@@ -21,6 +21,25 @@
 #                                       # timeout to 1200s, since the suite
 #                                       # runs well past BOOT_OK; an explicit
 #                                       # --timeout= still wins.
+#
+#                                       # DO NOT RUN ANYTHING ELSE ON THIS
+#                                       # MACHINE WHILE --bench IS IN ITS QEMU
+#                                       # WINDOW.  TCG is pure emulation and
+#                                       # entirely CPU-bound, so competing work
+#                                       # scales the measurements.  Demonstrated,
+#                                       # not assumed: the 2026-08-14T22:22 run
+#                                       # measured a 47% spread in the reference
+#                                       # access cost while a grep, an Edit and
+#                                       # two Python scripts ran alongside it;
+#                                       # the next run, on an idle machine, read
+#                                       # 0% (5.16 vs 5.17 cycles) at every one
+#                                       # of the same 8 sample positions.  The
+#                                       # build phase is safe; the QEMU window is
+#                                       # not.  Several "regressions" written up
+#                                       # on 2026-08-14 were self-inflicted this
+#                                       # way.  The canary reports it as
+#                                       # CONTAMINATED -- believe it.  See
+#                                       # known-issues.md P19.
 #   ./scripts/boot-test.sh --hard-lockup-watchdog
 #                                       # attach a QEMU i6300esb PCI watchdog set
 #                                       # to inject an NMI on timeout. OFF by

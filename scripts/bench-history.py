@@ -94,9 +94,16 @@ SCORE_RE = re.compile(
 # 20:30 reported a serene 0% spread over 0-0 cycles while measuring nothing at
 # all. See known-issues.md
 # B-BENCH-CANARY-MEASURES-ZERO-IN-RELEASE-AND-BLAMES-THE-HOST.
+# Two further fields, `<min_centi> <max_centi>`, carry the extremes in
+# hundredths of a cycle. They exist because `min`/`max` are rounded to whole
+# cycles while `spread` is computed at full precision, so a record could state
+# both "the extremes were 5 and 7" (a 40% spread) and "spread = 47" -- the
+# 2026-08-14T22:1x record does exactly that. Their presence is also the only
+# signal that a record's `spread` is trustworthy at all: see canary_verdict.
 CANARY_RE = re.compile(
     r"^\[bench\]\s+CANARY\s+(\d+)\s+(\d+)\s+(\d+)"
-    r"(?:\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)(?:\s+(\d+))?)?\s*$"
+    r"(?:\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)"
+    r"(?:\s+(\d+)(?:\s+(\d+)\s+(\d+))?)?)?\s*$"
 )
 
 # Percent deviation at which a run is called contaminated. Must match
@@ -199,7 +206,7 @@ def parse_canary(path):
                 match = CANARY_RE.match(line.strip())
                 if match:
                     (start, end, pct, lo, hi, spread, samples,
-                     invalid) = match.groups()
+                     invalid, lo_centi, hi_centi) = match.groups()
                     result = {
                         "start": int(start),
                         "end": int(end),
@@ -214,6 +221,9 @@ def parse_canary(path):
                         })
                     if invalid is not None:
                         result["invalid"] = int(invalid)
+                    if lo_centi is not None and hi_centi is not None:
+                        result["min_centi"] = int(lo_centi)
+                        result["max_centi"] = int(hi_centi)
     except FileNotFoundError:
         return None
     except OSError as exc:
@@ -263,6 +273,25 @@ def canary_verdict(canary):
     low = canary.get("min")
     if low is not None and low < CANARY_MIN_RESOLVABLE:
         return CANARY_BROKEN
+    # A whole-cycle record's `spread` may be two roundings wide.
+    #
+    # CANARY_MIN_RESOLVABLE bounds *one* cycle of quantisation at the tolerance,
+    # but a spread is taken across two samples. So on a record that predates the
+    # centicycle extremes, a per-access cost below twice that bound cannot
+    # support either verdict: `min=5 max=7` is consistent with a true spread
+    # anywhere from 17% to 60%, which straddles the 25% tolerance. Neither
+    # "contaminated" nor "clean" is assertable, and "the instrument could not
+    # measure" is exactly what CANARY_BROKEN means.
+    #
+    # This deliberately RECLASSIFIES two historical records -- 21:37 from
+    # `contaminated` and 21:56 from `clean`, both to `broken`. That is a
+    # correction, not a loss: those runs really were unable to resolve their own
+    # quantity, and the later centicycle run showed the true figure (47%) sits
+    # between what the two of them claimed. Records carrying `min_centi` are
+    # exempt because their spread was computed at 0.01-cycle resolution.
+    if "min_centi" not in canary and low is not None:
+        if low < 2 * CANARY_MIN_RESOLVABLE and canary.get("samples"):
+            return CANARY_BROKEN
     if "spread" in canary:
         over = canary["spread"] > CANARY_TOLERANCE_PCT
     else:

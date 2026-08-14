@@ -62542,3 +62542,80 @@ That is exactly the self-contradiction predicted in the SELF-CAUGHT entry above,
 now demonstrated on real data rather than argued from the diff. It raises the
 priority of appending `min_centi`/`max_centi`: the two halves of this record
 disagree, and the *rounded* half is the one a future reader would reach for.
+
+### RESULT P19 — refuted, and the canary was right the whole time — 2026-08-14
+
+Boot PASSED. The positional trace, first run:
+
+    CANARY 5 5 99 5 5 0 10 0 516 517
+    CANARY-TRACE 0:5.1 8:5.1 16:5.1 24:5.1 32:5.1 40:5.1 48:5.1 56:5.1 end:5.1 end:5.1
+    Canary OK: reference access cost stable across 10 samples (5.1-5.1 cycles, spread 0%)
+
+| | predicted | measured | grade |
+|---|---|---|---|
+| P19(a) | dear samples cluster at the same suite positions | **no dear samples at all**; every one of the 8 mid-suite positions read 5.1 | **MISS** |
+| P19(b) | spread stays above 25% on an idle machine | **0%** (516 vs 517 centicycles) | **MISS** |
+
+Both wrong, and the manner of the failure is conclusive. I hypothesised the 47%
+was the suite's own cache/TLB residue. A suite-induced effect is **reproducible
+by construction** — the same benchmarks run in the same order, so the same
+positions would be dear every time. Positions 0–56 were dear last run and are
+flat to 0.01 cycle this run. Cache residue cannot switch itself off.
+
+> **RETRACTED:** "`CONTAMINATED: Host load changed mid-run` is a third kind of
+> false attribution." It is not. The message was correct. The reference cost
+> really did move 47%, and the cause really was host load.
+
+**What the load was: me.** The two runs differ in one respect I can check
+directly from this session's own transcript rather than infer:
+
+| run | spread | what I was doing during its QEMU window |
+|---|---|---|
+| 22:22 | **47%** | editing `known-issues.md`, running `test-bench-history.py`, running a Python replay over all 18 records |
+| 22:41 | **0%** | nothing — asleep on a 900 s scheduled wakeup |
+
+The canary detected my own tooling competing with QEMU for the host CPU. Under
+TCG the guest is pure emulation and entirely CPU-bound, so this is precisely the
+interference it was built to catch. Its first two live firings were both real,
+and both were my fault.
+
+**Operational consequence — this is the actionable part:** *do not run anything
+during a `--bench` boot.* Grep, a Python script, a file read: each is enough to
+move the reference cost by tens of percent and to inflate whichever benchmarks
+happen to be executing. Several of the "regressions" written up earlier in this
+thread were produced exactly this way. The build phase is safe; the QEMU window
+is not.
+
+#### The bias worth naming
+
+P18(b) and P19 are the same mistake twice: **I assumed the instrument was broken
+and it was reporting the truth.**
+
+- P18(b): assumed 40% was rounding. It was a real 2.4-cycle spread.
+- P19: assumed 47% was a suite artefact. It was real host load.
+
+This is the exact inverse of the failure that opened this thread, where nine
+consecutive runs were certified clean by a canary that measured nothing. Both
+are the same underlying error — *deciding what the instrument must be saying
+instead of establishing what it can say* — and the correction is not to trust it
+more or less, but to make each reading falsifiable before acting on it. Every
+one of these five defects was caught that way and none by reading output.
+
+#### PREDICTION P20 — the positive control this instrument has never had
+
+The canary is now believed to detect host load on the strength of two
+*uncontrolled* observations. That is circumstantial: I did not set the load, I
+reconstructed it afterwards. By this file's own maxim, a detector that has never
+been shown to fire on a known stimulus is not yet a detector.
+
+- **P20(a)** — a `--bench` boot run with deliberate CPU load during the QEMU
+  window will report `CONTAMINATED` with a spread above 25%. *Falsified if it
+  reports `Canary OK`*, which would mean the two dirty runs had some other
+  cause and the attribution above is wrong.
+- **P20(b)** — the `CANARY-TRACE` positions of the dear samples will differ from
+  those in any other loaded run, since applied load is not synchronised to the
+  suite. This is the negative half of P19(a) and distinguishes load from a
+  suite artefact directly.
+
+Until P20 grades, "the canary detects host load" is a well-supported hypothesis,
+not an established property.

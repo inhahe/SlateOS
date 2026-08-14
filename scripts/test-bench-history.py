@@ -142,6 +142,31 @@ def test_canary(bh, tmpdir):
     check("a mid-suite burst is contaminated despite quiet endpoints",
           bh.canary_is_contaminated(burst), True)
 
+    # Every wire arity the kernel has ever emitted must still parse. The format
+    # is append-only precisely so old records stay readable, but "append-only"
+    # is a claim about a regex with nested optional groups -- easy to get wrong
+    # and impossible to notice, since a mis-parse yields None and None reads as
+    # "this run had no canary" rather than as an error. Checked by construction
+    # rather than by inspection.
+    arities = {
+        3: ("[bench] CANARY 271 275 101", "pct", 101),
+        7: ("[bench] CANARY 271 275 101 266 309 16 9", "samples", 9),
+        8: ("[bench] CANARY 271 275 101 266 309 16 9 0", "invalid", 0),
+        10: ("[bench] CANARY 5 5 100 5 7 47 10 0 510 750", "max_centi", 750),
+    }
+    for arity, (line, key, want) in arities.items():
+        got = bh.parse_canary(
+            write(tmpdir, f"canary-arity{arity}.txt", line + "\n"))
+        check(f"a {arity}-field CANARY record parses",
+              (got or {}).get(key), want)
+    # The centicycle fields must not leak into shorter records as zeros: absent
+    # and zero are different, and only absence marks a spread as untrustworthy.
+    check("an 8-field record has no centicycle extremes",
+          "min_centi" in (bh.parse_canary(
+              write(tmpdir, "canary-nocenti.txt",
+                    "[bench] CANARY 271 275 101 266 309 16 9 0\n")) or {}),
+          False)
+
     # Legacy 3-field records fall back to the endpoint comparison.
     legacy = write(tmpdir, "canary-legacy.txt", "[bench] CANARY 200 204 102\n")
     check("legacy 3-field canary still parses",
@@ -239,8 +264,9 @@ def test_canary_broken_is_not_contamination(bh, tmpdir):
 
     # The collapse caught halfway: the 15:57 and 16:16 release records measured
     # 1-2 cycles per guest store and were called *contaminated* on a "spread" of
-    # 100% that is one cycle of integer rounding. The honest measurement of the
-    # same quantity on the same host is 266-309 cycles.
+    # 100% that is one cycle of integer rounding. (This comment used to add
+    # "the honest measurement of the same quantity on the same host is 266-309
+    # cycles" -- a *debug*-profile figure. The release figure is ~5 cycles.)
     quantised = {"start": 2, "end": 2, "pct": 100, "min": 1, "max": 2,
                  "spread": 100, "samples": 10}
     check("a 1-2 cycle canary is broken, not contaminated",
@@ -249,11 +275,34 @@ def test_canary_broken_is_not_contamination(bh, tmpdir):
     # of quantisation outweighs the tolerance the spread is judged against.
     check("the resolution bound follows from the tolerance",
           bh.CANARY_MIN_RESOLVABLE, math.ceil(100 / bh.CANARY_TOLERANCE_PCT))
+
+    # CONTRACT CHANGED 2026-08-14. This block used to assert that a record
+    # sitting exactly at the resolution bound was CLEAN, i.e. that one cycle of
+    # headroom sufficed. P18 disproved that premise with direct evidence: the
+    # same 5-cycle quantity read 40% on one whole-cycle run and 0% on the next,
+    # and 47% once measured at 0.01-cycle resolution. One cycle of headroom
+    # bounds a *single* rounding, but a spread spans two samples and so can
+    # carry two -- which is 50% at the bound, twice the tolerance.
+    #
+    # The test was not relaxed to make the new code pass; the old assertion
+    # encoded a belief that measurement then falsified.
     at_bound = {"start": 100, "end": 100, "pct": 100,
                 "min": bh.CANARY_MIN_RESOLVABLE, "max": bh.CANARY_MIN_RESOLVABLE,
                 "spread": 0, "samples": 9}
-    check("exactly at the resolution bound is measurable",
-          v(at_bound), bh.CANARY_CLEAN)
+    check("a whole-cycle record at the bound cannot support a spread verdict",
+          v(at_bound), bh.CANARY_BROKEN)
+    # ...but the identical record *with* centicycle extremes can: its spread was
+    # computed at 0.01-cycle resolution, so no amount of rounding produced it.
+    at_bound_precise = dict(at_bound, min_centi=400, max_centi=400)
+    check("centicycle extremes rescue the same record",
+          v(at_bound_precise), bh.CANARY_CLEAN)
+    # And a precise record genuinely over tolerance is contamination, not
+    # breakage -- the two must stay distinguishable at fine resolution too.
+    over_precise = {"start": 100, "end": 100, "pct": 100, "min": 5, "max": 7,
+                    "spread": 47, "samples": 10, "min_centi": 510,
+                    "max_centi": 750}
+    check("a precise record over tolerance is contaminated, not broken",
+          v(over_precise), bh.CANARY_CONTAMINATED)
 
     check("a legacy zero-start canary is broken",
           v({"start": 0, "end": 200, "pct": 0}), bh.CANARY_BROKEN)

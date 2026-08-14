@@ -50,7 +50,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::serial_println;
+use crate::{serial_print, serial_println};
 use crate::sync::PreemptSpinMutex as Mutex;
 
 // ---------------------------------------------------------------------------
@@ -757,11 +757,47 @@ static CANARY_INVALID: core::sync::atomic::AtomicU32 = core::sync::atomic::Atomi
 /// Counts `score` calls so every Nth one triggers a sample.
 static CANARY_SCORED: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
+/// Per-sample trace: where in the suite each sample was taken, and what it read.
+///
+/// # Why extremes were not enough
+///
+/// `CANARY_MIN`/`CANARY_MAX` answer "how much did the reference cost move",
+/// which is the wrong question once the answer is "a lot". They cannot
+/// distinguish a transient burst landing on one sample from a *systematic*
+/// offset that appears after certain benchmarks — and those two have opposite
+/// remedies. The 2026-08-14T22:1x run measured a 47% spread while both suite
+/// endpoints and both calibration runs agreed exactly, which extremes alone
+/// can neither explain nor even express.
+///
+/// Sized above the ~10 samples a 64-benchmark suite produces at
+/// `CANARY_SAMPLE_EVERY = 8`; excess samples are dropped from the trace but
+/// still counted and still folded into the extremes, so no verdict depends on
+/// the trace being complete.
+const CANARY_TRACE_MAX: usize = 24;
+/// Trace position meaning "a suite endpoint", not a mid-suite sample.
+const CANARY_POS_ENDPOINT: u32 = u32::MAX;
+static CANARY_TRACE_POS: [core::sync::atomic::AtomicU32; CANARY_TRACE_MAX] =
+    [const { core::sync::atomic::AtomicU32::new(0) }; CANARY_TRACE_MAX];
+static CANARY_TRACE_VAL: [AtomicU64; CANARY_TRACE_MAX] =
+    [const { AtomicU64::new(0) }; CANARY_TRACE_MAX];
+
 /// Fold one reference measurement into the running extremes.
-fn canary_record(measured: u64) {
+///
+/// `pos` is the scored-benchmark index the sample follows, recorded so the
+/// variation can be *attributed* rather than merely detected: a cost that is
+/// dear at the same positions across two runs is the suite's own cache/TLB
+/// residue, whereas one that is dear at different positions each run is host
+/// load. See known-issues.md P19.
+fn canary_record(measured: u64, pos: u32) {
     CANARY_MIN.fetch_min(measured, Ordering::Relaxed);
     CANARY_MAX.fetch_max(measured, Ordering::Relaxed);
-    CANARY_SAMPLES.fetch_add(1, Ordering::Relaxed);
+    let slot = CANARY_SAMPLES.fetch_add(1, Ordering::Relaxed) as usize;
+    // `.get()` rather than indexing: a suite longer than the trace must drop
+    // trace entries, not panic in the middle of a benchmark run.
+    if let (Some(p), Some(v)) = (CANARY_TRACE_POS.get(slot), CANARY_TRACE_VAL.get(slot)) {
+        p.store(pos, Ordering::Relaxed);
+        v.store(measured, Ordering::Relaxed);
+    }
 }
 
 /// Sample the reference cost every [`CANARY_SAMPLE_EVERY`] scored benchmarks.
@@ -782,7 +818,7 @@ fn maybe_canary_sample() {
     let n = CANARY_SCORED.fetch_add(1, Ordering::Relaxed);
     if n.wrapping_rem(CANARY_SAMPLE_EVERY) == 0 {
         match measure_access_cost().0 {
-            Some(measured) => canary_record(measured),
+            Some(measured) => canary_record(measured, n),
             // Do not fold a failed measurement into the extremes: a `0` would
             // drag CANARY_MIN to zero and make the spread meaningless (or,
             // once every sample fails, make it a serene 0%). Count it instead,
@@ -1006,7 +1042,10 @@ fn report_canary(start: Option<u64>) {
     // but only the ones that measured something.
     for endpoint in [start, end] {
         match endpoint {
-            Some(measured) => canary_record(measured),
+            // Endpoints are not at a suite position; they bracket the suite.
+            // They are already reported individually as `start`/`end`, so the
+            // sentinel only needs to keep them out of the positional analysis.
+            Some(measured) => canary_record(measured, CANARY_POS_ENDPOINT),
             None => {
                 CANARY_INVALID.fetch_add(1, Ordering::Relaxed);
             }
@@ -1038,12 +1077,18 @@ fn report_canary(start: Option<u64>) {
         0
     };
 
-    // The wire format stays in whole cycles. `pct` and `spread` above were
-    // computed from the centicycle values, so they carry the full measured
-    // precision; these four are the human-facing magnitudes and a hundredth of
-    // a cycle is not a magnitude anyone reads. Keeping the units unchanged also
-    // means every historical record and `scripts/bench-history.py` continue to
-    // mean exactly what they meant.
+    // The first six wire fields stay in whole cycles so all 18 historical
+    // records keep their meaning.
+    //
+    // But `spread` is computed from centicycles while `min`/`max` are rounded,
+    // and that made each record contradict itself: the 22:1x run wrote
+    // `min=5 max=7 spread=47` when (7-5)/5 is 40%. A reader reconciling those
+    // would reach for the rounded pair, which is the wrong half. So the exact
+    // extremes are appended as two further fields -- append-only, leaving every
+    // existing record and the parser's optional trailing groups untouched --
+    // and they also give the history tool the discriminator it lacks: a record
+    // carrying centicycle extremes has a trustworthy `spread`; one without is a
+    // whole-cycle record whose spread may be two roundings wide.
     let (start_c, start_t) = centi_parts(start);
     let (end_c, end_t) = centi_parts(end);
     let (lo_c, lo_t) = centi_parts(lo);
@@ -1053,9 +1098,34 @@ fn report_canary(start: Option<u64>) {
     // an append-only extension, so the one record written before mid-suite
     // sampling existed still reads back correctly. `invalid` is the newest.
     serial_println!(
-        "[bench] CANARY {} {} {} {} {} {} {} {}",
-        start_c, end_c, pct, lo_c, hi_c, spread, samples, invalid
+        "[bench] CANARY {} {} {} {} {} {} {} {} {} {}",
+        start_c, end_c, pct, lo_c, hi_c, spread, samples, invalid, lo, hi
     );
+
+    // The positional trace, on its own line so the CANARY record stays a single
+    // fixed-arity tuple. Extremes say *how much* the reference cost moved; only
+    // positions can say *why*, and the two causes have opposite remedies:
+    // samples that are dear at the same positions across runs are the suite's
+    // own cache/TLB residue (not contamination, and not fixable by tuning the
+    // tolerance), whereas dear samples at differing positions are host load.
+    // See known-issues.md P19.
+    if samples > 0 {
+        serial_print!("[bench] CANARY-TRACE");
+        for slot in 0..(samples as usize).min(CANARY_TRACE_MAX) {
+            let (Some(p), Some(v)) = (CANARY_TRACE_POS.get(slot), CANARY_TRACE_VAL.get(slot))
+            else {
+                continue;
+            };
+            let pos = p.load(Ordering::Relaxed);
+            let (c, t) = centi_parts(v.load(Ordering::Relaxed));
+            if pos == CANARY_POS_ENDPOINT {
+                serial_print!(" end:{}.{}", c, t);
+            } else {
+                serial_print!(" {}:{}.{}", pos, c, t);
+            }
+        }
+        serial_println!("");
+    }
 
     // Three outcomes, deliberately not two. "The instrument failed" is not
     // "the instrument found contamination": reporting the second when the

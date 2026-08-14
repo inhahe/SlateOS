@@ -42,16 +42,24 @@
 //! * **Omitted rules** with a DST name present default to the United States
 //!   rules in force since 2007 (`M3.2.0,M11.1.0`), matching glibc and musl.
 //!
+//! ## Binary zoneinfo files
+//!
+//! A POSIX `TZ` string carries exactly one rule set, so it cannot express that
+//! the United States moved the start of daylight saving in 2007.  The binary
+//! TZif files under `/usr/share/zoneinfo` can, and [`TzFile`] reads them.  A
+//! TZif v2+ file ends with a POSIX `TZ` string covering everything past its
+//! last recorded transition, so [`Tz`] is the *tail* of [`TzFile`] rather than
+//! being superseded by it — the two paths share one engine and cannot
+//! disagree about a future date.
+//!
 //! ## What is not supported, and why that is safe
 //!
-//! A zoneinfo *name* (`America/New_York`) needs the tzdata binary database,
-//! which SlateOS does not ship yet — that is a packaging decision of its own,
-//! tracked in `known-issues.md`.  An unparseable `TZ` therefore falls back to
-//! UTC, which is exactly what glibc does when it cannot find the named file,
-//! so a program that sets a zoneinfo name is no worse off than before this
-//! module existed.  A `TZ` that *is* a POSIX string — including the ones
-//! `tzselect` emits and the ones embedded in most container images — is now
-//! honoured exactly.
+//! Resolving a zoneinfo *name* (`America/New_York`) to a file still needs the
+//! tzdata database to be installed, which SlateOS does not ship yet — that is
+//! a packaging decision of its own, tracked in `known-issues.md`.  A `TZ` that
+//! is neither a POSIX string nor a readable TZif file falls back to UTC, which
+//! is exactly what glibc does when it cannot find the named file, so such a
+//! program is no worse off than before this module existed.
 //!
 //! ## Precision
 //!
@@ -72,6 +80,10 @@
 #![cfg_attr(not(test), warn(clippy::panic))]
 #![cfg_attr(not(test), warn(clippy::indexing_slicing))]
 #![cfg_attr(not(test), warn(clippy::arithmetic_side_effects))]
+
+mod tzif;
+
+pub use tzif::TzFile;
 
 /// Longest zone abbreviation stored, in bytes.
 ///

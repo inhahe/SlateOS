@@ -160,7 +160,7 @@ pub fn set_hostname(name: &str) -> KernelResult<()> {
 
 /// Get domain.
 pub fn get_domain() -> String {
-    STATE.lock().as_ref().map_or(String::from(""), |s| s.domain.clone())
+    STATE.lock().as_ref().map_or(String::new(), |s| s.domain.clone())
 }
 
 /// Set domain.

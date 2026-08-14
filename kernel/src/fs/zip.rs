@@ -57,11 +57,11 @@
 
 #![allow(dead_code)]
 
-use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::error::{KernelError, KernelResult};
+use crate::fs::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
 // Constants — signatures
@@ -136,7 +136,14 @@ fn write_u64(buf: &mut Vec<u8>, val: u64) {
 #[derive(Debug, Clone)]
 pub struct ZipEntry {
     /// Filename (relative path inside the archive).
-    pub name: String,
+    ///
+    /// A byte string, not text.  ZIP stores the name as raw bytes and does
+    /// not require any particular encoding (the general-purpose bit 11 flag
+    /// only *claims* UTF-8; DOS/CP437 and arbitrary locale bytes are common
+    /// in the wild).  Decoding it as UTF-8 used to substitute a fabricated
+    /// `<invalid-utf8@0x…>` placeholder, so extraction wrote the member out
+    /// under a name that was not its own.
+    pub name: PathBuf,
     /// Compression method: 0 = Stored, 8 = Deflate.
     pub method: u16,
     /// CRC-32 of uncompressed data (ISO 3309).
@@ -153,8 +160,9 @@ pub struct ZipEntry {
 
 /// An entry to be written into a new ZIP archive.
 pub struct ZipWriteEntry {
-    /// Relative path inside the archive (use `/` separators).
-    pub name: String,
+    /// Relative path inside the archive (use `/` separators).  Bytes, not
+    /// text — see [`ZipEntry::name`].
+    pub name: PathBuf,
     /// Uncompressed file data.  Empty for directory markers.
     pub data: Vec<u8>,
     /// True to store without compression (method 0).
@@ -298,9 +306,7 @@ pub fn parse(data: &[u8]) -> KernelResult<Vec<ZipEntry>> {
         let name_start = off.wrapping_add(46);
         let name_end = name_start.wrapping_add(name_len).min(data.len());
         let name_bytes = data.get(name_start..name_end).unwrap_or(&[]);
-        let name = core::str::from_utf8(name_bytes)
-            .map(String::from)
-            .unwrap_or_else(|_| alloc::format!("<invalid-utf8@{:#x}>", off));
+        let name = PathBuf::from(name_bytes);
 
         // Parse extra field for ZIP64 overrides.
         let extra_start = name_end;
@@ -310,7 +316,9 @@ pub fn parse(data: &[u8]) -> KernelResult<Vec<ZipEntry>> {
         let (uncompressed_size, compressed_size, local_header_offset) =
             parse_zip64_extra(extra_data, uncomp32, comp32, offset32);
 
-        let is_dir = name.ends_with('/');
+        // The trailing `/` that marks a directory member is a byte of the
+        // stored name, so the test is on bytes rather than on a `char`.
+        let is_dir = name.as_bytes().ends_with(b"/");
 
         entries.push(ZipEntry {
             name,
@@ -570,7 +578,7 @@ pub fn create(entries: &[ZipWriteEntry]) -> Vec<u8> {
 
 /// Intermediate record used during archive creation.
 struct DirRecord {
-    name: String,
+    name: PathBuf,
     method: u16,
     crc32: u32,
     comp_size: u64,
@@ -594,7 +602,7 @@ pub fn self_test() -> KernelResult<()> {
     // --- Test 1: round-trip with stored entry ---
     {
         let entries = vec![ZipWriteEntry {
-            name: String::from("hello.txt"),
+            name: PathBuf::from("hello.txt"),
             data: b"Hello, world!".to_vec(),
             store_only: true,
         }];
@@ -603,7 +611,7 @@ pub fn self_test() -> KernelResult<()> {
         if parsed.len() != 1 {
             return Err(KernelError::CorruptedData);
         }
-        if parsed[0].name != "hello.txt" || parsed[0].method != 0 || parsed[0].uncompressed_size != 13 {
+        if parsed[0].name.as_path() != Path::new("hello.txt") || parsed[0].method != 0 || parsed[0].uncompressed_size != 13 {
             return Err(KernelError::CorruptedData);
         }
         let data = extract_entry(&archive, &parsed[0])?;
@@ -622,13 +630,13 @@ pub fn self_test() -> KernelResult<()> {
         }
 
         let entries = vec![ZipWriteEntry {
-            name: String::from("data.bin"),
+            name: PathBuf::from("data.bin"),
             data: text.clone(),
             store_only: false,
         }];
         let archive = create(&entries);
         let parsed = parse(&archive)?;
-        if parsed.len() != 1 || parsed[0].name != "data.bin" {
+        if parsed.len() != 1 || parsed[0].name.as_path() != Path::new("data.bin") {
             return Err(KernelError::CorruptedData);
         }
         // Should have been deflated since the data is repetitive.
@@ -651,22 +659,22 @@ pub fn self_test() -> KernelResult<()> {
     {
         let entries = vec![
             ZipWriteEntry {
-                name: String::from("dir/"),
+                name: PathBuf::from("dir/"),
                 data: Vec::new(),
                 store_only: true,
             },
             ZipWriteEntry {
-                name: String::from("dir/file1.txt"),
+                name: PathBuf::from("dir/file1.txt"),
                 data: b"First file".to_vec(),
                 store_only: false,
             },
             ZipWriteEntry {
-                name: String::from("dir/file2.txt"),
+                name: PathBuf::from("dir/file2.txt"),
                 data: b"Second file content here".to_vec(),
                 store_only: false,
             },
             ZipWriteEntry {
-                name: String::from("README"),
+                name: PathBuf::from("README"),
                 data: b"Top-level readme".to_vec(),
                 store_only: true,
             },
@@ -686,7 +694,7 @@ pub fn self_test() -> KernelResult<()> {
         for (i, orig) in entries.iter().enumerate() {
             let extracted = extract_entry(&archive, &parsed[i])?;
             if extracted != orig.data {
-                serial_println!("[zip]   data mismatch for entry '{}'", orig.name);
+                serial_println!("[zip]   data mismatch for entry '{}'", orig.name.display());
                 return Err(KernelError::CorruptedData);
             }
         }
@@ -696,7 +704,7 @@ pub fn self_test() -> KernelResult<()> {
     // --- Test 4: CRC-32 verification catches corruption ---
     {
         let entries = vec![ZipWriteEntry {
-            name: String::from("test.dat"),
+            name: PathBuf::from("test.dat"),
             data: b"integrity check data".to_vec(),
             store_only: true,
         }];

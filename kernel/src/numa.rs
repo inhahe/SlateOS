@@ -532,7 +532,7 @@ fn add_memory_to_node(domain: u32, base: u64, length: u64, hotplug: bool) {
     // SAFETY: We're the only writer during init (single-threaded boot).
     // The region array is initialized to zeros, and we write before
     // incrementing the count that others read.
-    let region_ptr = &node.regions[idx] as *const NumaMemRegion as *mut NumaMemRegion;
+    let region_ptr = (&node.regions[idx] as *const NumaMemRegion).cast_mut();
     unsafe {
         (*region_ptr).base = base;
         (*region_ptr).length = length;
@@ -581,7 +581,7 @@ fn init_uma() {
     // Single memory region covering all of RAM (simplified).
     // The exact regions don't matter for UMA — all accesses are local.
     NODES[0].region_count.store(1, Ordering::Relaxed);
-    let region_ptr = &NODES[0].regions[0] as *const NumaMemRegion as *mut NumaMemRegion;
+    let region_ptr = (&NODES[0].regions[0] as *const NumaMemRegion).cast_mut();
     // SAFETY: NODES[0] is a static; region_ptr points to its first region slot.
     // init_uma runs once at boot before any concurrent access.
     unsafe {

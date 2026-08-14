@@ -549,47 +549,18 @@ fn make_separator_at(priority: u32) -> MenuItem {
     }
 }
 
-/// Simple glob matching (supports `*` and `?`).
-fn simple_glob(pattern: &str, text: &str) -> bool {
-    let pat: Vec<char> = pattern.chars().collect();
-    let txt: Vec<char> = text.chars().collect();
-    glob_match(&pat, 0, &txt, 0)
-}
-
-fn glob_match(pat: &[char], pi: usize, txt: &[char], ti: usize) -> bool {
-    if pi == pat.len() {
-        return ti == txt.len();
-    }
-    match pat.get(pi).copied() {
-        Some('*') => {
-            let mut t = ti;
-            loop {
-                if glob_match(pat, pi + 1, txt, t) {
-                    return true;
-                }
-                if t >= txt.len() {
-                    break;
-                }
-                t += 1;
-            }
-            false
-        }
-        Some('?') => {
-            if ti < txt.len() {
-                glob_match(pat, pi + 1, txt, ti + 1)
-            } else {
-                false
-            }
-        }
-        Some(c) => {
-            if ti < txt.len() && txt.get(ti).copied() == Some(c) {
-                glob_match(pat, pi + 1, txt, ti + 1)
-            } else {
-                false
-            }
-        }
-        None => ti == txt.len(),
-    }
+/// Simple glob matching (supports `*`, `?`, `[...]` and `\`).
+///
+/// Matching is over **bytes**: `text` is a filename, which is an uninterpreted
+/// byte string and need not be valid UTF-8.  The private copy this replaced
+/// collected both sides into `Vec<char>`, which cannot represent such a name
+/// at all — a file whose name has a stray byte simply never matched any
+/// association — and recursed at every `*`, which is exponential on a pattern
+/// like `a*a*a*b`.
+///
+/// Case-sensitive, because the filesystem is.
+fn simple_glob<T: AsRef<[u8]>>(pattern: &str, text: T) -> bool {
+    crate::fs::vfs::glob_match(text, pattern, false)
 }
 
 // ---------------------------------------------------------------------------

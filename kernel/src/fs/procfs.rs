@@ -4626,9 +4626,16 @@ fn gen_recent() -> Vec<u8> {
     } else {
         out.push_str(&format!("{:40} {:8} {:>5} {}\n", "PATH", "TYPE", "COUNT", "SOURCE"));
         for e in &entries {
+            // Octal-escaped, not `.display()`: this is a one-line-per-entry
+            // text table, so a path containing a newline (legal — only `/`
+            // and NUL are excluded) would otherwise split into two rows, and
+            // a lossy U+FFFD would render two different files identically.
             out.push_str(&format!(
                 "{:40} {:8} {:>5} {}\n",
-                e.path, e.access_type.label(), e.access_count, e.source,
+                crate::fs::escape::escape_octal(e.path.as_bytes(), &[]),
+                e.access_type.label(),
+                e.access_count,
+                e.source,
             ));
         }
     }
@@ -4746,8 +4753,13 @@ fn gen_bookmarks() -> Vec<u8> {
     if !bookmarks.is_empty() {
         out.push_str(&format!("{:12} {:8} {:30} {}\n", "NAME", "CAT", "PATH", "LABEL"));
         for bm in &bookmarks {
+            // Escaped, not `.display()`: one line per bookmark, and a path
+            // may legally contain a newline.
             out.push_str(&format!("{:12} {:8} {:30} {}\n",
-                bm.name, bm.category.label(), bm.path, bm.label));
+                bm.name,
+                bm.category.label(),
+                crate::fs::escape::escape_octal(bm.path.as_bytes(), &[]),
+                bm.label));
         }
     }
 

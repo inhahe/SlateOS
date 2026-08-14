@@ -229,16 +229,14 @@ pub fn connect(ssid: &str) -> KernelResult<()> {
         if let Some(saved) = state.saved.iter_mut().find(|s| s.ssid == ssid) {
             saved.connect_count += 1;
             saved.last_connected_ns = now;
-        } else {
-            if state.saved.len() < MAX_SAVED {
-                state.saved.push(SavedNetwork {
-                    ssid: String::from(ssid),
-                    security: net.security,
-                    auto_connect: true,
-                    connect_count: 1,
-                    last_connected_ns: now,
-                });
-            }
+        } else if state.saved.len() < MAX_SAVED {
+            state.saved.push(SavedNetwork {
+                ssid: String::from(ssid),
+                security: net.security,
+                auto_connect: true,
+                connect_count: 1,
+                last_connected_ns: now,
+            });
         }
         // Mark network as known.
         for n in &mut state.networks {

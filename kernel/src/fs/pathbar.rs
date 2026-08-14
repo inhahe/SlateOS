@@ -120,7 +120,10 @@ static NAV_STATE: spin::Mutex<NavState> = spin::Mutex::new(NavState {
 pub fn parse_breadcrumbs<P: AsRef<Path> + ?Sized>(path: &P) -> Vec<Breadcrumb> {
     let normalized = normalize(path);
     let mut segments = Vec::new();
-    let mut accumulated = PathBuf::new();
+    // Seeded with the root separator, not empty: `components()` drops the
+    // leading `/`, so accumulating onto an empty buffer would emit *relative*
+    // breadcrumb paths ("home", "home/user") for an absolute input.
+    let mut accumulated = PathBuf::from(if normalized.is_absolute() { "/" } else { "" });
 
     if normalized.as_path() == Path::new("/") || normalized.is_empty() {
         segments.push(Breadcrumb {

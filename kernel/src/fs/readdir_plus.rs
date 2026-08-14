@@ -229,9 +229,10 @@ pub fn readdir_plus<P: AsRef<Path> + ?Sized>(
             continue;
         }
 
-        // Apply glob pattern.
+        // Apply glob pattern.  Case-sensitive: this is a directory listing on
+        // a case-sensitive filesystem, so `*.TXT` must not match `a.txt`.
         if !options.pattern.is_empty()
-            && !glob_match_bytes(&options.pattern, entry.name.as_bytes())
+            && !crate::fs::vfs::glob_match(&entry.name, &options.pattern, false)
         {
             continue;
         }
@@ -376,37 +377,6 @@ fn type_sort_key(et: EntryType) -> u8 {
     }
 }
 
-/// Byte-level glob matching with * (any sequence) and ? (any char).
-fn glob_match_bytes(pat: &[u8], txt: &[u8]) -> bool {
-    let mut pi = 0;
-    let mut ti = 0;
-    let mut star_pi = usize::MAX;
-    let mut star_ti = 0;
-
-    while ti < txt.len() {
-        if pi < pat.len() && (pat[pi] == b'?' || pat[pi] == txt[ti]) {
-            pi += 1;
-            ti += 1;
-        } else if pi < pat.len() && pat[pi] == b'*' {
-            star_pi = pi;
-            star_ti = ti;
-            pi += 1;
-        } else if star_pi != usize::MAX {
-            pi = star_pi + 1;
-            star_ti += 1;
-            ti = star_ti;
-        } else {
-            return false;
-        }
-    }
-
-    while pi < pat.len() && pat[pi] == b'*' {
-        pi += 1;
-    }
-
-    pi == pat.len()
-}
-
 // ---------------------------------------------------------------------------
 // Self-tests
 // ---------------------------------------------------------------------------
@@ -428,9 +398,9 @@ pub fn self_test() -> KernelResult<()> {
 fn test_basic_listing() {
     // Create test directory with files.
     let dir = "/tmp/_rdplus_test";
-    Vfs::write_file(&alloc::format!("{}/alpha.txt", dir), b"aaa").unwrap();
-    Vfs::write_file(&alloc::format!("{}/beta.dat", dir), b"bbbbb").unwrap();
-    Vfs::write_file(&alloc::format!("{}/gamma.log", dir), b"g").unwrap();
+    Vfs::write_file(alloc::format!("{}/alpha.txt", dir), b"aaa").unwrap();
+    Vfs::write_file(alloc::format!("{}/beta.dat", dir), b"bbbbb").unwrap();
+    Vfs::write_file(alloc::format!("{}/gamma.log", dir), b"g").unwrap();
 
     let result = readdir_plus_simple(dir).unwrap();
     assert!(result.entries.len() >= 3);
@@ -442,17 +412,17 @@ fn test_basic_listing() {
     }
 
     // Clean up.
-    let _ = Vfs::remove(&alloc::format!("{}/alpha.txt", dir));
-    let _ = Vfs::remove(&alloc::format!("{}/beta.dat", dir));
-    let _ = Vfs::remove(&alloc::format!("{}/gamma.log", dir));
+    let _ = Vfs::remove(alloc::format!("{}/alpha.txt", dir));
+    let _ = Vfs::remove(alloc::format!("{}/beta.dat", dir));
+    let _ = Vfs::remove(alloc::format!("{}/gamma.log", dir));
     serial_println!("[readdir_plus]   basic_listing: ok");
 }
 
 fn test_sort_orders() {
     let dir = "/tmp/_rdplus_sort";
-    Vfs::write_file(&alloc::format!("{}/c.txt", dir), b"ccc").unwrap();
-    Vfs::write_file(&alloc::format!("{}/a.txt", dir), b"a").unwrap();
-    Vfs::write_file(&alloc::format!("{}/b.txt", dir), b"bb").unwrap();
+    Vfs::write_file(alloc::format!("{}/c.txt", dir), b"ccc").unwrap();
+    Vfs::write_file(alloc::format!("{}/a.txt", dir), b"a").unwrap();
+    Vfs::write_file(alloc::format!("{}/b.txt", dir), b"bb").unwrap();
 
     // Sort by name.
     let opts = ListOptions { sort: SortOrder::Name, ..Default::default() };
@@ -470,17 +440,17 @@ fn test_sort_orders() {
         .collect();
     assert!(sizes.windows(2).all(|w| w[0] >= w[1]));
 
-    let _ = Vfs::remove(&alloc::format!("{}/a.txt", dir));
-    let _ = Vfs::remove(&alloc::format!("{}/b.txt", dir));
-    let _ = Vfs::remove(&alloc::format!("{}/c.txt", dir));
+    let _ = Vfs::remove(alloc::format!("{}/a.txt", dir));
+    let _ = Vfs::remove(alloc::format!("{}/b.txt", dir));
+    let _ = Vfs::remove(alloc::format!("{}/c.txt", dir));
     serial_println!("[readdir_plus]   sort_orders: ok");
 }
 
 fn test_type_filter() {
     let dir = "/tmp/_rdplus_type";
-    Vfs::write_file(&alloc::format!("{}/file.txt", dir), b"x").unwrap();
+    Vfs::write_file(alloc::format!("{}/file.txt", dir), b"x").unwrap();
     // Create a subdir by writing a file inside it.
-    Vfs::write_file(&alloc::format!("{}/subdir/inner.txt", dir), b"y").unwrap();
+    Vfs::write_file(alloc::format!("{}/subdir/inner.txt", dir), b"y").unwrap();
 
     // Files only.
     let opts = ListOptions {
@@ -502,16 +472,16 @@ fn test_type_filter() {
         assert_eq!(entry.entry_type, EntryType::Directory);
     }
 
-    let _ = Vfs::remove(&alloc::format!("{}/file.txt", dir));
-    let _ = Vfs::remove(&alloc::format!("{}/subdir/inner.txt", dir));
+    let _ = Vfs::remove(alloc::format!("{}/file.txt", dir));
+    let _ = Vfs::remove(alloc::format!("{}/subdir/inner.txt", dir));
     serial_println!("[readdir_plus]   type_filter: ok");
 }
 
 fn test_glob_filter() {
     let dir = "/tmp/_rdplus_glob";
-    Vfs::write_file(&alloc::format!("{}/test.txt", dir), b"t").unwrap();
-    Vfs::write_file(&alloc::format!("{}/test.dat", dir), b"d").unwrap();
-    Vfs::write_file(&alloc::format!("{}/other.txt", dir), b"o").unwrap();
+    Vfs::write_file(alloc::format!("{}/test.txt", dir), b"t").unwrap();
+    Vfs::write_file(alloc::format!("{}/test.dat", dir), b"d").unwrap();
+    Vfs::write_file(alloc::format!("{}/other.txt", dir), b"o").unwrap();
 
     // Filter: *.txt
     let opts = ListOptions {
@@ -534,16 +504,16 @@ fn test_glob_filter() {
         assert!(entry.name.as_bytes().starts_with(b"test."));
     }
 
-    let _ = Vfs::remove(&alloc::format!("{}/test.txt", dir));
-    let _ = Vfs::remove(&alloc::format!("{}/test.dat", dir));
-    let _ = Vfs::remove(&alloc::format!("{}/other.txt", dir));
+    let _ = Vfs::remove(alloc::format!("{}/test.txt", dir));
+    let _ = Vfs::remove(alloc::format!("{}/test.dat", dir));
+    let _ = Vfs::remove(alloc::format!("{}/other.txt", dir));
     serial_println!("[readdir_plus]   glob_filter: ok");
 }
 
 fn test_pagination() {
     let dir = "/tmp/_rdplus_page";
     for i in 0..10 {
-        Vfs::write_file(&alloc::format!("{}/file{:02}.txt", dir, i), b"x").unwrap();
+        Vfs::write_file(alloc::format!("{}/file{:02}.txt", dir, i), b"x").unwrap();
     }
 
     // Page 1: first 3 entries.
@@ -573,23 +543,28 @@ fn test_pagination() {
     }
 
     for i in 0..10 {
-        let _ = Vfs::remove(&alloc::format!("{}/file{:02}.txt", dir, i));
+        let _ = Vfs::remove(alloc::format!("{}/file{:02}.txt", dir, i));
     }
     serial_println!("[readdir_plus]   pagination: ok");
 }
 
 fn test_glob_match() {
-    // Basic tests for the glob matcher.
-    assert!(glob_match_bytes(b"*", b"anything"));
-    assert!(glob_match_bytes(b"*.txt", b"file.txt"));
-    assert!(!glob_match_bytes(b"*.txt", b"file.dat"));
-    assert!(glob_match_bytes(b"file?", b"file1"));
-    assert!(!glob_match_bytes(b"file?", b"file12"));
-    assert!(glob_match_bytes(b"*.rs", b"main.rs"));
-    assert!(glob_match_bytes(b"test*", b"testing123"));
-    assert!(glob_match_bytes(b"*test*", b"my_test_file"));
-    assert!(glob_match_bytes(b"a*b*c", b"aXbYc"));
-    assert!(!glob_match_bytes(b"a*b*c", b"aXbY"));
+    // Listing delegates to the one shared matcher; these pin the *mode* the
+    // listing asks for (case-sensitive), not the matcher itself.
+    let m = |pat: &[u8], name: &[u8]| crate::fs::vfs::glob_match(name, pat, false);
+
+    assert!(m(b"*", b"anything"));
+    assert!(m(b"*.txt", b"file.txt"));
+    assert!(!m(b"*.txt", b"file.dat"));
+    assert!(m(b"file?", b"file1"));
+    assert!(!m(b"file?", b"file12"));
+    assert!(m(b"*.rs", b"main.rs"));
+    assert!(m(b"test*", b"testing123"));
+    assert!(m(b"*test*", b"my_test_file"));
+    assert!(m(b"a*b*c", b"aXbYc"));
+    assert!(!m(b"a*b*c", b"aXbY"));
+    // Case-sensitive: the filesystem is, so the listing filter is too.
+    assert!(!m(b"*.TXT", b"file.txt"));
 
     serial_println!("[readdir_plus]   glob_match: ok");
 }

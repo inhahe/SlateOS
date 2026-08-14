@@ -179,7 +179,7 @@ fn cycles_to_bucket(cycles: u64) -> usize {
         return 0;
     }
     // Find the highest set bit position (floor(log2(cycles))).
-    let bits = 63 - cycles.leading_zeros();
+    let bits = cycles.ilog2();
     if bits < BASE_SHIFT {
         // Below 2^BASE_SHIFT → bucket 0.
         0

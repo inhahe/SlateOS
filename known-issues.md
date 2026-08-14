@@ -645,14 +645,36 @@ Done:
   anything that exists in them. Each carries a doc comment saying so.
 - `DirEntry.name` → `PathBuf`, with 74 construction sites updated.
 
-Remaining: `memfs` bodies (its `BTreeMap` keys are converted — it is the one
-in-kernel filesystem that genuinely must hold non-UTF-8 names, being `/tmp`),
-`ext4/vfs_impl.rs` and the `driver.rs` skip-on-non-UTF-8 site above,
-`overlay.rs`, `vfs.rs` internals (dcache keys, `resolve_path` → `PathBuf`), and
-the `.name` consumers (`kshell`, `oci`, `container`, `httpd`, `fswalk`, …).
-`Vfs`'s inherent methods should take `impl AsRef<Path>` (the `std::fs` shape)
-so the ~3325 existing `&str` literal call sites compile unchanged; only the
-`dyn`-used `FileSystem` trait needs `&Path` exactly.
+- `memfs`, `overlay.rs`, `ext4/vfs_impl.rs` and the `driver.rs`
+  skip-on-non-UTF-8 site above.
+- `vfs.rs` internals: dcache keys, `normalize_path`/`resolve_path` → `PathBuf`.
+  `Vfs`'s inherent methods take `impl AsRef<Path>` (the `std::fs` shape), so
+  the ~3325 existing `&str` literal call sites compile unchanged; only the
+  `dyn`-used `FileSystem` trait needs `&Path` exactly.
+- The syscall boundary: `read_user_path` (`syscall/handlers.rs`) and `sqe_path`
+  (`ipc/io_ring.rs`) no longer run `from_utf8`; `syscall/linux.rs` converted.
+- `fs/escape.rs` — a shared octal escaper (Linux `mangle()` semantics) for the
+  text formats *other programs parse* (procfs mount fields, the trash index),
+  where `.display()`'s U+FFFD would be both lossy and ambiguous.
+- Consumer fallout: `kshell`, `oci`, `container`, `undelete`, `tags`, `httpd`,
+  `fswalk` and ~25 smaller modules; `fs/tar`, `fs/cpio`, `fs/zip` and the
+  unified `fs/archive` layer.
+
+Remaining: nothing for the core conversion. Two follow-ups are carried
+separately — `TD-ARCHIVE-WRITER-NAMES-ARE-STRING-NOT-BYTES` (ar/rar/7z member
+names) and `TD-KSHELL-LINE-EDITOR-IS-UTF8` (the interactive editor cannot type
+or tab-complete a byte name that the API now handles fine).
+
+**What the conversion turned up.** The sweep was not merely mechanical; it
+exposed four real bugs, each written up separately under *Fixed Bugs*:
+`B-CPIO-DROPS-NON-UTF8-MEMBER-NAMES`, `B-ZIP-FABRICATES-MEMBER-NAMES`,
+`B-MKDIR-ALL-BUILT-A-RELATIVE-PATH-FROM-AN-ABSOLUTE-ONE`, and the ext4
+readdir skip described above. It also let six hand-rolled path-jail joins in
+`kshell` (`tar`, `cpio`, `ar`/`dpkg`, `un7z`, `unrar`, `unzip` extract) be
+replaced with `pathutil::confine_under`, closing a Zip Slip in each, and let
+`kshell`'s private duplicate tar parser (`tar_parse_entries` — no checksum
+verification, and `from_utf8(...).unwrap_or("")` silently dropping non-UTF-8
+member names) be deleted in favour of `fs::tar::parse`.
 
 **Testing note.** `path.rs`'s `self_test` was developed against a throwaway
 host harness (copy the file into a small `std` crate, stub `crate::error` and
@@ -43136,6 +43158,257 @@ deny — are now fixed; see F8 and F9.)_
 
 ## Fixed Bugs
 
+### B-FTS-INSTANCE-POOL-IS-SHARED-ACROSS-THREADS. Two concurrent `fts_open` calls could be handed the *same* stream — 2026-08-13 — FIXED 2026-08-13
+
+**Where:** `posix/src/fts.rs`, `FTS_INSTANCES` / `FTS_HANDLES` and the
+`allocate_instance` / `release_instance` / `with_instance` helpers.
+
+**Symptom that exposed it:** `cargo test --workspace` intermittently failed
+`fts::tests::test_fts_open_close_roundtrip` with `fts_close` returning `-1`
+instead of `0`. The test passed in isolation and only failed with more than one
+test thread, which is the classic signature of a shared-global race rather than
+a test bug.
+
+**Root cause — the pool was in the wrong storage class.** The slot table was a
+bare `static mut`, and occupancy was a plain `bool` field claimed by a
+check-then-set:
+
+```rust
+static mut FTS_INSTANCES: [Instance; MAX_FTS_INSTANCES] = ...;   // WRONG scope
+...
+for (i, inst) in table.iter_mut().enumerate() {
+    if !inst.in_use {          // check ...
+        *inst = INSTANCE_INIT;
+        inst.in_use = true;    // ... then set
+        return Some(i);
+    }
+}
+```
+
+Every *other* slot pool in the crate (`epoll`, `dirent`, `stdio`, `mqueue`,
+`aio`, `semaphore`, the three `sysv_*`) declares its table with the
+`process_global!` macro from `posix/src/perprocess.rs`. That macro is a plain
+`static mut` on the target but a `thread_local!` on the host, precisely so that
+one host test thread's fd/handle table is not another's — `perprocess.rs` even
+carries a test (`writes_are_not_shared_between_threads`) for exactly this
+failure mode. `fts.rs` was the one pool that never adopted it, so its two slots
+were shared by every test thread: two threads could observe the same free slot,
+both claim it, then interleave writes into one `Instance` (same traversal stack,
+same path buffer), and whichever called `fts_close` second found the slot
+already released and returned `EBADF`. The visible test failure was the
+*mildest* possible outcome; the silent one is two `fts` walks corrupting each
+other's state.
+
+**Fix:** `FTS_INSTANCES` and `FTS_HANDLES` moved into `process_global!`
+(`instances_ptr()` / `handles_ptr()`), making `fts` consistent with all eleven
+sibling pools. The handle bodies had to move too — an `FTS *` is only meaningful
+against its own process's slots.
+
+A bespoke `AtomicBool` claim bitmap was written first and then backed out: it
+would have made `fts` the only pool in the crate with a different concurrency
+model while leaving the other eleven untouched, which is worse to maintain and
+fixes nothing the storage-class change doesn't. The residual question — whether
+the target build's "one single-threaded process" assumption behind
+`process_global!` still holds now that the crate implements `pthread_create` —
+is a crate-wide design issue and is tracked separately as
+`TD-POSIX-SLOT-POOLS-ASSUME-A-SINGLE-THREADED-PROCESS`.
+
+**Follow-on:** with the pool per-thread, two tests could be tightened from
+"either outcome is acceptable" into real assertions —
+`test_fts_open_close_roundtrip` now requires the open to succeed (and re-opens
+`3 * MAX_FTS_INSTANCES` times to prove released slots return to the pool), and
+`test_fts_open_exhausts_pool_returns_enomem` now requires exactly
+`MAX_FTS_INSTANCES` successes, distinct handles, then `ENOMEM`. Both previously
+tolerated a null return "because parallel tests may have taken the slots",
+which is what let the shared-table bug hide.
+
+**Lesson:** a tolerant assertion written to paper over test flakiness will hide
+the very bug it was papering over. When a test says "either result is fine
+because of parallelism", that is evidence of a shared-state defect, not a
+reason to weaken the assertion.
+
+### B-ATFORK-TESTS-LEAKED-HANDLERS-INTO-A-SHARED-TABLE. `atfork_table_full_returns_enomem` failed intermittently under parallel test threads — 2026-08-13 — FIXED 2026-08-13
+
+**Where:** `posix/src/pthread.rs`, tests `atfork_returns_zero` and
+`atfork_with_handlers_returns_zero`.
+
+**Root cause:** the atfork handler table is process-global, and the tests that
+exercise ordering already serialise on `ATFORK_TEST_LOCK` and call
+`atfork_reset()`. These two older tests did neither — they registered handlers
+into the shared table and never removed them. `atfork_table_full_returns_enomem`
+fills the table *exactly* and asserts every one of those registrations returns
+`0`, so a leaked handler from a concurrently-running test made one of them
+return `ENOMEM` (12) instead.
+
+**Fix:** both tests now take `ATFORK_TEST_LOCK` and bracket themselves with
+`atfork_reset()`, matching the convention of the other atfork tests. Unlike
+`B-FTS-INSTANCE-POOL-CLAIM-IS-A-DATA-RACE` above, the production code here was
+correct — `pthread_atfork` takes `ATFORK_LOCK` — so this was purely a test
+isolation defect.
+
+**Lesson:** when a module introduces a test-serialising lock for a global, every
+test that touches that global has to take it; a partially-applied convention is
+worse than none, because the failures land in the tests that *do* follow it.
+
+### B-BIND-TESTS-ASSERTED-ON-A-FIXED-REAL-HOST-PORT. `test_phase201_bind_port1024_no_cap_ok` failed whenever port 1024 was busy — 2026-08-13 — FIXED 2026-08-13
+
+**Where:** `posix/src/socket.rs`, `test_phase201_bind_port1024_no_cap_ok` and
+`test_phase201_bind_port8080_no_cap_ok`.
+
+**Root cause:** both tests exist to prove one narrow property — that with
+`CAP_NET_BIND_SERVICE` dropped, an *unprivileged* port is not rejected by the
+privileged-port gate. But they asserted `bind(...) == 0`, and these binds reach
+a real host socket on 127.0.0.1 at a *fixed* port. Any unrelated program
+holding 1024 or 8080, or a socket from an earlier run of the suite still in
+`TIME_WAIT`, makes the bind fail with `EADDRINUSE` and the test fail for a
+reason unrelated to the code under test. Observed failing on one run out of
+three consecutive suite invocations.
+
+**Fix:** both now go through a shared `assert_bind_not_gated(port)` helper that
+asserts the *absence of `EACCES`* rather than success. `EACCES` is the only
+error the gate itself can raise, so this tests exactly the intended property and
+is immune to host port availability. `test_phase201_bind_port0_no_cap_ok` keeps
+its stronger `== 0` assertion because port 0 is ephemeral and cannot collide.
+
+**Lesson:** assert on the specific failure mode under test, not on overall
+success, whenever the call also depends on shared machine state.
+
+### B-MKDIR-ALL-BUILT-A-RELATIVE-PATH-FROM-AN-ABSOLUTE-ONE. Every `mkdir -p` in the kernel failed `InvalidArgument`; boot panicked mounting `/tmp` — 2026-08-13 — FIXED 2026-08-13
+
+**Where:** `kernel/src/fs/vfs.rs`, `Vfs::mkdir_all` (~line 2217); the same bug
+in `kernel/src/fs/pathbar.rs`, `parse_breadcrumbs`.
+
+**Symptom:** the QEMU boot test died at
+`panicked at kernel\src\container.rs:6996:40: add /tmp tmpfs: InvalidArgument`.
+Not a `/tmp`-specific fault: *every* caller of `mkdir_all` was broken, and
+`container.rs` was simply the first one on the boot path that treats the
+failure as fatal.
+
+**Root cause — the one sharp edge of `Path::components()`.** `components()`
+drops empty components, which is exactly what makes it robust against `//`,
+a trailing `/`, and `.`-free normalisation. The corollary is easy to miss:
+the leading `/` of an absolute path *is* an empty leading component, so it is
+dropped too. `components()` on `/a/b` yields `a`, `b` — nothing that says
+"absolute".
+
+`mkdir_all` rebuilt the prefix chain by pushing components onto a fresh
+`PathBuf::new()`:
+
+```rust
+let mut built = PathBuf::new();          // WRONG
+for comp in &components { built.push(comp); ... Self::stat(&built) ... }
+```
+
+so the first probe was `stat("a")`, a *relative* path, which
+`validate_path` rejects with `InvalidArgument` ("must be absolute") before
+any filesystem is consulted. The function could never get past its first
+component.
+
+**Fix:** seed the accumulator with the root separator, with a comment naming
+the trap so the next reader does not re-introduce it:
+
+```rust
+// Seed with the root separator, not an empty buffer: `components()`
+// drops the leading `/`, so pushing the first component onto an empty
+// `PathBuf` would build a *relative* path and the `stat` below would
+// fail `validate_path` ("must be absolute") before touching the disk.
+let mut built = PathBuf::with_capacity(norm.len().saturating_add(1));
+built.extend_bytes(b"/");
+```
+
+`pathbar::parse_breadcrumbs` had the identical shape and emitted relative
+breadcrumb paths (`home`, `home/user`) for an absolute input; it is now seeded
+with `PathBuf::from(if normalized.is_absolute() { "/" } else { "" })`.
+
+**Audit.** All 19 `components()` rebuild loops in the kernel were checked
+after this. The rest are either correctly seeded (`cap/file_tags.rs` ×2,
+`vfs.rs::normalize_path`, `ipc/namespace.rs::normalize_jailed`,
+`memfs.rs::parent_path_of`) or deliberately relative (`overlay.rs` ×3,
+`container.rs:3106`, `oci.rs::archive_norm`, `oci.rs:1154`, `cpio.rs:349`,
+`pathutil.rs:121`, `kshell.rs:79987`). **This is a recurring trap, not a
+one-off** — treat "rebuilding a path from `components()`" as a code smell and
+check the seed every time.
+
+### B-CPIO-DROPS-NON-UTF8-MEMBER-NAMES. A cpio member whose name is not UTF-8 vanished from listings and was never extracted — 2026-08-13 — FIXED 2026-08-13
+
+**Where:** `kernel/src/fs/cpio.rs`, the name-decoding step of `parse`.
+
+**What it was:** `CpioEntry::name` was a `String`, so the parser decoded the
+NUL-terminated byte field with `core::str::from_utf8(...)` and, on failure,
+substituted `""`. An empty name matches nothing, is filtered out of listings,
+and names no file on extraction — so the member was *silently* dropped. Since
+cpio's name field is a raw byte run terminated by NUL (any byte but NUL is
+legal, exactly like our own paths), this is a routine input, not an exotic
+one: any archive built on a non-UTF-8 locale or containing a file that came
+off a foreign filesystem hits it.
+
+**Consequence:** `cpio -t` under-reported the archive's contents with no
+diagnostic, and `cpio -i` extracted fewer files than the archive held while
+reporting success. An initramfs built with such a name would be missing that
+file at runtime.
+
+**Fix:** `CpioEntry::name` and `::link_target` are now `fs::path::PathBuf`, so
+the bytes are carried through unmodified and no decode happens at all. Part of
+`D-VFS-PATHS-ARE-STR-NOT-BYTES`; see
+`TD-ARCHIVE-WRITER-NAMES-ARE-STRING-NOT-BYTES` for the formats still to
+convert.
+
+### B-ZIP-FABRICATES-MEMBER-NAMES. A ZIP member whose name is not UTF-8 was extracted under an invented `<invalid-utf8@0x…>` name — 2026-08-13 — FIXED 2026-08-13
+
+**Where:** `kernel/src/fs/zip.rs`, the central-directory / local-header name
+decode in `parse`.
+
+**What it was:** `ZipEntry::name` was a `String`, and where the stored bytes
+did not decode as UTF-8 the parser synthesised a placeholder of the form
+`<invalid-utf8@0x…>` (the offset of the record) and used it as the member's
+name. Unlike the cpio bug this is not a *drop* — it is worse. The placeholder
+is a perfectly usable name, so:
+
+- `unzip -l` displayed a name that appears nowhere in the archive;
+- `unzip` **wrote the file out under the fabricated name**, so extraction
+  produced a file that was not the one the archive contained, with no error
+  and no warning;
+- round-tripping (extract, re-zip) permanently replaced the real name with the
+  placeholder.
+
+ZIP does not require UTF-8. General-purpose bit 11 only *claims* it; DOS/CP437
+and arbitrary locale bytes are ubiquitous in real archives, so this fires on
+ordinary third-party input.
+
+**Fix:** `ZipEntry::name`, `ZipWriteEntry::name` and `DirRecord::name` are now
+`fs::path::PathBuf`; the parser does `PathBuf::from(name_bytes)` and the
+directory-member test became a byte test
+(`name.as_bytes().ends_with(b"/")`) rather than a `char` test. Display sites
+use `.display()`, which is lossy *for the terminal only* and never feeds back
+into a filename.
+
+### TD-KSHELL-LINE-EDITOR-IS-UTF8. The shell's line editor and tab completion cannot type or complete a non-UTF-8 filename — 2026-08-13 — LOGGED 2026-08-13
+
+**Where:** `kernel/src/kshell.rs`, the line-editor buffer and the tab-completion
+path (a code comment there points at this entry).
+
+**What it is:** `D-VFS-PATHS-ARE-STR-NOT-BYTES` made the VFS, the syscall
+boundary and `DirEntry.name` byte-clean, so a file named `re\xffport.txt` can
+now be created, listed, opened and deleted through the API. The kshell line
+editor, however, still holds the command line as a `String` and completes
+against `String`s. So such a file is visible in `ls` (via `.display()`, which
+renders the stray byte as U+FFFD) but **cannot be typed or tab-completed**:
+the completion candidate is dropped rather than inserted, and there is no way
+to enter the raw byte from the keyboard.
+
+**Why it is debt and not a bug:** nothing is corrupted or silently lost — the
+name is displayed honestly and every programmatic path works. It is a
+usability gap in one interactive front end.
+
+**Proper fix:** make the editor buffer a `Vec<u8>` with a separate
+grapheme/column model for cursor movement and redraw (the display width of a
+byte run is already computed lossily for rendering; that part stays), have
+completion produce `PathBuf` candidates, and add an escape input (e.g. the
+`$'\xff'` spelling the shell already parses in word expansion) so a byte with
+no key can still be entered. Not blocked on anything; deferred because the
+editor's cursor arithmetic is `char`-indexed throughout and converting it is a
+self-contained but non-trivial rewrite.
+
 ### TD-OILS-AN-UPPERCASE-G-WAS-READ-BY-THE-HALF-OF-THE-COMMAND-THAT-ONLY-EVER-READS-THE-LOWERCASE-ONE. `declare -Ga g=(1 2)` bound the array globally where bash keeps it in the frame — 2026-08-12 — FIXED 2026-08-12
 
 **Where:** `userspace/oils/src/interp.rs`, [`Shell::in_declare_global_scope`].
@@ -47037,19 +47310,81 @@ of the frag_history hang AND zero recurrence of Active Bugs #1
 
 ## Technical Debt
 
-### TD-ARCHIVE-WRITER-NAMES-ARE-STRING-NOT-BYTES. zip/cpio/ar/rar/7z member names are still `String` — LOGGED 2026-08-13
+### TD-POSIX-SLOT-POOLS-ASSUME-A-SINGLE-THREADED-PROCESS. Every fixed-size table in `posix/` claims slots with an unsynchronised check-then-set — LOGGED 2026-08-13
 
-**Where:** `kernel/src/fs/zip.rs` (`ZipEntry::name`, `ZipWriteEntry::name`),
-`kernel/src/fs/cpio.rs` (`CpioEntry::name`, `::link_target`),
-`kernel/src/fs/ar.rs` (`ArEntry::name`), `kernel/src/fs/rar.rs`,
+**Where:** the `process_global!` tables and their `alloc_*` helpers in
+`posix/src/`: `aio.rs` (~line 283), `dirent.rs` (~709, ~869), `epoll.rs` (~173,
+~1131, ~1829, ~2714), `mqueue.rs` (~326, ~357, ~610), `semaphore.rs` (~600),
+`stdio.rs` (~169), `sysv_msg.rs` (~327, ~532), `sysv_sem.rs` (~296),
+`sysv_shm.rs` (~311). Roughly 15 allocation sites across 10 modules.
+
+**The debt.** All of them claim a slot the same way:
+
+```rust
+for (i, inst) in table.iter_mut().enumerate() {
+    if !inst.in_use {       // check ...
+        inst.in_use = true; // ... then set, with nothing held
+        return Some(i);
+    }
+}
+```
+
+This is safe only under the assumption written into
+`posix/src/perprocess.rs`: *"the target links this crate into one single-threaded
+process"*. On the host that assumption is enforced — `process_global!` expands
+to a `thread_local!`, so each test thread gets its own table. On the target
+(`target_os = "none"`) it expands to a bare `static mut` and the assumption is
+load-bearing.
+
+**Why it's questionable.** The crate implements `pthread_create`. If a target
+process ever runs two threads that both call, say, `opendir` or `epoll_create`,
+they can claim the same slot and then corrupt each other's state — exactly the
+failure that `B-FTS-INSTANCE-POOL-IS-SHARED-ACROSS-THREADS` produced on the host
+once `fts.rs` was found not to be using `process_global!`. Several of these are
+worse than `fts` because allocation is *compound*: `sysv_msg::alloc_queue(key)`,
+`sysv_sem::alloc_set(key, ..)` and `sysv_shm::alloc_segment(key, ..)` scan for an
+existing entry with a matching key and then allocate if absent, so even an atomic
+per-slot claim would not make them correct — two threads could each create a
+segment for the same key.
+
+**Proper fix.** Add one shared primitive rather than 15 hand-rolled ones — a
+small slot-pool type in `perprocess.rs` offering (a) an atomic
+`compare_exchange`-based claim for the simple "first free slot" pools, and (b) a
+guard for the compound find-or-create pools, so the key lookup and the claim
+happen under the same critical section. Then convert all 15 sites and delete the
+per-module `in_use` scanning loops. Follow the `pthread.rs` `ATFORK_LOCK`
+spinlock as the model for the guard.
+
+**Why deferred.** It is a 10-module refactor and the current work (the
+`vfs-byte-paths` branch) needs to land first. It is not currently *reachable* as
+a bug: nothing on the target yet runs two threads through these entry points,
+and on the host `process_global!` makes each pool per-thread. Trigger to do it
+properly: before any target-side service is made multithreaded.
+
+### TD-ARCHIVE-WRITER-NAMES-ARE-STRING-NOT-BYTES. ar/rar/7z member names are still `String` — LOGGED 2026-08-13 — PARTIALLY FIXED 2026-08-13 (tar, cpio, zip converted)
+
+**Where:** `kernel/src/fs/ar.rs` (`ArEntry::name`), `kernel/src/fs/rar.rs`,
 `kernel/src/fs/sevenz.rs`.  The narrowing point is
 `kernel/src/fs/archive.rs::name_for_string_writer`.
 
-**What it is:** as part of `D-VFS-PATHS-ARE-STR-NOT-BYTES`, `fs::tar` and the
-unified `fs::archive` layer now carry member names as `fs::path::PathBuf`
-(raw bytes).  The other five format modules still model their names as
-`String`.  On the *read* path this is harmless — `archive::list_*` widens
-`String → PathBuf` losslessly.  On the *write* path it is not: a member name
+**Fixed so far:** `fs::tar`, `fs::cpio` (`CpioEntry::name`, `::link_target`)
+and `fs::zip` (`ZipEntry::name`, `ZipWriteEntry::name`) now carry `PathBuf`
+end to end, and `create_zip`/`create_cpio` are infallible again.  Converting
+the *read* side of those two also uncovered and closed two silent
+data-corruption bugs — see `B-CPIO-DROPS-NON-UTF8-MEMBER-NAMES` and
+`B-ZIP-FABRICATES-MEMBER-NAMES` below.  Both were caused by the same thing:
+a parser that must produce a `String` has nowhere to put a byte sequence that
+is not UTF-8, so it invents something.  Assume `ar.rs`, `rar.rs` and
+`sevenz.rs` each carry a variant of that bug and audit their name-decoding as
+part of converting them.
+
+**What it is:** as part of `D-VFS-PATHS-ARE-STR-NOT-BYTES`, `fs::tar`,
+`fs::cpio`, `fs::zip` and the unified `fs::archive` layer now carry member
+names as `fs::path::PathBuf` (raw bytes).  The remaining three format modules
+still model their names as `String`.  On the *read* path this is harmless
+*provided the parser did not already mangle the name* — `archive::list_*`
+widens `String → PathBuf` losslessly, but it cannot undo a lossy decode.  On
+the *write* path it is not harmless: a member name
 that is not valid UTF-8 cannot be handed to those writers at all, so
 `archive::create` now **rejects** it with `KernelError::InvalidArgument`
 (`name_for_string_writer`).  That is the honest failure — the alternative,
@@ -47065,15 +47400,13 @@ PathBuf::from(b"re\xffport.txt".as_slice()), .. }])` → `InvalidArgument`.
 The same content in a tar round-trips byte-for-byte (see
 `archive::test_tar_byte_name_roundtrip`).
 
-**Proper fix:** convert `ZipEntry`/`ZipWriteEntry`/`CpioEntry`/`ArEntry` and
-the rar/7z entry types' `name` and `link_target` fields to `PathBuf`, exactly
-as was done for `TarEntry`/`TarWriteEntry`, then delete
-`name_for_string_writer` and make `create_zip`/`create_cpio`/`create_ar`
-infallible again.  The fallout is confined to those five modules plus
-`kshell.rs` (the `cpio`, `dpkg`/`ar` and `unzip` builtins, around lines
-80343–80900) — and `kshell.rs` has to be swept for this conversion anyway.
-Deferred only to keep the tar/archive commit reviewable; it is not blocked on
-anything.
+**Proper fix:** convert `ArEntry` and the rar/7z entry types' `name` and
+`link_target` fields to `PathBuf`, exactly as was done for
+`TarEntry`/`TarWriteEntry`, `CpioEntry` and `ZipEntry`/`ZipWriteEntry`, then
+delete `name_for_string_writer` and make `create_ar` infallible again.  The
+fallout is confined to those three modules plus `kshell.rs`'s `dpkg`/`ar`
+builtins.  Deferred only to keep the tar/archive commit reviewable; it is not
+blocked on anything.
 
 ### TD-POSIX-LONG-DOUBLE-PRECISION. `long double` has the right *ABI* but only `double` (53-bit) *precision* — ACCEPTED LIMITATION 2026-07-30
 

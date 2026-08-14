@@ -566,7 +566,7 @@ impl NvmeController {
 
         // Parse namespace data.
         // SAFETY: Controller wrote 4096 bytes.
-        let data = unsafe { core::slice::from_raw_parts(data_virt as *const u8, 4096) };
+        let data = unsafe { core::slice::from_raw_parts(data_virt.cast_const(), 4096) };
 
         // Bytes 0-7: NSZE (Namespace Size in logical blocks, 64-bit LE).
         let nsze = u64::from_le_bytes([

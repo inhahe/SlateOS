@@ -282,7 +282,7 @@ pub fn self_test() {
     record_load(BinFormat::Elf64, 100_000_000).expect("big_load");
     let f = format_stats().into_iter().find(|f| f.format == BinFormat::Elf64).expect("p4");
     assert_eq!(f.max_load_ns, 100_000_000);
-    assert_eq!(f.avg_load_ns, (400_000 + 100_000_000) / 2);
+    assert_eq!(f.avg_load_ns, u64::midpoint(400_000, 100_000_000));
     crate::serial_println!("  [4/8] max + average: OK");
 
     // 5: Record error — bumps the registered format's error count, the per-error

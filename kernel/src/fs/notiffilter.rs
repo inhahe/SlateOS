@@ -257,14 +257,14 @@ pub fn self_test() {
     crate::serial_println!("  [3/8] block: OK");
 
     // 4: Ad silenced.
-    let ad = NotifData { app_name: String::from("game"), category: String::from("advertisement"), title: String::from("Special offer"), body: String::from(""), priority: String::from("low") };
+    let ad = NotifData { app_name: String::from("game"), category: String::from("advertisement"), title: String::from("Special offer"), body: String::new(), priority: String::from("low") };
     let action = evaluate(&ad).expect("eval3");
     assert_eq!(action, FilterAction::Silence);
     crate::serial_println!("  [4/8] silence: OK");
 
     // 5: Add custom rule.
     let rid = add_rule("Defer work emails", MatchField::AppName, "work", FilterAction::Defer).expect("add");
-    let work = NotifData { app_name: String::from("work-email"), category: String::from("email"), title: String::from("Meeting"), body: String::from(""), priority: String::from("normal") };
+    let work = NotifData { app_name: String::from("work-email"), category: String::from("email"), title: String::from("Meeting"), body: String::new(), priority: String::from("normal") };
     let action = evaluate(&work).expect("eval4");
     assert_eq!(action, FilterAction::Defer);
     crate::serial_println!("  [5/8] custom rule: OK");

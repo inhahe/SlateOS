@@ -1048,11 +1048,11 @@ pub fn self_test() -> KernelResult<()> {
     Vfs::mkdir(upper)?;
 
     // Populate lower layer with test files.
-    Vfs::write_file(&alloc::format!("{}/file_a.txt", lower), b"lower content A")?;
-    Vfs::write_file(&alloc::format!("{}/file_b.txt", lower), b"lower content B")?;
-    Vfs::write_file(&alloc::format!("{}/shared.txt", lower), b"from lower")?;
-    Vfs::mkdir(&alloc::format!("{}/subdir", lower))?;
-    Vfs::write_file(&alloc::format!("{}/subdir/deep.txt", lower), b"deep file")?;
+    Vfs::write_file(alloc::format!("{}/file_a.txt", lower), b"lower content A")?;
+    Vfs::write_file(alloc::format!("{}/file_b.txt", lower), b"lower content B")?;
+    Vfs::write_file(alloc::format!("{}/shared.txt", lower), b"from lower")?;
+    Vfs::mkdir(alloc::format!("{}/subdir", lower))?;
+    Vfs::write_file(alloc::format!("{}/subdir/deep.txt", lower), b"deep file")?;
 
     // --- Test 1: Create overlay ---
     let id = create("test_overlay", lower, upper)?;
@@ -1094,7 +1094,7 @@ pub fn self_test() -> KernelResult<()> {
         }
 
         // Lower is unchanged.
-        let lower_data = Vfs::read_file(&alloc::format!("{}/shared.txt", lower))?;
+        let lower_data = Vfs::read_file(alloc::format!("{}/shared.txt", lower))?;
         if lower_data != b"from lower" {
             serial_println!("[overlay]   ERROR: lower was modified!");
             let _ = Vfs::remove_recursive(test_base);
@@ -1129,7 +1129,7 @@ pub fn self_test() -> KernelResult<()> {
         }
 
         // Lower still has the file.
-        let lower_data = Vfs::read_file(&alloc::format!("{}/file_b.txt", lower))?;
+        let lower_data = Vfs::read_file(alloc::format!("{}/file_b.txt", lower))?;
         if lower_data != b"lower content B" {
             serial_println!("[overlay]   ERROR: lower file was deleted!");
             let _ = Vfs::remove_recursive(test_base);
@@ -1221,7 +1221,7 @@ pub fn self_test() -> KernelResult<()> {
         }
 
         // Lower unchanged.
-        let lower_deep = Vfs::read_file(&alloc::format!("{}/subdir/deep.txt", lower))?;
+        let lower_deep = Vfs::read_file(alloc::format!("{}/subdir/deep.txt", lower))?;
         if lower_deep != b"deep file" {
             serial_println!("[overlay]   ERROR: lower subdir was modified");
             let _ = Vfs::remove_recursive(test_base);
@@ -1290,7 +1290,7 @@ pub fn self_test() -> KernelResult<()> {
         }
 
         // After commit, lower should have the committed file.
-        let lower_data = Vfs::read_file(&alloc::format!("{}/committed.txt", lower))?;
+        let lower_data = Vfs::read_file(alloc::format!("{}/committed.txt", lower))?;
         if lower_data != b"committed data" {
             serial_println!("[overlay]   ERROR: commit didn't write to lower");
             let _ = Vfs::remove_recursive(test_base);
@@ -1310,7 +1310,7 @@ pub fn self_test() -> KernelResult<()> {
         Vfs::mount(mount_path, alloc::boxed::Box::new(ovl_fs))?;
 
         // Read through a normal VFS path → merged view (lower layer).
-        let via_vfs = Vfs::read_file(&alloc::format!("{}/file_a.txt", mount_path))?;
+        let via_vfs = Vfs::read_file(alloc::format!("{}/file_a.txt", mount_path))?;
         if via_vfs != b"lower content A" {
             serial_println!("[overlay]   ERROR: VFS-mounted read mismatch");
             let _ = Vfs::unmount(mount_path);
@@ -1320,8 +1320,8 @@ pub fn self_test() -> KernelResult<()> {
         }
 
         // Write through a normal VFS path → copy-up into the upper layer.
-        Vfs::write_file(&alloc::format!("{}/vfs_new.txt", mount_path), b"via vfs")?;
-        let back = Vfs::read_file(&alloc::format!("{}/vfs_new.txt", mount_path))?;
+        Vfs::write_file(alloc::format!("{}/vfs_new.txt", mount_path), b"via vfs")?;
+        let back = Vfs::read_file(alloc::format!("{}/vfs_new.txt", mount_path))?;
         if back != b"via vfs" {
             serial_println!("[overlay]   ERROR: VFS-mounted write/read mismatch");
             let _ = Vfs::unmount(mount_path);
@@ -1338,7 +1338,7 @@ pub fn self_test() -> KernelResult<()> {
             destroy(id).ok();
             return Err(KernelError::InternalError);
         }
-        if Vfs::exists(&alloc::format!("{}/vfs_new.txt", lower)) {
+        if Vfs::exists(alloc::format!("{}/vfs_new.txt", lower)) {
             serial_println!("[overlay]   ERROR: VFS write leaked into lower layer");
             let _ = Vfs::unmount(mount_path);
             let _ = Vfs::remove_recursive(test_base);

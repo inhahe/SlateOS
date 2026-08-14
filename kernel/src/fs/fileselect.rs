@@ -620,7 +620,7 @@ fn collect_checked_recursive(node: &CheckTreeNode, result: &mut Vec<PathBuf>) {
     // Unchecked — skip entirely.
 }
 
-/// Simple glob pattern matching (supports `*` and `?`).
+/// Simple glob pattern matching (supports `*`, `?`, `[...]` and `\`).
 ///
 /// Matching is over **bytes**, not `char`s.  `text` is a filename, which is an
 /// uninterpreted byte string that need not be valid UTF-8, so `chars()` could
@@ -628,45 +628,13 @@ fn collect_checked_recursive(node: &CheckTreeNode, result: &mut Vec<PathBuf>) {
 /// one byte rather than one code point — the same rule a POSIX shell applies
 /// in a non-multibyte locale, and the only rule that is total over the names
 /// the filesystem accepts.
+///
+/// Case-sensitive, because the filesystem is.  Delegates to the one shared
+/// matcher in `fs::vfs`; the private recursive copy this replaced backtracked
+/// by re-entering itself at every `*`, which is exponential on a pattern like
+/// `a*a*a*b`.
 fn simple_glob(pattern: &str, text: impl AsRef<Path>) -> bool {
-    glob_match(pattern.as_bytes(), 0, text.as_ref().as_bytes(), 0)
-}
-
-fn glob_match(pat: &[u8], pi: usize, txt: &[u8], ti: usize) -> bool {
-    if pi == pat.len() {
-        return ti == txt.len();
-    }
-    match pat.get(pi).copied() {
-        Some(b'*') => {
-            // Try matching zero or more characters.
-            let mut t = ti;
-            loop {
-                if glob_match(pat, pi + 1, txt, t) {
-                    return true;
-                }
-                if t >= txt.len() {
-                    break;
-                }
-                t += 1;
-            }
-            false
-        }
-        Some(b'?') => {
-            if ti < txt.len() {
-                glob_match(pat, pi + 1, txt, ti + 1)
-            } else {
-                false
-            }
-        }
-        Some(c) => {
-            if ti < txt.len() && txt.get(ti).copied() == Some(c) {
-                glob_match(pat, pi + 1, txt, ti + 1)
-            } else {
-                false
-            }
-        }
-        None => ti == txt.len(),
-    }
+    crate::fs::vfs::glob_match(text.as_ref(), pattern, false)
 }
 
 /// Format a byte size for display.

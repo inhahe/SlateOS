@@ -166,7 +166,7 @@ impl Color {
         let max = if r >= g && r >= b { r } else if g >= b { g } else { b };
         let min = if r <= g && r <= b { r } else if g <= b { g } else { b };
         let delta = max - min;
-        let l = (max + min) / 2.0;
+        let l = f64::midpoint(max, min);
 
         if delta < 0.00001 {
             return (0, 0, (l * 100.0) as u8);

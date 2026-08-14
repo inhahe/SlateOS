@@ -1017,7 +1017,7 @@ pub fn init() {
         // Wait for the AP to set its started flag.
         let mut started = false;
         for _ in 0..AP_STARTUP_TIMEOUT {
-            if read_started_flag(tramp_virt as *const u8) != 0 {
+            if read_started_flag(tramp_virt.cast_const()) != 0 {
                 started = true;
                 break;
             }

@@ -1167,9 +1167,9 @@ fn test_full_backup() {
 
     // Verify files exist in backup.
     let backup_dir = alloc::format!("/tmp/bkp_dst/{}", result.manifest_id);
-    let data = Vfs::read_file(&alloc::format!("{}/a.txt", backup_dir)).expect("read a.txt");
+    let data = Vfs::read_file(alloc::format!("{}/a.txt", backup_dir)).expect("read a.txt");
     assert_eq!(&data, b"alpha");
-    let data = Vfs::read_file(&alloc::format!("{}/sub/b.txt", backup_dir)).expect("read b.txt");
+    let data = Vfs::read_file(alloc::format!("{}/sub/b.txt", backup_dir)).expect("read b.txt");
     assert_eq!(&data, b"beta");
 
     // Cleanup.

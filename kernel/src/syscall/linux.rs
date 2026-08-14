@@ -36495,7 +36495,7 @@ fn socket_stream_bind_from_user(
     }
     let port = u16::from_be_bytes([sa[2], sa[3]]);
     match crate::net::socket::bind_stream(h, port) {
-        Ok(_) => SyscallResult::ok(0),
+        Ok(()) => SyscallResult::ok(0),
         Err(e) => linux_err(linux_errno_for(e)),
     }
 }
@@ -36580,7 +36580,7 @@ fn sys_listen(args: &SyscallArgs) -> SyscallResult {
     {
         let h = crate::net::socket::SocketHandle::from_raw(entry.raw_handle);
         return match crate::net::socket::listen(h, backlog) {
-            Ok(_) => SyscallResult::ok(0),
+            Ok(()) => SyscallResult::ok(0),
             Err(e) => linux_err(linux_errno_for(e)),
         };
     }

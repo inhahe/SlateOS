@@ -2214,7 +2214,12 @@ impl Vfs {
             return Err(KernelError::InvalidArgument);
         }
 
-        let mut built = PathBuf::with_capacity(norm.len());
+        // Seed with the root separator, not an empty buffer: `components()`
+        // drops the leading `/`, so pushing the first component onto an empty
+        // `PathBuf` would build a *relative* path and the `stat` below would
+        // fail `validate_path` ("must be absolute") before touching the disk.
+        let mut built = PathBuf::with_capacity(norm.len().saturating_add(1));
+        built.extend_bytes(b"/");
 
         for comp in &components {
             built.push(comp);

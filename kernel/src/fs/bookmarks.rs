@@ -37,6 +37,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::{KernelError, KernelResult};
+use crate::fs::path::{Path, PathBuf};
 use crate::serial_println;
 
 // ---------------------------------------------------------------------------
@@ -92,7 +93,11 @@ pub struct Bookmark {
     /// Short name for reference ("work", "docs", "home").
     pub name: String,
     /// Full filesystem path.
-    pub path: String,
+    ///
+    /// A byte string, not text: a bookmark that cannot name every path the
+    /// filesystem accepts is a bookmark that silently cannot point at some
+    /// directories.
+    pub path: PathBuf,
     /// Display label (may differ from name: "My Documents").
     pub label: String,
     /// Category for sidebar grouping.
@@ -152,7 +157,7 @@ pub fn init() {
     for (name, path, label, icon, order) in &defaults {
         bm.push(Bookmark {
             name: String::from(*name),
-            path: String::from(*path),
+            path: PathBuf::from(*path),
             label: String::from(*label),
             category: Category::Places,
             icon: String::from(*icon),
@@ -171,7 +176,13 @@ pub fn init() {
 // ---------------------------------------------------------------------------
 
 /// Add a user bookmark.
-pub fn add(name: &str, path: &str, label: &str, category: Category) -> KernelResult<()> {
+pub fn add<P: AsRef<Path>>(
+    name: &str,
+    path: P,
+    label: &str,
+    category: Category,
+) -> KernelResult<()> {
+    let path = path.as_ref();
     ADD_COUNT.fetch_add(1, Ordering::Relaxed);
     init(); // Ensure system defaults exist.
 
@@ -196,7 +207,7 @@ pub fn add(name: &str, path: &str, label: &str, category: Category) -> KernelRes
 
     bm.push(Bookmark {
         name: String::from(name),
-        path: String::from(path),
+        path: path.to_path_buf(),
         label: if label.is_empty() { String::from(name) } else { String::from(label) },
         category,
         icon: String::new(),
@@ -232,7 +243,7 @@ pub fn remove(name: &str) -> KernelResult<()> {
 /// Resolve a bookmark name to its path.
 ///
 /// Used by `cd @name` in the shell.
-pub fn resolve(name: &str) -> Option<String> {
+pub fn resolve(name: &str) -> Option<PathBuf> {
     RESOLVE_COUNT.fetch_add(1, Ordering::Relaxed);
     init();
 
@@ -274,14 +285,15 @@ pub fn rename(old_name: &str, new_name: &str) -> KernelResult<()> {
 }
 
 /// Update a bookmark's path.
-pub fn update_path(name: &str, new_path: &str) -> KernelResult<()> {
+pub fn update_path<P: AsRef<Path>>(name: &str, new_path: P) -> KernelResult<()> {
+    let new_path = new_path.as_ref();
     let mut bm = BOOKMARKS.lock();
     let name_lower = name.to_lowercase();
 
     let pos = bm.iter().position(|b| b.name.to_lowercase() == name_lower);
     match pos {
         Some(i) => {
-            bm[i].path = String::from(new_path);
+            bm[i].path = new_path.to_path_buf();
             Ok(())
         }
         None => Err(KernelError::NotFound),
@@ -357,7 +369,7 @@ pub fn get(name: &str) -> Option<Bookmark> {
 /// Validate all bookmarks — check if paths still exist.
 ///
 /// Returns list of (name, path, exists) tuples.
-pub fn validate() -> Vec<(String, String, bool)> {
+pub fn validate() -> Vec<(String, PathBuf, bool)> {
     init();
     let bm = BOOKMARKS.lock();
     bm.iter()
@@ -434,11 +446,11 @@ fn test_add_and_resolve() {
     assert!(result.is_ok());
 
     let path = resolve("work");
-    assert_eq!(path, Some(String::from("/home/user/work")));
+    assert_eq!(path, Some(PathBuf::from("/home/user/work")));
 
     // Case-insensitive lookup.
     let path = resolve("WORK");
-    assert_eq!(path, Some(String::from("/home/user/work")));
+    assert_eq!(path, Some(PathBuf::from("/home/user/work")));
 
     // Duplicate name.
     let result = add("work", "/other/path", "", Category::Favorites);

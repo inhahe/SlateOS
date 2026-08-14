@@ -520,7 +520,7 @@ fn json_extract_path(json: &str, key: &str) -> Option<PathBuf> {
 /// odd length or a non-hex digit.
 fn hex_decode(s: &str) -> Option<Vec<u8>> {
     let bytes = s.as_bytes();
-    if bytes.len() % 2 != 0 {
+    if !bytes.len().is_multiple_of(2) {
         return None;
     }
     let mut out = Vec::with_capacity(bytes.len() / 2);

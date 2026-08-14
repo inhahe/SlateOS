@@ -710,7 +710,7 @@ fn decode_huffman_tree(data: &[u8]) -> KernelResult<(Vec<u8>, usize, usize)> {
             return Err(KernelError::CorruptedData);
         }
 
-        let weight_data = &data[1..1 + compressed_size];
+        let weight_data = &data[1..=compressed_size];
         let weights = decode_huffman_weights_fse(weight_data)?;
         let num_symbols = weights.len();
         Ok((weights, num_symbols, 1 + compressed_size))
@@ -1790,7 +1790,7 @@ pub fn zstd_store(data: &[u8]) -> Vec<u8> {
         (0u8, 1usize) // fcs_flag=0, single_segment → 1 byte
     } else if data.len() <= 65535 + 256 {
         (1u8, 2)
-    } else if data.len() <= u32::MAX as usize {
+    } else if u32::try_from(data.len()).is_ok() {
         (2u8, 4)
     } else {
         (3u8, 8)
@@ -1889,7 +1889,7 @@ pub fn compress_zstd(data: &[u8]) -> Vec<u8> {
         (0u8, 1usize)
     } else if data.len() <= 65535 + 256 {
         (1u8, 2)
-    } else if data.len() <= u32::MAX as usize {
+    } else if u32::try_from(data.len()).is_ok() {
         (2u8, 4)
     } else {
         (3u8, 8)

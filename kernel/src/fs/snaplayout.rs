@@ -251,16 +251,14 @@ pub fn snap_to_zone(window_id: u32, zone_id: u32) -> KernelResult<SnapZone> {
         if let Some(group) = state.groups.iter_mut().find(|g| g.layout_id == state.active_layout_id) {
             group.assignments.retain(|&(wid, _)| wid != window_id);
             group.assignments.push((window_id, zone_id));
-        } else {
-            if state.groups.len() < MAX_GROUPS {
-                let gid = state.next_group_id;
-                state.next_group_id += 1;
-                state.groups.push(SnapGroup {
-                    group_id: gid,
-                    layout_id: state.active_layout_id,
-                    assignments: alloc::vec![(window_id, zone_id)],
-                });
-            }
+        } else if state.groups.len() < MAX_GROUPS {
+            let gid = state.next_group_id;
+            state.next_group_id += 1;
+            state.groups.push(SnapGroup {
+                group_id: gid,
+                layout_id: state.active_layout_id,
+                assignments: alloc::vec![(window_id, zone_id)],
+            });
         }
         Ok(zone)
     })

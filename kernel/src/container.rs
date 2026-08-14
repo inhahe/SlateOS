@@ -98,7 +98,7 @@ pub type PublishedPort = (crate::net::nat::NatProto, u16, u16);
 /// A container's volume (bind) mount spec: `(guest_prefix, host_target,
 /// read_only)`.  The Docker `-v host_target:guest_prefix[:ro]` mechanism.
 /// `read_only == true` makes the mount reject writes (mapped to `EROFS`).
-pub type VolumeSpec = (String, String, bool);
+pub type VolumeSpec = (PathBuf, PathBuf, bool);
 
 /// Snapshot of the data [`run`] needs to install a container's published-port
 /// NAT rules, taken under the table lock: `(net_ns, container_ip, ports)`.
@@ -612,7 +612,7 @@ struct Container {
     /// jailed to via [`crate::ipc::namespace::set_root`].  Empty string
     /// means "no jail" — processes see the host root (used by tests and by
     /// containers whose rootfs has not been configured).
-    root_path: String,
+    root_path: PathBuf,
     /// VFS mountpoint of this container's overlay rootfs, if one was mounted
     /// for copy-on-write isolation (e.g. `/containers/<name>/rootfs`).
     ///
@@ -620,7 +620,7 @@ struct Container {
     /// per-container `OverlayFs` adapter is released.  Empty means the
     /// container's jail (if any) points at a plain host directory that the
     /// container module does not own and must not unmount.
-    rootfs_mount: String,
+    rootfs_mount: PathBuf,
     /// Overlay id backing this container's copy-on-write rootfs, if one was
     /// created for it. `None` when the container is jailed directly at a plain
     /// (non-overlay) directory. Recorded at run time so introspection that
@@ -645,7 +645,7 @@ struct Container {
     /// container: [`delete`] unmounts each and removes its (now-empty)
     /// backing directory, so the tmpfs contents are ephemeral — freed when
     /// the container is removed.  Empty for a container with no tmpfs mounts.
-    tmpfs_mounts: Vec<String>,
+    tmpfs_mounts: Vec<PathBuf>,
     /// When `true`, the container's root filesystem is read-only (Docker
     /// `--read-only`): writes resolving into the rootfs are denied with
     /// `EROFS`, while writable (`:rw`) volumes remain writable.  Installed on
@@ -796,8 +796,8 @@ impl Container {
             memberships: Vec::new(),
             pids: Vec::new(),
             init_pid: None,
-            root_path: String::new(),
-            rootfs_mount: String::new(),
+            root_path: PathBuf::new(),
+            rootfs_mount: PathBuf::new(),
             overlay_id: None,
             volumes: Vec::new(),
             tmpfs_mounts: Vec::new(),
@@ -865,11 +865,11 @@ pub struct ContainerInfo {
     pub init_pid: Option<u64>,
     /// Filesystem root (chroot) for the container, or empty if processes
     /// see the host root (no rootfs configured).
-    pub root_path: String,
+    pub root_path: PathBuf,
     /// VFS mountpoint of the container's overlay rootfs, or empty if the
     /// container does not own a mounted overlay (the jail, if any, points at
     /// a plain host directory). Unmounted by [`delete`].
-    pub rootfs_mount: String,
+    pub rootfs_mount: PathBuf,
     /// Volume (bind) mounts as `(guest_prefix, host_target, read_only)`.
     pub volumes: Vec<VolumeSpec>,
     /// Whether the container's root filesystem is read-only (`--read-only`).
@@ -2416,30 +2416,15 @@ fn relaunch_recorded(id: ContainerId, reset_restart_count: bool) -> KernelResult
 ///
 /// Returns the host VFS path, or [`KernelError::InvalidArgument`] if the
 /// container has no rootfs configured or the path is unsafe.
-fn resolve_in_rootfs(root_path: &str, container_path: &str) -> KernelResult<String> {
-    if root_path.is_empty() {
-        return Err(KernelError::InvalidArgument);
-    }
-    if container_path.contains('\0') {
-        return Err(KernelError::InvalidArgument);
-    }
-    let rel = container_path.trim_start_matches('/');
-    // Reject any `..` path component (jail escape) and empty/`.`-only paths.
-    let mut has_real_component = false;
-    for comp in rel.split('/') {
-        if comp == ".." {
-            return Err(KernelError::InvalidArgument);
-        }
-        if !comp.is_empty() && comp != "." {
-            has_real_component = true;
-        }
-    }
-    if !has_real_component {
-        // Refuse to copy the rootfs root itself (must name a file).
-        return Err(KernelError::InvalidArgument);
-    }
-    let base = root_path.trim_end_matches('/');
-    Ok(alloc::format!("{base}/{rel}"))
+fn resolve_in_rootfs<P: AsRef<Path> + ?Sized>(
+    root_path: &Path,
+    container_path: &P,
+) -> KernelResult<PathBuf> {
+    // This is exactly the shared "join under a jail" guard: strip a leading
+    // `/`, drop `.`, reject `..`, NUL, an empty base, and a path that names
+    // the base itself.  A hand-rolled copy here is how the two `..`-escape
+    // spellings drift apart, so it delegates rather than re-deriving.
+    confine_under(root_path, container_path)
 }
 
 /// Copy a file's bytes *into* a container's filesystem (Docker `cp` host →
@@ -2896,8 +2881,9 @@ pub fn commit(
 /// - [`KernelError::InvalidArgument`] if the container doesn't exist, is
 ///   not in `Created` state, or `root` is non-empty but not an absolute
 ///   path.
-pub fn set_root_path(id: ContainerId, root: &str) -> KernelResult<()> {
-    if !root.is_empty() && !root.starts_with('/') {
+pub fn set_root_path<P: AsRef<Path> + ?Sized>(id: ContainerId, root: &P) -> KernelResult<()> {
+    let root = root.as_ref();
+    if !root.is_empty() && !root.is_absolute() {
         return Err(KernelError::InvalidArgument);
     }
     with_table(|table| {
@@ -2908,7 +2894,7 @@ pub fn set_root_path(id: ContainerId, root: &str) -> KernelResult<()> {
         if table.containers[idx].state != ContainerState::Created {
             return Err(KernelError::InvalidArgument);
         }
-        table.containers[idx].root_path = String::from(root);
+        table.containers[idx].root_path = root.to_path_buf();
         Ok(())
     })
 }
@@ -2993,8 +2979,9 @@ pub fn set_hostname(id: ContainerId, name: &str) -> KernelResult<()> {
 /// - [`KernelError::InvalidArgument`] if the container doesn't exist, is
 ///   not in `Created` state, or `mount` is non-empty but not an absolute
 ///   path.
-pub fn set_rootfs_mount(id: ContainerId, mount: &str) -> KernelResult<()> {
-    if !mount.is_empty() && !mount.starts_with('/') {
+pub fn set_rootfs_mount<P: AsRef<Path> + ?Sized>(id: ContainerId, mount: &P) -> KernelResult<()> {
+    let mount = mount.as_ref();
+    if !mount.is_empty() && !mount.is_absolute() {
         return Err(KernelError::InvalidArgument);
     }
     with_table(|table| {
@@ -3005,7 +2992,7 @@ pub fn set_rootfs_mount(id: ContainerId, mount: &str) -> KernelResult<()> {
         if table.containers[idx].state != ContainerState::Created {
             return Err(KernelError::InvalidArgument);
         }
-        table.containers[idx].rootfs_mount = String::from(mount);
+        table.containers[idx].rootfs_mount = mount.to_path_buf();
         Ok(())
     })
 }
@@ -3248,16 +3235,17 @@ pub fn commit_image(id: ContainerId, dest_dir: &str) -> KernelResult<String> {
 /// `read_only == true` makes the volume reject writes once the container runs
 /// (writes to the mount and its subtree fail with `EROFS`), matching Docker
 /// `-v host:guest:ro`.
-pub fn add_volume_mount(
+pub fn add_volume_mount<H: AsRef<Path> + ?Sized, G: AsRef<Path> + ?Sized>(
     id: ContainerId,
-    host_target: &str,
-    guest_prefix: &str,
+    host_target: &H,
+    guest_prefix: &G,
     read_only: bool,
 ) -> KernelResult<()> {
-    if !host_target.starts_with('/') || !guest_prefix.starts_with('/') {
+    let (host_target, guest_prefix) = (host_target.as_ref(), guest_prefix.as_ref());
+    if !host_target.is_absolute() || !guest_prefix.is_absolute() {
         return Err(KernelError::InvalidArgument);
     }
-    if guest_prefix == "/" {
+    if guest_prefix == Path::new("/") {
         return Err(KernelError::InvalidArgument);
     }
     with_table(|table| {
@@ -3273,9 +3261,9 @@ pub fn add_volume_mount(
         // wins), mirroring `namespace::add_volume` semantics. Both the host
         // target and the read-only flag are overwritten.
         if let Some(existing) =
-            vols.iter_mut().find(|(g, _, _)| g == guest_prefix)
+            vols.iter_mut().find(|(g, _, _)| g.as_path() == guest_prefix)
         {
-            existing.1 = String::from(host_target);
+            existing.1 = host_target.to_path_buf();
             existing.2 = read_only;
             return Ok(());
         }
@@ -3283,8 +3271,8 @@ pub fn add_volume_mount(
             return Err(KernelError::ResourceExhausted);
         }
         vols.push((
-            String::from(guest_prefix),
-            String::from(host_target),
+            guest_prefix.to_path_buf(),
+            host_target.to_path_buf(),
             read_only,
         ));
         Ok(())
@@ -3317,8 +3305,12 @@ pub fn add_volume_mount(
 /// - [`KernelError::ResourceExhausted`] if the container already has
 ///   [`MAX_VOLUMES_PER_CONTAINER`] volume/tmpfs entries.
 /// - Any VFS error from creating or mounting the tmpfs backing directory.
-pub fn add_tmpfs_mount(id: ContainerId, guest_prefix: &str) -> KernelResult<()> {
-    if !guest_prefix.starts_with('/') || guest_prefix == "/" {
+pub fn add_tmpfs_mount<G: AsRef<Path> + ?Sized>(
+    id: ContainerId,
+    guest_prefix: &G,
+) -> KernelResult<()> {
+    let guest_prefix = guest_prefix.as_ref();
+    if !guest_prefix.is_absolute() || guest_prefix == Path::new("/") {
         return Err(KernelError::InvalidArgument);
     }
 
@@ -3334,7 +3326,7 @@ pub fn add_tmpfs_mount(id: ContainerId, guest_prefix: &str) -> KernelResult<()> 
             return Err(KernelError::InvalidArgument);
         }
         // Reject a duplicate guest prefix (a plain volume or an existing tmpfs).
-        if ct.volumes.iter().any(|(g, _, _)| g == guest_prefix) {
+        if ct.volumes.iter().any(|(g, _, _)| g.as_path() == guest_prefix) {
             return Err(KernelError::InvalidArgument);
         }
         if ct.volumes.len() >= MAX_VOLUMES_PER_CONTAINER {
@@ -3345,7 +3337,7 @@ pub fn add_tmpfs_mount(id: ContainerId, guest_prefix: &str) -> KernelResult<()> 
 
     // Build a unique host mountpoint and mount a fresh in-memory filesystem
     // there, outside the table lock.
-    let host_mount = alloc::format!("{TMPFS_ROOT}/{id}-{index}");
+    let host_mount = PathBuf::from(alloc::format!("{TMPFS_ROOT}/{id}-{index}"));
     crate::fs::vfs::Vfs::mkdir_all(&host_mount)?;
     // On mount failure, leave the (empty) mountpoint dir behind — harmless, and
     // removing it here would race a concurrent mount attempt. Propagate the
@@ -3364,7 +3356,7 @@ pub fn add_tmpfs_mount(id: ContainerId, guest_prefix: &str) -> KernelResult<()> 
             return Err(KernelError::InvalidArgument);
         }
         let ct = &mut table.containers[idx];
-        ct.volumes.push((String::from(guest_prefix), host_mount.clone(), false));
+        ct.volumes.push((guest_prefix.to_path_buf(), host_mount.clone(), false));
         ct.tmpfs_mounts.push(host_mount.clone());
         Ok(())
     });
@@ -5196,8 +5188,8 @@ pub fn self_test() {
         set_root_path(ct_jail, "/containers/test-jail/rootfs")
             .expect("set rootfs");
         assert_eq!(
-            info(ct_jail).unwrap().root_path,
-            "/containers/test-jail/rootfs",
+            info(ct_jail).unwrap().root_path.as_path(),
+            Path::new("/containers/test-jail/rootfs"),
         );
         // Non-absolute rootfs is rejected.
         assert!(set_root_path(ct_jail, "relative").is_err());
@@ -6034,8 +6026,8 @@ pub fn self_test() {
         let _ = Vfs::mkdir(base);
         let _ = Vfs::mkdir(lower);
         let _ = Vfs::mkdir(upper);
-        Vfs::write_file(&alloc::format!("{lower}/keep"), b"orig").expect("write keep");
-        Vfs::write_file(&alloc::format!("{lower}/gone"), b"bye").expect("write gone");
+        Vfs::write_file(alloc::format!("{lower}/keep"), b"orig").expect("write keep");
+        Vfs::write_file(alloc::format!("{lower}/gone"), b"bye").expect("write gone");
         let ov = crate::fs::overlay::create("ct-diff-ov", lower, upper).expect("overlay");
         // Modify keep (copy-up → Both/Changed), add a new file (Upper/Added),
         // delete gone (whiteout → Deleted).
@@ -6080,10 +6072,10 @@ pub fn self_test() {
         // Source "image-like" tree: /tmp/ct_saveload_src/{oci-layout, blobs/x}.
         let src = "/tmp/ct_saveload_src";
         let _ = Vfs::mkdir(src);
-        let _ = Vfs::mkdir(&alloc::format!("{src}/blobs"));
-        Vfs::write_file(&alloc::format!("{src}/oci-layout"), b"{\"v\":\"1.0.0\"}")
+        let _ = Vfs::mkdir(alloc::format!("{src}/blobs"));
+        Vfs::write_file(alloc::format!("{src}/oci-layout"), b"{\"v\":\"1.0.0\"}")
             .expect("write oci-layout");
-        Vfs::write_file(&alloc::format!("{src}/blobs/x"), b"BLOBDATA")
+        Vfs::write_file(alloc::format!("{src}/blobs/x"), b"BLOBDATA")
             .expect("write blob");
 
         // save: tar the tree, write archive to a host file.
@@ -6099,11 +6091,11 @@ pub fn self_test() {
 
         // The reconstructed tree matches byte-for-byte, nested subdir included.
         assert_eq!(
-            Vfs::read_file(&alloc::format!("{dst}/oci-layout")).expect("read layout"),
+            Vfs::read_file(alloc::format!("{dst}/oci-layout")).expect("read layout"),
             b"{\"v\":\"1.0.0\"}",
         );
         assert_eq!(
-            Vfs::read_file(&alloc::format!("{dst}/blobs/x")).expect("read blob"),
+            Vfs::read_file(alloc::format!("{dst}/blobs/x")).expect("read blob"),
             b"BLOBDATA",
         );
 
@@ -6111,14 +6103,14 @@ pub fn self_test() {
         assert!(untar_tree("", &archive).is_err(), "empty base rejected");
 
         // Cleanup.
-        let _ = Vfs::remove(&alloc::format!("{src}/blobs/x"));
-        let _ = Vfs::rmdir(&alloc::format!("{src}/blobs"));
-        let _ = Vfs::remove(&alloc::format!("{src}/oci-layout"));
+        let _ = Vfs::remove(alloc::format!("{src}/blobs/x"));
+        let _ = Vfs::rmdir(alloc::format!("{src}/blobs"));
+        let _ = Vfs::remove(alloc::format!("{src}/oci-layout"));
         let _ = Vfs::rmdir(src);
         let _ = Vfs::remove(tar_path);
-        let _ = Vfs::remove(&alloc::format!("{dst}/blobs/x"));
-        let _ = Vfs::rmdir(&alloc::format!("{dst}/blobs"));
-        let _ = Vfs::remove(&alloc::format!("{dst}/oci-layout"));
+        let _ = Vfs::remove(alloc::format!("{dst}/blobs/x"));
+        let _ = Vfs::rmdir(alloc::format!("{dst}/blobs"));
+        let _ = Vfs::remove(alloc::format!("{dst}/oci-layout"));
         let _ = Vfs::rmdir(dst);
     }
     serial_println!("[container]   image save/load data path: OK");
@@ -6380,7 +6372,7 @@ pub fn self_test() {
         );
         // The new container is configured with the extracted rootfs.
         let ci = info(id).expect("imported container exists");
-        assert_eq!(ci.root_path, "/tmp/imp-root", "rootfs must be attached");
+        assert_eq!(ci.root_path.as_path(), Path::new("/tmp/imp-root"), "rootfs must be attached");
 
         // A `..` member name is rejected as a jail escape and leaves no
         // container behind.
@@ -6428,7 +6420,11 @@ pub fn self_test() {
         let snap = commit(src, "test-commit-snap", "/tmp/commit-dst")
             .expect("commit snapshot");
         let ci = info(snap).expect("snapshot container exists");
-        assert_eq!(ci.root_path, "/tmp/commit-dst", "snapshot rootfs attached");
+        assert_eq!(
+            ci.root_path.as_path(),
+            Path::new("/tmp/commit-dst"),
+            "snapshot rootfs attached",
+        );
         assert_eq!(
             Vfs::read_file("/tmp/commit-dst/data.txt").expect("read snapshot data"),
             b"original",
@@ -7021,14 +7017,13 @@ pub fn self_test() {
         assert_eq!(vols.len(), 2, "two tmpfs mounts must appear as volumes");
         let tmp_vol = vols
             .iter()
-            .find(|(g, _, _)| g == "/tmp")
+            .find(|(g, _, _)| g.as_path() == Path::new("/tmp"))
             .expect("tmpfs /tmp volume must exist");
         assert!(!tmp_vol.2, "a tmpfs mount is always writable (never read-only)");
 
         // The backing memfs is genuinely writable: write a file through the host
         // mountpoint and read it back byte-for-byte.
-        let tmp_host = &tmp_vol.1;
-        let probe = alloc::format!("{tmp_host}/probe.txt");
+        let probe = tmp_vol.1.join("probe.txt");
         crate::fs::vfs::Vfs::write_file(&probe, b"tmpfs-ok")
             .expect("write into tmpfs");
         assert_eq!(

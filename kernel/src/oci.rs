@@ -1383,8 +1383,8 @@ pub fn write_image(dest_dir: &str, spec: &ImageSpec) -> KernelResult<Descriptor>
 fn create_layout_skeleton(dest: &str) {
     use crate::fs::Vfs;
     let _ = Vfs::mkdir(dest);
-    let _ = Vfs::mkdir(&format!("{dest}/blobs"));
-    let _ = Vfs::mkdir(&format!("{dest}/blobs/sha256"));
+    let _ = Vfs::mkdir(format!("{dest}/blobs"));
+    let _ = Vfs::mkdir(format!("{dest}/blobs/sha256"));
 }
 
 /// Assemble config + manifest + `index.json` + `oci-layout` from
@@ -1437,11 +1437,11 @@ fn finish_image(
     index.push_str(",\"os\":");
     push_json_string(&mut index, &spec.os);
     index.push_str("}}]}");
-    Vfs::write_file(&format!("{dest}/index.json"), index.as_bytes())?;
+    Vfs::write_file(format!("{dest}/index.json"), index.as_bytes())?;
 
     // oci-layout marker.
     Vfs::write_file(
-        &format!("{dest}/oci-layout"),
+        format!("{dest}/oci-layout"),
         format!("{{\"imageLayoutVersion\":\"{OCI_LAYOUT_VERSION}\"}}").as_bytes(),
     )?;
 
@@ -1507,7 +1507,7 @@ fn store_read_index() -> KernelResult<Vec<StoreEntry>> {
 /// Returns an empty vec if the index is absent.
 fn read_index_at(dir: &str) -> KernelResult<Vec<StoreEntry>> {
     use crate::fs::Vfs;
-    let data = match Vfs::read_file(&format!("{}/index.json", dir.trim_end_matches('/'))) {
+    let data = match Vfs::read_file(format!("{}/index.json", dir.trim_end_matches('/'))) {
         Ok(d) => d,
         Err(_) => return Ok(Vec::new()),
     };
@@ -1581,9 +1581,9 @@ fn serialize_index(entries: &[StoreEntry]) -> String {
 fn write_index_at(dir: &str, entries: &[StoreEntry]) -> KernelResult<()> {
     use crate::fs::Vfs;
     let dir = dir.trim_end_matches('/');
-    Vfs::write_file(&format!("{dir}/index.json"), serialize_index(entries).as_bytes())?;
+    Vfs::write_file(format!("{dir}/index.json"), serialize_index(entries).as_bytes())?;
     Vfs::write_file(
-        &format!("{dir}/oci-layout"),
+        format!("{dir}/oci-layout"),
         b"{\"imageLayoutVersion\":\"1.0.0\"}",
     )?;
     Ok(())
@@ -1623,7 +1623,7 @@ pub fn store_tag_from_dir(src_image_dir: &str, reference: &str) -> KernelResult<
     create_layout_skeleton(STORE_DIR);
 
     let src = src_image_dir.trim_end_matches('/');
-    let src_index = Vfs::read_file(&format!("{src}/index.json"))?;
+    let src_index = Vfs::read_file(format!("{src}/index.json"))?;
     let idx = ImageIndex::parse(&src_index)?;
     let man = idx.find_manifest_for_host().ok_or(KernelError::NotFound)?;
     let media_type = if man.media_type.is_empty() {
@@ -1729,7 +1729,7 @@ pub fn store_remove(reference: &str) -> KernelResult<()> {
             continue;
         };
         keep.insert(String::from(hex));
-        if let Ok(data) = Vfs::read_file(&format!("{STORE_DIR}/blobs/sha256/{hex}")) {
+        if let Ok(data) = Vfs::read_file(format!("{STORE_DIR}/blobs/sha256/{hex}")) {
             collect_manifest_blob_hexes(&data, &mut keep);
         }
     }
@@ -1779,8 +1779,8 @@ fn collect_manifest_blob_hexes(
 fn copy_blob_by_digest(src: &str, dst: &str, digest: &str) -> KernelResult<()> {
     use crate::fs::Vfs;
     let (_, hex) = digest.split_once(':').ok_or(KernelError::InvalidArgument)?;
-    let data = Vfs::read_file(&format!("{}/blobs/sha256/{hex}", src.trim_end_matches('/')))?;
-    Vfs::write_file(&format!("{}/blobs/sha256/{hex}", dst.trim_end_matches('/')), &data)?;
+    let data = Vfs::read_file(format!("{}/blobs/sha256/{hex}", src.trim_end_matches('/')))?;
+    Vfs::write_file(format!("{}/blobs/sha256/{hex}", dst.trim_end_matches('/')), &data)?;
     Ok(())
 }
 
@@ -1805,7 +1805,7 @@ pub fn store_export_ref(reference: &str, dest_dir: &str) -> KernelResult<()> {
     // Manifest blob, then the config + layer blobs it references.
     copy_blob_by_digest(STORE_DIR, dest_dir, &entry.digest)?;
     let (_, hex) = entry.digest.split_once(':').ok_or(KernelError::InvalidArgument)?;
-    let manifest_data = Vfs::read_file(&format!("{STORE_DIR}/blobs/sha256/{hex}"))?;
+    let manifest_data = Vfs::read_file(format!("{STORE_DIR}/blobs/sha256/{hex}"))?;
     let manifest = ImageManifest::parse(&manifest_data)?;
     copy_blob_by_digest(STORE_DIR, dest_dir, &manifest.config.digest)?;
     for l in &manifest.layers {
@@ -1852,12 +1852,12 @@ fn load_manifest_by_digest(dir: &str, manifest_digest: &str) -> KernelResult<Oci
     let (_, hex) = manifest_digest
         .split_once(':')
         .ok_or(KernelError::InvalidArgument)?;
-    let manifest_data = crate::fs::Vfs::read_file(&format!("{dir}/blobs/sha256/{hex}"))?;
+    let manifest_data = crate::fs::Vfs::read_file(format!("{dir}/blobs/sha256/{hex}"))?;
     verify_digest(&manifest_data, manifest_digest)?;
     let manifest = ImageManifest::parse(&manifest_data)?;
 
     let config_blob_path = manifest.config.blob_path().ok_or(KernelError::InvalidArgument)?;
-    let config_data = crate::fs::Vfs::read_file(&format!("{dir}/{config_blob_path}"))?;
+    let config_data = crate::fs::Vfs::read_file(format!("{dir}/{config_blob_path}"))?;
     verify_digest(&config_data, &manifest.config.digest)?;
     let config = ImageConfig::parse(&config_data)?;
 
@@ -1879,7 +1879,7 @@ fn load_manifest_by_digest(dir: &str, manifest_digest: &str) -> KernelResult<Oci
 pub fn resolve_image_source(arg: &str) -> KernelResult<(String, OciImage)> {
     let dir = arg.trim_end_matches('/');
     // A valid on-disk OCI layout is marked by its `oci-layout` file.
-    if crate::fs::Vfs::metadata(&format!("{dir}/oci-layout")).is_ok() {
+    if crate::fs::Vfs::metadata(format!("{dir}/oci-layout")).is_ok() {
         let img = load_image(dir)?;
         return Ok((String::from(dir), img));
     }
@@ -3830,8 +3830,8 @@ fn build_one_stage_inner(
     if let Some(bdir) = &base_dir {
         for d in &layer_descs {
             let bp = d.blob_path().ok_or(BuildError::Kernel(KernelError::InvalidArgument))?;
-            let data = Vfs::read_file(&format!("{}/{}", bdir.trim_end_matches('/'), bp))?;
-            Vfs::write_file(&format!("{dest}/{bp}"), &data)?;
+            let data = Vfs::read_file(format!("{}/{}", bdir.trim_end_matches('/'), bp))?;
+            Vfs::write_file(format!("{dest}/{bp}"), &data)?;
         }
     }
     for layer in &spec.layers {
@@ -4267,12 +4267,12 @@ pub fn self_test() -> KernelResult<()> {
         let extract_dir = "/tmp/oci_wr_extract";
         let _ = Vfs::mkdir(extract_dir);
         extract_layer(dir, layer1, extract_dir)?;
-        let hello = Vfs::read_file(&format!("{extract_dir}/bin/hello"))?;
+        let hello = Vfs::read_file(format!("{extract_dir}/bin/hello"))?;
         assert_eq!(hello, b"hello-binary-contents");
 
         // Clean up.
-        let _ = Vfs::remove(&format!("{extract_dir}/bin/hello"));
-        let _ = Vfs::rmdir(&format!("{extract_dir}/bin"));
+        let _ = Vfs::remove(format!("{extract_dir}/bin/hello"));
+        let _ = Vfs::rmdir(format!("{extract_dir}/bin"));
         let _ = Vfs::rmdir(extract_dir);
         cleanup_image_dir(dir);
         serial_println!("[oci]   write_image round-trip: OK");
@@ -4291,9 +4291,9 @@ pub fn self_test() -> KernelResult<()> {
 
         // Build context: a directory source and a plain file source.
         let _ = Vfs::mkdir(ctx);
-        let _ = Vfs::mkdir(&format!("{ctx}/app"));
-        Vfs::write_file(&format!("{ctx}/app/run.sh"), b"#!/bin/sh\necho serving\n")?;
-        Vfs::write_file(&format!("{ctx}/readme.txt"), b"read me")?;
+        let _ = Vfs::mkdir(format!("{ctx}/app"));
+        Vfs::write_file(format!("{ctx}/app/run.sh"), b"#!/bin/sh\necho serving\n")?;
+        Vfs::write_file(format!("{ctx}/readme.txt"), b"read me")?;
 
         let dockerfile = br#"# demo build
 FROM scratch
@@ -4353,9 +4353,9 @@ CMD ["--serve"]
         for layer in &image.manifest.layers {
             extract_layer(img, layer, ext)?;
         }
-        let run = Vfs::read_file(&format!("{ext}/srv/app/run.sh"))?;
+        let run = Vfs::read_file(format!("{ext}/srv/app/run.sh"))?;
         assert_eq!(run, b"#!/bin/sh\necho serving\n");
-        let readme = Vfs::read_file(&format!("{ext}/srv/readme.txt"))?;
+        let readme = Vfs::read_file(format!("{ext}/srv/readme.txt"))?;
         assert_eq!(readme, b"read me");
 
         // RUN now executes the real in-container exec (§58/Q17). A shell-form
@@ -4455,14 +4455,14 @@ CMD ["--serve"]
         serial_println!("[oci]   build HEALTHCHECK + durations: OK");
 
         // Clean up.
-        let _ = Vfs::remove(&format!("{ext}/srv/app/run.sh"));
-        let _ = Vfs::remove(&format!("{ext}/srv/readme.txt"));
-        let _ = Vfs::rmdir(&format!("{ext}/srv/app"));
-        let _ = Vfs::rmdir(&format!("{ext}/srv"));
+        let _ = Vfs::remove(format!("{ext}/srv/app/run.sh"));
+        let _ = Vfs::remove(format!("{ext}/srv/readme.txt"));
+        let _ = Vfs::rmdir(format!("{ext}/srv/app"));
+        let _ = Vfs::rmdir(format!("{ext}/srv"));
         let _ = Vfs::rmdir(ext);
-        let _ = Vfs::remove(&format!("{ctx}/app/run.sh"));
-        let _ = Vfs::remove(&format!("{ctx}/readme.txt"));
-        let _ = Vfs::rmdir(&format!("{ctx}/app"));
+        let _ = Vfs::remove(format!("{ctx}/app/run.sh"));
+        let _ = Vfs::remove(format!("{ctx}/readme.txt"));
+        let _ = Vfs::rmdir(format!("{ctx}/app"));
         let _ = Vfs::rmdir(ctx);
         cleanup_image_dir(img);
         cleanup_image_dir(img2);
@@ -4479,16 +4479,16 @@ CMD ["--serve"]
         cleanup_image_dir(img);
 
         let _ = Vfs::mkdir(ctx);
-        let _ = Vfs::mkdir(&format!("{ctx}/secret"));
-        let _ = Vfs::mkdir(&format!("{ctx}/logs"));
-        Vfs::write_file(&format!("{ctx}/keep.txt"), b"keep")?;
-        Vfs::write_file(&format!("{ctx}/debug.log"), b"noisy")?;
-        Vfs::write_file(&format!("{ctx}/logs/app.log"), b"applog")?;
-        Vfs::write_file(&format!("{ctx}/logs/important.log"), b"important")?;
-        Vfs::write_file(&format!("{ctx}/secret/key.pem"), b"topsecret")?;
+        let _ = Vfs::mkdir(format!("{ctx}/secret"));
+        let _ = Vfs::mkdir(format!("{ctx}/logs"));
+        Vfs::write_file(format!("{ctx}/keep.txt"), b"keep")?;
+        Vfs::write_file(format!("{ctx}/debug.log"), b"noisy")?;
+        Vfs::write_file(format!("{ctx}/logs/app.log"), b"applog")?;
+        Vfs::write_file(format!("{ctx}/logs/important.log"), b"important")?;
+        Vfs::write_file(format!("{ctx}/secret/key.pem"), b"topsecret")?;
         // Exclude all *.log and the whole secret/ dir, but re-include one log.
         Vfs::write_file(
-            &format!("{ctx}/.dockerignore"),
+            format!("{ctx}/.dockerignore"),
             b"# ignore rules\n*.log\nlogs/*.log\nsecret\n!logs/important.log\n",
         )?;
 
@@ -4505,30 +4505,30 @@ CMD ["--serve"]
             extract_layer(img, layer, ext)?;
         }
         // Kept: keep.txt and the re-included important.log.
-        assert_eq!(Vfs::read_file(&format!("{ext}/data/keep.txt"))?, b"keep");
+        assert_eq!(Vfs::read_file(format!("{ext}/data/keep.txt"))?, b"keep");
         assert_eq!(
-            Vfs::read_file(&format!("{ext}/data/logs/important.log"))?,
+            Vfs::read_file(format!("{ext}/data/logs/important.log"))?,
             b"important"
         );
         // Excluded: top-level log, dir log, and everything under secret/.
-        assert!(Vfs::read_file(&format!("{ext}/data/debug.log")).is_err(), "*.log excluded");
-        assert!(Vfs::read_file(&format!("{ext}/data/logs/app.log")).is_err(), "logs/*.log excluded");
-        assert!(Vfs::read_file(&format!("{ext}/data/secret/key.pem")).is_err(), "secret/ excluded");
+        assert!(Vfs::read_file(format!("{ext}/data/debug.log")).is_err(), "*.log excluded");
+        assert!(Vfs::read_file(format!("{ext}/data/logs/app.log")).is_err(), "logs/*.log excluded");
+        assert!(Vfs::read_file(format!("{ext}/data/secret/key.pem")).is_err(), "secret/ excluded");
 
         // Clean up context, extract tree, and image.
-        let _ = Vfs::remove(&format!("{ext}/data/keep.txt"));
-        let _ = Vfs::remove(&format!("{ext}/data/logs/important.log"));
-        let _ = Vfs::rmdir(&format!("{ext}/data/logs"));
-        let _ = Vfs::rmdir(&format!("{ext}/data"));
+        let _ = Vfs::remove(format!("{ext}/data/keep.txt"));
+        let _ = Vfs::remove(format!("{ext}/data/logs/important.log"));
+        let _ = Vfs::rmdir(format!("{ext}/data/logs"));
+        let _ = Vfs::rmdir(format!("{ext}/data"));
         let _ = Vfs::rmdir(ext);
-        let _ = Vfs::remove(&format!("{ctx}/.dockerignore"));
-        let _ = Vfs::remove(&format!("{ctx}/keep.txt"));
-        let _ = Vfs::remove(&format!("{ctx}/debug.log"));
-        let _ = Vfs::remove(&format!("{ctx}/logs/app.log"));
-        let _ = Vfs::remove(&format!("{ctx}/logs/important.log"));
-        let _ = Vfs::remove(&format!("{ctx}/secret/key.pem"));
-        let _ = Vfs::rmdir(&format!("{ctx}/logs"));
-        let _ = Vfs::rmdir(&format!("{ctx}/secret"));
+        let _ = Vfs::remove(format!("{ctx}/.dockerignore"));
+        let _ = Vfs::remove(format!("{ctx}/keep.txt"));
+        let _ = Vfs::remove(format!("{ctx}/debug.log"));
+        let _ = Vfs::remove(format!("{ctx}/logs/app.log"));
+        let _ = Vfs::remove(format!("{ctx}/logs/important.log"));
+        let _ = Vfs::remove(format!("{ctx}/secret/key.pem"));
+        let _ = Vfs::rmdir(format!("{ctx}/logs"));
+        let _ = Vfs::rmdir(format!("{ctx}/secret"));
         let _ = Vfs::rmdir(ctx);
         cleanup_image_dir(img);
         serial_println!("[oci]   .dockerignore context filtering: OK");
@@ -4590,8 +4590,8 @@ ONBUILD RUN echo triggered
         let ext = "/tmp/oci_ms_ext";
         cleanup_image_dir(img);
         let _ = Vfs::mkdir(ctx);
-        Vfs::write_file(&format!("{ctx}/app.txt"), b"appdata")?;
-        Vfs::write_file(&format!("{ctx}/extra.txt"), b"extradata")?;
+        Vfs::write_file(format!("{ctx}/app.txt"), b"appdata")?;
+        Vfs::write_file(format!("{ctx}/extra.txt"), b"extradata")?;
 
         // Stage 0 (builder): puts /out/app.txt into its rootfs.
         // Stage 1 (mid): FROM builder, so it inherits /out/app.txt, adds
@@ -4622,27 +4622,27 @@ COPY --from=mid /extra.txt /extra.txt
         for layer in &ms.manifest.layers {
             extract_layer(img, layer, ext)?;
         }
-        assert_eq!(Vfs::read_file(&format!("{ext}/app.txt"))?, b"appdata");
-        assert_eq!(Vfs::read_file(&format!("{ext}/extra.txt"))?, b"extradata");
+        assert_eq!(Vfs::read_file(format!("{ext}/app.txt"))?, b"appdata");
+        assert_eq!(Vfs::read_file(format!("{ext}/extra.txt"))?, b"extradata");
         // The final stage copied only specific files: the builder's /out/
         // directory must NOT leak into the final image.
         assert!(
-            Vfs::read_file(&format!("{ext}/out/app.txt")).is_err(),
+            Vfs::read_file(format!("{ext}/out/app.txt")).is_err(),
             "builder /out/ must not leak into the final image"
         );
 
         // Intermediate stage images and `--from` scratch rootfs dirs must be
         // cleaned up by the builder.
         assert!(
-            Vfs::metadata(&format!("{img}.stage0")).is_err(),
+            Vfs::metadata(format!("{img}.stage0")).is_err(),
             "stage0 temp image removed"
         );
         assert!(
-            Vfs::metadata(&format!("{img}.stage1")).is_err(),
+            Vfs::metadata(format!("{img}.stage1")).is_err(),
             "stage1 temp image removed"
         );
         assert!(
-            Vfs::metadata(&format!("{img}.from0")).is_err(),
+            Vfs::metadata(format!("{img}.from0")).is_err(),
             "COPY --from rootfs scratch removed"
         );
 
@@ -4661,19 +4661,19 @@ COPY --from=mid /extra.txt /extra.txt
         for layer in &tms.manifest.layers {
             extract_layer(timg, layer, text)?;
         }
-        assert_eq!(Vfs::read_file(&format!("{text}/out/app.txt"))?, b"appdata");
+        assert_eq!(Vfs::read_file(format!("{text}/out/app.txt"))?, b"appdata");
         // The `mid`/final stages must not have been built past the target.
-        assert!(Vfs::read_file(&format!("{text}/extra.txt")).is_err(), "target stops before mid");
-        let _ = Vfs::remove(&format!("{text}/out/app.txt"));
-        let _ = Vfs::rmdir(&format!("{text}/out"));
+        assert!(Vfs::read_file(format!("{text}/extra.txt")).is_err(), "target stops before mid");
+        let _ = Vfs::remove(format!("{text}/out/app.txt"));
+        let _ = Vfs::rmdir(format!("{text}/out"));
         let _ = Vfs::rmdir(text);
         cleanup_image_dir(timg);
 
-        let _ = Vfs::remove(&format!("{ext}/app.txt"));
-        let _ = Vfs::remove(&format!("{ext}/extra.txt"));
+        let _ = Vfs::remove(format!("{ext}/app.txt"));
+        let _ = Vfs::remove(format!("{ext}/extra.txt"));
         let _ = Vfs::rmdir(ext);
-        let _ = Vfs::remove(&format!("{ctx}/app.txt"));
-        let _ = Vfs::remove(&format!("{ctx}/extra.txt"));
+        let _ = Vfs::remove(format!("{ctx}/app.txt"));
+        let _ = Vfs::remove(format!("{ctx}/extra.txt"));
         let _ = Vfs::rmdir(ctx);
         cleanup_image_dir(img);
         serial_println!("[oci]   multi-stage builds (FROM..AS / COPY --from / --target): OK");
@@ -4686,7 +4686,7 @@ COPY --from=mid /extra.txt /extra.txt
         let img = "/tmp/oci_chmod_img";
         cleanup_image_dir(img);
         let _ = Vfs::mkdir(ctx);
-        Vfs::write_file(&format!("{ctx}/run.sh"), b"#!/bin/sh\n")?;
+        Vfs::write_file(format!("{ctx}/run.sh"), b"#!/bin/sh\n")?;
 
         let df = b"FROM scratch\nCOPY --chmod=0600 --chown=1000:1001 run.sh /run.sh\n";
         build_image(df, ctx, img).map_err(|e| {
@@ -4696,7 +4696,7 @@ COPY --from=mid /extra.txt /extra.txt
         let ci = load_image(img)?;
         let layer = ci.manifest.layers.first().ok_or(KernelError::InternalError)?;
         let bp = layer.blob_path().ok_or(KernelError::InvalidArgument)?;
-        let blob = Vfs::read_file(&format!("{img}/{bp}"))?;
+        let blob = Vfs::read_file(format!("{img}/{bp}"))?;
         let tar = crate::fs::compress::gunzip(&blob)?;
         let entries = crate::fs::tar::parse(&tar)?;
         let run = entries
@@ -4707,7 +4707,7 @@ COPY --from=mid /extra.txt /extra.txt
         assert_eq!(run.uid, 1000, "--chown uid applied to run.sh");
         assert_eq!(run.gid, 1001, "--chown gid applied to run.sh");
 
-        let _ = Vfs::remove(&format!("{ctx}/run.sh"));
+        let _ = Vfs::remove(format!("{ctx}/run.sh"));
         let _ = Vfs::rmdir(ctx);
         cleanup_image_dir(img);
         serial_println!("[oci]   COPY --chmod / --chown: OK");
@@ -4747,9 +4747,9 @@ COPY --from=mid /extra.txt /extra.txt
                 mtime: 0,
             },
         ]);
-        Vfs::write_file(&format!("{ctx}/bundle.tar"), &bundle)?;
+        Vfs::write_file(format!("{ctx}/bundle.tar"), &bundle)?;
         let gz = crate::fs::compress::gzip(&bundle);
-        Vfs::write_file(&format!("{ctx}/bundle.tgz"), &gz)?;
+        Vfs::write_file(format!("{ctx}/bundle.tgz"), &gz)?;
 
         // ADD unpacks both the plain and gzip archives; COPY keeps it whole.
         let df = b"FROM scratch\nADD bundle.tar /opt\nADD bundle.tgz /gzp\nCOPY bundle.tar /raw/bundle.tar\n";
@@ -4763,24 +4763,24 @@ COPY --from=mid /extra.txt /extra.txt
             extract_layer(img, layer, ext)?;
         }
         // ADD extracted the archive contents into /opt and /gzp.
-        assert_eq!(Vfs::read_file(&format!("{ext}/opt/a.txt"))?, b"alpha");
-        assert_eq!(Vfs::read_file(&format!("{ext}/opt/sub/b.txt"))?, b"bravo");
-        assert_eq!(Vfs::read_file(&format!("{ext}/gzp/a.txt"))?, b"alpha");
+        assert_eq!(Vfs::read_file(format!("{ext}/opt/a.txt"))?, b"alpha");
+        assert_eq!(Vfs::read_file(format!("{ext}/opt/sub/b.txt"))?, b"bravo");
+        assert_eq!(Vfs::read_file(format!("{ext}/gzp/a.txt"))?, b"alpha");
         // ADD did not leave the archive file itself behind.
         assert!(
-            Vfs::read_file(&format!("{ext}/opt/bundle.tar")).is_err(),
+            Vfs::read_file(format!("{ext}/opt/bundle.tar")).is_err(),
             "ADD tar must not leave the archive file"
         );
         // COPY of the same archive copied it verbatim (no extraction).
-        assert_eq!(Vfs::read_file(&format!("{ext}/raw/bundle.tar"))?, bundle);
+        assert_eq!(Vfs::read_file(format!("{ext}/raw/bundle.tar"))?, bundle);
         assert!(
-            Vfs::read_file(&format!("{ext}/raw/a.txt")).is_err(),
+            Vfs::read_file(format!("{ext}/raw/a.txt")).is_err(),
             "COPY must not extract the archive"
         );
 
         let _ = Vfs::remove_recursive(ext);
-        let _ = Vfs::remove(&format!("{ctx}/bundle.tar"));
-        let _ = Vfs::remove(&format!("{ctx}/bundle.tgz"));
+        let _ = Vfs::remove(format!("{ctx}/bundle.tar"));
+        let _ = Vfs::remove(format!("{ctx}/bundle.tgz"));
         let _ = Vfs::rmdir(ctx);
         cleanup_image_dir(img);
         serial_println!("[oci]   ADD local-tar auto-extraction: OK");
@@ -4796,7 +4796,7 @@ COPY --from=mid /extra.txt /extra.txt
         let ext = "/tmp/oci_workdir_ext";
         cleanup_image_dir(img);
         let _ = Vfs::mkdir(ctx);
-        Vfs::write_file(&format!("{ctx}/app.txt"), b"payload")?;
+        Vfs::write_file(format!("{ctx}/app.txt"), b"payload")?;
 
         // WORKDIR /srv then a relative WORKDIR app → /srv/app.
         let df = b"FROM scratch\nWORKDIR /srv\nWORKDIR app\nCOPY app.txt ./app.txt\n";
@@ -4826,9 +4826,9 @@ COPY --from=mid /extra.txt /extra.txt
         for layer in &wi.manifest.layers {
             extract_layer(img, layer, ext)?;
         }
-        assert!(Vfs::is_directory(&format!("{ext}/srv")), "/srv must be a directory");
-        assert!(Vfs::is_directory(&format!("{ext}/srv/app")), "/srv/app must be a directory");
-        assert_eq!(Vfs::read_file(&format!("{ext}/srv/app/app.txt"))?, b"payload");
+        assert!(Vfs::is_directory(format!("{ext}/srv")), "/srv must be a directory");
+        assert!(Vfs::is_directory(format!("{ext}/srv/app")), "/srv/app must be a directory");
+        assert_eq!(Vfs::read_file(format!("{ext}/srv/app/app.txt"))?, b"payload");
         let _ = Vfs::remove_recursive(ext);
         cleanup_image_dir(img);
 
@@ -4848,7 +4848,7 @@ COPY --from=mid /extra.txt /extra.txt
             ri.manifest.layers.len()
         );
 
-        let _ = Vfs::remove(&format!("{ctx}/app.txt"));
+        let _ = Vfs::remove(format!("{ctx}/app.txt"));
         let _ = Vfs::rmdir(ctx);
         cleanup_image_dir(img);
         serial_println!("[oci]   WORKDIR creates image directory: OK");
@@ -4863,9 +4863,9 @@ COPY --from=mid /extra.txt /extra.txt
         let ext = "/tmp/oci_glob_ext";
         cleanup_image_dir(img);
         let _ = Vfs::mkdir(ctx);
-        Vfs::write_file(&format!("{ctx}/package.json"), b"pkg")?;
-        Vfs::write_file(&format!("{ctx}/package-lock.json"), b"lock")?;
-        Vfs::write_file(&format!("{ctx}/readme.md"), b"readme")?;
+        Vfs::write_file(format!("{ctx}/package.json"), b"pkg")?;
+        Vfs::write_file(format!("{ctx}/package-lock.json"), b"lock")?;
+        Vfs::write_file(format!("{ctx}/readme.md"), b"readme")?;
 
         // `COPY package*.json /app/` matches the two JSON files but not the
         // markdown; the trailing-slash dest keeps their basenames.
@@ -4879,10 +4879,10 @@ COPY --from=mid /extra.txt /extra.txt
         for layer in &gi.manifest.layers {
             extract_layer(img, layer, ext)?;
         }
-        assert_eq!(Vfs::read_file(&format!("{ext}/app/package.json"))?, b"pkg");
-        assert_eq!(Vfs::read_file(&format!("{ext}/app/package-lock.json"))?, b"lock");
+        assert_eq!(Vfs::read_file(format!("{ext}/app/package.json"))?, b"pkg");
+        assert_eq!(Vfs::read_file(format!("{ext}/app/package-lock.json"))?, b"lock");
         assert!(
-            Vfs::read_file(&format!("{ext}/app/readme.md")).is_err(),
+            Vfs::read_file(format!("{ext}/app/readme.md")).is_err(),
             "glob must not pull in non-matching files"
         );
         let _ = Vfs::remove_recursive(ext);
@@ -4896,9 +4896,9 @@ COPY --from=mid /extra.txt /extra.txt
         }
         cleanup_image_dir(img);
 
-        let _ = Vfs::remove(&format!("{ctx}/package.json"));
-        let _ = Vfs::remove(&format!("{ctx}/package-lock.json"));
-        let _ = Vfs::remove(&format!("{ctx}/readme.md"));
+        let _ = Vfs::remove(format!("{ctx}/package.json"));
+        let _ = Vfs::remove(format!("{ctx}/package-lock.json"));
+        let _ = Vfs::remove(format!("{ctx}/readme.md"));
         let _ = Vfs::rmdir(ctx);
         serial_println!("[oci]   COPY/ADD wildcard source matching: OK");
     }
@@ -4914,7 +4914,7 @@ COPY --from=mid /extra.txt /extra.txt
         // Start from a clean store so counts are deterministic.
         let _ = Vfs::remove_recursive(STORE_DIR);
         let _ = Vfs::mkdir(ctx);
-        Vfs::write_file(&format!("{ctx}/app.txt"), b"store-payload")?;
+        Vfs::write_file(format!("{ctx}/app.txt"), b"store-payload")?;
 
         let df = b"FROM scratch\nCOPY app.txt /app.txt\n";
         build_image(df, ctx, img).map_err(|e| {
@@ -4968,7 +4968,7 @@ COPY --from=mid /extra.txt /extra.txt
         assert_eq!(blob_count(&blobs_dir), 0, "all blobs GC'd after last tag removed");
 
         let _ = Vfs::remove_recursive(STORE_DIR);
-        let _ = Vfs::remove(&format!("{ctx}/app.txt"));
+        let _ = Vfs::remove(format!("{ctx}/app.txt"));
         let _ = Vfs::rmdir(ctx);
         cleanup_image_dir(img);
         serial_println!("[oci]   named image store tag/list/resolve/rmi+GC: OK");
@@ -4986,7 +4986,7 @@ COPY --from=mid /extra.txt /extra.txt
         cleanup_image_dir(child);
         let _ = Vfs::remove_recursive(STORE_DIR);
         let _ = Vfs::mkdir(ctx);
-        Vfs::write_file(&format!("{ctx}/base.txt"), b"base-data")?;
+        Vfs::write_file(format!("{ctx}/base.txt"), b"base-data")?;
 
         // Build a base image and tag it into the store as `base:1`.
         let df_base = b"FROM scratch\nENV FOO=bar\nCOPY base.txt /base.txt\n";
@@ -5009,7 +5009,7 @@ COPY --from=mid /extra.txt /extra.txt
 
         // `FROM base:1` (resolved from the store) inherits ENV + the base layer,
         // then adds a COPY layer of its own.
-        Vfs::write_file(&format!("{ctx}/child.txt"), b"child-data")?;
+        Vfs::write_file(format!("{ctx}/child.txt"), b"child-data")?;
         let df_child = b"FROM base:1\nCOPY child.txt /child.txt\n";
         build_image(df_child, ctx, child).map_err(|e| {
             serial_println!("[oci] FROM name:tag build failed: {}", e.describe());
@@ -5023,8 +5023,8 @@ COPY --from=mid /extra.txt /extra.txt
         assert!(resolve_image_source("nope:9").is_err(), "unknown ref errors");
 
         let _ = Vfs::remove_recursive(STORE_DIR);
-        let _ = Vfs::remove(&format!("{ctx}/base.txt"));
-        let _ = Vfs::remove(&format!("{ctx}/child.txt"));
+        let _ = Vfs::remove(format!("{ctx}/base.txt"));
+        let _ = Vfs::remove(format!("{ctx}/child.txt"));
         let _ = Vfs::rmdir(ctx);
         cleanup_image_dir(base);
         cleanup_image_dir(child);
@@ -5044,7 +5044,7 @@ COPY --from=mid /extra.txt /extra.txt
         cleanup_image_dir(exp);
         let _ = Vfs::remove_recursive(STORE_DIR);
         let _ = Vfs::mkdir(ctx);
-        Vfs::write_file(&format!("{ctx}/data.txt"), b"round-trip")?;
+        Vfs::write_file(format!("{ctx}/data.txt"), b"round-trip")?;
 
         let df = b"FROM scratch\nCOPY data.txt /data.txt\n";
         build_image(df, ctx, img).map_err(|e| {
@@ -5081,11 +5081,11 @@ COPY --from=mid /extra.txt /extra.txt
         for layer in &li.manifest.layers {
             extract_layer(STORE_DIR, layer, ext)?;
         }
-        assert_eq!(Vfs::read_file(&format!("{ext}/data.txt"))?, b"round-trip");
+        assert_eq!(Vfs::read_file(format!("{ext}/data.txt"))?, b"round-trip");
         let _ = Vfs::remove_recursive(ext);
 
         let _ = Vfs::remove_recursive(STORE_DIR);
-        let _ = Vfs::remove(&format!("{ctx}/data.txt"));
+        let _ = Vfs::remove(format!("{ctx}/data.txt"));
         let _ = Vfs::rmdir(ctx);
         cleanup_image_dir(img);
         cleanup_image_dir(exp);
@@ -5109,7 +5109,7 @@ COPY --from=mid /extra.txt /extra.txt
         cleanup_image_dir(dest);
         let _ = Vfs::remove_recursive(upper);
         let _ = Vfs::mkdir(ctx);
-        Vfs::write_file(&format!("{ctx}/base.txt"), b"base-content")?;
+        Vfs::write_file(format!("{ctx}/base.txt"), b"base-content")?;
 
         // Base image: one layer (base.txt), plus Cmd/Env to verify config carry.
         let df = b"FROM scratch\nCOPY base.txt /base.txt\nENV FOO=bar\nCMD [\"/bin/sh\"]\n";
@@ -5124,9 +5124,9 @@ COPY --from=mid /extra.txt /extra.txt
         // Synthesise the container's overlay upper: a new top-level file and a
         // nested file under a new subdirectory.
         let _ = Vfs::mkdir(upper);
-        Vfs::write_file(&format!("{upper}/newfile.txt"), b"added-by-container")?;
-        let _ = Vfs::mkdir(&format!("{upper}/sub"));
-        Vfs::write_file(&format!("{upper}/sub/nested.txt"), b"nested")?;
+        Vfs::write_file(format!("{upper}/newfile.txt"), b"added-by-container")?;
+        let _ = Vfs::mkdir(format!("{upper}/sub"));
+        Vfs::write_file(format!("{upper}/sub/nested.txt"), b"nested")?;
         // The container deleted base.txt → an OCI whiteout.
         let whiteouts = alloc::vec![PathBuf::from("base.txt")];
 
@@ -5159,7 +5159,7 @@ COPY --from=mid /extra.txt /extra.txt
         // Inspect the commit layer (the top descriptor): decompress + parse and
         // confirm it holds the added files and the whiteout marker.
         let commit_layer = committed.manifest.layers.last().ok_or(KernelError::InternalError)?;
-        let blob = Vfs::read_file(&format!(
+        let blob = Vfs::read_file(format!(
             "{dest}/{}",
             commit_layer.blob_path().ok_or(KernelError::InvalidArgument)?
         ))?;
@@ -5179,7 +5179,7 @@ COPY --from=mid /extra.txt /extra.txt
         assert!(Vfs::metadata(&base_blob).is_ok(), "base layer blob carried into new layout");
 
         let _ = Vfs::remove_recursive(upper);
-        let _ = Vfs::remove(&format!("{ctx}/base.txt"));
+        let _ = Vfs::remove(format!("{ctx}/base.txt"));
         let _ = Vfs::rmdir(ctx);
         cleanup_image_dir(base);
         cleanup_image_dir(dest);
@@ -5204,8 +5204,8 @@ fn cleanup_image_dir(dir: &str) {
         }
     }
     let _ = Vfs::rmdir(&sha_dir);
-    let _ = Vfs::rmdir(&format!("{dir}/blobs"));
-    let _ = Vfs::remove(&format!("{dir}/index.json"));
-    let _ = Vfs::remove(&format!("{dir}/oci-layout"));
+    let _ = Vfs::rmdir(format!("{dir}/blobs"));
+    let _ = Vfs::remove(format!("{dir}/index.json"));
+    let _ = Vfs::remove(format!("{dir}/oci-layout"));
     let _ = Vfs::rmdir(dir);
 }

@@ -302,7 +302,7 @@ pub fn record_launch(item_id: u64, duration_ms: u32) -> KernelResult<()> {
     if item.avg_duration_ms == 0 {
         item.avg_duration_ms = duration_ms;
     } else {
-        item.avg_duration_ms = (item.avg_duration_ms + duration_ms) / 2;
+        item.avg_duration_ms = u32::midpoint(item.avg_duration_ms, duration_ms);
     }
     state.changes += 1;
     Ok(())

@@ -43,6 +43,7 @@
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
+use crate::fs::path::{Path, PathBuf};
 use crate::sync::PreemptSpinMutex as Mutex;
 
 // ---------------------------------------------------------------------------
@@ -168,6 +169,26 @@ static CWD: Mutex<String> = Mutex::new(String::new());
 /// `cmd_history()` function to list history without needing a reference
 /// to the stack-local `History` struct.
 static SHELL_HISTORY: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// Render a list of byte paths as one comma-separated line for the operator.
+///
+/// `Vec<PathBuf>` has no `join` (that is a `[S: Borrow<str>]` method), and a
+/// path is not `Display`, so every "list of paths" status line goes through
+/// this: each element is rendered with `Path::display`, which is lossy by
+/// design and therefore for human eyes only.
+fn join_paths_display(paths: &[PathBuf]) -> String {
+    if paths.is_empty() {
+        return String::from("(none)");
+    }
+    let mut out = String::new();
+    for (i, p) in paths.iter().enumerate() {
+        if i > 0 {
+            out.push_str(", ");
+        }
+        out.push_str(&alloc::format!("{}", p.display()));
+    }
+    out
+}
 
 /// Get the current working directory as a new String.
 fn get_cwd() -> String {
@@ -3794,22 +3815,26 @@ fn tab_complete(line: &str, cursor: usize) -> (String, Vec<String>) {
             Err(_) => return (String::new(), Vec::new()),
         };
 
-        let matches: Vec<&crate::fs::DirEntry> = entries.iter()
-            .filter(|e| e.name.starts_with(name_prefix))
-            .filter(|e| e.name != "." && e.name != "..")
+        // The line editor's buffer is a `String`, so a candidate whose name is
+        // not UTF-8 cannot be inserted into it.  Such names are skipped rather
+        // than lossily transcoded (which would complete to a path that does
+        // not exist); see TD-KSHELL-LINE-EDITOR-IS-UTF8 in known-issues.md.
+        let matches: Vec<(&crate::fs::DirEntry, &str)> = entries
+            .iter()
+            .filter(|e| !crate::fs::pathutil::is_dot_entry(&e.name))
+            .filter_map(|e| e.name.to_str().map(|n| (e, n)))
+            .filter(|(_, n)| n.starts_with(name_prefix))
             .collect();
 
-        if matches.is_empty() {
+        let Some((first, first_name)) = matches.first() else {
             return (String::new(), Vec::new());
-        }
+        };
 
         if matches.len() == 1 {
             // Unique match.
-            let entry = &matches[0];
-            let suffix: String = entry.name.get(name_prefix.len()..).unwrap_or("").into();
-            let mut result = suffix;
+            let mut result: String = first_name.get(name_prefix.len()..).unwrap_or("").into();
             // Add trailing slash for directories, space for files.
-            if entry.entry_type == crate::fs::EntryType::Directory {
+            if first.entry_type == crate::fs::EntryType::Directory {
                 result.push('/');
             } else {
                 result.push(' ');
@@ -3818,11 +3843,11 @@ fn tab_complete(line: &str, cursor: usize) -> (String, Vec<String>) {
         }
 
         // Multiple matches — complete common prefix.
-        let names: Vec<&str> = matches.iter().map(|e| e.name.as_str()).collect();
+        let names: Vec<&str> = matches.iter().map(|(_, n)| *n).collect();
         let common = longest_common_prefix(&names);
         let suffix: String = common.get(name_prefix.len()..).unwrap_or("").into();
-        let display: Vec<String> = matches.iter().map(|e| {
-            let mut s = e.name.clone();
+        let display: Vec<String> = matches.iter().map(|(e, n)| {
+            let mut s = String::from(*n);
             if e.entry_type == crate::fs::EntryType::Directory {
                 s.push('/');
             }
@@ -8127,7 +8152,7 @@ fn cmd_ls(args: &str) {
     };
 
     ls_list_dir(
-        &path, long_format, show_all, human_sizes,
+        Path::new(path.as_str()), long_format, show_all, human_sizes,
         sort_by_size, sort_by_time, reverse_sort,
         recursive, 0,
     );
@@ -8139,7 +8164,7 @@ fn cmd_ls(args: &str) {
 /// maximum depth is 32.
 #[allow(clippy::too_many_arguments)]
 fn ls_list_dir(
-    path: &str,
+    path: &Path,
     long_format: bool,
     show_all: bool,
     human_sizes: bool,
@@ -8157,13 +8182,13 @@ fn ls_list_dir(
     // When recursing, print the directory name as a header.
     if recursive && depth > 0 {
         shell_println!("");
-        shell_println!("{}:", path);
+        shell_println!("{}:", path.display());
     }
 
     let entries = match crate::fs::Vfs::readdir(path) {
         Ok(e) => e,
         Err(e) => {
-            crate::console_println!("ls: {}: {:?}", path, e);
+            crate::console_println!("ls: {}: {:?}", path.display(), e);
             set_exit(1);
             return;
         }
@@ -8177,7 +8202,7 @@ fn ls_list_dir(
     // Filter hidden files unless -a is given.
     let mut filtered: Vec<crate::fs::vfs::DirEntry> = entries
         .into_iter()
-        .filter(|e| show_all || !e.name.starts_with('.'))
+        .filter(|e| show_all || !e.name.as_bytes().starts_with(b"."))
         .collect();
 
     // Apply sorting.  Sorting requires metadata lookups.
@@ -8189,11 +8214,9 @@ fn ls_list_dir(
         let mut with_mtime: Vec<(crate::fs::vfs::DirEntry, u64)> = filtered
             .into_iter()
             .map(|e| {
-                let fp = if path == "/" {
-                    alloc::format!("/{}", e.name)
-                } else {
-                    alloc::format!("{}/{}", path, e.name)
-                };
+                // `Path::join` collapses a trailing separator, so a `path` of
+                // `/` needs no special case.
+                let fp = path.join(&e.name);
                 let mtime = crate::fs::Vfs::metadata(&fp)
                     .map(|m| m.modified_ns)
                     .unwrap_or(0);
@@ -8216,11 +8239,7 @@ fn ls_list_dir(
             Vec::with_capacity(filtered.len());
 
         for entry in &filtered {
-            let full_path = if path == "/" {
-                alloc::format!("/{}", entry.name)
-            } else {
-                alloc::format!("{}/{}", path, entry.name)
-            };
+            let full_path = path.join(&entry.name);
             if let Ok(meta) = crate::fs::Vfs::metadata(&full_path) {
                 total_blocks = total_blocks.saturating_add(meta.blocks);
                 metas.push(Some(meta));
@@ -8258,13 +8277,9 @@ fn ls_list_dir(
 
                 // For symlinks, show " -> target".
                 let suffix = if entry.entry_type == crate::fs::EntryType::Symlink {
-                    let full_path = if path == "/" {
-                        alloc::format!("/{}", entry.name)
-                    } else {
-                        alloc::format!("{}/{}", path, entry.name)
-                    };
+                    let full_path = path.join(&entry.name);
                     match crate::fs::Vfs::readlink(&full_path) {
-                        Ok(target) => alloc::format!(" -> {}", target),
+                        Ok(target) => alloc::format!(" -> {}", target.display()),
                         Err(_) => String::new(),
                     }
                 } else {
@@ -8275,7 +8290,7 @@ fn ls_list_dir(
                     "{}{} {:>3} {:>5} {:>5} {:>8} {} {}{}",
                     type_ch, perm_str, meta.nlinks,
                     meta.uid, meta.gid, size_str,
-                    time_str, entry.name, suffix,
+                    time_str, entry.name.display(), suffix,
                 );
             } else {
                 // Metadata unavailable — basic listing.
@@ -8286,7 +8301,7 @@ fn ls_list_dir(
                 };
                 shell_println!(
                     "{}--------- {:>3} {:>5} {:>5} {:>8}            {}",
-                    type_ch, 1, 0, 0, size_str, entry.name,
+                    type_ch, 1, 0, 0, size_str, entry.name.display(),
                 );
             }
         }
@@ -8306,7 +8321,7 @@ fn ls_list_dir(
             };
             shell_println!(
                 "  {} {}  {}",
-                type_indicator, size_str, entry.name
+                type_indicator, size_str, entry.name.display()
             );
         }
     }
@@ -8316,13 +8331,9 @@ fn ls_list_dir(
     if recursive {
         for entry in &filtered {
             if entry.entry_type == crate::fs::EntryType::Directory
-                && entry.name != "." && entry.name != ".."
+                && !crate::fs::pathutil::is_dot_entry(&entry.name)
             {
-                let child_path = if path == "/" {
-                    alloc::format!("/{}", entry.name)
-                } else {
-                    alloc::format!("{}/{}", path, entry.name)
-                };
+                let child_path = path.join(&entry.name);
                 ls_list_dir(
                     &child_path, long_format, show_all, human_sizes,
                     sort_by_size, sort_by_time, reverse_sort,
@@ -8634,7 +8645,7 @@ fn cmd_df(args: &str) {
                         format_bytes(used),
                         format_bytes(free),
                         pct,
-                        mount_path,
+                        mount_path.display(),
                         info.volume_label,
                     );
                     if verbose {
@@ -9212,14 +9223,14 @@ fn cmd_tree(args: &str) {
     crate::console_println!("{}", path);
     let mut dirs: u64 = 0;
     let mut files: u64 = 0;
-    tree_recurse(&path, "", &mut dirs, &mut files, 0);
+    tree_recurse(Path::new(&path), "", &mut dirs, &mut files, 0);
     crate::console_println!("\n{} directories, {} files", dirs, files);
 }
 
 /// Internal recursive helper for tree display.
 ///
 /// Limits depth to 8 levels to avoid excessive output.
-fn tree_recurse(path: &str, prefix: &str, dirs: &mut u64, files: &mut u64, depth: u32) {
+fn tree_recurse(path: &Path, prefix: &str, dirs: &mut u64, files: &mut u64, depth: u32) {
     if depth > 8 {
         return;
     }
@@ -9239,15 +9250,11 @@ fn tree_recurse(path: &str, prefix: &str, dirs: &mut u64, files: &mut u64, depth
             _ => "",
         };
 
-        crate::console_println!("{}{}{}{}", prefix, connector, entry.name, type_marker);
+        crate::console_println!("{}{}{}{}", prefix, connector, entry.name.display(), type_marker);
 
         if entry.entry_type == crate::fs::EntryType::Directory {
             *dirs = dirs.saturating_add(1);
-            let child_path = if path == "/" {
-                alloc::format!("/{}", entry.name)
-            } else {
-                alloc::format!("{}/{}", path, entry.name)
-            };
+            let child_path = Path::new(path).join(&entry.name);
             let child_prefix = if is_last {
                 alloc::format!("{}    ", prefix)
             } else {
@@ -9291,7 +9298,7 @@ fn cmd_du(args: &str) {
         resolve_path(path_arg)
     };
 
-    let total = du_recurse(&path, 0, max_depth, summary_only);
+    let total = du_recurse(Path::new(&path), 0, max_depth, summary_only);
     crate::console_println!("{}\t{}", format_bytes(total), path);
 }
 
@@ -9301,7 +9308,7 @@ fn cmd_du(args: &str) {
 /// `max_depth` limits how deep subdirectories are printed.
 /// `summary_only` suppresses all subdirectory output.
 #[allow(clippy::arithmetic_side_effects)]
-fn du_recurse(path: &str, depth: usize, max_depth: usize, summary_only: bool) -> u64 {
+fn du_recurse(path: &Path, depth: usize, max_depth: usize, summary_only: bool) -> u64 {
     let mut total: u64 = 0;
 
     let entries = match crate::fs::Vfs::readdir(path) {
@@ -9310,11 +9317,7 @@ fn du_recurse(path: &str, depth: usize, max_depth: usize, summary_only: bool) ->
     };
 
     for entry in &entries {
-        let child_path = if path == "/" {
-            alloc::format!("/{}", entry.name)
-        } else {
-            alloc::format!("{}/{}", path, entry.name)
-        };
+        let child_path = Path::new(path).join(&entry.name);
 
         total = total.saturating_add(entry.size);
 
@@ -9326,7 +9329,7 @@ fn du_recurse(path: &str, depth: usize, max_depth: usize, summary_only: bool) ->
                 summary_only,
             );
             if !summary_only && depth < max_depth {
-                crate::console_println!("{}\t{}", format_bytes(subdir_total), child_path);
+                crate::console_println!("{}\t{}", format_bytes(subdir_total), child_path.display());
             }
             total = total.saturating_add(subdir_total);
         }
@@ -9421,7 +9424,7 @@ fn cmd_find(args: &str) {
     };
 
     let mut count: u64 = 0;
-    find_recurse_filtered(&root, &filter, &mut count, 0);
+    find_recurse_filtered(Path::new(&root), &filter, &mut count, 0);
     shell_println!("\n{} matches found", count);
 }
 
@@ -9580,10 +9583,15 @@ fn cmd_locate(args: &str) {
                 index::search_path(q)
             } else {
                 // Extension/size only.
-                index::search(None, ext_filter, size_min, size_max)
+                index::search(None, ext_filter.map(str::as_bytes), size_min, size_max)
             }
         } else {
-            index::search(pattern, ext_filter, size_min, size_max)
+            index::search(
+                pattern.map(str::as_bytes),
+                ext_filter.map(str::as_bytes),
+                size_min,
+                size_max,
+            )
         }
     } else {
         crate::console_println!("No search pattern given.");
@@ -9612,7 +9620,7 @@ fn cmd_locate(args: &str) {
             crate::fs::EntryType::Symlink => 'l',
             _ => '?',
         };
-        crate::console_println!("{} {:>8}  {}", type_char, entry.size, entry.path);
+        crate::console_println!("{} {:>8}  {}", type_char, entry.size, entry.path.display());
     }
 
     if results.len() <= max_display {
@@ -9715,9 +9723,9 @@ fn cmd_dedup(args: &str) {
     shell_println!("Scanning {} for duplicates...", root);
 
     // Phase 1: Walk the directory tree, collecting (path, size) pairs.
-    let mut file_list: Vec<(String, u64)> = Vec::new();
-    let mut dirs_to_visit: Vec<String> = Vec::new();
-    dirs_to_visit.push(root.clone());
+    let mut file_list: Vec<(PathBuf, u64)> = Vec::new();
+    let mut dirs_to_visit: Vec<PathBuf> = Vec::new();
+    dirs_to_visit.push(PathBuf::from(root.as_str()));
 
     let mut total_scanned: u64 = 0;
     let mut total_skipped: u64 = 0;
@@ -9730,16 +9738,12 @@ fn cmd_dedup(args: &str) {
         };
 
         for entry in &entries {
-            let path = if dir == "/" {
-                alloc::format!("/{}", entry.name)
-            } else {
-                alloc::format!("{}/{}", dir, entry.name)
-            };
+            let path = dir.join(&entry.name);
 
             match entry.entry_type {
                 EntryType::Directory => {
                     // Skip . and .. (shouldn't appear, but be safe).
-                    if entry.name != "." && entry.name != ".." {
+                    if !crate::fs::pathutil::is_dot_entry(&entry.name) {
                         dirs_to_visit.push(path);
                     }
                 }
@@ -9772,7 +9776,7 @@ fn cmd_dedup(args: &str) {
     }
 
     // Phase 2: Group by size.
-    let mut by_size: BTreeMap<u64, Vec<String>> = BTreeMap::new();
+    let mut by_size: BTreeMap<u64, Vec<PathBuf>> = BTreeMap::new();
     for (path, size) in &file_list {
         by_size.entry(*size)
             .or_default()
@@ -9780,7 +9784,7 @@ fn cmd_dedup(args: &str) {
     }
 
     // Keep only groups with 2+ files (potential duplicates).
-    let candidate_groups: Vec<(u64, Vec<String>)> = by_size
+    let candidate_groups: Vec<(u64, Vec<PathBuf>)> = by_size
         .into_iter()
         .filter(|(_, paths)| paths.len() > 1)
         .collect();
@@ -9799,12 +9803,12 @@ fn cmd_dedup(args: &str) {
         candidates_count, candidate_groups.len());
 
     // Phase 3: Hash files in each size group and group by hash.
-    let mut dup_groups: Vec<(String, u64, Vec<String>)> = Vec::new(); // (hex_hash, size, paths)
+    let mut dup_groups: Vec<(String, u64, Vec<PathBuf>)> = Vec::new(); // (hex_hash, size, paths)
     let mut hash_errors: u64 = 0;
     let mut files_hashed: u64 = 0;
 
     for (size, paths) in &candidate_groups {
-        let mut by_hash: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let mut by_hash: BTreeMap<String, Vec<PathBuf>> = BTreeMap::new();
 
         for path in paths {
             match Vfs::read_file(path) {
@@ -9879,9 +9883,9 @@ fn cmd_dedup(args: &str) {
                 format_size_human(size.saturating_mul((paths.len() as u64).saturating_sub(1))));
             for (pi, path) in paths.iter().enumerate() {
                 if pi == 0 {
-                    shell_println!("  KEEP  {}", path);
+                    shell_println!("  KEEP  {}", path.display());
                 } else {
-                    shell_println!("  DUP   {}", path);
+                    shell_println!("  DUP   {}", path.display());
                 }
             }
         }
@@ -9902,7 +9906,7 @@ fn cmd_dedup(args: &str) {
                         deleted_bytes = deleted_bytes.saturating_add(*size);
                     }
                     Err(e) => {
-                        shell_println!("  Error deleting {}: {:?}", path, e);
+                        shell_println!("  Error deleting {}: {:?}", path.display(), e);
                         delete_errors = delete_errors.saturating_add(1);
                     }
                 }
@@ -10071,7 +10075,7 @@ fn cmd_integrity(args: &str) {
             let max_display = 100;
 
             let (entries, total) = integrity::list_entries(
-                prefix.as_deref(),
+                prefix.as_deref().map(Path::new),
                 max_display,
             );
 
@@ -10081,7 +10085,7 @@ fn cmd_integrity(args: &str) {
             } else {
                 for (path, hash, size) in &entries {
                     let hex = crate::fs::cas::hash_to_hex(hash);
-                    shell_println!("{}  {:>8}  {}", &hex[..12], size, path);
+                    shell_println!("{}  {:>8}  {}", &hex[..12], size, path.display());
                 }
                 if entries.len() >= max_display && total > max_display {
                     shell_println!("... showing first {} of {} entries", max_display, total);
@@ -10109,7 +10113,7 @@ fn print_verify_result(result: &crate::fs::integrity::VerifyResult) {
         VerifyStatus::Error => "ERROR ",
     };
 
-    shell_println!("[{}] {}", status_str, result.path);
+    shell_println!("[{}] {}", status_str, result.path.display());
 
     if result.status == VerifyStatus::Modified {
         if let (Some(bl_hash), Some(cur_hash)) = (result.baseline_hash, result.current_hash) {
@@ -10321,14 +10325,14 @@ fn cmd_fhist(args: &str) {
 
         "list" | "ls" => {
             let prefix = target.map(resolve_path);
-            let tracked = history::list_tracked(prefix.as_deref(), 100);
+            let tracked = history::list_tracked(prefix.as_deref().map(Path::new), 100);
 
             if tracked.is_empty() {
                 shell_println!("No tracked files{}.",
                     if prefix.is_some() { " matching prefix" } else { "" });
             } else {
                 for (path, count) in &tracked {
-                    shell_println!("  {:>3} versions  {}", count, path);
+                    shell_println!("  {:>3} versions  {}", count, path.display());
                 }
                 shell_println!("({} tracked files)", tracked.len());
             }
@@ -10824,7 +10828,11 @@ fn cmd_intercept(args: &str) {
                         i.invocations,
                         i.denials,
                         i.name,
-                        if i.path_prefix.is_empty() { "(all)" } else { &i.path_prefix },
+                        if i.path_prefix.is_empty() {
+                            String::from("(all)")
+                        } else {
+                            alloc::format!("{}", i.path_prefix.display())
+                        },
                     );
                 }
             }
@@ -11061,7 +11069,7 @@ fn cmd_overlay(args: &str) {
             shell_println!("{}", "-".repeat(84));
             for (id, s) in &overlays {
                 shell_println!("{:<4} {:<16} {:<24} {:<24} {:>4} {:>6} {:>6}",
-                    id, s.name, s.lower_path, s.upper_path,
+                    id, s.name, s.lower_path.display(), s.upper_path.display(),
                     s.whiteout_count, s.reads, s.writes);
             }
         }
@@ -11112,18 +11120,14 @@ fn cmd_overlay(args: &str) {
                                 _ => "?",
                             };
                             // Show which layer.
-                            let layer = overlay::which_layer(id, &if rel.is_empty() {
-                                e.name.clone()
-                            } else {
-                                alloc::format!("{}/{}", rel, e.name)
-                            }).unwrap_or(overlay::Layer::None);
+                            let layer = overlay::which_layer(id, Path::new(rel).join(&e.name)).unwrap_or(overlay::Layer::None);
                             let layer_tag = match layer {
                                 overlay::Layer::Upper => "[upper]",
                                 overlay::Layer::Lower => "[lower]",
                                 overlay::Layer::Both => "[both] ",
                                 overlay::Layer::None => "[none] ",
                             };
-                            shell_println!("{} {} {:>8} {}", type_char, layer_tag, e.size, e.name);
+                            shell_println!("{} {} {:>8} {}", type_char, layer_tag, e.size, e.name.display());
                         }
                         shell_println!("({} entries)", entries.len());
                     }
@@ -11221,7 +11225,7 @@ fn cmd_overlay(args: &str) {
                             shell_println!("No whiteout entries.");
                         } else {
                             for w in &wos {
-                                shell_println!("  .wh.{}", w);
+                                shell_println!("  .wh.{}", w.display());
                             }
                             shell_println!("({} whiteouts)", wos.len());
                         }
@@ -11242,8 +11246,8 @@ fn cmd_overlay(args: &str) {
                 match overlay::stats(id) {
                     Ok(s) => {
                         shell_println!("Overlay: {}", s.name);
-                        shell_println!("  Lower: {}", s.lower_path);
-                        shell_println!("  Upper: {}", s.upper_path);
+                        shell_println!("  Lower: {}", s.lower_path.display());
+                        shell_println!("  Upper: {}", s.upper_path.display());
                         shell_println!("  Whiteouts:    {}", s.whiteout_count);
                         shell_println!("  Opaque dirs:  {}", s.opaque_dir_count);
                         shell_println!("  Reads:        {}", s.reads);
@@ -11374,8 +11378,8 @@ fn cmd_tmpwatch(args: &str) {
         shell_println!("Tmpwatch status:");
         shell_println!("  Enabled:     {}", if tmpwatch::is_enabled() { "yes" } else { "no" });
         shell_println!("  Max age:     {} seconds", tmpwatch::max_age());
-        shell_println!("  Watch dirs:  {}", if dirs.is_empty() { "(none)".into() } else { dirs.join(", ") });
-        shell_println!("  Excludes:    {}", if exc.is_empty() { "(none)".into() } else { exc.join(", ") });
+        shell_println!("  Watch dirs:  {}", join_paths_display(&dirs));
+        shell_println!("  Excludes:    {}", join_paths_display(&exc));
         shell_println!("  Runs:        {}", s.runs);
         shell_println!("  Removed:     {} files ({} bytes)", s.total_files_removed, s.total_bytes_freed);
         return;
@@ -11391,7 +11395,7 @@ fn cmd_tmpwatch(args: &str) {
                         result.files_removed, result.bytes_freed, result.files_skipped, result.errors);
                     if !result.removed_paths.is_empty() {
                         for p in &result.removed_paths {
-                            shell_println!("  removed: {}", p);
+                            shell_println!("  removed: {}", p.display());
                         }
                     }
                 }
@@ -11409,7 +11413,7 @@ fn cmd_tmpwatch(args: &str) {
                         shell_println!("Would remove {} files:", candidates.len());
                         let mut total = 0u64;
                         for (path, size) in &candidates {
-                            shell_println!("  {} ({} bytes)", path, size);
+                            shell_println!("  {} ({} bytes)", path.display(), size);
                             total = total.saturating_add(*size);
                         }
                         shell_println!("Total: {} bytes", total);
@@ -11427,9 +11431,9 @@ fn cmd_tmpwatch(args: &str) {
             shell_println!("  Enabled:     {}", if tmpwatch::is_enabled() { "yes" } else { "no" });
             shell_println!("  Max age:     {} seconds", tmpwatch::max_age());
             shell_println!("  Watch dirs:");
-            for d in &dirs { shell_println!("    {}", d); }
+            for d in &dirs { shell_println!("    {}", d.display()); }
             shell_println!("  Excludes:");
-            for e in &exc { shell_println!("    {}", e); }
+            for e in &exc { shell_println!("    {}", e.display()); }
             shell_println!("  Stats:");
             shell_println!("    Runs:            {}", s.runs);
             shell_println!("    Files removed:   {}", s.total_files_removed);
@@ -11561,9 +11565,9 @@ fn cmd_audit(args: &str) {
             for e in &entries {
                 let ok = if e.success { "OK" } else { "FAIL" };
                 let path_display = if let Some(p2) = &e.path2 {
-                    alloc::format!("{} -> {}", e.path, p2)
+                    alloc::format!("{} -> {}", e.path.display(), p2.display())
                 } else {
-                    e.path.clone()
+                    alloc::format!("{}", e.path.display())
                 };
                 shell_println!("{:<6} {:<10} {:<8} {:>5} {:<5} {}",
                     e.seq, e.timestamp, e.op.name(), e.uid, ok, path_display);
@@ -11629,7 +11633,11 @@ fn cmd_audit(args: &str) {
                 let uid_str = r.uid.map(|u| alloc::format!("{}", u)).unwrap_or_else(|| String::from("*"));
                 shell_println!("{:<4} {:<6} {:<24} 0x{:>08X} {:>6} {}",
                     r.id, if r.enabled { "yes" } else { "no" },
-                    if r.path_prefix.is_empty() { "(all)" } else { &r.path_prefix },
+                    if r.path_prefix.is_empty() {
+                        String::from("(all)")
+                    } else {
+                        alloc::format!("{}", r.path_prefix.display())
+                    },
                     r.mask.0, uid_str, flags);
             }
         }
@@ -11677,7 +11685,7 @@ fn cmd_audit(args: &str) {
                 i += 1;
             }
 
-            let results = audit::search(50, op_filter, path_prefix, uid_filter, failures);
+            let results = audit::search(50, op_filter, path_prefix.map(Path::new), uid_filter, failures);
             if results.is_empty() {
                 shell_println!("No matching entries.");
                 return;
@@ -11685,8 +11693,8 @@ fn cmd_audit(args: &str) {
             for e in &results {
                 let ok = if e.success { "OK" } else { "FAIL" };
                 shell_println!("[{}] {} uid={} {} {} {}",
-                    e.seq, e.op.name(), e.uid, ok, e.path,
-                    e.path2.as_deref().unwrap_or(""));
+                    e.seq, e.op.name(), e.uid, ok, e.path.display(),
+                    e.path2.as_deref().unwrap_or(Path::new("")).display());
             }
             shell_println!("({} results)", results.len());
         }
@@ -11812,7 +11820,7 @@ fn cmd_namespace(args: &str) {
                         shell_println!("{}", "-".repeat(42));
                         for m in &mounts {
                             let flags = if m.readonly { "ro" } else { "rw" };
-                            shell_println!("{:<24} {:<12} {}", m.mount_path, m.fs_type, flags);
+                            shell_println!("{:<24} {:<12} {}", m.mount_path.display(), m.fs_type, flags);
                         }
                         shell_println!("({} mounts)", mounts.len());
                     }
@@ -11966,7 +11974,7 @@ fn cmd_fssnapshot(args: &str) {
                     Ok(i) => {
                         // We need to use the root_path, but we can't borrow from KernelResult
                         // because the String is temporary. Use a fallback approach.
-                        shell_println!("Restoring to original path: {}", i.root_path);
+                        shell_println!("Restoring to original path: {}", i.root_path.display());
                         // Re-fetch info for the path.
                         let info = snapshot::info(id).expect("just checked");
                         let target = info.root_path.clone();
@@ -12010,7 +12018,7 @@ fn cmd_fssnapshot(args: &str) {
                     .map(|p| alloc::format!("{}", p.0))
                     .unwrap_or_else(|| "-".to_string());
                 shell_println!("{:>4}  {:20}  {:30}  {:>8}  {:>12}  {}",
-                    s.id.0, s.name, s.root_path, s.file_count, s.total_bytes, parent_str);
+                    s.id.0, s.name, s.root_path.display(), s.file_count, s.total_bytes, parent_str);
             }
         }
         "info" => {
@@ -12029,7 +12037,7 @@ fn cmd_fssnapshot(args: &str) {
                 Ok(i) => {
                     shell_println!("Snapshot ID: {}", i.id.0);
                     shell_println!("  Name:   {}", i.name);
-                    shell_println!("  Path:   {}", i.root_path);
+                    shell_println!("  Path:   {}", i.root_path.display());
                     shell_println!("  Files:  {}", i.file_count);
                     shell_println!("  Bytes:  {}", i.total_bytes);
                     shell_println!("  Parent: {}", i.parent
@@ -12071,13 +12079,13 @@ fn cmd_fssnapshot(args: &str) {
                         shell_println!("Snapshots are identical.");
                     } else {
                         for p in &added {
-                            shell_println!("  + {}", p);
+                            shell_println!("  + {}", p.display());
                         }
                         for p in &removed {
-                            shell_println!("  - {}", p);
+                            shell_println!("  - {}", p.display());
                         }
                         for p in &modified {
-                            shell_println!("  ~ {}", p);
+                            shell_println!("  ~ {}", p.display());
                         }
                         shell_println!("");
                         shell_println!("{} added, {} removed, {} modified",
@@ -12135,7 +12143,7 @@ fn cmd_fssnapshot(args: &str) {
                             })
                             .unwrap_or_else(|| "-".to_string());
                         shell_println!("  {} {:>8}  {}  {}",
-                            t, e.size, hash_str, e.path);
+                            t, e.size, hash_str, e.path.display());
                     }
                     shell_println!("{} entries", ents.len());
                 }
@@ -12457,7 +12465,7 @@ fn cmd_changetrack(args: &str) {
             }
             let mut filter = changetrack::ChangeFilter::default();
             if parts.len() >= 3 {
-                filter.path_prefixes = alloc::vec![alloc::string::String::from(resolve_path(parts[2]).as_str())];
+                filter.path_prefixes = alloc::vec![PathBuf::from(resolve_path(parts[2]).as_str())];
             }
             match changetrack::changes(parts[1], &filter) {
                 Ok(result) => {
@@ -12475,10 +12483,10 @@ fn cmd_changetrack(args: &str) {
                                 crate::fs::journal::JournalEventType::Deleted => "DELETE",
                                 crate::fs::journal::JournalEventType::Renamed => "RENAME",
                             };
-                            if c.old_path.is_empty() {
-                                shell_println!("  [{}] seq={} {}", etype, c.seq, c.path);
+                            if let Some(old) = c.old_path.as_deref() {
+                                shell_println!("  [{}] seq={} {} -> {}", etype, c.seq, old.display(), c.path.display());
                             } else {
-                                shell_println!("  [{}] seq={} {} -> {}", etype, c.seq, c.old_path, c.path);
+                                shell_println!("  [{}] seq={} {}", etype, c.seq, c.path.display());
                             }
                         }
                     }
@@ -12494,7 +12502,7 @@ fn cmd_changetrack(args: &str) {
             }
             let mut filter = changetrack::ChangeFilter::default();
             if parts.len() >= 3 {
-                filter.path_prefixes = alloc::vec![alloc::string::String::from(resolve_path(parts[2]).as_str())];
+                filter.path_prefixes = alloc::vec![PathBuf::from(resolve_path(parts[2]).as_str())];
             }
             match changetrack::peek(parts[1], &filter) {
                 Ok(result) => {
@@ -12509,10 +12517,10 @@ fn cmd_changetrack(args: &str) {
                                 crate::fs::journal::JournalEventType::Deleted => "DELETE",
                                 crate::fs::journal::JournalEventType::Renamed => "RENAME",
                             };
-                            if c.old_path.is_empty() {
-                                shell_println!("  [{}] seq={} {}", etype, c.seq, c.path);
+                            if let Some(old) = c.old_path.as_deref() {
+                                shell_println!("  [{}] seq={} {} -> {}", etype, c.seq, old.display(), c.path.display());
                             } else {
-                                shell_println!("  [{}] seq={} {} -> {}", etype, c.seq, c.old_path, c.path);
+                                shell_println!("  [{}] seq={} {}", etype, c.seq, c.path.display());
                             }
                         }
                     }
@@ -13050,7 +13058,7 @@ fn cmd_fsearch(args: &str) {
                             crate::fs::EntryType::Directory => "D",
                             _ => "?",
                         };
-                        shell_println!("  [{}] {:>8} {}", typ, r.size, r.path);
+                        shell_println!("  [{}] {:>8} {}", typ, r.size, r.path.display());
                     }
                 }
                 Err(e) => shell_println!("Search error: {:?}", e),
@@ -13079,7 +13087,7 @@ fn cmd_fsearch(args: &str) {
                             crate::fs::EntryType::Directory => "D",
                             _ => "?",
                         };
-                        shell_println!("  [{}] {:>8} {}", typ, r.size, r.path);
+                        shell_println!("  [{}] {:>8} {}", typ, r.size, r.path.display());
                     }
                 }
                 Err(e) => shell_println!("Search error: {:?}", e),
@@ -13103,7 +13111,7 @@ fn cmd_fsearch(args: &str) {
                 Ok(results) => {
                     shell_println!("Found {} .{} file(s):", results.len(), ext);
                     for r in &results {
-                        shell_println!("  {:>8} {}", r.size, r.path);
+                        shell_println!("  {:>8} {}", r.size, r.path.display());
                     }
                 }
                 Err(e) => shell_println!("Search error: {:?}", e),
@@ -13151,7 +13159,7 @@ fn cmd_fsearch(args: &str) {
                 Ok(results) => {
                     shell_println!("Found {} file(s) >= {} bytes:", results.len(), min);
                     for r in &results {
-                        shell_println!("  {:>8} {}", r.size, r.path);
+                        shell_println!("  {:>8} {}", r.size, r.path.display());
                     }
                 }
                 Err(e) => shell_println!("Search error: {:?}", e),
@@ -13180,7 +13188,7 @@ fn cmd_fsearch(args: &str) {
                             crate::fs::EntryType::Directory => "D",
                             _ => "?",
                         };
-                        shell_println!("  [{}] {:>8} {}", t, r.size, r.path);
+                        shell_println!("  [{}] {:>8} {}", t, r.size, r.path.display());
                     }
                 }
                 Err(e) => shell_println!("Search error: {:?}", e),
@@ -13329,7 +13337,7 @@ fn cmd_tag(args: &str) {
                     } else {
                         shell_println!("Found {} file(s):", files.len());
                         for f in &files {
-                            shell_println!("  {} [{}]", f.path, f.tags.join(", "));
+                            shell_println!("  {} [{}]", f.path.display(), f.tags.join(", "));
                         }
                     }
                 }
@@ -13398,7 +13406,7 @@ fn cmd_diskuse(args: &str) {
     match usage::analyze_path(root) {
         Ok(report) => {
             shell_println!();
-            shell_println!("=== Disk Usage Report: {} ===", report.root);
+            shell_println!("=== Disk Usage Report: {} ===", report.root.display());
             shell_println!();
             shell_println!("  Total size:      {}", usage::format_size(report.total_size));
             shell_println!("  Files:           {}", report.file_count);
@@ -13416,7 +13424,7 @@ fn cmd_diskuse(args: &str) {
                     } else {
                         0
                     };
-                    shell_println!("  {:>10} {:>3}%  {}", usage::format_size(d.size), pct, d.path);
+                    shell_println!("  {:>10} {:>3}%  {}", usage::format_size(d.size), pct, d.path.display());
                 }
             }
 
@@ -13424,7 +13432,7 @@ fn cmd_diskuse(args: &str) {
                 shell_println!();
                 shell_println!("--- Top Files ---");
                 for f in report.top_files.iter().take(10) {
-                    shell_println!("  {:>10}  {}", usage::format_size(f.size), f.path);
+                    shell_println!("  {:>10}  {}", usage::format_size(f.size), f.path.display());
                 }
             }
 
@@ -13439,7 +13447,7 @@ fn cmd_diskuse(args: &str) {
                     };
                     shell_println!(
                         "  .{:8} {:>10} {:>3}%  ({} files)",
-                        e.extension,
+                        Path::new(&e.extension).display(),
                         usage::format_size(e.total_size),
                         pct,
                         e.count
@@ -13596,9 +13604,9 @@ fn cmd_fswatch(args: &str) {
                             };
                             let dirtag = if ev.is_dir { " [dir]" } else { "" };
                             if let Some(ref new) = ev.new_path {
-                                shell_println!("  {:8} {} -> {}{}", kind, ev.path, new, dirtag);
+                                shell_println!("  {:8} {} -> {}{}", kind, ev.path.display(), new.display(), dirtag);
                             } else {
-                                shell_println!("  {:8} {}{}", kind, ev.path, dirtag);
+                                shell_println!("  {:8} {}{}", kind, ev.path.display(), dirtag);
                             }
                         }
                     }
@@ -13691,21 +13699,21 @@ fn cmd_dirsync(args: &str) {
                         shell_println!();
                         shell_println!("  New:");
                         for f in &diff.new_files {
-                            shell_println!("    + {}", f);
+                            shell_println!("    + {}", f.display());
                         }
                     }
                     if !diff.modified_files.is_empty() {
                         shell_println!();
                         shell_println!("  Modified:");
                         for f in &diff.modified_files {
-                            shell_println!("    ~ {}", f);
+                            shell_println!("    ~ {}", f.display());
                         }
                     }
                     if !diff.deleted_files.is_empty() {
                         shell_println!();
                         shell_println!("  Deleted:");
                         for f in &diff.deleted_files {
-                            shell_println!("    - {}", f);
+                            shell_println!("    - {}", f.display());
                         }
                     }
                 }
@@ -13789,7 +13797,7 @@ fn cmd_backup(args: &str) {
             while i < flags.len() {
                 if flags[i] == "--exclude" || flags[i] == "-x" {
                     if i + 1 < flags.len() {
-                        exclude.push(String::from(flags[i + 1]));
+                        exclude.push(PathBuf::from(flags[i + 1]));
                         i += 1;
                     }
                 }
@@ -13914,7 +13922,7 @@ fn cmd_backup(args: &str) {
                             };
                             shell_println!(
                                 "  {} [{}] {} files, {} bytes, from {}",
-                                b.id, mode, b.file_count, b.total_bytes, b.source,
+                                b.id, mode, b.file_count, b.total_bytes, b.source.display(),
                             );
                         }
                     }
@@ -14020,7 +14028,7 @@ fn cmd_undelete(args: &str) {
                             let sources: Vec<&str> = r.sources.iter().map(|s| s.label()).collect();
                             shell_println!(
                                 "  {} ({} bytes) [{}]",
-                                r.path, size_str, sources.join(", "),
+                                r.path.display(), size_str, sources.join(", "),
                             );
                         }
                     }
@@ -14035,9 +14043,9 @@ fn cmd_undelete(args: &str) {
             }
             let path = parts[1];
             let dest = parts.get(2).copied();
-            match undelete::recover(path, dest) {
+            match undelete::recover(path, dest.map(Path::new)) {
                 Ok(result) => {
-                    shell_println!("Recovered: {} -> {}", path, result.recovered_path);
+                    shell_println!("Recovered: {} -> {}", path, result.recovered_path.display());
                     shell_println!("  Source: {}", result.source.label());
                     shell_println!("  Bytes:  {}", result.bytes);
                     if let Some(verified) = result.verified {
@@ -14107,7 +14115,7 @@ fn cmd_archive(args: &str) {
                                     archive::EntryKind::Symlink => 'l',
                                     archive::EntryKind::Other => '?',
                                 };
-                                shell_println!("{} {:>10}  {}", kind_ch, e.size, e.name);
+                                shell_println!("{} {:>10}  {}", kind_ch, e.size, e.name.display());
                             }
                             shell_println!("({} entries)", entries.len());
                         }
@@ -14220,9 +14228,11 @@ fn cmd_archive(args: &str) {
                 let path = resolve_path(name);
                 match crate::fs::Vfs::read_file(&path) {
                     Ok(data) => {
-                        let entry_name = path.rsplit('/').next().unwrap_or(&path);
+                        let entry_name = Path::new(path.as_str())
+                            .file_name()
+                            .unwrap_or(Path::new(path.as_str()));
                         entries.push(archive::CreateEntry {
-                            name: String::from(entry_name),
+                            name: entry_name.to_path_buf(),
                             data,
                             kind: archive::EntryKind::File,
                         });
@@ -14295,9 +14305,9 @@ fn cmd_batch(args: &str) {
                     shell_println!("{} renamed, {} failed:", r.succeeded, r.failed);
                     for item in &r.items {
                         if item.ok {
-                            shell_println!("  {} -> {}", item.src, item.dst);
+                            shell_println!("  {} -> {}", item.src.display(), item.dst.display());
                         } else {
-                            shell_println!("  ! {}: {}", item.src, item.error);
+                            shell_println!("  ! {}: {}", item.src.display(), item.error);
                         }
                     }
                 }
@@ -14357,7 +14367,7 @@ fn cmd_batch(args: &str) {
             match batch::glob_files(&dir, parts[2]) {
                 Ok(files) => {
                     for f in &files {
-                        shell_println!("  {}", f);
+                        shell_println!("  {}", f.display());
                     }
                     shell_println!("({} matches)", files.len());
                 }
@@ -15490,7 +15500,7 @@ fn cmd_lsplus(args: &str) {
     let mut dir_path = String::new();
     let mut sort = SortOrder::Name;
     let mut type_filter = TypeFilter::All;
-    let mut pattern = String::new();
+    let mut pattern: Vec<u8> = Vec::new();
     let mut show_hidden = true;
     let mut show_stats = false;
 
@@ -15516,7 +15526,7 @@ fn cmd_lsplus(args: &str) {
             }
             "-p" | "--pattern" => {
                 if let Some(&val) = parts.get(i + 1) {
-                    pattern = String::from(val);
+                    pattern = val.as_bytes().to_vec();
                     i += 1;
                 }
             }
@@ -15565,7 +15575,7 @@ fn cmd_lsplus(args: &str) {
                     crate::fs::EntryType::VolumeLabel => "VOL ",
                 };
                 let size = entry.meta.as_ref().map_or(0, |m| m.size);
-                shell_println!("  {:4} {:>10} {}", type_str, size, entry.name);
+                shell_println!("  {:4} {:>10} {}", type_str, size, entry.name.display());
             }
             if result.has_more {
                 shell_println!("  ... ({} more)", result.total_count - result.entries.len());
@@ -15800,7 +15810,7 @@ fn cmd_recent(args: &str) {
                 shell_println!("{:40} {:8} {:>5} {}", "PATH", "TYPE", "COUNT", "SOURCE");
                 shell_println!("{}", "-".repeat(70));
                 for e in &entries {
-                    shell_println!("{:40} {:8} {:>5} {}", e.path, e.access_type.label(), e.access_count, e.source);
+                    shell_println!("{:40} {:8} {:>5} {}", e.path.display(), e.access_type.label(), e.access_count, e.source);
                 }
                 shell_println!("\n{} entries shown.", entries.len());
             }
@@ -15866,7 +15876,7 @@ fn cmd_recent(args: &str) {
                     } else {
                         shell_println!("Custom excludes:");
                         for e in &excludes {
-                            shell_println!("  {}", e);
+                            shell_println!("  {}", e.display());
                         }
                     }
                 }
@@ -15962,7 +15972,7 @@ fn cmd_fileinfo(args: &str) {
             let path = resolve_path(sub);
             match fileinfo::extract(&path) {
                 Ok(info) => {
-                    shell_println!("File:   {}", info.path);
+                    shell_println!("File:   {}", info.path.display());
                     shell_println!("MIME:   {}", info.mime);
                     shell_println!("Format: {}", info.format_desc);
                     if info.fields.is_empty() {
@@ -16031,7 +16041,7 @@ fn cmd_fswalk(args: &str) {
                         shell_println!("No files found matching '{}'.", pattern);
                     } else {
                         for f in &files {
-                            shell_println!("{}", f);
+                            shell_println!("{}", f.display());
                         }
                         shell_println!("\n{} matches.", files.len());
                     }
@@ -16057,11 +16067,11 @@ fn cmd_fswalk(args: &str) {
                             crate::fs::EntryType::Symlink => "l",
                             _ => "?",
                         };
-                        let name = entry.path.rsplit('/').next().unwrap_or(&entry.path);
+                        let name = entry.path.file_name().unwrap_or(&entry.path);
                         if entry.size > 0 {
-                            shell_println!("{}[{}] {} ({} B)", prefix, type_char, name, entry.size);
+                            shell_println!("{}[{}] {} ({} B)", prefix, type_char, name.display(), entry.size);
                         } else {
-                            shell_println!("{}[{}] {}", prefix, type_char, name);
+                            shell_println!("{}[{}] {}", prefix, type_char, name.display());
                         }
                     }
                     shell_println!("\n{} files, {} dirs, {} total bytes",
@@ -16103,7 +16113,7 @@ fn cmd_fswalk(args: &str) {
                     "-b" | "--bfs" => { opts.order = WalkOrder::BreadthFirst; i += 1; }
                     "-p" | "--pattern" => {
                         if let Some(p) = parts.get(i + 1) {
-                            opts.pattern = alloc::string::String::from(*p);
+                            opts.pattern = p.as_bytes().to_vec();
                         }
                         i += 2;
                     }
@@ -16120,11 +16130,11 @@ fn cmd_fswalk(args: &str) {
                             crate::fs::EntryType::Symlink => "l",
                             _ => "?",
                         };
-                        let name = entry.path.rsplit('/').next().unwrap_or(&entry.path);
+                        let name = entry.path.file_name().unwrap_or(&entry.path);
                         if entry.size > 0 {
-                            shell_println!("{}[{}] {} ({} B)", prefix, type_char, name, entry.size);
+                            shell_println!("{}[{}] {} ({} B)", prefix, type_char, name.display(), entry.size);
                         } else {
-                            shell_println!("{}[{}] {}", prefix, type_char, name);
+                            shell_println!("{}[{}] {}", prefix, type_char, name.display());
                         }
                     }
                     shell_println!("\n{} files, {} dirs, {} total bytes",
@@ -16195,7 +16205,7 @@ fn cmd_findex(args: &str) {
                 shell_println!("No matching files.");
             } else {
                 for path in &results {
-                    shell_println!("{}", path);
+                    shell_println!("{}", path.display());
                 }
                 shell_println!("\n{} matches.", results.len());
             }
@@ -16289,7 +16299,7 @@ fn cmd_thumbcache(args: &str) {
                 shell_println!("{:40} {:8} {:>5}x{:<5} {:>8}", "PATH", "SIZE", "W", "H", "BYTES");
                 shell_println!("{}", "-".repeat(75));
                 for (path, size, w, h, bytes) in &entries {
-                    shell_println!("{:40} {:8} {:>5}x{:<5} {:>8}", path, size.label(), w, h, bytes);
+                    shell_println!("{:40} {:8} {:>5}x{:<5} {:>8}", path.display(), size.label(), w, h, bytes);
                 }
                 shell_println!("\n{} entries, {} bytes used.", entries.len(), thumbcache::memory_used());
             }
@@ -16351,7 +16361,7 @@ fn cmd_bookmark(args: &str) {
                         current_cat = cat;
                     }
                     let vis = if bm.system { "(sys)" } else { "" };
-                    shell_println!("  {:12} {:30} {} {}", bm.name, bm.path, bm.label, vis);
+                    shell_println!("  {:12} {:30} {} {}", bm.name, bm.path.display(), bm.label, vis);
                 }
             }
         }
@@ -16389,13 +16399,25 @@ fn cmd_bookmark(args: &str) {
             }
             if let Some(path) = bookmarks::resolve(parts[1]) {
                 bookmarks::record_access(parts[1]);
-                // Update CWD like cmd_cd does.
+                // Update CWD like cmd_cd does.  The shell's CWD is still a
+                // `String` (see TD-KSHELL-LINE-EDITOR-IS-UTF8), so a bookmark
+                // pointing at a path that is not UTF-8 is *refused* rather
+                // than lossily transcoded — silently cd-ing somewhere other
+                // than where the bookmark points would be worse than failing.
+                let Some(text) = path.to_str() else {
+                    shell_println!(
+                        "bookmark '{}' points at a non-UTF-8 path ({}); the shell cannot cd there yet",
+                        parts[1],
+                        path.display()
+                    );
+                    return;
+                };
                 {
                     let mut cwd = CWD.lock();
                     cwd.clear();
-                    cwd.push_str(&path);
+                    cwd.push_str(text);
                 }
-                shell_println!("{}", path);
+                shell_println!("{}", path.display());
             } else {
                 shell_println!("Unknown bookmark: {}", parts[1]);
             }
@@ -16414,7 +16436,7 @@ fn cmd_bookmark(args: &str) {
             let results = bookmarks::validate();
             for (name, path, exists) in &results {
                 let status = if *exists { "OK" } else { "MISSING" };
-                shell_println!("{:12} {:30} {}", name, path, status);
+                shell_println!("{:12} {:30} {}", name, path.display(), status);
             }
         }
         "stats" => {
@@ -16733,7 +16755,7 @@ fn cmd_deskicons(args: &str) {
         "list" => {
             if let Some(layout) = crate::fs::deskicons::get_layout() {
                 shell_println!("Desktop: {} ({}x{}) [{:?}]",
-                               layout.desktop_path, layout.screen_w, layout.screen_h, layout.mode);
+                               layout.desktop_path.display(), layout.screen_w, layout.screen_h, layout.mode);
                 shell_println!("{:<20} {:<8} {:<8} {}", "Name", "X", "Y", "Type");
                 shell_println!("{}", "-".repeat(50));
                 for icon in &layout.icons {
@@ -16745,7 +16767,7 @@ fn cmd_deskicons(args: &str) {
                         "file"
                     };
                     let sel = if icon.selected { " *" } else { "" };
-                    shell_println!("{:<20} {:<8} {:<8} {}{}", icon.name, icon.x, icon.y, kind, sel);
+                    shell_println!("{:<20} {:<8} {:<8} {}{}", icon.name.display(), icon.x, icon.y, kind, sel);
                 }
             } else {
                 shell_println!("(no desktop layout loaded - use 'deskicons load' first)");
@@ -16812,7 +16834,7 @@ fn cmd_deskicons(args: &str) {
                 parts.get(2).and_then(|s| s.parse::<u32>().ok()),
             ) {
                 match crate::fs::deskicons::icon_at(x, y) {
-                    Some(name) => shell_println!("Hit: {}", name),
+                    Some(name) => shell_println!("Hit: {}", name.display()),
                     None => shell_println!("(no icon at {}, {})", x, y),
                 }
             } else {
@@ -17225,7 +17247,7 @@ fn cmd_fileselect(args: &str) {
                             shell_println!("(no items selected)");
                         } else {
                             for p in &paths {
-                                shell_println!("  {}", p);
+                                shell_println!("  {}", p.display());
                             }
                         }
                     }
@@ -17240,7 +17262,7 @@ fn cmd_fileselect(args: &str) {
                     shell_println!("{:<6} {:<30} {}", "ID", "Directory", "Items");
                     shell_println!("{}", "-".repeat(50));
                     for (id, dir, count) in &sets {
-                        shell_println!("#{:<5} {:<30} {}", id, dir, count);
+                        shell_println!("#{:<5} {:<30} {}", id, dir.display(), count);
                     }
                 }
             }
@@ -17272,14 +17294,10 @@ fn cmd_fileselect(args: &str) {
                     .map(|(_, d, _)| d.clone());
                 if let Some(dir) = dir {
                     if let Ok(entries) = crate::fs::vfs::Vfs::readdir(&dir) {
-                        let paths: Vec<String> = entries.iter().map(|e| {
-                            if dir == "/" {
-                                alloc::format!("/{}", e.name)
-                            } else {
-                                alloc::format!("{}/{}", dir, e.name)
-                            }
+                        let paths: Vec<PathBuf> = entries.iter().map(|e| {
+                            dir.join(&e.name)
                         }).collect();
-                        let refs: Vec<&str> = paths.iter().map(|s| s.as_str()).collect();
+                        let refs: Vec<&Path> = paths.iter().map(PathBuf::as_path).collect();
                         match crate::fs::fileselect::select_pattern(id, &refs, pat) {
                             Ok(()) => {
                                 let count = crate::fs::fileselect::count(id).unwrap_or(0);
@@ -17306,10 +17324,10 @@ fn cmd_fileselect(args: &str) {
             };
             match crate::fs::fileselect::build_check_tree(&dir) {
                 Ok(tree) => {
-                    shell_println!("[{}] {} ({})", check_char(tree.state), tree.name,
+                    shell_println!("[{}] {} ({})", check_char(tree.state), tree.name.display(),
                                    if tree.is_dir { "dir" } else { "file" });
                     for child in &tree.children {
-                        shell_println!("  [{}] {} ({})", check_char(child.state), child.name,
+                        shell_println!("  [{}] {} ({})", check_char(child.state), child.name.display(),
                                        if child.is_dir { "dir" } else { "file" });
                     }
                 }
@@ -17598,7 +17616,7 @@ fn cmd_sidebar(args: &str) {
                         } else {
                             alloc::format!("  ({})", item.usage_info)
                         };
-                        shell_println!("    {} → {}{}", item.label, item.path, info);
+                        shell_println!("    {} → {}{}", item.label, item.path.display(), info);
                     }
                 }
             }
@@ -18328,11 +18346,11 @@ fn cmd_rundialog(args: &str) {
                         rundialog::CompletionSource::Alias => "alias",
                         rundialog::CompletionSource::Bookmark => "bookmark",
                     };
-                    shell_println!("Resolved: {} (via {})", result.path, src);
+                    shell_println!("Resolved: {} (via {})", result.path.display(), src);
                     if !result.args.is_empty() {
                         shell_println!("Args: {:?}", result.args);
                     }
-                    rundialog::record(&cmd_text, &result.path);
+                    rundialog::record(&cmd_text, Some(&result.path));
                     shell_println!("Recorded in history");
                 }
                 Err(e) => shell_println!("Could not resolve '{}': {:?}", cmd_text, e),
@@ -18352,7 +18370,7 @@ fn cmd_rundialog(args: &str) {
                         rundialog::CompletionSource::Alias => "alias",
                         rundialog::CompletionSource::Bookmark => "bookmark",
                     };
-                    shell_println!("  {:20} [{:8}] {}", c.text, src, c.description);
+                    shell_println!("  {:20} [{:8}] {}", Path::new(&c.text).display(), src, c.description);
                 }
             }
         }
@@ -18364,7 +18382,12 @@ fn cmd_rundialog(args: &str) {
             } else {
                 shell_println!("{} recent commands:", recent.len());
                 for cmd in &recent {
-                    shell_println!("  {:30} x{:<4} {}", cmd.command, cmd.run_count, cmd.resolved_path);
+                    shell_println!(
+                        "  {:30} x{:<4} {}",
+                        Path::new(&cmd.command).display(),
+                        cmd.run_count,
+                        cmd.resolved_path.as_deref().unwrap_or(Path::new("(unresolved)")).display(),
+                    );
                 }
             }
         }
@@ -18401,7 +18424,11 @@ fn cmd_rundialog(args: &str) {
                     } else {
                         shell_println!("{} aliases:", aliases.len());
                         for (name, target) in &aliases {
-                            shell_println!("  {:20} → {}", name, target);
+                            shell_println!(
+                                "  {:20} → {}",
+                                Path::new(name.as_slice()).display(),
+                                target.display()
+                            );
                         }
                     }
                 }
@@ -18442,7 +18469,7 @@ fn cmd_rundialog(args: &str) {
                     } else {
                         shell_println!("{} bookmarks:", bm.len());
                         for cmd in &bm {
-                            shell_println!("  {}", cmd);
+                            shell_println!("  {}", Path::new(cmd).display());
                         }
                     }
                 }
@@ -18459,7 +18486,7 @@ fn cmd_rundialog(args: &str) {
                     } else {
                         shell_println!("PATH ({} dirs):", dirs.len());
                         for d in &dirs {
-                            shell_println!("  {}", d);
+                            shell_println!("  {}", d.display());
                         }
                     }
                 }
@@ -20398,7 +20425,7 @@ fn cmd_display(args: &str) {
         "confirm" => { match display::confirm_change() { Ok(()) => shell_println!("Change confirmed"), Err(e) => shell_println!("Error: {:?}", e), } }
         "revert" => { match display::revert_change() { Ok(()) => shell_println!("Change reverted"), Err(e) => shell_println!("Error: {:?}", e), } }
         "pending" => { if let Some(p) = display::pending_change() { shell_println!("Pending: monitor={} timeout={}s prev_mode={}", p.monitor_id, p.timeout_secs, p.previous_mode); } else { shell_println!("No pending change"); } }
-        "scale" => { let id = parts.get(1).copied().unwrap_or(""); let pct = parts.get(2).and_then(|s| s.parse::<u32>().ok()); if let Some(pct) = pct { match display::set_scale(id, pct) { Ok(()) => shell_println!("Scale: {}%", pct.clamp(50, 400)), Err(e) => shell_println!("Error: {:?}", e), } } else { if let Some(m) = display::get_monitor(id) { shell_println!("Scale: {}%", m.scale_percent); } else { shell_println!("Usage: display scale <id> [percent]"); } } }
+        "scale" => { let id = parts.get(1).copied().unwrap_or(""); let pct = parts.get(2).and_then(|s| s.parse::<u32>().ok()); if let Some(pct) = pct { match display::set_scale(id, pct) { Ok(()) => shell_println!("Scale: {}%", pct.clamp(50, 400)), Err(e) => shell_println!("Error: {:?}", e), } } else if let Some(m) = display::get_monitor(id) { shell_println!("Scale: {}%", m.scale_percent); } else { shell_println!("Usage: display scale <id> [percent]"); } }
         "autoscale" => { let id = parts.get(1).copied().unwrap_or(""); match display::auto_scale(id) { Ok(pct) => shell_println!("Auto scale: {}%", pct), Err(e) => shell_println!("Error: {:?}", e), } }
         "pos" | "position" => { let id = parts.get(1).copied().unwrap_or(""); let x = parts.get(2).and_then(|s| s.parse::<i32>().ok()); let y = parts.get(3).and_then(|s| s.parse::<i32>().ok()); if let (Some(x), Some(y)) = (x, y) { match display::set_position(id, x, y) { Ok(()) => shell_println!("Position: ({},{})", x, y), Err(e) => shell_println!("Error: {:?}", e), } } else { shell_println!("Usage: display pos <id> <x> <y>"); } }
         "orient" | "orientation" => { let id = parts.get(1).copied().unwrap_or(""); let o = match parts.get(2).copied().unwrap_or("") { "landscape" | "l" => Some(display::Orientation::Landscape), "portrait" | "p" => Some(display::Orientation::Portrait), "landscape-flip" | "lf" => Some(display::Orientation::LandscapeFlipped), "portrait-flip" | "pf" => Some(display::Orientation::PortraitFlipped), _ => None, }; if let Some(o) = o { match display::set_orientation(id, o) { Ok(()) => shell_println!("Orientation set"), Err(e) => shell_println!("Error: {:?}", e), } } else { shell_println!("Usage: display orient <id> <landscape|portrait|landscape-flip|portrait-flip>"); } }
@@ -20435,7 +20462,7 @@ fn cmd_vdesktop(args: &str) {
         "pin" => { let wid = parts.get(1).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0); if wid == 0 { shell_println!("Usage: vd pin <window_id>"); } else { match vdesktop::pin(wid) { Ok(()) => shell_println!("Pinned window {}", wid), Err(e) => shell_println!("Error: {:?}", e), } } }
         "unpin" => { let wid = parts.get(1).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0); vdesktop::unpin(wid); shell_println!("Unpinned window {}", wid); }
         "pinned" => { let pins = vdesktop::pinned_windows(); if pins.is_empty() { shell_println!("No pinned windows"); } else { for w in &pins { shell_println!("  window {}", w); } } }
-        "wallpaper" | "wp" => { let id = parts.get(1).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0); let path = parts.get(2).copied().unwrap_or(""); if id == 0 { shell_println!("Usage: vd wp <id> [path|clear]"); } else if path == "clear" { match vdesktop::clear_wallpaper(id) { Ok(()) => shell_println!("Cleared wallpaper for #{}", id), Err(e) => shell_println!("Error: {:?}", e), } } else if !path.is_empty() { match vdesktop::set_wallpaper(id, path) { Ok(()) => shell_println!("Set wallpaper for #{}: {}", id, path), Err(e) => shell_println!("Error: {:?}", e), } } else { if let Some(d) = vdesktop::get(id) { shell_println!("Wallpaper: {}", if d.wallpaper.is_empty() {"(global)"} else {&d.wallpaper}); } } }
+        "wallpaper" | "wp" => { let id = parts.get(1).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0); let path = parts.get(2).copied().unwrap_or(""); if id == 0 { shell_println!("Usage: vd wp <id> [path|clear]"); } else if path == "clear" { match vdesktop::clear_wallpaper(id) { Ok(()) => shell_println!("Cleared wallpaper for #{}", id), Err(e) => shell_println!("Error: {:?}", e), } } else if !path.is_empty() { match vdesktop::set_wallpaper(id, path) { Ok(()) => shell_println!("Set wallpaper for #{}: {}", id, path), Err(e) => shell_println!("Error: {:?}", e), } } else if let Some(d) = vdesktop::get(id) { shell_println!("Wallpaper: {}", if d.wallpaper.is_empty() {"(global)"} else {&d.wallpaper}); } }
         "anim" | "animation" => { if let Some(a) = parts.get(1).and_then(|s| vdesktop::SwitchAnimation::from_str(s)) { vdesktop::set_animation(a); shell_println!("Animation: {}", a.label()); } else { shell_println!("Animation: {} (none/slide/fade/overview)", vdesktop::animation().label()); } }
         "wrap" => { match parts.get(1).copied().unwrap_or("") { "on"|"true" => { vdesktop::set_wrap(true); shell_println!("Wrap: on"); } "off"|"false" => { vdesktop::set_wrap(false); shell_println!("Wrap: off"); } _ => { shell_println!("Wrap: {}", vdesktop::wrap_around()); } } }
         "init" => { match vdesktop::init_defaults() { Ok(()) => shell_println!("Initialized default desktops"), Err(e) => shell_println!("Error: {:?}", e), } }
@@ -24791,18 +24818,16 @@ fn cmd_netsettings(args: &str) {
         "dns" => {
             if parts.len() < 3 {
                 shell_println!("Usage: netsettings dns <iface> <auto|server1,server2,...>");
+            } else if parts[2] == "auto" {
+                match netsettings::set_dns(parts[1], true, &[]) {
+                    Ok(()) => shell_println!("DNS set to auto for {}", parts[1]),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
             } else {
-                if parts[2] == "auto" {
-                    match netsettings::set_dns(parts[1], true, &[]) {
-                        Ok(()) => shell_println!("DNS set to auto for {}", parts[1]),
-                        Err(e) => shell_println!("Error: {:?}", e),
-                    }
-                } else {
-                    let servers: Vec<&str> = parts[2].split(',').collect();
-                    match netsettings::set_dns(parts[1], false, &servers) {
-                        Ok(()) => shell_println!("DNS servers set for {}", parts[1]),
-                        Err(e) => shell_println!("Error: {:?}", e),
-                    }
+                let servers: Vec<&str> = parts[2].split(',').collect();
+                match netsettings::set_dns(parts[1], false, &servers) {
+                    Ok(()) => shell_println!("DNS servers set for {}", parts[1]),
+                    Err(e) => shell_println!("Error: {:?}", e),
                 }
             }
         }
@@ -53011,12 +53036,10 @@ fn cmd_cfreq(args: &str) {
                     Ok(()) => shell_println!("Governor set to {}", gov.label()),
                     Err(e) => shell_println!("Error: {:?}", e),
                 }
+            } else if let Some(gov) = cpufreq::get_governor() {
+                shell_println!("Current governor: {}", gov.label());
             } else {
-                if let Some(gov) = cpufreq::get_governor() {
-                    shell_println!("Current governor: {}", gov.label());
-                } else {
-                    shell_println!("Not initialized");
-                }
+                shell_println!("Not initialized");
             }
         }
         "boost" => {
@@ -54599,7 +54622,7 @@ fn cmd_nameservice(args: &str) {
             let hosts = nameservice::list_hosts();
             shell_println!("{} host entry(ies):", hosts.len());
             for h in &hosts {
-                let aliases = if h.aliases.is_empty() { String::from("") }
+                let aliases = if h.aliases.is_empty() { String::new() }
                     else { format!(" ({})", h.aliases.join(", ")) };
                 shell_println!("  {} → {}{}", h.address, h.hostname, aliases);
             }
@@ -60683,7 +60706,7 @@ fn cmd_filepicker(args: &str) {
             match filepicker::navigate(id, path) {
                 Ok(()) => {
                     if let Some(d) = filepicker::get_dialog(id) {
-                        shell_println!("Navigated to: {} ({} items)", d.current_dir, d.listing.len());
+                        shell_println!("Navigated to: {} ({} items)", d.current_dir.display(), d.listing.len());
                     }
                 }
                 Err(e) => shell_println!("Error: {:?}", e),
@@ -60698,7 +60721,7 @@ fn cmd_filepicker(args: &str) {
             match filepicker::go_up(id) {
                 Ok(()) => {
                     if let Some(d) = filepicker::get_dialog(id) {
-                        shell_println!("Now at: {}", d.current_dir);
+                        shell_println!("Now at: {}", d.current_dir.display());
                     }
                 }
                 Err(e) => shell_println!("Error: {:?}", e),
@@ -60713,7 +60736,7 @@ fn cmd_filepicker(args: &str) {
             match filepicker::go_back(id) {
                 Ok(()) => {
                     if let Some(d) = filepicker::get_dialog(id) {
-                        shell_println!("Back to: {}", d.current_dir);
+                        shell_println!("Back to: {}", d.current_dir.display());
                     }
                 }
                 Err(e) => shell_println!("Error: {:?}", e),
@@ -60753,7 +60776,7 @@ fn cmd_filepicker(args: &str) {
                 Ok(filepicker::DialogResult::Confirmed(paths)) => {
                     shell_println!("Confirmed ({} paths):", paths.len());
                     for p in &paths {
-                        shell_println!("  {}", p);
+                        shell_println!("  {}", p.display());
                     }
                 }
                 Ok(filepicker::DialogResult::Cancelled) => shell_println!("Cancelled"),
@@ -60792,13 +60815,13 @@ fn cmd_filepicker(args: &str) {
                 Some(d) => {
                     shell_println!("Dialog #{}", d.id);
                     shell_println!("  Mode:      {}", d.mode.title());
-                    shell_println!("  Directory: {}", d.current_dir);
+                    shell_println!("  Directory: {}", d.current_dir.display());
                     shell_println!("  Items:     {}", d.listing.len());
                     shell_println!("  Selected:  {}", d.selection.len());
                     shell_println!("  Filters:   {}", d.filters.len());
                     shell_println!("  Open:      {}", if d.open { "yes" } else { "no" });
                     if !d.filename.is_empty() {
-                        shell_println!("  Filename:  {}", d.filename);
+                        shell_println!("  Filename:  {}", d.filename.display());
                     }
                 }
                 None => shell_println!("Dialog not found: {}", id),
@@ -60815,11 +60838,11 @@ fn cmd_filepicker(args: &str) {
                     if d.listing.is_empty() {
                         shell_println!("Empty listing");
                     } else {
-                        shell_println!("{} items in {}:", d.listing.len(), d.current_dir);
+                        shell_println!("{} items in {}:", d.listing.len(), d.current_dir.display());
                         for item in d.listing.iter().take(30) {
                             let kind = if item.is_dir { "DIR " } else { "FILE" };
                             let sel = if d.selection.iter().any(|s| s == &item.path) { " *" } else { "" };
-                            shell_println!("  {} {:8} {}{}", kind, item.size, item.name, sel);
+                            shell_println!("  {} {:8} {}{}", kind, item.size, item.name.display(), sel);
                         }
                         if d.listing.len() > 30 {
                             shell_println!("  ... and {} more", d.listing.len() - 30);
@@ -60863,7 +60886,7 @@ fn cmd_filepicker(args: &str) {
                     } else {
                         shell_println!("{} bookmarks:", bms.len());
                         for bm in &bms {
-                            shell_println!("  {} → {}", bm.label, bm.path);
+                            shell_println!("  {} → {}", bm.label, bm.path.display());
                         }
                     }
                 }
@@ -62142,8 +62165,14 @@ fn cmd_columnview(args: &str) {
             } else {
                 shell_println!("{:30} {:24} {:8} {:6} {:4}", "DIR", "COLUMN", "VISIBLE", "WIDTH", "POS");
                 for p in &prefs {
+                    // `directory: None` is the global default, not a directory
+                    // named "*" — see `ColumnPref::directory`.
+                    let dir = p.directory.as_deref().map_or_else(
+                        || String::from("(global)"),
+                        |d| alloc::format!("{}", d.display()),
+                    );
                     shell_println!("{:30} {:24} {:8} {:6} {:4}",
-                        p.directory, p.column_id, p.visible, p.width, p.position);
+                        dir, p.column_id, p.visible, p.width, p.position);
                 }
             }
         }
@@ -62181,7 +62210,7 @@ fn cmd_pathbar(args: &str) {
             let crumbs = pathbar::parse_breadcrumbs(&path);
             for c in &crumbs {
                 let marker = if c.current { " ← current" } else { "" };
-                shell_println!("  {} → {}{}", c.name, c.path, marker);
+                shell_println!("  {} → {}{}", c.name.display(), c.path.display(), marker);
             }
         }
         "complete" | "ac" => {
@@ -62197,7 +62226,7 @@ fn cmd_pathbar(args: &str) {
             } else {
                 for c in &completions {
                     let kind = if c.is_dir { "dir " } else { "file" };
-                    shell_println!("  [{}] {}", kind, c.text);
+                    shell_println!("  [{}] {}", kind, c.text.display());
                 }
             }
         }
@@ -62215,19 +62244,19 @@ fn cmd_pathbar(args: &str) {
         }
         "back" => {
             match pathbar::back() {
-                Some(path) => shell_println!("Back to: {}", path),
+                Some(path) => shell_println!("Back to: {}", path.display()),
                 None => shell_println!("No back history."),
             }
         }
         "forward" | "fwd" => {
             match pathbar::forward() {
-                Some(path) => shell_println!("Forward to: {}", path),
+                Some(path) => shell_println!("Forward to: {}", path.display()),
                 None => shell_println!("No forward history."),
             }
         }
         "up" => {
             match pathbar::up() {
-                Ok(path) => shell_println!("Up to: {}", path),
+                Ok(path) => shell_println!("Up to: {}", path.display()),
                 Err(e) => shell_println!("Error: {:?}", e),
             }
         }
@@ -62237,7 +62266,7 @@ fn cmd_pathbar(args: &str) {
                 shell_println!("No navigation history.");
             } else {
                 for (i, entry) in hist.iter().enumerate() {
-                    shell_println!("  {:4} {}", i, entry.path);
+                    shell_println!("  {:4} {}", i, entry.path.display());
                 }
             }
         }
@@ -62247,7 +62276,7 @@ fn cmd_pathbar(args: &str) {
                 shell_println!("No recent directories.");
             } else {
                 for entry in &rec {
-                    shell_println!("  {}", entry.path);
+                    shell_println!("  {}", entry.path.display());
                 }
             }
         }
@@ -62257,7 +62286,7 @@ fn cmd_pathbar(args: &str) {
                 shell_println!("Usage: pathbar normalize <path>");
                 return;
             }
-            shell_println!("{}", pathbar::normalize(path_arg));
+            shell_println!("{}", pathbar::normalize(path_arg).display());
         }
         "stats" | "" => {
             let (nav, complete, hist, recent_len) = pathbar::stats();
@@ -62266,7 +62295,7 @@ fn cmd_pathbar(args: &str) {
             shell_println!("  Completions:  {}", complete);
             shell_println!("  History:      {}/{}", hist, 256);
             shell_println!("  Recent dirs:  {}/{}", recent_len, 32);
-            shell_println!("  Current:      {}", pathbar::current());
+            shell_println!("  Current:      {}", pathbar::current().display());
         }
         "reset" => {
             pathbar::clear_history();
@@ -62411,13 +62440,13 @@ fn cmd_properties(args: &str) {
         Ok(props) => {
             // General tab.
             shell_println!("=== General ===");
-            shell_println!("  Name:        {}", props.general.name);
+            shell_println!("  Name:        {}", props.general.name.display());
             shell_println!("  Type:        {}", props.general.type_description);
             shell_println!("  MIME:        {}", props.general.mime_type);
             if !props.general.opens_with.is_empty() {
                 shell_println!("  Opens with:  {}", props.general.opens_with);
             }
-            shell_println!("  Location:    {}", props.general.location);
+            shell_println!("  Location:    {}", props.general.location.display());
             shell_println!("  Size:        {} bytes", props.general.size);
             if props.general.size_on_disk > 0 {
                 shell_println!("  On disk:     {} bytes", props.general.size_on_disk);
@@ -62428,7 +62457,10 @@ fn cmd_properties(args: &str) {
             if props.general.read_only { shell_println!("  [Read-only]"); }
             if props.general.hidden { shell_println!("  [Hidden]"); }
             if props.general.is_symlink {
-                shell_println!("  Link target: {}", props.general.link_target);
+                shell_println!(
+                    "  Link target: {}",
+                    props.general.link_target.as_deref().unwrap_or(Path::new("(unreadable)")).display()
+                );
             }
             shell_println!("  Hard links:  {}", props.general.nlinks);
 
@@ -62759,7 +62791,7 @@ fn cmd_file(args: &str) {
             // Try to read the link target.
             match crate::fs::Vfs::readlink(&path) {
                 Ok(target) => {
-                    shell_println!("{}: symbolic link to {}", path, target);
+                    shell_println!("{}: symbolic link to {}", path, target.display());
                 }
                 Err(_) => {
                     shell_println!("{}: symbolic link", path);
@@ -63159,7 +63191,7 @@ fn extension_hint(path: &str) -> &'static str {
 /// Limits depth to 16.
 /// Recursive find with predicate filtering.
 #[allow(clippy::arithmetic_side_effects)]
-fn find_recurse_filtered(path: &str, filter: &FindFilter<'_>, count: &mut u64, depth: u32) {
+fn find_recurse_filtered(path: &Path, filter: &FindFilter<'_>, count: &mut u64, depth: u32) {
     if depth > filter.max_depth {
         return;
     }
@@ -63170,11 +63202,7 @@ fn find_recurse_filtered(path: &str, filter: &FindFilter<'_>, count: &mut u64, d
     };
 
     for entry in &entries {
-        let child_path = if path == "/" {
-            alloc::format!("/{}", entry.name)
-        } else {
-            alloc::format!("{}/{}", path, entry.name)
-        };
+        let child_path = path.join(&entry.name);
 
         // Apply all predicates (AND logic).
         let mut matched = true;
@@ -63186,9 +63214,12 @@ fn find_recurse_filtered(path: &str, filter: &FindFilter<'_>, count: &mut u64, d
                     matched = false;
                 }
             } else {
-                let name_lower = entry.name.to_ascii_lowercase();
-                let pattern_lower = pattern.to_ascii_lowercase();
-                if !name_lower.contains(&pattern_lower) {
+                // A name is a byte string, so the substring match runs on
+                // bytes: `str::contains` is unavailable and lossy decoding
+                // would make a non-UTF-8 name unmatchable.
+                let name_lower = entry.name.as_bytes().to_ascii_lowercase();
+                let pattern_lower = pattern.as_bytes().to_ascii_lowercase();
+                if !crate::fs::pathutil::contains_bytes(&name_lower, &pattern_lower) {
                     matched = false;
                 }
             }
@@ -63244,7 +63275,7 @@ fn find_recurse_filtered(path: &str, filter: &FindFilter<'_>, count: &mut u64, d
                 crate::fs::EntryType::Symlink => "@",
                 crate::fs::EntryType::VolumeLabel => "*",
             };
-            shell_println!("{}{}", child_path, type_str);
+            shell_println!("{}{}", child_path.display(), type_str);
             *count = count.saturating_add(1);
         }
 
@@ -63583,11 +63614,11 @@ fn cmd_grep(args: &str) {
         let path = resolve_path(target);
         if flags.recursive {
             grep_recursive(
-                &path, &pattern_cmp, &flags, multi_file,
+                Path::new(&path), &pattern_cmp, &flags, multi_file,
                 &mut total_matches, 0,
             );
         } else {
-            grep_file(&path, &pattern_cmp, &flags, multi_file, &mut total_matches);
+            grep_file(Path::new(&path), &pattern_cmp, &flags, multi_file, &mut total_matches);
         }
         if total_matches >= flags.max_matches {
             break;
@@ -63603,7 +63634,7 @@ fn cmd_grep(args: &str) {
 
 /// Search a single file for grep matches.
 fn grep_file(
-    path: &str,
+    path: &Path,
     pattern: &str,
     flags: &GrepFlags,
     multi_file: bool,
@@ -63612,7 +63643,7 @@ fn grep_file(
     let data = match crate::fs::Vfs::read_file(path) {
         Ok(d) => d,
         Err(e) => {
-            crate::console_println!("grep: {}: {:?}", path, e);
+            crate::console_println!("grep: {}: {:?}", path.display(), e);
             return;
         }
     };
@@ -63622,7 +63653,7 @@ fn grep_file(
         Err(_) => {
             // Skip binary files silently in recursive mode.
             if !flags.recursive {
-                crate::console_println!("grep: {}: binary file", path);
+                crate::console_println!("grep: {}: binary file", path.display());
             }
             return;
         }
@@ -63645,15 +63676,15 @@ fn grep_file(
             *total = total.saturating_add(1);
 
             if flags.files_only {
-                shell_println!("{}", path);
+                shell_println!("{}", path.display());
                 return; // One match is enough for -l.
             }
 
             if !flags.count_only {
                 if multi_file && flags.show_line_numbers {
-                    shell_println!("{}:{}:{}", path, line_num.saturating_add(1), line);
+                    shell_println!("{}:{}:{}", path.display(), line_num.saturating_add(1), line);
                 } else if multi_file {
-                    shell_println!("{}:{}", path, line);
+                    shell_println!("{}:{}", path.display(), line);
                 } else if flags.show_line_numbers {
                     shell_println!("{}:{}", line_num.saturating_add(1), line);
                 } else {
@@ -63669,13 +63700,13 @@ fn grep_file(
     }
 
     if flags.count_only && multi_file {
-        shell_println!("{}:{}", path, file_matches);
+        shell_println!("{}:{}", path.display(), file_matches);
     }
 }
 
 /// Recursively search a directory for grep matches (depth limit 16).
 fn grep_recursive(
-    path: &str,
+    path: &Path,
     pattern: &str,
     flags: &GrepFlags,
     multi_file: bool,
@@ -63707,19 +63738,16 @@ fn grep_recursive(
     };
 
     for child in &entries {
-        if child.name == "." || child.name == ".." {
+        if crate::fs::pathutil::is_dot_entry(&child.name) {
             continue;
         }
         // Skip hidden directories/files starting with '.' in recursive mode.
-        if child.name.starts_with('.') {
+        // A leading dot is a *byte* prefix of the name, not a path prefix.
+        if child.name.as_bytes().starts_with(b".") {
             continue;
         }
 
-        let child_path = if path == "/" {
-            alloc::format!("/{}", child.name)
-        } else {
-            alloc::format!("{}/{}", path, child.name)
-        };
+        let child_path = path.join(&child.name);
 
         match child.entry_type {
             crate::fs::vfs::EntryType::File => {
@@ -64071,7 +64099,7 @@ fn cmd_lsof() {
 
         crate::console_println!(
             "{:<7} {:<5} {:<12} {:<12} {}",
-            h.id, flags, h.offset, h.size, h.path,
+            h.id, flags, h.offset, h.size, h.path.display(),
         );
     }
 
@@ -64134,7 +64162,7 @@ fn cmd_lsp(args: &str) {
                     };
                     crate::console_println!(
                         "{:<5} {:<8} {}",
-                        type_str, entry.size, entry.name,
+                        type_str, entry.size, entry.name.display(),
                     );
                 }
 
@@ -64176,7 +64204,7 @@ fn cmd_mount(args: &str) {
         } else {
             crate::console_println!("{:<12} {:<16} {}", "Type", "Mount point", "Options");
             for (path, fs_type, options) in &mounts {
-                crate::console_println!("{:<12} {:<16} {}", fs_type, path, options.to_string());
+                crate::console_println!("{:<12} {:<16} {}", fs_type, path.display(), options.to_string());
             }
         }
         return;
@@ -65797,7 +65825,7 @@ fn cmd_cap_tags(args: &str) {
                         .map(|(_, name, _, _, _)| name.clone())
                         .unwrap_or_else(|| alloc::format!("id={}", id))
                 }).collect();
-                crate::console_println!("  {} → [{}]", path, names.join(", "));
+                crate::console_println!("  {} → [{}]", path.display(), names.join(", "));
             }
         }
         "show" => {
@@ -67625,6 +67653,14 @@ fn cmd_container(args: &str) {
                     }
                     out
                 };
+                // A path is a byte string and may not be valid UTF-8, so it
+                // cannot be placed in a JSON string verbatim.  It is
+                // octal-escaped first (Linux `mangle()` — the encoding
+                // `/proc/mounts` already uses), which is total and lossless
+                // and yields pure ASCII; that is then JSON-escaped.
+                let esc_path = |p: &Path| -> alloc::string::String {
+                    esc(&crate::fs::escape::escape_octal(p.as_bytes(), &[]))
+                };
                 let mut labels_json = alloc::string::String::from("{");
                 for (i, (k, v)) in ci.labels.iter().enumerate() {
                     if i > 0 {
@@ -67674,7 +67710,7 @@ fn cmd_container(args: &str) {
                     ci.auto_remove,
                     init_pid_json,
                     ci.nr_procs,
-                    esc(&ci.root_path),
+                    esc_path(&ci.root_path),
                     esc(&ci.hostname),
                     ci.pid_ns,
                     ci.user_ns,
@@ -67733,7 +67769,7 @@ fn cmd_container(args: &str) {
             if ci.root_path.is_empty() {
                 crate::console_println!("  Rootfs:     (host root)");
             } else {
-                crate::console_println!("  Rootfs:     {}", ci.root_path);
+                crate::console_println!("  Rootfs:     {}", ci.root_path.display());
             }
             crate::console_println!("  PID NS:     {}", ci.pid_ns);
             crate::console_println!("  User NS:    {}", ci.user_ns);
@@ -68180,7 +68216,7 @@ fn cmd_container(args: &str) {
                         crate::console_println!("(no changes)");
                     } else {
                         for c in &changes {
-                            crate::console_println!("{} {}", c.kind.prefix(), c.path);
+                            crate::console_println!("{} {}", c.kind.prefix(), c.path.display());
                         }
                     }
                 }
@@ -68786,7 +68822,7 @@ fn cmd_container(args: &str) {
                         crate::console_println!("{:<24} {}", "NAME", "MOUNTPOINT");
                         for name in &names {
                             let mount = crate::volume::path_of(name).unwrap_or_default();
-                            crate::console_println!("{:<24} {}", name, mount);
+                            crate::console_println!("{:<24} {}", name, mount.display());
                         }
                     }
                 }
@@ -68796,7 +68832,7 @@ fn cmd_container(args: &str) {
                         return;
                     };
                     match crate::volume::create(name) {
-                        Ok(path) => crate::console_println!("{} ({})", name, path),
+                        Ok(path) => crate::console_println!("{} ({})", name, path.display()),
                         Err(e) => crate::console_println!("Error: {:?}", e),
                     }
                 }
@@ -68821,7 +68857,7 @@ fn cmd_container(args: &str) {
                         Some(path) => {
                             crate::console_println!("Name:       {}", name);
                             crate::console_println!("Driver:     local");
-                            crate::console_println!("Mountpoint: {}", path);
+                            crate::console_println!("Mountpoint: {}", path.display());
                         }
                         None => crate::console_println!("Volume '{}' not found", name),
                     }
@@ -69633,7 +69669,7 @@ fn cmd_oci(args: &str) {
             // (resolved at parse time), so the tuple owns its strings rather
             // than borrowing the raw argv. Installed after the container is
             // created (while still in Created state).
-            let mut volumes: alloc::vec::Vec<(alloc::string::String, alloc::string::String, bool)> =
+            let mut volumes: alloc::vec::Vec<(PathBuf, PathBuf, bool)> =
                 alloc::vec::Vec::new();
             // Published ports as (proto, host_port, container_port) from
             // `-p host:container[/tcp|/udp]` (Docker order, default tcp).
@@ -69859,8 +69895,8 @@ fn cmd_oci(args: &str) {
                                 } else if source.starts_with('/') {
                                     // Host bind mount: use the absolute host path.
                                     volumes.push((
-                                        alloc::string::String::from(source),
-                                        alloc::string::String::from(guest),
+                                        PathBuf::from(source),
+                                        PathBuf::from(guest),
                                         ro,
                                     ));
                                 } else if source.is_empty() {
@@ -69875,7 +69911,7 @@ fn cmd_oci(args: &str) {
                                         Ok(backing) => {
                                             volumes.push((
                                                 backing,
-                                                alloc::string::String::from(guest),
+                                                PathBuf::from(guest),
                                                 ro,
                                             ));
                                         }
@@ -70504,12 +70540,12 @@ fn cmd_oci(args: &str) {
                         match crate::container::add_volume_mount(ct_id, host, guest, *read_only) {
                             Ok(()) => crate::console_println!(
                                 "  Volume:       {} -> {}{}",
-                                host, guest,
+                                host.display(), guest.display(),
                                 if *read_only { " (ro)" } else { "" }
                             ),
                             Err(e) => crate::console_println!(
                                 "[oci] Warning: could not add volume {}:{}: {:?}",
-                                host, guest, e
+                                host.display(), guest.display(), e
                             ),
                         }
                     }
@@ -70734,7 +70770,7 @@ fn cmd_oci(args: &str) {
                 return;
             };
             let is_layout = crate::fs::vfs::Vfs::metadata(
-                &alloc::format!("{}/oci-layout", src.trim_end_matches('/')),
+                alloc::format!("{}/oci-layout", src.trim_end_matches('/')),
             )
             .is_ok();
             let (pack_dir, temp) = if is_layout {
@@ -73879,7 +73915,7 @@ fn cmd_readlink(args: &str) {
 
     match crate::fs::Vfs::readlink(path) {
         Ok(target) => {
-            crate::console_println!("{}", target);
+            crate::console_println!("{}", target.display());
         }
         Err(e) => {
             crate::console_println!("readlink: '{}': {:?}", path, e);
@@ -74141,17 +74177,19 @@ fn cmd_journal(args: &str) {
         let secs = entry.timestamp_ns / 1_000_000_000;
         let ms = (entry.timestamp_ns % 1_000_000_000) / 1_000_000;
 
-        if entry.event_type == crate::fs::journal::JournalEventType::Renamed
-            && !entry.old_path.is_empty()
+        // `old_path` is `Some` only for a rename; an absent source is a
+        // non-rename, not a rename from the empty path.
+        if let (crate::fs::journal::JournalEventType::Renamed, Some(old)) =
+            (entry.event_type, entry.old_path.as_deref())
         {
             crate::console_println!(
                 "  #{:<6} {}.{:03}s  {:<6}  {} -> {}",
-                entry.seq, secs, ms, type_str, entry.old_path, entry.path
+                entry.seq, secs, ms, type_str, old.display(), entry.path.display()
             );
         } else {
             crate::console_println!(
                 "  #{:<6} {}.{:03}s  {:<6}  {}",
-                entry.seq, secs, ms, type_str, entry.path
+                entry.seq, secs, ms, type_str, entry.path.display()
             );
         }
     }
@@ -74213,7 +74251,9 @@ fn cmd_trash(args: &str) {
                             let type_prefix = if item.is_directory { "D " } else { "  " };
                             crate::console_println!(
                                 "{}{:<18} {:>10}  {}",
-                                type_prefix, item.trash_name, size_str, item.original_path
+                                type_prefix, item.trash_name.display(), size_str,
+                                item.original_path.as_deref()
+                                    .unwrap_or(Path::new("<unknown>")).display()
                             );
                         }
                         crate::console_println!("\n{} item(s) in recycle bin", items.len());
@@ -74243,7 +74283,7 @@ fn cmd_trash(args: &str) {
             }
             match crate::fs::trash::restore(name) {
                 Ok(original) => {
-                    crate::console_println!("Restored '{}' to '{}'", name, original);
+                    crate::console_println!("Restored '{}' to '{}'", name, original.display());
                 }
                 Err(e) => crate::console_println!("trash: restore '{}': {:?}", name, e),
             }
@@ -74338,7 +74378,7 @@ fn cmd_realpath(args: &str) {
 
     match crate::fs::Vfs::resolve_path(path) {
         Ok(resolved) => {
-            crate::console_println!("{}", resolved);
+            crate::console_println!("{}", resolved.display());
         }
         Err(e) => {
             crate::console_println!("realpath: '{}': {:?}", path, e);
@@ -79232,7 +79272,7 @@ fn cmd_lsblk() {
 
         // Check if this device is mounted anywhere.
         // The mount system uses the device name as the key for block-backed mounts.
-        let mut mount_path = "";
+        let mut mount_path: &Path = Path::new("");
         let mut label = String::new();
         for (mp, _fs_t, _opts) in &mounts {
             if let Ok(info) = crate::fs::Vfs::statvfs(mp) {
@@ -79240,7 +79280,7 @@ fn cmd_lsblk() {
                 // in the debug_stats output, it's this device.
                 if let Ok(stats) = crate::fs::Vfs::debug_stats(mp) {
                     if stats.contains(&dev.name) || (info.fs_type == fs_type && !fs_type.is_empty()) {
-                        mount_path = mp;
+                        mount_path = mp.as_path();
                         label = info.volume_label.clone();
                         break;
                     }
@@ -79250,7 +79290,7 @@ fn cmd_lsblk() {
 
         crate::console_println!(
             "{:<8} {:>12} {:>8} {:>6}  {:<8} {:<16} {}",
-            dev.name, dev.sector_count, size_str, ro, fs_type, mount_path, label
+            dev.name, dev.sector_count, size_str, ro, fs_type, mount_path.display(), label
         );
     }
 }
@@ -79276,7 +79316,7 @@ fn cmd_glob(args: &str) {
                 crate::console_println!("(no matches)");
             } else {
                 for path in &matches {
-                    crate::console_println!("{}", path);
+                    crate::console_println!("{}", path.display());
                 }
                 crate::console_println!("\n{} matches", matches.len());
             }
@@ -79602,9 +79642,10 @@ fn cmd_tar(args: &str) {
                 continue;
             }
             let source_path = resolve_path(source);
+            let source_path = Path::new(&source_path);
             if let Err(e) = tar_add_recursive(
-                &source_path,
-                &source_path,
+                source_path,
+                source_path,
                 &mut archive_data,
                 &mut file_count,
                 verbose,
@@ -79831,18 +79872,23 @@ fn cmd_tar(args: &str) {
                 if verbose {
                     crate::console_println!(
                         "{} {:>8} {}",
-                        type_ch, entry.size, entry.name
+                        type_ch, entry.size, entry.name.display()
                     );
                 } else {
-                    crate::console_println!("{}", entry.name);
+                    crate::console_println!("{}", entry.name.display());
                 }
             } else {
-                // Extract mode.
-                let clean_name = entry.name.trim_start_matches('/');
-                let out_path = if target_dir == "/" {
-                    alloc::format!("/{}", clean_name)
-                } else {
-                    alloc::format!("{}/{}", target_dir.trim_end_matches('/'), clean_name)
+                // Extract mode.  Stripping a leading `/` does nothing about
+                // `../`, so the member name goes through the shared jail
+                // guard: an archive member called `../../etc/passwd` must
+                // land inside `target_dir` or be refused outright (Zip Slip).
+                let Ok(out_path) =
+                    crate::fs::pathutil::confine_under(&target_dir, &entry.name)
+                else {
+                    crate::console_println!(
+                        "tar: refusing unsafe member '{}'", entry.name.display()
+                    );
+                    continue;
                 };
 
                 match entry.kind {
@@ -79850,18 +79896,24 @@ fn cmd_tar(args: &str) {
                         match Vfs::mkdir(&out_path) {
                             Ok(()) | Err(crate::error::KernelError::AlreadyExists) => {}
                             Err(e) => {
-                                crate::console_println!("tar: mkdir '{}': {:?}", out_path, e);
+                                crate::console_println!(
+                                    "tar: mkdir '{}': {:?}", out_path.display(), e
+                                );
                             }
                         }
                         if verbose {
-                            crate::console_println!("x {}", out_path);
+                            crate::console_println!("x {}", out_path.display());
                         }
                     }
                     crate::fs::tar::EntryKind::File => {
-                        if let Some(slash) = out_path.rfind('/') {
-                            if slash > 0 {
-                                let parent = &out_path[..slash];
-                                let _ = tar_mkdir_p(parent);
+                        // `confine_under` guarantees at least one component
+                        // under the base, so a parent always exists; only the
+                        // VFS root has none, and that is never the target.
+                        if let Some(parent) = out_path.parent() {
+                            if !parent.is_empty() {
+                                // Best-effort: a failure here surfaces as
+                                // the write error below, which names the file.
+                                let _ = Vfs::mkdir_all(parent);
                             }
                         }
 
@@ -79871,18 +79923,22 @@ fn cmd_tar(args: &str) {
                         match Vfs::write_file(&out_path, file_data) {
                             Ok(()) => {}
                             Err(e) => {
-                                crate::console_println!("tar: write '{}': {:?}", out_path, e);
+                                crate::console_println!(
+                                    "tar: write '{}': {:?}", out_path.display(), e
+                                );
                             }
                         }
                         if verbose {
-                            crate::console_println!("x {} ({} bytes)", out_path, entry.size);
+                            crate::console_println!(
+                                "x {} ({} bytes)", out_path.display(), entry.size
+                            );
                         }
                     }
                     crate::fs::tar::EntryKind::Symlink => {
                         if verbose {
                             crate::console_println!(
                                 "x {} -> {} (symlink, skipped)",
-                                out_path, entry.link_target
+                                out_path.display(), entry.link_target.display()
                             );
                         }
                     }
@@ -79890,7 +79946,7 @@ fn cmd_tar(args: &str) {
                         if verbose {
                             crate::console_println!(
                                 "x {} (type '{}', skipped)",
-                                out_path, t as char
+                                out_path.display(), t as char
                             );
                         }
                     }
@@ -79912,8 +79968,8 @@ fn cmd_tar(args: &str) {
 /// Recursively add files/directories to a tar archive buffer.
 #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
 fn tar_add_recursive(
-    path: &str,
-    base: &str,
+    path: &Path,
+    base: &Path,
     archive: &mut alloc::vec::Vec<u8>,
     count: &mut u32,
     verbose: bool,
@@ -79922,36 +79978,33 @@ fn tar_add_recursive(
 
     let meta = Vfs::metadata(path)?;
 
-    // Compute the archive-internal path: relative to the base's parent.
-    // E.g., if base="/data" and path="/data/sub/file.txt", archive name = "data/sub/file.txt"
-    let archive_name = if path == base {
-        // Top-level item: use just the last component.
-        let name = path.rsplit('/').next().unwrap_or(path);
-        if meta.entry_type == EntryType::Directory {
-            alloc::format!("{}/", name)
-        } else {
-            alloc::string::String::from(name)
-        }
+    // Archive-internal name: relative to the base's *parent*, so packing
+    // `/data` yields members named `data/...` rather than bare `sub/file`.
+    let mut archive_name = if path == base {
+        // Top-level item: just the final component.
+        path.file_name().unwrap_or(path).to_path_buf()
     } else {
-        // Descendent: compute relative path from base's parent.
-        let base_parent = if let Some(slash) = base.rfind('/') {
-            if slash == 0 { "/" } else { &base[..slash] }
-        } else {
-            "/"
-        };
-        let rel = if base_parent == "/" {
-            path.trim_start_matches('/')
-        } else if let Some(rest) = path.strip_prefix(base_parent) {
-            rest.trim_start_matches('/')
-        } else {
-            path.trim_start_matches('/')
-        };
-        if meta.entry_type == EntryType::Directory {
-            alloc::format!("{}/", rel)
-        } else {
-            alloc::string::String::from(rel)
+        // Descendant.  `Path::strip_prefix` matches whole components, so it
+        // cannot be fooled by a shared byte prefix (`/data2` vs `/data`); a
+        // base whose parent is the root has nothing to strip beyond the
+        // leading separator, which `components()` drops anyway.
+        let stripped = base
+            .parent()
+            .filter(|bp| !bp.is_empty() && *bp != Path::new("/"))
+            .and_then(|bp| path.strip_prefix(bp));
+        let mut rel = PathBuf::new();
+        match stripped {
+            // Pushing onto an empty `PathBuf` yields a relative path, which
+            // is exactly what a tar member name must be.
+            Some(r) => for comp in r.components() { rel.push(comp); },
+            None => for comp in path.components() { rel.push(comp); },
         }
+        rel
     };
+    // A directory member is conventionally spelled with a trailing `/`.
+    if meta.entry_type == EntryType::Directory {
+        archive_name.extend_bytes(b"/");
+    }
 
     use crate::fs::tar::{self, TarWriteEntry, EntryKind};
 
@@ -79961,7 +80014,7 @@ fn tar_add_recursive(
                 name: archive_name.clone(),
                 data: alloc::vec::Vec::new(),
                 kind: EntryKind::Directory,
-                link_target: alloc::string::String::new(),
+                link_target: PathBuf::new(),
                 mode: u32::from(meta.permissions),
                 uid: meta.uid,
                 gid: meta.gid,
@@ -79971,20 +80024,16 @@ fn tar_add_recursive(
             archive.extend_from_slice(&header);
             *count = count.saturating_add(1);
             if verbose {
-                crate::console_println!("a {}", archive_name);
+                crate::console_println!("a {}", archive_name.display());
             }
 
             // Recurse into children.
             let entries = Vfs::readdir(path)?;
             for dir_entry in &entries {
-                if dir_entry.name == "." || dir_entry.name == ".." {
+                if crate::fs::pathutil::is_dot_entry(&dir_entry.name) {
                     continue;
                 }
-                let child = if path == "/" {
-                    alloc::format!("/{}", dir_entry.name)
-                } else {
-                    alloc::format!("{}/{}", path, dir_entry.name)
-                };
+                let child = path.join(&dir_entry.name);
                 tar_add_recursive(&child, base, archive, count, verbose)?;
             }
         }
@@ -79996,7 +80045,7 @@ fn tar_add_recursive(
                 name: archive_name.clone(),
                 data: data.clone(),
                 kind: EntryKind::File,
-                link_target: alloc::string::String::new(),
+                link_target: PathBuf::new(),
                 mode: u32::from(meta.permissions),
                 uid: meta.uid,
                 gid: meta.gid,
@@ -80017,7 +80066,7 @@ fn tar_add_recursive(
 
             *count = count.saturating_add(1);
             if verbose {
-                crate::console_println!("a {} ({} bytes)", archive_name, file_size);
+                crate::console_println!("a {} ({} bytes)", archive_name.display(), file_size);
             }
         }
         EntryType::Symlink => {
@@ -80037,7 +80086,7 @@ fn tar_add_recursive(
             archive.extend_from_slice(&header);
             *count = count.saturating_add(1);
             if verbose {
-                crate::console_println!("a {} -> {}", archive_name, target);
+                crate::console_println!("a {} -> {}", archive_name.display(), target.display());
             }
         }
         _ => {
@@ -80045,29 +80094,6 @@ fn tar_add_recursive(
         }
     }
 
-    Ok(())
-}
-
-/// Create directories recursively (mkdir -p equivalent for tar extraction).
-fn tar_mkdir_p(path: &str) -> crate::error::KernelResult<()> {
-    use crate::fs::Vfs;
-
-    // Walk each component and create if missing.
-    let mut current = alloc::string::String::new();
-    for component in path.split('/') {
-        if component.is_empty() {
-            current.push('/');
-            continue;
-        }
-        if current.len() > 1 {
-            current.push('/');
-        }
-        current.push_str(component);
-        match Vfs::mkdir(&current) {
-            Ok(()) | Err(crate::error::KernelError::AlreadyExists) => {}
-            Err(e) => return Err(e),
-        }
-    }
     Ok(())
 }
 
@@ -80169,7 +80195,7 @@ fn cmd_unzip(args: &str) {
             crate::console_println!(
                 "  {:>10}  {:>10}  {:>6}  {}",
                 entry.uncompressed_size, entry.compressed_size,
-                method_str, entry.name
+                method_str, entry.name.display()
             );
             total_size = total_size.saturating_add(entry.uncompressed_size);
             total_compressed = total_compressed.saturating_add(entry.compressed_size);
@@ -80187,34 +80213,44 @@ fn cmd_unzip(args: &str) {
     let mut errors: u32 = 0;
 
     for entry in &entries {
-        // Build output path.
-        let clean_name = entry.name.trim_start_matches('/');
-        if clean_name.is_empty() {
+        // Member names are attacker-controlled: stripping a leading `/` does
+        // nothing about `../`, so the join runs through the shared jail guard
+        // — `../../etc/passwd` must land inside `target_dir` or be refused
+        // outright (Zip Slip).  It also rejects the names that denote no file
+        // at all (empty, `.`, `/`).
+        let Ok(out_path) =
+            crate::fs::pathutil::confine_under(&target_dir, &entry.name)
+        else {
+            // A name that resolves to nothing under the base is an archive
+            // artefact, not an attack; only report a real escape.
+            if entry.name.components().any(|c| c == Path::new("..")) {
+                crate::console_println!(
+                    "  unzip: refusing unsafe member '{}'", entry.name.display()
+                );
+                errors = errors.saturating_add(1);
+            }
             continue;
-        }
-
-        let out_path = if target_dir == "/" {
-            alloc::format!("/{}", clean_name)
-        } else {
-            alloc::format!("{}/{}", target_dir.trim_end_matches('/'), clean_name)
         };
 
         // Directory entries end with '/'.
         if entry.is_dir {
-            match Vfs::mkdir(&out_path) {
+            match Vfs::mkdir_all(&out_path) {
                 Ok(()) | Err(crate::error::KernelError::AlreadyExists) => {}
                 Err(e) => {
-                    crate::console_println!("  unzip: mkdir '{}': {:?}", out_path, e);
+                    crate::console_println!(
+                        "  unzip: mkdir '{}': {:?}", out_path.display(), e
+                    );
                     errors = errors.saturating_add(1);
                 }
             }
-            crate::console_println!("  creating: {}", out_path);
+            crate::console_println!("  creating: {}", out_path.display());
             continue;
         }
 
-        // Ensure parent directory exists.
-        if let Some(slash) = out_path.rfind('/') {
-            let parent = &out_path[..slash];
+        // A member may sit deeper than any directory entry the archive
+        // carries, so create the whole parent chain.  Best-effort: a failure
+        // resurfaces as the write error below, which names the file.
+        if let Some(parent) = out_path.parent() {
             if !parent.is_empty() {
                 let _ = Vfs::mkdir_all(parent);
             }
@@ -80224,7 +80260,7 @@ fn cmd_unzip(args: &str) {
         let file_data = match zip::extract_entry(&data, entry) {
             Ok(d) => d,
             Err(e) => {
-                crate::console_println!("  unzip: '{}': {:?}", entry.name, e);
+                crate::console_println!("  unzip: '{}': {:?}", entry.name.display(), e);
                 errors = errors.saturating_add(1);
                 continue;
             }
@@ -80235,12 +80271,14 @@ fn cmd_unzip(args: &str) {
             Ok(()) => {
                 crate::console_println!(
                     "  extracting: {} ({} bytes)",
-                    out_path, file_data.len()
+                    out_path.display(), file_data.len()
                 );
                 extracted = extracted.saturating_add(1);
             }
             Err(e) => {
-                crate::console_println!("  unzip: write '{}': {:?}", out_path, e);
+                crate::console_println!(
+                    "  unzip: write '{}': {:?}", out_path.display(), e
+                );
                 errors = errors.saturating_add(1);
             }
         }
@@ -80353,9 +80391,9 @@ fn cmd_cpio_list(args: &[&str]) {
         let display_name = if entry.entry_type == crate::fs::cpio::CpioEntryType::Symlink
             && !entry.link_target.is_empty()
         {
-            alloc::format!("{} -> {}", entry.name, entry.link_target)
+            alloc::format!("{} -> {}", entry.name.display(), entry.link_target.display())
         } else {
-            entry.name.clone()
+            alloc::format!("{}", entry.name.display())
         };
 
         crate::console_println!(
@@ -80436,10 +80474,17 @@ fn cmd_cpio_extract(args: &[&str]) {
     let mut errors = 0u64;
 
     for entry in &entries {
-        let dest = if target_dir == "/" {
-            alloc::format!("/{}", entry.name)
-        } else {
-            alloc::format!("{}/{}", target_dir, entry.name)
+        // A member name is attacker-controlled, so it goes through the shared
+        // jail guard rather than a bare join: `../../etc/passwd` must land
+        // inside `target_dir` or be refused outright (Zip Slip).  `uncpio`
+        // already rejects `..`, but the guard is what makes that guarantee
+        // local to the write instead of an assumption about the parser.
+        let Ok(dest) = crate::fs::pathutil::confine_under(&target_dir, &entry.name) else {
+            crate::console_println!(
+                "cpio: refusing unsafe member '{}'", entry.name.display()
+            );
+            errors = errors.wrapping_add(1);
+            continue;
         };
 
         match entry.entry_type {
@@ -80452,17 +80497,20 @@ fn cmd_cpio_extract(args: &[&str]) {
                         extracted = extracted.wrapping_add(1);
                     }
                     Err(e) => {
-                        crate::console_println!("cpio: symlink '{}': {:?}", dest, e);
+                        crate::console_println!("cpio: symlink '{}': {:?}", dest.display(), e);
                         errors = errors.wrapping_add(1);
                     }
                 }
             }
             crate::fs::cpio::CpioEntryType::File => {
-                // Ensure parent directory exists.
-                if let Some(slash_pos) = dest.rfind('/') {
-                    if slash_pos > 0 {
-                        let parent = &dest[..slash_pos];
-                        let _ = Vfs::mkdir(parent);
+                // Ensure the parent directory chain exists.  A cpio member may
+                // name a file several levels deep without the intervening
+                // directories appearing as their own members, so this is
+                // `mkdir_all`, not a single `mkdir`.  Best-effort: a failure
+                // resurfaces as the write error below, which names the file.
+                if let Some(parent) = dest.parent() {
+                    if !parent.is_empty() {
+                        let _ = Vfs::mkdir_all(parent);
                     }
                 }
 
@@ -80471,7 +80519,7 @@ fn cmd_cpio_extract(args: &[&str]) {
                         extracted = extracted.wrapping_add(1);
                     }
                     Err(e) => {
-                        crate::console_println!("cpio: write '{}': {:?}", dest, e);
+                        crate::console_println!("cpio: write '{}': {:?}", dest.display(), e);
                         errors = errors.wrapping_add(1);
                     }
                 }
@@ -80530,17 +80578,17 @@ fn cmd_cpio_create(args: &[&str]) {
                 let link_target = if etype == crate::fs::cpio::CpioEntryType::Symlink {
                     Vfs::readlink(&path).unwrap_or_default()
                 } else {
-                    alloc::string::String::new()
+                    PathBuf::new()
                 };
 
-                // Use relative name (strip leading /).
+                // A cpio member name is relative, so drop the leading `/`.
                 let name = path.strip_prefix('/').unwrap_or(&path);
 
                 // Convert nanosecond timestamp to seconds for CPIO mtime.
                 let mtime_secs = (meta.modified_ns / 1_000_000_000) as u32;
 
                 entries.push(crate::fs::cpio::CpioEntry {
-                    name: alloc::string::String::from(name),
+                    name: PathBuf::from(name),
                     data,
                     entry_type: etype,
                     mode: 0o644, // Default mode
@@ -80725,10 +80773,13 @@ fn cmd_ar_extract(args: &[&str]) {
     let mut errors = 0u64;
 
     for entry in &entries {
-        let dest = if target_dir == "/" {
-            alloc::format!("/{}", entry.name)
-        } else {
-            alloc::format!("{}/{}", target_dir, entry.name)
+        // An `ar` member name is nominally a flat filename, but nothing in the
+        // format enforces that, so the write goes through the shared jail guard
+        // (Zip Slip) rather than trusting the archive.
+        let Ok(dest) = crate::fs::pathutil::confine_under(&target_dir, &entry.name) else {
+            crate::console_println!("ar: refusing unsafe member '{}'", entry.name);
+            errors = errors.wrapping_add(1);
+            continue;
         };
 
         match Vfs::write_file(&dest, &entry.data) {
@@ -80736,7 +80787,7 @@ fn cmd_ar_extract(args: &[&str]) {
                 extracted = extracted.wrapping_add(1);
             }
             Err(e) => {
-                crate::console_println!("ar: write '{}': {:?}", dest, e);
+                crate::console_println!("ar: write '{}': {:?}", dest.display(), e);
                 errors = errors.wrapping_add(1);
             }
         }
@@ -80936,7 +80987,7 @@ fn dpkg_decompress_tar(member: &crate::fs::ar::ArEntry) -> Option<alloc::vec::Ve
     }
 
     // Uncompressed tar (rare but possible).
-    Some(data.to_vec())
+    Some(data.clone())
 }
 
 fn cmd_dpkg_info(args: &[&str]) {
@@ -80980,19 +81031,31 @@ fn cmd_dpkg_info(args: &[&str]) {
     };
 
     // Parse the tar and look for the "control" file.
-    let tar_entries = tar_parse_entries(&tar_data);
-    for entry in &tar_entries {
-        let name = entry.0.as_str();
-        // The control file is usually "./control" or "control".
-        let clean = name.strip_prefix("./").unwrap_or(name);
-        if clean == "control" {
-            crate::console_println!("  ---");
-            let content = core::str::from_utf8(&entry.1).unwrap_or("(binary data)");
-            for line in content.lines() {
-                crate::console_println!("  {}", line);
-            }
+    let tar_entries = match crate::fs::tar::parse(&tar_data) {
+        Ok(e) => e,
+        Err(e) => {
+            crate::console_println!("  (control.tar is not a valid tar: {:?})", e);
             return;
         }
+    };
+    for entry in &tar_entries {
+        // The control file is usually "./control" or "control"; `components()`
+        // drops the `.`, so a single-component name spelled either way matches.
+        let mut comps = entry.name.components();
+        let (Some(first), None) = (comps.next(), comps.next()) else { continue };
+        if first != Path::new("control") {
+            continue;
+        }
+        crate::console_println!("  ---");
+        let Ok(bytes) = crate::fs::tar::entry_data(&tar_data, entry) else {
+            crate::console_println!("  (truncated)");
+            return;
+        };
+        let content = core::str::from_utf8(bytes).unwrap_or("(binary data)");
+        for line in content.lines() {
+            crate::console_println!("  {}", line);
+        }
+        return;
     }
 
     crate::console_println!("  (control file not found in control.tar)");
@@ -81025,14 +81088,20 @@ fn cmd_dpkg_contents(args: &[&str]) {
         None => return,
     };
 
-    let entries = tar_parse_entries(&tar_data);
+    let entries = match crate::fs::tar::parse(&tar_data) {
+        Ok(e) => e,
+        Err(e) => {
+            crate::console_println!("dpkg: data.tar is not a valid tar: {:?}", e);
+            return;
+        }
+    };
     crate::console_println!("  {:>10}  Name", "Size");
     crate::console_println!("  {}  {}", "-".repeat(10), "-".repeat(50));
 
     let mut total_size: u64 = 0;
-    for (name, data) in &entries {
-        crate::console_println!("  {:>10}  {}", data.len(), name);
-        total_size = total_size.wrapping_add(data.len() as u64);
+    for entry in &entries {
+        crate::console_println!("  {:>10}  {}", entry.size, entry.name.display());
+        total_size = total_size.wrapping_add(entry.size);
     }
 
     crate::console_println!(
@@ -81097,43 +81166,60 @@ fn cmd_dpkg_extract(args: &[&str]) {
         None => return,
     };
 
-    let entries = tar_parse_entries(&tar_data);
+    let entries = match crate::fs::tar::parse(&tar_data) {
+        Ok(e) => e,
+        Err(e) => {
+            crate::console_println!("dpkg: data.tar is not a valid tar: {:?}", e);
+            return;
+        }
+    };
     let mut extracted = 0u64;
     let mut errors = 0u64;
 
-    for (name, data) in &entries {
-        let clean = name.strip_prefix("./").unwrap_or(name);
-        if clean.is_empty() || clean == "." {
+    for entry in &entries {
+        // Member names are attacker-controlled, so the join runs through the
+        // shared jail guard: `../../etc/passwd` must land inside `target_dir`
+        // or be refused (Zip Slip).  It also rejects the names that denote no
+        // file at all (`.`, `./`, the empty name).
+        let Ok(dest) = crate::fs::pathutil::confine_under(&target_dir, &entry.name) else {
+            // A name that resolves to nothing under the base is the common
+            // `./` archive-root entry, not an attack; only report real escapes.
+            if entry.name.components().any(|c| c == Path::new("..")) {
+                crate::console_println!(
+                    "dpkg: refusing unsafe member '{}'", entry.name.display()
+                );
+                errors = errors.wrapping_add(1);
+            }
             continue;
-        }
-
-        let dest = if target_dir == "/" {
-            alloc::format!("/{}", clean)
-        } else {
-            alloc::format!("{}/{}", target_dir, clean)
         };
 
-        // Check if it's a directory (tar entries ending with / are dirs).
-        if clean.ends_with('/') {
-            let dir_path = String::from(dest.trim_end_matches('/'));
-            let _ = Vfs::mkdir(&dir_path);
+        if entry.kind == crate::fs::tar::EntryKind::Directory {
+            // `confine_under` already dropped the conventional trailing `/`.
+            let _ = Vfs::mkdir_all(&dest);
             continue;
         }
 
-        // Ensure parent directory exists.
-        if let Some(slash_pos) = dest.rfind('/') {
-            if slash_pos > 0 {
-                let parent = &dest[..slash_pos];
-                let _ = Vfs::mkdir(parent);
+        // A tar may name a file deeper than any directory member it carries,
+        // so create the whole parent chain.  Best-effort: a failure resurfaces
+        // as the write error below, which names the file.
+        if let Some(parent) = dest.parent() {
+            if !parent.is_empty() {
+                let _ = Vfs::mkdir_all(parent);
             }
         }
+
+        let Ok(data) = crate::fs::tar::entry_data(&tar_data, entry) else {
+            crate::console_println!("dpkg: truncated member '{}'", entry.name.display());
+            errors = errors.wrapping_add(1);
+            continue;
+        };
 
         match Vfs::write_file(&dest, data) {
             Ok(()) => {
                 extracted = extracted.wrapping_add(1);
             }
             Err(e) => {
-                crate::console_println!("dpkg: write '{}': {:?}", dest, e);
+                crate::console_println!("dpkg: write '{}': {:?}", dest.display(), e);
                 errors = errors.wrapping_add(1);
             }
         }
@@ -81149,66 +81235,6 @@ fn cmd_dpkg_extract(args: &[&str]) {
             alloc::string::String::new()
         }
     );
-}
-
-/// Simple tar entry parser: returns a list of (name, data) tuples.
-///
-/// This is a lightweight parser for the tar-inside-deb use case.
-/// For full tar functionality, use the main `tar` command.
-fn tar_parse_entries(tar_data: &[u8]) -> alloc::vec::Vec<(alloc::string::String, alloc::vec::Vec<u8>)> {
-    const TAR_BLOCK: usize = 512;
-    let mut entries = alloc::vec::Vec::new();
-    let mut pos = 0usize;
-
-    while pos.wrapping_add(TAR_BLOCK) <= tar_data.len() {
-        let header = &tar_data[pos..pos.wrapping_add(TAR_BLOCK)];
-
-        // Check for zero block (end of archive).
-        if header.iter().all(|&b| b == 0) {
-            break;
-        }
-
-        // Parse name (bytes 0..100, null-terminated).
-        let name_end = header[..100].iter().position(|&b| b == 0).unwrap_or(100);
-        let name = core::str::from_utf8(&header[..name_end]).unwrap_or("");
-
-        // Check for USTAR prefix (bytes 345..500).
-        let prefix_end = header[345..500].iter().position(|&b| b == 0).unwrap_or(0);
-        let prefix = core::str::from_utf8(&header[345..345 + prefix_end]).unwrap_or("");
-
-        let full_name = if !prefix.is_empty() {
-            alloc::format!("{}/{}", prefix, name)
-        } else {
-            alloc::string::String::from(name)
-        };
-
-        // Parse size (bytes 124..136, octal ASCII).
-        let size_str = core::str::from_utf8(&header[124..136]).unwrap_or("0");
-        let size_str = size_str.trim().trim_end_matches('\0');
-        let mut size = 0u64;
-        for &b in size_str.as_bytes() {
-            if b < b'0' || b > b'7' { break; }
-            size = size.wrapping_mul(8).wrapping_add(u64::from(b - b'0'));
-        }
-
-        pos = pos.wrapping_add(TAR_BLOCK);
-
-        // Read data blocks.
-        let data_end = pos.wrapping_add(size as usize);
-        let data = if data_end <= tar_data.len() {
-            tar_data[pos..data_end].to_vec()
-        } else {
-            alloc::vec::Vec::new()
-        };
-
-        entries.push((full_name, data));
-
-        // Advance past data (rounded up to block boundary).
-        let data_blocks = (size as usize).wrapping_add(TAR_BLOCK - 1) / TAR_BLOCK;
-        pos = pos.wrapping_add(data_blocks.wrapping_mul(TAR_BLOCK));
-    }
-
-    entries
 }
 
 // ---------------------------------------------------------------------------
@@ -81323,23 +81349,26 @@ fn cmd_un7z(args: &str) {
     let mut errors = 0u64;
 
     for entry in &entries {
-        let dest = if target_dir == "/" {
-            alloc::format!("/{}", entry.name)
-        } else {
-            alloc::format!("{}/{}", target_dir, entry.name)
+        // Member names are attacker-controlled: route the join through the
+        // shared jail guard so `../../etc/passwd` cannot escape (Zip Slip).
+        let Ok(dest) = crate::fs::pathutil::confine_under(&target_dir, &entry.name) else {
+            crate::console_println!("un7z: refusing unsafe member '{}'", entry.name);
+            errors = errors.wrapping_add(1);
+            continue;
         };
 
         if entry.is_dir {
-            // Create directory (ignore errors — it may already exist).
-            let _ = Vfs::mkdir(&dest);
+            // Ignore errors — it may already exist.
+            let _ = Vfs::mkdir_all(&dest);
             continue;
         }
 
-        // Ensure parent directory exists.
-        if let Some(slash_pos) = dest.rfind('/') {
-            if slash_pos > 0 {
-                let parent = &dest[..slash_pos];
-                let _ = Vfs::mkdir(parent);
+        // A member may sit deeper than any directory entry the archive
+        // carries, so create the whole parent chain.  Best-effort: a failure
+        // resurfaces as the write error below, which names the file.
+        if let Some(parent) = dest.parent() {
+            if !parent.is_empty() {
+                let _ = Vfs::mkdir_all(parent);
             }
         }
 
@@ -81348,7 +81377,7 @@ fn cmd_un7z(args: &str) {
                 extracted = extracted.wrapping_add(1);
             }
             Err(e) => {
-                crate::console_println!("un7z: write '{}': {:?}", dest, e);
+                crate::console_println!("un7z: write '{}': {:?}", dest.display(), e);
                 errors = errors.wrapping_add(1);
             }
         }
@@ -81485,14 +81514,16 @@ fn cmd_unrar(args: &str) {
     let mut errors = 0u64;
 
     for entry in &entries {
-        let dest = if target_dir == "/" {
-            alloc::format!("/{}", entry.name)
-        } else {
-            alloc::format!("{}/{}", target_dir, entry.name)
+        // Member names are attacker-controlled: route the join through the
+        // shared jail guard so `../../etc/passwd` cannot escape (Zip Slip).
+        let Ok(dest) = crate::fs::pathutil::confine_under(&target_dir, &entry.name) else {
+            crate::console_println!("unrar: refusing unsafe member '{}'", entry.name);
+            errors = errors.wrapping_add(1);
+            continue;
         };
 
         if entry.is_dir {
-            let _ = Vfs::mkdir(&dest);
+            let _ = Vfs::mkdir_all(&dest);
             continue;
         }
 
@@ -81502,11 +81533,12 @@ fn cmd_unrar(args: &str) {
             continue;
         }
 
-        // Ensure parent directory exists.
-        if let Some(slash_pos) = dest.rfind('/') {
-            if slash_pos > 0 {
-                let parent = &dest[..slash_pos];
-                let _ = Vfs::mkdir(parent);
+        // A member may sit deeper than any directory entry the archive
+        // carries, so create the whole parent chain.  Best-effort: a failure
+        // resurfaces as the write error below, which names the file.
+        if let Some(parent) = dest.parent() {
+            if !parent.is_empty() {
+                let _ = Vfs::mkdir_all(parent);
             }
         }
 
@@ -81517,7 +81549,7 @@ fn cmd_unrar(args: &str) {
                         extracted = extracted.wrapping_add(1);
                     }
                     Err(e) => {
-                        crate::console_println!("unrar: write '{}': {:?}", dest, e);
+                        crate::console_println!("unrar: write '{}': {:?}", dest.display(), e);
                         errors = errors.wrapping_add(1);
                     }
                 }
@@ -81556,9 +81588,9 @@ fn cmd_unrar(args: &str) {
 /// Directories themselves are added as entries with trailing `/`
 /// (ZIP convention for directory markers).
 fn zip_collect_files(
-    base: &str,
-    prefix: &str,
-    files: &mut Vec<(String, String)>,
+    base: &Path,
+    prefix: &Path,
+    files: &mut Vec<(PathBuf, PathBuf)>,
     depth: usize,
 ) {
     use crate::fs::Vfs;
@@ -81573,24 +81605,19 @@ fn zip_collect_files(
     };
 
     for entry in &entries {
-        if entry.name == "." || entry.name == ".." {
+        if crate::fs::pathutil::is_dot_entry(&entry.name) {
             continue;
         }
 
-        let abs_path = if base == "/" {
-            alloc::format!("/{}", entry.name)
-        } else {
-            alloc::format!("{}/{}", base, entry.name)
-        };
-
-        let rel_path = if prefix.is_empty() {
-            entry.name.clone()
-        } else {
-            alloc::format!("{}/{}", prefix, entry.name)
-        };
+        let abs_path = base.join(&entry.name);
+        let rel_path = prefix.join(&entry.name);
 
         if entry.entry_type == crate::fs::vfs::EntryType::Directory {
-            files.push((alloc::format!("{}/", rel_path), String::new()));
+            // A ZIP directory marker is the name with a trailing `/`, and an
+            // empty source path is what marks it as "no file to read".
+            let mut marker = rel_path.clone();
+            marker.extend_bytes(b"/");
+            files.push((marker, PathBuf::new()));
             zip_collect_files(&abs_path, &rel_path, files, depth.saturating_add(1));
         } else {
             files.push((rel_path, abs_path));
@@ -81653,26 +81680,31 @@ fn cmd_zip(args: &str) {
     let archive_path = resolve_path(positional[0]);
 
     // Collect all input files.
-    let mut input_files: Vec<(String, String)> = Vec::new(); // (name_in_zip, abs_path)
+    // (name_in_zip, abs_path); an empty abs_path marks a directory entry.
+    let mut input_files: Vec<(PathBuf, PathBuf)> = Vec::new();
 
     for &token in positional.iter().skip(1) {
-        let abs = resolve_path(token);
+        let abs = PathBuf::from(resolve_path(token));
 
         match Vfs::lstat(&abs) {
             Ok(meta) if meta.entry_type == crate::fs::vfs::EntryType::Directory => {
                 if recursive {
-                    let dir_name = token.rsplit('/').next()
-                        .unwrap_or(token)
-                        .trim_end_matches('/');
-                    input_files.push((alloc::format!("{}/", dir_name), String::new()));
-                    zip_collect_files(&abs, dir_name, &mut input_files, 0);
+                    // The member name is the argument's last component, so a
+                    // trailing separator must not be mistaken for the name.
+                    // `file_name` is `components().next_back()`, which already
+                    // ignores one.
+                    let dir_name = abs.file_name().unwrap_or(abs.as_path()).to_path_buf();
+                    let mut marker = dir_name.clone();
+                    marker.extend_bytes(b"/");
+                    input_files.push((marker, PathBuf::new()));
+                    zip_collect_files(&abs, &dir_name, &mut input_files, 0);
                 } else {
                     crate::console_println!("zip: '{}' is a directory (use -r)", token);
                 }
             }
             Ok(_) => {
-                let name = token.rsplit('/').next().unwrap_or(token);
-                input_files.push((String::from(name), abs));
+                let name = abs.file_name().unwrap_or(abs.as_path()).to_path_buf();
+                input_files.push((name, abs));
             }
             Err(e) => {
                 crate::console_println!("zip: '{}': {:?}", token, e);
@@ -81706,7 +81738,7 @@ fn cmd_zip(args: &str) {
         let raw_data = match Vfs::read_file(abs_path) {
             Ok(d) => d,
             Err(e) => {
-                crate::console_println!("  zip: read '{}': {:?}", abs_path, e);
+                crate::console_println!("  zip: read '{}': {:?}", abs_path.display(), e);
                 errors = errors.saturating_add(1);
                 continue;
             }
@@ -81714,7 +81746,7 @@ fn cmd_zip(args: &str) {
 
         crate::console_println!(
             "  adding: {} ({} bytes)",
-            name, raw_data.len()
+            name.display(), raw_data.len()
         );
 
         total_in = total_in.wrapping_add(raw_data.len() as u64);

@@ -459,9 +459,10 @@ fn matches_name_filters(name: &Path, query: &Query) -> bool {
         }
     }
 
-    // Glob pattern.
+    // Glob pattern.  Search is case-insensitive throughout (see the extension
+    // test above), so the shared matcher is asked for that mode explicitly.
     if let Some(ref pattern) = query.name_glob {
-        if !glob_match(pattern, name) {
+        if !crate::fs::vfs::glob_match(name, pattern, true) {
             return false;
         }
     }
@@ -577,48 +578,6 @@ fn matches_metadata_filters(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-/// Simple glob matching (`*`, `?`) over raw bytes.
-///
-/// `?` matches exactly one *byte*, not one character. That is the only
-/// definable semantics here: a filename has no declared encoding, so there is
-/// no character boundary to find. It also matches POSIX `fnmatch` in the C
-/// locale, which is what a shell glob does on a Linux filesystem.
-fn glob_match(pattern: &[u8], text: &[u8]) -> bool {
-    glob_match_impl(pattern, text, 0, 0)
-}
-
-fn glob_match_impl(pat: &[u8], txt: &[u8], pi: usize, ti: usize) -> bool {
-    let Some(&p) = pat.get(pi) else {
-        return ti == txt.len();
-    };
-
-    match p {
-        b'*' => {
-            // Try matching 0 or more bytes.
-            for skip in 0..=txt.len().saturating_sub(ti) {
-                if glob_match_impl(pat, txt, pi.saturating_add(1), ti.saturating_add(skip)) {
-                    return true;
-                }
-            }
-            false
-        }
-        b'?' => {
-            if ti < txt.len() {
-                glob_match_impl(pat, txt, pi.saturating_add(1), ti.saturating_add(1))
-            } else {
-                false
-            }
-        }
-        c => {
-            if txt.get(ti).is_some_and(|t| t.eq_ignore_ascii_case(&c)) {
-                glob_match_impl(pat, txt, pi.saturating_add(1), ti.saturating_add(1))
-            } else {
-                false
-            }
-        }
-    }
-}
 
 /// Encode bytes as hex string.
 fn hex_encode(data: &[u8]) -> String {
@@ -785,14 +744,25 @@ fn test_type_filter() {
 }
 
 fn test_glob_match() {
-    assert!(glob_match(b"*.txt", b"hello.txt"));
-    assert!(!glob_match(b"*.txt", b"hello.log"));
-    assert!(glob_match(b"report*", b"report_2024.pdf"));
-    assert!(glob_match(b"?at", b"cat"));
-    assert!(!glob_match(b"?at", b"chat"));
-    assert!(glob_match(b"*", b"anything"));
-    assert!(glob_match(b"a*b", b"aXb"));
-    assert!(glob_match(b"a*b", b"ab"));
+    // Search delegates to the one shared matcher; these assertions pin the
+    // *mode* search asks for (case-insensitive) rather than re-testing the
+    // matcher itself, which `vfs` covers.
+    let m = |pat: &[u8], name: &[u8]| crate::fs::vfs::glob_match(name, pat, true);
+
+    assert!(m(b"*.txt", b"hello.txt"));
+    assert!(!m(b"*.txt", b"hello.log"));
+    assert!(m(b"report*", b"report_2024.pdf"));
+    assert!(m(b"?at", b"cat"));
+    assert!(!m(b"?at", b"chat"));
+    assert!(m(b"*", b"anything"));
+    assert!(m(b"a*b", b"aXb"));
+    assert!(m(b"a*b", b"ab"));
+    // Case-insensitivity is the whole reason search passes `true`; the old
+    // private copy had it but never asserted it.
+    assert!(m(b"*.TXT", b"hello.txt"));
+    assert!(m(b"Report*", b"report_2024.pdf"));
+    // `?` matches one *byte*, so a name that is not UTF-8 still matches.
+    assert!(m(b"?at", b"\xffat"));
 
     serial_println!("[search]   glob match: ok");
 }

@@ -359,7 +359,7 @@ pub fn list_blocked() -> Vec<BlockedApp> {
 pub fn cameras_in_use() -> Vec<u32> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
         let mut ids: Vec<u32> = s.streams.iter().map(|st| st.camera_id).collect();
-        ids.sort();
+        ids.sort_unstable();
         ids.dedup();
         ids
     })

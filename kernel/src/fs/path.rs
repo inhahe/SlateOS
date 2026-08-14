@@ -488,30 +488,41 @@ impl fmt::Display for Display<'_> {
         // plain `{}` path used by fault handlers stays allocation-free.
         if f.width().is_some() || f.precision().is_some() {
             let mut s = alloc::string::String::with_capacity(self.0.len());
-            fmt::write(&mut s, format_args!("{self}"))?;
+            write_lossy(&mut s, self.0)?;
             return f.pad(&s);
         }
-        let mut rest = self.0;
-        loop {
-            match core::str::from_utf8(rest) {
-                Ok(s) => return f.write_str(s),
-                Err(e) => {
-                    let good = e.valid_up_to();
-                    // SAFETY-free: `valid_up_to` is by definition a valid
-                    // UTF-8 boundary, so the `get` cannot fail; the `?` on a
-                    // `None` would be a bug, so fall back to stopping rather
-                    // than indexing.
-                    let Some(head) = rest.get(..good) else { return Ok(()) };
-                    let Ok(head) = core::str::from_utf8(head) else { return Ok(()) };
-                    f.write_str(head)?;
-                    f.write_str("\u{FFFD}")?;
-                    // Skip the whole invalid subsequence, or the rest of the
-                    // input if the error was a truncated final sequence.
-                    let skip = good.saturating_add(e.error_len().unwrap_or(rest.len()));
-                    match rest.get(skip..) {
-                        Some(r) if !r.is_empty() => rest = r,
-                        _ => return Ok(()),
-                    }
+        write_lossy(f, self.0)
+    }
+}
+
+/// Write `bytes` to `out`, decoding as UTF-8 and substituting U+FFFD for each
+/// maximal invalid subsequence.
+///
+/// Split out of the [`fmt::Display`] impl so the padded and unpadded branches
+/// share one decoder: the padded branch has to buffer into a `String` first,
+/// and re-entering `Display::fmt` to do that would be a recursion that only
+/// terminates by accident (the inner `Formatter` happens to carry no width).
+fn write_lossy(out: &mut dyn fmt::Write, bytes: &[u8]) -> fmt::Result {
+    let mut rest = bytes;
+    loop {
+        match core::str::from_utf8(rest) {
+            Ok(s) => return out.write_str(s),
+            Err(e) => {
+                let good = e.valid_up_to();
+                // SAFETY-free: `valid_up_to` is by definition a valid
+                // UTF-8 boundary, so the `get` cannot fail; the `?` on a
+                // `None` would be a bug, so fall back to stopping rather
+                // than indexing.
+                let Some(head) = rest.get(..good) else { return Ok(()) };
+                let Ok(head) = core::str::from_utf8(head) else { return Ok(()) };
+                out.write_str(head)?;
+                out.write_str("\u{FFFD}")?;
+                // Skip the whole invalid subsequence, or the rest of the
+                // input if the error was a truncated final sequence.
+                let skip = good.saturating_add(e.error_len().unwrap_or(rest.len()));
+                match rest.get(skip..) {
+                    Some(r) if !r.is_empty() => rest = r,
+                    _ => return Ok(()),
                 }
             }
         }

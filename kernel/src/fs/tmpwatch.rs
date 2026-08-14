@@ -550,8 +550,8 @@ pub fn self_test() -> KernelResult<()> {
         // Use now=0 to make all files appear "old".
         add_watch_dir(test_dir)?;
 
-        Vfs::write_file(&format!("{}/old1.tmp", test_dir), b"old data 1")?;
-        Vfs::write_file(&format!("{}/old2.tmp", test_dir), b"old data 2")?;
+        Vfs::write_file(format!("{}/old1.tmp", test_dir), b"old data 1")?;
+        Vfs::write_file(format!("{}/old2.tmp", test_dir), b"old data 2")?;
 
         // Remove default excludes that might interfere.
         let saved_excludes = excludes();
@@ -573,7 +573,7 @@ pub fn self_test() -> KernelResult<()> {
         }
 
         // Verify files are gone.
-        if Vfs::exists(&format!("{}/old1.tmp", test_dir)) {
+        if Vfs::exists(format!("{}/old1.tmp", test_dir)) {
             serial_println!("[tmpwatch]   ERROR: old1.tmp still exists");
             for e in &saved_excludes { add_exclude(e); }
             remove_watch_dir(test_dir);
@@ -595,10 +595,10 @@ pub fn self_test() -> KernelResult<()> {
         Vfs::mkdir(test_dir)?;
 
         add_watch_dir(test_dir)?;
-        add_exclude(&format!("{}/keep", test_dir));
+        add_exclude(format!("{}/keep", test_dir));
 
-        Vfs::write_file(&format!("{}/delete_me.tmp", test_dir), b"delete")?;
-        Vfs::write_file(&format!("{}/keep_me.tmp", test_dir), b"keep")?;
+        Vfs::write_file(format!("{}/delete_me.tmp", test_dir), b"delete")?;
+        Vfs::write_file(format!("{}/keep_me.tmp", test_dir), b"keep")?;
 
         // Remove all other excludes to prevent interference.
         let saved_excludes: Vec<PathBuf> = excludes().into_iter()
@@ -611,27 +611,27 @@ pub fn self_test() -> KernelResult<()> {
         let result = run(0)?;
 
         // keep_me.tmp should still exist (matches exclude prefix).
-        if !Vfs::exists(&format!("{}/keep_me.tmp", test_dir)) {
+        if !Vfs::exists(format!("{}/keep_me.tmp", test_dir)) {
             serial_println!("[tmpwatch]   ERROR: excluded file was removed");
             for e in &saved_excludes { add_exclude(e); }
-            remove_exclude(&format!("{}/keep", test_dir));
+            remove_exclude(format!("{}/keep", test_dir));
             remove_watch_dir(test_dir);
             let _ = Vfs::remove_recursive(test_dir);
             return Err(KernelError::InternalError);
         }
 
         // delete_me.tmp should be gone.
-        if Vfs::exists(&format!("{}/delete_me.tmp", test_dir)) {
+        if Vfs::exists(format!("{}/delete_me.tmp", test_dir)) {
             serial_println!("[tmpwatch]   ERROR: non-excluded file survived");
             for e in &saved_excludes { add_exclude(e); }
-            remove_exclude(&format!("{}/keep", test_dir));
+            remove_exclude(format!("{}/keep", test_dir));
             remove_watch_dir(test_dir);
             let _ = Vfs::remove_recursive(test_dir);
             return Err(KernelError::InternalError);
         }
 
         for e in &saved_excludes { add_exclude(e); }
-        remove_exclude(&format!("{}/keep", test_dir));
+        remove_exclude(format!("{}/keep", test_dir));
         remove_watch_dir(test_dir);
         let _ = result;
         serial_println!("[tmpwatch]   excludes protect files: OK");
@@ -644,7 +644,7 @@ pub fn self_test() -> KernelResult<()> {
 
         add_watch_dir(test_dir)?;
 
-        Vfs::write_file(&format!("{}/dryrun.tmp", test_dir), b"dry run data")?;
+        Vfs::write_file(format!("{}/dryrun.tmp", test_dir), b"dry run data")?;
 
         let saved_excludes: Vec<PathBuf> = excludes().into_iter()
             .filter(|e| !e.as_bytes().starts_with(test_dir.as_bytes()))
@@ -654,7 +654,7 @@ pub fn self_test() -> KernelResult<()> {
         let candidates = dry_run(0)?;
 
         // File should still exist.
-        if !Vfs::exists(&format!("{}/dryrun.tmp", test_dir)) {
+        if !Vfs::exists(format!("{}/dryrun.tmp", test_dir)) {
             serial_println!("[tmpwatch]   ERROR: dry run deleted files!");
             for e in &saved_excludes { add_exclude(e); }
             remove_watch_dir(test_dir);
@@ -681,7 +681,7 @@ pub fn self_test() -> KernelResult<()> {
         Vfs::mkdir(test_dir)?;
 
         add_watch_dir(test_dir)?;
-        Vfs::write_file(&format!("{}/disabled.tmp", test_dir), b"should stay")?;
+        Vfs::write_file(format!("{}/disabled.tmp", test_dir), b"should stay")?;
 
         set_enabled(false);
         let result = run(0)?;
@@ -694,7 +694,7 @@ pub fn self_test() -> KernelResult<()> {
             return Err(KernelError::InternalError);
         }
 
-        if !Vfs::exists(&format!("{}/disabled.tmp", test_dir)) {
+        if !Vfs::exists(format!("{}/disabled.tmp", test_dir)) {
             serial_println!("[tmpwatch]   ERROR: disabled but file removed");
             remove_watch_dir(test_dir);
             let _ = Vfs::remove_recursive(test_dir);
@@ -721,8 +721,8 @@ pub fn self_test() -> KernelResult<()> {
     {
         let _ = Vfs::remove_recursive(test_dir);
         Vfs::mkdir(test_dir)?;
-        Vfs::mkdir(&format!("{}/sub", test_dir))?;
-        Vfs::write_file(&format!("{}/sub/deep.tmp", test_dir), b"deep data")?;
+        Vfs::mkdir(format!("{}/sub", test_dir))?;
+        Vfs::write_file(format!("{}/sub/deep.tmp", test_dir), b"deep data")?;
 
         add_watch_dir(test_dir)?;
 
@@ -733,7 +733,7 @@ pub fn self_test() -> KernelResult<()> {
 
         let result = run(0)?;
 
-        if Vfs::exists(&format!("{}/sub/deep.tmp", test_dir)) {
+        if Vfs::exists(format!("{}/sub/deep.tmp", test_dir)) {
             serial_println!("[tmpwatch]   ERROR: deep file not removed");
             for e in &saved_excludes { add_exclude(e); }
             remove_watch_dir(test_dir);

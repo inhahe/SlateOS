@@ -49,10 +49,10 @@
 
 #![allow(dead_code)]
 
-use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 use crate::error::{KernelError, KernelResult};
+use crate::fs::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -95,7 +95,13 @@ mod file_type {
 /// A single entry extracted from a CPIO archive.
 pub struct CpioEntry {
     /// File path (no leading slash; e.g., "etc/passwd").
-    pub name: String,
+    ///
+    /// A byte string, not text: a cpio header stores the name as raw bytes
+    /// and any byte but NUL is legal in one.  Decoding it as UTF-8 used to
+    /// turn an undecodable name into the *empty* name, which the parser then
+    /// skipped — so a member whose name was not UTF-8 vanished from the
+    /// extraction without a diagnostic.
+    pub name: PathBuf,
     /// File data (empty for directories and special files).
     pub data: Vec<u8>,
     /// Entry type.
@@ -108,8 +114,9 @@ pub struct CpioEntry {
     pub gid: u32,
     /// Modification time (Unix timestamp).
     pub mtime: u32,
-    /// Symlink target (only valid if entry_type is Symlink).
-    pub link_target: String,
+    /// Symlink target (only valid if entry_type is Symlink).  A path, and
+    /// therefore bytes — see [`CpioEntry::name`].
+    pub link_target: PathBuf,
 }
 
 /// Types of CPIO archive entries.
@@ -298,13 +305,12 @@ pub fn uncpio(data: &[u8]) -> KernelResult<Vec<CpioEntry>> {
         // Parse filename (strip null terminator).
         let name_bytes = &data[name_start..name_end];
         let name_len = name_bytes.iter().position(|&b| b == 0).unwrap_or(namesize);
-        let name = String::from(
-            core::str::from_utf8(name_bytes.get(..name_len).unwrap_or(b""))
-                .unwrap_or("")
-        );
+        // The name is taken verbatim: it is a path, so every byte but NUL is
+        // meaningful and a UTF-8 round-trip would lose it.
+        let name = Path::new(name_bytes.get(..name_len).unwrap_or(b""));
 
         // Check for trailer.
-        if name == TRAILER {
+        if name == Path::new(TRAILER) {
             break;
         }
 
@@ -329,19 +335,30 @@ pub fn uncpio(data: &[u8]) -> KernelResult<Vec<CpioEntry>> {
 
         // For symlinks, the file data IS the link target.
         let link_target = if etype == CpioEntryType::Symlink {
-            String::from(core::str::from_utf8(&file_data).unwrap_or(""))
+            PathBuf::from(file_data.as_slice())
         } else {
-            String::new()
+            PathBuf::new()
         };
 
-        // Strip leading "./" or "/" from name for consistency.
-        let clean_name = name.strip_prefix("./").unwrap_or(&name);
-        let clean_name = clean_name.strip_prefix('/').unwrap_or(clean_name);
+        // Normalise the name to a relative path: `components()` drops the
+        // leading `/` and any `.`, which covers both the `./x` and `/x`
+        // spellings a producer may emit, and drops the bare `.` root entry.
+        // A `..` component is a jail escape and is refused rather than
+        // silently kept for the extractor to trip over.
+        let mut clean_name = PathBuf::new();
+        for comp in name.components() {
+            if comp == Path::new("..") {
+                return Err(KernelError::InvalidArgument);
+            }
+            if comp != Path::new(".") {
+                clean_name.push(comp);
+            }
+        }
 
         // Skip the "." root directory entry.
         if !clean_name.is_empty() {
             entries.push(CpioEntry {
-                name: String::from(clean_name),
+                name: clean_name,
                 data: file_data,
                 entry_type: etype,
                 mode: hdr.mode & 0o7777, // Permission bits only
@@ -374,12 +391,12 @@ pub fn uncpio(data: &[u8]) -> KernelResult<Vec<CpioEntry>> {
 /// ```ignore
 /// let entries = vec![
 ///     CpioEntry {
-///         name: "hello.txt".into(),
+///         name: PathBuf::from("hello.txt"),
 ///         data: b"Hello, world!\n".to_vec(),
 ///         entry_type: CpioEntryType::File,
 ///         mode: 0o644,
 ///         uid: 0, gid: 0, mtime: 0,
-///         link_target: String::new(),
+///         link_target: PathBuf::new(),
 ///     },
 /// ];
 /// let archive = mkcpio(&entries)?;
@@ -404,7 +421,7 @@ pub fn mkcpio(entries: &[CpioEntry]) -> KernelResult<Vec<u8>> {
         let file_data = if entry.entry_type == CpioEntryType::Symlink {
             entry.link_target.as_bytes()
         } else {
-            &entry.data
+            entry.data.as_slice()
         };
 
         let nlink = match entry.entry_type {
@@ -541,6 +558,12 @@ pub fn self_test() -> KernelResult<()> {
     // Test 5: magic detection.
     test_magic()?;
 
+    // Test 6: a member name that is not UTF-8 survives a round-trip.
+    test_non_utf8_name()?;
+
+    // Test 7: a `..` member name is refused as a jail escape.
+    test_dotdot_name_rejected()?;
+
     crate::serial_println!("[cpio] Self-test passed.");
     Ok(())
 }
@@ -614,34 +637,34 @@ fn test_roundtrip() -> KernelResult<()> {
     // Create a small archive with a file and a directory.
     let entries = vec![
         CpioEntry {
-            name: String::from("testdir"),
+            name: PathBuf::from("testdir"),
             data: Vec::new(),
             entry_type: CpioEntryType::Directory,
             mode: 0o755,
             uid: 0,
             gid: 0,
             mtime: 1700000000,
-            link_target: String::new(),
+            link_target: PathBuf::new(),
         },
         CpioEntry {
-            name: String::from("testdir/hello.txt"),
+            name: PathBuf::from("testdir/hello.txt"),
             data: Vec::from(*b"Hello, CPIO!\n"),
             entry_type: CpioEntryType::File,
             mode: 0o644,
             uid: 1000,
             gid: 1000,
             mtime: 1700000000,
-            link_target: String::new(),
+            link_target: PathBuf::new(),
         },
         CpioEntry {
-            name: String::from("testdir/link"),
+            name: PathBuf::from("testdir/link"),
             data: Vec::new(),
             entry_type: CpioEntryType::Symlink,
             mode: 0o777,
             uid: 0,
             gid: 0,
             mtime: 1700000000,
-            link_target: String::from("hello.txt"),
+            link_target: PathBuf::from("hello.txt"),
         },
     ];
 
@@ -662,15 +685,19 @@ fn test_roundtrip() -> KernelResult<()> {
 
     // Check directory.
     let dir = &extracted[0];
-    if dir.name != "testdir" || dir.entry_type != CpioEntryType::Directory {
-        crate::serial_println!("[cpio]   FAIL: entry 0: name='{}', type={:?}", dir.name, dir.entry_type);
+    if dir.name != PathBuf::from("testdir") || dir.entry_type != CpioEntryType::Directory {
+        crate::serial_println!(
+            "[cpio]   FAIL: entry 0: name='{}', type={:?}", dir.name.display(), dir.entry_type
+        );
         return Err(KernelError::InternalError);
     }
 
     // Check file.
     let file = &extracted[1];
-    if file.name != "testdir/hello.txt" || file.entry_type != CpioEntryType::File {
-        crate::serial_println!("[cpio]   FAIL: entry 1: name='{}', type={:?}", file.name, file.entry_type);
+    if file.name != PathBuf::from("testdir/hello.txt") || file.entry_type != CpioEntryType::File {
+        crate::serial_println!(
+            "[cpio]   FAIL: entry 1: name='{}', type={:?}", file.name.display(), file.entry_type
+        );
         return Err(KernelError::InternalError);
     }
     if file.data != b"Hello, CPIO!\n" {
@@ -684,16 +711,96 @@ fn test_roundtrip() -> KernelResult<()> {
 
     // Check symlink.
     let link = &extracted[2];
-    if link.name != "testdir/link" || link.entry_type != CpioEntryType::Symlink {
-        crate::serial_println!("[cpio]   FAIL: entry 2: name='{}', type={:?}", link.name, link.entry_type);
+    if link.name != PathBuf::from("testdir/link") || link.entry_type != CpioEntryType::Symlink {
+        crate::serial_println!(
+            "[cpio]   FAIL: entry 2: name='{}', type={:?}", link.name.display(), link.entry_type
+        );
         return Err(KernelError::InternalError);
     }
-    if link.link_target != "hello.txt" {
-        crate::serial_println!("[cpio]   FAIL: entry 2 link target: '{}'", link.link_target);
+    if link.link_target != PathBuf::from("hello.txt") {
+        crate::serial_println!(
+            "[cpio]   FAIL: entry 2 link target: '{}'", link.link_target.display()
+        );
         return Err(KernelError::InternalError);
     }
 
     crate::serial_println!("[cpio]   round-trip OK (3 entries: dir + file + symlink)");
+    Ok(())
+}
+
+/// A cpio member name is raw bytes.  Before the byte-`Path` conversion the
+/// parser decoded it as UTF-8 and substituted the *empty* name on failure,
+/// which the "skip the `.` root entry" guard then dropped — so extracting an
+/// archive silently lost every file whose name was not UTF-8, with no error.
+fn test_non_utf8_name() -> KernelResult<()> {
+    let wild = PathBuf::from(b"dir/re\xffport\xfe".as_slice());
+    let entries = vec![CpioEntry {
+        name: wild.clone(),
+        data: Vec::from(*b"bytes"),
+        entry_type: CpioEntryType::File,
+        mode: 0o644,
+        uid: 0,
+        gid: 0,
+        mtime: 0,
+        link_target: PathBuf::new(),
+    }];
+    let extracted = uncpio(&mkcpio(&entries)?)?;
+    if extracted.len() != 1 {
+        crate::serial_println!(
+            "[cpio]   FAIL: non-UTF-8 name dropped ({} entries survived)", extracted.len()
+        );
+        return Err(KernelError::InternalError);
+    }
+    let got = &extracted[0];
+    if got.name != wild || got.data != b"bytes" {
+        crate::serial_println!(
+            "[cpio]   FAIL: non-UTF-8 name mangled: '{}'", got.name.display()
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[cpio]   non-UTF-8 member name OK");
+    Ok(())
+}
+
+/// A member named `../x` would write outside the extraction directory (the
+/// "Zip Slip" bug class).  The parser refuses the whole archive rather than
+/// handing such a name to a caller that may not re-check it.
+fn test_dotdot_name_rejected() -> KernelResult<()> {
+    let entries = vec![CpioEntry {
+        name: PathBuf::from("../escape"),
+        data: Vec::new(),
+        entry_type: CpioEntryType::File,
+        mode: 0o644,
+        uid: 0,
+        gid: 0,
+        mtime: 0,
+        link_target: PathBuf::new(),
+    }];
+    if uncpio(&mkcpio(&entries)?).is_ok() {
+        crate::serial_println!("[cpio]   FAIL: `..` member name was accepted");
+        return Err(KernelError::InternalError);
+    }
+    // A leading `./` and a leading `/` are both normalised away, not refused.
+    for spelling in ["./ok.txt", "/ok.txt"] {
+        let e = vec![CpioEntry {
+            name: PathBuf::from(spelling),
+            data: Vec::new(),
+            entry_type: CpioEntryType::File,
+            mode: 0o644,
+            uid: 0,
+            gid: 0,
+            mtime: 0,
+            link_target: PathBuf::new(),
+        }];
+        let out = uncpio(&mkcpio(&e)?)?;
+        if out.len() != 1 || out[0].name != PathBuf::from("ok.txt") {
+            crate::serial_println!("[cpio]   FAIL: '{}' did not normalise to 'ok.txt'", spelling);
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    crate::serial_println!("[cpio]   `..` member name rejected OK");
     Ok(())
 }
 

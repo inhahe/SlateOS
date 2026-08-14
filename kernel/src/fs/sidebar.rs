@@ -33,6 +33,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::{KernelError, KernelResult};
+use crate::fs::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -100,7 +101,13 @@ pub struct SidebarItem {
     /// Display label.
     pub label: String,
     /// Navigation path.
-    pub path: String,
+    ///
+    /// A byte string, not text — this is what a click navigates to, so it has
+    /// to be able to name every directory the filesystem can hold.  The
+    /// sibling `label` stays a `String` because it is display text (some
+    /// labels, like "This PC", are not paths at all); where a label is derived
+    /// from a file name it goes through the deliberately-lossy `.display()`.
+    pub path: PathBuf,
     /// Icon identifier.
     pub icon: String,
     /// Whether this item can be unpinned/removed.
@@ -232,7 +239,8 @@ pub fn toggle_expanded(kind: SectionKind) -> bool {
 }
 
 /// Pin a folder to Quick Access.
-pub fn pin_to_quick_access(path: &str, label: &str) -> KernelResult<()> {
+pub fn pin_to_quick_access<P: AsRef<Path>>(path: P, label: &str) -> KernelResult<()> {
+    let path = path.as_ref();
     // Use bookmarks module under the hood.
     let name = alloc::format!("qa_{}", label.replace(' ', "_").to_lowercase());
     crate::fs::bookmarks::add(
@@ -244,11 +252,12 @@ pub fn pin_to_quick_access(path: &str, label: &str) -> KernelResult<()> {
 }
 
 /// Unpin a folder from Quick Access.
-pub fn unpin_from_quick_access(path: &str) -> KernelResult<()> {
+pub fn unpin_from_quick_access<P: AsRef<Path>>(path: P) -> KernelResult<()> {
+    let path = path.as_ref();
     // Find bookmark by path.
     let bookmarks = crate::fs::bookmarks::list_category(crate::fs::bookmarks::Category::Favorites);
     for bm in &bookmarks {
-        if bm.path == path {
+        if bm.path.as_path() == path {
             return crate::fs::bookmarks::remove(&bm.name);
         }
     }
@@ -305,7 +314,7 @@ fn build_quick_access(expanded: &[(SectionKind, bool)]) -> SidebarSection {
         for (idx, (label, path)) in defaults.iter().enumerate() {
             items.push(SidebarItem {
                 label: String::from(*label),
-                path: String::from(*path),
+                path: PathBuf::from(*path),
                 icon: String::new(),
                 removable: true,
                 droppable: true,
@@ -330,7 +339,7 @@ fn build_this_pc(expanded: &[(SectionKind, bool)]) -> SidebarSection {
     // Root filesystem.
     items.push(SidebarItem {
         label: String::from("Local Disk (/)"),
-        path: String::from("/"),
+        path: PathBuf::from("/"),
         icon: String::from("drive"),
         removable: false,
         droppable: true,
@@ -346,7 +355,7 @@ fn build_this_pc(expanded: &[(SectionKind, bool)]) -> SidebarSection {
             let label = mp.to_string();
             items.push(SidebarItem {
                 label,
-                path: String::from(*mp),
+                path: PathBuf::from(*mp),
                 icon: String::from("folder"),
                 removable: false,
                 droppable: true,
@@ -394,9 +403,12 @@ fn build_recent(expanded: &[(SectionKind, bool)]) -> SidebarSection {
         // Check if this is a directory.
         if let Ok(meta) = crate::fs::vfs::Vfs::metadata(&entry.path) {
             if meta.entry_type == crate::fs::EntryType::Directory {
-                let label = entry.path.rsplit('/').next().unwrap_or(&entry.path);
+                // The label is display text for a GUI row, so the lossy
+                // rendering is the right one here; `path` below keeps the
+                // exact bytes that navigation uses.
+                let leaf = entry.path.file_name().unwrap_or(entry.path.as_path());
                 items.push(SidebarItem {
-                    label: String::from(label),
+                    label: alloc::format!("{}", leaf.display()),
                     path: entry.path.clone(),
                     icon: String::from("folder"),
                     removable: true,
@@ -434,7 +446,7 @@ fn build_tags(expanded: &[(SectionKind, bool)]) -> SidebarSection {
         items.push(SidebarItem {
             label: tag.clone(),
             // Tags navigate to a virtual search path.
-            path: alloc::format!("/tags/{}", tag),
+            path: PathBuf::from(alloc::format!("/tags/{}", tag)),
             icon: String::from("tag"),
             removable: false,
             droppable: false,
@@ -458,7 +470,7 @@ fn build_tags(expanded: &[(SectionKind, bool)]) -> SidebarSection {
 // ---------------------------------------------------------------------------
 
 /// Get disk usage string for a path.
-fn disk_usage_string(path: &str) -> String {
+fn disk_usage_string<P: AsRef<Path>>(path: P) -> String {
     // Use VFS fsinfo if available.
     match crate::fs::vfs::Vfs::statvfs(path) {
         Ok(info) => {
@@ -562,7 +574,9 @@ pub fn self_test() -> KernelResult<()> {
         let sidebar = build();
         let pc = sidebar.sections.iter().find(|s| s.kind == SectionKind::ThisPC);
         assert!(pc.is_some());
-        let has_root = pc.map(|s| s.items.iter().any(|i| i.path == "/")).unwrap_or(false);
+        let has_root = pc
+            .map(|s| s.items.iter().any(|i| i.path.as_path() == Path::new("/")))
+            .unwrap_or(false);
         assert!(has_root);
         serial_println!("[sidebar] test 6 passed: this PC root drive");
     }

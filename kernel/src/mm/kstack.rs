@@ -488,7 +488,7 @@ pub fn self_test() -> KernelResult<()> {
         let near_top = (info.stack_top - 8) as *mut u64;
         core::ptr::write_volatile(near_top, 0xCAFE_BABE);
         let v1 = core::ptr::read_volatile(info.stack_bottom as *const u64);
-        let v2 = core::ptr::read_volatile(near_top as *const u64);
+        let v2 = core::ptr::read_volatile(near_top.cast_const());
         assert_eq!(v1, 0xDEAD_BEEF, "stack bottom write/read mismatch");
         assert_eq!(v2, 0xCAFE_BABE, "stack top write/read mismatch");
     }

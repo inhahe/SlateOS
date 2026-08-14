@@ -266,7 +266,7 @@ pub fn list_format(data: &[u8], fmt: ArchiveFormat) -> KernelResult<Vec<ArchiveE
 fn list_zip(data: &[u8]) -> KernelResult<Vec<ArchiveEntry>> {
     let zip_entries = crate::fs::zip::parse(data)?;
     Ok(zip_entries.iter().map(|e| ArchiveEntry {
-        name: PathBuf::from(e.name.as_str()),
+        name: e.name.clone(),
         size: e.uncompressed_size,
         kind: if e.is_dir { EntryKind::Directory } else { EntryKind::File },
         mtime: 0,
@@ -309,14 +309,14 @@ fn list_cpio(data: &[u8]) -> KernelResult<Vec<ArchiveEntry>> {
             _ => EntryKind::Other,
         };
         ArchiveEntry {
-            name: PathBuf::from(e.name.as_str()),
+            name: e.name.clone(),
             size: e.data.len() as u64,
             kind,
             mtime: e.mtime as u64,
             mode: e.mode,
             uid: e.uid,
             gid: e.gid,
-            link_target: PathBuf::from(e.link_target.as_str()),
+            link_target: e.link_target.clone(),
         }
     }).collect())
 }
@@ -391,7 +391,7 @@ pub fn extract_one_format<N: AsRef<Path> + ?Sized>(
     match fmt {
         ArchiveFormat::Zip => {
             let entries = crate::fs::zip::parse(data)?;
-            let entry = entries.iter().find(|e| Path::new(e.name.as_str()) == name)
+            let entry = entries.iter().find(|e| e.name.as_path() == name)
                 .ok_or(KernelError::NotFound)?;
             crate::fs::zip::extract_entry(data, entry)
         }
@@ -403,7 +403,7 @@ pub fn extract_one_format<N: AsRef<Path> + ?Sized>(
         }
         ArchiveFormat::Cpio => {
             let entries = crate::fs::cpio::uncpio(data)?;
-            let entry = entries.iter().find(|e| Path::new(e.name.as_str()) == name)
+            let entry = entries.iter().find(|e| e.name.as_path() == name)
                 .ok_or(KernelError::NotFound)?;
             Ok(entry.data.clone())
         }
@@ -546,15 +546,15 @@ pub fn extract_all_format<D: AsRef<Path> + ?Sized>(
 /// # Errors
 /// - [`KernelError::NotSupported`] if `fmt` has no writer.
 /// - [`KernelError::InvalidArgument`] if a member name is not valid UTF-8 and
-///   the target format's writer still models names as `String` (zip, cpio,
-///   ar).  See [`name_for_string_writer`].
+///   the target format's writer still models names as `String` (`ar` only).
+///   See [`name_for_string_writer`].
 pub fn create(fmt: ArchiveFormat, entries: &[CreateEntry]) -> KernelResult<Vec<u8>> {
     if !fmt.supports_create() {
         return Err(KernelError::NotSupported);
     }
 
     let data = match fmt {
-        ArchiveFormat::Zip => create_zip(entries)?,
+        ArchiveFormat::Zip => create_zip(entries),
         ArchiveFormat::Tar => create_tar(entries),
         ArchiveFormat::Cpio => create_cpio(entries)?,
         ArchiveFormat::Ar => create_ar(entries)?,
@@ -571,51 +571,52 @@ pub fn create(fmt: ArchiveFormat, entries: &[CreateEntry]) -> KernelResult<Vec<u
     Ok(data)
 }
 
-/// Narrow a byte member name to the `String` that the zip, cpio and ar
-/// writers still take.
+/// Narrow a byte member name to the `String` that the `ar` writer still takes.
 ///
-/// Those three formats store names as raw bytes on disk, so this narrowing is
-/// an artefact of their in-kernel writer types, not of the file formats — see
-/// `known-issues.md`.  Until they carry [`PathBuf`] end to end, a name that is
-/// not valid UTF-8 is **rejected** rather than lossily transcoded: silently
-/// replacing bytes would write an archive whose member cannot be extracted
-/// back to the file it came from.
-///
-/// `trailing_slash` appends the `/` that directory members conventionally
-/// carry, when the caller has not already supplied one.
-fn name_for_string_writer(name: &Path, trailing_slash: bool) -> KernelResult<String> {
-    let s = name.to_str().ok_or(KernelError::InvalidArgument)?;
-    let mut out = String::from(s);
-    if trailing_slash && !out.ends_with('/') {
-        out.push('/');
-    }
-    Ok(out)
+/// `ar` stores names as raw bytes on disk, so this narrowing is an artefact of
+/// the in-kernel writer type, not of the file format — see `known-issues.md`.
+/// Until it carries [`PathBuf`] end to end, a name that is not valid UTF-8 is
+/// **rejected** rather than lossily transcoded: silently replacing bytes would
+/// write an archive whose member cannot be extracted back to the file it came
+/// from.
+fn name_for_string_writer(name: &Path) -> KernelResult<String> {
+    name.to_str().map(String::from).ok_or(KernelError::InvalidArgument)
 }
 
-fn create_zip(entries: &[CreateEntry]) -> KernelResult<Vec<u8>> {
+/// Append the `/` that directory members conventionally carry, when the caller
+/// has not already supplied one.
+///
+/// The marker is a *byte* of the stored name, so the test and the append are
+/// both on bytes — a name need not be UTF-8 for a trailing slash to be
+/// meaningful.
+fn dir_member_name(name: &Path, is_dir: bool) -> PathBuf {
+    let mut out = name.to_path_buf();
+    if is_dir && !out.as_bytes().ends_with(b"/") {
+        out.extend_bytes(b"/");
+    }
+    out
+}
+
+fn create_zip(entries: &[CreateEntry]) -> Vec<u8> {
     use crate::fs::zip::ZipWriteEntry;
     let mut zip_entries: Vec<ZipWriteEntry> = Vec::with_capacity(entries.len());
     for e in entries {
         zip_entries.push(ZipWriteEntry {
-            name: name_for_string_writer(&e.name, e.kind == EntryKind::Directory)?,
+            // The zip writer carries names as bytes end to end, so no UTF-8
+            // narrowing is needed (unlike the `ar` writer below).
+            name: dir_member_name(&e.name, e.kind == EntryKind::Directory),
             data: e.data.clone(),
             store_only: false,
         });
     }
-    Ok(crate::fs::zip::create(&zip_entries))
+    crate::fs::zip::create(&zip_entries)
 }
 
 fn create_tar(entries: &[CreateEntry]) -> Vec<u8> {
     use crate::fs::tar::{TarWriteEntry, EntryKind as TarKind};
     let tar_entries: Vec<TarWriteEntry> = entries.iter().map(|e| {
         TarWriteEntry {
-            name: if e.kind == EntryKind::Directory && !e.name.as_bytes().ends_with(b"/") {
-                let mut n = e.name.clone();
-                n.extend_bytes(b"/");
-                n
-            } else {
-                e.name.clone()
-            },
+            name: dir_member_name(&e.name, e.kind == EntryKind::Directory),
             data: e.data.clone(),
             kind: match e.kind {
                 EntryKind::File => TarKind::File,
@@ -638,7 +639,9 @@ fn create_cpio(entries: &[CreateEntry]) -> KernelResult<Vec<u8>> {
     let mut cpio_entries: Vec<CpioEntry> = Vec::with_capacity(entries.len());
     for e in entries {
         cpio_entries.push(CpioEntry {
-            name: name_for_string_writer(&e.name, false)?,
+            // The cpio writer carries names as bytes end to end, so no
+            // UTF-8 narrowing is needed (unlike zip/ar below).
+            name: e.name.clone(),
             data: e.data.clone(),
             entry_type: match e.kind {
                 EntryKind::File => CpioEntryType::File,
@@ -650,7 +653,7 @@ fn create_cpio(entries: &[CreateEntry]) -> KernelResult<Vec<u8>> {
             uid: 0,
             gid: 0,
             mtime: 0,
-            link_target: String::new(),
+            link_target: PathBuf::new(),
         });
     }
     crate::fs::cpio::mkcpio(&cpio_entries)
@@ -662,7 +665,7 @@ fn create_ar(entries: &[CreateEntry]) -> KernelResult<Vec<u8>> {
     for e in entries.iter().filter(|e| e.kind == EntryKind::File) {
         // AR only supports files.
         ar_entries.push(ArEntry {
-            name: name_for_string_writer(&e.name, false)?,
+            name: name_for_string_writer(&e.name)?,
             data: e.data.clone(),
             mtime: 0,
             uid: 0,

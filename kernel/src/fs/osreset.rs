@@ -359,7 +359,7 @@ pub fn plan_reset(scope: ResetScope) -> KernelResult<u64> {
     let settings = if scope == ResetScope::Full {
         Vec::new()
     } else {
-        use SettingsCategory::*;
+        use SettingsCategory::{Display, Network, Audio, Input, Privacy, Power, Accounts, Locale, Appearance, FileAssociations, Accessibility};
         alloc::vec![
             SettingsImportInfo { category: Display, description: String::from("Display and resolution"), include: true, entry_count: 12 },
             SettingsImportInfo { category: Network, description: String::from("WiFi and network"), include: true, entry_count: 8 },

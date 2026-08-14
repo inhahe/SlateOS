@@ -1231,7 +1231,13 @@ impl FileSystem for MemFs {
 // ---------------------------------------------------------------------------
 
 /// Mount a new in-memory filesystem at the given path.
-pub fn mount(mount_path: &str) -> KernelResult<()> {
+///
+/// # Errors
+/// Any error from [`crate::fs::Vfs::mount`] (e.g. the mountpoint is already
+/// occupied or its parent does not exist).
+pub fn mount<P: AsRef<crate::fs::path::Path> + ?Sized>(
+    mount_path: &P,
+) -> KernelResult<()> {
     let fs = MemFs::new();
     crate::fs::Vfs::mount(mount_path, Box::new(fs))?;
     Ok(())

@@ -38,6 +38,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::KernelResult;
+use crate::fs::path::{Path, PathBuf};
 use crate::serial_println;
 
 // ---------------------------------------------------------------------------
@@ -97,7 +98,11 @@ impl AccessType {
 #[derive(Debug, Clone)]
 pub struct RecentEntry {
     /// Full file path.
-    pub path: String,
+    ///
+    /// A byte string, not text: a recent-files list that cannot hold every
+    /// name the filesystem accepts would silently forget exactly the files
+    /// hardest to re-find by hand.
+    pub path: PathBuf,
     /// Type of last access.
     pub access_type: AccessType,
     /// Timestamp of last access (nanoseconds since boot).
@@ -140,7 +145,7 @@ impl Default for RecentFilter {
 static RECENT: spin::Mutex<Vec<RecentEntry>> = spin::Mutex::new(Vec::new());
 
 /// Custom excluded prefixes.
-static EXCLUDES: spin::Mutex<Vec<String>> = spin::Mutex::new(Vec::new());
+static EXCLUDES: spin::Mutex<Vec<PathBuf>> = spin::Mutex::new(Vec::new());
 
 /// Retention period.
 static RETENTION_NS: AtomicU64 = AtomicU64::new(DEFAULT_RETENTION_NS);
@@ -163,7 +168,8 @@ static EXCLUDED_COUNT: AtomicU64 = AtomicU64::new(0);
 /// Called by the VFS or kshell when a file is accessed. The entry is
 /// deduplicated: if the same path already exists, its timestamp and
 /// access type are updated rather than creating a duplicate.
-pub fn record(path: &str, access_type: AccessType, source: &str) {
+pub fn record<P: AsRef<Path>>(path: P, access_type: AccessType, source: &str) {
+    let path = path.as_ref();
     if !*ENABLED.lock() {
         return;
     }
@@ -181,7 +187,7 @@ pub fn record(path: &str, access_type: AccessType, source: &str) {
 
     // Deduplicate: update existing entry.
     for entry in recent.iter_mut() {
-        if entry.path == path {
+        if entry.path.as_path() == path {
             entry.access_type = access_type;
             entry.timestamp_ns = now;
             entry.access_count = entry.access_count.saturating_add(1);
@@ -205,7 +211,7 @@ pub fn record(path: &str, access_type: AccessType, source: &str) {
     }
 
     recent.push(RecentEntry {
-        path: String::from(path),
+        path: path.to_path_buf(),
         access_type,
         timestamp_ns: now,
         access_count: 1,
@@ -245,7 +251,10 @@ pub fn query(filter: &RecentFilter) -> Vec<RecentEntry> {
             }
             // Pattern filter.
             if !filter.pattern.is_empty() {
-                if !simple_glob(&filter.pattern, &e.path) {
+                // Case-sensitive: the filesystem is, so a recent-files
+                // filter that ignored case would match files the user
+                // did not name.
+                if !crate::fs::vfs::glob_match(&e.path, &filter.pattern, false) {
                     return false;
                 }
             }
@@ -300,23 +309,25 @@ pub fn get_retention_ns() -> u64 {
 }
 
 /// Add a path prefix to the exclusion list.
-pub fn add_exclude(prefix: &str) {
+pub fn add_exclude<P: AsRef<Path>>(prefix: P) {
+    let prefix = prefix.as_ref();
     let mut excludes = EXCLUDES.lock();
-    if !excludes.iter().any(|e| e == prefix) {
-        excludes.push(String::from(prefix));
+    if !excludes.iter().any(|e| e.as_path() == prefix) {
+        excludes.push(prefix.to_path_buf());
     }
 }
 
 /// Remove a path prefix from the exclusion list.
-pub fn remove_exclude(prefix: &str) -> bool {
+pub fn remove_exclude<P: AsRef<Path>>(prefix: P) -> bool {
+    let prefix = prefix.as_ref();
     let mut excludes = EXCLUDES.lock();
     let len_before = excludes.len();
-    excludes.retain(|e| e != prefix);
+    excludes.retain(|e| e.as_path() != prefix);
     excludes.len() < len_before
 }
 
 /// List current exclusion prefixes.
-pub fn list_excludes() -> Vec<String> {
+pub fn list_excludes() -> Vec<PathBuf> {
     EXCLUDES.lock().clone()
 }
 
@@ -326,10 +337,11 @@ pub fn clear() {
 }
 
 /// Remove a specific path from recent files.
-pub fn remove(path: &str) -> bool {
+pub fn remove<P: AsRef<Path>>(path: P) -> bool {
+    let path = path.as_ref();
     let mut recent = RECENT.lock();
     let len_before = recent.len();
-    recent.retain(|e| e.path != path);
+    recent.retain(|e| e.path.as_path() != path);
     recent.len() < len_before
 }
 
@@ -380,55 +392,28 @@ pub fn reset_stats() {
 // ---------------------------------------------------------------------------
 
 /// Check if a path should be excluded from tracking.
-fn is_excluded(path: &str) -> bool {
+///
+/// An exclude names a *directory*, so the test is subtree containment rather
+/// than a byte prefix: excluding `/tmp` must not also exclude `/tmpfile`, and
+/// a caller who writes the exclude with a trailing slash must get the same
+/// answer as one who does not.  `path_in_subtree` is the canonical spelling of
+/// both rules; the open-coded `starts_with` this replaced got the first one
+/// wrong.
+fn is_excluded(path: &Path) -> bool {
     // Check default excludes.
     for prefix in DEFAULT_EXCLUDES {
-        if path.starts_with(prefix) {
+        if crate::fs::pathutil::path_in_subtree(path, prefix) {
             return true;
         }
     }
     // Check custom excludes.
     let excludes = EXCLUDES.lock();
     for prefix in excludes.iter() {
-        if path.starts_with(prefix.as_str()) {
+        if crate::fs::pathutil::path_in_subtree(path, prefix) {
             return true;
         }
     }
     false
-}
-
-/// Simple glob matching (supports * and ?).
-fn simple_glob(pattern: &str, text: &str) -> bool {
-    let pat = pattern.as_bytes();
-    let txt = text.as_bytes();
-
-    let mut pi = 0;
-    let mut ti = 0;
-    let mut star_pi = usize::MAX;
-    let mut star_ti = 0;
-
-    while ti < txt.len() {
-        if pi < pat.len() && (pat[pi] == b'?' || pat[pi] == txt[ti]) {
-            pi += 1;
-            ti += 1;
-        } else if pi < pat.len() && pat[pi] == b'*' {
-            star_pi = pi;
-            star_ti = ti;
-            pi += 1;
-        } else if star_pi != usize::MAX {
-            pi = star_pi + 1;
-            star_ti += 1;
-            ti = star_ti;
-        } else {
-            return false;
-        }
-    }
-
-    while pi < pat.len() && pat[pi] == b'*' {
-        pi += 1;
-    }
-
-    pi == pat.len()
 }
 
 // ---------------------------------------------------------------------------
@@ -460,7 +445,7 @@ fn test_record_and_query() {
     assert_eq!(results.len(), 3);
 
     // Should be newest first.
-    assert_eq!(results[0].path, "/home/user/code.rs");
+    assert_eq!(results[0].path.as_path(), Path::new("/home/user/code.rs"));
 
     clear();
     serial_println!("[recent]   record_and_query: ok");
@@ -495,7 +480,7 @@ fn test_type_filter() {
     };
     let results = query(&filter);
     assert_eq!(results.len(), 1);
-    assert_eq!(results[0].path, "/b.txt");
+    assert_eq!(results[0].path.as_path(), Path::new("/b.txt"));
 
     clear();
     serial_println!("[recent]   type_filter: ok");
@@ -511,7 +496,7 @@ fn test_exclusions() {
 
     let results = most_recent(10);
     assert_eq!(results.len(), 1);
-    assert_eq!(results[0].path, "/home/user/real.txt");
+    assert_eq!(results[0].path.as_path(), Path::new("/home/user/real.txt"));
 
     // Custom exclude.
     add_exclude("/var/log");
@@ -529,11 +514,7 @@ fn test_capacity() {
 
     // Fill to capacity.
     for i in 0..MAX_ENTRIES + 10 {
-        record(
-            &alloc::format!("/cap/file_{}", i),
-            AccessType::Open,
-            "",
-        );
+        record(alloc::format!("/cap/file_{}", i), AccessType::Open, "");
     }
 
     // Should not exceed max.

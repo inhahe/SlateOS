@@ -44,6 +44,7 @@
 use guitk::Color;
 use guitk::render::{FontWeightHint, RenderCommand};
 use guitk::style::CornerRadii;
+use guitk::text;
 
 // ============================================================================
 // Catppuccin Mocha theme
@@ -79,11 +80,31 @@ const LIST_WIDTH: f32 = 280.0;
 const TOOLBAR_HEIGHT: f32 = 44.0;
 const PADDING: f32 = 8.0;
 const LINE_HEIGHT: f32 = 20.0;
-const CHAR_WIDTH: f32 = 8.0;
 const SMALL_TEXT: f32 = 12.0;
 const NORMAL_TEXT: f32 = 14.0;
 const HEADER_TEXT: f32 = 16.0;
 const TITLE_TEXT: f32 = 18.0;
+/// Font size of the language badge on a list row.
+const BADGE_TEXT: f32 = 10.0;
+
+/// Width of one cell of the code panel's character grid.
+///
+/// The code panel — and only the code panel — is a grid: it has a line-number
+/// gutter, and a reader lines indentation up by eye between rows, so column
+/// *n* of one line has to sit above column *n* of the next. Deriving the cell
+/// from the face keeps the grid true if the face or the size changes; the old
+/// fixed 8.0 was a guess that drifted the moment either did. Everything else
+/// in this app is proportional UI text and is measured, not gridded.
+fn char_width() -> f32 {
+    text::digit_advance(NORMAL_TEXT, FontWeightHint::Regular)
+}
+
+/// How many grid cells `text` occupies. Characters, not bytes — `str::len()`
+/// counts UTF-8 bytes, so a token holding any non-ASCII character advanced the
+/// pen two to four cells too far and shoved the rest of the line right.
+fn columns(text: &str) -> f32 {
+    text.chars().count() as f32
+}
 
 const MAX_SNIPPETS: usize = 5000;
 const MAX_FOLDERS: usize = 200;
@@ -1341,7 +1362,10 @@ impl App {
         ];
         let mut bx = 180.0;
         for (label, color) in &buttons {
-            let bw = (label.len() as f32) * CHAR_WIDTH + 16.0;
+            // Drawn bold, so measured bold: the old estimate sized "Import"
+            // from its regular-weight guess and let the bold label touch the
+            // edge of its own button.
+            let bw = text::measure(label, SMALL_TEXT, FontWeightHint::Bold) + 16.0;
             cmds.push(RenderCommand::FillRect {
                 x: bx,
                 y: 8.0,
@@ -1680,7 +1704,8 @@ impl App {
             });
 
             // Language badge
-            let badge_w = (snippet.language.name().len() as f32) * 6.0 + 8.0;
+            let badge_w =
+                text::measure(snippet.language.name(), BADGE_TEXT, FontWeightHint::Bold) + 8.0;
             cmds.push(RenderCommand::FillRect {
                 x: x + 8.0,
                 y: sy + 4.0,
@@ -1693,7 +1718,7 @@ impl App {
                 x: x + 12.0,
                 y: sy + 6.0,
                 text: snippet.language.name().into(),
-                font_size: 10.0,
+                font_size: BADGE_TEXT,
                 color: CRUST,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(badge_w),
@@ -1716,7 +1741,13 @@ impl App {
             cmds.push(RenderCommand::Text {
                 x: x + 8.0,
                 y: sy + 22.0,
-                text: truncate_str(&snippet.title, 32),
+                text: text::elide(
+                    &snippet.title,
+                    LIST_WIDTH - 20.0,
+                    "...",
+                    NORMAL_TEXT,
+                    FontWeightHint::Bold,
+                ),
                 font_size: NORMAL_TEXT,
                 color: if selected { TEXT } else { SUBTEXT1 },
                 font_weight: FontWeightHint::Bold,
@@ -1893,7 +1924,7 @@ impl App {
                 // Tokens
                 let mut tx = x + 48.0;
                 for token in line_tokens {
-                    let tw = (token.text.len() as f32) * CHAR_WIDTH;
+                    let tw = columns(&token.text) * char_width();
                     cmds.push(RenderCommand::Text {
                         x: tx,
                         y: ly,
@@ -1924,7 +1955,11 @@ impl App {
 
             let mut tag_x = x + 8.0;
             for tag in &snippet.tags {
-                let tw = (tag.len() as f32) * 7.0 + 16.0;
+                // The `#` is drawn, so it is measured: the old estimate sized
+                // the pill from the bare tag and let the last character sit on
+                // the rounded edge.
+                let label = format!("#{tag}");
+                let tw = text::measure(&label, BADGE_TEXT, FontWeightHint::Regular) + 16.0;
                 cmds.push(RenderCommand::FillRect {
                     x: tag_x,
                     y: tags_y + 4.0,
@@ -1936,8 +1971,8 @@ impl App {
                 cmds.push(RenderCommand::Text {
                     x: tag_x + 8.0,
                     y: tags_y + 8.0,
-                    text: format!("#{tag}"),
-                    font_size: 10.0,
+                    text: label,
+                    font_size: BADGE_TEXT,
                     color: TEAL,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(tw),
@@ -1958,19 +1993,22 @@ impl App {
             });
         } else {
             // Empty state
+            let center = x + width / 2.0;
+            let headline = "Select a snippet";
+            let subline = "or create a new one";
             cmds.push(RenderCommand::Text {
-                x: x + width / 2.0 - 80.0,
+                x: text::center_x(headline, center, HEADER_TEXT, FontWeightHint::Regular),
                 y: y + height / 2.0 - 20.0,
-                text: "Select a snippet".into(),
+                text: headline.into(),
                 font_size: HEADER_TEXT,
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(200.0),
             });
             cmds.push(RenderCommand::Text {
-                x: x + width / 2.0 - 100.0,
+                x: text::center_x(subline, center, NORMAL_TEXT, FontWeightHint::Regular),
                 y: y + height / 2.0 + 10.0,
-                text: "or create a new one".into(),
+                text: subline.into(),
                 font_size: NORMAL_TEXT,
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
@@ -2080,15 +2118,6 @@ impl App {
                 max_width: Some(200.0),
             });
         }
-    }
-}
-
-fn truncate_str(s: &str, max_chars: usize) -> String {
-    if s.len() <= max_chars {
-        s.into()
-    } else {
-        let truncated: String = s.chars().take(max_chars.saturating_sub(3)).collect();
-        format!("{truncated}...")
     }
 }
 
@@ -2499,15 +2528,29 @@ mod tests {
 
     // --- Utility tests ---
 
+    /// A snippet title is cut to the width of the list column it is drawn in.
+    /// The old helper compared `s.len()` — bytes — against a budget of 32
+    /// "characters", so an accented title was cut short while it still fitted
+    /// the column, and a title of wide glyphs ran past it.
     #[test]
-    fn test_truncate_str_short() {
-        assert_eq!(truncate_str("hello", 10), "hello");
+    fn a_long_title_is_cut_to_the_list_column() {
+        let room = LIST_WIDTH - 20.0;
+        for title in [
+            "a snippet title far too long to fit the list column beside it",
+            "un titre de fragment beaucoup trop long pour la colonne de gauche",
+        ] {
+            let out = text::elide(title, room, "...", NORMAL_TEXT, FontWeightHint::Bold);
+            let w = text::measure(&out, NORMAL_TEXT, FontWeightHint::Bold);
+            assert!(w <= room + 0.01, "{out:?} is {w} px in {room} px of room");
+            assert!(out.ends_with("..."), "a cut title should say so");
+        }
     }
 
     #[test]
-    fn test_truncate_str_long() {
-        let result = truncate_str("hello world this is long", 10);
-        assert!(result.ends_with("..."));
+    fn a_short_title_is_left_alone() {
+        let title = "Quick sort";
+        let out = text::elide(title, LIST_WIDTH - 20.0, "...", NORMAL_TEXT, FontWeightHint::Bold);
+        assert_eq!(out, title);
     }
 
     #[test]
@@ -2583,5 +2626,65 @@ mod tests {
             is_template: false,
             template_vars: Vec::new(),
         }
+    }
+
+    // --- Text measurement ---
+
+    /// The code panel is the one grid in this app, and a cell of it holds one
+    /// *character*. Advancing by `str::len()` moved the pen a cell per UTF-8
+    /// byte, so a line holding any accented character pushed everything after
+    /// it two to four columns right of where the line above put it.
+    #[test]
+    fn a_code_token_advances_one_cell_per_character() {
+        assert!((columns("let x") - 5.0).abs() < f32::EPSILON);
+        // Five characters, seven bytes.
+        assert!((columns("héllo") - 5.0).abs() < f32::EPSILON);
+        assert!((columns("héllo") - columns("hello")).abs() < f32::EPSILON);
+    }
+
+    /// The cell comes from the face, so it stays true if the face changes.
+    #[test]
+    fn the_code_cell_is_derived_from_the_face() {
+        let cell = char_width();
+        assert!(cell > 0.0, "an empty cell would collapse the code panel");
+        assert!(
+            cell <= NORMAL_TEXT,
+            "a cell wider than the em box would space the code out absurdly"
+        );
+    }
+
+    /// Toolbar labels are drawn bold, so they are measured bold — measuring a
+    /// bold label at regular weight is exactly how a button overflows.
+    #[test]
+    fn toolbar_labels_fit_their_buttons() {
+        for label in ["+ New", "Import", "Export", "Stats"] {
+            let bw = text::measure(label, SMALL_TEXT, FontWeightHint::Bold) + 16.0;
+            let drawn = text::measure(label, SMALL_TEXT, FontWeightHint::Bold);
+            assert!(drawn + 16.0 <= bw + 0.01, "{label:?} overflows its button");
+            assert!(bw > 16.0, "{label:?} produced an empty button");
+        }
+    }
+
+    /// Every language badge has to fit the pill drawn behind it.
+    #[test]
+    fn language_badges_fit_their_pills() {
+        for lang in Language::all() {
+            let name = lang.name();
+            let badge_w = text::measure(name, BADGE_TEXT, FontWeightHint::Bold) + 8.0;
+            assert!(
+                text::measure(name, BADGE_TEXT, FontWeightHint::Bold) + 8.0 <= badge_w + 0.01,
+                "{name:?} does not fit its badge"
+            );
+        }
+    }
+
+    /// A tag pill is drawn as `#tag`, so it has to be measured that way. The
+    /// old estimate sized it from the bare tag and left the last character
+    /// sitting on the pill's rounded edge.
+    #[test]
+    fn a_tag_pill_is_measured_with_its_hash() {
+        let bare = text::measure("rust", BADGE_TEXT, FontWeightHint::Regular);
+        let hashed = text::measure("#rust", BADGE_TEXT, FontWeightHint::Regular);
+        assert!(hashed > bare, "the hash is drawn, so it has to be measured");
     }
 }

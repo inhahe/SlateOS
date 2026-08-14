@@ -59797,3 +59797,15 @@ will debug the wrong function when they are not.
 
 **Where.** `gui/font/src/fallback.rs`, `attach_class` (~line 244) and
 `COMPLEX_SCRIPTS` (~line 115).
+
+**Fixed** (2026-08-14). Deleted, and the doc comment now says *why* there is no
+Thai arm rather than leaving a reader to notice there isn't one. The sweep is
+byte-for-byte unchanged across 556 faces x 23 strings — 10917 / 32 / 841 / 998
+before and after — which is the whole claim of the entry, measured.
+
+The test that covered the deleted arms was replaced rather than dropped:
+`the_scripts_the_class_map_omits_are_scripts_it_is_never_asked_about` asserts
+`positions_marks` is false for `thai`, `lao ` and `tibt`, so that taking one of
+them out of `COMPLEX_SCRIPTS` fails here instead of silently sending marks the
+map has no classes for through it — U+0E34 SARA I would arrive as class 0 and
+be taken for a base.

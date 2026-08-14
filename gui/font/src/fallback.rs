@@ -220,19 +220,26 @@ impl Extents {
 /// Zero means "not a combining mark", which is what the caller uses to tell a
 /// base from a mark.
 ///
-/// Three groups of input are handled:
+/// Two groups of input are handled:
 ///
 /// * Classes **200 and up** already name a position (`ABOVE`, `BELOW_RIGHT`,
 ///   …) and pass through untouched. That is nearly every mark in Latin,
 ///   Greek, Cyrillic and Vietnamese.
-/// * Classes **10–36, 103, 107, 118, 122, 129–132** are Unicode's
-///   *fixed-position* classes. Their numeric value encodes the order the
-///   marks must be sorted into, not where they are drawn, so each is mapped
-///   onto the position class its script actually wants — Arabic fatha above,
-///   kasra below, Hebrew sheva below, shin dot above-right, and so on.
-/// * A handful of **Thai and Lao vowel signs carry class 0** despite being
-///   drawn above or below, because they never reorder. They are recognised by
-///   code point.
+/// * Classes **10–36** are Unicode's *fixed-position* classes for Hebrew,
+///   Arabic and Syriac. Their numeric value encodes the order the marks must
+///   be sorted into, not where they are drawn, so each is mapped onto the
+///   position class its script actually wants — Arabic fatha above, kasra
+///   below, Hebrew sheva below, shin dot above-right, and so on.
+///
+/// Unicode's other fixed-position classes — 103 and 107 (Thai), 118 and 122
+/// (Lao), 129–132 (Tibetan) — are deliberately absent, along with the Thai and
+/// Lao vowel signs that carry class 0 despite being drawn above or below. Not
+/// because they have no answer but because nothing can ask the question: the
+/// one caller asks only about a run whose script passed
+/// [`positions_marks`], and `thai`, `lao ` and `tibt` are all in
+/// [`COMPLEX_SCRIPTS`]. Arms for them would be claims no test could check and
+/// no sweep could measure. HarfBuzz declines those scripts' fallback placement
+/// too, so their absence changes no output.
 ///
 /// The mapping is HarfBuzz's `recategorize_combining_class`, transposed from
 /// its "modified" combining classes back onto Unicode's. HarfBuzz permutes
@@ -242,26 +249,9 @@ impl Extents {
 /// characters. What this crate does not do is the reordering itself — see
 /// `known-issues.md`.
 pub(crate) fn attach_class(ch: char) -> u8 {
-    let mut klass = norm::combining_class(ch);
+    let klass = norm::combining_class(ch);
     if klass >= 200 {
         return klass;
-    }
-    let cp = u32::from(ch);
-    // Thai and Lao, which need the code point and not just the class: the
-    // vowel signs below are drawn above or below the consonant but never
-    // reorder, so Unicode leaves them at class 0.
-    if cp & !0xFF == 0x0E00 {
-        if klass == 0 {
-            klass = match cp {
-                0x0E31 | 0x0E34..=0x0E37 | 0x0E47 | 0x0E4C..=0x0E4E => ABOVE_RIGHT,
-                0x0EB1 | 0x0EB4..=0x0EB7 | 0x0EBB | 0x0ECC | 0x0ECD => ABOVE,
-                0x0EBC => BELOW,
-                _ => 0,
-            };
-        } else if cp == 0x0E3A {
-            // Thai phinthu, class 9, is drawn below and to the right.
-            klass = BELOW_RIGHT;
-        }
     }
     match klass {
         // Hebrew points. Everything under the letter except the dots that
@@ -279,15 +269,6 @@ pub(crate) fn attach_class(ch: char) -> u8 {
         // Arabic and Syriac vowels: everything above but kasra and kasratan.
         27 | 28 | 30 | 31 | 33..=36 => ABOVE,
         29 | 32 => BELOW,
-        // Thai sara u/uu and mai.
-        103 => BELOW_RIGHT,
-        107 => ABOVE_RIGHT,
-        // Lao sign u/uu and mai.
-        118 => BELOW,
-        122 => ABOVE,
-        // Tibetan vowel signs aa, i, u.
-        129 | 132 => BELOW,
-        130 => ABOVE,
         other => other,
     }
 }
@@ -525,16 +506,22 @@ mod tests {
         assert_eq!(attach_class('\u{05BF}'), ATTACHED_ABOVE);
     }
 
+    /// `attach_class` has no arm for Thai, Lao or Tibetan, and this is the
+    /// assertion that keeps that honest: it is allowed to have none only
+    /// because those scripts never reach it. Whoever takes one of them out of
+    /// [`COMPLEX_SCRIPTS`] will fail here rather than silently start placing
+    /// its marks by a class map that was never written for them — U+0E34 SARA
+    /// I would arrive as class 0 and be taken for a base.
     #[test]
-    fn a_thai_vowel_with_no_class_is_still_a_mark() {
-        // U+0E34 sara i has combining class 0 because it never reorders, but
-        // it is drawn above the consonant.
-        assert_eq!(norm::combining_class('\u{0E34}'), 0);
-        assert_eq!(attach_class('\u{0E34}'), ABOVE_RIGHT);
-        // U+0E3A phinthu has class 9 and is drawn below right.
-        assert_eq!(attach_class('\u{0E3A}'), BELOW_RIGHT);
-        // A Thai consonant in the same block is left alone.
-        assert_eq!(attach_class('\u{0E01}'), 0);
+    fn the_scripts_the_class_map_omits_are_scripts_it_is_never_asked_about() {
+        for tag in [*b"thai", *b"lao ", *b"tibt"] {
+            assert!(
+                !positions_marks(Some(ScriptTags::exactly(tag))),
+                "{:?} reaches attach_class, which has no classes for it",
+                core::str::from_utf8(&tag)
+            );
+        }
+        assert_eq!(attach_class('\u{0E34}'), 0);
     }
 
     #[test]

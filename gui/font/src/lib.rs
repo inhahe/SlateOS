@@ -18,6 +18,23 @@
 //! - Box drawing characters (U+2500..U+257F) — procedurally generated
 //! - Block elements (U+2580..U+259F) — procedurally generated
 //! - Missing glyphs render as a replacement box (hollow rectangle)
+//!
+//! # Dependencies and I/O
+//!
+//! Everything here is written in `alloc` terms — `alloc::vec::Vec`,
+//! `alloc::string::String` — rather than through the `std` prelude, because
+//! the intent is for this crate to be `no_std`. It is **not `no_std` yet**:
+//! the rasterizer and the metric scaling call `f32::sqrt`, `floor`, `ceil`,
+//! `round` and `mul_add`, which live in `std` and not in `core`, so the
+//! declaration would need a `libm` dependency that this workspace does not
+//! have. Tracked as `TD-FONT-NOT-ACTUALLY-NO-STD` in `known-issues.md`;
+//! please keep writing `alloc::` paths so that closing it stays a small
+//! change.
+//!
+//! Regardless of that, this crate **does no I/O** and should not start. Font
+//! *discovery* — walking a directory, reading a file — belongs to the caller,
+//! which knows whether it is talking to a host filesystem or to the SlateOS
+//! VFS. This crate takes bytes and gives back glyphs.
 
 extern crate alloc;
 

@@ -307,8 +307,10 @@ fn dict_operand(d: &[u8], at: usize) -> Result<(f64, usize), SfntError> {
 
 /// `10^n` for a small `n`, by repeated multiplication.
 ///
-/// `f64::powi` lives in `std`; this crate is `no_std`, and the exponents a
-/// real DICT operand can carry are single digits in practice.
+/// `f64::powi` lives in `std`, and this crate is written to be `no_std`-ready
+/// (see the crate docs). The exponents a real DICT operand can carry are
+/// single digits in practice, so a loop costs nothing and keeps the
+/// dependency out.
 fn pow10(n: i32) -> f64 {
     let mut v = 1.0_f64;
     for _ in 0..n.abs().min(60) {

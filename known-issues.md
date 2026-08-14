@@ -60804,7 +60804,7 @@ be re-derived anyway. The proper fix is for the kernel's scorecard to be checked
 against the parsed file by `bench-history.py`, so the file becomes the authority
 it already claims to be. Blocked on nothing but effort; tracked here.
 
-#### FOLLOW-UP 2026-08-14: with the file finally parseable, the drift is measurable — and it is near-total
+#### FOLLOW-UP 2026-08-14: with the file finally parseable, the drift is measurable â€” and it is near-total
 
 Making `baselines.toml` load was worth doing for its own sake, but the first
 thing a working parser bought was a number for the damage. Matching the 63
@@ -60819,7 +60819,7 @@ benchmark names the kernel prints against the 57 baseline tables:
 | baselines naming a benchmark never measured | 27 |
 
 **Less than half of what runs has a baseline it can be compared to.** And the
-two lists are not describing different work — they are largely the *same*
+two lists are not describing different work â€” they are largely the *same*
 benchmarks under two names, drifted apart because nothing ever had to reconcile
 them:
 
@@ -60850,23 +60850,23 @@ split into benchmarks genuinely lacking a baseline (`vfs_stat_root`,
 `http_gzip_*`, `ipc_channel_sync`, `net_arp_lookup`, `net_checksum`,
 `net_ethernet_parse`, `net_ipv4_parse`, `pick_next`, `sched_pick_next`) and
 baselines for work that is not benchmarked at all (`futex_uncontended`,
-`futex_contended_wake`, `futex_wait_mismatch`, `compositor_frame_4k` — the last
+`futex_contended_wake`, `futex_wait_mismatch`, `compositor_frame_4k` â€” the last
 is Lane C's and is measured by a host-side `cargo test`, not by this suite).
 
 **Note what this does to the headline number.** The `over_target` count the
 kernel reports (15 of 63 on the release run) is computed from the literals in
-`bench.rs`, not from this file — so it is not wrong, but it is also not
+`bench.rs`, not from this file â€” so it is not wrong, but it is also not
 *checkable* against the stated baselines for the 33 unmatched. Ranking the
 release run against the parsed file yields only 7 over-target entries, and that
 smaller number is an artefact of the missing half, not good news. Notably
-`vfs_stat_root` — the benchmark currently under investigation at 8.5x over — has
+`vfs_stat_root` â€” the benchmark currently under investigation at 8.5x over â€” has
 **no** table here at all; its 700 ns target exists only as a comment in
 `bench.rs` citing a file that does not mention it.
 
 **Proper fix, unchanged but now specified.** `bench-history.py` should parse
 this file and check each recorded entry against it, reporting unmatched names
 in both directions as a failure rather than silence. That requires first
-reconciling the names — one canonical name per benchmark, used by both the
+reconciling the names â€” one canonical name per benchmark, used by both the
 `run()` call in `bench.rs` and the table here. The rename table above is the
 work list. Until then the parse test added today guarantees only that the file
 is *loadable*, not that it is *true*.

@@ -277,6 +277,43 @@ fn uncharge_cgroup_free(frame_addr: u64, count: u64) {
     }
 }
 
+/// Tag `count` freshly-allocated frames with this CPU's ambient owner.
+///
+/// The allocator cannot tell *who* is asking, so the tag comes from the
+/// per-CPU [`frame_owner::OwnerScope`] context the caller is running under;
+/// allocations outside any scope are recorded as `Owner::Unknown`.
+///
+/// [`frame_owner::OwnerScope`]: super::frame_owner::OwnerScope
+#[inline]
+fn tag_alloc_owner(frame_addr: u64, count: u64) {
+    if !super::frame_owner::is_enabled() {
+        return;
+    }
+    // Read the ambient tag once — it cannot change under us for the duration
+    // of this loop (only this CPU writes its own slot, and we are not
+    // preemptible into another OwnerScope between these stores in practice;
+    // a stale tag would only mis-label a diagnostic anyway).
+    let owner = super::frame_owner::current_owner();
+    #[allow(clippy::arithmetic_side_effects)]
+    let base_idx = (frame_addr / FRAME_SIZE as u64) as usize;
+    for i in 0..count as usize {
+        super::frame_owner::set(base_idx.wrapping_add(i), owner);
+    }
+}
+
+/// Mark `count` frames as unowned again (called on every free).
+#[inline]
+fn untag_free_owner(frame_addr: u64, count: u64) {
+    if !super::frame_owner::is_enabled() {
+        return;
+    }
+    #[allow(clippy::arithmetic_side_effects)]
+    let base_idx = (frame_addr / FRAME_SIZE as u64) as usize;
+    for i in 0..count as usize {
+        super::frame_owner::clear(base_idx.wrapping_add(i));
+    }
+}
+
 /// Physical memory below this address is never added to the free lists.
 ///
 /// The first 1 MiB of physical address space on x86 is reserved for:
@@ -1293,6 +1330,15 @@ pub fn refill_zero_pool() -> usize {
         // Both calls fast-exit when cgroup memory limits are inactive.
         uncharge_cgroup_free(frame.addr(), 1);
 
+        // The frame is still allocated (parked in the pool), so it keeps an
+        // owner tag — but it belongs to the pool now, not to the refiller.
+        // `alloc_frame_zeroed` re-tags it for the real consumer on pop.
+        #[allow(clippy::arithmetic_side_effects)]
+        super::frame_owner::set(
+            (frame.addr() / FRAME_SIZE as u64) as usize,
+            super::frame_owner::Owner::ZeroPool,
+        );
+
         // Zero the frame outside any lock using non-temporal stores.
         // OPT: Non-temporal (streaming) stores bypass the cache, avoiding
         // pollution of this CPU's L1/L2 with zeros that won't be used by
@@ -1575,22 +1621,25 @@ fn plan_metadata(memory_map: &[&MemmapEntry]) -> KernelResult<(usize, u64, u64)>
     );
 
     // We need 1 byte per frame for page_info + 2 bytes per frame for
-    // refcount + 1 byte per frame for the per-frame cgroup id, plus up to
-    // 1 byte of alignment padding before the (u16) refcount array.  The
-    // cgroup array is u8 so it needs no further alignment.
+    // refcount + 1 byte per frame for the per-frame cgroup id + 1 byte per
+    // frame for the frame-owner tag, plus up to 1 byte of alignment padding
+    // before the (u16) refcount array.  The cgroup and owner arrays are u8
+    // so they need no further alignment.
     let refcount_offset = (total_frames + 1) & !1; // align up to 2
     let cgroup_offset = refcount_offset + total_frames * 2;
-    let metadata_bytes = cgroup_offset + total_frames;
+    let owner_offset = cgroup_offset + total_frames;
+    let metadata_bytes = owner_offset + total_frames;
     let metadata_frames = (align_up(metadata_bytes as u64, frame_size) / frame_size) as usize;
     let metadata_size = (metadata_frames as u64) * frame_size;
 
     serial_println!(
-        "[mm] Metadata: {} bytes ({} frames, {} KiB) [page_info: {}B, refcount: {}B, cgroup: {}B]",
+        "[mm] Metadata: {} bytes ({} frames, {} KiB) [page_info: {}B, refcount: {}B, cgroup: {}B, owner: {}B]",
         metadata_bytes,
         metadata_frames,
         metadata_size / 1024,
         total_frames,
         total_frames * 2,
+        total_frames,
         total_frames
     );
 
@@ -1702,10 +1751,12 @@ pub unsafe fn init(hhdm_offset: u64, memory_map: &[&MemmapEntry]) -> KernelResul
     //
     // The refcount array must be 2-byte aligned (u16).  Round up the
     // page_info region to the next even byte boundary.  The per-frame cgroup
-    // id array (u8) follows the refcount array; it must match the layout
-    // computed in `plan_metadata`.
+    // id array (u8) follows the refcount array, and the per-frame owner tag
+    // array (u8) follows that; it must match the layout computed in
+    // `plan_metadata`.
     let refcount_offset = (total_frames + 1) & !1; // align up to 2
     let cgroup_offset = refcount_offset + total_frames * 2;
+    let owner_offset = cgroup_offset + total_frames;
     let metadata_virt = (metadata_phys + hhdm_offset) as *mut u8;
     // SAFETY: metadata_phys is in a USABLE memory region, the HHDM maps
     // it to metadata_virt, and we have exclusive access during early boot
@@ -1721,6 +1772,9 @@ pub unsafe fn init(hhdm_offset: u64, memory_map: &[&MemmapEntry]) -> KernelResul
         // per-frame cgroup ids: fill with 0 = "root / not charged".
         let cgroup_ptr = metadata_virt.add(cgroup_offset);
         core::ptr::write_bytes(cgroup_ptr, 0, total_frames);
+        // per-frame owner tags: fill with 0 = Owner::Free ("not allocated").
+        let owner_ptr = metadata_virt.add(owner_offset);
+        core::ptr::write_bytes(owner_ptr, 0, total_frames);
     }
     // SAFETY: refcount_offset is even, so metadata_virt + refcount_offset
     // is 2-byte aligned (metadata_virt is frame-aligned = 16 KiB aligned).
@@ -1733,6 +1787,20 @@ pub unsafe fn init(hhdm_offset: u64, memory_map: &[&MemmapEntry]) -> KernelResul
     // reader that observes a non-zero length also observes a valid pointer.
     FRAME_CGROUP_PTR.store(cgroup_virt as u64, Ordering::Release);
     FRAME_CGROUP_LEN.store(total_frames as u64, Ordering::Release);
+
+    // Publish the per-frame owner-tag array the same way.  Sizing it to
+    // `total_frames` (rather than a fixed 65536-entry window) is what lets
+    // ownership tracking cover RAM above 1 GiB — see known-issues
+    // TD-FRAME-OWNER-1GIB.
+    // SAFETY: owner_offset is within the metadata region reserved by
+    // plan_metadata (which sized it to include `total_frames` owner bytes).
+    let owner_virt = unsafe { metadata_virt.add(owner_offset) };
+    // SAFETY: `owner_virt` points at `total_frames` writable bytes inside the
+    // permanently-reserved metadata region, they were just zeroed above, and
+    // `init` runs exactly once during single-threaded early boot.
+    unsafe {
+        super::frame_owner::init_storage(owner_virt, total_frames);
+    }
 
     // Build the allocator and populate free lists.
     let mut allocator = BuddyAllocator {
@@ -1826,6 +1894,7 @@ pub fn alloc_frame() -> KernelResult<PhysFrame> {
                 let _ = unsafe { free_frame(frame) };
                 return Err(e);
             }
+            tag_alloc_owner(addr, 1);
             return Ok(frame);
         }
 
@@ -1849,6 +1918,7 @@ pub fn alloc_frame() -> KernelResult<PhysFrame> {
                     let _ = unsafe { free_frame(frame) };
                     return Err(e);
                 }
+                tag_alloc_owner(addr, 1);
                 return Ok(frame);
             }
         }
@@ -1902,6 +1972,9 @@ pub fn alloc_frame_zeroed() -> KernelResult<PhysFrame> {
                 let _ = unsafe { free_frame(frame) };
                 return Err(e);
             }
+            // Re-tag: the frame carries the `ZeroPool` tag applied when the
+            // refiller parked it, but it now belongs to this consumer.
+            tag_alloc_owner(frame.addr(), 1);
             return Ok(frame);
         }
     }
@@ -1985,6 +2058,7 @@ pub fn alloc_order(order: usize) -> KernelResult<PhysFrame> {
         let _ = unsafe { free_order_inner(frame, order) };
         return Err(e);
     }
+    tag_alloc_owner(frame.addr(), count);
 
     Ok(frame)
 }
@@ -2132,6 +2206,7 @@ pub fn alloc_order_constrained(order: usize, max_addr: u64) -> KernelResult<Phys
         let _ = unsafe { free_order_inner(frame, order) };
         return Err(e);
     }
+    tag_alloc_owner(frame.addr(), count);
 
     Ok(frame)
 }
@@ -2218,6 +2293,7 @@ pub unsafe fn free_frame(frame: PhysFrame) -> KernelResult<()> {
     // Uncharge cgroup before returning the frame to the free pool.
     // Done up front so the accounting is updated promptly.
     uncharge_cgroup_free(frame.addr(), 1);
+    untag_free_owner(frame.addr(), 1);
 
     // Fast path: push to per-CPU cache (no global lock needed).
     if PCPU_ENABLED.load(Ordering::Acquire) {
@@ -2309,6 +2385,7 @@ pub unsafe fn free_order(frame: PhysFrame, order: usize) -> KernelResult<()> {
     // updated before the frame is visible on the free list).
     let count = 1u64 << order;
     uncharge_cgroup_free(frame.addr(), count);
+    untag_free_owner(frame.addr(), count);
 
     // SAFETY: Caller guarantees frame was validly allocated.
     unsafe { free_order_inner(frame, order) }

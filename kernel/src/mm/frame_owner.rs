@@ -11,7 +11,11 @@
 //! frame (page tables, kernel stacks, DMA buffers, user pages, etc.).
 //!
 //! Tags are set at allocation time and cleared on free.  The overhead is
-//! exactly 1 byte per frame (64 KiB for 65536 frames = 1 GiB physical RAM).
+//! exactly 1 byte per frame, and the array is sized to *all* installed RAM:
+//! it is carved from the frame allocator's metadata region in `frame::init`
+//! (alongside `page_info` / `refcount` / the per-frame cgroup id) and
+//! published here via [`init_storage`].  It is therefore not a fixed window
+//! — a frame at any physical address is tracked.
 //!
 //! ## Owner Tags
 //!
@@ -26,9 +30,15 @@
 //!
 //! ## Integration
 //!
-//! The frame allocator calls `set()` after allocation and `clear()` on free.
-//! Subsystems pass their owner tag to allocation functions, or the allocator
-//! infers it from the call context.
+//! The frame allocator calls [`set`] after every successful allocation and
+//! [`clear`] on every free.  The allocator has no idea *who* is asking, so
+//! the tag comes from an ambient **owner context**: a subsystem wraps its
+//! allocations in [`OwnerScope`], and every frame allocated while that guard
+//! is alive is tagged with it.  Untagged allocations get [`Owner::Unknown`].
+//!
+//! [`OwnerScope`] saves and restores the previous tag on drop, so it nests
+//! correctly — including when an interrupt handler allocates in the middle of
+//! another subsystem's scope.
 //!
 //! ## References
 //!
@@ -37,13 +47,16 @@
 
 use core::sync::atomic::{AtomicU64, Ordering};
 use crate::serial_println;
+use crate::smp::MAX_CPUS;
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
-/// Maximum tracked frames (matches frame allocator's MAX_FRAMES).
-const MAX_FRAMES: usize = 65536;
+// The ownership array is sized dynamically to the machine's frame count in
+// `frame::init` — see `init_storage`.  There is deliberately no MAX_FRAMES
+// ceiling here; a fixed one used to silently drop every tag above 1 GiB
+// (known-issues: TD-FRAME-OWNER-1GIB).
 
 // ---------------------------------------------------------------------------
 // Owner tag
@@ -178,19 +191,64 @@ impl Owner {
 // Storage
 // ---------------------------------------------------------------------------
 
-/// Per-frame owner tags.  Index = frame index, value = Owner as u8.
+/// Per-frame owner tags.  Index = frame index, value = `Owner as u8`.
 ///
-/// Uses a flat array for O(1) lookup.  No heap allocation needed.
-/// Wrapped in UnsafeCell for interior mutability since each frame slot
-/// is only written by the CPU that just allocated/freed it (no races).
-struct OwnerArray(core::cell::UnsafeCell<[u8; MAX_FRAMES]>);
+/// A flat byte array for O(1) lookup, carved from the frame allocator's
+/// metadata region by `frame::init` and published through [`init_storage`].
+/// `OWNERS_PTR` is its HHDM virtual base and `OWNERS_LEN` its length in
+/// frames; both are written once during early boot and never change.
+///
+/// Before they are set every access no-ops (and [`get`] reports
+/// [`Owner::Unknown`]), which is correct: nothing can have been recorded
+/// yet.  Access needs no lock because alloc/free for a given frame index is
+/// serialised by the allocator itself — a frame is either free or
+/// exclusively owned, so only one CPU ever writes a given slot at a time.
+/// Diagnostic reads are inherently racy, which is acceptable for statistics.
+static OWNERS_PTR: AtomicU64 = AtomicU64::new(0);
+static OWNERS_LEN: AtomicU64 = AtomicU64::new(0);
 
-// SAFETY: Each frame slot is only mutated by the CPU that just allocated
-// or freed it, so there are no data races.  Reads from diagnostics are
-// inherently racy but that's acceptable for statistics.
-unsafe impl Sync for OwnerArray {}
+/// Publish the per-frame owner array.
+///
+/// Called once from `frame::init` with a pointer into the frame-allocator
+/// metadata region, which has already been zeroed (`0` == [`Owner::Free`]).
+///
+/// # Safety
+///
+/// - `base` must point to at least `len` writable bytes that live for the
+///   rest of the kernel's lifetime (the metadata region never moves).
+/// - The region must already be zero-initialised.
+/// - Must be called exactly once, during early single-threaded boot.
+pub unsafe fn init_storage(base: *mut u8, len: usize) {
+    // Store the base before the length so any reader that observes a
+    // non-zero length is guaranteed to also observe a valid pointer.
+    OWNERS_PTR.store(base as u64, Ordering::Release);
+    OWNERS_LEN.store(len as u64, Ordering::Release);
+}
 
-static OWNERS: OwnerArray = OwnerArray(core::cell::UnsafeCell::new([0u8; MAX_FRAMES]));
+/// Number of frames covered by the ownership array (0 before `init_storage`).
+#[inline]
+#[must_use]
+pub fn tracked_frames() -> usize {
+    #[allow(clippy::cast_possible_truncation)]
+    let len = OWNERS_LEN.load(Ordering::Relaxed) as usize;
+    len
+}
+
+/// Resolve the array base for `frame_idx`, or `None` if out of range or
+/// the storage has not been published yet.
+#[inline]
+fn slot(frame_idx: usize) -> Option<*mut u8> {
+    if frame_idx >= tracked_frames() {
+        return None;
+    }
+    let base = OWNERS_PTR.load(Ordering::Relaxed);
+    if base == 0 {
+        return None;
+    }
+    // SAFETY: `frame_idx` is less than the published length, so `base +
+    // frame_idx` lies inside the `len`-byte array carved in `frame::init`.
+    Some(unsafe { (base as *mut u8).add(frame_idx) })
+}
 
 /// Whether frame ownership tracking is enabled.
 ///
@@ -198,6 +256,89 @@ static OWNERS: OwnerArray = OwnerArray(core::cell::UnsafeCell::new([0u8; MAX_FRA
 /// operations on every alloc/free.
 static ENABLED: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(true);
+
+// ---------------------------------------------------------------------------
+// Ambient owner context
+// ---------------------------------------------------------------------------
+
+/// One CPU's current owner tag, padded to its own cache line.
+///
+/// Padding matters because this is written on the allocation hot path: an
+/// unpadded `[AtomicU8; MAX_CPUS]` would put every CPU's tag in one or two
+/// cache lines and turn each `OwnerScope` into a false-sharing storm.
+#[repr(align(64))]
+struct CpuOwner(core::sync::atomic::AtomicU8);
+
+/// Per-CPU ambient owner tag, consulted by the allocator on every alloc.
+///
+/// Defaults to [`Owner::Unknown`] (1) so untagged allocations are reported
+/// as such rather than masquerading as `Free`.
+static CURRENT_OWNER: [CpuOwner; MAX_CPUS] = {
+    #[allow(clippy::declare_interior_mutable_const)]
+    const INIT: CpuOwner = CpuOwner(core::sync::atomic::AtomicU8::new(Owner::Unknown as u8));
+    [INIT; MAX_CPUS]
+};
+
+/// The owner tag that frames allocated on this CPU are currently attributed to.
+#[inline]
+#[must_use]
+pub fn current_owner() -> Owner {
+    let cpu = crate::smp::fast_cpu_index();
+    match CURRENT_OWNER.get(cpu) {
+        Some(c) => Owner::from_u8(c.0.load(Ordering::Relaxed)),
+        None => Owner::Unknown,
+    }
+}
+
+/// Overwrite this CPU's ambient owner tag, returning the previous one.
+#[inline]
+fn swap_current_owner(owner: Owner) -> Owner {
+    let cpu = crate::smp::fast_cpu_index();
+    match CURRENT_OWNER.get(cpu) {
+        Some(c) => Owner::from_u8(c.0.swap(owner as u8, Ordering::Relaxed)),
+        None => Owner::Unknown,
+    }
+}
+
+/// RAII guard that attributes every frame allocated in its scope to `owner`.
+///
+/// ```ignore
+/// let _own = OwnerScope::new(Owner::PageTable);
+/// let frame = frame::alloc_frame()?;   // tagged PageTable
+/// ```
+///
+/// The guard saves the previous tag and restores it on drop, so scopes nest
+/// correctly — including an interrupt handler that opens its own scope in the
+/// middle of another subsystem's.
+///
+/// **Accuracy caveat.** The tag is per-CPU, so if a task is preempted and
+/// migrated to another CPU mid-scope, the restore lands on the new CPU and
+/// the old CPU keeps the tag until its next scope. That can mis-attribute a
+/// handful of frames. This is accepted deliberately: ownership tracking is
+/// diagnostic-only, and the alternative (a lock or a per-task field reachable
+/// from boot and IRQ contexts) would cost more on the allocation hot path than
+/// the precision is worth.
+pub struct OwnerScope {
+    previous: Owner,
+}
+
+impl OwnerScope {
+    /// Begin attributing allocations on this CPU to `owner`.
+    #[inline]
+    #[must_use]
+    pub fn new(owner: Owner) -> Self {
+        Self {
+            previous: swap_current_owner(owner),
+        }
+    }
+}
+
+impl Drop for OwnerScope {
+    #[inline]
+    fn drop(&mut self) {
+        swap_current_owner(self.previous);
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Statistics
@@ -215,27 +356,20 @@ static TOTAL_CLEARS: AtomicU64 = AtomicU64::new(0);
 
 /// Record ownership of a frame.
 ///
-/// Called by the frame allocator after a successful allocation.
-/// If tracking is disabled, this is a no-op.
-///
-/// # Safety
-///
-/// Caller must ensure `frame_idx < MAX_FRAMES` and that this CPU
-/// has exclusive access to the frame (just allocated it).
+/// Called by the frame allocator after a successful allocation.  Out-of-range
+/// indices and the pre-`init_storage` window are silently ignored, and this is
+/// a no-op while tracking is disabled.
 #[inline]
 pub fn set(frame_idx: usize, owner: Owner) {
     if !ENABLED.load(Ordering::Relaxed) {
         return;
     }
-    if frame_idx >= MAX_FRAMES {
-        return;
-    }
-    // SAFETY: Frame was just allocated by this CPU — no concurrent access.
-    // The array is large enough (checked above).  We use raw pointer
-    // arithmetic to avoid creating a reference to the mutable static.
+    let Some(p) = slot(frame_idx) else { return };
+    // SAFETY: `slot` returned an in-bounds pointer into the live ownership
+    // array, and the caller has just allocated this frame, so no other CPU
+    // writes this slot concurrently.
     unsafe {
-        let ptr = OWNERS.0.get() as *mut u8;
-        ptr.add(frame_idx).write(owner as u8);
+        p.write(owner as u8);
     }
     TOTAL_SETS.fetch_add(1, Ordering::Relaxed);
 }
@@ -243,39 +377,35 @@ pub fn set(frame_idx: usize, owner: Owner) {
 /// Clear ownership of a frame (mark as free).
 ///
 /// Called by the frame allocator when a frame is freed.
-///
-/// # Safety
-///
-/// Caller must ensure `frame_idx < MAX_FRAMES` and has exclusive
-/// ownership (is freeing the frame).
 #[inline]
 pub fn clear(frame_idx: usize) {
     if !ENABLED.load(Ordering::Relaxed) {
         return;
     }
-    if frame_idx >= MAX_FRAMES {
-        return;
-    }
-    // SAFETY: Frame is being freed by this CPU — exclusive access.
+    let Some(p) = slot(frame_idx) else { return };
+    // SAFETY: `slot` returned an in-bounds pointer into the live ownership
+    // array, and the caller holds the frame exclusively while freeing it.
     unsafe {
-        let ptr = OWNERS.0.get() as *mut u8;
-        ptr.add(frame_idx).write(Owner::Free as u8);
+        p.write(Owner::Free as u8);
     }
     TOTAL_CLEARS.fetch_add(1, Ordering::Relaxed);
 }
 
 /// Query the owner of a specific frame.
+///
+/// Returns [`Owner::Unknown`] for an out-of-range index or before the
+/// ownership array has been published.
 #[inline]
 #[must_use]
 pub fn get(frame_idx: usize) -> Owner {
-    if frame_idx >= MAX_FRAMES {
+    let Some(p) = slot(frame_idx) else {
         return Owner::Unknown;
-    }
-    // SAFETY: Read-only access, and we checked bounds.
-    let raw = unsafe {
-        let ptr = OWNERS.0.get() as *const u8;
-        ptr.add(frame_idx).read()
     };
+    // SAFETY: `slot` returned an in-bounds pointer into the live ownership
+    // array.  Concurrent writes by an allocating CPU are possible, but a
+    // single-byte read is atomic on x86 and a torn/stale tag is acceptable
+    // for a diagnostic.
+    let raw = unsafe { p.read() };
     Owner::from_u8(raw)
 }
 
@@ -316,23 +446,33 @@ pub struct OwnerSummary {
 
 /// Compute a summary of frame ownership across all physical memory.
 ///
-/// Scans the entire ownership array.  O(MAX_FRAMES) — not for hot paths,
-/// but fine for diagnostics (takes < 1ms for 65536 frames).
+/// Scans the entire ownership array.  O(`tracked_frames`) — not for hot
+/// paths, but fine for diagnostics (a byte scan of one array).
 #[must_use]
 pub fn summary() -> OwnerSummary {
     let mut counts = [0u32; Owner::COUNT];
     let mut total_free: u32 = 0;
     let mut total_allocated: u32 = 0;
 
-    for i in 0..MAX_FRAMES {
-        // SAFETY: i is in bounds (0..MAX_FRAMES).
-        let raw = unsafe {
-            let ptr = OWNERS.0.get() as *const u8;
-            ptr.add(i).read()
+    let len = tracked_frames();
+    let base = OWNERS_PTR.load(Ordering::Relaxed) as *const u8;
+    if base.is_null() {
+        return OwnerSummary {
+            counts,
+            total_allocated: 0,
+            total_free: 0,
+            total_sets: TOTAL_SETS.load(Ordering::Relaxed),
+            total_clears: TOTAL_CLEARS.load(Ordering::Relaxed),
         };
-        let idx = raw as usize;
-        if idx < Owner::COUNT {
-            counts[idx] = counts[idx].saturating_add(1);
+    }
+
+    for i in 0..len {
+        // SAFETY: `i < len`, the published length of the array at `base`.
+        let raw = unsafe { base.add(i).read() };
+        // An out-of-range byte can only mean a corrupted record; skip it
+        // rather than indexing blindly.
+        if let Some(slot) = counts.get_mut(raw as usize) {
+            *slot = slot.saturating_add(1);
         }
         if raw == 0 {
             total_free = total_free.saturating_add(1);
@@ -358,18 +498,23 @@ pub fn find_by_owner(owner: Owner, buf: &mut [usize]) -> usize {
     let target = owner as u8;
     let mut found = 0;
 
-    for i in 0..MAX_FRAMES {
+    let len = tracked_frames();
+    let base = OWNERS_PTR.load(Ordering::Relaxed) as *const u8;
+    if base.is_null() {
+        return 0;
+    }
+
+    for i in 0..len {
         if found >= buf.len() {
             break;
         }
-        // SAFETY: i is in bounds (0..MAX_FRAMES).
-        let raw = unsafe {
-            let ptr = OWNERS.0.get() as *const u8;
-            ptr.add(i).read()
-        };
+        // SAFETY: `i < len`, the published length of the array at `base`.
+        let raw = unsafe { base.add(i).read() };
         if raw == target {
-            buf[found] = i;
-            found += 1;
+            if let Some(dst) = buf.get_mut(found) {
+                *dst = i;
+            }
+            found = found.saturating_add(1);
         }
     }
     found
@@ -384,16 +529,29 @@ pub fn top_owners() -> [(Owner, u32); Owner::COUNT] {
     let s = summary();
     let mut result = [(Owner::Free, 0u32); Owner::COUNT];
 
-    for (i, &count) in s.counts.iter().enumerate() {
-        result[i] = (Owner::from_u8(i as u8), count);
+    // `result` and `s.counts` are both `Owner::COUNT` long, so zip pairs
+    // them exactly — no indexing needed.
+    for (i, (dst, &count)) in result.iter_mut().zip(s.counts.iter()).enumerate() {
+        #[allow(clippy::cast_possible_truncation)]
+        let tag = Owner::from_u8(i as u8);
+        *dst = (tag, count);
     }
 
     // Sort by count descending (simple insertion sort, N=24 is tiny).
     for i in 1..Owner::COUNT {
         let mut j = i;
-        while j > 0 && result[j].1 > result[j - 1].1 {
-            result.swap(j, j - 1);
-            j -= 1;
+        // `j` and `j - 1` are both < Owner::COUNT == result.len() here, but
+        // read them through `get` so a future change to the bounds cannot
+        // turn this into a panic.
+        while j > 0 {
+            let (Some(cur), Some(prev)) = (result.get(j), result.get(j.wrapping_sub(1))) else {
+                break;
+            };
+            if cur.1 <= prev.1 {
+                break;
+            }
+            result.swap(j, j.wrapping_sub(1));
+            j = j.wrapping_sub(1);
         }
     }
 
@@ -405,101 +563,200 @@ pub fn top_owners() -> [(Owner, u32); Owner::COUNT] {
 // ---------------------------------------------------------------------------
 
 /// Self-test for frame ownership tracking.
+///
+/// Note on methodology: the ownership array is now **live** — the frame
+/// allocator writes it on every alloc/free — so this test must never scribble
+/// on an arbitrary frame index, which would corrupt a real frame's record.
+/// Every index it writes is either a frame it allocated itself (and frees
+/// again) or is saved and restored around the check.
+// `expect_used` is suppressed because this is a boot self-test: an allocation
+// failing here means the frame allocator is broken, and panicking loudly at
+// boot is the correct response — propagating the error would let a broken
+// allocator boot silently.  The surrounding `assert!`s have the same intent.
+#[allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::expect_used
+)]
 pub fn self_test() {
+    use crate::mm::frame;
+
     serial_println!("[frame_owner] Running self-test...");
 
-    // Test 1: Default state — all frames are Free.
-    let owner = get(0);
-    assert_eq!(owner, Owner::Free, "frame 0 should start as Free");
-    serial_println!("[frame_owner]   Default Free state: OK");
+    // Test 1: storage was published by frame::init and covers ALL installed
+    // RAM.  This is the regression test for TD-FRAME-OWNER-1GIB: the array
+    // used to be a fixed 65536 frames (= 1 GiB), silently dropping every tag
+    // above that.
+    let tracked = tracked_frames();
+    assert!(tracked > 0, "ownership array must be published by frame::init");
+    if let Some(st) = frame::stats() {
+        assert_eq!(
+            tracked, st.total_frames,
+            "ownership array must cover every frame the allocator manages"
+        );
+        serial_println!(
+            "[frame_owner]   Covers all {} frames ({} MiB): OK",
+            tracked,
+            (tracked * frame::FRAME_SIZE) / (1024 * 1024)
+        );
+    }
 
-    // Test 2: Set and get.
-    set(100, Owner::HeapSlab);
-    assert_eq!(get(100), Owner::HeapSlab);
-    set(101, Owner::KernelStack);
-    assert_eq!(get(101), Owner::KernelStack);
-    set(102, Owner::PageTable);
-    assert_eq!(get(102), Owner::PageTable);
-    serial_println!("[frame_owner]   Set/get round-trip: OK");
+    // Test 2: a frame index beyond the old fixed 1 GiB window round-trips.
+    // Skipped on machines with <= 1 GiB, where there is no such index.
+    const OLD_CEILING: usize = 65536; // the historical MAX_FRAMES
+    if tracked > OLD_CEILING {
+        let high = tracked - 1;
+        let saved = get(high);
+        set(high, Owner::Dma);
+        assert_eq!(
+            get(high),
+            Owner::Dma,
+            "frame above the old 1 GiB ceiling must be tracked"
+        );
+        set(high, saved); // restore the real record
+        assert_eq!(get(high), saved);
+        serial_println!(
+            "[frame_owner]   High frame {} (> old {}-frame window): OK",
+            high,
+            OLD_CEILING
+        );
+    } else {
+        serial_println!(
+            "[frame_owner]   High-frame test skipped ({tracked} frames <= {OLD_CEILING})"
+        );
+    }
 
-    // Test 3: Clear resets to Free.
-    clear(100);
-    assert_eq!(get(100), Owner::Free);
-    clear(101);
-    clear(102);
-    serial_println!("[frame_owner]   Clear resets to Free: OK");
-
-    // Test 4: Out-of-bounds returns Unknown without panicking.
-    assert_eq!(get(MAX_FRAMES + 1), Owner::Unknown);
-    set(MAX_FRAMES + 1, Owner::Dma); // Should be no-op.
+    // Test 3: out-of-bounds is inert — no panic, no wild write.
+    assert_eq!(get(tracked), Owner::Unknown, "OOB get must report Unknown");
+    assert_eq!(get(tracked + 1_000_000), Owner::Unknown);
+    set(tracked, Owner::Dma); // must be a no-op
+    clear(tracked); // must be a no-op
     serial_println!("[frame_owner]   Out-of-bounds safety: OK");
 
-    // Test 5: Summary reports correct counts.
-    set(200, Owner::UserAnon);
-    set(201, Owner::UserAnon);
-    set(202, Owner::UserAnon);
-    set(203, Owner::Dma);
-    let s = summary();
-    assert!(s.counts[Owner::UserAnon as usize] >= 3);
-    assert!(s.counts[Owner::Dma as usize] >= 1);
-    // Cleanup.
-    clear(200);
-    clear(201);
-    clear(202);
-    clear(203);
-    serial_println!("[frame_owner]   Summary counting: OK");
+    // Test 4: end-to-end wiring — a frame allocated inside an OwnerScope is
+    // tagged with that owner, and freeing it clears the tag.  This is the
+    // test that actually proves `set`/`clear` are reached from the allocator
+    // (they used to have no callers at all).
+    {
+        let frame_a = {
+            let _scope = OwnerScope::new(Owner::SelfTest);
+            frame::alloc_frame().expect("self-test frame alloc must succeed")
+        };
+        let idx = (frame_a.addr() / frame::FRAME_SIZE as u64) as usize;
+        assert_eq!(
+            get(idx),
+            Owner::SelfTest,
+            "allocation inside an OwnerScope must be tagged with it"
+        );
+        // SAFETY: `frame_a` was just allocated here and no mapping or
+        // reference to its memory was ever created, so freeing it is sound.
+        unsafe {
+            frame::free_frame(frame_a).expect("self-test frame free must succeed");
+        }
+        assert_eq!(get(idx), Owner::Free, "freeing a frame must clear its tag");
+        serial_println!("[frame_owner]   Alloc/free tagging round-trip: OK");
+    }
 
-    // Test 6: find_by_owner locates tagged frames.
-    set(300, Owner::Crypto);
-    set(301, Owner::Crypto);
-    set(302, Owner::Crypto);
-    let mut buf = [0usize; 8];
-    let found = find_by_owner(Owner::Crypto, &mut buf);
-    assert!(found >= 3, "should find at least 3 Crypto frames");
-    assert!(buf[..found].contains(&300));
-    assert!(buf[..found].contains(&301));
-    assert!(buf[..found].contains(&302));
-    // Cleanup.
-    clear(300);
-    clear(301);
-    clear(302);
-    serial_println!("[frame_owner]   find_by_owner: OK");
+    // Test 5: OwnerScope nests and restores the previous tag on drop.
+    assert_eq!(current_owner(), Owner::Unknown, "default tag is Unknown");
+    {
+        let _outer = OwnerScope::new(Owner::PageTable);
+        assert_eq!(current_owner(), Owner::PageTable);
+        {
+            let _inner = OwnerScope::new(Owner::KernelStack);
+            assert_eq!(current_owner(), Owner::KernelStack);
+        }
+        assert_eq!(
+            current_owner(),
+            Owner::PageTable,
+            "inner scope must restore the outer tag"
+        );
+    }
+    assert_eq!(
+        current_owner(),
+        Owner::Unknown,
+        "outermost scope must restore the default tag"
+    );
+    serial_println!("[frame_owner]   OwnerScope nesting: OK");
 
-    // Test 7: top_owners sorting.
-    set(400, Owner::Vmalloc);
-    set(401, Owner::Vmalloc);
-    set(402, Owner::Vmalloc);
-    set(403, Owner::Vmalloc);
-    set(410, Owner::NetBuffer);
-    set(411, Owner::NetBuffer);
+    // Test 6: summary() and find_by_owner() see a live tag.
+    {
+        let frame_b = {
+            let _scope = OwnerScope::new(Owner::Crypto);
+            frame::alloc_frame().expect("self-test frame alloc must succeed")
+        };
+        let idx = (frame_b.addr() / frame::FRAME_SIZE as u64) as usize;
+
+        let s = summary();
+        assert!(
+            s.counts[Owner::Crypto as usize] >= 1,
+            "summary must count the Crypto-tagged frame"
+        );
+        assert!(
+            s.total_allocated >= 1,
+            "summary must report allocated frames"
+        );
+
+        let mut buf = [0usize; 8];
+        let found = find_by_owner(Owner::Crypto, &mut buf);
+        assert!(found >= 1, "find_by_owner must locate the tagged frame");
+        assert!(
+            buf[..found].contains(&idx),
+            "find_by_owner must return the frame we tagged"
+        );
+
+        // SAFETY: `frame_b` was just allocated here and is unmapped and
+        // unreferenced, so freeing it is sound.
+        unsafe {
+            frame::free_frame(frame_b).expect("self-test frame free must succeed");
+        }
+        serial_println!("[frame_owner]   summary/find_by_owner: OK");
+    }
+
+    // Test 7: top_owners is sorted descending.  Most frames are unallocated,
+    // so `Free` should lead.
     let top = top_owners();
-    // Free should be at top (most frames are unallocated).
-    assert_eq!(top[0].0, Owner::Free, "Free should have most frames");
-    // Cleanup.
-    clear(400);
-    clear(401);
-    clear(402);
-    clear(403);
-    clear(410);
-    clear(411);
+    for w in top.windows(2) {
+        assert!(w[0].1 >= w[1].1, "top_owners must be sorted descending");
+    }
+    assert_eq!(top[0].0, Owner::Free, "Free should have the most frames");
     serial_println!("[frame_owner]   top_owners sorted: OK");
 
-    // Test 8: Disable/enable.
-    disable();
-    set(500, Owner::Boot);
-    assert_eq!(get(500), Owner::Free, "set should be no-op when disabled");
-    enable();
-    set(500, Owner::Boot);
-    assert_eq!(get(500), Owner::Boot, "set should work when re-enabled");
-    clear(500);
-    serial_println!("[frame_owner]   Enable/disable toggle: OK");
+    // Test 8: disable() suppresses updates; enable() restores them.  Use a
+    // frame we own so a suppressed update cannot corrupt a live record.
+    {
+        let frame_c = frame::alloc_frame().expect("self-test frame alloc must succeed");
+        let idx = (frame_c.addr() / frame::FRAME_SIZE as u64) as usize;
+        let before = get(idx);
 
-    // Test 9: Statistics tracking.
+        disable();
+        set(idx, Owner::Boot);
+        assert_eq!(get(idx), before, "set must be a no-op while disabled");
+        enable();
+        set(idx, Owner::Boot);
+        assert_eq!(get(idx), Owner::Boot, "set must work once re-enabled");
+
+        // SAFETY: `frame_c` was just allocated here and is unmapped and
+        // unreferenced, so freeing it is sound.  The free also restores the
+        // tag to `Free`.
+        unsafe {
+            frame::free_frame(frame_c).expect("self-test frame free must succeed");
+        }
+        serial_println!("[frame_owner]   Enable/disable toggle: OK");
+    }
+
+    // Test 9: statistics moved, proving the allocator hit set() and clear().
     let s2 = summary();
-    assert!(s2.total_sets > 0);
-    assert!(s2.total_clears > 0);
-    serial_println!("[frame_owner]   Stats: sets={}, clears={}",
-        s2.total_sets, s2.total_clears);
+    assert!(s2.total_sets > 0, "allocator must have recorded set() calls");
+    assert!(
+        s2.total_clears > 0,
+        "allocator must have recorded clear() calls"
+    );
+    serial_println!(
+        "[frame_owner]   Stats: sets={}, clears={}",
+        s2.total_sets,
+        s2.total_clears
+    );
 
     serial_println!("[frame_owner] Self-test PASSED");
 }

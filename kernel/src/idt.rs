@@ -2672,10 +2672,15 @@ fn try_grow_user_stack(cr2: u64, error: u64, pid: u64) -> bool {
         core::arch::asm!("mov {}, cr3", out(reg) pml4_phys, options(nomem, nostack, preserves_flags));
     }
 
-    // Allocate a zeroed physical frame for the new stack page.
-    let phys_frame = match frame::alloc_frame_zeroed() {
-        Ok(f) => f,
-        Err(_) => return false, // OOM or HHDM unavailable — can't grow stack.
+    // Allocate a zeroed physical frame for the new stack page.  A grown user
+    // stack page is anonymous user memory for census purposes.
+    let phys_frame = {
+        let _own =
+            crate::mm::frame_owner::OwnerScope::new(crate::mm::frame_owner::Owner::UserAnon);
+        match frame::alloc_frame_zeroed() {
+            Ok(f) => f,
+            Err(_) => return false, // OOM or HHDM unavailable — can't grow stack.
+        }
     };
 
     // Map the frame with user read/write/no-execute permissions.

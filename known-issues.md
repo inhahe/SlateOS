@@ -24621,7 +24621,7 @@ to line start (`grep -q "^$WAIT_MARKER"` / `^BOOT_OK`) in `scripts/boot-test.sh`
 so only the standalone marker line counts.  Found while validating the
 fastpy-nice (nice→priority) self-test.
 
-### TD-FRAME-OWNER-1GIB. `frame_owner` ownership array only tracks the first 1 GiB of RAM (fixed `[u8; 65536]`) — 2026-07-22 — OPEN (diagnostic-only; low severity)
+### TD-FRAME-OWNER-1GIB. `frame_owner` ownership array only tracks the first 1 GiB of RAM (fixed `[u8; 65536]`) — 2026-07-22 — ✅ RESOLVED 2026-08-14 (array made dynamic *and* wired into the allocator)
 
 **Where:** `kernel/src/mm/frame_owner.rs` — `const MAX_FRAMES: usize = 65536;`
 and the `OwnerArray([u8; MAX_FRAMES])` static; `set`/`get`/`clear` no-op when
@@ -24655,6 +24655,74 @@ carve `total_frames` bytes from the frame-allocator metadata region in
 and bounds-check `set`/`get`/`clear` against the dynamic length. The metadata
 region already reserves per-frame bytes; adding one more `total_frames`-byte
 sub-array is the same pattern used for `page_info`/`refcount`/cgroup.
+
+---
+
+**RESOLVED 2026-08-14.** Both halves were done together, exactly as the note
+above insisted — resizing the array alone would have been busywork while
+`set`/`clear` still had no callers.
+
+**1. Dynamic array.** `const MAX_FRAMES = 65536` and the
+`OwnerArray([u8; MAX_FRAMES])` static are gone. `frame::plan_metadata` now
+reserves a fourth per-frame sub-array (`owner_offset = cgroup_offset +
+total_frames`), `frame::init` zeroes it (`0` == `Owner::Free`) and publishes it
+via `frame_owner::init_storage(ptr, total_frames)`; `OWNERS_PTR`/`OWNERS_LEN`
+back a `slot()` helper that every accessor goes through. Same pattern as the
+cgroup array (BUG-CGROUP-1GIB). Boot confirms the carve:
+`[mm] Metadata: ... [page_info: 327680B, refcount: 655360B, cgroup: 327680B, owner: 327680B]`.
+
+**2. Actually wired up.** `tag_alloc_owner`/`untag_free_owner` are called from
+all six allocator choke points: both per-CPU fast paths in `alloc_frame`, the
+zero-pool pop in `alloc_frame_zeroed`, `alloc_order`, `alloc_order_constrained`,
+`free_frame` and `free_order`. The zero-pool refiller tags parked frames
+`Owner::ZeroPool`; the consumer re-tags on pop.
+
+**3. Ambient owner context.** The allocator cannot know its caller, so
+attribution comes from `OwnerScope` — a cache-line-padded per-CPU RAII guard
+that saves the previous tag and restores it on drop, so it nests correctly even
+when an IRQ handler allocates inside another subsystem's scope. Tagged so far:
+page tables (`page_table.rs` PT-page pool refill), kernel stacks (`kstack.rs`),
+slab + large heap (`heap.rs`), CoW (`cow.rs`), and user anon pages (`vma.rs`
+demand paging, `idt.rs` stack growth). Untagged allocations record
+`Owner::Unknown`, which is honest rather than wrong.
+
+Known accuracy limit, documented on `OwnerScope`: the tag is per-CPU, so a task
+preempted and migrated mid-scope restores onto the new CPU and can mis-attribute
+a handful of frames. Accepted deliberately — this is diagnostic-only, and a lock
+or a per-task field reachable from boot/IRQ contexts would cost more on the
+allocation hot path than the precision is worth.
+
+**Verified.** Boot PASSED 273s; the rewritten self-test reports:
+
+```
+[frame_owner]   Covers all 327680 frames (5120 MiB): OK
+[frame_owner]   High frame 327679 (> old 65536-frame window): OK
+[frame_owner]   Alloc/free tagging round-trip: OK
+[frame_owner]   OwnerScope nesting: OK
+[frame_owner]   summary/find_by_owner: OK
+[frame_owner]   Stats: sets=155837, clears=299809
+```
+
+The second line is the direct regression test for this bug. The nonzero
+`sets`/`clears` are the proof that the allocator now reaches this module at all.
+
+*On `clears` > `sets`:* these count **calls, not transitions**. `clear()` runs on
+every free, including frames that were never tagged — anything allocated before
+`init_storage` published the array, plus rollback paths that free via
+`free_order_inner` without a matching tagged alloc. Not a leak; the per-frame
+state is still a correct free/allocated mirror, as test 4's round-trip shows.
+
+**The self-test had to be rewritten, not just extended.** The old one wrote raw
+indices (100, 200, 300…) straight into the array. That was harmless while
+nothing populated it, but the moment the allocator went live those writes would
+corrupt *real* frames' records. It now allocates and frees actual frames for
+every check, and saves/restores around the one raw-index probe.
+
+**Side effect: found and fixed a latent bug.** Making `current_owner()` run on
+every allocation pulled `smp::fast_cpu_index()` into early boot and exposed
+B-SMP-FAST-CPU-INDEX-PANICS-BEFORE-APIC-INIT (tier-3 APIC fallback reads a null
+APIC base before `apic::init` — panic in debug, wild read in release). See that
+entry.
 
 ### BUG-CGROUP-1GIB. (RESOLVED 2026-07-22) per-frame cgroup array only covered the first 1 GiB → cgroup accounting leak above 1 GiB
 
@@ -58029,3 +58097,54 @@ Two ways to make deferring the shootdown actually sound:
 invisible gap into a measured one — it says whether this is a once-a-boot event
 or a never event, which decides whether (a)/(b) is worth its risk at all, and it
 is the only way to tell afterwards that the fix worked.
+
+---
+
+### B-SMP-FAST-CPU-INDEX-PANICS-BEFORE-APIC-INIT. `smp::fast_cpu_index()` reads the APIC before it is mapped — `debug_assert` panic in debug, wild read in release — FIXED 2026-08-14
+
+**Where:** `kernel/src/smp.rs` — the tier-3 fallback in `fast_cpu_index()`;
+`kernel/src/apic.rs:~214` — `apic_read()`'s `debug_assert!(base != 0, "APIC not
+initialized")`.
+
+**What.** `fast_cpu_index()` has three tiers: RDPID, then `rdtscp`, then an APIC
+MMIO read. On a CPU where neither RDPID nor `rdtscp` is advertised — which is
+exactly the boot-test configuration, `qemu64,+smep,+smap,+umip` under TCG —
+every call lands in tier 3 and does `crate::apic::read_id()`. Before
+`apic::init` has run, `APIC_BASE_VIRT` is still 0, so:
+
+- **debug builds:** `debug_assert!` fires → `KERNEL PANIC: APIC not initialized`.
+- **release builds:** *worse* — the assert is compiled out and `apic_read`
+  dereferences `(0 + offset) as *const u32`, a wild read of low memory. Silent
+  garbage, or a fault, depending on what is mapped there.
+
+**How it surfaced.** Wiring `frame_owner` ownership tagging into the frame
+allocator (TD-FRAME-OWNER-1GIB) made `current_owner()` — and therefore
+`fast_cpu_index()` — run on *every* frame allocation, including the allocator's
+own boot-time self-test. That self-test runs long before `apic::init`, so the
+kernel panicked at `[mm] Running frame allocator self-test...`:
+
+```
+!!! KERNEL PANIC !!!
+panicked at kernel\src\apic.rs:214:5:
+APIC not initialized
+  Task: 0 (""), priority 0, cpu 0
+```
+
+**Why it was latent.** The pre-existing tier-3 callers were all gated behind
+flags that only go true well after APIC init — the frame allocator's own
+per-CPU cache checks `PCPU_ENABLED` first, for instance. Nothing called
+`fast_cpu_index()` early, so the landmine was never stepped on. It was a real
+bug regardless: the function's contract claims tier 3 "always works", and any
+future early-boot caller would have hit it, in release builds silently.
+
+**Fix.** Added `apic::is_ready()` (`APIC_BASE_VIRT != 0`) and made tier 3 check
+it, returning CPU 0 when the APIC is not yet mapped. That is not a fudge: before
+`apic::init` the system is strictly uniprocessor (BSP only), so 0 is the
+*correct* index, not a fallback guess. Cost is one relaxed atomic load on the
+already-slowest tier; tiers 1 and 2 are untouched, so real hardware pays
+nothing.
+
+**Lesson.** A "this can't happen yet" precondition that is enforced only by the
+accident of who happens to call the function is not enforced at all. When the
+cheap tiers of a tiered fast path are unavailable, the "always works" fallback
+is the one that runs — so it is the one that has to actually always work.

@@ -316,7 +316,16 @@ Known-issues (open, kernel-owned):
 - `B-FORKEXEC-BOOT-HANG` — intermittent hang at the glibc fork+exec self-test
 - `B-KASAN-INSTRUMENTED-BOOT-WEDGES-MID-PRINT-ON-A-PAGE-FAULT` — re-run with
   `--hard-lockup-watchdog`
-- `TD-FRAME-OWNER-1GIB` — `frame_owner` only tracks the first 1 GiB
+- ~~`TD-FRAME-OWNER-1GIB`~~ — **RESOLVED 2026-08-14**: the owner array is no
+  longer a fixed 65536-entry static (1 GiB at 16 KiB pages); it is carved from
+  the frame-allocator metadata region alongside `page_info`/`refcount`/`cgroup`
+  and sized to `total_frames`. It is also now actually *wired in* — six hook
+  sites in `frame.rs` tag on alloc and untag on free, with an ambient per-CPU
+  `OwnerScope` RAII guard supplying the attribution. Boot-verified: the carve
+  line reports `owner: 327680B` (327680 frames = 5120 MiB tracked) and all 9
+  self-tests pass, including a direct regression test at frame index 327679.
+  Fixing this surfaced `B-SMP-FAST-CPU-INDEX-PANICS-BEFORE-APIC-INIT` (also
+  fixed 2026-08-14).
 - `W-KERNEL-COW-WRITE` — kernel-mode write fault on a user COW page
 - `TD-KSHELL-LINE-EDITOR-IS-UTF8` — byte-input escape + `PathBuf` completion
   candidates (~270 `resolve_path` call sites in `kernel/src/kshell.rs`)

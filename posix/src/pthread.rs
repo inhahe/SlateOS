@@ -69,6 +69,10 @@
 //!   lock/unlock (no futex-based blocking yet).
 
 use crate::errno;
+// The stack floor lives with the other pthread limits; `pthread_attr_setstack`
+// and `pthread_attr_setstacksize` are the only users, and they must agree with
+// it rather than carry a second, hardcoded value of their own.
+use crate::linux_pthread_key_types::PTHREAD_STACK_MIN;
 use crate::syscall;
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 
@@ -1724,13 +1728,20 @@ pub extern "C" fn pthread_attr_destroy(_attr: *mut PthreadAttrT) -> i32 {
 }
 
 /// Set the stack size in a thread attribute object.
+///
+/// A size below [`PTHREAD_STACK_MIN`] is `EINVAL`, and that verdict is
+/// reached **before** `attr` is examined — glibc's
+/// `__pthread_attr_setstacksize` (nptl/pthread_attr_setstacksize.c) opens with
+/// `int ret = check_stacksize_attr (stacksize); if (ret) return ret;` and only
+/// then dereferences the attribute, so on Linux a too-small size wins over a
+/// bad pointer.  See `design-decisions.md` §303.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_attr_setstacksize(attr: *mut PthreadAttrT, stacksize: usize) -> i32 {
+    if stacksize < PTHREAD_STACK_MIN as usize {
+        return errno::EINVAL;
+    }
     if attr.is_null() {
         return errno::EFAULT;
-    }
-    if stacksize < 4096 {
-        return errno::EINVAL;
     }
     // Store stack size at bytes [0..8).
     // SAFETY: attr is non-null, 64 bytes — we only write 8 bytes.
@@ -1769,13 +1780,20 @@ pub const PTHREAD_CREATE_JOINABLE: i32 = 0;
 pub const PTHREAD_CREATE_DETACHED: i32 = 1;
 
 /// Set the detach state in a thread attribute object.
+///
+/// A state that is neither `PTHREAD_CREATE_JOINABLE` nor
+/// `PTHREAD_CREATE_DETACHED` is `EINVAL`, decided before `attr` is examined —
+/// glibc's `__pthread_attr_setdetachstate`
+/// (nptl/pthread_attr_setdetachstate.c) opens with the `/* Catch invalid
+/// values.  */` test and dereferences the attribute only afterwards.  See
+/// `design-decisions.md` §303.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_attr_setdetachstate(attr: *mut PthreadAttrT, detachstate: i32) -> i32 {
-    if attr.is_null() {
-        return errno::EFAULT;
-    }
     if detachstate != PTHREAD_CREATE_JOINABLE && detachstate != PTHREAD_CREATE_DETACHED {
         return errno::EINVAL;
+    }
+    if attr.is_null() {
+        return errno::EFAULT;
     }
     // Store detach state at byte offset 8.
     // SAFETY: attr is non-null and 64 bytes.
@@ -1844,17 +1862,22 @@ pub extern "C" fn pthread_attr_getstack(
 /// Set both the stack address and size in a thread attribute object.
 ///
 /// `stackaddr` is the lowest address of the caller-provided stack region.
+///
+/// As with [`pthread_attr_setstacksize`], the size is checked against
+/// [`PTHREAD_STACK_MIN`] before `attr` is examined: glibc's
+/// `__pthread_attr_setstack` (nptl/pthread_attr_setstack.c) shares the same
+/// `check_stacksize_attr` prologue.  See `design-decisions.md` §303.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_attr_setstack(
     attr: *mut PthreadAttrT,
     stackaddr: *mut core::ffi::c_void,
     stacksize: usize,
 ) -> i32 {
+    if stacksize < PTHREAD_STACK_MIN as usize {
+        return errno::EINVAL;
+    }
     if attr.is_null() {
         return errno::EFAULT;
-    }
-    if stacksize < 4096 {
-        return errno::EINVAL;
     }
     let p = attr.cast::<u8>();
     // SAFETY: attr is non-null; writing 8 bytes at offsets 0 and 16 ends at
@@ -1956,21 +1979,33 @@ pub type PthreadBarrierattrT = [u8; 4];
 /// Return value for the one thread designated as the "serial thread".
 pub const PTHREAD_BARRIER_SERIAL_THREAD: i32 = -1;
 
+/// Upper bound on a barrier's `count`, matching glibc's `BARRIER_IN_THRESHOLD`
+/// (`UINT_MAX / 2`, sysdeps/nptl/internaltypes.h:119).  glibc reserves the top
+/// half of the arrival counter's range for its reset protocol; we have the same
+/// need for a different reason — our arrival counter is an `AtomicI32`, so a
+/// `count` above `i32::MAX` could never be reached and the barrier would hang.
+const BARRIER_IN_THRESHOLD: u32 = u32::MAX / 2;
+
 /// Initialize a barrier.
 ///
 /// `count` is the number of threads that must call `pthread_barrier_wait`
-/// before any of them successfully return.  Must be > 0.
+/// before any of them successfully return.  It must be greater than 0 and
+/// below [`BARRIER_IN_THRESHOLD`]; both bounds are checked before `barrier` is
+/// examined, because glibc's `___pthread_barrier_init`
+/// (nptl/pthread_barrier_init.c) opens with `if (__glibc_unlikely (count == 0
+/// || count >= BARRIER_IN_THRESHOLD)) return EINVAL;` and casts the barrier
+/// only afterwards.  See `design-decisions.md` §303.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_barrier_init(
     barrier: *mut PthreadBarrierT,
     _attr: *const PthreadBarrierattrT,
     count: u32,
 ) -> i32 {
+    if count == 0 || count >= BARRIER_IN_THRESHOLD {
+        return errno::EINVAL;
+    }
     if barrier.is_null() {
         return errno::EFAULT;
-    }
-    if count == 0 {
-        return errno::EINVAL;
     }
     // SAFETY: barrier is non-null.
     unsafe {
@@ -2275,13 +2310,19 @@ pub extern "C" fn pthread_mutexattr_destroy(_attr: *mut PthreadMutexattrT) -> i3
 ///
 /// Supported types: `PTHREAD_MUTEX_NORMAL` (default),
 /// `PTHREAD_MUTEX_RECURSIVE`, `PTHREAD_MUTEX_ERRORCHECK`.
+///
+/// An out-of-range `kind` is `EINVAL` and outranks a bad `attr` — glibc's
+/// `___pthread_mutexattr_settype` (nptl/pthread_mutexattr_settype.c) opens
+/// with `if (kind < PTHREAD_MUTEX_NORMAL || kind > PTHREAD_MUTEX_ADAPTIVE_NP)
+/// return EINVAL;` and casts `attr` only afterwards.  See
+/// `design-decisions.md` §303.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_mutexattr_settype(attr: *mut PthreadMutexattrT, kind: i32) -> i32 {
-    if attr.is_null() {
-        return errno::EFAULT;
-    }
     if !(0..=2).contains(&kind) {
         return errno::EINVAL;
+    }
+    if attr.is_null() {
+        return errno::EFAULT;
     }
     // Store kind in first 4 bytes (all 4 bytes of the attr).
     // SAFETY: attr is non-null and 4 bytes.
@@ -2424,14 +2465,20 @@ pub extern "C" fn pthread_condattr_destroy(_attr: *mut PthreadCondattrT) -> i32 
 /// Stores the clock ID for use by `pthread_cond_timedwait`.
 /// We accept any valid clock but our timedwait currently only uses
 /// the real-time clock.
+///
+/// A clock other than `CLOCK_REALTIME`/`CLOCK_MONOTONIC` is `EINVAL`, and that
+/// verdict precedes any look at `attr` — glibc's
+/// `__pthread_condattr_setclock` (nptl/pthread_condattr_setclock.c) opens with
+/// `/* Only a few clocks are allowed.  */` and casts `attr` only afterwards.
+/// See `design-decisions.md` §303.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_condattr_setclock(attr: *mut PthreadCondattrT, clock_id: i32) -> i32 {
-    if attr.is_null() {
-        return errno::EFAULT;
-    }
     // Validate clock_id.
     if clock_id != crate::time::CLOCK_REALTIME && clock_id != crate::time::CLOCK_MONOTONIC {
         return errno::EINVAL;
+    }
+    if attr.is_null() {
+        return errno::EFAULT;
     }
     // Store in first 4 bytes.
     unsafe {
@@ -2483,18 +2530,27 @@ pub extern "C" fn pthread_rwlockattr_destroy(_attr: *mut PthreadRwlockattrT) -> 
 
 /// Set the process-shared attribute for a rwlock.
 ///
-/// We only support `PTHREAD_PROCESS_PRIVATE` (0).
+/// We only support `PTHREAD_PROCESS_PRIVATE` (0); `PTHREAD_PROCESS_SHARED` is
+/// `ENOTSUP` because we have no cross-process futex.  A value that is neither
+/// is `EINVAL`, not `ENOTSUP` — glibc's `__pthread_rwlockattr_setpshared`
+/// (nptl/pthread_rwlockattr_setpshared.c) delegates to
+/// `futex_supports_pshared` (sysdeps/nptl/futex-internal.h:102), which accepts
+/// both POSIX values and returns `EINVAL` for anything else.  Both verdicts are
+/// reached before `attr` is cast, so an out-of-domain value outranks a bad
+/// pointer.  See `design-decisions.md` §303.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_rwlockattr_setpshared(
     attr: *mut PthreadRwlockattrT,
     pshared: i32,
 ) -> i32 {
+    if pshared != PTHREAD_PROCESS_PRIVATE && pshared != PTHREAD_PROCESS_SHARED {
+        return errno::EINVAL;
+    }
+    if pshared == PTHREAD_PROCESS_SHARED {
+        return errno::ENOTSUP;
+    }
     if attr.is_null() {
         return errno::EFAULT;
-    }
-    if pshared != PTHREAD_PROCESS_PRIVATE {
-        // PTHREAD_PROCESS_SHARED not supported.
-        return errno::ENOTSUP;
     }
     unsafe {
         core::ptr::write_unaligned(attr.cast::<i32>(), pshared);
@@ -2660,19 +2716,26 @@ pub unsafe extern "C" fn pthread_setname_np(thread: PthreadT, name: *const u8) -
 /// Get the name of a thread (GNU extension).
 ///
 /// Copies the thread name into `name` (at most `len` bytes including null).
-/// Returns 0 on success, ERANGE if buffer too small.  A thread with no
-/// name set yields the empty string.
+/// A thread with no name set yields the empty string.
+///
+/// `len` must be at least [`PTHREAD_NAME_MAX`] (Linux's `TASK_COMM_LEN`, 16)
+/// *whatever the name's actual length*, and that is the first thing checked —
+/// glibc's `__pthread_getname_np` (nptl/pthread_getname.c) opens with `if (len
+/// < TASK_COMM_LEN) return ERANGE;` and touches `buf` only afterwards, via
+/// `prctl (PR_GET_NAME, buf)` or a read from `/proc/self/task/<tid>/comm`.  So
+/// a short buffer outranks a null one, and a 4-byte buffer is `ERANGE` even
+/// for a 2-character name.  See `design-decisions.md` §303.
 ///
 /// # Safety
 ///
 /// `name` must be valid for `len` bytes.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn pthread_getname_np(thread: PthreadT, name: *mut u8, len: usize) -> i32 {
+    if len < PTHREAD_NAME_MAX {
+        return errno::ERANGE;
+    }
     if name.is_null() {
         return errno::EFAULT;
-    }
-    if len == 0 {
-        return errno::EINVAL;
     }
 
     // Snapshot the name under the lock into a local buffer, then copy out.
@@ -2704,19 +2767,20 @@ pub unsafe extern "C" fn pthread_getname_np(thread: PthreadT, name: *mut u8, len
         nl
     };
 
-    if name_len.wrapping_add(1) > len {
-        return errno::ERANGE;
-    }
+    // No second `ERANGE` test is needed: a stored name is at most
+    // `PTHREAD_NAME_MAX - 1` bytes, and `len >= PTHREAD_NAME_MAX` was checked
+    // on entry, so the name plus its terminator always fits.  glibc has no
+    // second test either — its only length check is the entry one.
 
     let mut i: usize = 0;
     while i < name_len {
-        // SAFETY: i < name_len < len (checked above); name valid for len.
+        // SAFETY: i < name_len < PTHREAD_NAME_MAX <= len; name valid for len.
         unsafe {
             *name.add(i) = local.get(i).copied().unwrap_or(0);
         }
         i = i.wrapping_add(1);
     }
-    // SAFETY: i == name_len < len.
+    // SAFETY: i == name_len < PTHREAD_NAME_MAX <= len.
     unsafe {
         *name.add(i) = 0;
     }
@@ -2954,6 +3018,15 @@ pub fn cpu_count(set: &CpuSetT) -> i32 {
 ///
 /// Stub: returns 0 (success) — our scheduler doesn't support per-thread
 /// affinity yet.  The `cpuset` is accepted but not enforced.
+///
+/// Unlike the rest of this file, `EFAULT` here is the *kernel's* verdict rather
+/// than a substitute for a glibc segfault: glibc's
+/// `__pthread_setaffinity_new` (nptl/pthread_setaffinity.c) is nothing but
+/// `INTERNAL_SYSCALL_CALL (sched_setaffinity, …)`, and Linux's
+/// `get_user_cpu_mask` (kernel/sched/core.c:8429) does no size rejection at all
+/// — a short `len` merely clears the mask — so `copy_from_user` reaches the
+/// null pointer first and `EFAULT` outranks the length.  That is the opposite
+/// order from [`pthread_getaffinity_np`].  See `design-decisions.md` §303.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_setaffinity_np(
     _thread: PthreadT,
@@ -2963,6 +3036,9 @@ pub extern "C" fn pthread_setaffinity_np(
     if cpuset.is_null() {
         return crate::errno::EFAULT;
     }
+    // A too-small mask is `EINVAL` on Linux too, but reached the long way
+    // round: the kernel clears the mask, then `__sched_setaffinity` rejects the
+    // resulting empty CPU set.  Same answer, so we short-circuit it.
     if cpusetsize < core::mem::size_of::<CpuSetT>() {
         return crate::errno::EINVAL;
     }
@@ -2973,17 +3049,28 @@ pub extern "C" fn pthread_setaffinity_np(
 /// Get the CPU affinity mask for a thread.
 ///
 /// Stub: returns a mask with all CPUs set (no affinity restrictions).
+///
+/// Both length rejections precede the null check, because glibc's
+/// `__pthread_getaffinity_np` (nptl/pthread_getaffinity.c) forwards straight to
+/// `sched_getaffinity`, whose two `EINVAL` tests sit above the `copy_to_user`
+/// that would fault (kernel/sched/core.c:8506-8509).  The second test — a
+/// length that is not a whole number of `unsigned long`s — has no counterpart
+/// in `sched_setaffinity`.  See `design-decisions.md` §303.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_getaffinity_np(
     _thread: PthreadT,
     cpusetsize: usize,
     cpuset: *mut CpuSetT,
 ) -> i32 {
+    // The kernel spells the second test `len & (sizeof (unsigned long) - 1)`;
+    // `usize` is a power of two wide, so the mask is exactly that subtraction,
+    // and doing it in a `const` keeps `arithmetic_side_effects` quiet.
+    const WORD_MASK: usize = core::mem::size_of::<usize>().wrapping_sub(1);
+    if cpusetsize < core::mem::size_of::<CpuSetT>() || cpusetsize & WORD_MASK != 0 {
+        return crate::errno::EINVAL;
+    }
     if cpuset.is_null() {
         return crate::errno::EFAULT;
-    }
-    if cpusetsize < core::mem::size_of::<CpuSetT>() {
-        return crate::errno::EINVAL;
     }
     // SAFETY: caller guarantees cpuset is valid and big enough.
     let set = unsafe { &mut *cpuset };
@@ -3197,6 +3284,19 @@ mod tests {
         );
     }
 
+    /// glibc's `___pthread_mutexattr_settype` (nptl/pthread_mutexattr_settype.c)
+    /// opens with `if (kind < PTHREAD_MUTEX_NORMAL || kind > PTHREAD_MUTEX_ERRORCHECK)
+    /// return EINVAL;` and only afterwards writes through `attr`, so an
+    /// out-of-domain kind is decided before the pointer is ever touched.
+    /// See `design-decisions.md` §303.
+    #[test]
+    fn mutexattr_settype_bad_kind_outranks_a_null_attr() {
+        assert_eq!(
+            pthread_mutexattr_settype(core::ptr::null_mut(), 3),
+            errno::EINVAL
+        );
+    }
+
     #[test]
     fn mutexattr_gettype_reads_back() {
         let mut attr: PthreadMutexattrT = [0; 4];
@@ -3352,12 +3452,24 @@ mod tests {
         assert_eq!(stored, 128 * 1024);
     }
 
+    /// The floor is `PTHREAD_STACK_MIN`, which glibc's `check_stacksize_attr`
+    /// (sysdeps/nptl/pthreadP.h:704) compares against — 16 KiB on x86-64, not
+    /// a page.  This used to be a hardcoded 4096, which accepted three sizes
+    /// glibc rejects.
     #[test]
-    fn attr_setstacksize_minimum_4096() {
+    fn attr_setstacksize_minimum_is_pthread_stack_min() {
         let mut attr: PthreadAttrT = [0; 56];
         pthread_attr_init(&mut attr);
-        // Exactly 4096 should succeed.
-        assert_eq!(pthread_attr_setstacksize(&mut attr, 4096), 0);
+        assert_eq!(
+            pthread_attr_setstacksize(&mut attr, PTHREAD_STACK_MIN as usize),
+            0
+        );
+        assert_eq!(
+            pthread_attr_setstacksize(&mut attr, PTHREAD_STACK_MIN as usize - 1),
+            errno::EINVAL
+        );
+        // A page is below the floor, so it is now rejected.
+        assert_eq!(pthread_attr_setstacksize(&mut attr, 4096), errno::EINVAL);
     }
 
     #[test]
@@ -3369,11 +3481,26 @@ mod tests {
         assert_eq!(pthread_attr_setstacksize(&mut attr, 1), errno::EINVAL);
     }
 
+    /// `EFAULT` is reserved for the case where the *size* is acceptable and only
+    /// the pointer is bad — 8 KiB used to be the size here, but it is below
+    /// `PTHREAD_STACK_MIN` (16 KiB on x86-64) and so now loses to the size check.
     #[test]
     fn attr_setstacksize_null_returns_efault() {
         assert_eq!(
-            pthread_attr_setstacksize(core::ptr::null_mut(), 8192),
+            pthread_attr_setstacksize(core::ptr::null_mut(), 64 * 1024),
             errno::EFAULT
+        );
+    }
+
+    /// glibc's `__pthread_attr_setstacksize` (nptl/pthread_attr_setstacksize.c)
+    /// opens with `int ret = check_stacksize_attr (stacksize); if (ret) return ret;`
+    /// and dereferences the attribute only afterwards, so a too-small size is
+    /// decided before the pointer is examined.  See `design-decisions.md` §303.
+    #[test]
+    fn attr_setstacksize_too_small_outranks_a_null_attr() {
+        assert_eq!(
+            pthread_attr_setstacksize(core::ptr::null_mut(), 8192),
+            errno::EINVAL
         );
     }
 
@@ -3456,6 +3583,18 @@ mod tests {
         assert_eq!(
             pthread_attr_setdetachstate(core::ptr::null_mut(), 0),
             errno::EFAULT
+        );
+    }
+
+    /// glibc's `__pthread_attr_setdetachstate`
+    /// (nptl/pthread_attr_setdetachstate.c) opens with a `/* Catch invalid
+    /// values.  */` test on `detachstate` and writes through `attr` only
+    /// afterwards.  See `design-decisions.md` §303.
+    #[test]
+    fn attr_setdetachstate_bad_state_outranks_a_null_attr() {
+        assert_eq!(
+            pthread_attr_setdetachstate(core::ptr::null_mut(), 2),
+            errno::EINVAL
         );
     }
 
@@ -3609,11 +3748,26 @@ mod tests {
         );
     }
 
+    /// As with `pthread_attr_setstacksize`, `EFAULT` only applies once the size
+    /// clears `PTHREAD_STACK_MIN`; 8 KiB (the size this test used to pass) is
+    /// below the 16 KiB floor and now loses to the size check.
     #[test]
     fn setstack_null_attr_returns_efault() {
         assert_eq!(
-            pthread_attr_setstack(core::ptr::null_mut(), core::ptr::null_mut(), 8192),
+            pthread_attr_setstack(core::ptr::null_mut(), core::ptr::null_mut(), 64 * 1024),
             errno::EFAULT
+        );
+    }
+
+    /// glibc's `__pthread_attr_setstack` (nptl/pthread_attr_setstack.c) shares
+    /// `check_stacksize_attr`'s prologue with `setstacksize`, so a too-small size
+    /// is decided before the attribute pointer is touched.
+    /// See `design-decisions.md` §303.
+    #[test]
+    fn setstack_too_small_outranks_a_null_attr() {
+        assert_eq!(
+            pthread_attr_setstack(core::ptr::null_mut(), core::ptr::null_mut(), 8192),
+            errno::EINVAL
         );
     }
 
@@ -3768,6 +3922,18 @@ mod tests {
         );
     }
 
+    /// glibc's `__pthread_condattr_setclock` (nptl/pthread_condattr_setclock.c)
+    /// validates `clock_id` in full — including the `futex_supports_exact_relative_timeouts`
+    /// check — before it writes through `attr`, so a bad clock outranks a null
+    /// pointer.  See `design-decisions.md` §303.
+    #[test]
+    fn condattr_setclock_bad_clock_outranks_a_null_attr() {
+        assert_eq!(
+            pthread_condattr_setclock(core::ptr::null_mut(), 99),
+            errno::EINVAL
+        );
+    }
+
     #[test]
     fn condattr_getclock_reads_back() {
         let mut attr: PthreadCondattrT = [0; 4];
@@ -3883,12 +4049,20 @@ mod tests {
         );
     }
 
+    /// A value that is neither `PTHREAD_PROCESS_PRIVATE` nor
+    /// `PTHREAD_PROCESS_SHARED` is `EINVAL`, not `ENOTSUP`: glibc's
+    /// `___pthread_rwlockattr_setpshared` gates on
+    /// `futex_supports_pshared (pshared)` (sysdeps/nptl/futex-internal.h:102),
+    /// which accepts *both* POSIX values and returns `EINVAL` for anything else.
+    /// `ENOTSUP` is our own verdict on `PTHREAD_PROCESS_SHARED`, which glibc
+    /// accepts and we do not — it must not swallow out-of-domain values too.
+    /// See `design-decisions.md` §303.
     #[test]
     fn rwlockattr_setpshared_rejects_invalid() {
         let mut attr: PthreadRwlockattrT = [0; 8];
         pthread_rwlockattr_init(&mut attr);
-        assert_eq!(pthread_rwlockattr_setpshared(&mut attr, 2), errno::ENOTSUP);
-        assert_eq!(pthread_rwlockattr_setpshared(&mut attr, -1), errno::ENOTSUP);
+        assert_eq!(pthread_rwlockattr_setpshared(&mut attr, 2), errno::EINVAL);
+        assert_eq!(pthread_rwlockattr_setpshared(&mut attr, -1), errno::EINVAL);
     }
 
     #[test]
@@ -3896,6 +4070,20 @@ mod tests {
         assert_eq!(
             pthread_rwlockattr_setpshared(core::ptr::null_mut(), 0),
             errno::EFAULT
+        );
+    }
+
+    /// The domain check precedes the pointer, and so does our `ENOTSUP` verdict:
+    /// both are decided from the scalar alone.  See `design-decisions.md` §303.
+    #[test]
+    fn rwlockattr_setpshared_scalar_verdicts_outrank_a_null_attr() {
+        assert_eq!(
+            pthread_rwlockattr_setpshared(core::ptr::null_mut(), 2),
+            errno::EINVAL
+        );
+        assert_eq!(
+            pthread_rwlockattr_setpshared(core::ptr::null_mut(), PTHREAD_PROCESS_SHARED),
+            errno::ENOTSUP
         );
     }
 
@@ -3976,6 +4164,10 @@ mod tests {
         assert_eq!(pthread_barrier_destroy(&mut barrier), 0);
     }
 
+    /// A large-but-legal count is accepted.  The ceiling is
+    /// `BARRIER_IN_THRESHOLD` (`UINT_MAX / 2`), matching glibc's
+    /// `___pthread_barrier_init` (nptl/pthread_barrier_init.c), which rejects
+    /// `count == 0 || count >= BARRIER_IN_THRESHOLD`.
     #[test]
     fn barrier_init_large_count() {
         let mut barrier = PthreadBarrierT {
@@ -3984,9 +4176,49 @@ mod tests {
             generation: AtomicI32::new(0),
             _pad: [0; 20],
         };
-        let ret = pthread_barrier_init(&mut barrier, core::ptr::null(), u32::MAX);
+        let large = BARRIER_IN_THRESHOLD - 1;
+        let ret = pthread_barrier_init(&mut barrier, core::ptr::null(), large);
         assert_eq!(ret, 0);
-        assert_eq!(barrier.count, u32::MAX);
+        assert_eq!(barrier.count, large);
+    }
+
+    /// `u32::MAX` used to be accepted, which was a latent hang: the arrival
+    /// counter is an `AtomicI32`, so a count above `i32::MAX` can never be
+    /// reached and every waiter would block forever.  glibc caps `count` at
+    /// `BARRIER_IN_THRESHOLD` (`UINT_MAX / 2`,
+    /// sysdeps/nptl/internaltypes.h:119) for its own reset protocol; we adopt
+    /// the same bound.  See `design-decisions.md` §303.
+    #[test]
+    fn barrier_init_count_above_the_threshold_returns_einval() {
+        let mut barrier = PthreadBarrierT {
+            count: 0,
+            current: AtomicI32::new(0),
+            generation: AtomicI32::new(0),
+            _pad: [0; 20],
+        };
+        assert_eq!(
+            pthread_barrier_init(&mut barrier, core::ptr::null(), u32::MAX),
+            errno::EINVAL
+        );
+        assert_eq!(
+            pthread_barrier_init(&mut barrier, core::ptr::null(), BARRIER_IN_THRESHOLD),
+            errno::EINVAL
+        );
+        assert_eq!(barrier.count, 0, "a rejected init must not store the count");
+    }
+
+    /// glibc validates `count` before it writes through `barrier`, so a bad
+    /// count outranks a null pointer.  See `design-decisions.md` §303.
+    #[test]
+    fn barrier_init_bad_count_outranks_a_null_barrier() {
+        assert_eq!(
+            pthread_barrier_init(core::ptr::null_mut(), core::ptr::null(), 0),
+            errno::EINVAL
+        );
+        assert_eq!(
+            pthread_barrier_init(core::ptr::null_mut(), core::ptr::null(), u32::MAX),
+            errno::EINVAL
+        );
     }
 
     // =======================================================================
@@ -4815,11 +5047,37 @@ mod tests {
         assert_eq!(ret, crate::errno::EFAULT);
     }
 
+    /// A zero length is `ERANGE`, not `EINVAL`: glibc's `__pthread_getname_np`
+    /// (nptl/pthread_getname.c) has exactly one length test,
+    /// `if (len < TASK_COMM_LEN) return ERANGE;`, and zero is simply the smallest
+    /// value that fails it.  See `design-decisions.md` §303.
     #[test]
     fn test_pthread_getname_np_zero_len() {
         let mut buf = [0u8; 16];
         let ret = unsafe { pthread_getname_np(0, buf.as_mut_ptr(), 0) };
-        assert_eq!(ret, crate::errno::EINVAL);
+        assert_eq!(ret, crate::errno::ERANGE);
+    }
+
+    /// The length test precedes the buffer dereference, so a short buffer
+    /// outranks a null one.  See `design-decisions.md` §303.
+    #[test]
+    fn test_pthread_getname_np_short_len_outranks_a_null_buffer() {
+        let ret = unsafe { pthread_getname_np(0, core::ptr::null_mut(), 4) };
+        assert_eq!(ret, crate::errno::ERANGE);
+    }
+
+    /// glibc requires `len >= TASK_COMM_LEN` *unconditionally* — the comparison
+    /// is against the constant, never against the name's actual length.  So a
+    /// 4-byte buffer is `ERANGE` even for a 2-character name, which is a case we
+    /// used to accept.  See `design-decisions.md` §303.
+    #[test]
+    fn test_pthread_getname_np_short_len_rejected_even_when_the_name_would_fit() {
+        let name = b"ab\0";
+        assert_eq!(unsafe { pthread_setname_np(9, name.as_ptr()) }, 0);
+
+        let mut buf = [0u8; 4];
+        let ret = unsafe { pthread_getname_np(9, buf.as_mut_ptr(), 4) };
+        assert_eq!(ret, crate::errno::ERANGE);
     }
 
     #[test]
@@ -4839,7 +5097,10 @@ mod tests {
         let name = b"longthreadname\0"; // 14 chars
         let _ = unsafe { pthread_setname_np(4, name.as_ptr()) };
 
-        let mut buf = [0u8; 5]; // Too small for "longthreadname\0" (15 bytes)
+        // 5 is below TASK_COMM_LEN, so it is rejected on entry — it would also
+        // be too small for "longthreadname\0" (15 bytes), but glibc never gets
+        // as far as comparing against the stored name.
+        let mut buf = [0u8; 5];
         let ret = unsafe { pthread_getname_np(4, buf.as_mut_ptr(), 5) };
         assert_eq!(ret, crate::errno::ERANGE);
     }
@@ -5229,6 +5490,36 @@ mod tests {
         let mut set = CpuSetT::new();
         let ret = pthread_getaffinity_np(0, 1, &raw mut set);
         assert_eq!(ret, crate::errno::EINVAL);
+    }
+
+    /// A length that is not a whole number of `unsigned long`s is `EINVAL` —
+    /// `sched_getaffinity`'s second test, `len & (sizeof (unsigned long) - 1)`
+    /// (kernel/sched/core.c:8506-8509).  It has no counterpart in
+    /// `sched_setaffinity`.  See `design-decisions.md` §303.
+    #[test]
+    fn test_pthread_getaffinity_np_unaligned_size() {
+        let mut set = CpuSetT::new();
+        let unaligned = core::mem::size_of::<CpuSetT>() + 1;
+        let ret = pthread_getaffinity_np(0, unaligned, &raw mut set);
+        assert_eq!(ret, crate::errno::EINVAL);
+    }
+
+    /// The two calls order their checks *oppositely*, and that asymmetry is
+    /// Linux's, not ours: `sched_getaffinity` rejects the length above its
+    /// `copy_to_user`, while `sched_setaffinity`'s `get_user_cpu_mask`
+    /// (kernel/sched/core.c:8429) copies first and never rejects a size.  So a
+    /// null mask with a short length is `EINVAL` on the get side and `EFAULT` on
+    /// the set side.  See `design-decisions.md` §303.
+    #[test]
+    fn test_affinity_np_orders_its_checks_oppositely() {
+        assert_eq!(
+            pthread_getaffinity_np(0, 1, core::ptr::null_mut()),
+            crate::errno::EINVAL
+        );
+        assert_eq!(
+            pthread_setaffinity_np(0, 1, core::ptr::null()),
+            crate::errno::EFAULT
+        );
     }
 
     #[test]

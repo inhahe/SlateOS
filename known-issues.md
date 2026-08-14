@@ -58062,16 +58062,50 @@ optional; `iconv` treats a NULL `inbuf` as a state reset. `telldir`/`seekdir`
 looked like hits but the EINVAL there is in glibc's *stub*; Linux's versions
 (`sysdeps/unix/sysv/linux/`) have no check.
 
-**What remains.** The ~280 surviving `is_null() -> EFAULT` sites have not been
+**Third pass, 2026-08-13 — `pthread.rs` (47 sites), and it was not a judgement
+call after all.** This cluster was recorded here as the one needing "a decision
+rather than a lookup", because NPTL contains no NULL checks at all and so
+offers no errno to copy. That framing was wrong. The answerable question was
+the *ordering* one this entry's own **Proper fix** paragraph names: NPTL
+validates its **scalar** argument first and dereferences the pointer only
+afterwards, so on Linux a call that is bad in both ways returns the scalar's
+`EINVAL`/`ERANGE`, never `EFAULT`. Our code checked the pointer first
+everywhere. Nine functions fixed, each verified against the glibc (or kernel)
+source and cited in both the code and the test — full reasoning in
+`design-decisions.md` §303:
+
+- `pthread_attr_setstacksize`, `pthread_attr_setstack` — size checked first
+  (`check_stacksize_attr`). **Also** their floor was a hardcoded `4096` while
+  the crate's own `PTHREAD_STACK_MIN` is `16384`; they now use the shared
+  constant, so three stack sizes glibc rejects are no longer accepted.
+- `pthread_attr_setdetachstate`, `pthread_mutexattr_settype`,
+  `pthread_condattr_setclock` — scalar checked first.
+- `pthread_rwlockattr_setpshared` — scalar first, **and** the errno was wrong:
+  any non-`PRIVATE` value used to be `ENOTSUP`, conflating "we don't support
+  cross-process rwlocks" with "that isn't a pshared value". glibc's
+  `futex_supports_pshared` accepts both POSIX values and gives `EINVAL` for
+  anything else; `ENOTSUP` is now `PTHREAD_PROCESS_SHARED` alone.
+- `pthread_barrier_init` — count checked first, **and** `u32::MAX` used to be
+  accepted, which was a latent hang (the arrival counter is an `AtomicI32`, so
+  a count above `i32::MAX` is unreachable and every waiter would block
+  forever). Now capped at glibc's `BARRIER_IN_THRESHOLD` (`UINT_MAX / 2`).
+- `pthread_getname_np` — `len` checked first, **and** the check was against the
+  stored name's length rather than `TASK_COMM_LEN`; glibc compares against the
+  constant unconditionally, so a 4-byte buffer is `ERANGE` even for a
+  2-character name. The second, now-dead length test is gone.
+- `pthread_getaffinity_np` — both length rejections moved above the NULL check,
+  and the missing `len & (sizeof (unsigned long) - 1)` test added.
+  `pthread_setaffinity_np` keeps NULL-first and gained a comment saying why:
+  the asymmetry is Linux's, not ours (`sched_setaffinity`'s `get_user_cpu_mask`
+  does no size rejection and copies first, so `EFAULT` wins there).
+
+**What remains.** The ~240 surviving `is_null() -> EFAULT` sites have not been
 individually classified. This entry stays open for coverage, not because any
-specific remaining site is known wrong. The densest concentrations are
-`pthread.rs` (47), `file.rs` (28), `spawn.rs` (16), `socket.rs` (15),
-`unistd.rs` (13) and `xattr.rs` (11). `pthread.rs` is the one that still needs
-a decision rather than a lookup: NPTL is pure userspace, so none of its 47
-sites can be justified by "the kernel would say `EFAULT`" — but glibc mostly
-does not check at all there and simply faults, so there is no upstream errno to
-copy and the question is what we *should* return in glibc's place. That is a
-judgement call across 47 functions and wants its own pass.
+specific remaining site is known wrong. The densest remaining concentrations
+are `file.rs` (28), `spawn.rs` (16), `socket.rs` (15), `unistd.rs` (13) and
+`xattr.rs` (11). None of them needs §303's reasoning, which is specific to
+NPTL's shape — they are ordinary §300 lookups: does the pointer reach a
+syscall or not.
 
 **Reproduce.** Not a runtime failure. `rg -A3 'is_null\(\)' posix/src`, filtered
 for `EFAULT` in the following lines, enumerates the candidate sites; each has to
@@ -58090,7 +58124,22 @@ the same pass.
 **Tooling.** `D:\refsrc\glibc-2.39` (added 2026-08-13; shallow clone of the
 `glibc-2.39` tag from the `bminor/glibc` GitHub mirror — `sourceware.org`
 answers 429) is the reference for this work, alongside the bash checkout in
-`TOOLING-BASH-5.2.37-SOURCE`. Do **not** do this audit from man pages:
+`TOOLING-BASH-5.2.37-SOURCE`.
+
+`D:\refsrc\linux-6.6` (added 2026-08-13; shallow clone of the `v6.6` tag from
+`gitlab.com/linux-kernel/linux`, sparse-checked-out to
+`kernel fs mm ipc include/linux include/uapi`, ~130 MB) is the **other half**
+of this audit and was missing until the pthread pass needed it. §300's rule has
+a kernel side — "does the pointer reach a syscall, and what does the kernel do
+with it" — which cannot be answered from glibc, because for a thin wrapper like
+`pthread_getaffinity_np` glibc is nothing but `INTERNAL_SYSCALL_CALL` and every
+validation lives in `kernel/sched/core.c`. Note for whoever clones it next:
+`git checkout` fails on Windows with `invalid path …/aux.c` — `AUX` is a
+reserved DOS device name and git validates *every* index entry, not just the
+ones inside the sparse cone, so narrowing the cone does not help. Use
+`git -c core.protectNTFS=false checkout v6.6`.
+
+Do **not** do this audit from man pages:
 `ptsname_r`'s documented `EINVAL` has not matched any glibc implementation
 since the TIOCGPTN fast path landed, and trusting the man page is exactly how
 the first attempt at this fix went wrong.

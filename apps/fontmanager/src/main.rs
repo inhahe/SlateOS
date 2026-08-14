@@ -17,6 +17,7 @@ use guitk::layout::{FlexAlign, FlexDirection, FlexWrap, Size};
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
 #[allow(unused_imports)]
 use guitk::style::{CornerRadii, Edges};
+use guitk::text;
 
 // ============================================================================
 // Catppuccin Mocha theme colors
@@ -1025,7 +1026,7 @@ impl FontManagerState {
             // System/User badge
             let badge = if font.system { "System Font" } else { "User Font" };
             let badge_color = if font.system { COL_ACCENT } else { COL_TEAL };
-            let badge_w = badge.len() as f32 * 7.0 + 16.0;
+            let badge_w = text::padded_width(badge, 8.0, 11.0, FontWeightHint::Regular);
             fill_rounded(tree, panel_x + CONTENT_PADDING, y, badge_w, 22.0, badge_color, 4.0);
             tree.text(panel_x + CONTENT_PADDING + 8.0, y + 4.0, badge, COL_CRUST, 11.0);
             y += 36.0;
@@ -1187,11 +1188,12 @@ fn text_bold(tree: &mut RenderTree, x: f32, y: f32, content: &str, color: Color,
 }
 
 /// Render a toolbar button.
-fn render_toolbar_button(tree: &mut RenderTree, x: f32, y: f32, label: &str, color: Color) {
-    let w = label.len() as f32 * 8.0 + 20.0;
+fn render_toolbar_button(tree: &mut RenderTree, x: f32, y: f32, label: &str, color: Color) -> f32 {
+    let w = text::padded_width(label, 10.0, 12.0, FontWeightHint::Regular);
     let h = 28.0;
     fill_rounded(tree, x, y, w, h, color, 6.0);
     tree.text(x + 10.0, y + 7.0, label, COL_CRUST, 12.0);
+    w
 }
 
 /// Render a sidebar item.
@@ -1224,7 +1226,7 @@ fn render_setting_options<T: PartialEq + Copy>(
         let is_sel = *opt == selected;
         let color = if is_sel { COL_ACCENT } else { COL_SUBTEXT0 };
         tree.text(ox, y, lbl, color, 12.0);
-        ox += lbl.len() as f32 * 7.0 + 12.0;
+        ox += text::measure(lbl, 12.0, FontWeightHint::Regular) + 12.0;
     }
 }
 
@@ -1250,6 +1252,61 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ====================================================================
+    // Measured widths
+    // ====================================================================
+
+    #[test]
+    fn a_toolbar_button_reports_the_width_it_drew() {
+        let mut tree = RenderTree::new();
+        for label in ["Install", "Remove", "Schriftart installieren"] {
+            let w = render_toolbar_button(&mut tree, 0.0, 0.0, label, COL_ACCENT);
+            assert!(
+                w >= text::measure(label, 12.0, FontWeightHint::Regular) + 20.0,
+                "{label} overflows its button"
+            );
+        }
+    }
+
+    #[test]
+    fn the_system_badge_fits_its_label() {
+        for label in ["System Font", "User Font"] {
+            let w = text::padded_width(label, 8.0, 11.0, FontWeightHint::Regular);
+            assert!(
+                w >= text::measure(label, 11.0, FontWeightHint::Regular) + 16.0,
+                "{label} overflows its badge"
+            );
+        }
+    }
+
+    #[test]
+    fn setting_options_do_not_overlap() {
+        // The row advances by the width of the label it just drew, so no two
+        // labels can land on top of each other however long they are.
+        let mut tree = RenderTree::new();
+        let opts = [0_usize, 1, 2];
+        render_setting_options(&mut tree, 0.0, 0.0, &opts, 0, |i| match i {
+            0 => "Alphabetisch",
+            1 => "Nach Familie",
+            _ => "Zuletzt hinzugef\u{fc}gt",
+        });
+        let drawn: Vec<(f32, String)> = tree
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { x, text, .. } => Some((*x, text.clone())),
+                _ => None,
+            })
+            .collect();
+        for pair in drawn.windows(2) {
+            let (Some((x0, label)), Some((x1, _))) = (pair.first(), pair.get(1)) else {
+                unreachable!("windows(2) yields pairs");
+            };
+            let end = x0 + text::measure(label, 12.0, FontWeightHint::Regular);
+            assert!(*x1 >= end, "{label} runs into the option after it");
+        }
+    }
 
     // ====================================================================
     // FontCollection basics

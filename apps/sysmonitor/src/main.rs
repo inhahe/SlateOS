@@ -38,6 +38,7 @@ use guitk::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEventKind};
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
 use guitk::style::CornerRadii;
+use guitk::text;
 
 // ============================================================================
 // Catppuccin Mocha palette
@@ -69,6 +70,16 @@ const PINK: Color = Color::from_hex(0xF5C2E7);
 
 /// Height of the tab bar at the top.
 const TAB_BAR_HEIGHT: f32 = 32.0;
+
+/// Width of the tab drawn for `label`, including the 12 px padding on each side.
+///
+/// Measured at whichever weight the tab may end up drawn at, because the active
+/// tab is bold: sizing each tab to its current weight would shuffle the whole
+/// strip sideways every time the selection moved. One function, so the click
+/// handler and the renderer cannot drift apart.
+fn tab_width(label: &str) -> f32 {
+    text::padded_width_any_weight(label, 12.0, 12.0)
+}
 /// Height of the status bar at the bottom.
 const STATUS_BAR_HEIGHT: f32 = 24.0;
 /// Height of a single row in tables.
@@ -1097,7 +1108,7 @@ impl SysMonitorState {
                 if my < TAB_BAR_HEIGHT {
                     let mut tab_x = 0.0f32;
                     for tab in &Tab::ALL {
-                        let tab_w = tab.label().len() as f32 * 9.0 + 24.0;
+                        let tab_w = tab_width(tab.label());
                         if mx >= tab_x && mx < tab_x + tab_w {
                             self.active_tab = *tab;
                             return EventResult::Consumed;
@@ -1349,7 +1360,7 @@ impl SysMonitorState {
         let mut tx = 0.0f32;
         for tab in &Tab::ALL {
             let label = tab.label();
-            let tab_w = label.len() as f32 * 9.0 + 24.0;
+            let tab_w = tab_width(label);
             let is_active = *tab == self.active_tab;
 
             if is_active {
@@ -1755,7 +1766,12 @@ impl SysMonitorState {
             max_width: Some(filter_w - 16.0),
         });
         if self.filter_focused {
-            let cursor_x = filter_x + 8.0 + self.filter_text.len() as f32 * 7.0;
+            // The caret sits where the glyphs actually end, not where a byte
+            // count guessed they would: a filter containing any non-ASCII
+            // character used to draw the caret well past its own text. It is
+            // held inside the box because the text itself is clipped there.
+            let typed = text::width(&self.filter_text, 11.0).min(filter_w - 16.0);
+            let cursor_x = filter_x + 8.0 + typed;
             tree.fill_rect(cursor_x, content_y + 5.0, 1.0, filter_h - 8.0, TEXT);
         }
 
@@ -3203,8 +3219,91 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+
     use super::*;
     use guitk::event::{Event, KeyEvent, Modifiers, MouseEvent, MouseEventKind};
+
+    // -- Measured-width tests --
+
+    #[test]
+    fn tabs_fit_their_labels_at_either_weight() {
+        for tab in &Tab::ALL {
+            let w = tab_width(tab.label());
+            for weight in [FontWeightHint::Regular, FontWeightHint::Bold] {
+                assert!(
+                    w >= text::measure(tab.label(), 12.0, weight) + 24.0,
+                    "{} does not fit at {weight:?}",
+                    tab.label()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn tab_width_does_not_change_when_a_tab_is_selected() {
+        // The strip must not shuffle sideways as the selection moves, so the
+        // width a tab is given cannot depend on the weight it is drawn at.
+        let widths: Vec<f32> = Tab::ALL.iter().map(|t| tab_width(t.label())).collect();
+        let mut app = SysMonitorState::new();
+        for tab in &Tab::ALL {
+            app.active_tab = *tab;
+            let now: Vec<f32> = Tab::ALL.iter().map(|t| tab_width(t.label())).collect();
+            assert_eq!(widths, now);
+        }
+    }
+
+    #[test]
+    fn tab_width_is_not_driven_by_byte_length() {
+        // Seven characters, one of which takes two bytes, against eight ASCII
+        // ones: by byte count the shorter string wins, by measurement it does
+        // not.
+        let ascii = text::padded_width_any_weight("Prozesse", 12.0, 12.0);
+        let sharp = text::padded_width_any_weight("Proze\u{df}e", 12.0, 12.0);
+        assert!(
+            sharp < ascii,
+            "a seven-character label measured wider than an eight-character one"
+        );
+    }
+
+    #[test]
+    fn the_filter_caret_follows_the_glyphs() {
+        let mut app = SysMonitorState::new();
+        app.active_tab = Tab::Processes;
+        app.filter_focused = true;
+        app.filter_text = String::from("\u{fc}ber");
+        let tree = app.render();
+        // The caret is the one-pixel-wide fill pushed straight after the
+        // filter text, so find the text first and then look forward.
+        let text_i = tree
+            .commands
+            .iter()
+            .position(
+                |c| matches!(c, RenderCommand::Text { text, .. } if *text == app.filter_text),
+            )
+            .expect("filter text not drawn");
+        let text_origin = match tree.commands.get(text_i) {
+            Some(RenderCommand::Text { x, .. }) => *x,
+            _ => unreachable!("just matched a Text command"),
+        };
+        let caret = tree
+            .commands
+            .iter()
+            .skip(text_i)
+            .find_map(|c| match c {
+                RenderCommand::FillRect { x, width, .. } if (width - 1.0).abs() < 0.01 => Some(*x),
+                _ => None,
+            })
+            .expect("no caret drawn");
+        // The caret must sit exactly one measured string past the text origin.
+        // A byte count would put it a whole character out, because the u-umlaut
+        // is two bytes.
+        let expected = text_origin + text::width(&app.filter_text, 11.0);
+        assert!(
+            (caret - expected).abs() < 0.01,
+            "caret at {caret}, glyphs end at {expected}"
+        );
+    }
 
     // -- GraphHistory tests --
 

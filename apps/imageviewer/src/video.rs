@@ -11,6 +11,7 @@
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
 use guitk::style::CornerRadii;
+use guitk::text;
 
 // ============================================================================
 // Catppuccin Mocha palette
@@ -39,6 +40,8 @@ const MOCHA_PEACH: Color = Color::rgb(250, 179, 135);
 const CONTROL_BAR_HEIGHT: f32 = 72.0;
 const SEEK_BAR_HEIGHT: f32 = 6.0;
 const SEEK_BAR_HIT_HEIGHT: f32 = 20.0;
+/// Space between two adjacent status badges in the indicator row.
+const BADGE_GAP: f32 = 8.0;
 const CONTROL_BUTTON_SIZE: f32 = 32.0;
 const VOLUME_SLIDER_WIDTH: f32 = 80.0;
 
@@ -1457,14 +1460,15 @@ pub fn render_controls(
     // Loop mode badge
     if player.loop_mode != LoopMode::Off {
         let label = player.loop_mode.label();
-        render_badge(tree, ix, indicator_y, label, MOCHA_MAUVE);
-        ix += label.len() as f32 * 6.5 + 16.0;
+        // Advance by the width the badge actually drew. The caller used to
+        // recompute it with different padding, so the gap after the loop badge
+        // was 8 px only by coincidence and moved whenever the badge did.
+        ix += render_badge(tree, ix, indicator_y, label, MOCHA_MAUVE) + BADGE_GAP;
     }
 
     // Subtitle indicator
     if player.subtitles_enabled {
-        render_badge(tree, ix, indicator_y, "CC", MOCHA_GREEN);
-        ix += 28.0;
+        ix += render_badge(tree, ix, indicator_y, "CC", MOCHA_GREEN) + BADGE_GAP;
     }
 
     // Muted indicator
@@ -1476,9 +1480,13 @@ pub fn render_controls(
     match &player.state {
         PlayerState::Buffering => {
             let msg = "Buffering...";
-            let tw = msg.len() as f32 * 7.0;
             tree.push(RenderCommand::Text {
-                x: area_x + (area_w - tw) / 2.0,
+                x: text::center_x(
+                    msg,
+                    area_x + area_w / 2.0,
+                    14.0,
+                    FontWeightHint::Bold,
+                ),
                 y: area_y + area_h / 2.0 - 8.0,
                 text: String::from(msg),
                 color: MOCHA_YELLOW,
@@ -1488,7 +1496,7 @@ pub fn render_controls(
             });
         }
         PlayerState::Error(msg) => {
-            let display = if msg.len() > 60 {
+            let display = if msg.chars().count() > 60 {
                 let truncated: String = msg.chars().take(57).collect();
                 format!("{truncated}...")
             } else {
@@ -1694,8 +1702,8 @@ fn render_volume(player: &VideoPlayer, tree: &mut RenderTree, x: f32, y: f32, wi
 }
 
 /// Render a small status badge.
-fn render_badge(tree: &mut RenderTree, x: f32, y: f32, label: &str, color: Color) {
-    let w = label.len() as f32 * 6.5 + 8.0;
+fn render_badge(tree: &mut RenderTree, x: f32, y: f32, label: &str, color: Color) -> f32 {
+    let w = text::padded_width(label, 4.0, 10.0, FontWeightHint::Bold);
     tree.push(RenderCommand::FillRect {
         x,
         y,
@@ -1713,6 +1721,7 @@ fn render_badge(tree: &mut RenderTree, x: f32, y: f32, label: &str, color: Color
         font_weight: FontWeightHint::Bold,
         max_width: None,
     });
+    w
 }
 
 /// Compute fitted dimensions that maintain aspect ratio within the given area.
@@ -1853,6 +1862,79 @@ pub fn execute_action(player: &mut VideoPlayer, action: VideoAction) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -- Badge layout ------------------------------------------------------
+
+    #[test]
+    fn a_badge_reports_the_width_it_drew() {
+        let mut tree = RenderTree::new();
+        for label in ["CC", "MUTED", "Playlist", "Wiederholen"] {
+            let w = render_badge(&mut tree, 0.0, 0.0, label, MOCHA_MAUVE);
+            assert!(
+                w >= text::measure(label, 10.0, FontWeightHint::Bold) + 8.0,
+                "{label} overflows its badge"
+            );
+        }
+    }
+
+    #[test]
+    fn the_indicator_badges_are_eight_pixels_apart() {
+        // The loop badge used to be measured twice -- once to draw it and once
+        // to advance past it -- with different padding, so the gap after it was
+        // whatever the difference happened to be.
+        let mut p = VideoPlayer::new();
+        p.loop_mode = LoopMode::Playlist;
+        p.subtitles_enabled = true;
+        p.muted = true;
+        let mut tree = RenderTree::new();
+        render_controls(&p, &mut tree, 0.0, 0.0, 800.0, 400.0);
+
+        let badges: Vec<(f32, f32)> = tree
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::FillRect {
+                    x, width, height, ..
+                } if (height - 16.0).abs() < 0.01 => Some((*x, *width)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(badges.len(), 3, "expected three status badges");
+        for pair in badges.windows(2) {
+            let (Some(&(x0, w0)), Some(&(x1, _))) = (pair.first(), pair.get(1)) else {
+                unreachable!("windows(2) yields pairs");
+            };
+            assert!(
+                (x1 - (x0 + w0) - BADGE_GAP).abs() < 0.01,
+                "badge gap was {} not {BADGE_GAP}",
+                x1 - (x0 + w0)
+            );
+        }
+    }
+
+    #[test]
+    fn the_buffering_message_is_centred() {
+        let mut p = VideoPlayer::new();
+        p.state = PlayerState::Buffering;
+        let mut tree = RenderTree::new();
+        render_controls(&p, &mut tree, 0.0, 0.0, 800.0, 400.0);
+        let (x, msg) = tree
+            .commands
+            .iter()
+            .find_map(|c| match c {
+                RenderCommand::Text { x, text, .. } if text.starts_with("Buffering") => {
+                    Some((*x, text.clone()))
+                }
+                _ => None,
+            })
+            .expect("no buffering message drawn");
+        let w = text::measure(&msg, 14.0, FontWeightHint::Bold);
+        assert!(
+            (x + w / 2.0 - 400.0).abs() < 0.01,
+            "message centred on {} not 400",
+            x + w / 2.0
+        );
+    }
 
     // -- State machine transitions ----------------------------------------
 

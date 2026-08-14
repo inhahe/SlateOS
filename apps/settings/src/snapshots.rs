@@ -17,6 +17,7 @@
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
 use guitk::style::CornerRadii;
+use guitk::text;
 
 use core::fmt;
 
@@ -1247,17 +1248,19 @@ fn render_section_header(tree: &mut RenderTree, x: f32, y: f32, title: &str) -> 
 }
 
 /// Helper: render a small colored badge.
-fn render_badge(tree: &mut RenderTree, x: f32, y: f32, label: &str, color: Color) {
-    let width = label.len() as f32 * 7.0 + 16.0;
+fn render_badge(tree: &mut RenderTree, x: f32, y: f32, label: &str, color: Color) -> f32 {
+    let width = text::padded_width(label, 8.0, 11.0, FontWeightHint::Regular);
     fill_rounded(tree, x, y, width, 20.0, color, 4.0);
     tree.text(x + 8.0, y + 3.0, label, COL_BASE, 11.0);
+    width
 }
 
 /// Helper: render a clickable button.
-fn render_button(tree: &mut RenderTree, x: f32, y: f32, label: &str, color: Color) {
-    let width = label.len() as f32 * 7.5 + 24.0;
+fn render_button(tree: &mut RenderTree, x: f32, y: f32, label: &str, color: Color) -> f32 {
+    let width = text::padded_width(label, 12.0, 13.0, FontWeightHint::Regular);
     fill_rounded(tree, x, y, width, 32.0, color, 6.0);
     tree.text(x + 12.0, y + 8.0, label, COL_BASE, 13.0);
+    width
 }
 
 /// Render the full snapshots settings page.
@@ -1299,9 +1302,14 @@ pub fn render_snapshots_page(
 
             // Name and type badge.
             text_bold(tree, x + 12.0, y + 8.0, &snap.name, COL_TEXT, 13.0);
+            // Placed from a *bold* measurement, because that is how the name
+            // above was drawn: a byte count at a guessed regular advance either
+            // buried the badge in a long name or left a ragged gap after a short
+            // one.
+            let name_w = text::measure(&snap.name, 13.0, FontWeightHint::Bold);
             render_badge(
                 tree,
-                x + 12.0 + snap.name.len() as f32 * 8.0 + 8.0,
+                x + 12.0 + name_w + 8.0,
                 y + 8.0,
                 snap.snapshot_type.label(),
                 snap.snapshot_type.badge_color(),
@@ -1449,6 +1457,48 @@ mod tests {
     // Helper: create a simple test snapshot in a manager.
     fn make_test_manager() -> SnapshotManager {
         SnapshotManager::new()
+    }
+
+    // ---- Measured widths ----
+
+    #[test]
+    fn a_badge_fits_its_label() {
+        let mut tree = RenderTree::new();
+        for label in ["System", "User", "Pre-Update", "Sicherheitskopie"] {
+            let w = render_badge(&mut tree, 0.0, 0.0, label, COL_ACCENT);
+            assert!(
+                w >= text::measure(label, 11.0, FontWeightHint::Regular) + 16.0,
+                "{label} overflows its badge"
+            );
+        }
+    }
+
+    #[test]
+    fn a_button_fits_its_label() {
+        let mut tree = RenderTree::new();
+        for label in ["Restore", "Delete", "Wiederherstellen"] {
+            let w = render_button(&mut tree, 0.0, 0.0, label, COL_ACCENT);
+            assert!(
+                w >= text::measure(label, 13.0, FontWeightHint::Regular) + 24.0,
+                "{label} overflows its button"
+            );
+        }
+    }
+
+    #[test]
+    fn the_type_badge_clears_the_snapshot_name() {
+        // The name is drawn bold, so the badge after it has to be placed from a
+        // bold measurement or it lands on top of the last few letters.
+        let name = "Vor dem Update \u{fc}berpr\u{fc}ft";
+        let bold = text::measure(name, 13.0, FontWeightHint::Bold);
+        let regular = text::measure(name, 13.0, FontWeightHint::Regular);
+        assert!(bold >= regular, "bold measured narrower than regular");
+        // And the name is not sized by its byte count: this one has four
+        // two-byte characters in it.
+        assert!(
+            bold < name.len() as f32 * 8.0,
+            "a bold measurement came out wider than the old byte estimate"
+        );
     }
 
     // ---- Snapshot creation with metadata ----

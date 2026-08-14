@@ -22,6 +22,7 @@ use guitk::layout::{FlexAlign, FlexDirection, FlexWrap, Size};
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
 #[allow(unused_imports)]
 use guitk::style::{CornerRadii, Edges};
+use guitk::text;
 
 // ============================================================================
 // Catppuccin Mocha theme colors
@@ -73,6 +74,15 @@ const SEARCH_BAR_HEIGHT: f32 = 40.0;
 const CATEGORY_ITEM_HEIGHT: f32 = 44.0;
 const CONTENT_PADDING: f32 = 32.0;
 const SECTION_SPACING: f32 = 24.0;
+
+/// Width of the page tab drawn for `label`, including the 8 px padding each side.
+///
+/// The renderer and the click handler both need this, and when they each had
+/// their own copy of the arithmetic a change to one silently moved the hit
+/// targets off the tabs.
+fn page_tab_width(label: &str) -> f32 {
+    text::padded_width(label, 8.0, 13.0, FontWeightHint::Regular)
+}
 const ITEM_HEIGHT: f32 = 48.0;
 const TOGGLE_WIDTH: f32 = 44.0;
 const TOGGLE_HEIGHT: f32 = 24.0;
@@ -1376,7 +1386,7 @@ impl SettingsState {
         for page in pages {
             let is_active = *page == self.current_page;
             let label = page.label();
-            let tab_width = label.len() as f32 * 8.0 + 16.0;
+            let tab_width = page_tab_width(label);
 
             if is_active {
                 // Active tab underline
@@ -2615,7 +2625,7 @@ impl SettingsState {
 
     #[allow(dead_code)]
     fn render_button(&self, tree: &mut RenderTree, x: f32, y: f32, label: &str, color: Color) {
-        let btn_w = label.len() as f32 * 8.0 + 24.0;
+        let btn_w = text::padded_width(label, 12.0, 13.0, FontWeightHint::Regular);
         let btn_h = 32.0;
         fill_rounded(tree, x, y, btn_w, btn_h, color, 6.0);
         tree.text(x + 12.0, y + 8.0, label, COL_CRUST, 13.0);
@@ -3042,7 +3052,7 @@ impl SettingsState {
             let mut tab_x = SIDEBAR_WIDTH + CONTENT_PADDING;
             for page in pages {
                 let label = page.label();
-                let tab_width = label.len() as f32 * 8.0 + 16.0;
+                let tab_width = page_tab_width(label);
                 if mx >= tab_x && mx < tab_x + tab_width + 8.0 {
                     self.current_page = *page;
                     return EventResult::Consumed;
@@ -3592,6 +3602,49 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- Measured widths ----
+
+    #[test]
+    fn page_tabs_fit_their_labels() {
+        for category in SettingsCategory::ALL {
+            for page in category.pages() {
+                let label = page.label();
+                assert!(
+                    page_tab_width(label)
+                        >= text::measure(label, 13.0, FontWeightHint::Regular) + 16.0,
+                    "{label} overflows its tab"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_tab_hit_target_is_the_tab_that_was_drawn() {
+        // Renderer and click handler share one function, so a click at the
+        // centre of the nth tab lands on the nth page whatever the labels are.
+        let mut state = SettingsState::new();
+        let pages: Vec<SettingsPage> = state.current_category.pages().to_vec();
+        let mut tab_x = SIDEBAR_WIDTH + CONTENT_PADDING;
+        for page in &pages {
+            let w = page_tab_width(page.label());
+            let centre = tab_x + w / 2.0;
+            state.handle_click(centre, HEADER_HEIGHT - 10.0);
+            tab_x += w + 8.0;
+        }
+        // The last click leaves us on the last page.
+        assert_eq!(Some(state.current_page), pages.last().copied());
+    }
+
+    #[test]
+    fn a_tab_is_not_sized_by_byte_length() {
+        let ascii = page_tab_width("Anzeige");
+        let accented = page_tab_width("Anzeig\u{e9}");
+        assert!(
+            (ascii - accented).abs() < 4.0,
+            "an accent changed the tab width by more than a glyph's worth"
+        );
+    }
 
     #[test]
     fn test_initial_state() {

@@ -34,6 +34,7 @@
 use guitk::Color;
 use guitk::render::{FontWeightHint, RenderCommand};
 use guitk::style::CornerRadii;
+use guitk::text;
 
 use std::collections::HashMap;
 
@@ -1855,7 +1856,7 @@ impl NotesApp {
         let template_colors = [OVERLAY0, TEAL, GREEN, MAUVE];
         let mut tx = tmpl_x + 35.0;
         for (i, label) in template_labels.iter().enumerate() {
-            let btn_w = label.len() as f32 * 7.0 + 16.0;
+            let btn_w = text::padded_width(label, 8.0, 11.0, FontWeightHint::Regular);
             let color = template_colors.get(i).copied().unwrap_or(OVERLAY0);
             cmds.push(RenderCommand::FillRect {
                 x: tx,
@@ -2039,7 +2040,7 @@ impl NotesApp {
 
             let mut tag_x: f32 = 8.0;
             for tag in &tags {
-                let tag_w = tag.len() as f32 * 6.5 + TAG_PADDING * 2.0;
+                let tag_w = text::padded_width(tag, TAG_PADDING, 10.0, FontWeightHint::Regular);
                 if tag_x + tag_w > SIDEBAR_WIDTH - 4.0 {
                     tag_x = 8.0;
                     y += TAG_HEIGHT + 4.0;
@@ -2424,7 +2425,7 @@ impl NotesApp {
         if !note.tags.is_empty() {
             let mut tx = x + EDITOR_PADDING;
             for tag in &note.tags {
-                let tw = tag.len() as f32 * 6.5 + 16.0;
+                let tw = text::padded_width(tag, 8.0, 10.0, FontWeightHint::Regular);
                 cmds.push(RenderCommand::FillRect {
                     x: tx,
                     y: tags_y + 2.0,
@@ -3005,6 +3006,37 @@ mod tests {
     )]
 
     use super::*;
+
+    // --- Measured-width tests ---
+
+    #[test]
+    fn tag_pills_fit_their_tags() {
+        for tag in ["work", "todo", "id\u{e9}es", "\u{5b}\u{5d}"] {
+            let sidebar = text::padded_width(tag, TAG_PADDING, 10.0, FontWeightHint::Regular);
+            assert!(
+                sidebar >= text::measure(tag, 10.0, FontWeightHint::Regular) + TAG_PADDING * 2.0,
+                "{tag} overflows its sidebar pill"
+            );
+            let editor = text::padded_width(tag, 8.0, 10.0, FontWeightHint::Regular);
+            assert!(
+                editor >= text::measure(tag, 10.0, FontWeightHint::Regular) + 16.0,
+                "{tag} overflows its editor pill"
+            );
+        }
+    }
+
+    #[test]
+    fn a_tag_pill_is_not_sized_by_byte_length() {
+        // "idees" and "idees" with an acute accent are the same five glyphs,
+        // so their pills should be within a hair of each other -- by byte
+        // count the accented one is a whole character wider.
+        let plain = text::padded_width("idees", TAG_PADDING, 10.0, FontWeightHint::Regular);
+        let accented = text::padded_width("id\u{e9}es", TAG_PADDING, 10.0, FontWeightHint::Regular);
+        assert!(
+            (plain - accented).abs() < 4.0,
+            "an accent changed the pill width by more than a glyph's worth"
+        );
+    }
 
     // -----------------------------------------------------------------------
     // Helper: create an app with a couple of notebooks and notes

@@ -23,6 +23,7 @@
 use guitk::Color;
 use guitk::render::{FontWeightHint, RenderCommand};
 use guitk::style::CornerRadii;
+use guitk::text;
 
 // ============================================================================
 // Catppuccin Mocha theme
@@ -1156,7 +1157,7 @@ impl PasswordApp {
         let mut tx = 220.0;
         for tab in &tabs {
             let is_active = *tab == self.active_tab;
-            let btn_w = tab.label().len() as f32 * 8.0 + 20.0;
+            let btn_w = text::padded_width_any_weight(tab.label(), 10.0, 11.0);
             cmds.push(RenderCommand::FillRect {
                 x: tx,
                 y: 8.0,
@@ -1295,7 +1296,7 @@ impl PasswordApp {
         ];
 
         for (label, color) in &buttons {
-            let btn_w = label.len() as f32 * 7.5 + 24.0;
+            let btn_w = text::padded_width(label, 12.0, 11.0, FontWeightHint::Bold);
             cmds.push(RenderCommand::FillRect {
                 x: lx,
                 y: cy,
@@ -1432,7 +1433,8 @@ impl PasswordApp {
 
                 if let Some(ref analysis) = self.current_analysis {
                     // Rating badge
-                    let badge_w = analysis.rating.label().len() as f32 * 9.0 + 20.0;
+                    let badge_w =
+                        text::padded_width(analysis.rating.label(), 10.0, 13.0, FontWeightHint::Bold);
                     cmds.push(RenderCommand::FillRect {
                         x: lx,
                         y: cy,
@@ -1646,6 +1648,57 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- Measured-width tests ---
+
+    #[test]
+    fn the_rating_badge_fits_its_label() {
+        for rating in [
+            StrengthRating::VeryWeak,
+            StrengthRating::Weak,
+            StrengthRating::Fair,
+            StrengthRating::Strong,
+            StrengthRating::VeryStrong,
+        ] {
+            let label = rating.label();
+            let w = text::padded_width(label, 10.0, 13.0, FontWeightHint::Bold);
+            assert!(
+                w >= text::measure(label, 13.0, FontWeightHint::Bold) + 20.0,
+                "{label} overflows its badge"
+            );
+        }
+    }
+
+    #[test]
+    fn a_toolbar_tab_keeps_its_width_when_selected() {
+        // The tab strip is laid out left to right from a fixed origin, so a tab
+        // that grew when selected would push every tab after it sideways.
+        let widths: Vec<f32> = [
+            ActiveTab::Generator,
+            ActiveTab::Analyzer,
+            ActiveTab::History,
+        ]
+        .iter()
+        .map(|t| text::padded_width_any_weight(t.label(), 10.0, 11.0))
+        .collect();
+        for (i, tab) in [
+            ActiveTab::Generator,
+            ActiveTab::Analyzer,
+            ActiveTab::History,
+        ]
+        .iter()
+        .enumerate()
+        {
+            for weight in [FontWeightHint::Regular, FontWeightHint::Bold] {
+                let needed = text::measure(tab.label(), 11.0, weight) + 20.0;
+                assert!(
+                    widths.get(i).copied().unwrap_or(0.0) >= needed,
+                    "{} overflows at {weight:?}",
+                    tab.label()
+                );
+            }
+        }
+    }
 
     // --- RNG tests ---
 

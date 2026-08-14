@@ -22,6 +22,7 @@
 extern crate alloc;
 
 pub mod raster;
+pub mod scaled;
 pub mod sfnt;
 
 use alloc::string::String;

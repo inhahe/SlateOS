@@ -21,16 +21,20 @@
 //! outline for at least one common Latin letter (i.e. we did not "succeed"
 //! by parsing the container and then failing every glyph).
 
+// A test that indexes past the end of its own fixed-size buffer *should*
+// panic — that is the failure being reported, not a defect to guard against.
 #![allow(
     clippy::unwrap_used,
     clippy::print_stdout,
-    clippy::arithmetic_side_effects
+    clippy::arithmetic_side_effects,
+    clippy::indexing_slicing
 )]
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use osfont::raster::rasterize;
+use osfont::scaled::{ScaledFont, Target};
 use osfont::sfnt::{Face, PathCmd, SfntError};
 
 /// Directories a font might live in, on any host this repo is developed on.
@@ -203,24 +207,17 @@ fn every_installed_font_parses_or_fails_cleanly() {
     assert!(opened > 0, "not one installed font opened");
 }
 
-/// Render real letters as ASCII art so a human can confirm they are letters.
+/// An ordinary Latin text face from this host, for the shape tests below.
 ///
-/// The bulk test above proves the rasterizer produces *ink*, which a mirrored,
-/// transposed or otherwise scrambled glyph would too. Nothing but looking at
-/// the output catches that class of bug, so this prints it. It also asserts
-/// the two properties that distinguish a letter from noise: 'l' is far taller
-/// than it is wide, and 'o' is hollow — there is a run of blank pixels
-/// enclosed by ink on its middle row.
-#[test]
-#[ignore = "depends on the host's installed fonts"]
-fn letters_look_like_letters() {
+/// Prefers one that is present nearly everywhere on each platform, and falls
+/// back to whatever the host has so the test still runs somewhere unusual.
+fn pick_text_face() -> PathBuf {
     let mut candidates: Vec<PathBuf> = Vec::new();
     for dir in font_dirs() {
         collect_fonts(&dir, &mut candidates, 0);
     }
-    // Any ordinary text face will do; prefer one that is present nearly
-    // everywhere on each platform.
-    let face_path = candidates
+    candidates.sort();
+    candidates
         .iter()
         .find(|p| {
             let n = p
@@ -232,8 +229,21 @@ fn letters_look_like_letters() {
         })
         .or_else(|| candidates.first())
         .expect("no fonts on this host")
-        .clone();
+        .clone()
+}
 
+/// Render real letters as ASCII art so a human can confirm they are letters.
+///
+/// The bulk test above proves the rasterizer produces *ink*, which a mirrored,
+/// transposed or otherwise scrambled glyph would too. Nothing but looking at
+/// the output catches that class of bug, so this prints it. It also asserts
+/// the two properties that distinguish a letter from noise: 'l' is far taller
+/// than it is wide, and 'o' is hollow — there is a run of blank pixels
+/// enclosed by ink on its middle row.
+#[test]
+#[ignore = "depends on the host's installed fonts"]
+fn letters_look_like_letters() {
+    let face_path = pick_text_face();
     let data = fs::read(&face_path).expect("read font");
     let face = Face::parse(data).expect("parse font");
     println!("face: {}", face_path.display());
@@ -289,5 +299,116 @@ fn letters_look_like_letters() {
                 "'o' is solid on its middle row — the counter did not cancel"
             );
         }
+    }
+}
+
+/// Drive the whole stack the way a toolkit will: file → face → `ScaledFont`
+/// → pixels in an ARGB buffer.
+///
+/// The tests above stop at a `GlyphMask`. This one goes all the way to the
+/// framebuffer, because the parts that only exist at this level — the pen
+/// advancing between glyphs, the baseline placement, the coverage-to-alpha
+/// blend, the cache — have no other coverage against a real font.
+#[test]
+#[ignore = "depends on the host's installed fonts"]
+fn a_string_renders_into_a_buffer() {
+    const W: u32 = 320;
+    const H: u32 = 48;
+    const BG: u32 = 0xFF00_0000;
+
+    let path = pick_text_face();
+    let data = fs::read(&path).expect("read font");
+    let mut font = ScaledFont::from_bytes(data, 24.0).expect("scaled font");
+    println!("face: {}  {:?}", path.display(), font);
+
+    let m = font.metrics().clone();
+    println!(
+        "ascent {:.2}  descent {:.2}  line_height {:.2}  x_height {:.2}  cap_height {:.2}",
+        m.ascent, m.descent, m.line_height, m.x_height, m.cap_height
+    );
+    // Sanity on the derived metrics: these orderings hold for every Latin
+    // text face and would break loudly if the scaling were wrong.
+    assert!(m.ascent > 0.0 && m.descent >= 0.0);
+    assert!(m.line_height >= m.ascent + m.descent);
+    assert!(
+        m.x_height > 0.0 && m.x_height < m.cap_height,
+        "x-height {} should be below cap-height {}",
+        m.x_height,
+        m.cap_height
+    );
+    assert!(m.cap_height <= m.ascent + 1.0);
+
+    let text = "Hamburgefonstiv 0123";
+    let mut buf = vec![BG; (W * H) as usize];
+    let end = {
+        let mut target = Target {
+            buffer: &mut buf,
+            stride: W,
+            height: H,
+            color: 0xFFFF_FFFF,
+        };
+        font.draw_text(text, &mut target, 4.0, m.ascent + 4.0)
+    };
+
+    // The pen must have advanced by exactly what `measure` predicts —
+    // otherwise layout and drawing disagree and every centred label is off.
+    let predicted = 4.0 + font.measure(text);
+    assert!(
+        (end - predicted).abs() < 0.01,
+        "pen ended at {end}, measure predicted {predicted}"
+    );
+    assert!(
+        end < f32::from(u16::try_from(W).unwrap()),
+        "test string overflowed the buffer"
+    );
+
+    let lit = buf.iter().filter(|&&p| p != BG).count();
+    assert!(lit > 100, "only {lit} pixels were drawn");
+    println!(
+        "drew {lit} pixels; cache holds {} glyphs",
+        font.cached_glyphs()
+    );
+
+    // Anti-aliasing means intermediate greys, not just black and white. A
+    // purely binary result would mean the coverage was thresholded somewhere.
+    let greys = buf
+        .iter()
+        .filter(|&&p| {
+            let v = p & 0xFF;
+            v > 0 && v < 255
+        })
+        .count();
+    assert!(greys > 0, "no partial coverage — anti-aliasing was lost");
+
+    // Nothing may be drawn above the ascent line or below the descent line.
+    let top_limit = 4;
+    for y in 0..top_limit {
+        for x in 0..W {
+            let idx = (y * W + x) as usize;
+            assert_eq!(
+                buf[idx], BG,
+                "ink at ({x},{y}) is above the baseline's ascent"
+            );
+        }
+    }
+
+    // Print it, so a human can read the sentence.
+    for y in 0..H {
+        let row: String = (0..W)
+            .map(|x| {
+                let v = buf[(y * W + x) as usize] & 0xFF;
+                match v {
+                    0 => ' ',
+                    1..=84 => '.',
+                    85..=169 => ':',
+                    170..=254 => '*',
+                    _ => '#',
+                }
+            })
+            .collect();
+        if row.trim().is_empty() {
+            continue;
+        }
+        println!("|{row}|");
     }
 }

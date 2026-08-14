@@ -358,6 +358,9 @@ pub struct FaceMetrics {
     pub descender: i16,
     /// Extra space the designer wants between lines.
     pub line_gap: i16,
+    /// The widest advance in the face. Declared by `hhea`, so reading it
+    /// costs nothing — the alternative is scanning every entry of `hmtx`.
+    pub advance_width_max: u16,
     /// The design grid size these values are expressed in.
     pub units_per_em: u16,
 }
@@ -480,6 +483,7 @@ impl Face {
         let ascender = i16_at(hhea_data, 4).ok_or(SfntError::MalformedTable("hhea"))?;
         let descender = i16_at(hhea_data, 6).ok_or(SfntError::MalformedTable("hhea"))?;
         let line_gap = i16_at(hhea_data, 8).ok_or(SfntError::MalformedTable("hhea"))?;
+        let advance_width_max = u16_at(hhea_data, 10).ok_or(SfntError::MalformedTable("hhea"))?;
         let num_h_metrics = u16_at(hhea_data, 34).ok_or(SfntError::MalformedTable("hhea"))?;
 
         let maxp_data = data
@@ -497,6 +501,7 @@ impl Face {
                 ascender,
                 descender,
                 line_gap,
+                advance_width_max,
                 units_per_em,
             },
             num_glyphs,
@@ -1191,7 +1196,7 @@ fn emit_contour(pts: &[GlyphPoint], out: &mut Outline) {
     clippy::float_cmp,
     clippy::too_many_lines
 )]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// Build a minimal but *real* TrueType file in memory.
@@ -1204,7 +1209,7 @@ mod tests {
     /// * glyph 1 — 'A' at U+0041: a 100x100 square from (100,0)
     /// * glyph 2 — 'B' at U+0042: a triangle with one off-curve point
     /// * glyph 3 — 'C' at U+0043: a composite placing glyph 1 at +500,+200
-    pub(super) fn build_test_font() -> Vec<u8> {
+    pub(crate) fn build_test_font() -> Vec<u8> {
         fn be16(v: u16) -> [u8; 2] {
             v.to_be_bytes()
         }
@@ -1286,6 +1291,7 @@ mod tests {
         hhea[4..6].copy_from_slice(&be16i(800)); // ascender
         hhea[6..8].copy_from_slice(&be16i(-200)); // descender
         hhea[8..10].copy_from_slice(&be16i(100)); // lineGap
+        hhea[10..12].copy_from_slice(&be16(600)); // advanceWidthMax
         hhea[34..36].copy_from_slice(&be16(3)); // numberOfHMetrics
 
         // ---- maxp ----------------------------------------------------------

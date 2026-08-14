@@ -59158,4 +59158,59 @@ and only the row is missing.
   parse, so the `@P` re-read is a `bad substitution` and the text is printed
   unchanged; osh splices the re-print and prints `<(fi)`.
 
+  **Measured against bash 5.2.37 (2026-08-14).** The row behaves as the `$(`
+  row beside it in every respect: `A${z:-<(fi)}TAIL` and `A${z:-$(fi)}TAIL`
+  give byte-identical output, down to the quoted remainder `` `fi)}TAIL' ``
+  and the `line 2` numbering `xparse_dolparen` gives an unread body. It is the
+  scan's row and not the string's — `x='a<(fi)b'` is silent — and it is reached
+  only where the scan's own quoting allows: `"<(fi)"` (double-quoted),
+  `'<(fi)'` (single-quoted, `skip_single_quoted`) and `\<(fi)` are all silent
+  and print their text. A body that parses is silent too and is *not*
+  performed: `A${z:-<(echo A >&2)}B` prints `A<(echo A >&2)B` and no `A` on
+  stderr.
+
+  osh already matches on six of those shapes. What it gets wrong:
+
+  | written (as `x`, then `echo "${x@P}"`) | bash | osh |
+  |---|---|---|
+  | `A${z:-<(fi)}TAIL` | reports, `bad substitution`, text | `A<(fi)TAIL` |
+  | `A${z:-${y:-<(fi)}}B` | reports (nested body too) | `A<(fi)B` |
+  | `A${z:-p<(fi)q$(for)r}B` | reports the **`<(fi)`** | reports the `$(for)` |
+  | `A${z:-<(fi}B` | `unexpected EOF`, `bad substitution`, text | runs `fi}` — `command not found` |
+
+  **Why it is not a two-line change.** The `<(` span *is* already collected —
+  `Lexer::read_dollar_brace` has the row (lexer.rs:7069) and records a
+  `CmdSubSpan` with `SubOpen::Proc`, its `src`, its `range` and
+  `SubBody::Unread`. What is missing is a [`WordPart`] for
+  [`Shell::brace_scanned_subs`] to walk to: `procsub_reprints`
+  (parser.rs:6288) splices a re-print only for a `SubBody::Eager` span, and the
+  re-lex that carves the operand out of the body (`read_word_verbatim`) leaves
+  a `<(` as characters on purpose. So for an *unread* body the process
+  substitution survives only as text in a `WordPart::Literal`.
+  `arith_unread_subs` is the shape of the answer for the arithmetic scan, and
+  it excludes this spelling deliberately (parser.rs:6233-6240).
+
+  Two things make the obvious fixes wrong, both measured above:
+
+  * **The remainder runs past the `}`.** `` `fi)}TAIL' `` and
+    `` `fi)}B${y:-<(for)}C' `` are the rest of the *whole re-read string*, not
+    of the `${ … }`. So a text scan confined to the brace's own source (the
+    only text [`Shell::brace_extent_scan`] is handed) cannot build the part's
+    `tail`, and the `$( … )` spelling gets its own from
+    `unparse::attach_comsub_tails`, which runs over the assembled word in the
+    parser.
+  * **It must interleave with the `$(` spelling**, in the order the one scan
+    meets them — hence the `p<(fi)q$(for)r` row above.
+
+  Reusing [`CmdSubBody::Unread`] for the synthesized part is safe for the
+  *read* (the diagnostic quotes the body's remnant, never the delimiter, so a
+  `<(` and a `$(` in this position are byte-identical) but not for anything
+  that re-prints or *runs* one — `interp.rs:34302` performs an unread body, and
+  a process substitution here is never performed. So either the part carries
+  its spelling (a new field on `CmdSubBody::Unread`, two construction sites and
+  one printer, plus the run site taught to refuse) or it is synthesized late
+  enough that it can never escape into a print or a run — which is what
+  `Shell::gobbled_procsubs` does for the `brace_gobbler` half above, and the
+  reason that one could be done without touching the AST.
+
 **How it was found:** implementing the entry above.

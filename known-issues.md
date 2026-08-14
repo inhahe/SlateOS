@@ -58126,9 +58126,15 @@ surfaced three things worth carrying forward:
 
 ## TD-GUI-TEXT-COMMAND-DOES-NOT-WRAP — callers assume `max_width` wraps, but it clips
 
-**Status.** Open. `gui/**` is done — the About dialog's licence list
-(`7948cf8d5`), every `AlertDialog` (`46db88142`), the notification toast body
-(`f559ea8b1`) and `InputDialog`'s prompt. The app tree is unaudited.
+**Status.** Fixed for every prose caller found. `gui/**` first — the About
+dialog's licence list (`7948cf8d5`), every `AlertDialog` (`46db88142`), the
+notification toast body (`f559ea8b1`) and `InputDialog`'s prompt (`5a3a2e3d9`)
+— then the app tree: `whiteboard` sticky notes (`658743045`), `contacts` notes
+(`e48423a86`), `weather` alert descriptions (`4ca3cc4b1`), `dbviewer` result
+messages (`9ace36e4c`), `reminders` and `podcast` prose fields (`42359f6fc`),
+`vpnmanager` profile notes (`21813b691`), `partmanager` confirmation messages
+and `netmanager` diagnostic details. Reopen it if a new prose caller turns up;
+the survey below says how to find one.
 
 **What it is.** `RenderCommand::Text` carries a `max_width`, and the obvious
 reading is that the compositor wraps to it. It does not. `Compositor::draw_text`
@@ -58185,22 +58191,101 @@ Two things the fixes had to get right, and any further one will too:
   screen. It takes three lines and elides the last, because a body cut without
   a mark reads as a complete sentence — the reader cannot tell there was more.
 
+**`text::Paragraph` — the fix the app tree actually uses.** After the same
+wrap-and-advance block had been hand-written at five call sites, the convention
+it rests on stopped being worth trusting to memory, so `guitk::text::Paragraph`
+(added in `42359f6fc`) makes it structural: `Paragraph::draw` emits the
+commands *and returns the height it used, measured from those commands*, so a
+caller that advances its cursor by the return value cannot reserve a height
+that disagrees with what was drawn. `.max_lines(n)` caps a bounded surface and
+elides the last line. Prefer it over calling `wrap` by hand; `wrap` is still
+right when a caller needs the lines themselves rather than a drawing.
+
+It takes `&mut impl Extend<RenderCommand>`, because half the app tree collects
+into a bare `Vec<RenderCommand>` and half into a `RenderTree`; `RenderTree`
+implements `Extend<RenderCommand>` so both work without a caller reaching past
+it into `commands`.
+
+**Each site needs three questions asked before anything changes:** *what is the
+text's box, what reserves that box's height, and does anything downstream of it
+move.* The answers split the app sites into four shapes, and the fix differs:
+
+- **A running cursor** (`contacts` notes, `reminders` description and notes,
+  `podcast` description and show notes) — wrap and advance the cursor by the
+  height drawn. These were the dangerous ones: the field below was drawn on top
+  of the one above the moment either ran past a line.
+- **A card that sizes itself** (`weather` alert descriptions) — wrap, then grow
+  the card to the wrapped height, floored at the old size so the common
+  one-line case looks unchanged.
+- **A fixed box the user drew** (`whiteboard` sticky notes) — wrap in *canvas*
+  units, not screen pixels, so zooming moves and scales the note without
+  reflowing it; drop lines that fall past the bottom rather than spilling onto
+  the canvas.
+- **A pane or dialog with fixed furniture below** (`dbviewer` result messages,
+  `partmanager` confirmation dialogs) — wrap, move what follows down, *and* cap
+  the lines so the prose cannot crowd out the results table or run through the
+  button row. `partmanager` was the sharpest case: its messages are whole
+  sentences about destroying a disk, and the first one in the toolbar
+  ("This will destroy ALL data on the disk. Choose GPT (default) or MBR.")
+  was already losing its second half.
+
 **Where it is *not* a bug.** `max_width` on a single-line label — a title, a
 column cell, a status-bar message — is doing exactly what it should. Clipping is
 the intended behaviour there, and the fix for an over-long one is `text::elide`,
-not wrapping. Only reach for `wrap` where the text is prose the user is meant to
-read in full.
+not wrapping. `netmanager`'s diagnostics rows are the example: a row is a fixed
+two-line cell in a list meant to be scanned, so the detail line is elided to the
+row width rather than wrapped. Only reach for `Paragraph` where the text is
+prose the user is meant to read in full.
 
-**Where to look next.** Unaudited callers passing prose to a single command,
-found by grepping for a `Text` command whose body is a `description` / `body` /
-`message` / `notes` / `content` field with `max_width: Some(..)`. Remaining
-candidates, all under `apps/`: `contacts` (the notes field), `whiteboard`
-(sticky-note content), `weather` (alert descriptions), `dbviewer` (query result
-messages). Status-bar messages are *not* in scope — truncating those to one line
-is the intended behaviour, and the survey turns up many of them
-(`automator`, `dictionary`, `diskimager`).
+**Where to look next.** Prose callers are found by grepping for a `Text` command
+whose body is a `description` / `body` / `message` / `notes` / `content` field
+with `max_width: Some(..)`. The survey turned up no remaining prose sites, but
+it is not a proof — a new app can reintroduce one, and the grep will not catch a
+prose field under an unusual name. Status-bar messages are *not* in scope —
+truncating those to one line is the intended behaviour, and the survey turns up
+many of them (`automator`, `dictionary`, `diskimager`, `battleship`, `reversi`).
+
+**Follow-on debt this exposed:** see `TD-GUI-CLIPPED-TEXT-IS-NOT-MARKED` below.
 
 Each fix has the same three questions: what is the text's box, what reserves
 that box's height, and does anything downstream of it move. Where the answer to
 the third is "yes" — a stacked list, a following field — the height and the
 drawn lines must come from one call, not two.
+
+## TD-GUI-CLIPPED-TEXT-IS-NOT-MARKED — `max_width` cuts mid-glyph and says nothing
+
+**Status.** Open, and deliberately not fixed in the pass that closed
+`TD-GUI-TEXT-COMMAND-DOES-NOT-WRAP`, because the good fix is a change to
+`RenderCommand::Text` itself and wants a decision rather than a sweep.
+
+**What it is.** `max_width` clips: the compositor walks glyphs and stops when
+the next one would cross the limit. It draws no ellipsis. So a label that does
+not fit ends mid-word — and, worse, ends *plausibly*: "Gateway 192.168.1.1 res"
+reads as a complete string to anyone who cannot see the field it was cut from.
+A caller that wants the cut marked has to call `text::elide` first, which
+measures the string a second time to answer a question the compositor is about
+to answer again while drawing. That is the same two-calculations-for-one-quantity
+shape as the wrap bug, one layer down.
+
+**How widespread.** Every single-line label in the app tree that passes
+`max_width: Some(..)` without eliding first — well over a hundred sites. Most
+are fine in practice because the values are short and app-authored; the ones
+that bite are those carrying user or network data (file names, SSIDs, error
+strings, host names). `netmanager`'s diagnostics detail line was fixed by hand;
+the rest were left.
+
+**Proper fix.** Give the command an explicit overflow policy — `Clip` (today's
+behaviour, correct for a progress label that must not jitter) versus `Ellipsis`
+(the right default for a data-bearing label) — and let the compositor draw the
+mark, since it is the only party that knows exactly where the glyphs ran out.
+
+**Why it is not done.** Adding a field to `RenderCommand::Text` touches every
+struct-literal construction of it in `gui/**` and `apps/**` — several hundred —
+because Rust has no default for a struct-variant field. The alternatives are
+each a compromise: a second variant (`TextClipped`) splits the match arms in
+every renderer; a builder function leaves the literal form available and so does
+not actually prevent the mistake; a blanket `text::elide` sweep at the call
+sites fixes the symptom while keeping the double measurement. The mechanical
+churn is cheap to *do* and expensive to *review* against three lanes' in-flight
+work, so it should be scheduled deliberately rather than smuggled into an
+unrelated fix. Recorded for the operator in `open-questions.md`.

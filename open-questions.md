@@ -626,6 +626,60 @@ the 63 gate sites led by `posix/src/process.rs` (13) and `posix/src/unistd.rs`
 projected), `kernel/src/syscall/handlers.rs` (`sys_cap_query`), and
 `known-issues.md` → `TD-POSIX-CAPS-ARE-NOT-THE-KERNEL'S`.
 
+## Q45 — Text clipped by `max_width` is cut mid-glyph with no ellipsis. Should `RenderCommand::Text` carry an overflow policy? — Status: OPEN
+
+**Raised by Claude** (2026-08-14), falling out of the pass that closed
+`known-issues.md` → `TD-GUI-TEXT-COMMAND-DOES-NOT-WRAP`. Logged there as
+`TD-GUI-CLIPPED-TEXT-IS-NOT-MARKED`.
+
+**The situation.** `max_width` on a `Text` command clips: the compositor walks
+glyphs and stops before the first one that would cross the limit, drawing no
+mark. A label that does not fit therefore ends mid-word and ends *plausibly* —
+"Gateway 192.168.1.1 res" looks like a complete string to a reader who cannot
+see the field it was cut from. A caller that wants the cut marked must call
+`text::elide` first, which measures the string a second time to answer a
+question the compositor is about to answer again while drawing it. Well over a
+hundred single-line labels across `gui/**` and `apps/**` pass `max_width`
+without eliding; most are safe only because their values are short and
+app-authored, and the ones that bite carry user or network data — file names,
+SSIDs, error strings, host names.
+
+**Why this needs you rather than me.** Every option is a different tax on the
+same several-hundred call sites, and the cheapest-to-write one is the one that
+does not actually stop the mistake recurring. That is a taste call about the
+API's shape, and it lands across three lanes' in-flight work.
+
+- **A — add an `overflow: TextOverflow` field to `RenderCommand::Text`**
+  (`Clip` | `Ellipsis`), and let the compositor draw the mark, since it is the
+  only party that knows exactly where the glyphs ran out. *Pro:* one
+  calculation, right by construction, and the policy is visible at every call
+  site. *Con:* Rust has no default for a struct-variant field, so this edits
+  every construction of `Text` in the tree — several hundred, mechanical but
+  wide, and it conflicts with anything else in flight that touches rendering.
+- **B — a second variant** (`TextClipped` / `TextElided`). *Pro:* no churn at
+  existing call sites. *Con:* splits the match arms in every renderer and every
+  test that walks a command list, forever, to encode one boolean.
+- **C — a constructor/builder** (`RenderCommand::text(..).elided()`), leaving
+  the struct literal as it is. *Pro:* no churn; opt in where it matters.
+  *Con:* the literal form stays available and stays wrong, so it prevents
+  nothing — it is documentation with a return type.
+- **D — sweep `text::elide` across the data-bearing call sites** and leave the
+  command alone. *Pro:* smallest diff, fixes the sites that actually bite.
+  *Con:* keeps the double measurement, and the next label someone adds has the
+  bug again.
+
+**Claude's recommendation.** **A**, done as its own commit with nothing else in
+flight, because it is the only option that makes the mistake unrepresentable —
+and the churn is mechanical, which is the cheap kind. **D** is the sensible
+answer if you would rather not spend a wide diff on this now; in that case it
+should be scoped to labels carrying user or network data rather than swept
+blindly.
+
+**Where it bites:** `gui/toolkit/src/render.rs` (`RenderCommand::Text`),
+`gui/compositor/src/main.rs` (`draw_text`, the `break` at the limit),
+`gui/toolkit/src/text.rs` (`elide` / `elide_start`), and every `max_width:
+Some(..)` in `gui/**` and `apps/**`.
+
 
 ---
 

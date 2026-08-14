@@ -64,6 +64,8 @@ const BUTTON_HEIGHT: f32 = 32.0;
 const BUTTON_WIDTH: f32 = 100.0;
 const WIFI_ITEM_HEIGHT: f32 = 40.0;
 const VPN_ITEM_HEIGHT: f32 = 44.0;
+/// Point size of the second line of a diagnostics row.
+const DIAG_DETAIL_FONT_SIZE: f32 = 10.0;
 const GRAPH_BAR_WIDTH: f32 = 8.0;
 const GRAPH_BAR_GAP: f32 = 2.0;
 const TRAFFIC_GRAPH_HEIGHT: f32 = 100.0;
@@ -1832,15 +1834,25 @@ fn render_tab_diagnostics(tree: &mut RenderTree, app: &NetManagerApp, px: f32, p
             max_width: Some(200.0),
         });
 
-        // Details
+        // Details. A row is a fixed two-line cell in a list meant to be
+        // scanned, so a detail wider than the row is cut rather than wrapped —
+        // but cut with a mark. `max_width` on its own stops mid-glyph, which
+        // leaves a truncated sentence reading as a complete one.
+        let detail_width = pw - SECTION_PADDING * 2.0 - 120.0;
         tree.push(RenderCommand::Text {
             x: lx + 28.0,
             y: y + 18.0,
-            text: diag.details.clone(),
+            text: text::elide(
+                &diag.details,
+                detail_width,
+                "…",
+                DIAG_DETAIL_FONT_SIZE,
+                FontWeightHint::Regular,
+            ),
             color: SUBTEXT0,
-            font_size: 10.0,
+            font_size: DIAG_DETAIL_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
-            max_width: Some(pw - SECTION_PADDING * 2.0 - 120.0),
+            max_width: Some(detail_width),
         });
 
         // Status label on right
@@ -3109,6 +3121,64 @@ mod tests {
             .iter()
             .any(|cmd| matches!(cmd, RenderCommand::Text { text, .. } if text.contains("Ping")));
         assert!(has_ping);
+    }
+
+    #[test]
+    fn an_overlong_diagnostic_detail_is_marked_as_cut() {
+        let mut app = NetManagerApp::new();
+        app.run_diagnostics();
+        // Far wider than a diagnostics row, which is fixed height by design.
+        let long = "The gateway did not answer within the timeout, and the \
+            route to it goes through an interface that is currently down."
+            .to_string();
+        app.diagnostics[0].details = long.clone();
+        app.set_tab(DetailTab::Diagnostics);
+
+        let mut tree = RenderTree::new();
+        render_tab_diagnostics(&mut tree, &app, 0.0, 0.0, 600.0);
+        let detail = tree
+            .commands
+            .iter()
+            .find_map(|c| match c {
+                RenderCommand::Text {
+                    text, font_size, ..
+                } if (*font_size - DIAG_DETAIL_FONT_SIZE).abs() < 0.01 => {
+                    Some(text.clone())
+                }
+                _ => None,
+            })
+            .expect("the first diagnostic's detail line is drawn");
+        assert_ne!(detail, long, "a detail too wide for its row was left whole");
+        assert!(
+            detail.ends_with('…'),
+            "a detail cut to fit its row was not marked as cut: {detail}"
+        );
+        assert!(
+            long.starts_with(detail.trim_end_matches('…')),
+            "the kept part of the detail is not its own beginning: {detail}"
+        );
+    }
+
+    #[test]
+    fn a_short_diagnostic_detail_is_left_alone() {
+        let mut app = NetManagerApp::new();
+        app.run_diagnostics();
+        app.diagnostics[0].details = "OK".to_string();
+        let mut tree = RenderTree::new();
+        render_tab_diagnostics(&mut tree, &app, 0.0, 0.0, 600.0);
+        let detail = tree
+            .commands
+            .iter()
+            .find_map(|c| match c {
+                RenderCommand::Text {
+                    text, font_size, ..
+                } if (*font_size - DIAG_DETAIL_FONT_SIZE).abs() < 0.01 => {
+                    Some(text.clone())
+                }
+                _ => None,
+            })
+            .expect("the first diagnostic's detail line is drawn");
+        assert_eq!(detail, "OK");
     }
 
     // --- Sample data tests ---

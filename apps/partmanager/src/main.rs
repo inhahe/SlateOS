@@ -24,6 +24,7 @@ use guitk::event::{Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, Mo
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
+use guitk::text;
 
 // ============================================================================
 // Catppuccin Mocha palette
@@ -74,6 +75,20 @@ const DIALOG_WIDTH: f32 = 420.0;
 const DIALOG_HEIGHT: f32 = 260.0;
 const DIALOG_BTN_WIDTH: f32 = 90.0;
 const DIALOG_BTN_HEIGHT: f32 = 30.0;
+/// Top of a confirmation dialog's message, from the top of the dialog.
+const DIALOG_MESSAGE_TOP: f32 = 50.0;
+/// Point size of a confirmation dialog's message.
+const DIALOG_MESSAGE_FONT_SIZE: f32 = 12.0;
+/// Line spacing of a confirmation dialog's message.
+const DIALOG_MESSAGE_LINE_HEIGHT: f32 = 17.0;
+/// Space left under the message before whatever the dialog draws next.
+const DIALOG_MESSAGE_GAP: f32 = 8.0;
+/// Top of the destructive-operation warning banner, from the top of the
+/// dialog. Also the floor the message must stay above on such a dialog.
+const DIALOG_WARNING_TOP: f32 = 120.0;
+/// Top of the button row, from the top of the dialog. The floor the message
+/// must stay above when there is no warning banner between them.
+const DIALOG_BTN_TOP: f32 = DIALOG_HEIGHT - 50.0;
 const SIDEBAR_DISK_ROW_HEIGHT: f32 = 48.0;
 const MIN_PARTITION_BAR_WIDTH: f32 = 4.0;
 
@@ -2076,22 +2091,32 @@ fn render_confirm_dialog(tree: &mut RenderTree, app: &PartitionManagerApp) {
         max_width: Some(DIALOG_WIDTH - 40.0),
     });
 
-    // Message
-    tree.push(RenderCommand::Text {
-        x: dx + 20.0,
-        y: dy + 50.0,
-        text: dialog.message.clone(),
-        color: COLOR_SUBTEXT1,
-        font_size: 12.0,
-        font_weight: FontWeightHint::Regular,
-        max_width: Some(DIALOG_WIDTH - 40.0),
-    });
+    // Message. `RenderCommand::Text` clips at `max_width` rather than
+    // wrapping, so this used to show its first line and no more — and the
+    // messages here are whole sentences about destroying a disk, which is the
+    // worst possible place to lose the second half of a warning. The dialog is
+    // a fixed size and everything under the message sits at a fixed offset in
+    // it, so the message gets the room down to whatever comes next and is
+    // marked with an ellipsis if it wants more.
+    let message_floor = if dialog.destructive {
+        DIALOG_WARNING_TOP
+    } else {
+        DIALOG_BTN_TOP
+    };
+    let message_lines = ((message_floor - DIALOG_MESSAGE_TOP - DIALOG_MESSAGE_GAP)
+        / DIALOG_MESSAGE_LINE_HEIGHT) as usize;
+    text::Paragraph::new(&dialog.message, COLOR_SUBTEXT1)
+        .at(dx + 20.0, dy + DIALOG_MESSAGE_TOP, DIALOG_WIDTH - 40.0)
+        .font(DIALOG_MESSAGE_FONT_SIZE, FontWeightHint::Regular)
+        .line_height(DIALOG_MESSAGE_LINE_HEIGHT)
+        .max_lines(message_lines.max(1))
+        .draw(tree);
 
     // Warning icon area for destructive operations
     if dialog.destructive {
         tree.push(RenderCommand::FillRect {
             x: dx + 20.0,
-            y: dy + 120.0,
+            y: dy + DIALOG_WARNING_TOP,
             width: DIALOG_WIDTH - 40.0,
             height: 36.0,
             color: Color::rgba(COLOR_RED.r, COLOR_RED.g, COLOR_RED.b, 30),
@@ -2099,7 +2124,7 @@ fn render_confirm_dialog(tree: &mut RenderTree, app: &PartitionManagerApp) {
         });
         tree.push(RenderCommand::Text {
             x: dx + 32.0,
-            y: dy + 130.0,
+            y: dy + DIALOG_WARNING_TOP + 10.0,
             text: String::from("WARNING: This action cannot be undone!"),
             color: COLOR_RED,
             font_size: 11.0,
@@ -2109,7 +2134,7 @@ fn render_confirm_dialog(tree: &mut RenderTree, app: &PartitionManagerApp) {
     }
 
     // Buttons
-    let btn_y = dy + DIALOG_HEIGHT - 50.0;
+    let btn_y = dy + DIALOG_BTN_TOP;
     let confirm_x = dx + DIALOG_WIDTH - DIALOG_BTN_WIDTH * 2.0 - 30.0;
     let cancel_x = dx + DIALOG_WIDTH - DIALOG_BTN_WIDTH - 20.0;
 
@@ -2543,7 +2568,7 @@ fn render_format_dialog(tree: &mut RenderTree, app: &PartitionManagerApp) {
     }
 
     // Buttons
-    let btn_y = dy + DIALOG_HEIGHT - 50.0;
+    let btn_y = dy + DIALOG_BTN_TOP;
     let format_x = dx + DIALOG_WIDTH - DIALOG_BTN_WIDTH * 2.0 - 30.0;
     let cancel_x = dx + DIALOG_WIDTH - DIALOG_BTN_WIDTH - 20.0;
 
@@ -3033,7 +3058,7 @@ fn handle_dialog_mouse(
         ActiveDialog::Confirm(dialog) => {
             let dx = (app.width - DIALOG_WIDTH) / 2.0;
             let dy_base = (app.height - DIALOG_HEIGHT) / 2.0;
-            let btn_y = dy_base + DIALOG_HEIGHT - 50.0;
+            let btn_y = dy_base + DIALOG_BTN_TOP;
             let confirm_x = dx + DIALOG_WIDTH - DIALOG_BTN_WIDTH * 2.0 - 30.0;
             let cancel_x = dx + DIALOG_WIDTH - DIALOG_BTN_WIDTH - 20.0;
 
@@ -3114,7 +3139,7 @@ fn handle_dialog_mouse(
         ActiveDialog::Format(dialog) => {
             let dx = (app.width - DIALOG_WIDTH) / 2.0;
             let dy_base = (app.height - DIALOG_HEIGHT) / 2.0;
-            let btn_y = dy_base + DIALOG_HEIGHT - 50.0;
+            let btn_y = dy_base + DIALOG_BTN_TOP;
             let format_x = dx + DIALOG_WIDTH - DIALOG_BTN_WIDTH * 2.0 - 30.0;
             let cancel_x = dx + DIALOG_WIDTH - DIALOG_BTN_WIDTH - 20.0;
 
@@ -4247,6 +4272,82 @@ mod tests {
         app.dialog = ActiveDialog::Confirm(ConfirmDialog::new("Del", "Sure?", "Delete", true));
         let tree = render(&app);
         assert!(!tree.is_empty());
+    }
+
+    /// The lines of a confirmation dialog's message: every text drawn in the
+    /// message's colour and size, top to bottom.
+    fn confirm_message_lines(app: &PartitionManagerApp) -> Vec<(f32, String)> {
+        let tree = render(app);
+        let mut lines: Vec<(f32, String)> = tree
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text {
+                    y,
+                    text,
+                    color,
+                    font_size,
+                    ..
+                } if *color == COLOR_SUBTEXT1
+                    && (*font_size - DIALOG_MESSAGE_FONT_SIZE).abs() < 0.01 =>
+                {
+                    Some((*y, text.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        lines.sort_by(|a, b| a.0.total_cmp(&b.0));
+        lines
+    }
+
+    #[test]
+    fn a_long_confirmation_message_is_wrapped_not_truncated() {
+        let mut app = PartitionManagerApp::new();
+        app.dialog = ActiveDialog::Confirm(ConfirmDialog::new(
+            "Create New Partition Table",
+            "This will destroy ALL data on the disk. Choose GPT (default) or MBR.",
+            "Create GPT",
+            true,
+        ));
+        let lines = confirm_message_lines(&app);
+        assert!(
+            lines.len() > 1,
+            "a sentence too long for the dialog was drawn as {} line(s)",
+            lines.len()
+        );
+        let drawn = lines
+            .iter()
+            .map(|(_, t)| t.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            drawn.contains("MBR"),
+            "the end of a destructive warning was cut off: {drawn}"
+        );
+    }
+
+    #[test]
+    fn a_confirmation_message_stays_above_the_warning_banner() {
+        let mut app = PartitionManagerApp::new();
+        // Far more than the dialog can hold, so the cap is what stops it.
+        let long = "Deleting this partition removes every file on it. ".repeat(8);
+        app.dialog =
+            ActiveDialog::Confirm(ConfirmDialog::new("Delete", &long, "Delete", true));
+        let lines = confirm_message_lines(&app);
+        let bottom = lines
+            .last()
+            .map_or(0.0, |(y, _)| *y + DIALOG_MESSAGE_LINE_HEIGHT);
+        let dy = (app.height - DIALOG_HEIGHT) / 2.0;
+        assert!(
+            bottom <= dy + DIALOG_WARNING_TOP,
+            "the message runs to {bottom}, past the warning banner at {}",
+            dy + DIALOG_WARNING_TOP
+        );
+        let last = lines.last().map_or(String::new(), |(_, t)| t.clone());
+        assert!(
+            last.ends_with('…'),
+            "a message cut short was not marked as cut: {last}"
+        );
     }
 
     // -- Event handling tests --

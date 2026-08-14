@@ -1483,6 +1483,20 @@ pub enum CmdSubBody {
         /// merely untidy — a nested `` \` `` would lose its backslash and the
         /// result would no longer parse.
         verbatim: Str,
+        /// What follows the closing `` ` `` in the word `brace_gobbler` walks —
+        /// filled only by [`crate::unparse::gobbler_word`], empty everywhere
+        /// else.
+        ///
+        /// No *parser* wants this: a backquote body is `string_extract`'s byte
+        /// hunt for the closer (subst.c:1886), which stops there and never looks
+        /// past it. The gobbler does look past it, because inside `" … "` a
+        /// backquote is only a character to it and the scan reads straight on
+        /// into the body — so a `$( … )` in there is handed
+        /// `extract_command_subst` over the **word's** string, and a diagnostic
+        /// from it quotes the rest of the word. See
+        /// [`crate::interp::Shell::gobbled_subs`], which glues this onto the
+        /// body-scoped tail of each substitution it finds inside.
+        tail: Str,
     },
     /// `$(( … )` — a `$((` whose body did not read as an arithmetic expression,
     /// so bash ran it as a command substitution instead.

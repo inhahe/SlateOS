@@ -1410,6 +1410,18 @@ fn attach_tails_scoped(parts: &mut [WordPart], index: bool) {
 pub(crate) fn gobbler_word(word: &Word) -> Word {
     let mut w = word.clone();
     attach_tails_scoped(&mut w.parts, true);
+    // A backquote wants one too, and only here. Every other reader stops at the
+    // closing `` ` `` — the body is `string_extract`'s byte hunt for it — but
+    // inside `" … "` the gobbler never treated the opening one as a quote, so
+    // it reads on into the body and a `$( … )` there takes the rest of the
+    // *word*. See [`crate::ast::CmdSubBody::Backtick::tail`].
+    let is_backtick =
+        |p: &WordPart| matches!(p, WordPart::CommandSub { body: CmdSubBody::Backtick { .. } });
+    attach_tails_by(&mut w.parts, &is_backtick, true, &mut |p, tail| {
+        if let WordPart::CommandSub { body: CmdSubBody::Backtick { tail: t, .. } } = p {
+            *t = tail;
+        }
+    });
     w
 }
 

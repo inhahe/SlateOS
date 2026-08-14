@@ -6382,6 +6382,9 @@ fn seg_to_part(seg: &Seg, opts: ParseOpts, q: Quoting) -> Result<WordPart, Parse
                 SubBody::Backtick(verbatim) => CmdSubBody::Backtick {
                     src: raw.clone(),
                     verbatim: verbatim.clone(),
+                    // Only the gobbler's copy of the word wants this, and only
+                    // it fills it — see [`CmdSubBody::Backtick::tail`].
+                    tail: Str::new(),
                 },
                 // Collected by the same `P_ARITH` scan, so its nested bodies
                 // are re-printed into it the same way — the classification

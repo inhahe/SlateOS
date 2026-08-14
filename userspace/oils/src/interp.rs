@@ -27029,23 +27029,31 @@ impl Shell {
     ///   word with two failing substitutions reports once, where the same word
     ///   under a prompt expansion (which suppresses the jump) reports twice.
     fn gobble_scan(&mut self, word: &Word) -> bool {
-        // bash never reaches the scanner for a word with no `{` in it at all
-        // (`brace_expand_word_list`'s `mbschr (…, LBRACE)`, subst.c:9905), and a
-        // word with no substitution in it has nothing for the scan to read
-        // either way. The second test is the cheap one and subsumes the first
-        // for this purpose: a `${` carries its own `{`.
+        // A word with no substitution in it has nothing for the scan to read.
+        // This is the cheap test, so it goes first.
         if self.expansion_failed() || !Self::has_gobbled_sub(&word.parts, false) {
+            return false;
+        }
+        // And bash never reaches the scanner at all for a word with no `{` in it
+        // — `brace_expand_word_list`'s `mbschr (…, LBRACE)` (subst.c:9905), over
+        // the word as written. A `${` carries its own `{` and so passes this on
+        // its own, but a backquote body does not: ``echo "p`echo $(fi)`q"``
+        // reaches the scanner nowhere and reports from the body's own run
+        // instead, where the same word with a `{,}` on the end is scanned.
+        let src = crate::unparse::word_src(word);
+        if !src.contains(&b'{') {
             return false;
         }
         // The tails have to be re-measured, because the gobbler's string is the
         // whole word — brackets included — and the parsed word carries the
         // scopes every other reader wants. See [`crate::unparse::gobbler_word`].
         let scoped = crate::unparse::gobbler_word(word);
-        let mut subs: Vec<&WordPart> = Vec::new();
-        Self::gobbled_subs(&scoped.parts, false, &mut subs);
+        let mut subs: Vec<WordPart> = Vec::new();
+        self.gobbled_subs(&scoped.parts, false, &mut subs);
+        let subs: Vec<&WordPart> = subs.iter().collect();
         // Whatever the read complains about, it is the scanner complaining and
         // the scanner was handed the whole word. See [`Shell::enter_scanned_word`].
-        let saved = self.enter_scanned_word(crate::unparse::word_src(word));
+        let saved = self.enter_scanned_word(src);
         let read = self.extent_read_of_subs(&subs);
         self.leave_inner_source(saved);
         matches!(read, ExtentRead::Aborted)
@@ -27057,6 +27065,14 @@ impl Shell {
     fn has_gobbled_sub(parts: &[WordPart], dquoted: bool) -> bool {
         parts.iter().any(|p| {
             if Self::gobbler_reads(p) {
+                return true;
+            }
+            // A backquote inside `" … "` is answered yes without looking, since
+            // looking means lexing its body ([`Shell::gobbled_subs`]) and this
+            // is the test that exists to be cheap. Over-answering costs a scan
+            // that finds nothing and reports nothing; under-answering would lose
+            // the diagnostic outright.
+            if dquoted && matches!(p, WordPart::CommandSub { body: CmdSubBody::Backtick { .. } }) {
                 return true;
             }
             if let WordPart::SingleQuoted { parts: sub, .. } = p {
@@ -27081,17 +27097,39 @@ impl Shell {
     /// (see [`crate::ast::WordPart::SingleQuoted`]), which is precisely where
     /// bash's own parser left a `'` standing as a character.
     ///
-    /// A `` ` … ` `` is left out for the same structural reason, and is *not*
-    /// exact: at the top level the gobbler's `quoted` becomes `` ` `` and the
-    /// body is skipped, which is what leaving it out gives — but inside `" … "`
-    /// a backquote is only a character to it, so a `$( … )` in the body is read
-    /// there. osh keeps a backquote body as text rather than as parts, so this
-    /// scan cannot reach it; see TD-OILS-A-BACKQUOTE-BODY-INSIDE-DOUBLE-QUOTES-
-    /// IS-NOT-GOBBLED in known-issues.md.
-    fn gobbled_subs<'a>(parts: &'a [WordPart], dquoted: bool, out: &mut Vec<&'a WordPart>) {
+    /// A `` ` … ` `` is two different things to the gobbler depending on the
+    /// same state. At the top level its `` ` `` row is reached, `quoted` becomes
+    /// `` ` ``, and the body is skipped whole — nothing to collect. Inside
+    /// `" … "` that row is *not* reached, so the backquote is only a character
+    /// and the scan reads straight on into the body, where the `$(` row of the
+    /// `quoted == '"'` branch still fires. So the body is lexed here, as what it
+    /// is to the scan — more double-quoted text — and walked like any other
+    /// nested scope.
+    ///
+    /// The lexed body's own tails stop at its end, and the gobbler's do not: it
+    /// was handed the whole word, so `extract_command_subst` there takes the
+    /// rest of the *word* and a diagnostic quotes it. Hence the glue —
+    /// `body tail` + `` ` `` + [`crate::ast::CmdSubBody::Backtick::tail`] — laid
+    /// on every substitution the body contributes. Measured against bash 5.2.37,
+    /// ``echo "p`echo "$(fi)"`q{,}"`` quotes ``fi)"`q{,}"``: the body's `"`, the
+    /// closing backquote, and the rest of the word.
+    ///
+    /// One state flip is not followed: a `"` **inside** the body closes the
+    /// gobbler's `quoted`, after which a `'` opens a skip and a `<(`/`>(` starts
+    /// reading. Lexing the body as one double-quoted run keeps `quoted` at `"`
+    /// throughout instead. See
+    /// TD-OILS-A-QUOTE-INSIDE-A-GOBBLED-BACKQUOTE-BODY-DOES-NOT-END-THE-RUN in
+    /// known-issues.md.
+    fn gobbled_subs(&mut self, parts: &[WordPart], dquoted: bool, out: &mut Vec<WordPart>) {
         for p in parts {
             if Self::gobbler_reads(p) {
-                out.push(p);
+                out.push(p.clone());
+                continue;
+            }
+            if let WordPart::CommandSub { body: CmdSubBody::Backtick { verbatim, tail, .. } } = p {
+                if dquoted {
+                    self.gobbled_backtick_subs(verbatim, tail, out);
+                }
                 continue;
             }
             // …and inside `" … "` the `'` row is not reached, so the run is read
@@ -27102,15 +27140,64 @@ impl Shell {
             // [`crate::ast::WordPart::SingleQuoted`].
             if let WordPart::SingleQuoted { parts: sub, .. } = p {
                 if let (true, Some(w)) = (dquoted, sub.as_ref()) {
-                    Self::gobbled_subs(w, true, out);
+                    self.gobbled_subs(w, true, out);
                 }
                 continue;
             }
             // Every other scope, a `[ … ]` subscript included: the gobbler has
             // no bracket row, so it simply reads on through them.
             for (kind, w) in crate::unparse::nested_parts(p) {
-                Self::gobbled_subs(w, dquoted || kind == Nested::Quoted, out);
+                self.gobbled_subs(w, dquoted || kind == Nested::Quoted, out);
             }
+        }
+    }
+
+    /// The substitutions a backquote body contributes when the gobbler walks
+    /// into it — which it does only from inside `" … "`. See
+    /// [`Shell::gobbled_subs`].
+    ///
+    /// The body is lexed as double-quoted text because that is exactly what the
+    /// scan takes it for: its `` ` `` row is unreachable there, so the opening
+    /// backquote never changed `quoted` and everything after it is still being
+    /// read in the `"` state. A body that will not lex holds nothing this scan
+    /// can read — the same answer [`Shell::extent_read_of_rest`] gives its own
+    /// remainder, and not a diagnostic of its own.
+    fn gobbled_backtick_subs(
+        &mut self,
+        verbatim: BStr<'_>,
+        tail: BStr<'_>,
+        out: &mut Vec<WordPart>,
+    ) {
+        let Ok(body) = crate::parser::dquote_word_from_source(verbatim, self.parse_opts()) else {
+            return;
+        };
+        // Re-scoped for the gobbler like the enclosing word was: its brackets
+        // are not a scope either, and a backquote nested in this one wants the
+        // remainder of *this* body before the glue below carries it further out.
+        let body = crate::unparse::gobbler_word(&body);
+        let start = out.len();
+        self.gobbled_subs(&body.parts, true, out);
+        let suffix = bfmt![b"`", tail];
+        for p in out.iter_mut().skip(start) {
+            Self::extend_gobbled_tail(p, &suffix);
+        }
+    }
+
+    /// Carry a substitution's remainder past the end of the string it was lexed
+    /// from — the glue [`Shell::gobbled_backtick_subs`] lays on.
+    fn extend_gobbled_tail(p: &mut WordPart, suffix: BStr<'_>) {
+        match p {
+            WordPart::ArithSub { tail, .. }
+            | WordPart::CommandSub {
+                body:
+                    CmdSubBody::Unread { tail, .. }
+                    | CmdSubBody::ArithFallback { tail, .. }
+                    | CmdSubBody::Backtick { tail, .. },
+            } => tail.extend_from_slice(suffix),
+            WordPart::CommandSub { body: CmdSubBody::Parsed { tail, .. } } => {
+                tail.get_or_insert_with(Str::new).extend_from_slice(suffix);
+            }
+            _ => {}
         }
     }
 
@@ -100981,5 +101068,54 @@ st=1
         assert!(!gate(b"a[0]${b}"));
         // A closed reference does not hide a divergent one after it.
         assert!(gate(b"${a[0]}${h[}x]}"));
+    }
+
+    /// A backquote is a quote to `brace_gobbler` only where its `` ` `` row is
+    /// reached, which is the unquoted state alone. Inside `" … "` the `quoted`
+    /// branch is taken first, the backquote is merely a character, and the scan
+    /// reads on into the body — where the `$(` row of that branch still fires
+    /// and takes the rest of the *word* for its remainder.
+    ///
+    /// The tell is which of the two endings a failing body gets: the scanner's
+    /// is `jump_to_top_level (DISCARD)`, so the `echo` never runs and `$?` is 1;
+    /// the backquote's own run is just a substitution that expanded to nothing,
+    /// so the `echo` prints and `$?` is 0.
+    #[test]
+    fn a_backquote_body_inside_double_quotes_is_read_by_the_brace_scanner() {
+        // The top level: the body is hidden, and the word brace-expands into
+        // two `echo` arguments that each run the backquote for real.
+        assert_eq!(run("echo p`echo $(fi)`q{,}"), ("pq pq\n".into(), 0));
+        // Inside double quotes the scan reads the body, and the read fails.
+        for src in [
+            r#"echo "p`echo $(fi)`q{,}""#,
+            r#"echo "p`echo ${z:-'$(fi)'}`q{,}""#,
+            r#"echo "p`echo '$(fi)'`q{,}""#,
+            r#"echo "p`echo "$(fi)"`q{,}""#,
+            r#"echo p"`echo $(fi)`"q{,}"#,
+            r#"echo "p${z:-`echo $(fi)`}q{,}""#,
+            // The `$((` spelling is the same `$(` row; the `$[` one is not the
+            // row at all, so the scan meets the `$( … )` inside it directly.
+            r#"echo "p`echo $((1+$(fi)))`q{,}""#,
+            r#"echo "p`echo $[1+$(fi)]`q{,}""#,
+        ] {
+            assert_eq!(run(src), (String::new(), 1), "{src}");
+        }
+        // Rows that do *not* fire in the `"` state, leaving the body to its own
+        // run: `<(` belongs to the unquoted comsub row alone, a `\` passes the
+        // next character over, and a nested backquote is a quote again.
+        for src in [
+            r#"echo "p`echo <(fi)`q{,}""#,
+            r#"echo "p`echo \$(fi)`q{,}""#,
+            r#"echo "p`echo ${z:-\$(fi)}`q{,}""#,
+            r#"echo "p`echo \`fi\``q{,}""#,
+        ] {
+            assert_eq!(run(src), ("pq{,}\n".into(), 0), "{src}");
+        }
+        // No `{` in the word, so `brace_expand_word_list` never calls the
+        // scanner and the body is left to its own run.
+        assert_eq!(run(r#"echo "p`echo $(fi)`q""#), ("pq\n".into(), 0));
+        // A body that parses is read and thrown away, not run — the `SIDE` here
+        // is the backquote's own later expansion, printed once.
+        assert_eq!(run(r#"echo "p`echo $(echo SIDE)`q{,}""#), ("pSIDEq{,}\n".into(), 0));
     }
 }

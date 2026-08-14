@@ -4128,7 +4128,7 @@ the array being non-empty.
 
 Corpus: `a-compound-assignment-binds-up-to-the-subscript-that-fails.sh`.
 
-### TD-OILS-A-BACKQUOTE-BODY-INSIDE-DOUBLE-QUOTES-IS-NOT-GOBBLED. A backquote body inside `" … "` is run where bash only scanned it — 2026-08-10
+### TD-OILS-A-BACKQUOTE-BODY-INSIDE-DOUBLE-QUOTES-IS-NOT-GOBBLED. A backquote body inside `" … "` is run where bash only scanned it — 2026-08-10 — ✅ FIXED 2026-08-14
 
 **Where:** `userspace/oils/src/interp.rs`, `Shell::gobbled_subs` — the walk that
 lists the substitutions `brace_gobbler` reads. It is structural, over
@@ -4162,13 +4162,74 @@ treated like `\{`, the `'` is not a quote, and the `$( … )` is handed to
 then no `$(` row is reached, so the body is skipped; leaving backquotes out of
 the walk is right there and wrong only inside double quotes.
 
-**The fix.** Give a backquote body parts — or a lazily-parsed view of them — so
-`gobbled_subs` can walk into one when the enclosing state is `"`. Descending
-must stay off at the top level, which is where the current `gobbler_reads`
-answer (`false` for every `CmdSubBody::Backtick`) is already correct.
+**The fix — done 2026-08-14.** `Shell::gobbled_subs` now lexes a backquote body
+as the double-quoted text the scan takes it for — `parser::dquote_word_from_
+source`, then `unparse::gobbler_word` to re-scope it — and walks the result,
+but only when `dquoted`. Descending stays off at the top level, where
+`gobbler_reads`'s `false` for every `CmdSubBody::Backtick` was already right.
+
+Two things came with it:
+
+* **The remainder a diagnostic quotes.** The lexed body's tails stop at its
+  end; the gobbler's do not, because it was handed the whole word. So
+  `CmdSubBody::Backtick` gained a `tail` field, filled by `gobbler_word` alone
+  (no parser wants it — a backquote body is `string_extract`'s byte hunt for
+  the closer), and each substitution the body contributes gets
+  `body tail` + `` ` `` + that. Measured: ``echo "p`echo "$(fi)"`q{,}"`` quotes
+  ``fi)"`q{,}"``.
+* **The `{` gate.** `gobble_scan` had relied on "a `${` carries its own `{`" to
+  subsume `brace_expand_word_list`'s `mbschr (…, LBRACE)` (subst.c:9905). A
+  backquote body carries no `{`, so the gate is now tested for real against the
+  word's source — ``echo "p`echo $(fi)`q"`` reaches no scanner where the same
+  word with a `{,}` on the end does.
+
+Corpus: `a-backquote-body-inside-double-quotes-is-read-by-the-brace-scanner.sh`.
 
 Note the same walk reaches nothing inside a `<( … )` / `>( … )` body either,
 because `crate::unparse::nested_parts` returns no scope for a `ProcSub`.
+
+### TD-OILS-A-QUOTE-INSIDE-A-GOBBLED-BACKQUOTE-BODY-DOES-NOT-END-THE-RUN. `brace_gobbler`'s quoting state is flat, and osh's is nested — 2026-08-14 — ⚠️ OPEN
+
+**Where:** `userspace/oils/src/interp.rs`, `Shell::gobbled_backtick_subs`. It
+lexes a backquote body as **one** double-quoted run, so `quoted` stays `"` for
+the whole of it. bash's scan is a flat character loop, and a `"` inside the body
+is `c == quoted` — it sets `quoted = 0`, after which a `'` opens a skip, a
+`` ` `` opens another, and a `<(`/`>(` starts reading.
+
+**Reproduce.** With `z` unset:
+
+```sh
+echo "p`echo " ' $(fi)`q{,}"
+```
+
+| | bash 5.2.37 | osh |
+|---|---|---|
+| stdout | `pq{,}` | — |
+| stderr | the backquote's own run: ``` `echo " ' $(fi)' ``` | the scanner's: ``` `fi)`q{,}"' ``` |
+| `$?` | 0 | 1 |
+
+The `"` closes the gobbler's state, the `'` then opens a single-quote skip, and
+the `$(` inside it is never read — so the word brace-expands and the backquote
+runs. osh reads the `$(fi)` and drops the command.
+
+**What bash does.** braces.c:637-682, in order: `\` passes the next character
+over unless `quoted == '\''`; `${` is treated like `\{`; then `if (quoted) { if
+(c == quoted) quoted = 0; if (quoted == '"' && c == '$' && text[i+1] == '(')
+goto comsub; … }`; then the unquoted `"`/`'`/`` ` `` row; then the unquoted
+`($|<|>)(` row. Nothing about it nests.
+
+**The fix.** Split the body on the gobbler's own state machine before lexing:
+run the flat loop over the verbatim text, cut it into runs by whether `quoted`
+is one the `$(` row can fire in (`0` or `"`) or one it cannot (`'` or `` ` ``),
+lex only the former and leave the latter as literals. The catch is the comsub
+row itself — `extract_command_subst` skips a whole `$( … )` extent, and a
+quote inside *that* must not flip the state either, so the split needs an extent
+count of its own rather than a byte scan. That is the only reason this was not
+done with the fix above.
+
+Reaching this needs a `"` (or a `` ` ``) inside a backquote body inside `" … "`
+inside a word with a `{`, so it is not on any ordinary road. All 24 other cases
+of the probe matrix that produced it agree with bash.
 
 ### TD-OILS-A-REDIRECTION-TARGET-IS-NOT-BRACE-EXPANDED. `> f{1,2}` writes a file called `f{1,2}` where bash calls it ambiguous — 2026-08-10 — ✅ FIXED 2026-08-10
 

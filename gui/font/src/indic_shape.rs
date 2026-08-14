@@ -52,8 +52,10 @@
     reason = "the shaper that builds this plan is not wired in yet"
 )]
 
-use crate::gsub::Substitutions;
-use crate::indic::Position;
+use alloc::vec::Vec;
+
+use crate::gsub::{SubGlyph, Substitutions};
+use crate::indic::{Category, Position, Syllable};
 use crate::script::ScriptTags;
 
 /// One of the nine scripts this shaper shapes.
@@ -267,6 +269,36 @@ pub(crate) struct Plan<'a> {
     /// in which case nothing can be asked about consonant forms, since every
     /// such question is about a consonant beside a virama.
     virama: Option<u16>,
+    /// The seven features the reordering hands out per glyph, as the bits that
+    /// select them — or `0` for a feature this face does not have.
+    ///
+    /// HarfBuzz's `mask_array`, kept for the same reason it keeps one: the
+    /// answer is a property of the face and the script, so asking once per plan
+    /// rather than once per syllable turns a scan of the face's lookups into a
+    /// field read. That a missing feature reads `0` is load-bearing rather than
+    /// incidental — "does this face form a reph at all?" is asked as
+    /// `masks.rphf != 0`, and a zero mask also sets no bit on any glyph, so the
+    /// one value is both the question and the right answer to it.
+    masks: Masks,
+}
+
+/// The bits that select the seven per-glyph Indic features on one face.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Masks {
+    /// Reph form, from an initial RA + virama.
+    rphf: u64,
+    /// Pre-base form, the one that moves to the head of the syllable.
+    pref: u64,
+    /// Below-base form.
+    blwf: u64,
+    /// Above-base form.
+    abvf: u64,
+    /// Post-base form.
+    pstf: u64,
+    /// Half form: a consonant that lost its vowel and is drawn narrow.
+    half: u64,
+    /// Word-initial form, for a syllable a left matra begins.
+    init: u64,
 }
 
 impl<'a> Plan<'a> {
@@ -293,6 +325,7 @@ impl<'a> Plan<'a> {
             .subs
             .chosen_script(probe.tags)
             .is_none_or(|tag| tag.get(3) != Some(&b'2'));
+        let mask = |tag: &[u8; 4]| probe.subs.feature_mask(probe.tags, tag);
         Self {
             probe,
             script,
@@ -300,6 +333,15 @@ impl<'a> Plan<'a> {
             old_spec,
             zero_context: !old_spec && script != Script::Malayalam,
             virama: glyph(config.virama),
+            masks: Masks {
+                rphf: mask(b"rphf"),
+                pref: mask(b"pref"),
+                blwf: mask(b"blwf"),
+                abvf: mask(b"abvf"),
+                pstf: mask(b"pstf"),
+                half: mask(b"half"),
+                init: mask(b"init"),
+            },
         }
     }
 
@@ -376,6 +418,586 @@ impl<'a> Plan<'a> {
             Position::BaseC
         }
     }
+
+    /// Re-ask the face about every consonant the table called a base.
+    ///
+    /// Runs over the whole run before any syllable is laid out, because the
+    /// base-finding walk reads the answers and reads them across the syllable
+    /// it is in. The table's [`Position::BaseC`] means only "this is a
+    /// consonant"; what it is *in this font* — a below-base form, a post-base
+    /// form, or a letter in its own right — is what
+    /// [`consonant_position`](Self::consonant_position) settles here.
+    pub(crate) fn update_consonant_positions(&self, glyphs: &mut [SubGlyph]) {
+        // Every question is about a consonant beside a virama, so with no
+        // virama every answer would be the base the position already is.
+        if self.virama.is_none() {
+            return;
+        }
+        for g in glyphs {
+            if g.indic.position == Position::BaseC {
+                g.indic.position = self.consonant_position(g.gid);
+            }
+        }
+    }
+}
+
+/// The category a glyph still counts as.
+///
+/// [`Category::Other`] once it has ligated, because it is no longer the
+/// character it was categorised from: `ka` and `ka + virama + ssa` are one
+/// glyph after `cjct`, and calling that a consonant would have the base search
+/// stop on a conjunct. HarfBuzz's `is_one_of` opens with the same rule.
+///
+/// The shaper reads the raw [`SubGlyph::indic`] field directly where HarfBuzz
+/// does, which is most of the places a *halant* is looked for: those run before
+/// anything has ligated, or want the halant back precisely because a ligature
+/// swallowed it.
+fn category(g: &SubGlyph) -> Category {
+    if g.lig.ligated() {
+        Category::Other
+    } else {
+        g.indic.category
+    }
+}
+
+/// Whether this glyph may be a syllable's base, or stand where one would.
+fn is_consonant(g: &SubGlyph) -> bool {
+    category(g).is_base_candidate()
+}
+
+/// Whether this glyph is a ZWJ or a ZWNJ.
+fn is_joiner(g: &SubGlyph) -> bool {
+    matches!(category(g), Category::Joiner | Category::NonJoiner)
+}
+
+/// Give every glyph in `glyphs` the earliest cluster any of them has.
+///
+/// HarfBuzz's `merge_clusters`, and the reason reordering needs it: a cluster
+/// is a byte offset into the source, and reordering moves glyphs past each
+/// other, so after it the offsets no longer ascend. A caret placed by one of
+/// them would jump backwards inside a word. Merging says what is actually true
+/// of a reordered syllable — that it has no interior boundary a caret can
+/// honestly point at — by giving the whole of it one offset.
+fn merge(glyphs: &mut [SubGlyph]) {
+    let Some(first) = glyphs.iter().map(|g| g.cluster).min() else {
+        return;
+    };
+    for g in glyphs {
+        g.cluster = first;
+    }
+}
+
+/// The longest syllable this lays out cluster-by-cluster rather than wholesale.
+///
+/// Past it the permutation no longer fits the byte that records it, and every
+/// glyph after the base is merged into one cluster instead. HarfBuzz draws the
+/// line in the same place and for the same reason. A syllable this long is not
+/// a word in any Indic script; it is a pathological string, and a coarser caret
+/// is the right thing to give up on it.
+const MAX_TRACKED: usize = 127;
+
+/// Lay out one syllable: HarfBuzz's `initial_reordering_syllable_indic`.
+///
+/// `glyphs` is exactly the syllable — the caller has already cut the run at the
+/// boundaries [`indic::syllables`](crate::indic::syllables) found — and comes
+/// out the same length, since initial reordering only permutes and annotates.
+/// `order` is scratch the caller owns so that laying out a word does not
+/// allocate once per syllable; its contents on entry are ignored.
+///
+/// A symbol cluster and a non-Indic one are left exactly as they are. Both of
+/// the others are laid out as consonant syllables: an independent vowel and a
+/// dotted circle are treated as consonants throughout, which is what lets one
+/// piece of code serve all four.
+pub(crate) fn initial_reordering_syllable(
+    plan: &Plan,
+    kind: Syllable,
+    glyphs: &mut [SubGlyph],
+    order: &mut Vec<u8>,
+) {
+    match kind {
+        Syllable::Consonant | Syllable::Vowel | Syllable::Standalone | Syllable::Broken => {}
+        Syllable::Symbol | Syllable::NonIndic => return,
+    }
+    let end = glyphs.len();
+    if end == 0 {
+        return;
+    }
+
+    // Ra,H,ZWJ must behave like Ra,ZWJ,H, for compatibility with how Kannada
+    // was written before the joiner's meaning there was settled.
+    // https://github.com/harfbuzz/harfbuzz/issues/435
+    if plan.script == Script::Kannada
+        && end >= 3
+        && glyphs.first().map(category) == Some(Category::Ra)
+        && glyphs.get(1).map(category) == Some(Category::Halant)
+        && glyphs.get(2).map(category) == Some(Category::Joiner)
+    {
+        merge(glyphs.get_mut(1..3).unwrap_or_default());
+        glyphs.swap(1, 2);
+    }
+
+    let (mut base, has_reph) = find_base(plan, glyphs);
+    assign_positions(plan, glyphs, base, has_reph);
+    base = sort_syllable(plan, glyphs, order);
+    set_masks(plan, glyphs, base);
+}
+
+/// Step 1: which glyph is the base consonant, and does the syllable open with
+/// a reph?
+///
+/// The rule, from the Devanagari spec: start at the end of the syllable and
+/// move backwards until a consonant is found that has neither a below-base nor
+/// a post-base form — post-base forms have to follow below-base ones, so a
+/// post-base form is only disqualifying once one has been seen — or until the
+/// first consonant is reached. That one is the base.
+///
+/// A pre-base-reordering RA needs no case of its own: this crate marks those
+/// [`Position::PostC`], so the walk already steps over them.
+fn find_base(plan: &Plan, glyphs: &[SubGlyph]) -> (usize, bool) {
+    let end = glyphs.len();
+    let mut base = end;
+    let mut has_reph = false;
+    // Where the backwards walk stops. It moves past an opening reph, since a
+    // RA that became one is no longer a candidate for base.
+    let mut limit = 0usize;
+
+    let explicit = plan.reph_mode() == RephMode::Explicit;
+    let opens_reph = plan.masks.rphf != 0
+        && end >= 3
+        && match plan.reph_mode() {
+            // An implicit reph is RA,H and is inhibited by either joiner
+            // after it: a ZWJ asks for the letter, a ZWNJ for the half form.
+            RephMode::Implicit => glyphs.get(2).is_none_or(|g| !is_joiner(g)),
+            // An explicit one is spelled with the ZWJ.
+            RephMode::Explicit => glyphs.get(2).map(category) == Some(Category::Joiner),
+            RephMode::LogRepha => false,
+        };
+    if opens_reph {
+        let probe = [
+            glyphs.first().map_or(0, |g| g.gid),
+            glyphs.get(1).map_or(0, |g| g.gid),
+            // The third glyph is part of the question only when the ZWJ is,
+            // and HarfBuzz passes a glyph id of zero rather than a glyph when
+            // it is not. Zero is `.notdef`, which no `rphf` covers.
+            if explicit {
+                glyphs.get(2).map_or(0, |g| g.gid)
+            } else {
+                0
+            },
+        ];
+        let formed = probe.get(..2).is_some_and(|p| plan.would(b"rphf", p))
+            || (explicit && plan.would(b"rphf", &probe));
+        if formed {
+            limit = 2;
+            while limit < end && glyphs.get(limit).is_some_and(is_joiner) {
+                limit = limit.saturating_add(1);
+            }
+            base = 0;
+            has_reph = true;
+        }
+    } else if plan.reph_mode() == RephMode::LogRepha
+        && glyphs.first().map(category) == Some(Category::Repha)
+    {
+        // Malayalam encodes the reph as its own character, so there is nothing
+        // to ask the font — it is already a reph, and only needs moving.
+        limit = 1;
+        while limit < end && glyphs.get(limit).is_some_and(is_joiner) {
+            limit = limit.saturating_add(1);
+        }
+        base = 0;
+        has_reph = true;
+    }
+
+    let mut i = end;
+    let mut seen_below = false;
+    loop {
+        i = i.saturating_sub(1);
+        let Some(g) = glyphs.get(i) else { break };
+        if is_consonant(g) {
+            if g.indic.position != Position::BelowC
+                && (g.indic.position != Position::PostC || seen_below)
+            {
+                base = i;
+                break;
+            }
+            if g.indic.position == Position::BelowC {
+                seen_below = true;
+            }
+            base = i;
+        } else if i > 0
+            && g.indic.category == Category::Joiner
+            && glyphs.get(i.wrapping_sub(1)).map(|p| p.indic.category) == Some(Category::Halant)
+        {
+            // A ZWJ *after* a halant stops the search and asks for an explicit
+            // half form. A ZWJ *before* one asks for a subjoined form instead,
+            // so the search goes on — which is what makes the Bengali sequence
+            // Ra,H,Ya subjoin the Ya into a Ya-Phalaa.
+            break;
+        }
+        if i <= limit {
+            break;
+        }
+    }
+
+    // Only for an unforced reph: Ra,H,ZWJ asked for one explicitly and keeps
+    // it. Otherwise a syllable with no other consonant has nothing for the
+    // reph to sit over, so the RA is the base after all.
+    if has_reph && base == 0 && limit <= 2 {
+        has_reph = false;
+    }
+    (base, has_reph)
+}
+
+/// Steps 2 and 3: say where each glyph of the syllable goes.
+///
+/// The matra decomposition and the nukta/halant reordering the spec calls for
+/// here have already happened — normalisation does both — so what is left is
+/// to write the positions down and, for a face shaped by the old rules, to move
+/// the halant the engine rather than the font is expected to place.
+fn assign_positions(plan: &Plan, glyphs: &mut [SubGlyph], base: usize, has_reph: bool) {
+    let end = glyphs.len();
+    for g in glyphs.get_mut(..base).unwrap_or_default() {
+        g.indic.position = g.indic.position.min(Position::PreC);
+    }
+    if let Some(g) = glyphs.get_mut(base) {
+        g.indic.position = Position::BaseC;
+    }
+    if has_reph && let Some(g) = glyphs.first_mut() {
+        g.indic.position = Position::RaToBecomeReph;
+    }
+
+    if plan.old_spec {
+        move_old_spec_halant(plan, glyphs, base);
+    }
+
+    // Attach the marks that have no position of their own to whatever came
+    // before them, so that they travel with it through the sort.
+    let mut last_pos = Position::Start;
+    for i in 0..end {
+        let Some(&g) = glyphs.get(i) else { break };
+        let travels = matches!(
+            g.indic.category,
+            Category::Joiner
+                | Category::NonJoiner
+                | Category::Nukta
+                | Category::Cantillation
+                | Category::ConsonantMedial
+                | Category::Halant
+        );
+        if travels {
+            let mut pos = last_pos;
+            if g.indic.category == Category::Halant && pos == Position::PreM {
+                // Uniscribe does not move a halant with a left matra, so
+                // neither does this. TEST: U+092B,U+093F,U+094D.
+                for j in (0..i).rev() {
+                    let before = glyphs.get(j).map_or(Position::Start, |p| p.indic.position);
+                    if before != Position::PreM {
+                        pos = before;
+                        break;
+                    }
+                }
+            }
+            if let Some(g) = glyphs.get_mut(i) {
+                g.indic.position = pos;
+            }
+        } else if g.indic.position != Position::Smvd {
+            // A syllable modifier followed by an always-post matra belongs
+            // where the matra does, not where its own table entry says.
+            if g.indic.category == Category::MatraPost
+                && glyphs
+                    .get(i.wrapping_sub(1))
+                    .is_some_and(|p| p.indic.category == Category::SyllableModifier)
+                && let Some(p) = glyphs.get_mut(i.wrapping_sub(1))
+            {
+                p.indic.position = g.indic.position;
+            }
+            last_pos = g.indic.position;
+        }
+    }
+
+    // A post-base consonant owns everything between it and the last consonant
+    // or matra, so that a below-base form takes its own halant down with it.
+    let mut last = base;
+    for i in base.saturating_add(1)..end {
+        let Some(&g) = glyphs.get(i) else { break };
+        if is_consonant(&g) {
+            let pos = g.indic.position;
+            for owned in glyphs
+                .get_mut(last.saturating_add(1)..i)
+                .unwrap_or_default()
+            {
+                if owned.indic.position < Position::Smvd {
+                    owned.indic.position = pos;
+                }
+            }
+            last = i;
+        } else if matches!(g.indic.category, Category::Matra | Category::MatraPost) {
+            last = i;
+        }
+    }
+}
+
+/// Move the first post-base halant to after the last consonant, for a face
+/// shaped by the pre-revision rules.
+///
+/// Reports suggest Uniscribe does this in Kannada only when there is not
+/// already a halant after the last consonant, and unconditionally elsewhere —
+/// Malayalam, Bengali and Devanagari are all known to reorder regardless — so
+/// Kannada is the one script this holds back on. Test cases, each with the font
+/// that showed it: U+0C9A,U+0CCD,U+0C9A,U+0CCD with Lohit Kannada;
+/// U+0D38,U+0D4D,U+0D31,U+0D4D,U+0D31,U+0D4D with Lohit Malayalam;
+/// U+0998,U+09CD,U+09AF,U+09CD with Vrinda; U+091F,U+094D,U+0930,U+094D with
+/// Chandas.
+fn move_old_spec_halant(plan: &Plan, glyphs: &mut [SubGlyph], base: usize) {
+    let end = glyphs.len();
+    let disallow_double_halants = plan.script == Script::Kannada;
+    for i in base.saturating_add(1)..end {
+        if glyphs.get(i).map(|g| g.indic.category) != Some(Category::Halant) {
+            continue;
+        }
+        let mut j = end.saturating_sub(1);
+        while j > i {
+            let stop = glyphs.get(j).is_some_and(|g| {
+                is_consonant(g)
+                    || (disallow_double_halants && g.indic.category == Category::Halant)
+            });
+            if stop {
+                break;
+            }
+            j = j.saturating_sub(1);
+        }
+        if j > i && glyphs.get(j).map(|g| g.indic.category) != Some(Category::Halant) {
+            // Rotating is the move: everything from `i+1` through `j` shifts
+            // down one and the halant lands on `j`.
+            if let Some(run) = glyphs.get_mut(i..=j) {
+                run.rotate_left(1);
+            }
+        }
+        break;
+    }
+}
+
+/// Sort the syllable into its laid-out order and report where the base landed.
+///
+/// The sort is by [`Position`] and is stable, which between them *are* the
+/// reordering: the variants are declared in the order they are drawn in, and
+/// stability is what keeps two glyphs the table gave the same position to in
+/// the order they were typed.
+fn sort_syllable(plan: &Plan, glyphs: &mut [SubGlyph], order: &mut Vec<u8>) -> usize {
+    let end = glyphs.len();
+    order.clear();
+    order.extend((0..end).map(|i| u8::try_from(i).unwrap_or(u8::MAX)));
+    // Insertion sort: stable, in place, and it carries `order` along so that
+    // the permutation is still known afterwards — which is what the cluster
+    // merging below needs and what a call to `sort_by` would throw away. A
+    // syllable is a handful of glyphs, so the quadratic term never bites.
+    for i in 1..end {
+        let mut j = i;
+        while j > 0
+            && glyphs.get(j.wrapping_sub(1)).map(|g| g.indic.position)
+                > glyphs.get(j).map(|g| g.indic.position)
+        {
+            glyphs.swap(j.wrapping_sub(1), j);
+            order.swap(j.wrapping_sub(1), j);
+            j = j.wrapping_sub(1);
+        }
+    }
+
+    // Find the base again — the sort moved it — and, on the way, the run of
+    // left matras that now sits at the head.
+    let mut base = end;
+    let mut first_left = end;
+    let mut last_left = end;
+    for (i, g) in glyphs.iter().enumerate() {
+        if g.indic.position == Position::BaseC {
+            base = i;
+            break;
+        } else if g.indic.position == Position::PreM {
+            if first_left == end {
+                first_left = i;
+            }
+            last_left = i;
+        }
+    }
+    // Several left matras come out in the order they were typed, but they are
+    // drawn leftwards from the base, so the sequence reads backwards.
+    // Reversing it and then reversing each matra's own marks back is what puts
+    // them right. https://github.com/harfbuzz/harfbuzz/issues/3863
+    if first_left < last_left {
+        reverse(glyphs, order, first_left, last_left);
+        let mut i = first_left;
+        for j in first_left..=last_left {
+            if glyphs
+                .get(j)
+                .is_some_and(|g| matches!(g.indic.category, Category::Matra | Category::MatraPost))
+            {
+                reverse(glyphs, order, i, j);
+                i = j.saturating_add(1);
+            }
+        }
+    }
+
+    merge_reordered(plan, glyphs, order, base);
+    base
+}
+
+/// Reverse `glyphs[from..=to]`, keeping `order` in step.
+fn reverse(glyphs: &mut [SubGlyph], order: &mut [u8], from: usize, to: usize) {
+    if let Some(run) = glyphs.get_mut(from..=to) {
+        run.reverse();
+    }
+    if let Some(run) = order.get_mut(from..=to) {
+        run.reverse();
+    }
+}
+
+/// Merge the clusters of everything the sort actually moved, from the base on.
+///
+/// Only from the base on. Things before it move again in final reordering —
+/// a left matra is brought back towards the base — so merging them now would
+/// join a cluster to one it is about to leave. Final reordering merges up to
+/// the base for the same reason, and the two interlock.
+/// https://github.com/harfbuzz/harfbuzz/issues/2272
+fn merge_reordered(plan: &Plan, glyphs: &mut [SubGlyph], order: &mut [u8], base: usize) {
+    let end = glyphs.len();
+    // In old-spec mode halants were moved around above, so nothing after the
+    // base can be trusted to have stayed put; and past `MAX_TRACKED` the
+    // permutation no longer fits `order`. Either way, merge it all.
+    if plan.old_spec || end > MAX_TRACKED {
+        merge(glyphs.get_mut(base..).unwrap_or_default());
+        return;
+    }
+    // Otherwise merge each cycle of the permutation: a glyph that ended up
+    // where another began is a glyph that moved past it, and the span between
+    // them is what can no longer be pointed into.
+    const DONE: u8 = u8::MAX;
+    for i in base..end {
+        if order.get(i).copied() == Some(DONE) {
+            continue;
+        }
+        let (mut lo, mut hi) = (i, i);
+        let mut j = order.get(i).map_or(i, |&o| usize::from(o));
+        while j != i {
+            lo = lo.min(j);
+            hi = hi.max(j);
+            let next = order.get(j).map_or(i, |&o| usize::from(o));
+            if let Some(slot) = order.get_mut(j) {
+                *slot = DONE;
+            }
+            j = next;
+        }
+        merge(
+            glyphs
+                .get_mut(base.max(lo)..=hi.max(base.max(lo)))
+                .unwrap_or_default(),
+        );
+    }
+}
+
+/// Say which of the per-glyph features each glyph of the laid-out syllable is
+/// eligible for.
+///
+/// This is the point of everything above: a half form is asked for by setting
+/// `half` on the glyphs before the base and nowhere else, so the font's own
+/// `half` lookups match exactly where the layout says a half form belongs.
+fn set_masks(plan: &Plan, glyphs: &mut [SubGlyph], base: usize) {
+    let end = glyphs.len();
+    for g in glyphs.iter_mut() {
+        if g.indic.position != Position::RaToBecomeReph {
+            break;
+        }
+        g.mask |= plan.masks.rphf;
+    }
+
+    // Before the base: half forms, and — under the new rules, in the scripts
+    // that allow it — below-base forms too, since a vattu may sit under a half
+    // form as well as under the base.
+    let mut pre = plan.masks.half;
+    if !plan.old_spec && plan.blwf_mode() == BlwfMode::PreAndPost {
+        pre |= plan.masks.blwf;
+    }
+    for g in glyphs.get_mut(..base).unwrap_or_default() {
+        g.mask |= pre;
+    }
+    // After it: the three dependent forms.
+    let post = plan.masks.blwf | plan.masks.abvf | plan.masks.pstf;
+    for g in glyphs
+        .get_mut(base.saturating_add(1)..)
+        .unwrap_or_default()
+    {
+        g.mask |= post;
+    }
+
+    if plan.old_spec && plan.script == Script::Devanagari {
+        // The old spec: "The feature 'below-base form' is applied to consonants
+        // having below-base forms and following the base consonant. The
+        // exception is vattu, which may appear below half forms as well as
+        // below the base glyph. The feature 'below-base form' will be applied
+        // to all such occurrences of Ra as well."
+        //
+        // TEST: U+0924,U+094D,U+0930,U+094D,U+0915 with Sanskrit 2003.
+        //
+        // Ra,Halant,ZWJ is how the eyelash form is asked for, though, so that
+        // sequence is left alone. TEST: the same with a U+200D before the
+        // U+0915.
+        for i in 0..base.saturating_sub(1) {
+            let eyelash = glyphs.get(i).map(|g| g.indic.category) == Some(Category::Ra)
+                && glyphs.get(i.saturating_add(1)).map(|g| g.indic.category)
+                    == Some(Category::Halant)
+                && (i.saturating_add(2) == base
+                    || glyphs.get(i.saturating_add(2)).map(|g| g.indic.category)
+                        != Some(Category::Joiner));
+            if eyelash {
+                for g in glyphs
+                    .get_mut(i..=i.saturating_add(1))
+                    .unwrap_or_default()
+                {
+                    g.mask |= plan.masks.blwf;
+                }
+            }
+        }
+    }
+
+    // A Halant,Ra after the base is the pre-base-reordering sequence, and only
+    // the font can say whether this one is: the pair is offered to `pref` and
+    // marked if it would take it. The first such pair wins.
+    if plan.masks.pref != 0 {
+        for i in base.saturating_add(1)..end.saturating_sub(1) {
+            let pair = [
+                glyphs.get(i).map_or(0, |g| g.gid),
+                glyphs.get(i.saturating_add(1)).map_or(0, |g| g.gid),
+            ];
+            if plan.would(b"pref", &pair) {
+                for g in glyphs
+                    .get_mut(i..=i.saturating_add(1))
+                    .unwrap_or_default()
+                {
+                    g.mask |= plan.masks.pref;
+                }
+                break;
+            }
+        }
+    }
+
+    // Both joiners disable `cjct` simply by being there — the feature does not
+    // skip them, so their presence breaks the sequence it would have matched.
+    // A ZWNJ additionally disables `half`, back to the consonant it follows.
+    for i in 1..end {
+        if !glyphs.get(i).is_some_and(is_joiner) {
+            continue;
+        }
+        let non_joiner = glyphs.get(i).map(category) == Some(Category::NonJoiner);
+        let mut j = i;
+        loop {
+            j = j.wrapping_sub(1);
+            if non_joiner && let Some(g) = glyphs.get_mut(j) {
+                g.mask &= !plan.masks.half;
+            }
+            if j == 0 || glyphs.get(j).is_some_and(is_consonant) {
+                break;
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -389,7 +1011,8 @@ impl<'a> Plan<'a> {
 mod tests {
     use super::*;
     use crate::fixture::{gsub_from_scripts, ligature, ligature_set, ligature_subst, script_list, span};
-    use crate::gsub::LOOKUP_LIGATURE;
+    use crate::gsub::{LOOKUP_LIGATURE, feature_bit};
+    use crate::indic::Char;
     use alloc::vec::Vec;
 
     /// Every script, so a table change cannot be tested against only the one
@@ -658,5 +1281,232 @@ mod tests {
         let mlym = face(b"mlm2", &[b"blwf"], &[VIRAMA, CONSONANT]);
         let subs = Substitutions::parse(&mlym, Some(span(0, mlym.len())), None).unwrap();
         assert!(!plan(&mlym, &subs, Script::Malayalam).zero_context);
+    }
+
+    // ---- Reordering ----------------------------------------------------
+
+    /// A glyph run for `text`, one glyph per character and all distinct, so
+    /// that an assertion about the order the glyphs came out in is an
+    /// assertion about which *character* went where.
+    fn run(text: &str) -> Vec<SubGlyph> {
+        text.char_indices()
+            .enumerate()
+            .map(|(i, (at, ch))| SubGlyph {
+                indic: Char::of(ch),
+                ..SubGlyph::new(u16::try_from(FIRST + i).unwrap(), at)
+            })
+            .collect()
+    }
+
+    /// The glyph id [`run`] gives a run's first character. Past [`JOINED`] so
+    /// that nothing collides with the glyph the test faces' ligature makes.
+    const FIRST: usize = 100;
+
+    /// A feature to register when a test wants a face with none of the ones
+    /// the shaper reads.
+    ///
+    /// A `GSUB` that registers nothing at all does not parse — there is no
+    /// table to point at — so "a font with no `rphf`" has to be a font with
+    /// *something else*. `liga` is the something else: the Indic shaper turns
+    /// it off rather than asking about it, so it can never be mistaken for one
+    /// of the features under test.
+    const INERT: &[u8; 4] = b"liga";
+
+    /// Which characters of the original run, by index, `glyphs` now are.
+    fn order_of(glyphs: &[SubGlyph]) -> Vec<usize> {
+        glyphs
+            .iter()
+            .map(|g| usize::from(g.gid).saturating_sub(FIRST))
+            .collect()
+    }
+
+    /// Lay `glyphs` out in place under a face registering `tags`.
+    ///
+    /// The face's one lookup joins the run's first two glyphs, so a probe
+    /// about the head of the syllable — which is what `rphf` asks — has
+    /// something to say yes to.
+    fn with_plan(script: Script, tag: &[u8; 4], tags: &[&[u8; 4]], glyphs: &mut [SubGlyph]) {
+        let first = u16::try_from(FIRST).unwrap();
+        let data = face(tag, if tags.is_empty() { &[INERT] } else { tags }, &[
+            first,
+            first + 1,
+        ]);
+        let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
+        let plan = Plan::new(
+            script,
+            Probe::new(&data, &subs, Some(ScriptTags::exactly(*tag))),
+            |_| Some(VIRAMA),
+        );
+        plan.update_consonant_positions(glyphs);
+        initial_reordering_syllable(&plan, Syllable::Consonant, glyphs, &mut Vec::new());
+    }
+
+    /// The reason this module exists: the `i` of Devanagari is typed after the
+    /// consonant it modifies and drawn before it.
+    #[test]
+    fn a_left_matra_is_drawn_before_its_consonant() {
+        // U+0939 HA, U+093F vowel sign I.
+        let mut glyphs = run("\u{939}\u{93f}");
+        with_plan(Script::Devanagari, b"dev2", &[], &mut glyphs);
+        assert_eq!(order_of(&glyphs), [1, 0]);
+    }
+
+    /// And the matra drawn to the right is not moved, so that the rule is
+    /// about the character rather than about matras.
+    #[test]
+    fn a_right_matra_stays_where_it_was_typed() {
+        // U+0926 DA, U+0940 vowel sign II.
+        let mut glyphs = run("\u{926}\u{940}");
+        with_plan(Script::Devanagari, b"dev2", &[], &mut glyphs);
+        assert_eq!(order_of(&glyphs), [0, 1]);
+    }
+
+    /// The base is the last consonant that is a letter in its own right.
+    /// Everything before it is a pre-base form, and the halant that killed a
+    /// consonant's vowel travels with the consonant.
+    #[test]
+    fn the_base_is_the_last_consonant_with_no_dependent_form() {
+        // U+0928 NA, U+094D virama, U+0926 DA — a conjunct whose base is DA.
+        let mut glyphs = run("\u{928}\u{94d}\u{926}");
+        with_plan(Script::Devanagari, b"dev2", &[b"half"], &mut glyphs);
+        assert_eq!(order_of(&glyphs), [0, 1, 2]);
+        assert_eq!(glyphs[2].indic.position, Position::BaseC);
+        assert_eq!(glyphs[0].indic.position, Position::PreC);
+        assert_eq!(glyphs[1].indic.position, Position::PreC);
+    }
+
+    /// A half form is asked for by mask, and only before the base.
+    #[test]
+    fn only_the_glyphs_before_the_base_are_offered_a_half_form() {
+        let mut glyphs = run("\u{928}\u{94d}\u{926}");
+        with_plan(Script::Devanagari, b"dev2", &[b"half"], &mut glyphs);
+        let half = feature_bit(b"half");
+        assert_ne!(glyphs[0].mask & half, 0);
+        assert_ne!(glyphs[1].mask & half, 0);
+        assert_eq!(glyphs[2].mask & half, 0);
+    }
+
+    /// A ZWNJ after the virama asks for the letter rather than the half form,
+    /// and cancels the mask that would have made one.
+    #[test]
+    fn a_non_joiner_cancels_the_half_form() {
+        // U+0928 NA, U+094D virama, U+200C ZWNJ, U+0926 DA.
+        let mut glyphs = run("\u{928}\u{94d}\u{200c}\u{926}");
+        with_plan(Script::Devanagari, b"dev2", &[b"half"], &mut glyphs);
+        let half = feature_bit(b"half");
+        // The cancellation walks back from the ZWNJ to the consonant before
+        // it, so the NA and its virama lose the bit. The ZWNJ itself keeps it,
+        // exactly as HarfBuzz leaves it — the walk starts one glyph back — and
+        // it costs nothing, since no font's `half` covers a joiner.
+        assert_eq!(glyphs[0].mask & half, 0);
+        assert_eq!(glyphs[1].mask & half, 0);
+        // And the base never had it.
+        assert_eq!(glyphs[3].mask & half, 0);
+        // Without the ZWNJ, those two glyphs would have asked for a half form.
+        let mut joined = run("\u{928}\u{94d}\u{926}");
+        with_plan(Script::Devanagari, b"dev2", &[b"half"], &mut joined);
+        assert_ne!(joined[0].mask & half, 0);
+    }
+
+    /// A face that has no `half` feature hands out no `half` mask, so no font
+    /// is ever asked for a form it does not have.
+    #[test]
+    fn a_face_without_half_forms_hands_out_no_half_mask() {
+        let mut glyphs = run("\u{928}\u{94d}\u{926}");
+        with_plan(Script::Devanagari, b"dev2", &[b"blwf"], &mut glyphs);
+        let half = feature_bit(b"half");
+        for g in &glyphs {
+            assert_eq!(g.mask & half, 0);
+        }
+    }
+
+    /// A syllable opening RA + virama, in a font that forms a reph, sends the
+    /// RA to the head as a reph-to-be and takes the next consonant as base.
+    #[test]
+    fn an_opening_ra_and_virama_become_a_reph() {
+        // U+0930 RA, U+094D virama, U+0915 KA.
+        let mut glyphs = run("\u{930}\u{94d}\u{915}");
+        with_plan(Script::Devanagari, b"dev2", &[b"rphf"], &mut glyphs);
+        assert_eq!(glyphs[0].indic.position, Position::RaToBecomeReph);
+        assert_eq!(glyphs[2].indic.position, Position::BaseC);
+        let rphf = feature_bit(b"rphf");
+        assert_ne!(glyphs[0].mask & rphf, 0);
+        assert_eq!(glyphs[2].mask & rphf, 0);
+    }
+
+    /// But only if the font says it forms one. The same text in a font with no
+    /// `rphf` leaves the RA an ordinary pre-base consonant.
+    #[test]
+    fn a_font_that_forms_no_reph_gets_none() {
+        let mut glyphs = run("\u{930}\u{94d}\u{915}");
+        with_plan(Script::Devanagari, b"dev2", &[b"half"], &mut glyphs);
+        assert_ne!(glyphs[0].indic.position, Position::RaToBecomeReph);
+        assert_eq!(glyphs[2].indic.position, Position::BaseC);
+    }
+
+    /// And only if there is another consonant for it to sit over: RA + virama
+    /// alone is a RA, not a reph with nothing under it.
+    #[test]
+    fn a_reph_needs_a_consonant_to_sit_over() {
+        let mut glyphs = run("\u{930}\u{94d}");
+        with_plan(Script::Devanagari, b"dev2", &[b"rphf"], &mut glyphs);
+        assert_eq!(glyphs[0].indic.position, Position::BaseC);
+    }
+
+    /// Under the pre-revision rules a halant may have been moved, so nothing
+    /// after the base can be trusted to have stayed put and the whole of it
+    /// becomes one cluster: a caret can only honestly point at the head of a
+    /// stretch that is no longer in typing order.
+    #[test]
+    fn the_old_rules_merge_everything_after_the_base() {
+        // U+0928 NA, U+094D virama, U+0926 DA, U+0940 vowel sign II. `deva`
+        // rather than `dev2` is what puts the face under the old rules.
+        let mut glyphs = run("\u{928}\u{94d}\u{926}\u{940}");
+        with_plan(Script::Devanagari, b"deva", &[b"half"], &mut glyphs);
+        assert_eq!(glyphs[2].cluster, glyphs[3].cluster);
+        // But not what is before it: those move again in final reordering, so
+        // merging them now would join a cluster to one it is about to leave.
+        assert_ne!(glyphs[0].cluster, glyphs[2].cluster);
+    }
+
+    /// A left matra crossing its base is *not* merged here, though it plainly
+    /// scrambled the offsets.
+    ///
+    /// That is deliberate rather than an oversight, and it is why this is a
+    /// test: a left matra is moved a second time in final reordering, brought
+    /// back towards the base, so a merge at this point would fuse it to a
+    /// cluster it is about to leave. Final reordering merges up to the base
+    /// once the matra has landed, and the two halves interlock.
+    /// <https://github.com/harfbuzz/harfbuzz/issues/2272>
+    #[test]
+    fn a_left_matra_keeps_its_own_cluster_until_final_reordering() {
+        let mut glyphs = run("\u{939}\u{93f}");
+        with_plan(Script::Devanagari, b"dev2", &[], &mut glyphs);
+        assert_eq!(order_of(&glyphs), [1, 0]);
+        assert_ne!(glyphs[0].cluster, glyphs[1].cluster);
+    }
+
+    /// A symbol cluster and a non-Indic one are not syllables, and are left
+    /// exactly as they were.
+    #[test]
+    fn the_clusters_that_are_not_syllables_are_left_alone() {
+        let data = face(b"dev2", &[INERT], &[100, 101]);
+        let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
+        let plan = plan(&data, &subs, Script::Devanagari);
+        for kind in [Syllable::Symbol, Syllable::NonIndic] {
+            let before = run("\u{939}\u{93f}");
+            let mut after = before.clone();
+            initial_reordering_syllable(&plan, kind, &mut after, &mut Vec::new());
+            assert_eq!(before, after, "{kind:?}");
+        }
+    }
+
+    /// An empty syllable cannot happen — the scanner never emits one — but the
+    /// layout must not panic if one arrives anyway.
+    #[test]
+    fn an_empty_syllable_is_laid_out_without_complaint() {
+        let mut glyphs: Vec<SubGlyph> = Vec::new();
+        with_plan(Script::Devanagari, b"dev2", &[], &mut glyphs);
+        assert!(glyphs.is_empty());
     }
 }

@@ -121,6 +121,7 @@
 use alloc::vec::Vec;
 
 use crate::context::{MAX_NESTING, Matched, Nested, chain_match, context_match, read_records};
+use crate::indic::Char;
 use crate::joining::Form;
 use crate::otl::{
     ByScript, Lookup, MAX_SUBTABLES, coverage_index, lookup_at, lookup_list,
@@ -351,6 +352,24 @@ pub struct SubGlyph {
     /// because a lookup cannot join glyphs from two syllables in the first
     /// place.
     pub(crate) syllable: u8,
+    /// What the Indic shaper thinks this glyph is and where it belongs.
+    ///
+    /// Set from the *character* `cmap` looked the glyph up from, because that
+    /// is the only place the answer exists: an Indic category is a property of
+    /// the code point, and by the time a lookup has run there may be no code
+    /// point left to ask. Then edited in place by the shaper, which is the
+    /// whole of reordering — [`Position`](crate::indic::Position) starts as the
+    /// script's default for the character and ends as where in the laid-out
+    /// syllable it goes.
+    ///
+    /// Carried through substitution untouched, like [`klass`](Self::klass), and
+    /// for the same reason: no lookup has an opinion about it. That a ligature
+    /// keeps its first component's is what makes a stacked conjunct inherit the
+    /// position of the consonant it was built from.
+    ///
+    /// Left at its default — not Indic, never reordered — for every run no
+    /// Indic shaper touches, which is nearly all of them.
+    pub(crate) indic: Char,
 }
 
 /// Where a glyph sits inside a ligature: HarfBuzz's `lig_props`, unpacked.
@@ -444,6 +463,17 @@ impl Lig {
         }
     }
 
+    /// Whether a ligature substitution produced this glyph.
+    ///
+    /// The Indic shaper asks because a glyph that ligated is no longer the
+    /// character it was categorised from — `ka` and `ka+virama+ssa` are one
+    /// glyph now, and calling it a consonant would have the base search stop on
+    /// a conjunct. HarfBuzz answers the same question the same way and in the
+    /// same place: its `is_one_of` opens with "if it ligated, all bets are off".
+    pub(crate) fn ligated(self) -> bool {
+        self.comps > 0
+    }
+
     /// Which component of its ligature this glyph follows, or `0` for "none" —
     /// which is also the answer for the ligature glyph itself, since a
     /// ligature does not sit inside itself.
@@ -482,6 +512,7 @@ impl SubGlyph {
             klass: 0,
             mark: false,
             lig: Lig::default(),
+            indic: Char::DEFAULT,
             syllable: 0,
         }
     }
@@ -499,6 +530,7 @@ impl SubGlyph {
             klass: 0,
             mark: false,
             lig: Lig::default(),
+            indic: Char::DEFAULT,
             syllable: 0,
         }
     }
@@ -519,6 +551,7 @@ impl SubGlyph {
             klass: 0,
             mark: false,
             lig: Lig::default(),
+            indic: Char::DEFAULT,
             syllable: 0,
         }
     }
@@ -653,6 +686,24 @@ impl Substitutions {
     /// the tag is a question worth asking.
     pub(crate) fn chosen_script(&self, script: Option<ScriptTags>) -> Option<[u8; 4]> {
         self.lookups.chosen_script(script)
+    }
+
+    /// The bit that selects `tag`'s lookups on a run of `script`, or `0` if
+    /// this face reaches none.
+    ///
+    /// HarfBuzz's `get_1_mask`, and the difference from
+    /// [`feature_bit`] is the whole point of having it: `feature_bit` says
+    /// which bit the tag *would* use, this says whether the face gives it
+    /// anything to select. The Indic shaper reads it as a yes-or-no — "does
+    /// this font form a reph at all?" — and then, when the answer is yes, as
+    /// the bit to set on the glyphs that should get one.
+    pub(crate) fn feature_mask(&self, script: Option<ScriptTags>, tag: &[u8; 4]) -> u64 {
+        let bit = feature_bit(tag);
+        if bit != 0 && self.lookups.for_script(script).any(|(_, m)| m & bit != 0) {
+            bit
+        } else {
+            0
+        }
     }
 
     /// Would the feature tagged `tag`, on a run of `script`, substitute

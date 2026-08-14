@@ -53,14 +53,16 @@
 //!   replaced writing a shaper per script. It is a larger piece of work and
 //!   is tracked separately.
 
-// Nothing outside this module reads the table yet, and three of the positions
-// are assigned by reordering rather than by the table, so they are not
-// constructed either. `expect` rather than `allow` on purpose: the moment the
-// shaper is wired into `scaled.rs` the expectation goes unfulfilled and the
-// compiler asks for this line back.
-#![expect(
-    dead_code,
-    reason = "the shaper that reads this table is not wired in yet"
+// The syllable scanner and the table behind it are read only by the pass that
+// cuts a run into syllables, and that pass is not wired into `scaled.rs` yet;
+// `indic_shape` reads the categories and positions but never builds a `Char`.
+// Not under `cfg(test)`, where this module's own tests exercise all of it and
+// the expectation would go unfulfilled. `expect` rather than `allow` on
+// purpose: the moment the shaper is wired in the compiler asks for this line
+// back.
+#![cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the pass that reads this table is not wired in yet")
 )]
 
 use alloc::vec::Vec;
@@ -217,7 +219,11 @@ impl Char {
     }
 
     /// What a character outside the table is.
-    const DEFAULT: Self = Self {
+    ///
+    /// Also what every glyph starts as, so that a run no Indic shaper touches
+    /// carries a category that says so rather than an accidental one: `Other`
+    /// is in no syllable and `End` is never moved.
+    pub(crate) const DEFAULT: Self = Self {
         category: Category::Other,
         position: Position::End,
     };

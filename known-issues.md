@@ -57948,13 +57948,17 @@ the first attempt at this fix went wrong.
 
 ## TD-APPS-ESTIMATE-TEXT-WIDTH — apps still guess at text width instead of measuring it
 
-**Status.** Open, in progress. The toolkit and the compositor were converted on
-2026-08-13 (`fa5135c36`, `f2d74c8a2`). Ten applications have followed:
-`lockscreen` (`1523f7412`), `filediff` (`353a41211`), `tmux` (`99198808c`),
+**Status.** Open, in progress. **`gui/**` is now clean** — the toolkit and the
+compositor were converted on 2026-08-13 (`fa5135c36`, `f2d74c8a2`), the desktop
+shell's 18 files on 2026-08-14 (`210172279`), and `gui/notifications`
+(`b654d2cd0`). Fourteen applications have followed: `lockscreen`
+(`1523f7412`), `filediff` (`353a41211`), `tmux` (`99198808c`),
 `markdowneditor` (`77bf7bf14`), `regextester` (`504c67bc0`), `jsonviewer`
 (`0c107cce7`), `logviewer` (`f5befec99`), `snippets` (`537a9eaa8`),
-`credmanager` (`dba94444d`), `diskimager` (`1e5dc7edb`) and `netscan`
-(`1b436c341`). Roughly 130 sites across ~67 files remain.
+`credmanager` (`dba94444d`), `diskimager` (`1e5dc7edb`), `netscan`
+(`1b436c341`), `netmanager` (`a3669e178`), `hexeditor` (`50c6b17a5`) and
+`defrag` (`45aa280d1`). Roughly 90 sites across 52 files remain, all under
+`apps/`.
 
 **What it is.** Roughly 322 sites across ~90 files under `apps/` and
 `gui/desktop/` size and position text with a per-app fudge factor —
@@ -57974,11 +57978,15 @@ The visible symptoms are the same class the toolkit had: labels overflowing
 their buttons, text cursors landing between characters rather than on them, and
 centred text drifting off-centre in proportion to its length.
 
-**Where it lives.** Densest remaining, in order: `apps/netmanager` (5),
-`apps/hexeditor` (5, the terminal-grid pattern), `apps/defrag` (5), then a long
-tail of four and fewer. `apps/editor/src/main.rs` is a special case: it declares
-its own `char_width` config field, mirroring the `SimpleTextViewConfig` design
-that was fixed in `guitk/textview`.
+**Where it lives.** The tail is now flat: no file has more than four sites.
+Densest remaining: `apps/systemrestore`, `apps/spreadsheet`, `apps/podcast` and
+`apps/dbviewer` (4 each), then `apps/unitconverter`, `apps/sysmonitor`,
+`apps/settings` (three files), `apps/passwordgen`, `apps/notes`,
+`apps/imageviewer` and `apps/fontmanager` (3 each), then 40 files with one or
+two. `apps/editor/src/main.rs` is a special case: it declares its own
+`char_width` config field, mirroring the `SimpleTextViewConfig` design that was
+fixed in `guitk/textview`. `apps/spreadsheet` is likely a second grid case —
+check whether its column widths are a genuine grid before converting.
 
 **Reproduce.** `rg 'len\(\) as f32\)? \* [0-9]|CHAR_WIDTH|char_width' apps/
 gui/desktop/`. Note the earlier version of this command missed two forms that
@@ -58060,3 +58068,30 @@ width it drew, and the three callers that lay something out beside a badge use
 that instead of each re-deriving it. Three separate estimates for one badge had
 already diverged there (`len*7.0+12` drawn, `len*7.5+16` used for the tag
 strip's wrap test, `len*7.0+20` before the audit list's entry name).
+
+**And what the desktop shell turned up.** The shell is the most *localised*
+surface in the system — its tab labels, month names, key names, snap-zone names
+and application names are all translated or user-supplied — so it is where a
+byte-based width was guaranteed to be wrong rather than merely likely to be.
+Three things came out of converting it:
+
+- **The padded-box shape belongs in the toolkit.** Buttons, tabs, chips, badges
+  and pills are all "text with N px of space on each side", and 30-odd sites had
+  each written that out as `label.len() * 8.0 + 16.0` — which is how the byte
+  count got in. `text::padded_width(text, padding, size, weight)` names the
+  shape (`519ad41e2`). Its sibling `padded_width_any_weight` covers the tab
+  strip: the selected tab is drawn bold and the rest regular, and sizing each
+  tab to the weight it currently has makes the whole strip shuffle sideways
+  every time the selection moves. It takes the wider of the two weights rather
+  than assuming bold is the wider one.
+- **An estimate used for caret positioning is a correctness bug, not a cosmetic
+  one.** `gui/desktop/src/run_dialog.rs` carried an `estimate_text_width` at
+  0.55 em per byte and used it to place the caret *and* the selection highlight
+  in the Run box. Typing anything non-ASCII put the caret somewhere other than
+  where the glyphs were. Grep for estimate helpers used by anything other than a
+  box width.
+- **A pill holding one glyph needs a floor.** The notification centre's unread
+  badge is drawn with a corner radius of half its height; measured honestly, a
+  single digit is narrower than the badge is tall, so it rendered as a squashed
+  oval. `max(BADGE_HEIGHT)` — the old byte estimate had been hiding this by
+  being too wide.

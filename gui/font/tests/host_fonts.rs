@@ -1058,6 +1058,92 @@ fn installed_fonts_ligate_fi() {
     );
 }
 
+/// Faces whose Latin substitutions sit *past* the first few dozen subtables,
+/// so that a budget too small to reach them is caught.
+///
+/// This is the regression test for a bug that green tests missed entirely.
+/// `otl::MAX_SUBTABLES` was 64, shared across every lookup a face's features
+/// reach, and 61 of this host's 365 `GSUB` faces declare more than that. The
+/// budget ran out partway down the lookup list and the rest of the face was
+/// silently dropped — so Amiri, whose enormous Arabic feature set is listed
+/// before its Latin `liga`, produced no ligature at all, and FiraCode never
+/// reached the `calt` that shortens `f` before `i`. Nothing failed: the
+/// shaper returned the input unchanged, which is a legal answer for a face
+/// with no ligatures, and every assertion we had was happy with it. It took
+/// shaping all 556 installed faces against HarfBuzz to see it.
+///
+/// The lesson is in the choice of faces below: each is named because its
+/// answer is known to live deep, not because it is popular. A face that is
+/// not installed is skipped, but at least one must be found.
+#[test]
+#[ignore = "depends on the host's installed fonts"]
+fn installed_fonts_reach_lookups_past_the_subtable_budget() {
+    let mut files = Vec::new();
+    for dir in font_dirs() {
+        collect_fonts(&dir, &mut files, 0);
+    }
+    files.sort();
+
+    // (file, text, what a shaper that reaches the whole face produces).
+    // The lengths are HarfBuzz's, taken with kerning and mark attachment off
+    // so that only substitution is compared.
+    let deep: &[(&str, &str, usize)] = &[
+        // Latin `liga` behind the Arabic lookups: ff, fi, fl all join.
+        ("Amiri-Regular.ttf", "office", 4),
+        ("Amiri-Regular.ttf", "fi", 1),
+        ("Amiri-Bold.ttf", "waffle", 4),
+        // A programming face: `fi` stays two glyphs, but `calt` swaps the
+        // second, so the pair comes back changed rather than untouched.
+        // JetBrains Mono declares even more subtables than FiraCode but is
+        // *not* listed, because HarfBuzz shapes its `fi` unchanged too — a
+        // deep face only makes a witness when something deep applies to it.
+        ("FiraCode-Regular.ttf", "fi", 2),
+        ("FiraCode-Bold.ttf", "fi", 2),
+    ];
+
+    let mut checked = 0usize;
+    for (file, text, want) in deep {
+        let Some(path) = files
+            .iter()
+            .find(|p| p.file_name().is_some_and(|n| n.eq_ignore_ascii_case(file)))
+        else {
+            continue;
+        };
+        let Ok(data) = fs::read(path) else { continue };
+        let Ok(face) = Face::parse(data) else { continue };
+        let gids: Vec<u16> = text.chars().filter_map(|c| face.glyph_index(c)).collect();
+        if gids.len() != text.chars().count() {
+            continue;
+        }
+        let out = substitute(&face, &gids);
+        assert_eq!(
+            out.len(),
+            *want,
+            "{file}: {text:?} shaped to {} glyphs, not {want} — the lookups \
+             that do it are past the subtable budget and are not being reached",
+            out.len()
+        );
+        if out.len() == gids.len() {
+            // Same length, so the evidence has to be that a glyph changed.
+            assert!(
+                out.iter().map(|g| g.gid).ne(gids.iter().copied()),
+                "{file}: {text:?} came back untouched — the contextual lookup \
+                 that rewrites it was never reached"
+            );
+        }
+        println!(
+            "deep ok: {file} {text:?} -> {:?}",
+            out.iter().map(|g| g.gid).collect::<Vec<_>>()
+        );
+        checked += 1;
+    }
+    assert!(
+        checked >= 1,
+        "none of the deep-lookup faces are installed — the subtable budget was \
+         never exercised"
+    );
+}
+
 /// Run every installed face's `GSUB` over ordinary Latin prose and check that
 /// it leaves it alone.
 ///

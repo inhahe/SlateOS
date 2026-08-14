@@ -32,10 +32,31 @@ use alloc::vec::Vec;
 
 use crate::sfnt::{u16_at, u32_at};
 
-/// A limit on how many subtables are followed, so that a corrupt or hostile
-/// font cannot make lookup quadratic. Real fonts use single digits; the
-/// largest seen on the development host is 4.
-pub(crate) const MAX_SUBTABLES: usize = 64;
+/// A limit on how many subtables are followed in total, so that a corrupt or
+/// hostile font cannot make shaping arbitrarily slow: every glyph of a run is
+/// offered to every subtable, so the cost of a shape is the run length times
+/// this number.
+///
+/// The value is measured, not guessed, and the measurement is the whole point
+/// — an earlier 64 here was set from a per-lookup glance ("real fonts use
+/// single digits") and silently truncated 61 of the 365 installed faces that
+/// have a `GSUB`, so Amiri and FiraCode lost their Latin ligatures entirely
+/// while the tests stayed green. Counting what our own enabled features
+/// actually reach across every face installed on the development host:
+///
+/// | measure | worst face | count |
+/// |---|---|---|
+/// | subtables in one lookup | SansSerifCollection | 675 |
+/// | lookups reached | SansSerifCollection | 256 |
+/// | subtables in total | SansSerifCollection | 1874 |
+/// | (runner-up total) | JetBrains Mono | 768 |
+///
+/// 8192 is a little over four times the worst real face, which leaves room for
+/// the CJK and Indic faces this host does not have without leaving the cost of
+/// a hostile font unbounded. A face that does exceed it is shaped with the
+/// lookups found so far rather than rejected: a slightly wrong ligature is a
+/// better failure than a blank page.
+pub(crate) const MAX_SUBTABLES: usize = 8192;
 
 /// One lookup: what it does, and where the subtables that do it live.
 ///

@@ -700,12 +700,15 @@ fn fork_process_clone_inner(
     // parent never set a custom %gs.
     let parent_gs = crate::sched::current_task_gs_base();
 
-    // Seed the inherited FS/GS bases through `spawn_with_tls` so they are in
-    // place *before* the child is admitted.  Setting them after spawn returned
-    // would leave a window in which the child could be preempted and then have
-    // its trampoline-installed FS base clobbered by a still-zero `Task::fs_base`
-    // on switch-in (B-PTHREAD-CHILD-JUMPS-TO-GARBAGE defect 1).
-    match thread::spawn_with_tls(
+    // Phase 1 of the two-phase spawn.  Seeding the inherited FS/GS bases here
+    // puts them in place *before* the child is admitted: setting them after the
+    // spawn returned would leave a window in which the child could be preempted
+    // and then have its trampoline-installed FS base clobbered by a still-zero
+    // `Task::fs_base` on switch-in (B-PTHREAD-CHILD-JUMPS-TO-GARBAGE defect 1).
+    // Keeping the child suspended until the ctid registration below is likewise
+    // what keeps `pthread_join`'s wake from being lost
+    // (B-PTHREAD-JOIN-LOST-CTID).
+    match thread::spawn_suspended_with_tls(
         child_pid,
         b"forked",
         priority,
@@ -743,6 +746,10 @@ fn fork_process_clone_inner(
             // `on_thread_exit_hook` fires for it.  (When the child later
             // execve's, glibc startup re-registers via set_tid_address,
             // replacing this entry with one valid in the new image.)
+            // Done while the child is still suspended — an entry installed
+            // after admission can lose the race to a child that already
+            // exited, and the exit hook would then skip both the zero-write
+            // and the wake (B-PTHREAD-JOIN-LOST-CTID).
             if (clone_tid.flags & clone_flags::CLONE_CHILD_CLEARTID) != 0
                 && clone_tid.child_tid_ptr != 0
             {
@@ -750,6 +757,17 @@ fn fork_process_clone_inner(
                     task_id,
                     clone_tid.child_tid_ptr,
                 );
+            }
+
+            // Phase 2: all exit-path state is registered — let the child run.
+            if let Err(e) = thread::admit(child_pid, task_id) {
+                super::thread_clone::forget_clear_child_tid(task_id);
+                // SAFETY: `image_raw` came from `Box::into_raw` above and was
+                // not consumed — the task never ran, so the trampoline never
+                // freed it.
+                drop(unsafe { Box::from_raw(image_raw as *mut ForkChildImage) });
+                pcb::destroy(child_pid);
+                return Err(e);
             }
 
             Ok(child_pid)

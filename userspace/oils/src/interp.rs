@@ -29954,6 +29954,37 @@ impl Shell {
         self.extent_read_of_subs(&subs)
     }
 
+    /// The reads a `${ … }` scan had already made by the time it discovered it
+    /// had no `}` — run here because the discovery is the *last* thing
+    /// `extract_dollar_brace_string` does and every read it passed on the way
+    /// has already reported.
+    ///
+    /// The scan is one forward pass that reports as it goes (subst.c:1874-1960):
+    /// its `$(` row hands the rest of the string to `xparse_dolparen`, whose
+    /// diagnostic is printed there and then, and only when the walk finally runs
+    /// out of text does `if (c == 0 && nesting_level)` raise the `bad
+    /// substitution` (subst.c:1975-1988). So the two are ordered, and both
+    /// happen: measured against bash 5.2.37 under `${…@P}`, `A${z:-P1$(echo
+    /// hi⏎S1}B` prints `unexpected EOF while looking for matching `)'` and
+    /// *then* names the whole word. [`Shell::brace_extent_scan`] is this same
+    /// pass for a brace that did close; this is the arm for one that did not,
+    /// where there is no `${ … }` part left to hand it and only the undecoded
+    /// text survives.
+    ///
+    /// `src` is that text, from the `$` — the body is what follows the `${`, and
+    /// it is lexed as the string it is for the reason
+    /// [`Shell::extent_read_of_rest`] lexes its own remainder. The `}` the scan
+    /// never found is an ordinary byte to that lex, which is exactly right: it
+    /// is a byte the scan never reached either.
+    ///
+    /// `true` means the read raised the jump ([`ExtentRead::Aborted`]) and the
+    /// brace's own ending is never reached — the caller returns without a
+    /// second complaint.
+    fn unclosed_brace_reads(&mut self, src: BStr<'_>) -> bool {
+        let body = src.get(2..).unwrap_or_default().to_vec();
+        matches!(self.extent_read_of_rest(&body), ExtentRead::Aborted)
+    }
+
     /// The `$((` count a `${ … }` scan runs over `s`, for the two spellings
     /// that reach it — `None` where it closed and the scan walks on.
     ///
@@ -31344,7 +31375,17 @@ impl Shell {
             return Str::new();
         }
         match u {
-            Unclosed::BadSubst { close, text, .. } => {
+            Unclosed::BadSubst { close, src, text } => {
+                // The scan reported everything it read before it ran out of
+                // text to read; only then is there a brace with nothing to
+                // close on. See [`Shell::unclosed_brace_reads`] — and note the
+                // `$[` spelling makes no reads at all, its
+                // `extract_arithmetic_subst` passing flags `0` (subst.c:1299),
+                // so `v='A$[1+$(for⏎xB'` is silent in bash where the same body
+                // between braces names the `for`.
+                if *close == '}' && self.unclosed_brace_reads(src) {
+                    return Str::new();
+                }
                 if self.prompt_expanding {
                     if *close == '}' {
                         self.emit_stderr(&bfmt![

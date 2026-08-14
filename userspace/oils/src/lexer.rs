@@ -6162,6 +6162,53 @@ impl Lexer {
         self.here_text && e.looking_for.is_some()
     }
 
+    /// Where a scan that met an unclosed `$( … )` carries on from, having
+    /// swallowed the text that read consumed. See [`Lexer::unread_comsub`] for
+    /// which scans reach this and why the read takes the rest of the string.
+    ///
+    /// `extract_command_subst` hands `xparse_dolparen` that rest and reads the
+    /// reader's position back out of it (`*sindex = si`, subst.c:1322-1330), so
+    /// a read that fails **part way down** its text leaves the enclosing scan in
+    /// the *middle* of the string with its own delimiter still to find. Measured
+    /// against bash 5.2.37 under `${…@P}`, `A${z:-P1$(for⏎S1}B` finds its `}` and
+    /// expands to `AZZB` — that read stopped on the `for`'s line — where
+    /// `A${z:-P1$(echo hi⏎S1}B` is a `bad substitution`: that one ran the string
+    /// out and the brace has nothing left to close on.
+    ///
+    /// So the scan cannot answer this itself. The read is a real parse
+    /// ([`crate::parser::comsub_unclosed_error`]), run here for its stopping
+    /// point **only** — the diagnostic it found is bash's to raise when the word
+    /// is expanded, from the record the enclosing construct keeps, and a prompt
+    /// expansion parses the body twice for exactly that reason. See
+    /// [`crate::interp::Shell::comsub_reparse_read`].
+    ///
+    /// `body` is the cursor just past the `$(`; the text between it and where
+    /// the read stopped is returned for the caller to keep as raw text.
+    fn unread_comsub_stop(&mut self, body: usize) -> Str {
+        let src = self.slice(body, self.chars.len());
+        let stop = crate::parser::comsub_unclosed_error(&src, self.opts).stop_line;
+        // The reader works a line at a time (`shell_getc` fills
+        // `shell_input_line`), so a read that stopped on line `stop` consumed
+        // that whole line and no more — and bash resumes *at* the newline that
+        // ended it rather than past it, which is why the remainder of a failed
+        // read at the string level opens with one. Both halves are
+        // [`crate::interp::Shell::failed_extent_split`]'s, cutting the same
+        // point out of the same text; `u32::MAX` — the read ran the text out —
+        // falls out of the loop condition with nothing left to resume from.
+        self.pos = body;
+        let mut seen = 0u32;
+        while self.pos < self.chars.len() && seen < stop {
+            if self.at(self.pos) == Some('\n') {
+                seen = seen.saturating_add(1);
+            }
+            self.pos = self.pos.saturating_add(1);
+        }
+        while self.pos > body && self.at(self.pos.saturating_sub(1)) == Some('\n') {
+            self.pos = self.pos.saturating_sub(1);
+        }
+        self.slice(body, self.pos)
+    }
+
     /// Read text until the matching `close`, honoring nested `open`/`close`
     /// and skipping quoted spans. `self.pos` is just past the initial `open`.
     ///
@@ -6555,6 +6602,18 @@ impl Lexer {
                 // `parse_dollar_word` again (parse.y:3931), and again with no
                 // `push_delimiter`, so the body stands in whatever delimiter the
                 // arithmetic scan does.
+                // A `$(` with no mate is *this* scan's failure to have, unlike
+                // the `${ … }` one — see [`Lexer::unread_comsub_stop`], which
+                // deliberately has no call site here. An arithmetic span in
+                // unread text is reached only where the first failure takes the
+                // jump (a here-document body sets no `no_longjmp_on_fatal_error`),
+                // so the read's own diagnostic is the whole of the report and
+                // there is no second act for a resumption to reach. Measured:
+                // `$((1+$(echo` alone in a here-document body reports
+                // `unexpected EOF while looking for matching `)'` and *not* a
+                // `no closing `)' in $((1+$(echo` — the corpus case
+                // `an-unterminated-construct-in-text-no-parser-read-is-a-runtime-failure`
+                // pins both spellings.
                 let inner = self.read_subst_body(dq).map_err(|e| e.at(self.eof_line()))?;
                 // The parse is bash's, not ours to defer: `parse_dollar_word`
                 // runs `parse_comsub` here and now, and its failure is a syntax
@@ -7254,9 +7313,19 @@ impl Lexer {
                     // The same body read a `$(` in this position gets, and in
                     // the same delimiter — so `"${z:-<(fi}"` runs out looking
                     // for the `"`, exactly as `"${z:-$(fi}"` does.
-                    let inner = self
-                        .read_subst_body(in_dquote && !self.here_text)
-                        .map_err(|e| e.at(self.eof_line()))?;
+                    let body = self.pos;
+                    let inner = match self.read_subst_body(in_dquote && !self.here_text) {
+                        Ok(inner) => inner,
+                        // And the same resumption, `extract_command_subst` not
+                        // knowing which delimiter sent it. See
+                        // [`Lexer::unread_comsub_stop`].
+                        Err(e) if self.unread_comsub(&e) => {
+                            let read = self.unread_comsub_stop(body);
+                            raw.extend_from_slice(&read);
+                            continue;
+                        }
+                        Err(e) => return Err(e.at(self.eof_line())),
+                    };
                     raw.extend_from_slice(&inner);
                     raw.push(b')');
                     self.arith_comsubs.push(CmdSubSpan {
@@ -7382,9 +7451,23 @@ impl Lexer {
                                 // …and, like every `$(`, in this scan's delimiter
                                 // — which a here-document body does not have one
                                 // of. See [`Lexer::here_text`].
-                                let inner = self
+                                let body = self.pos;
+                                let inner = match self
                                     .read_subst_body(in_dquote && !self.here_text)
-                                    .map_err(|e| e.at(self.eof_line()))?;
+                                {
+                                    Ok(inner) => inner,
+                                    // A `$(` with no mate is not this scan's
+                                    // failure to have: the read it was handed
+                                    // says where the scan resumes, and this one
+                                    // still has a `}` to find. See
+                                    // [`Lexer::unread_comsub_stop`].
+                                    Err(e) if self.unread_comsub(&e) => {
+                                        let read = self.unread_comsub_stop(body);
+                                        raw.extend_from_slice(&read);
+                                        continue;
+                                    }
+                                    Err(e) => return Err(e.at(self.eof_line())),
+                                };
                                 // …and bash parses it here and now, from
                                 // `parse_dollar_word` (parse.y:3954). What
                                 // survives is the parse re-printed, not the

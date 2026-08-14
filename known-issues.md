@@ -5883,7 +5883,7 @@ stage and a background job. Unit tests
 
 ---
 
-### TD-OILS-A-BRACE-SCAN-THAT-NEVER-FINISHES-LOSES-THE-READS-IT-ALREADY-DID. A word whose `${` or `$(` is never closed reports nothing from the extent scan — 2026-08-10
+### TD-OILS-A-BRACE-SCAN-THAT-NEVER-FINISHES-LOSES-THE-READS-IT-ALREADY-DID. A word whose `${` or `$(` is never closed reports nothing from the extent scan — 2026-08-10 — ✅ FIXED 2026-08-14 (`userspace/oils/src/lexer.rs`, `userspace/oils/src/interp.rs`)
 
 **Where:** `userspace/oils/src/interp.rs` — `Shell::brace_extent_scan` and the
 `extent_read_of*` family it drives, and the parser that has to produce a `Word`
@@ -6006,12 +6006,51 @@ the wrong reason and would get row 4 wrong, because a paren count is not the
 parse: `$(for⏎S1}B` has no `)` at all, so the count overruns where bash's parse
 stops early and lets the brace close.
 
-**So the fix is not "grow the scan into the lexer".** It is to stop the
-`${ … }` case from falling through to the string-level path when the nested
-`$(` does not close, and route it to the `ExtentRead` arms that already exist —
-the open question being where the word is condemned today, since `begin_word`
-asks `wordscan::word_fault` about `unparse::word_src(w)` and therefore needs a
-parsed `Word` that this input never yields.
+**✅ FIXED 2026-08-14, in two halves.** Routing alone could not work, and that
+is the one thing the paragraph this replaces had wrong: *where the scan
+resumes is only knowable from a real parse*, so the lexer has to ask for one.
+
+**Half one — the lexer stops swallowing the string** (`lexer.rs`). A new
+`Lexer::unread_comsub_stop` runs `crate::parser::comsub_unclosed_error` — the
+pure model of `xparse_dolparen` — over the rest of the text **for its stopping
+point only**, keeps the consumed text as raw bytes, and leaves the enclosing
+scan looking for its own delimiter. The cut it makes in char space is
+`Shell::failed_extent_split`'s in byte space: past the stop-th newline, then
+back over the whole trailing run of newlines. Three call sites converted from
+`?` to a match on `Lexer::unread_comsub`: `read_dollar_brace_body`'s `$(` arm
+and its `<(`/`>(` arm.
+
+`read_opaque_span`'s arithmetic `$(` arm was converted too and then **reverted**
+before landing. `build/pgX.sh` had suggested the `$((` spelling was affected
+identically, but the corpus case
+`an-unterminated-construct-in-text-no-parser-read-is-a-runtime-failure`
+disagrees: an arithmetic span in unread text is reached only where the first
+failure takes the jump — a here-document body sets no
+`no_longjmp_on_fatal_error` — so the read's diagnostic is the whole report and
+there is no second act for a resumption to reach. Condemning the `$((` instead
+regressed that case. What `$((` needs is half *two*, not half one; see
+`TD-OILS-AN-ARITHMETIC-SCAN-REPORTS-NONE-OF-THE-READS-IT-MAKES` below.
+
+**Half two — the reads are emitted before the condemnation** (`interp.rs`). A
+scan that ran the text out reported everything it read *on the way*; only then
+is there a brace with nothing to close on. `Shell::unclosed_brace_reads` runs
+`extent_read_of_rest` over the undecoded body from the top of
+`expand_unclosed`'s `Unclosed::BadSubst` arm, gated on `close == '}'` because
+`$[`'s `extract_arithmetic_subst` passes flags `0` (subst.c:1299) and makes no
+reads at all. An `ExtentRead::Aborted` returns early — the jump stands and the
+brace's own ending is never reached.
+
+**Measured after: `build/pgW.sh`'s seven rows are byte-identical to bash
+5.2.37**, stderr included — including shape (b) above, whose lost `fi` report
+half two restores. Every spurious command execution is gone: rows that used to
+run `echo hi`, `S1}` and `fo` now run nothing, as bash does.
+
+**Still open, and logged separately below:** the `$((` spelling reports none of
+its reads (`TD-OILS-AN-ARITHMETIC-SCAN-REPORTS-NONE-OF-THE-READS-IT-MAKES`); a
+`<(` in an undecoded brace body is not read
+(`TD-OILS-AN-UNDECODED-BRACE-BODY-IS-RE-LEXED-AS-A-DOUBLE-QUOTED-RUN`); and
+`$[ … ]` bounds do not perform their `$( … )`
+(`TD-OILS-A-DOLLAR-BRACKET-BOUND-DOES-NOT-PERFORM-ITS-COMMAND-SUBSTITUTION`).
 
 ---
 
@@ -59748,3 +59787,161 @@ rather than by lengthening the sleep — a new `settle_jobs` test helper (the
 whole-table form of the existing `settle_job`) polls `poll_jobs` until every job
 has a status, after the same `JOB_EXIT_NOTICE_GRACE`. That removes this test from
 the flaky family; the *corpus* case above is untouched and stays open.
+
+---
+
+### TD-OILS-AN-ARITHMETIC-SCAN-REPORTS-NONE-OF-THE-READS-IT-MAKES. `$(( … ))` swallows the diagnostics its nested `$( … )` should raise, and loses the text after a read that stopped early — 2026-08-14
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::arith_extent_expand` /
+`arith_extent_frame` and the `$((` route out of `Shell::arith_extent_route`.
+
+**What is wrong.** `param_expand` reaches a `$((` through
+`extract_command_subst` with `SX_COMMAND` (subst.c:10575), so the paren count
+*does* recurse into a nested `$( … )` — a real parse, reported where it is met.
+osh runs the count but never reports, and in one shape stops in the wrong place.
+Measured against bash 5.2.37 (`build/pgX.sh` rows a/c, `build/pgY.sh` d4/d5):
+
+| word (inside `v='…'`, via `"${v@P}"`) | bash | osh |
+|---|---|---|
+| `A$((1+$(echo hi⏎q` | reports EOF, `[A]` | reports EOF, `[Ahi]` |
+| `A$((1+$(for⏎q))B` | reports **twice** (`for`, then `` `(1+$(for' ``), `[AB]` | silent, `[A]` |
+| `A$((1+$(for⏎xB` | reports `for`, `[A]` | reports `for`, **runs `fo`**, `[A⏎xB]` |
+
+Rows 1 and 3 report because the read runs from `Shell::arith_nested_read`,
+which does call `Shell::comsub_reparse_read`; what those two get wrong is the
+*value*, both by performing the abandoned extent the way the string level does
+and the brace level does not. Row 2 is the substantive one: the read stopped
+part way, so bash's count resumed after the `for`'s line and found the `))`,
+leaving `B` to the word. osh consumes to the end and loses it — and so never
+reaches the read at all, which is why it is the one row that is also silent.
+
+**What the proper fix looks like.** The `$((` count needs the same two-outcome
+treatment `${ … }` got on 2026-08-14: `Shell::comsub_reparse_read` for the
+report (which also decides jump vs. no-jump), and
+`Shell::failed_extent_split`'s resume point for where the count carries on.
+`Lexer::unread_comsub_stop` already puts the lexer in the right place; what is
+missing is the interp half — an `arith`-side counterpart of
+`Shell::unclosed_brace_reads`.
+
+**Impact.** Diagnostics only for two of the three rows; a wrong value for the
+third. Needs `@P`/`PS4`/here-doc text to be reachable at all.
+
+---
+
+### TD-OILS-AN-UNDECODED-BRACE-BODY-IS-RE-LEXED-AS-A-DOUBLE-QUOTED-RUN. A `<(`/`>(` in it is never read, though the brace scan names it — 2026-08-14
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::extent_read_of_rest` and
+`Shell::unclosed_brace_reads`, both of which lex their text with
+`crate::parser::dquote_word_from_source` → `crate::lexer::lex_dquote_body`.
+
+**What is wrong.** `extract_dollar_brace_string` names `$(`, `<(` and `>(`
+together and hands each to the same `extract_command_subst` (subst.c:1881-1950),
+**whatever the quoting** — that is why `x='A${z#<(fi)}B'` reports the parse
+twice. A double-quoted *run*, by contrast, has no process substitution in it at
+all: at string level bash and osh agree that `v='A<(echo hi⏎q'` is literal
+text. So `lex_dquote_body` is the right lexer for a string-level remainder and
+the wrong one for text the **brace scan** is walking.
+
+Measured (`build/pgY.sh` d6), `A${z:-P1<(echo hi⏎S1}B` under `${…@P}`:
+
+| | bash 5.2.37 | osh |
+|---|---|---|
+| reports | `` unexpected EOF while looking for matching `)' `` **then** `…: bad substitution` | the `bad substitution` only |
+| value | undecoded word | same |
+
+The `$(` spelling of the same row (`build/pgW.sh` row 5) is byte-exact, so this
+is precisely the two openers `lex_dquote_body` cannot see. The dollar spelling
+of d7 — where the read stops early and the brace closes — is also exact,
+because that path re-lexes through `parse_braced_param_in` in
+`Quoting::Unread`, which *does* read them.
+
+**It is not only the two openers — the whole quote model is wrong** (measured
+2026-08-14, `build/pq1.sh` and `build/pq2.sh`). `extract_dollar_brace_string`
+**skips** a quoted run rather than walking it, and the two quotes skip
+differently:
+
+| word (inside `v='…'`, via `"${v@P}"`) | bash 5.2.37 | what it shows |
+|---|---|---|
+| `A${z:-P1<(echo hi⏎S1}B` | reports EOF, `bad substitution` | the bare `<(` row **is** read |
+| `A${z:-P1"<(echo hi⏎S1"}B` | silent, `[AZZB]` | a `<(` inside `" … "` is **not** |
+| `A${z:-P1"$(echo hi⏎S1"}B` | reports EOF, `bad substitution` | a `$(` inside `" … "` **is** |
+| `A${z:-P1'$(echo hi⏎S1'}B` | silent, `[AZZB]` | a `$(` inside `' … '` is **not** |
+| `A${z:-P1'<(echo hi⏎S1'}B` | silent, `[AZZB]` | …nor a `<(` |
+| `A${z:-P1"<(echo hi⏎S1}B` | `bad substitution`, **no** read report | a lone `"` swallows to end of string |
+| `A${z:-P1'<(echo hi⏎S1}B` | `bad substitution`, **no** read report | …and so does a lone `'` |
+| `A${z:-"x"<(echo hi⏎S1}B` | reports EOF, `bad substitution` | a *closed* run does not suppress what follows |
+| `A${z:-P1\<(echo hi⏎S1}B` | silent, `[AZZB]` | a backslash escapes the opener |
+
+So the brace scan delegates a `" … "` run to a double-quote skipper that has
+the `$(` row and **not** the `<(`/`>(` row — bash's ordinary rule that there is
+no process substitution inside double quotes — and skips a `' … '` run whole,
+offering its interior to nothing. `lex_dquote_body` models neither: it treats
+both quote characters as ordinary literals (correct for `Q_DOUBLE_QUOTES`, where
+the string *is* already the quoted run), so it reads a `$(` inside `' … '` that
+bash never reaches. **That single-quote row is a live divergence today**,
+independent of the `<(` one this entry is named for.
+
+**What the proper fix looks like.** A real lex entry for "text a brace scan is
+walking" — not `lex_dquote_body` with a row bolted on. It needs, at its own
+level: the `<(`/`>(` openers beside `$(`; a `'` that consumes to the next `'`
+or to end of string, offering nothing inside it; and a `"` that consumes to the
+next `"` or to end of string, offering only `$(` (and `` ` ``) inside it. Then
+`extent_read_of_rest` and `unclosed_brace_reads` use it and `lex_dquote_body`
+keeps its current string-level callers unchanged — the p1/p2 probe above
+confirms those answers are right as they stand.
+
+An attempt that added only the `<(`/`>(` row to `lex_dquote_body` was written
+and reverted on 2026-08-14, before being compiled, because these measurements
+showed it would have regressed the three suppressed rows above (they are silent
+in bash today and in osh today, and would have started reporting).
+
+**Impact.** Two shapes. The `<(`/`>(` one is a missing diagnostic only — the
+value already agrees. The `' … '` one is a *spurious* diagnostic: osh reports a
+read bash never makes. Both are pre-existing in `extent_read_of_rest`;
+`unclosed_brace_reads` (new 2026-08-14) inherits them. Reachable only through
+`@P`/`PS4`/here-doc text holding a malformed `${ … }`.
+
+---
+
+### TD-OILS-A-DOLLAR-BRACKET-BOUND-DOES-NOT-PERFORM-ITS-COMMAND-SUBSTITUTION. `$[ 1+$(… ]` reads the `$( … )` as an arithmetic operand token — 2026-08-14
+
+**Where:** `userspace/oils/src/interp.rs` — the evaluation of a
+`WordPart::ArithSub { bracket: true, … }` whose expression text holds an
+unclosed `$( … )`.
+
+**What is wrong.** `extract_arithmetic_subst` is
+`extract_delimited_string (string, sindex, "$[", "[", "]", 0)` (subst.c:1299) —
+flags `0`, so **no** `SX_COMMAND` and no nested read. The `$[` therefore closes
+at its `]` by plain delimiter counting, and the unclosed `$( … )` inside is met
+later, by the *arithmetic expansion* of the bounds text, which performs it under
+`Q_DOUBLE_QUOTES|Q_ARITH`: it reports, runs the abandoned extent, and yields
+nothing. osh instead hands the raw characters to its arithmetic tokenizer, which
+calls them a bad operand.
+
+Measured (`build/pgY.sh` d1/d2):
+
+| word (inside `v='…'`, via `"${v@P}"`) | bash | osh |
+|---|---|---|
+| `A$[1+$(for⏎x]B` | reports `for`, runs `fo`, `[A1B]` | silent, `[AA$[1+$(for⏎x]B]` |
+| `A$[1+$(echo hi⏎x]B` | reports EOF, `[A1B]` | silent, `[AA$[1+$(echo hi⏎x]B]` |
+
+Row d3 — the same body with no `]` at all — is byte-exact in both shells
+(silent, undecoded text), because there the `$[` genuinely never closes.
+
+**What the proper fix looks like.** Two things, in order. (1) `$[`'s lex must
+close at its `]` by plain delimiter counting, without the nested read — which
+means `Lexer::read_opaque_span` needs to know its enclosing close character, so
+that the `$((` spelling (SX_COMMAND) and the `$[` one (flags `0`) can part
+company. Routing that arm through `Lexer::unread_comsub_stop` was tried on
+2026-08-14 and reverted: it made the `$[` bounds text match bash on d1/d2, but
+it *regressed* the `$((` spelling in the corpus case
+`an-unterminated-construct-in-text-no-parser-read-is-a-runtime-failure`, whose
+`$((1+$(echo` row must report the read and stop rather than condemn the `$((`.
+A passing case outranks a documented divergence, so that arm keeps its `?`.
+(2) The arithmetic evaluator must perform a `$( … )` in its expression text
+with the unread-text rule rather than tokenizing it — which is what makes both
+rows' values follow.
+
+**Impact.** Wrong value and wrong diagnostic for a deprecated spelling of
+arithmetic expansion, in malformed input, reachable only through `@P`/`PS4`/
+here-doc text.

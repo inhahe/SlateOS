@@ -580,6 +580,95 @@ fi
 # rather than dead code.  Override with QEMU_CPU=... to test other models.
 QEMU_CPU="${QEMU_CPU:-qemu64,+smep,+smap,+umip}"
 
+# --- Cross-worktree boot lock -------------------------------------------------
+#
+# The three lanes each work in their OWN git worktree (D:/…/os, os-lane-a,
+# os-lane-c), so `target/` and `build/serial-test.txt` are NO LONGER shared —
+# roadmap.md §6 predates the worktree split and is wrong about that.  What IS
+# still shared is the machine: we boot under TCG (pure emulation, CPU-bound),
+# so two concurrent QEMUs roughly double each other's wall-clock boot time and
+# push long boots past TIMEOUT, producing phantom "hang" failures.  A soak that
+# takes ~480s/iteration solo starts timing out when another lane boots
+# alongside it.
+#
+# So the lock must live somewhere ALL worktrees can see.  `git rev-parse
+# --git-common-dir` resolves to the single real .git directory shared by every
+# worktree (linked worktrees return its absolute path), which is exactly the
+# anchor we need.  Fall back to build/ when git is unavailable — that degrades
+# to the old per-tree behaviour rather than failing.
+#
+# Acquisition is `mkdir`, which is atomic on both NTFS and POSIX (unlike a
+# test-then-create on a file).  Metadata goes in a file inside the directory.
+#
+# Escape hatches:
+#   BOOT_LOCK=0          skip locking entirely (single-lane / debugging)
+#   BOOT_LOCK_WAIT=<sec> max seconds to wait for the lock (default 3600).
+#                        On expiry we proceed anyway rather than failing the
+#                        test — a slow boot beats a spurious error.
+BOOT_LOCK_DIR=""
+BOOT_LOCK_OWNER=""   # must exist before release_boot_lock runs under `set -u`
+if [ "${BOOT_LOCK:-1}" != "0" ]; then
+    _common_git="$(git -C "$PROJECT_ROOT" rev-parse --git-common-dir 2>/dev/null || echo "")"
+    if [ -n "$_common_git" ]; then
+        # A main worktree reports a relative ".git"; make it absolute.
+        case "$_common_git" in
+            /*|[A-Za-z]:*) : ;;
+            *) _common_git="$PROJECT_ROOT/$_common_git" ;;
+        esac
+        BOOT_LOCK_DIR="$_common_git/slateos-boot-lock"
+    else
+        BOOT_LOCK_DIR="$PROJECT_ROOT/build/.boot-lock"
+    fi
+fi
+
+# Release is idempotent and safe to call when we never acquired: we only remove
+# the lock if the owner file still names THIS process, so we can never delete a
+# lock that another lane acquired after we broke/released ours.
+release_boot_lock() {
+    [ -n "$BOOT_LOCK_DIR" ] || return 0
+    [ -d "$BOOT_LOCK_DIR" ] || return 0
+    if [ "$(cat "$BOOT_LOCK_DIR/owner" 2>/dev/null || echo "")" = "$BOOT_LOCK_OWNER" ]; then
+        rm -rf "$BOOT_LOCK_DIR" 2>/dev/null || true
+    fi
+}
+
+if [ -n "$BOOT_LOCK_DIR" ]; then
+    BOOT_LOCK_OWNER="$(python "$PROJECT_ROOT/scripts/which-lane.py" 2>/dev/null | awk '/^lane:/{print $2}' || true)"
+    BOOT_LOCK_OWNER="lane-${BOOT_LOCK_OWNER:-?}/pid-$$/$(date +%s)"
+    _lock_wait="${BOOT_LOCK_WAIT:-3600}"
+    _lock_waited=0
+    while ! mkdir "$BOOT_LOCK_DIR" 2>/dev/null; do
+        # Break a stale lock: >20 min old means the holder died without
+        # releasing (hard kill, power loss).  20 min > our longest healthy
+        # boot (~8 min) with a wide margin, so this cannot steal a live lock.
+        _lock_age=999999
+        if [ -f "$BOOT_LOCK_DIR/owner" ]; then
+            _lock_mtime="$(date -r "$BOOT_LOCK_DIR/owner" +%s 2>/dev/null || echo 0)"
+            [ "$_lock_mtime" -gt 0 ] && _lock_age=$(( $(date +%s) - _lock_mtime ))
+        fi
+        if [ "$_lock_age" -gt 1200 ]; then
+            echo "=== Breaking stale boot lock (age ${_lock_age}s, held by $(cat "$BOOT_LOCK_DIR/owner" 2>/dev/null || echo unknown)) ==="
+            rm -rf "$BOOT_LOCK_DIR" 2>/dev/null || true
+            continue
+        fi
+        if [ "$_lock_waited" -ge "$_lock_wait" ]; then
+            echo "=== Boot lock still held after ${_lock_waited}s; booting anyway (results may be slow) ==="
+            BOOT_LOCK_DIR=""
+            break
+        fi
+        if [ $(( _lock_waited % 60 )) -eq 0 ]; then
+            echo "=== Waiting for boot lock, held by $(cat "$BOOT_LOCK_DIR/owner" 2>/dev/null || echo unknown) (${_lock_waited}s) ==="
+        fi
+        sleep 5
+        _lock_waited=$(( _lock_waited + 5 ))
+    done
+    if [ -n "$BOOT_LOCK_DIR" ]; then
+        echo "$BOOT_LOCK_OWNER" > "$BOOT_LOCK_DIR/owner" 2>/dev/null || true
+        trap 'release_boot_lock' EXIT INT TERM
+        echo "=== Boot lock acquired: $BOOT_LOCK_OWNER ==="
+    fi
+fi
+
 # Step 4: Boot QEMU
 echo "=== Booting QEMU (timeout: ${TIMEOUT}s, cpu: $QEMU_CPU) ==="
 rm -f "$SERIAL_FILE"
@@ -607,7 +696,12 @@ QEMU_PID=$!
 # or exits early — a surviving qemu keeps the serial file locked and breaks
 # the next run.  (A hard SIGKILL/TaskStop of the harness cannot run this, so
 # callers that force-stop the script must still clean up qemu themselves.)
-trap 'kill_qemu "$QEMU_PID"' EXIT INT TERM
+#
+# NOTE: this trap must ALSO release the boot lock — it replaces the
+# release-only trap installed at lock-acquisition time, and bash keeps just one
+# handler per signal.  Reaping qemu first is deliberate: the next lane must not
+# be handed the lock while our emulator is still burning CPU.
+trap 'kill_qemu "$QEMU_PID"; release_boot_lock' EXIT INT TERM
 
 # Wait for BOOT_OK or timeout
 ELAPSED=0

@@ -5793,7 +5793,9 @@ pub fn exit_code(pid: ProcessId) -> Option<i32> {
 }
 
 /// Get the parent PID of a process.
-#[allow(dead_code)]
+///
+/// Returns `None` if `pid` is not in the process table. A recorded parent of
+/// `0` means "spawned by the kernel"; see `SpawnOptions::parent`.
 pub fn parent(pid: ProcessId) -> Option<ProcessId> {
     let table = PROCESS_TABLE.lock();
     table.get(&pid).map(|p| p.parent)

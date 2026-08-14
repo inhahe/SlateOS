@@ -926,8 +926,10 @@ pub fn self_test() {
     assert_eq!(held_rec, 0, "held stack empty after recursive-test releases");
     serial_println!("[lockdep]   Recursive self-deadlock detection: OK");
 
-    // Test 8: the class hash index agrees with an exhaustive scan.
-    test_class_hash_index();
+    // Test 8: the class hash index agrees with an exhaustive scan. Run a second
+    // time late in boot from `main`, when the table is actually populated —
+    // see the function's own doc comment for why once is not enough.
+    verify_class_index("early");
 
     // Restore state.
     ENABLED.store(prev_enabled, Ordering::Relaxed);
@@ -955,7 +957,17 @@ pub fn self_test() {
 /// So the linear scan is not deleted, it is demoted to the oracle: every
 /// registered class must be found by the hash at the same index the scan finds
 /// it at, and the two must agree on absence too.
-fn test_class_hash_index() {
+/// Called **twice per boot**, and both calls matter for different reasons.
+/// From `self_test()` the table holds ~3 classes, so the scan-vs-hash sweep is
+/// nearly vacuous and only the synthetic collision case does real work; late in
+/// boot it holds ~43, which is the occupancy at which a probe-sequence bug
+/// would actually manifest. A single early call would be a check sized for a
+/// table 7% as full as the one it defends.
+///
+/// `when` labels the call site, because the two runs are not interchangeable
+/// and a log line that doesn't say which one it is invites reading the vacuous
+/// pass as the meaningful one.
+pub fn verify_class_index(when: &str) {
     let count = (CLASS_COUNT.load(Ordering::Relaxed) as usize).min(MAX_CLASSES);
 
     // Every registered class is found, at the index the scan would report.
@@ -1019,16 +1031,16 @@ fn test_class_hash_index() {
         assert_eq!(hash_lookup(addr), c1, "colliding class not found by probe");
         assert_eq!(hash_lookup(FRESH), first, "probe run broke the earlier entry");
         serial_println!(
-            "[lockdep]   class hash: OK ({} classes verified vs scan, bucket collision handled)",
-            checked
+            "[lockdep]   class hash ({}): OK ({} classes verified vs scan, bucket collision handled)",
+            when, checked
         );
     } else {
         // Not a silent pass: if no collider was found the collision path went
         // untested and the log must say so.
         serial_println!(
-            "[lockdep]   class hash: OK ({} classes verified vs scan) — WARNING no \
+            "[lockdep]   class hash ({}): OK ({} classes verified vs scan) — WARNING no \
              colliding address found in 100k candidates, probe path UNTESTED",
-            checked
+            when, checked
         );
     }
 }

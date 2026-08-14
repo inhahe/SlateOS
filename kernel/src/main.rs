@@ -5463,6 +5463,23 @@ extern "C" fn kernel_main() -> ! {
     // ISR context and hands off to the (already-live) workqueue worker.
     container::start_health_monitor();
 
+    // Re-verify lockdep's O(1) class index now that the table is populated.
+    //
+    // The same check runs inside `lockdep::self_test()`, but that executes in
+    // early boot with ~3 classes registered, while by this point there are ~43.
+    // A probe-sequence bug in the hash index needs a populated table to show
+    // itself, and its symptom is silence — a missed lookup registers a second
+    // class for the same lock, splits that lock's dependency edges across two
+    // graph nodes, and stops cycles ever being found through it.
+    //
+    // Deliberately placed BEFORE the BOOT_OK marker. It was first written after
+    // it, which meant `boot-test.sh` (which kills QEMU at BOOT_OK unless
+    // `--bench` is given) never saw the line — a check that in practice ran only
+    // on the longer benchmark boots, i.e. only when someone was already looking.
+    // That is the exact failure mode this check exists to prevent, so it must
+    // sit inside the window the boot test observes.
+    lockdep::verify_class_index("populated");
+
     // Boot success marker — the boot test script greps for this.
     // Printed synchronously so it appears within seconds of power-on,
     // regardless of how long deferred benchmarks take.

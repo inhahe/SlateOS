@@ -327,10 +327,12 @@ Roadmap:
   they cannot diverge (§400). Pair kerning done, from GPOS and the legacy
   `kern` table (§401). Text is now shaped once into a `ShapedRun` that
   measuring, drawing, hit-testing and truncation all walk, so they cannot
-  disagree; GSUB `liga`/`rlig` ligatures ride on that (§402). Next unblocked
-  step is the rest of shaping: no combining-mark positioning (GPOS mark
-  attachment), no contextual substitution, no bidi. Vello itself waits on
-  `[A]`'s GPU driver.
+  disagree; GSUB `liga`/`rlig` ligatures ride on that (§402), as does GPOS
+  mark attachment, so a combining accent sits on its letter instead of in
+  the gap before it (§403). Next unblocked step is the rest of shaping: no
+  contextual substitution (GSUB 5/6), no mark-to-ligature attachment (GPOS
+  5), no bidi, no complex-script reordering. Vello itself waits on `[A]`'s
+  GPU driver.
 - `[C]` Wayland-inspired compositor: GPU acceleration, currently a software
   rasterizer (lines ~4605, ~4619)
 - `[C]` Video-encoded capture fallback, H.264/VP9 (lines ~4623, ~5060)

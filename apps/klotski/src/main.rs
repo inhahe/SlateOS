@@ -21,6 +21,7 @@ use guitk::color::Color;
 use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
 use guitk::render::{FontWeightHint, RenderCommand};
 use guitk::style::CornerRadii;
+use guitk::text;
 
 // ── Catppuccin Mocha palette ────────────────────────────────────────
 const BASE: Color = Color::from_hex(0x1E1E2E);
@@ -890,7 +891,8 @@ impl Klotski {
             // Label for the big block
             let label = block.kind.label();
             if !label.is_empty() {
-                let text_x = px + block_w / 2.0 - (label.len() as f32 * 5.0);
+                let text_x =
+                    text::center_x(label, px + block_w / 2.0, BLOCK_FONT_SIZE, FontWeightHint::Bold);
                 let text_y = py + block_h / 2.0 - BLOCK_FONT_SIZE / 2.0;
                 cmds.push(RenderCommand::Text {
                     x: text_x,

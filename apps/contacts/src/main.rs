@@ -22,6 +22,7 @@ use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
+use guitk::text;
 
 use std::collections::VecDeque;
 
@@ -2491,7 +2492,8 @@ impl ContactsApp {
             let mut chip_x = cx;
             for &gid in &contact.groups {
                 if let Some(group) = self.store.get_group(gid) {
-                    let chip_w = (group.name.len() as f32 * 7.0) + 16.0;
+                    let chip_w =
+                        text::padded_width(&group.name, 8.0, 11.0, FontWeightHint::Bold);
                     cmds.push(RenderCommand::FillRect {
                         x: chip_x,
                         y: cy,

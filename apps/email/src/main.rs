@@ -1489,6 +1489,7 @@ pub struct Signature {
 
 use guitk::render::{FontWeightHint, RenderCommand};
 use guitk::style::CornerRadii;
+use guitk::text;
 
 mod colors {
     use guitk::Color;
@@ -1999,7 +2000,7 @@ impl EmailApp {
         let buttons = ["Compose", "Reply", "Forward", "Delete", "Archive", "Spam"];
         let mut bx = 16.0;
         for label in &buttons {
-            let bw = label.len() as f32 * 7.5 + 20.0;
+            let bw = text::padded_width(label, 10.0, 12.0, FontWeightHint::Regular);
             cmds.push(RenderCommand::FillRect {
                 x: bx,
                 y: ty + 6.0,
@@ -2341,7 +2342,7 @@ impl EmailApp {
             // Labels
             let mut lx = text_x;
             for label in &msg.labels {
-                let lw = label.len() as f32 * 6.0 + 10.0;
+                let lw = text::padded_width(label, 5.0, 9.0, FontWeightHint::Regular);
                 if lx + lw > x + max_w {
                     break;
                 }

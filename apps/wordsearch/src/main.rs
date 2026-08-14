@@ -27,6 +27,7 @@ use guitk::color::Color;
 use guitk::event::{Event, Key, KeyEvent, Modifiers};
 use guitk::render::{FontWeightHint, RenderCommand};
 use guitk::style::CornerRadii;
+use guitk::text;
 
 // ── Catppuccin Mocha palette ────────────────────────────────────────
 const BASE: Color = Color::from_hex(0x1E1E2E);
@@ -946,7 +947,10 @@ impl WordSearchApp {
 
             // Strikethrough line for found words
             if pw.found {
-                let text_w = pw.word.len() as f32 * 8.0;
+                // The rule has to be exactly as long as the word it strikes
+                // through, so it is measured in the weight the word was drawn
+                // at rather than guessed from its byte count.
+                let text_w = text::measure(&pw.word, WORD_LIST_FONT_SIZE, weight);
                 cmds.push(RenderCommand::Line {
                     x1: list_x,
                     y1: wy + 7.0,
@@ -1086,6 +1090,29 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── Strikethrough width ─────────────────────────────────────────
+
+    #[test]
+    fn a_strikethrough_is_as_long_as_the_word_it_strikes() {
+        // The rule is measured in the weight the word is drawn at, so a found
+        // word drawn bold gets a bold-length rule, not a regular-length one.
+        for word in ["CAT", "ELEPHANT", "\u{c9}L\u{c9}PHANT"] {
+            let bold = text::measure(word, WORD_LIST_FONT_SIZE, FontWeightHint::Bold);
+            let regular = text::measure(word, WORD_LIST_FONT_SIZE, FontWeightHint::Regular);
+            assert!(bold > 0.0 && regular > 0.0, "{word} measured as nothing");
+            assert!(
+                bold >= regular,
+                "{word} measured narrower bold than regular"
+            );
+            // And neither is the byte count times eight: the accented word has
+            // three two-byte characters in it.
+            assert!(
+                bold < word.len() as f32 * 8.0 + 1.0,
+                "{word} measured wider than the old byte estimate"
+            );
+        }
+    }
 
     // ── LCG tests ───────────────────────────────────────────────────
 

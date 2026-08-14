@@ -25,6 +25,7 @@ use guitk::color::Color;
 use guitk::event::{Event, Key, KeyEvent, Modifiers};
 use guitk::render::{FontWeightHint, RenderCommand};
 use guitk::style::CornerRadii;
+use guitk::text;
 
 // ── Catppuccin Mocha palette ────────────────────────────────────────
 const BASE: Color = Color::from_hex(0x1E1E2E);
@@ -1069,7 +1070,7 @@ impl BreakoutApp {
 
         // Title.
         cmds.push(RenderCommand::Text {
-            x: box_x + box_w / 2.0 - (title.len() as f32 * 7.0),
+            x: text::center_x(title, box_x + box_w / 2.0, TITLE_FONT_SIZE, FontWeightHint::Bold),
             y: box_y + 35.0,
             text: title.to_string(),
             color: LAVENDER,
@@ -1080,7 +1081,12 @@ impl BreakoutApp {
 
         // Subtitle.
         cmds.push(RenderCommand::Text {
-            x: box_x + box_w / 2.0 - (subtitle.len() as f32 * 3.5),
+            x: text::center_x(
+                subtitle,
+                box_x + box_w / 2.0,
+                SUBTITLE_FONT_SIZE,
+                FontWeightHint::Regular,
+            ),
             y: box_y + 80.0,
             text: subtitle.to_string(),
             color: SUBTEXT0,

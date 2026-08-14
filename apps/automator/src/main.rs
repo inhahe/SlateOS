@@ -37,6 +37,7 @@
 use guitk::Color;
 use guitk::render::{FontWeightHint, RenderCommand};
 use guitk::style::CornerRadii;
+use guitk::text;
 
 use std::collections::BTreeMap;
 
@@ -1704,7 +1705,7 @@ impl AutomatorApp {
         bg: Color,
         fg: Color,
     ) -> f32 {
-        let btn_w = label.len() as f32 * 7.5 + 16.0;
+        let btn_w = text::padded_width(label, 8.0, FONT_SIZE_SMALL, FontWeightHint::Regular);
         cmds.push(RenderCommand::FillRect {
             x,
             y,

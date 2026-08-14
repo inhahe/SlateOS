@@ -9,6 +9,7 @@
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
 use guitk::style::CornerRadii;
+use guitk::text;
 
 // ============================================================================
 // Theme colors (same palette as main settings)
@@ -1292,7 +1293,8 @@ impl AssociationsPageState {
 
             // "(uninstalled)" marker
             if !app.installed {
-                let marker_x = panel_x + RADIO_SIZE + 10.0 + (app.name.len() as f32 * 7.5) + 8.0;
+                let name_w = text::measure(&app.name, 13.0, FontWeightHint::Regular);
+                let marker_x = panel_x + RADIO_SIZE + 10.0 + name_w + 8.0;
                 tree.push(RenderCommand::Text {
                     x: marker_x,
                     y: py + 2.0,

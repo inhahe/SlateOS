@@ -31,6 +31,7 @@ use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
+use guitk::text;
 
 use std::collections::BTreeMap;
 
@@ -1383,7 +1384,7 @@ impl StartupUI {
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
         tree.push(RenderCommand::Text {
-            x: x + w / 2.0 - (label.len() as f32 * FONT_SIZE * 0.3),
+            x: text::center_x(label, x + w / 2.0, FONT_SIZE, FontWeightHint::Bold),
             y: y + (h - FONT_SIZE) / 2.0,
             text: label.to_string(),
             color,
@@ -1701,7 +1702,7 @@ impl StartupUI {
             max_width: Option::None,
         });
         tree.push(RenderCommand::Text {
-            x: x + label.len() as f32 * 7.0 + 8.0,
+            x: x + text::measure(label, FONT_SIZE_SMALL, FontWeightHint::Bold) + 8.0,
             y,
             text: value.to_string(),
             color: COLOR_TEXT,

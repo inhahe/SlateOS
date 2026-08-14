@@ -18,6 +18,7 @@ use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, Mou
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
+use guitk::text;
 
 use std::path::{Path, PathBuf};
 
@@ -486,7 +487,7 @@ impl RegionSelector {
             let label_y = sel_y + sel_h + 4.0;
 
             // Background for label readability.
-            let label_w = label.len() as f32 * 8.0 + 12.0;
+            let label_w = text::padded_width(&label, 6.0, 13.0, FontWeightHint::Regular);
             tree.fill_rect(label_x - 4.0, label_y - 2.0, label_w, 20.0, Color::rgba(0, 0, 0, 180));
             tree.text(label_x, label_y, &label, TEXT_PRIMARY, 13.0);
         }
@@ -997,7 +998,15 @@ impl ScreenshotApp {
                                 self.annotation_color,
                             );
                             ann.text = self.annotation_text_input.clone();
-                            ann.end_x = draw_x + self.annotation_text_input.len() as f32 * 8.0;
+                            // The annotation's box is the box its text will
+                            // actually occupy when drawn at 14 px, not one
+                            // guessed from the byte count.
+                            ann.end_x = draw_x
+                                + text::measure(
+                                    &self.annotation_text_input,
+                                    14.0,
+                                    FontWeightHint::Regular,
+                                );
                             ann.end_y = draw_y + 16.0;
                             self.annotations.push(ann);
                             self.annotation_text_input.clear();

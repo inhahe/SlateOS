@@ -37,6 +37,7 @@
 use guitk::Color;
 use guitk::render::{FontWeightHint, RenderCommand};
 use guitk::style::CornerRadii;
+use guitk::text;
 
 // ============================================================================
 // Catppuccin Mocha theme
@@ -957,7 +958,7 @@ impl RenamerApp {
         ];
         let mut bx = 220.0;
         for (label, color) in buttons {
-            let bw = label.len() as f32 * 8.0 + 20.0;
+            let bw = text::padded_width(label, 10.0, 12.0, FontWeightHint::Regular);
             cmds.push(RenderCommand::FillRect {
                 x: bx,
                 y: 6.0,

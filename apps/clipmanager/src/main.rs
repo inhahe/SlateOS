@@ -16,6 +16,7 @@ use guitk::color::Color;
 use guitk::layout::FlexDirection;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
 use guitk::style::{CornerRadii, Edges};
+use guitk::text;
 use guitk::widget::{Widget, WidgetTree};
 
 // ---------------------------------------------------------------------------
@@ -1233,7 +1234,7 @@ fn render_detail_panel(
     if !entry.tags.is_empty() {
         let mut tx = x + pad;
         for tag in &entry.tags {
-            let tag_w = tag.len() as f32 * 7.0 + 16.0;
+            let tag_w = text::padded_width(tag, 8.0, 10.0, FontWeightHint::Regular);
             rt.push(RenderCommand::FillRect {
                 x: tx,
                 y: cy,

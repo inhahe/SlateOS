@@ -32,6 +32,7 @@
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand};
 use guitk::style::CornerRadii;
+use guitk::text;
 
 use std::collections::HashMap;
 
@@ -1087,8 +1088,12 @@ pub fn render_column_header(
         // Label text.
         let text_x = match def.alignment {
             Alignment::Left => x + 4.0,
-            Alignment::Right => x + w - 4.0 - estimated_text_width(&def.label, HEADER_FONT_SIZE),
-            Alignment::Center => x + (w - estimated_text_width(&def.label, HEADER_FONT_SIZE)) / 2.0,
+            Alignment::Right => {
+                text::right_x(&def.label, x + w - 4.0, HEADER_FONT_SIZE, FontWeightHint::Bold)
+            }
+            Alignment::Center => {
+                text::center_x(&def.label, x + w / 2.0, HEADER_FONT_SIZE, FontWeightHint::Bold)
+            }
         };
         cmds.push(RenderCommand::Text {
             x: text_x,
@@ -1176,12 +1181,18 @@ pub fn render_column_values(
 
             let text_x = match def.alignment {
                 Alignment::Left => x + 4.0,
-                Alignment::Right => {
-                    x + w - 4.0 - estimated_text_width(&text, CELL_FONT_SIZE)
-                }
-                Alignment::Center => {
-                    x + (w - estimated_text_width(&text, CELL_FONT_SIZE)) / 2.0
-                }
+                Alignment::Right => guitk::text::right_x(
+                    &text,
+                    x + w - 4.0,
+                    CELL_FONT_SIZE,
+                    FontWeightHint::Regular,
+                ),
+                Alignment::Center => guitk::text::center_x(
+                    &text,
+                    x + w / 2.0,
+                    CELL_FONT_SIZE,
+                    FontWeightHint::Regular,
+                ),
             };
 
             cmds.push(RenderCommand::Text {
@@ -1298,7 +1309,7 @@ pub fn render_column_chooser(
         // Category badge (dim, right-aligned).
         let cat_text = def.category.label();
         cmds.push(RenderCommand::Text {
-            x: x + menu_w - 8.0 - estimated_text_width(cat_text, 9.0),
+            x: text::right_x(cat_text, x + menu_w - 8.0, 9.0, FontWeightHint::Regular),
             y: row_y + 7.0,
             text: cat_text.to_string(),
             color: ColumnColors::CELL_DIM,
@@ -1358,12 +1369,6 @@ fn resolve_widths(manager: &ColumnManager, total_width: f32) -> Vec<f32> {
     }
 
     widths
-}
-
-/// Rough text width estimate (no real font metrics available).
-fn estimated_text_width(text: &str, font_size: f32) -> f32 {
-    // Approximate: each character is ~0.6 * font_size wide on average.
-    text.len() as f32 * font_size * 0.6
 }
 
 /// Extract the lowercase file extension from a path string.
@@ -1489,6 +1494,60 @@ fn format_percentage(frac: f32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ------------------------------------------------------------------
+    // Measured alignment
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn a_right_aligned_header_ends_at_the_column_edge() {
+        let mgr = ColumnManager::with_defaults();
+        let total = 800.0;
+        let widths = resolve_widths(&mgr, total);
+        let cmds = render_column_header(&mgr, total);
+
+        let mut x = 0.0_f32;
+        let mut checked = 0;
+        for (i, &id) in mgr.active_columns().iter().enumerate() {
+            let w = widths.get(i).copied().unwrap_or(80.0);
+            if let Some(def) = mgr.column_def(id)
+                && def.alignment == Alignment::Right
+            {
+                let drawn = cmds
+                    .iter()
+                    .find_map(|c| match c {
+                        RenderCommand::Text { x, text, .. } if *text == def.label => Some(*x),
+                        _ => None,
+                    })
+                    .expect("header label not drawn");
+                let end =
+                    drawn + text::measure(&def.label, HEADER_FONT_SIZE, FontWeightHint::Bold);
+                assert!(
+                    (end - (x + w - 4.0)).abs() < 0.01,
+                    "{} ends at {end}, column edge is {}",
+                    def.label,
+                    x + w - 4.0
+                );
+                checked += 1;
+            }
+            x += w;
+        }
+        assert!(checked > 0, "no right-aligned column to check");
+    }
+
+    #[test]
+    fn alignment_is_not_computed_from_byte_length() {
+        // A label with a two-byte character in it must not be treated as one
+        // glyph wider than the same label spelled in ASCII.
+        let bytes = "Gr\u{f6}\u{df}e";
+        let ascii = "Grosse";
+        let a = text::measure(bytes, HEADER_FONT_SIZE, FontWeightHint::Bold);
+        let b = text::measure(ascii, HEADER_FONT_SIZE, FontWeightHint::Bold);
+        assert!(
+            (a - b).abs() < HEADER_FONT_SIZE,
+            "measurement differed by more than a glyph: {a} vs {b}"
+        );
+    }
 
     // ------------------------------------------------------------------
     // Formatting

@@ -9,6 +9,7 @@
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
 use guitk::style::CornerRadii;
+use guitk::text;
 
 use core::fmt;
 
@@ -670,7 +671,7 @@ fn render_section_header(tree: &mut RenderTree, x: f32, y: f32, title: &str) -> 
 
 /// Draw a clickable button.
 fn render_button(tree: &mut RenderTree, x: f32, y: f32, label: &str, color: Color) -> f32 {
-    let width = label.len() as f32 * 7.5 + 24.0;
+    let width = text::padded_width(label, 12.0, 13.0, FontWeightHint::Regular);
     fill_rounded(tree, x, y, width, BUTTON_HEIGHT, color, 6.0);
     tree.text(x + 12.0, y + 8.0, label, COL_BASE, 13.0);
     width

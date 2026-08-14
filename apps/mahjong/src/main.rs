@@ -25,6 +25,7 @@ use guitk::color::Color;
 use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
 use guitk::render::{FontWeightHint, RenderCommand};
 use guitk::style::CornerRadii;
+use guitk::text;
 
 // ── Catppuccin Mocha palette ────────────────────────────────────────
 const BASE: Color = Color::from_hex(0x1E1E2E);
@@ -1089,7 +1090,7 @@ impl Mahjong {
                 tile.kind.text_color()
             };
             cmds.push(RenderCommand::Text {
-                x: tx + TILE_W / 2.0 - (label.len() as f32 * 4.0),
+                x: text::center_x(label, tx + TILE_W / 2.0, TILE_FONT_SIZE, FontWeightHint::Bold),
                 y: ty + TILE_H / 2.0 - TILE_FONT_SIZE / 2.0,
                 text: label.into(),
                 color: text_color,

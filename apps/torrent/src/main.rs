@@ -2087,6 +2087,7 @@ impl Default for ClientSettings {
 
 use guitk::render::{FontWeightHint, RenderCommand};
 use guitk::style::CornerRadii;
+use guitk::text;
 
 /// Catppuccin Mocha palette
 mod colors {
@@ -2475,7 +2476,7 @@ impl TorrentApp {
         ];
         let mut bx = 120.0;
         for label in &buttons {
-            let bw = label.len() as f32 * 8.0 + 24.0;
+            let bw = text::padded_width(label, 12.0, 12.0, FontWeightHint::Regular);
             cmds.push(RenderCommand::FillRect {
                 x: bx,
                 y: 8.0,
@@ -2611,7 +2612,7 @@ impl TorrentApp {
         let mut tx = content_x + 8.0;
         for tab in &Tab::ALL {
             let is_active = *tab == self.active_tab;
-            let tw = tab.label().len() as f32 * 8.0 + 20.0;
+            let tw = text::padded_width_any_weight(tab.label(), 10.0, 12.0);
             if is_active {
                 cmds.push(RenderCommand::FillRect {
                     x: tx,

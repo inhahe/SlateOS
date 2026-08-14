@@ -379,16 +379,24 @@ impl PdfDocument {
                 let mut start = 0;
                 while let Some(pos) = text_lower[start..].find(&query_lower) {
                     let abs_pos = start + pos;
-                    // Estimate highlight rect based on character position
-                    let char_width = if span.rect.width > 0.0 && !span.text.is_empty() {
-                        span.rect.width / span.text.len() as f32
+                    // The span's width comes from the document, so the honest
+                    // approximation is to spread it over the span's
+                    // *characters*. Spreading it over its bytes made the cell
+                    // too narrow for any span containing an accent, and
+                    // `abs_pos` is a byte offset, so the highlight landed short
+                    // of the match by one cell per preceding two-byte
+                    // character.
+                    let char_count = span.text.chars().count();
+                    let char_width = if span.rect.width > 0.0 && char_count > 0 {
+                        span.rect.width / char_count as f32
                     } else {
                         8.0
                     };
+                    let chars_before = text_lower.get(..abs_pos).map_or(0, |p| p.chars().count());
                     let highlight_rect = PageRect::new(
-                        span.rect.x + abs_pos as f32 * char_width,
+                        span.rect.x + chars_before as f32 * char_width,
                         span.rect.y,
-                        query.len() as f32 * char_width,
+                        query_lower.chars().count() as f32 * char_width,
                         span.rect.height.max(span.font_size),
                     );
                     results.push(SearchResult {
@@ -2483,6 +2491,54 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -- Search highlight placement -------------------------------------------
+
+    /// A one-page document whose only span is `text`, occupying `width` points.
+    fn doc_with_span(text: &str, width: f32) -> PdfDocument {
+        let mut doc = PdfDocument::new(PathBuf::from("test.pdf"));
+        let mut page = PdfPage::new(600.0, 800.0);
+        page.text_spans.push(TextSpan {
+            text: text.to_string(),
+            rect: PageRect::new(0.0, 0.0, width, 12.0),
+            font_size: 12.0,
+        });
+        doc.pages.push(page);
+        doc
+    }
+
+    #[test]
+    fn a_highlight_covers_the_match_it_found() {
+        // Ten characters across 100 points is 10 points per character, so the
+        // match at characters 5..10 must start at 50 and be 50 wide.
+        let doc = doc_with_span("abcdefghij", 100.0);
+        let hits = doc.search("fghij");
+        assert_eq!(hits.len(), 1);
+        let hit = hits.first().expect("one hit");
+        assert!((hit.rect.x - 50.0).abs() < 0.01, "starts at {}", hit.rect.x);
+        assert!(
+            (hit.rect.width - 50.0).abs() < 0.01,
+            "is {} wide",
+            hit.rect.width
+        );
+    }
+
+    #[test]
+    fn a_highlight_is_placed_by_characters_not_bytes() {
+        // Five characters across 100 points, two of which are two bytes each.
+        // The match is the last character, so it must start at 80 -- placing it
+        // by byte offset would put it at 100, past the end of the span.
+        let doc = doc_with_span("\u{e9}\u{e9}abc", 100.0);
+        let hits = doc.search("c");
+        assert_eq!(hits.len(), 1);
+        let hit = hits.first().expect("one hit");
+        assert!((hit.rect.x - 80.0).abs() < 0.01, "starts at {}", hit.rect.x);
+        assert!(
+            (hit.rect.width - 20.0).abs() < 0.01,
+            "is {} wide",
+            hit.rect.width
+        );
+    }
 
     // -- Rotation tests -------------------------------------------------------
 

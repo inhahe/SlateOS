@@ -42,6 +42,7 @@ use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
+use guitk::text;
 
 // ============================================================================
 // Catppuccin Mocha palette
@@ -1900,7 +1901,11 @@ impl RemindersApp {
             };
             if badge_count > 0 {
                 let badge_text = format!("{badge_count}");
-                let badge_w = 10.0 + badge_text.len() as f32 * 7.0;
+                // A count pill has a radius of half its height, so a single
+                // digit measured honestly would render as a squashed oval:
+                // floor the width at the height to keep it round.
+                let badge_w =
+                    text::padded_width(&badge_text, 5.0, 10.0, FontWeightHint::Regular).max(18.0);
                 cmds.push(RenderCommand::FillRect {
                     x: x + w - badge_w - 12.0,
                     y: row_y + 6.0,
@@ -1910,7 +1915,12 @@ impl RemindersApp {
                     corner_radii: CornerRadii::all(9.0),
                 });
                 cmds.push(RenderCommand::Text {
-                    x: x + w - badge_w - 7.0,
+                    x: text::center_x(
+                        &badge_text,
+                        x + w - badge_w / 2.0 - 12.0,
+                        10.0,
+                        FontWeightHint::Regular,
+                    ),
                     y: row_y + 9.0,
                     text: badge_text,
                     font_size: 10.0,

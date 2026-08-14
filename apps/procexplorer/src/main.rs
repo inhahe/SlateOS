@@ -16,6 +16,7 @@ mod features;
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEventKind};
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
+use guitk::text;
 
 use std::collections::HashMap;
 
@@ -27,6 +28,14 @@ use std::collections::HashMap;
 const TOOLBAR_HEIGHT: f32 = 40.0;
 /// Height of the tab bar below the toolbar.
 const TAB_BAR_HEIGHT: f32 = 28.0;
+
+/// Width of the tab drawn for `label`, including the 12 px padding each side.
+///
+/// One function for the renderer and the click handler, so the hit targets
+/// cannot drift off the tabs they belong to.
+fn tab_width(label: &str) -> f32 {
+    text::padded_width(label, 12.0, 12.0, FontWeightHint::Regular)
+}
 /// Height of the status bar at the bottom.
 const STATUS_BAR_HEIGHT: f32 = 24.0;
 /// Height of a single row in process/connection tables.
@@ -1063,7 +1072,7 @@ impl ProcessExplorerState {
                 if (TOOLBAR_HEIGHT..TOOLBAR_HEIGHT + TAB_BAR_HEIGHT).contains(&my) {
                     let mut tab_x = 0.0f32;
                     for tab in &Tab::ALL {
-                        let tab_w = (tab.label().len() as f32) * 9.0 + 24.0;
+                        let tab_w = tab_width(tab.label());
                         if mx >= tab_x && mx < tab_x + tab_w {
                             self.active_tab = *tab;
                             return EventResult::Consumed;
@@ -1367,7 +1376,9 @@ impl ProcessExplorerState {
 
         // Cursor indicator when focused.
         if self.filter_focused {
-            let cursor_x = filter_x + 8.0 + self.filter_text.len() as f32 * 7.0;
+            // The caret sits where the glyphs actually end: a byte count put
+            // it a whole character past every non-ASCII filter.
+            let cursor_x = filter_x + 8.0 + text::width(&self.filter_text, 11.0);
             tree.fill_rect(cursor_x, btn_y + 4.0, 1.0, btn_h - 8.0, COLOR_TEXT);
         }
     }
@@ -1383,7 +1394,7 @@ impl ProcessExplorerState {
         let mut tx = 0.0f32;
         for tab in &Tab::ALL {
             let label = tab.label();
-            let tab_w = label.len() as f32 * 9.0 + 24.0;
+            let tab_w = tab_width(label);
             let is_active = *tab == self.active_tab;
 
             if is_active {
@@ -2347,4 +2358,81 @@ fn main() {
     println!("Details tab: {} render commands", details_tree.len());
 
     println!("\nProcess Explorer ready.");
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+
+    use super::*;
+    use guitk::event::MouseEvent;
+
+    #[test]
+    fn tabs_fit_their_labels() {
+        for tab in &Tab::ALL {
+            assert!(
+                tab_width(tab.label())
+                    >= text::measure(tab.label(), 12.0, FontWeightHint::Regular) + 24.0,
+                "{} overflows its tab",
+                tab.label()
+            );
+        }
+    }
+
+    #[test]
+    fn clicking_a_tab_selects_that_tab() {
+        // Renderer and click handler share tab_width, so a click at the centre
+        // of the nth tab must land on the nth tab whatever the labels are.
+        let mut app = ProcessExplorerState::new();
+        let mut tab_x = 0.0f32;
+        for tab in &Tab::ALL {
+            let w = tab_width(tab.label());
+            app.handle_mouse(&MouseEvent {
+                x: tab_x + w / 2.0,
+                y: TOOLBAR_HEIGHT + TAB_BAR_HEIGHT / 2.0,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            });
+            assert_eq!(app.active_tab, *tab, "click missed {}", tab.label());
+            tab_x += w;
+        }
+    }
+
+    #[test]
+    fn the_filter_caret_follows_the_glyphs() {
+        let mut app = ProcessExplorerState::new();
+        app.filter_focused = true;
+        app.filter_text = String::from("\u{fc}ber");
+        let tree = app.render();
+        let text_i = tree
+            .commands
+            .iter()
+            .position(
+                |c| matches!(c, RenderCommand::Text { text, .. } if *text == app.filter_text),
+            )
+            .expect("filter text not drawn");
+        let origin = match tree.commands.get(text_i) {
+            Some(RenderCommand::Text { x, .. }) => *x,
+            _ => unreachable!("just matched a Text command"),
+        };
+        let caret = tree
+            .commands
+            .iter()
+            .skip(text_i)
+            .find_map(|c| match c {
+                RenderCommand::FillRect { x, width, .. } if (width - 1.0).abs() < 0.01 => Some(*x),
+                _ => None,
+            })
+            .expect("no caret drawn");
+        // A byte count would put the caret a whole character past the glyphs,
+        // because the u-umlaut is two bytes.
+        let expected = origin + text::width(&app.filter_text, 11.0);
+        assert!(
+            (caret - expected).abs() < 0.01,
+            "caret at {caret}, glyphs end at {expected}"
+        );
+    }
 }

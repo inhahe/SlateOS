@@ -18,6 +18,7 @@
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand};
 use guitk::style::CornerRadii;
+use guitk::text;
 
 use std::path::{Path, PathBuf};
 
@@ -647,14 +648,14 @@ pub fn render_drop_feedback(
     if !label.is_empty() {
         let label_x = drag_x + 16.0;
         let label_y = drag_y + 16.0;
-        let estimated_width = label.len() as f32 * 7.0 + 16.0;
+        let pill_width = text::padded_width(&label, 8.0, 12.0, FontWeightHint::Regular);
         let label_height = 22.0;
 
         // Background pill.
         cmds.push(RenderCommand::FillRect {
             x: label_x,
             y: label_y,
-            width: estimated_width,
+            width: pill_width,
             height: label_height,
             color: FeedbackColors::LABEL_BG,
             corner_radii: CornerRadii::all(4.0),

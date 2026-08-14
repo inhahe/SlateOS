@@ -20,6 +20,7 @@
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand};
 use guitk::style::CornerRadii;
+use guitk::text;
 
 use std::collections::VecDeque;
 
@@ -1880,7 +1881,7 @@ impl WhiteboardApp {
         let mut tx = TOOLBAR_WIDTH + 4.0;
         for (i, page) in self.pages.iter().enumerate() {
             let is_active = i == self.active_page;
-            let tab_width = (page.name.len() as f32 * 8.0).max(60.0) + 16.0;
+            let tab_width = text::padded_width_any_weight(&page.name, 8.0, 12.0).max(76.0);
 
             let bg = if is_active { MOCHA_BASE } else { MOCHA_SURFACE0 };
             cmds.push(RenderCommand::FillRect {

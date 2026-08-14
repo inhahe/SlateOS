@@ -18,6 +18,7 @@
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand};
 use guitk::style::CornerRadii;
+use guitk::text;
 
 // ============================================================================
 // Catppuccin Mocha palette
@@ -1102,7 +1103,12 @@ impl WeatherApp {
         ];
         let mut tx = self.width - 16.0;
         for (label, view) in tabs.iter().rev() {
-            let text_width = label.len() as f32 * 7.5;
+            // Measured at the widest weight the tab can take: the active one
+            // is drawn bold, and the strip is laid out right to left, so
+            // sizing to the current weight walked every tab sideways whenever
+            // the selection moved.
+            let text_width = text::measure(label, 13.0, FontWeightHint::Bold)
+                .max(text::measure(label, 13.0, FontWeightHint::Regular));
             tx -= text_width + 16.0;
             let is_active = *view == self.active_view;
 

@@ -1393,7 +1393,7 @@ pub fn render_placeholder(
     let text = label.unwrap_or(category.icon_label());
     let font_size = display_size / 3.0;
     cmds.push(RenderCommand::Text {
-        x: x + display_size / 2.0 - font_size * text.len() as f32 / 4.0,
+        x: guitk::text::center_x(text, x + display_size / 2.0, font_size, FontWeightHint::Bold),
         y: y + display_size / 2.0 - font_size / 2.0,
         text: text.to_owned(),
         color: Color::WHITE,

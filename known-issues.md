@@ -59828,7 +59828,7 @@ third. Needs `@P`/`PS4`/here-doc text to be reachable at all.
 
 ---
 
-### TD-OILS-AN-UNDECODED-BRACE-BODY-IS-RE-LEXED-AS-A-DOUBLE-QUOTED-RUN. A `<(`/`>(` in it is never read, though the brace scan names it — 2026-08-14
+### TD-OILS-AN-UNDECODED-BRACE-BODY-IS-RE-LEXED-AS-A-DOUBLE-QUOTED-RUN. A `<(`/`>(` in it is never read, though the brace scan names it — 2026-08-14 — ✅ FIXED 2026-08-14
 
 **Where:** `userspace/oils/src/interp.rs` — `Shell::extent_read_of_rest` and
 `Shell::unclosed_brace_reads`, both of which lex their text with
@@ -59948,9 +59948,9 @@ ones that pin *which* quote wins when the two are interleaved (measured
 |---|---|---|
 | `A${z:-"it's"$(fi⏎S1}B` | reports `fi`, `[AZZB]` | same |
 | `A${z:-"it's"<(fi⏎S1}B` | reports `fi`, `[AZZB]` | same |
-| `A${z:-'i"t'<(fi⏎S1}B` | reports `fi`, `[AZZB]` | **silent**, `[AZZB]` |
-| `A${z:-P1\'<(echo hi⏎S1}B` | reports EOF, `bad substitution` | **silent**, condemned |
-| `A${z:->(echo hi⏎S1}B` | reports EOF, `bad substitution` | **silent**, condemned |
+| `A${z:-'i"t'<(fi⏎S1}B` | reports `fi`, `[AZZB]` | ✅ same since 2026-08-14 |
+| `A${z:-P1\'<(echo hi⏎S1}B` | reports EOF, `bad substitution` | ✅ same since 2026-08-14 |
+| `A${z:->(echo hi⏎S1}B` | reports EOF, `bad substitution` | ✅ same since 2026-08-14 |
 | `A${z:-${y:-<(fi⏎S1}B` | reports `fi`, `bad substitution` | same |
 
 So a `'` inside a closed `" … "` run opens nothing (rows 1-2) and a `"` inside a
@@ -59963,13 +59963,179 @@ and reverted on 2026-08-14, before being compiled, because these measurements
 showed it would have regressed the three suppressed rows above (they are silent
 in bash today and in osh today, and would have started reporting).
 
-**Impact.** Two shapes remain, both **diagnostics only** — the values already
-agree. A `<(`/`>(` at brace level loses its read report; a `' … '` run beside a
-failing read loses its report too. The third and worst shape — a lone `"` before
-a `$( … )` making osh run a command bash does not, and yield the wrong value —
-was fixed 2026-08-14 (see row 1 above). Both remaining shapes are pre-existing in
-`extent_read_of_rest`; `unclosed_brace_reads` (new 2026-08-14) inherits them.
+**Fixed 2026-08-14**, along the lines above. Three pieces:
+
+- `Lexer::brace_scan` (`userspace/oils/src/lexer.rs`) — a flag saying "this
+  scan stands in for `extract_dollar_brace_string`, not for the expansion after
+  it". With it set, `read_double_quote_until` grows the scan's other two
+  openers: a `<(`/`>(` becomes a `SubBody::Unread` segment carrying its own
+  `SubDelim`, which the expansion prints straight back
+  (`SubDelim::is_performed` is false for both), so the word's **value** is
+  untouched and only the extent walk gains a construct to read. The new entry
+  `lexer::lex_brace_scan_body` → `parser::brace_scan_word_from_source` is what
+  `Shell::extent_read_of_rest` now lexes its remainder with, which is the
+  unclosed-brace half (rows 4-5 of the interleaving table above).
+- The closed-brace half (row 3) is the same flag turned on from
+  `read_word_verbatim`'s `"` arm, and **only** when that run opened inside a
+  `' … '` one — `in_run && self.here_text`. That is exactly the case where the
+  scan never saw a quote at all, because it stepped over the single quotes
+  whole. Outside a run the `"` is the scan's own, and there `skip_double_quoted`
+  reads the `$(` spelling alone, which is what the reader already did.
+- The quote state itself moved out of the lexer and into the walk, as
+  `ScanQuote` (`interp.rs`): two independent flags, because
+  `skip_single_quoted` hunts for a `'` and `skip_double_quoted` for a `"` and
+  neither knows the other character — so each quote is an ordinary byte inside
+  the other's run. `Shell::brace_scanned_subs_slice` tracks both over the
+  literal runs (a `\` still hides the byte after it) and suppresses the two
+  process-substitution spellings inside a `" … "` while letting `$(` through;
+  `brace_scanned_subs_in` no longer resets the state on entering a
+  `WordPart::DoubleQuoted` whose `"` the scan never saw.
+
+Corpus case:
+`userspace/oils/tests/corpus/the-brace-scan-reads-a-process-substitution-and-the-expansion-after-it-does-not.sh`
+— 14 shapes plus a here-document body, byte-identical to bash 5.2.37 including
+stderr.
+
+**Impact while it stood.** Diagnostics only — the values already agreed. A
+`<(`/`>(` at brace level lost its read report. The worst shape — a lone `"`
+before a `$( … )` making osh run a command bash does not, and yield the wrong
+value — was fixed earlier the same day (see row 1 of the two-row table above).
 Reachable only through `@P`/`PS4`/here-doc text holding a malformed `${ … }`.
+
+**Not fixed by this, and tracked separately:** row 2 of the two-row table,
+`A${z:-'p$(echo hi'q$(fi⏎S1}B`. That one is not about the openers but about
+where a construct *ends*; see
+`TD-OILS-A-SQUOTE-RUN-DOES-NOT-CUT-A-SUBSTITUTION-SHORT-FOR-THE-BRACE-SCAN`.
+
+---
+
+### TD-OILS-AN-UNMATED-DOUBLE-QUOTE-GROWS-A-MATE-WHEN-THE-WORD-IS-PRINTED-BACK — 2026-08-14
+
+**Where:** `userspace/oils/src/unparse.rs` — `part_src`'s
+`WordPart::DoubleQuoted` arm, which writes a `"` on both ends unconditionally;
+the run that has no closing `"` is built by `userspace/oils/src/lexer.rs`,
+`Lexer::read_word_verbatim`'s `'"'` arm under `ParseOpts::tolerant`.
+
+**Repro** (bash 5.2.37, `build/pr11.sh` t1):
+
+```sh
+z=ZZ
+v='A${z:-'"'"'i"t'"'"'$(fi)}B'; printf '[%s]\n' "${v@P}"
+```
+
+| | bash 5.2.37 | osh |
+|---|---|---|
+| remainder quoted by the read | `` `fi)}B' `` | `` `fi)"}B' `` |
+| word named by `bad substitution` | `A${z:-'i"t'$(fi)}B` | `A${z:-'i"t'$(fi)"}B` |
+| value | `[A${z:-'i"t'$(fi)}B]` | same |
+
+**What is wrong.** In text no parser read, a `"` with no mate is not an error:
+`string_extract_double_quoted` is handed a *finished word* and its walk ends at
+the end of the string as readily as at a quote (that is
+`ParseOpts::tolerant`, and the corpus case
+`a-double-quote-with-no-mate-in-an-operand-runs-to-the-end-of-the-operand.sh`
+pins the expansion of it). The resulting `WordPart::DoubleQuoted` therefore
+covers a run whose closing quote **was never in the source** — but the part
+does not record that, and `part_src` prints the pair back. Every consumer of
+`crate::unparse::word_src` then sees one byte that was not in the word.
+
+The value is unaffected, because quote removal drops the `"` either way. What is
+affected is everything derived from the *text*: `Shell::bad_sub_word` (the word
+`bad substitution` names), the tail `extract_command_subst` quotes back in its
+own diagnostic, and — in principle, though no divergence has been measured for
+it yet — `crate::wordscan::word_fault`, which re-scans `word_src` for the
+unclosed `${`/`` ` `` verdicts and could be pushed either way by a stray quote.
+
+The single-quote analogue exists in the same shape:
+`Lexer::read_single_quote` has a `None if self.opts.tolerant => return Ok(s)`
+arm, and `part_src`'s `WordPart::SingleQuoted` likewise writes both `'`s. No
+divergence has been measured for it, because the paths that produce an unmated
+`'` do not currently reach a diagnostic that prints the word back — but the
+defect is the same one and a fix should cover both.
+
+**What the proper fix looks like.** Record the missing mate on the part rather
+than guessing at print time: `Seg::Dq(Vec<Seg>)` → `Seg::Dq(Vec<Seg>, bool)`
+and `WordPart::DoubleQuoted(Vec<WordPart>)` → a `closed` field, exactly as
+`Seg::Sq(Str, bool)` already carries its own flag, with `part_src` writing the
+trailing quote only when it was there. About 27 sites mention `DoubleQuoted`
+across `ast.rs`, `parser.rs`, `interp.rs` and `unparse.rs`; most are matches
+that need only a `..`. The single-quote half is the same edit on
+`WordPart::SingleQuoted`.
+
+Not worth reaching for a cheaper trick: an unmated run always extends to the
+end of its text, so "omit the quote when the part is last" would be *nearly*
+right, and nearly-right quoting is how a word stops re-parsing.
+
+**Impact.** Diagnostics only, as measured — one spurious `"` in the two lines
+bash prints for a malformed `${ … }` whose operand holds a `"` opened inside a
+`' … '` run. Pre-existing since the unmated-`"` fix of 2026-08-14 (before it,
+the same word was condemned outright, which was worse). Reachable only through
+`@P`/`PS4`/here-doc text.
+
+---
+
+### TD-OILS-A-SQUOTE-RUN-DOES-NOT-CUT-A-SUBSTITUTION-SHORT-FOR-THE-BRACE-SCAN. A `$( … )` opened inside one swallows the read that should have followed it — 2026-08-14
+
+**Where:** `userspace/oils/src/lexer.rs` — `Lexer::read_word_verbatim`'s `$`
+arm in [`Verbatim::Dquote`], reached through
+`Shell::brace_extent_scan` → `Shell::brace_scanned_subs`.
+
+**Repro** (bash 5.2.37, `build/pr12.sh`):
+
+```sh
+z=ZZ
+v='A${z:-'"'"'p$(echo hi'"'"'q$(fi
+S1}B'; printf '[%s]\n' "${v@P}"
+```
+
+| | bash 5.2.37 | osh |
+|---|---|---|
+| reports | ``syntax error near unexpected token `fi' `` | **nothing** |
+| value | `[AZZB]` | same |
+
+**What is wrong.** The two passes bash makes over this word carve it into
+*different constructs*, not merely read the same constructs differently.
+
+- `extract_dollar_brace_string` meets the `'` and hands the run to
+  `skip_single_quoted`, which stops at the **mate**. So `'p$(echo hi'` is one
+  skipped run, the `$(` inside it is never seen at all, and the scan resumes at
+  `q` — where it meets `$(fi⏎S1}B`, reads it, and reports `fi`.
+- `expand_word_internal` has no `'` left to speak of, so its
+  `string_extract_double_quoted` meets the **first** `$(`, hands the rest of the
+  word to `extract_command_subst`, and — there being no `)` anywhere — takes
+  everything. One substitution, not two.
+
+osh derives the brace scan's reads from the expansion's lex, so it gets the
+second carving and the second `$(` is inside the first's body, where the walk
+never reaches it. `Shell::brace_scanned_subs_slice`'s single-quote bookkeeping
+then correctly suppresses the one construct it *can* see (it is inside the run),
+and the result is silence.
+
+This is the residue of
+`TD-OILS-AN-UNDECODED-BRACE-BODY-IS-RE-LEXED-AS-A-DOUBLE-QUOTED-RUN`, which
+fixed the part of the same disagreement that was only about *which openers*
+count. Rows where the two passes agree on the extents but not on the openers are
+now handled by `Lexer::brace_scan`; this row is one where they disagree on the
+extents, and no flag on the expansion's lex can express it.
+
+**What the proper fix looks like.** `Shell::brace_extent_scan` has to run over
+the brace's **text**, with the scan's own carve, rather than over the parsed
+part. Concretely: keep the undecoded source of an unread `${ … }` on the part
+(or reach it through `crate::unparse`), and lex it once in
+`Lexer::brace_scan` mode with the single-quote rule the scan really has — a `'`
+consumes to its mate and offers nothing inside, so a `$(` in there can neither
+be read nor run past the mate. `read_word_verbatim` already computes that mate
+(`sq_close`); what it does not do is let it bound a substitution, because for
+the *expansion* it must not.
+
+Note that `Lexer::brace_scan` as it stands is deliberately the narrow version:
+it adds openers and leaves extents alone. Widening it to bound a `$( … )` at
+`sq_close` would be wrong for the same lexer's expansion duty, so the widening
+has to come with the second pass, not instead of it.
+
+**Impact.** Diagnostics only — the value is already right. Reachable only
+through `@P`/`PS4`/here-doc text holding a `${ … }` whose operand has both an
+unterminated `$( … )` inside a `' … '` run and a failing one after it.
 
 ---
 

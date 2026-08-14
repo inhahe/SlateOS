@@ -802,6 +802,67 @@ pub fn current_version() -> u32 {
     super::number::CURRENT_VERSION
 }
 
+/// Verify that dispatch still reaches its handlers once syscall filtering is
+/// live — in particular across the whole syscall number range.
+///
+/// # Why this exists as a *separate* entry point
+///
+/// [`self_test`] runs very early in boot, thousands of lines before
+/// `scfilter::init()`.  Every one of its ~90 cases therefore exercises
+/// `dispatch` with the filter subsystem switched off, which is **not the
+/// configuration the system ever actually runs in**.  Any bug in the
+/// dispatch↔filter interaction is invisible to it by construction.
+///
+/// One such bug shipped: `scfilter::MAX_SYSCALL_NR` had drifted to 1000 while
+/// the dispatch table grew to 1100, so from the moment `scfilter::init()` ran,
+/// every syscall in `1000..1100` — the entire DRM/graphics interface plus
+/// three process-control syscalls — returned `PermissionDenied` to every
+/// process on the system.  The self-test suite could not see it; it had
+/// already finished by then.
+///
+/// # What it checks
+///
+/// That a syscall in the top decade dispatches to its registered handler
+/// rather than being refused by the filter.  `SYS_SIGNAL_STOP_SELF` with
+/// signal 0 is used because it is the highest-numbered syscall with a
+/// registered handler whose *rejection* path is safe to call from the boot
+/// thread (a valid stop signal would park this thread forever — see
+/// `test_dispatch_signal_stop_self_rejects_non_stop_signals`).  It must answer
+/// `InvalidArgument`; `PermissionDenied` means the filter ate it, and
+/// `NotSupported` means the slot is not wired.
+///
+/// # Errors
+///
+/// Returns `InternalError` if a live-filter dispatch is refused.
+pub fn verify_dispatch_under_filtering() -> KernelResult<()> {
+    let args = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+    let r = dispatch(SYS_SIGNAL_STOP_SELF, &args);
+
+    if r.value == i64::from(KernelError::PermissionDenied.code()) {
+        serial_println!(
+            "[syscall]   FAIL: syscall {} refused by scfilter with no filter installed \
+             (scfilter::MAX_SYSCALL_NR={}, dispatch MAX_SYSCALL_NR={})",
+            SYS_SIGNAL_STOP_SELF,
+            crate::scfilter::MAX_SYSCALL_NR,
+            MAX_SYSCALL_NR
+        );
+        return Err(KernelError::InternalError);
+    }
+    if r.value != i64::from(KernelError::InvalidArgument.code()) {
+        serial_println!(
+            "[syscall]   FAIL: syscall {} under live filtering returned {}, expected InvalidArgument",
+            SYS_SIGNAL_STOP_SELF, r.value
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[syscall] Top-of-range dispatch under live filtering (nr {} of {}): OK",
+        SYS_SIGNAL_STOP_SELF, MAX_SYSCALL_NR
+    );
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Self-test
 // ---------------------------------------------------------------------------

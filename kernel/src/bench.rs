@@ -1954,6 +1954,155 @@ fn bench_syscall_dispatch() {
             result.min_ns, target_ns
         );
     }
+
+    bench_syscall_dispatch_breakdown(&result);
+}
+
+/// Decompose `dispatch()` into the work it does *besides* running the handler.
+///
+/// `syscall_dispatch` has sat at ~3.5x its 200 ns target across every boot on
+/// record, and the lockdep O(1) fix — which cut `crate::sync::Mutex`
+/// acquire+release from 632 ns to 274 ns and `vfs_stat_root` by 44% — moved it
+/// by exactly 0 ns.  That is a real finding, not a null result: it says the
+/// cost is somewhere `crate::sync::Mutex` is not.
+///
+/// Rather than infer which of dispatch's five prologue/epilogue stages that is,
+/// each is measured **directly, in isolation**, and the residual is printed as
+/// an explicit `unexplained` term.  This project has twice reasoned about a hot
+/// path from the source alone and been wrong (the `pick_next` benchmark measured
+/// a full yield; the `sched_pick_next` anchor came from a benchmark that took no
+/// lock at all), so the source is used here only to decide *what* to measure,
+/// never to decide *how much* something costs.
+fn bench_syscall_dispatch_breakdown(dispatch_result: &BenchResult) {
+    use crate::syscall::dispatch::SyscallArgs;
+    use crate::syscall::handlers::sys_task_id;
+    use crate::syscall::number::SYS_TASK_ID;
+
+    let args = SyscallArgs {
+        arg0: SYS_TASK_ID,
+        arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+    };
+    let tid = crate::sched::current_task_id();
+
+    // Stage 1: the handler itself — the only work a caller actually asked for.
+    // Everything else this function measures is overhead by definition.
+    let handler = run("sd_handler", 2000, || {
+        core::hint::black_box(sys_task_id(&args));
+    });
+
+    // Stage 2: `sched::current_task_id()`.  Dispatch calls it once directly, and
+    // each `ktrace::record` calls it again — so it is charged three times per
+    // syscall, and is measured alone to price that.
+    let task_id = run("sd_current_task_id", 2000, || {
+        core::hint::black_box(crate::sched::current_task_id());
+    });
+
+    // Stage 3: the syscall filter (seccomp equivalent).  Its doc comment claims
+    // "O(1)" and "~5 ns"; two bullets later the same comment says "linear scan
+    // miss".  Both cannot be true.  Measure it.
+    let scfilter = run("sd_scfilter_check", 2000, || {
+        core::hint::black_box(crate::scfilter::check(tid, SYS_TASK_ID));
+    });
+
+    // Stage 4: the two `ktrace::record` calls (enter + exit).  Measured as the
+    // pair, because that is how dispatch pays for them.
+    let ktrace = run("sd_ktrace_pair", 2000, || {
+        crate::ktrace::record(
+            crate::ktrace::Category::Syscall,
+            crate::ktrace::event::SYSCALL_ENTER,
+            SYS_TASK_ID,
+            0,
+        );
+        crate::ktrace::record(
+            crate::ktrace::Category::Syscall,
+            crate::ktrace::event::SYSCALL_EXIT,
+            SYS_TASK_ID,
+            0,
+        );
+    });
+
+    // Stage 5: the syscall-latency histogram, enter+exit as a pair.
+    let sclatency = run("sd_sclatency_pair", 2000, || {
+        let s = crate::sclatency::enter();
+        crate::sclatency::exit(s, SYS_TASK_ID);
+    });
+
+    let accounted = handler.min_ns
+        .saturating_add(task_id.min_ns)
+        .saturating_add(scfilter.min_ns)
+        .saturating_add(ktrace.min_ns)
+        .saturating_add(sclatency.min_ns);
+    let total = dispatch_result.min_ns;
+
+    serial_println!(
+        "[bench]   syscall_dispatch breakdown: total {}ns = handler {}ns + task_id {}ns \
+         + scfilter {}ns + ktrace_pair {}ns + sclatency_pair {}ns + unexplained {}ns",
+        total,
+        handler.min_ns,
+        task_id.min_ns,
+        scfilter.min_ns,
+        ktrace.min_ns,
+        sclatency.min_ns,
+        total.saturating_sub(accounted),
+    );
+    // How many filters exist decides *which* path `sd_scfilter_check` above
+    // just measured, so print it rather than leaving the reading to inference.
+    // With 0 installed, `check` returns after a single atomic load and the
+    // number above is the fast path; with any installed it is the locked
+    // hash-lookup path, and the two are not comparable.
+    //
+    // This line used to end "with 0 installed every call still walks all N
+    // slots", which is how the O(n) scan was found: it made the benchmark
+    // state the thing that was wrong with it.  That is no longer true — the
+    // scan is gone — so the sentence goes with it, because a stale
+    // explanation next to a live number is worse than no explanation.
+    let installed = crate::scfilter::active_count();
+    serial_println!(
+        "[bench]   syscall_dispatch breakdown: scfilter has {} filter(s) installed of {} \
+         slots — measured path: {}",
+        installed,
+        crate::scfilter::MAX_FILTERS,
+        if installed == 0 { "lock-free fast path (1 atomic load)" } else { "locked O(1) hash lookup" },
+    );
+
+    // ---- Coherence gate --------------------------------------------------
+    //
+    // The stage sum above is only usable if the parts were measured under the
+    // same conditions as the whole.  Under TCG they need not be: the VFS
+    // breakdown once printed a part *larger* than its whole, and two
+    // byte-identical benchmarks in one boot disagreed 1.67x.  So re-measure the
+    // whole at the end of the block and report the drift; and flag it when the
+    // parts do not fit inside the whole, because "unexplained" computed with
+    // `saturating_sub` renders that case as a comfortable 0.
+    let total_again = run("sd_dispatch_again", 2000, || {
+        core::hint::black_box(crate::syscall::dispatch::dispatch(SYS_TASK_ID, &args));
+    });
+    let (lo, hi) = if total <= total_again.min_ns {
+        (total, total_again.min_ns)
+    } else {
+        (total_again.min_ns, total)
+    };
+    let drift_pct = if lo == 0 { 0 } else { (hi.saturating_sub(lo)).saturating_mul(100) / lo };
+    const DRIFT_LIMIT_PCT: u64 = 25;
+    serial_println!(
+        "[bench]   syscall_dispatch breakdown: drift check — dispatch twice: {}ns then {}ns ({}%)",
+        total, total_again.min_ns, drift_pct
+    );
+    if drift_pct > DRIFT_LIMIT_PCT {
+        serial_println!(
+            "[bench]   WARNING: syscall_dispatch breakdown is NOT internally coherent \
+             ({}% drift > {}% limit) — the stage split above is measurement drift and \
+             must not be used to attribute cost",
+            drift_pct, DRIFT_LIMIT_PCT
+        );
+    }
+    if accounted > total {
+        serial_println!(
+            "[bench]   WARNING: syscall_dispatch stages sum to {}ns but the whole measured \
+             {}ns — the parts do not fit in the whole, so the split is noise, not attribution",
+            accounted, total
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

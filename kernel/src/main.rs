@@ -4969,6 +4969,16 @@ extern "C" fn kernel_main() -> ! {
     scfilter::init();
     scfilter::self_test();
 
+    // Now that filtering is live, re-check that dispatch still reaches its
+    // handlers.  The syscall dispatch self-test ran ~4200 lines above this
+    // point, with the filter subsystem off — a configuration the system never
+    // actually runs in — so it cannot see a dispatch↔filter interaction bug.
+    // One shipped this way: a stale `scfilter::MAX_SYSCALL_NR` denied every
+    // syscall in 1000..1100 to every process from this line onward.
+    if let Err(e) = syscall::dispatch::verify_dispatch_under_filtering() {
+        panic!("Syscall dispatch broken under live filtering: {e:?}");
+    }
+
     // Step 22e⅞++++q: Self-test runner infrastructure test.
     // Verifies the centralized test runner can enumerate suites.
     selftest::self_test();
@@ -5479,6 +5489,22 @@ extern "C" fn kernel_main() -> ! {
     // That is the exact failure mode this check exists to prevent, so it must
     // sit inside the window the boot test observes.
     lockdep::verify_class_index("populated");
+
+    // The syscall filter's pid index, same reasoning one subsystem over — but
+    // note honestly what this call does and does not prove.  By BOOT_OK the
+    // filter table is normally *empty*, so the lookup paths are barely
+    // exercised here; the real index test is inside `scfilter::self_test`,
+    // which verifies with filters installed and with two pids deliberately
+    // forced into the same hash bucket.
+    //
+    // What this placement does prove is that the self-tests drained what they
+    // installed: `ACTIVE_FILTERS` must agree with a linear count of active
+    // slots.  If a test leaked a filter, that counter stays non-zero and every
+    // syscall for the rest of the boot takes a table lock it does not need —
+    // precisely the failure the namespace self-tests had, where a leaked
+    // `NS_FEATURES_ACTIVE` silently cost every VFS operation three spinlocks
+    // for the whole run and went unnoticed until a benchmark contradicted it.
+    scfilter::verify_index("boot");
 
     // Boot success marker — the boot test script greps for this.
     // Printed synchronously so it appears within seconds of power-on,

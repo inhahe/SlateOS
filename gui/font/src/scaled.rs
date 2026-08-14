@@ -25,6 +25,7 @@
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use crate::FontMetrics;
@@ -76,7 +77,11 @@ pub struct Glyph {
 
 /// A face pinned to a pixel size, caching the glyphs it has drawn.
 pub struct ScaledFont {
-    face: Face,
+    /// Shared because a UI wants the same face at several sizes at once — a
+    /// label, a title, a tooltip — and a `Face` owns the whole font file.
+    /// Holding it by value meant a megabyte of `Vec<u8>` per size, and
+    /// re-parsing the tables each time to get it.
+    face: Arc<Face>,
     px_per_em: f32,
     scale: f32,
     metrics: FontMetrics,
@@ -112,6 +117,21 @@ impl ScaledFont {
     /// [`ScaledFontError::InvalidSize`] if `px_per_em` is not finite and
     /// positive.
     pub fn new(face: Face, px_per_em: f32) -> Result<Self, ScaledFontError> {
+        Self::shared(Arc::new(face), px_per_em)
+    }
+
+    /// Pin an already-parsed, shared `face` to `px_per_em` pixels per em.
+    ///
+    /// This is the constructor a font cache wants: parsing a face is the
+    /// expensive part and its result is immutable, so several sizes of the same
+    /// family should share one. Only the rasterized glyphs differ per size, and
+    /// those are this type's own.
+    ///
+    /// # Errors
+    ///
+    /// [`ScaledFontError::InvalidSize`] if `px_per_em` is not finite and
+    /// positive.
+    pub fn shared(face: Arc<Face>, px_per_em: f32) -> Result<Self, ScaledFontError> {
         if !px_per_em.is_finite() || px_per_em <= 0.0 {
             return Err(ScaledFontError::InvalidSize);
         }
@@ -125,6 +145,12 @@ impl ScaledFont {
             cache: BTreeMap::new(),
             order: Vec::new(),
         })
+    }
+
+    /// The face these glyphs come from, for sharing with another size.
+    #[must_use]
+    pub fn shared_face(&self) -> Arc<Face> {
+        Arc::clone(&self.face)
     }
 
     /// Read a font file and pin it to a size in one step.

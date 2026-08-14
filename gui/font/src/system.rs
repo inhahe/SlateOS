@@ -13,6 +13,11 @@
 //! hand-drawn faces and used the worse one. [`SystemFont`] is the single type
 //! those callers hold, so the choice of backend is made once, at load time.
 //!
+//! [`FontCache`] is where that choice is actually made for a UI: it serves the
+//! built-in face until someone hands it a real one with
+//! [`FontCache::set_face`], which is what lets text appear during early boot
+//! and improve later, without the drawing code knowing that happened.
+//!
 //! # Coordinates
 //!
 //! Pixels, y down, and `y` in [`SystemFont::draw_text`] is the **baseline** —
@@ -22,10 +27,12 @@
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use crate::raster::GlyphMask;
 use crate::scaled::{ScaledFont, ScaledFontError, Target, blit_mask, pixel_coord};
+use crate::sfnt::{Face, SfntError};
 use crate::{FONT_HEIGHT, Font, FontMetrics, GlyphBitmap};
 
 /// A font that can draw text, backed by either an outline face or the
@@ -98,14 +105,30 @@ impl SystemFont {
 
     /// Loads an outline face, falling back to the built-in bitmap face.
     ///
-    /// The fallback is silent by design: a font file that turns out to be CFF,
-    /// truncated, or simply not a font is a *configuration* problem, and the
-    /// user is better served by ugly text than by a blank screen. Callers that
-    /// want to report the failure should use [`SystemFont::from_bytes`] and
-    /// decide for themselves.
+    /// The fallback is silent by design: a font file that is truncated, is a
+    /// format this crate does not read, or is simply not a font is a
+    /// *configuration* problem, and the user is better served by ugly text than
+    /// by a blank screen. Callers that want to report the failure should use
+    /// [`SystemFont::from_bytes`] and decide for themselves.
     #[must_use]
     pub fn or_builtin(data: Vec<u8>, px_per_em: f32) -> Self {
         Self::from_bytes(data, px_per_em).unwrap_or_else(|_| Self::builtin(px_per_em))
+    }
+
+    /// Pins an already-parsed, shared face to a size.
+    ///
+    /// Parsing a font file is the expensive part and its result is immutable,
+    /// so a UI drawing one family at four sizes should parse once. Only the
+    /// rasterized glyphs are per-size, and those belong to the returned font.
+    ///
+    /// # Errors
+    ///
+    /// [`ScaledFontError::InvalidSize`] if `px_per_em` is not finite and
+    /// positive.
+    pub fn from_shared(face: Arc<Face>, px_per_em: f32) -> Result<Self, ScaledFontError> {
+        Ok(Self {
+            backend: Backend::Outline(ScaledFont::shared(face, px_per_em)?),
+        })
     }
 
     /// Whether this font came from a real font file.
@@ -256,26 +279,75 @@ pub enum Weight {
 /// one per label would re-rasterize the alphabet on every frame. The map stays
 /// small on its own, being keyed by the sizes a UI actually asks for, and a UI
 /// has a handful of text sizes rather than a continuum of them.
+/// A cache with no faces installed serves the built-in bitmap font, which is
+/// why this is useful before there is a filesystem to load a real one from —
+/// and why a UI that never calls [`FontCache::set_face`] still draws.
 #[derive(Debug, Default)]
 pub struct FontCache {
     fonts: BTreeMap<(u32, Weight), SystemFont>,
+    /// The installed face per weight, if any. Shared rather than owned per
+    /// size: a UI asks for the same family at a handful of sizes, and a face
+    /// is the whole font file.
+    faces: BTreeMap<Weight, Arc<Face>>,
 }
 
 impl FontCache {
-    /// An empty cache.
+    /// An empty cache, serving the built-in bitmap face.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Draw `weight` with `face` from now on.
+    ///
+    /// Every font already built at this weight is dropped, because a cached
+    /// `SystemFont` holds glyphs rasterized from the *previous* face: keeping
+    /// them would make the size a UI happened to ask for first decide which
+    /// face it gets. The glyphs are rebuilt lazily on the next `get`.
+    ///
+    /// Installing only a regular face is normal and supported — bold text then
+    /// falls back to the built-in bold bitmap face rather than to a synthesised
+    /// emboldening of the real one, which is the honest answer until there is a
+    /// bold face to use.
+    pub fn set_face(&mut self, weight: Weight, face: Arc<Face>) {
+        self.faces.insert(weight, face);
+        self.fonts.retain(|(_, w), _| *w != weight);
+    }
+
+    /// Parse `data` and install it for `weight`.
+    ///
+    /// The convenience form of [`FontCache::set_face`] for a caller that has
+    /// just read a file and has no other use for the parsed face.
+    ///
+    /// # Errors
+    ///
+    /// Whatever [`Face::parse`] rejects the file with. The cache is left
+    /// untouched on failure, so a bad file downgrades to the built-in face
+    /// rather than leaving the UI without one.
+    pub fn install_face(&mut self, weight: Weight, data: Vec<u8>) -> Result<(), SfntError> {
+        self.set_face(weight, Arc::new(Face::parse(data)?));
+        Ok(())
+    }
+
+    /// Whether a real face is installed for `weight`.
+    #[must_use]
+    pub fn has_face(&self, weight: Weight) -> bool {
+        self.faces.contains_key(&weight)
+    }
+
     /// The font for `px` and `weight`, building it on first use.
     pub fn get(&mut self, px: f32, weight: Weight) -> &mut SystemFont {
-        self.fonts
-            .entry((round_px(px), weight))
-            .or_insert_with(|| match weight {
-                Weight::Regular => SystemFont::builtin(px),
-                Weight::Bold => SystemFont::builtin_bold(px),
-            })
+        let face = self.faces.get(&weight).map(Arc::clone);
+        self.fonts.entry((round_px(px), weight)).or_insert_with(|| {
+            // An installed face that will not scale to this size is a
+            // per-size failure, not a reason to stop using the face: fall
+            // back for this entry and leave the face installed.
+            face.and_then(|f| SystemFont::from_shared(f, px).ok())
+                .unwrap_or_else(|| match weight {
+                    Weight::Regular => SystemFont::builtin(px),
+                    Weight::Bold => SystemFont::builtin_bold(px),
+                })
+        })
     }
 
     /// How many distinct fonts have been built.
@@ -478,6 +550,70 @@ mod tests {
         cache.get(16.0, Weight::Bold);
         cache.get(32.0, Weight::Regular);
         assert_eq!(cache.len(), 3, "size and weight each key the cache");
+    }
+
+    #[test]
+    fn an_installed_face_is_what_the_cache_serves() {
+        // The gap this closes: before `set_face` existed, `get` could only ever
+        // build the built-in bitmap font, so the entire outline pipeline was
+        // unreachable from the compositor and the toolkit — the two callers
+        // that hold a `FontCache`.
+        let mut cache = FontCache::new();
+        assert!(!cache.has_face(Weight::Regular));
+        assert!(
+            !cache.get(16.0, Weight::Regular).is_scalable(),
+            "an empty cache must serve the built-in face"
+        );
+
+        cache.install_face(Weight::Regular, build_test_font()).unwrap();
+        assert!(cache.has_face(Weight::Regular));
+        assert!(
+            cache.get(16.0, Weight::Regular).is_scalable(),
+            "installing a face must replace the font already built at that size"
+        );
+        assert!(
+            !cache.get(16.0, Weight::Bold).is_scalable(),
+            "a weight with no face installed must still fall back"
+        );
+    }
+
+    #[test]
+    fn every_size_of_one_family_shares_a_single_parsed_face() {
+        // A `Face` owns the whole font file. Parsing one per size would hold a
+        // copy of a megabyte-scale file per size and re-parse the tables to get
+        // it, which is what `Arc` in the cache is for.
+        let mut cache = FontCache::new();
+        cache.install_face(Weight::Regular, build_test_font()).unwrap();
+        let mut faces = Vec::new();
+        for px in [11.0, 16.0, 24.0, 48.0] {
+            let scaled = cache
+                .get(px, Weight::Regular)
+                .as_scaled()
+                .expect("installed face must scale")
+                .shared_face();
+            faces.push(scaled);
+        }
+        assert_eq!(cache.len(), 4, "four sizes, four fonts");
+        for f in &faces[1..] {
+            assert!(
+                Arc::ptr_eq(&faces[0], f),
+                "each size parsed its own copy of the face"
+            );
+        }
+    }
+
+    #[test]
+    fn a_face_the_cache_cannot_parse_leaves_it_usable() {
+        // A font path is configuration, and configuration is wrong sometimes.
+        // The failure must not cost the UI its text.
+        let mut cache = FontCache::new();
+        assert!(
+            cache
+                .install_face(Weight::Regular, alloc::vec![0u8; 32])
+                .is_err()
+        );
+        assert!(!cache.has_face(Weight::Regular));
+        assert!(cache.get(16.0, Weight::Regular).measure("x") > 0.0);
     }
 
     #[test]

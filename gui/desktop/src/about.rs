@@ -13,6 +13,7 @@
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand};
 use guitk::style::CornerRadii;
+use guitk::text;
 
 // ============================================================================
 // Catppuccin Mocha theme constants
@@ -29,6 +30,20 @@ const COL_OVERLAY0: Color = Color::from_hex(0x6C7086);
 const COL_MANTLE: Color = Color::from_hex(0x181825);
 const COL_GREEN: Color = Color::from_hex(0xA6E3A1);
 const COL_PEACH: Color = Color::from_hex(0xFAB387);
+
+// ============================================================================
+// License list metrics
+// ============================================================================
+
+/// Font size of a licence's body text.
+const LICENSE_FONT_SIZE: f32 = 11.0;
+
+/// Baseline-to-baseline spacing of the licence body, in pixels.
+///
+/// Named because the wrapper, the per-line draw and the reserved item height
+/// all have to agree on it; when they were three separate literals the list
+/// could reserve a different amount of room than it drew into.
+const LICENSE_LINE_HEIGHT: f32 = 16.0;
 
 // ============================================================================
 // System information
@@ -589,9 +604,26 @@ impl AboutDialog {
         let visible_bottom = y + height;
 
         for license in &self.licenses {
-            // Estimate height: name row + text lines (rough: 16px per 80-char line).
-            let text_lines = (license.text.len() as f32 / 80.0).ceil().max(1.0) as u32;
-            let item_h = 28.0 + text_lines as f32 * 16.0 + 16.0;
+            // `RenderCommand::Text` does not wrap — the compositor truncates at
+            // `max_width` — so the body is broken into lines here and drawn one
+            // command per line. Previously the whole licence went out as a
+            // single command, which meant only its first line's worth of
+            // characters was ever visible, while the height below reserved room
+            // for all of them.
+            //
+            // The height comes from that same list of lines, so the box an item
+            // gets is the size of what was drawn into it. Reserving it from a
+            // byte count over a guessed 80 characters per line was wrong twice:
+            // it counted a non-ASCII licence as two to three times longer than
+            // it is, and it ignored how wide the glyphs actually are, so items
+            // overlapped each other or left gaps.
+            let body_lines = text::wrap(
+                &license.text,
+                width - 16.0,
+                LICENSE_FONT_SIZE,
+                FontWeightHint::Regular,
+            );
+            let item_h = 28.0 + body_lines.len() as f32 * LICENSE_LINE_HEIGHT + 16.0;
 
             // Only render if overlapping the visible area.
             if item_y + item_h >= visible_top && item_y <= visible_bottom {
@@ -615,16 +647,18 @@ impl AboutDialog {
                     max_width: Some(width - 16.0),
                 });
 
-                // License body text.
-                cmds.push(RenderCommand::Text {
-                    x: x + 8.0,
-                    y: item_y + 28.0,
-                    text: license.text.clone(),
-                    font_size: 11.0,
-                    color: COL_SUBTEXT0,
-                    font_weight: FontWeightHint::Regular,
-                    max_width: Some(width - 16.0),
-                });
+                // License body text, one command per wrapped line.
+                for (n, line) in body_lines.iter().enumerate() {
+                    cmds.push(RenderCommand::Text {
+                        x: x + 8.0,
+                        y: item_y + 28.0 + n as f32 * LICENSE_LINE_HEIGHT,
+                        text: line.clone(),
+                        font_size: LICENSE_FONT_SIZE,
+                        color: COL_SUBTEXT0,
+                        font_weight: FontWeightHint::Regular,
+                        max_width: Some(width - 16.0),
+                    });
+                }
             }
 
             item_y += item_h;
@@ -1069,6 +1103,121 @@ mod tests {
         assert!(!cmds.is_empty());
         // Should include clip, license headers, license text, and pop clip.
         assert!(cmds.len() >= 12);
+    }
+
+    /// The y of every licence-header bar, in draw order.
+    fn header_ys(cmds: &[RenderCommand]) -> Vec<f32> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::FillRect { y, height, .. } if (*height - 24.0).abs() < 0.01 => {
+                    Some(*y)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Every licence-body line, as (y, text), in draw order.
+    fn body_lines(cmds: &[RenderCommand]) -> Vec<(f32, String)> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text {
+                    y,
+                    text,
+                    font_size,
+                    ..
+                } if (*font_size - LICENSE_FONT_SIZE).abs() < 0.01 => Some((*y, text.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_long_licence_is_drawn_in_full_not_truncated_to_one_line() {
+        // The compositor truncates at `max_width` rather than wrapping, so a
+        // body sent as a single command lost everything past its first line.
+        let text = "Permission is hereby granted, free of charge, to any person \
+                    obtaining a copy of this software and associated documentation \
+                    files, to deal in the Software without restriction.";
+        let mut dlg = AboutDialog {
+            licenses: vec![LicenseInfo::new("MIT", text)],
+            ..AboutDialog::default()
+        };
+        dlg.show();
+        dlg.set_tab(AboutTab::Licenses);
+        let lines = body_lines(&dlg.render(0.0, 0.0, 500.0, 400.0));
+
+        assert!(
+            lines.len() > 1,
+            "a {} character licence was drawn as {} line(s)",
+            text.len(),
+            lines.len()
+        );
+        let drawn: Vec<&str> = lines
+            .iter()
+            .flat_map(|(_, l)| l.split_whitespace())
+            .collect();
+        assert_eq!(
+            drawn,
+            text.split_whitespace().collect::<Vec<_>>(),
+            "the drawn lines are not the licence text"
+        );
+    }
+
+    #[test]
+    fn a_licence_item_is_as_tall_as_the_text_it_drew() {
+        // The reserved height and the drawn lines have to come from the same
+        // wrap, or the next licence's header lands on top of this one's body.
+        let long = "Redistribution and use in source and binary forms, with or \
+                    without modification, are permitted provided that the following \
+                    conditions are met and the notice is retained.";
+        let mut dlg = AboutDialog {
+            licenses: vec![
+                LicenseInfo::new("BSD", long),
+                LicenseInfo::new("MIT", "Short."),
+            ],
+            ..AboutDialog::default()
+        };
+        dlg.show();
+        dlg.set_tab(AboutTab::Licenses);
+        let cmds = dlg.render(0.0, 0.0, 500.0, 400.0);
+
+        let headers = header_ys(&cmds);
+        assert_eq!(headers.len(), 2, "both licences should be on screen");
+        let last_body_bottom = body_lines(&cmds)
+            .iter()
+            .map(|&(y, _)| y)
+            .filter(|&y| y < headers[1])
+            .fold(f32::MIN, f32::max)
+            + LICENSE_LINE_HEIGHT;
+        assert!(
+            last_body_bottom <= headers[1],
+            "the second header at {} overlaps the first licence's body, \
+             which ends at {last_body_bottom}",
+            headers[1]
+        );
+    }
+
+    #[test]
+    fn licence_height_is_not_reserved_from_byte_length() {
+        // The old estimate was one line per 80 *bytes*, so an accented licence
+        // reserved two to three times the room it needed and left a gap.
+        let layout = |body: &str| {
+            let mut dlg = AboutDialog {
+                licenses: vec![LicenseInfo::new("A", body), LicenseInfo::new("B", "x")],
+                ..AboutDialog::default()
+            };
+            dlg.show();
+            dlg.set_tab(AboutTab::Licenses);
+            header_ys(&dlg.render(0.0, 0.0, 500.0, 400.0))
+        };
+        let ascii = layout("aaaa aaaa aaaa aaaa aaaa aaaa aaaa aaaa");
+        let accented = layout("éééé éééé éééé éééé éééé éééé éééé éééé");
+        assert_eq!(ascii.len(), 2);
+        assert_eq!(
+            ascii, accented,
+            "same glyph count, twice the bytes, different layout"
+        );
     }
 
     #[test]

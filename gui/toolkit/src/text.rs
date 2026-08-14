@@ -256,6 +256,31 @@ pub fn elide_start(
     out
 }
 
+/// `text` broken into lines no wider than `max_width`, breaking at spaces.
+///
+/// Callers need this because [`RenderCommand::Text`] does **not** wrap: the
+/// compositor truncates at `max_width`, dropping whole glyphs off the end of
+/// the one line it draws. So a caller with a paragraph to show has to wrap it
+/// itself and emit one command per line — and, crucially, has to reserve height
+/// for the same lines it emits. Deriving the height from anything else (a byte
+/// count over a guessed characters-per-line, say) is how a list of paragraphs
+/// ends up with items overlapping each other.
+///
+/// A word longer than `max_width` gets its own over-long line rather than being
+/// cut mid-word; breaking inside a word is a per-script decision that belongs to
+/// a real line breaker. Existing newlines always break.
+///
+/// [`RenderCommand::Text`]: crate::render::RenderCommand::Text
+pub fn wrap(text: &str, max_width: f32, size: f32, weight: FontWeightHint) -> Vec<String> {
+    if max_width <= 0.0 {
+        // Nothing fits, and the greedy rule below would answer that with one
+        // word per line — an unbounded list for a box that cannot show it.
+        // Reporting the paragraphs unwrapped keeps the line count meaningful.
+        return text.split('\n').map(str::to_string).collect();
+    }
+    with_font(size, weight, |font| font.wrap(text, max_width))
+}
+
 /// The character index in `text` nearest to `offset` pixels from its start.
 ///
 /// This is what a click on a line of text means: the caret goes to the closest
@@ -507,6 +532,75 @@ mod tests {
         assert_eq!(a, b);
         assert!(a >= padded_width("Audio", 9.0, 12.0, FontWeightHint::Bold) - 0.01);
         assert!(a >= padded_width("Audio", 9.0, 12.0, FontWeightHint::Regular) - 0.01);
+    }
+
+    #[test]
+    fn wrapped_lines_fit_the_width_they_were_given() {
+        let text = "the quick brown fox jumps over the lazy dog and keeps on running";
+        for max in [60.0, 120.0, 240.0] {
+            for line in wrap(text, max, 11.0, FontWeightHint::Regular) {
+                // A lone over-long word is allowed past the limit — it is not
+                // broken mid-word — but a line that combined words is not.
+                if line.split_whitespace().count() < 2 {
+                    continue;
+                }
+                assert!(
+                    measure(&line, 11.0, FontWeightHint::Regular) <= max,
+                    "{line:?} is wider than the {max}px box it was wrapped into"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn wrapping_never_loses_a_word() {
+        let text = "Permission is hereby granted, free of charge, to any person";
+        let lines = wrap(text, 90.0, 11.0, FontWeightHint::Regular);
+        assert_eq!(
+            lines.join(" ").split_whitespace().collect::<Vec<_>>(),
+            text.split_whitespace().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn wrapping_honours_existing_newlines() {
+        // A blank line between paragraphs has to survive, or a licence's
+        // structure collapses into one run-on block.
+        let lines = wrap("first\n\nsecond", 1000.0, 11.0, FontWeightHint::Regular);
+        assert_eq!(lines, vec!["first", "", "second"]);
+    }
+
+    #[test]
+    fn wrapping_is_not_decided_by_byte_length() {
+        // Same glyph count, twice the bytes. Wrapped on a byte count the
+        // accented text would break into twice as many lines.
+        let ascii = wrap("aaa aaa aaa aaa aaa aaa", 80.0, 11.0, FontWeightHint::Regular);
+        let accented = wrap("ééé ééé ééé ééé ééé ééé", 80.0, 11.0, FontWeightHint::Regular);
+        assert_eq!(ascii.len(), accented.len());
+    }
+
+    #[test]
+    fn wrapping_into_no_width_does_not_explode() {
+        // The degenerate case: a greedy wrap would answer with one word per
+        // line, so a paragraph in a zero-width box would report a line count
+        // proportional to its word count.
+        let lines = wrap("a b c d e f g", 0.0, 11.0, FontWeightHint::Regular);
+        assert_eq!(lines, vec!["a b c d e f g"]);
+    }
+
+    #[test]
+    fn a_narrower_box_never_needs_fewer_lines() {
+        let text = "the quick brown fox jumps over the lazy dog";
+        let mut previous = usize::MAX;
+        for max in [400.0, 200.0, 100.0, 50.0] {
+            let n = wrap(text, max, 11.0, FontWeightHint::Regular).len();
+            assert!(n >= 1);
+            assert!(
+                n >= previous || previous == usize::MAX,
+                "{max}px needed {n} lines, but a wider box needed {previous}"
+            );
+            previous = n;
+        }
     }
 
     #[test]

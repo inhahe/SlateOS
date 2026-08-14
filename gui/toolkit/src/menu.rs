@@ -799,53 +799,17 @@ impl Tooltip {
 
     /// Word-wrap at `max_width` pixels.
     ///
-    /// Wrapping is decided by measuring the candidate line, not by counting its
-    /// characters against an estimated cell width. The two are not the same
-    /// thing in a proportional face — a line of `W`s is far wider than a line
-    /// of `i`s — and since `compute_width` measures the lines this produces,
-    /// wrapping on a different rule than the box is sized on is exactly how a
-    /// tooltip ends up with text hanging past its own background.
+    /// Deferred to [`crate::text::wrap`] so that the rule deciding where lines
+    /// break is the same one `compute_width` sizes the box with. Wrapping on a
+    /// different rule than the box is sized on is exactly how a tooltip ends up
+    /// with text hanging past its own background.
     fn wrap_text(&self) -> Vec<String> {
-        if self.max_width <= 0.0 {
-            return vec![self.text.clone()];
-        }
-
-        let mut lines = Vec::new();
-        for paragraph in self.text.split('\n') {
-            let words: Vec<&str> = paragraph.split_whitespace().collect();
-            if words.is_empty() {
-                lines.push(String::new());
-                continue;
-            }
-
-            let mut current_line = String::new();
-            for word in words {
-                if current_line.is_empty() {
-                    // A word wider than the whole tooltip still gets its own
-                    // line: breaking mid-word would be worse than overflowing,
-                    // and `compute_width` clamps the box either way.
-                    current_line = word.to_string();
-                    continue;
-                }
-                let candidate_width =
-                    crate::text::width(&format!("{current_line} {word}"), TOOLTIP_FONT_SIZE);
-                if candidate_width <= self.max_width {
-                    current_line.push(' ');
-                    current_line.push_str(word);
-                } else {
-                    lines.push(current_line);
-                    current_line = word.to_string();
-                }
-            }
-            if !current_line.is_empty() {
-                lines.push(current_line);
-            }
-        }
-
-        if lines.is_empty() {
-            lines.push(String::new());
-        }
-        lines
+        crate::text::wrap(
+            &self.text,
+            self.max_width,
+            TOOLTIP_FONT_SIZE,
+            FontWeightHint::Regular,
+        )
     }
 }
 

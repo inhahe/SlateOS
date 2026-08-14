@@ -896,16 +896,73 @@ pub struct Iovec {
     pub iov_len: SizeT,
 }
 
+/// Outcome of the argument checks `import_iovec` performs on `(iov, iovcnt)`.
+enum IovecCheck {
+    /// `nr_segs == 0`.  Upstream returns an empty iterator, so the call
+    /// succeeds transferring 0 bytes *without ever reading `iov`* — a NULL
+    /// vector at count 0 is therefore not an error.
+    Empty,
+    /// The vector is usable.
+    Usable,
+    /// `errno` has been set; the caller must fail.
+    Bad,
+}
+
+/// The `(iov, iovcnt)` checks from `iovec_from_user` (lib/iov_iter.c), in
+/// upstream's order and with upstream's constants.
+///
+/// ```text
+///   nr_segs == 0          -> empty iterator, success with 0 bytes
+///   nr_segs > UIO_MAXIOV  -> EINVAL
+///   copy_iovec_from_user  -> EFAULT
+/// ```
+///
+/// The zero case is deliberate upstream, not an accident — the comment there
+/// reads "SuS says the readv() function *may* fail if the iovcnt argument was
+/// less than or equal to 0 … Linux has traditionally returned zero for zero
+/// segments".
+///
+/// Our callers take `iovcnt` as `i32` where the syscall takes an
+/// `unsigned long`, so a negative count arrives upstream as a huge value and
+/// trips the `UIO_MAXIOV` test; that is why a negative count is `EINVAL` here
+/// rather than anything else.
+///
+/// The three verdicts used to be folded into a single `EINVAL`, which told a
+/// caller passing a valid count and a bad pointer that its *count* was wrong,
+/// and rejected the traditional zero-segment call outright.
+fn check_iovec(iov: *const Iovec, iovcnt: i32) -> IovecCheck {
+    if iovcnt == 0 {
+        return IovecCheck::Empty;
+    }
+    if iovcnt < 0 || iovcnt > crate::limits::IOV_MAX {
+        errno::set_errno(errno::EINVAL);
+        return IovecCheck::Bad;
+    }
+    if iov.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return IovecCheck::Bad;
+    }
+    IovecCheck::Usable
+}
+
 /// Read data into multiple buffers (scatter read).
 ///
 /// Reads sequentially into each iovec buffer.  Returns the total
 /// number of bytes read, or -1 on error.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn readv(fd: Fd, iov: *const Iovec, iovcnt: i32) -> SsizeT {
-    if iov.is_null() || iovcnt <= 0 || iovcnt > 1024 {
-        // POSIX: EINVAL if iovcnt ≤ 0 or > IOV_MAX (1024).
-        errno::set_errno(errno::EINVAL);
+    // `do_readv` (fs/read_write.c) is `fdget_pos` first and only then
+    // `vfs_readv` → `import_iovec`, so the descriptor outranks both the count
+    // and the pointer.  The per-segment `read` below repeats this lookup, but
+    // it would never run for a zero-segment call — which is exactly the case
+    // that must still report EBADF.
+    if lookup_fd(fd).is_none() {
         return -1;
+    }
+    match check_iovec(iov, iovcnt) {
+        IovecCheck::Empty => return 0,
+        IovecCheck::Bad => return -1,
+        IovecCheck::Usable => {}
     }
 
     let mut total: SsizeT = 0;
@@ -940,10 +997,14 @@ pub extern "C" fn readv(fd: Fd, iov: *const Iovec, iovcnt: i32) -> SsizeT {
 /// number of bytes written, or -1 on error.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn writev(fd: Fd, iov: *const Iovec, iovcnt: i32) -> SsizeT {
-    if iov.is_null() || iovcnt <= 0 || iovcnt > 1024 {
-        // POSIX: EINVAL if iovcnt ≤ 0 or > IOV_MAX (1024).
-        errno::set_errno(errno::EINVAL);
+    // `do_writev` mirrors `do_readv`: `fdget_pos` before `import_iovec`.
+    if lookup_fd(fd).is_none() {
         return -1;
+    }
+    match check_iovec(iov, iovcnt) {
+        IovecCheck::Empty => return 0,
+        IovecCheck::Bad => return -1,
+        IovecCheck::Usable => {}
     }
 
     let mut total: SsizeT = 0;
@@ -982,10 +1043,9 @@ pub extern "C" fn writev(fd: Fd, iov: *const Iovec, iovcnt: i32) -> SsizeT {
 /// Returns the total number of bytes read, or -1 on error.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn preadv(fd: Fd, iov: *const Iovec, iovcnt: i32, offset: OffT) -> SsizeT {
-    if iov.is_null() || iovcnt <= 0 || iovcnt > 1024 {
-        errno::set_errno(errno::EINVAL);
-        return -1;
-    }
+    // `do_preadv` (fs/read_write.c) fixes the order: `pos < 0` → EINVAL,
+    // `fdget` → EBADF, `!FMODE_PREAD` → ESPIPE, and only then `vfs_readv` →
+    // `import_iovec` for the count and the pointer.
     if offset < 0 {
         errno::set_errno(errno::EINVAL);
         return -1;
@@ -998,6 +1058,12 @@ pub extern "C" fn preadv(fd: Fd, iov: *const Iovec, iovcnt: i32, offset: OffT) -
     if entry.kind != HandleKind::File {
         errno::set_errno(errno::ESPIPE);
         return -1;
+    }
+
+    match check_iovec(iov, iovcnt) {
+        IovecCheck::Empty => return 0,
+        IovecCheck::Bad => return -1,
+        IovecCheck::Usable => {}
     }
 
     // Save current position.
@@ -1065,10 +1131,7 @@ pub extern "C" fn preadv(fd: Fd, iov: *const Iovec, iovcnt: i32, offset: OffT) -
 /// Returns the total number of bytes written, or -1 on error.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pwritev(fd: Fd, iov: *const Iovec, iovcnt: i32, offset: OffT) -> SsizeT {
-    if iov.is_null() || iovcnt <= 0 || iovcnt > 1024 {
-        errno::set_errno(errno::EINVAL);
-        return -1;
-    }
+    // Same order as `preadv`, from `do_pwritev` (fs/read_write.c).
     if offset < 0 {
         errno::set_errno(errno::EINVAL);
         return -1;
@@ -1081,6 +1144,12 @@ pub extern "C" fn pwritev(fd: Fd, iov: *const Iovec, iovcnt: i32, offset: OffT) 
     if entry.kind != HandleKind::File {
         errno::set_errno(errno::ESPIPE);
         return -1;
+    }
+
+    match check_iovec(iov, iovcnt) {
+        IovecCheck::Empty => return 0,
+        IovecCheck::Bad => return -1,
+        IovecCheck::Usable => {}
     }
 
     // Save current position.
@@ -6873,12 +6942,17 @@ mod tests {
     // -- readv / writev validation --
 
     #[test]
+    /// A NULL vector at a valid count faults in `copy_iovec_from_user`; it is
+    /// not the `UIO_MAXIOV` EINVAL.  The two used to be folded together.
     fn test_readv_null_iov() {
         let result = readv(0, core::ptr::null(), 1);
         assert_eq!(result, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
     }
 
+    /// "Linux has traditionally returned zero for zero segments"
+    /// (`iovec_from_user`, lib/iov_iter.c): `nr_segs == 0` returns the empty
+    /// iterator before any other check, so this succeeds.
     #[test]
     fn test_readv_zero_iovcnt() {
         let iov = Iovec {
@@ -6886,8 +6960,26 @@ mod tests {
             iov_len: 0,
         };
         let result = readv(0, &raw const iov, 0);
-        assert_eq!(result, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        assert_eq!(result, 0);
+    }
+
+    /// `do_readv` is `fdget_pos` before `vfs_readv`, so the descriptor
+    /// outranks both the count and the pointer — including for the
+    /// zero-segment call, which otherwise returns success.
+    #[test]
+    fn test_readv_bad_fd_outranks_the_iovec_checks() {
+        assert_eq!(readv(-1, core::ptr::null(), 1), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_readv_zero_iovcnt_on_a_closed_fd_is_ebadf() {
+        let iov = Iovec {
+            iov_base: core::ptr::null_mut(),
+            iov_len: 0,
+        };
+        assert_eq!(readv(-1, &raw const iov, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
     }
 
     #[test]
@@ -6916,7 +7008,7 @@ mod tests {
     fn test_writev_null_iov() {
         let result = writev(0, core::ptr::null(), 1);
         assert_eq!(result, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
     }
 
     #[test]
@@ -6926,8 +7018,13 @@ mod tests {
             iov_len: 0,
         };
         let result = writev(0, &raw const iov, 0);
-        assert_eq!(result, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        assert_eq!(result, 0);
+    }
+
+    #[test]
+    fn test_writev_bad_fd_outranks_the_iovec_checks() {
+        assert_eq!(writev(-1, core::ptr::null(), 1), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
     }
 
     // -- read / write zero-length --
@@ -7965,31 +8062,37 @@ mod tests {
 
     #[test]
     fn test_preadv2_null_iov() {
+        let fd = fdtable::alloc_fd(HandleKind::File, 0).expect("alloc_fd File failed");
         crate::errno::set_errno(0);
-        assert_eq!(preadv2(0, core::ptr::null(), 1, 0, 0), -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        assert_eq!(preadv2(fd, core::ptr::null(), 1, 0, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+        let _ = close(fd);
     }
 
     #[test]
     fn test_preadv2_zero_iovcnt() {
+        let fd = fdtable::alloc_fd(HandleKind::File, 0).expect("alloc_fd File failed");
         crate::errno::set_errno(0);
-        assert_eq!(preadv2(0, core::ptr::null(), 0, 0, 0), -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        assert_eq!(preadv2(fd, core::ptr::null(), 0, 0, 0), 0);
+        let _ = close(fd);
     }
 
     #[test]
     fn test_preadv2_negative_offset_delegates_to_readv() {
         // offset == -1 should use readv behavior (current file position).
-        // With null iov and iovcnt == 1, readv returns EINVAL.
+        // With null iov and iovcnt == 1, readv now returns EFAULT.
         crate::errno::set_errno(0);
         assert_eq!(preadv2(0, core::ptr::null(), 1, -1, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
     }
 
     #[test]
     fn test_pwritev2_null_iov() {
+        let fd = fdtable::alloc_fd(HandleKind::File, 0).expect("alloc_fd File failed");
         crate::errno::set_errno(0);
-        assert_eq!(pwritev2(0, core::ptr::null(), 1, 0, 0), -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        assert_eq!(pwritev2(fd, core::ptr::null(), 1, 0, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+        let _ = close(fd);
     }
 
     #[test]
@@ -8517,48 +8620,91 @@ mod tests {
 
     // -- preadv / pwritev --
 
+    // These need a seekable fd: `do_preadv` reaches `import_iovec` only after
+    // `fdget` and the `FMODE_PREAD` test, so on fd 0 (a console here) the
+    // ESPIPE fires first and the iovec checks are never exercised.
+
+    /// A NULL vector at a valid count is `EFAULT` — `copy_iovec_from_user`,
+    /// not the `UIO_MAXIOV` test.  This used to be folded into `EINVAL`.
     #[test]
     fn test_preadv_null_iov() {
+        let fd = fdtable::alloc_fd(HandleKind::File, 0).expect("alloc_fd File failed");
         crate::errno::set_errno(0);
-        let ret = preadv(0, core::ptr::null(), 1, 0);
+        let ret = preadv(fd, core::ptr::null(), 1, 0);
         assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+        let _ = close(fd);
     }
 
+    /// "Linux has traditionally returned zero for zero segments"
+    /// (`iovec_from_user`, lib/iov_iter.c) — `nr_segs == 0` returns an empty
+    /// iterator before any other check, so this succeeds rather than failing
+    /// with EINVAL as we used to report.
     #[test]
     fn test_preadv_zero_iovcnt() {
+        let fd = fdtable::alloc_fd(HandleKind::File, 0).expect("alloc_fd File failed");
         let iov = Iovec {
             iov_base: core::ptr::null_mut(),
             iov_len: 0,
         };
         crate::errno::set_errno(0);
-        let ret = preadv(0, &iov, 0, 0);
-        assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        let ret = preadv(fd, &iov, 0, 0);
+        assert_eq!(ret, 0);
+        let _ = close(fd);
     }
 
+    /// `iovcnt` is `unsigned long` at the syscall boundary, so a negative
+    /// count arrives as a huge value and trips `nr_segs > UIO_MAXIOV`.
     #[test]
     fn test_preadv_negative_iovcnt() {
+        let fd = fdtable::alloc_fd(HandleKind::File, 0).expect("alloc_fd File failed");
         let iov = Iovec {
             iov_base: core::ptr::null_mut(),
             iov_len: 0,
         };
         crate::errno::set_errno(0);
-        let ret = preadv(0, &iov, -1, 0);
+        let ret = preadv(fd, &iov, -1, 0);
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        let _ = close(fd);
     }
 
     #[test]
     fn test_preadv_over_max_iovcnt() {
+        let fd = fdtable::alloc_fd(HandleKind::File, 0).expect("alloc_fd File failed");
         let iov = Iovec {
             iov_base: core::ptr::null_mut(),
             iov_len: 0,
         };
         crate::errno::set_errno(0);
-        let ret = preadv(0, &iov, 1025, 0);
+        let ret = preadv(fd, &iov, 1025, 0);
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        let _ = close(fd);
+    }
+
+    /// The count is checked before the pointer, so an over-max count outranks
+    /// a NULL vector.
+    #[test]
+    fn test_preadv_over_max_iovcnt_outranks_a_null_iov() {
+        let fd = fdtable::alloc_fd(HandleKind::File, 0).expect("alloc_fd File failed");
+        crate::errno::set_errno(0);
+        let ret = preadv(fd, core::ptr::null(), 1025, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        let _ = close(fd);
+    }
+
+    /// …and ESPIPE outranks both, because `FMODE_PREAD` is tested before
+    /// `vfs_readv` is ever called.
+    #[test]
+    fn test_preadv_espipe_outranks_a_bad_iovcnt() {
+        let fd = fdtable::alloc_fd(fdtable::HandleKind::Console, 0).expect("fd available");
+        crate::errno::set_errno(0);
+        let ret = preadv(fd, core::ptr::null(), 1025, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ESPIPE);
+        let _ = close(fd);
     }
 
     #[test]
@@ -8576,22 +8722,25 @@ mod tests {
 
     #[test]
     fn test_pwritev_null_iov() {
+        let fd = fdtable::alloc_fd(HandleKind::File, 0).expect("alloc_fd File failed");
         crate::errno::set_errno(0);
-        let ret = pwritev(0, core::ptr::null(), 1, 0);
+        let ret = pwritev(fd, core::ptr::null(), 1, 0);
         assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+        let _ = close(fd);
     }
 
     #[test]
     fn test_pwritev_zero_iovcnt() {
+        let fd = fdtable::alloc_fd(HandleKind::File, 0).expect("alloc_fd File failed");
         let iov = Iovec {
             iov_base: core::ptr::null_mut(),
             iov_len: 0,
         };
         crate::errno::set_errno(0);
-        let ret = pwritev(0, &iov, 0, 0);
-        assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        let ret = pwritev(fd, &iov, 0, 0);
+        assert_eq!(ret, 0);
+        let _ = close(fd);
     }
 
     #[test]

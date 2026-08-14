@@ -42,6 +42,7 @@ pub mod bidi;
 mod bidi_tables;
 pub mod cff;
 mod fallback;
+mod gpos;
 pub mod gsub;
 mod joining;
 mod joining_tables;

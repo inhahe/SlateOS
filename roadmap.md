@@ -385,13 +385,21 @@ Roadmap:
   mark's advance, measure its place from two ink boxes and its
   recategorized combining class — gated per script, since a Brahmic cluster
   needs a reordering pass this crate does not have. The sweep's `misplaced`
-  bucket went 559 → 98. Next unblocked step is the
+  bucket went 559 → 98. Unified GPOS pass done (§417):
+  `gui/font/src/gpos.rs` collects the lookups a run's features reach and
+  applies them in table order through the same `Skipper` as `GSUB`, with
+  types 1, 2, 3, 4 and 6 dispatched from one place — so single adjustment
+  and cursive attachment work, and `kern.rs`/`mark.rs` no longer pick their
+  own lookups out of the table. `shape` cuts the string into segments once
+  and feeds both passes, and `recharge_kerns` is now gated to the legacy
+  `kern` table, since a GPOS pair already carries its own RTL correction.
+  The sweep's `misplaced` bucket went 98 → 85. Next unblocked step is the
   rest of shaping: no Indic reordering
-  (`TD-FONT-HAS-NO-JOINING-OR-REORDERING-SHAPER`), no GPOS single or
-  cursive adjustment (`TD-FONT-IGNORES-GPOS-SINGLE-AND-CURSIVE-ADJUSTMENTS`),
-  no language selection (`TD-FONT-IGNORES-LANGSYS-OVERRIDES`), no
-  mark-to-ligature attachment (GPOS 5). Vello itself waits on `[A]`'s GPU
-  driver.
+  (`TD-FONT-HAS-NO-JOINING-OR-REORDERING-SHAPER`), no contextual or
+  mark-to-ligature positioning, GPOS 5/7/8
+  (`TD-GPOS-HAS-NO-CONTEXTUAL-OR-MARK-TO-LIGATURE-POSITIONING`), no
+  language selection (`TD-FONT-IGNORES-LANGSYS-OVERRIDES`). Vello itself
+  waits on `[A]`'s GPU driver.
 - `[C]` Wayland-inspired compositor: GPU acceleration, currently a software
   rasterizer (lines ~4605, ~4619)
 - `[C]` Video-encoded capture fallback, H.264/VP9 (lines ~4623, ~5060)

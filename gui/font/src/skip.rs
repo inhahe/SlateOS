@@ -73,7 +73,18 @@ const IGNORE_BASE_GLYPHS: u16 = 0x0002;
 /// `lookupFlag` bit 2: do not see glyphs `GDEF` calls ligatures.
 const IGNORE_LIGATURES: u16 = 0x0004;
 /// `lookupFlag` bit 3: do not see glyphs `GDEF` calls marks.
-const IGNORE_MARKS: u16 = 0x0008;
+///
+/// Public because `GPOS` mark-to-base attachment searches for its base with
+/// this flag *instead of* the lookup's own: a mark-to-base lookup that did not
+/// ignore marks would attach the second accent of a stack to the first and call
+/// it a base.
+pub(crate) const IGNORE_MARKS: u16 = 0x0008;
+/// The three bits that hide a whole `GDEF` class from a lookup.
+///
+/// Public for the same reason: mark-to-*mark* attachment keeps the lookup's
+/// flag except for these, so that a mark-attachment class or a filtering set
+/// still selects which marks may stack while nothing is stepped over.
+pub(crate) const IGNORE_FLAGS: u16 = IGNORE_BASE_GLYPHS | IGNORE_LIGATURES | IGNORE_MARKS;
 /// `lookupFlag` bit 4: see only the marks in the named `MarkGlyphSet`.
 const USE_MARK_FILTERING_SET: u16 = 0x0010;
 /// `lookupFlag` high byte: see only the marks of this attachment class.
@@ -84,7 +95,7 @@ const CLASS_BASE: u16 = 1;
 /// `GDEF` `GlyphClassDef` class 2: a glyph that is itself a ligature.
 const CLASS_LIGATURE: u16 = 2;
 /// `GDEF` `GlyphClassDef` class 3: a combining mark.
-const CLASS_MARK: u16 = 3;
+pub(crate) const CLASS_MARK: u16 = 3;
 
 /// The three `GDEF` tables a lookup flag can consult, found once per face.
 ///
@@ -133,6 +144,20 @@ impl Definitions {
             attach: at(10),
             sets: minor.filter(|&m| m >= 2).and_then(|_| at(12)),
         }
+    }
+
+    /// What `GDEF` calls this glyph — base, ligature, mark — or `0` for a face
+    /// that classifies nothing, which is the answer for a face with no `GDEF`
+    /// and for a glyph the table simply does not mention.
+    ///
+    /// Public because `GPOS` mark-to-mark attachment has to check that what it
+    /// found below the mark really is a mark, which is a question about the
+    /// class rather than about any lookup's flag.
+    #[must_use]
+    pub(crate) fn class(self, data: &[u8], glyph: u16) -> u16 {
+        self.classes
+            .and_then(|table| glyph_class(data, table, glyph))
+            .unwrap_or(0)
     }
 }
 
@@ -215,12 +240,7 @@ impl<'a> Skipper<'a> {
         if self.is_trivial() {
             return false;
         }
-        let class = self
-            .defs
-            .classes
-            .and_then(|table| glyph_class(self.data, table, glyph))
-            .unwrap_or(0);
-        match class {
+        match self.defs.class(self.data, glyph) {
             CLASS_BASE => self.flag & IGNORE_BASE_GLYPHS != 0,
             CLASS_LIGATURE => self.flag & IGNORE_LIGATURES != 0,
             CLASS_MARK => self.skips_mark(glyph),

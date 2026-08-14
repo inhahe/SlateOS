@@ -59435,6 +59435,72 @@ their own lookups out of the table.
 `gui/font/src/mark.rs`; `gui/font/src/scaled.rs` — `shape`, where the passes
 are sequenced.
 
+**Fixed**, as the proper fix above describes. `gui/font/src/gpos.rs` is the
+unified pass: `Run` in, one `Adjust` per glyph out, lookups walked in table
+order through the same `Skipper` as `GSUB`, with types 1, 2, 3, 4 and 6
+dispatched from `Adjust::apply`. `kern.rs` keeps only the legacy `kern` table
+(the pass cannot see it); `mark.rs` keeps only its anchor/subtable readers,
+which `gpos.rs` calls. `scaled.rs::shape` now cuts the string into `Segment`s
+once — on tabs and script changes — and feeds the same segments to both
+passes, since after ligation nothing left in the glyph run says where a
+stretch began.
+
+Two things fell out of doing it. `Face::mark_on_base`/`mark_on_mark` are gone
+as public API: mark attachment is not a thing a caller can ask for out of
+lookup order any more, so `tests/host_fonts.rs` sweeps it through
+`ScaledFont::shape` instead. And `recharge_kerns` had to be gated on
+`Face::kerns_outside_gpos()` — see §417 in `design-decisions.md`; charging a
+`GPOS` pair's value to the visually-left glyph applies the font author's own
+right-to-left correction a second time.
+
+Measured on the HarfBuzz sweep (556 host faces x 19 strings): agree
+9526 → 9539, misplaced 98 → 85, reordered 0 throughout. The Arabic
+`العربية` disagreement the entry was filed on went from 14 faces to 1
+(Scheherazade-Regular, which needs the contextual positioning tracked in
+TD-GPOS-HAS-NO-CONTEXTUAL-OR-MARK-TO-LIGATURE-POSITIONING).
+
+## TD-GPOS-HAS-NO-CONTEXTUAL-OR-MARK-TO-LIGATURE-POSITIONING
+
+**What.** `gui/font/src/gpos.rs` dispatches `GPOS` lookup types 1, 2, 3, 4 and
+6. Three types are parsed past and ignored: 5 (mark-to-ligature), 7
+(contextual positioning) and 8 (chained contextual positioning). Device tables
+— the per-ppem correction a `ValueRecord` can point at with the
+`X_PLACEMENT_DEVICE`/`Y_PLACEMENT_DEVICE`/`X_ADVANCE_DEVICE`/`Y_ADVANCE_DEVICE`
+formats — are skipped over for their size but never read.
+
+**Symptom, measured.** Scheherazade-Regular is the one face still disagreeing
+with HarfBuzz on `العربية` after the unified pass landed: our glyph 3 sits at
+x=1280, HarfBuzz's at x=1150. It reaches the adjustment through a type-8
+chained rule, so we never apply it. Type 5 shows up wherever a script both
+ligates and takes marks — an Arabic lam-alef with a vowel sign on it, or a
+Devanagari conjunct — because the mark has to attach to a numbered *component*
+of the ligature glyph rather than to the glyph as a whole; without it the mark
+lands on the ligature's single origin. Device tables only bite at small ppem
+on faces that ship hinted corrections, and are the smallest of the three.
+
+**Why it is filed rather than fixed.** Types 7 and 8 are byte-for-byte the
+same three subtable formats as `GSUB`'s types 5 and 6, which
+`gui/font/src/gsub.rs` already reads (`context_match`, `chain_match`,
+`chain_rule`) — but their *action* differs. A `GSUB` contextual rule
+substitutes at a matched position; a `GPOS` one runs a nested *positioning*
+lookup there. So the matching is shareable and the record application is not,
+and the recursion has to re-enter `gpos.rs`'s per-lookup apply carrying both
+the skipper and a depth budget. That is a refactor of two modules' entry
+points, not an addition to a dispatch table.
+
+**Proper fix.** Lift `gsub.rs`'s rule matching out into a module both layout
+tables use, generic over what happens at a matched position, and give
+`gpos.rs` an apply-one-lookup-by-index entry point the recursion can call
+with the same `MAX_NESTING` budget `gsub.rs` already defines. Type 5 is
+independent and much smaller — it is type 4's reader with a component index
+selecting which anchor array to read — so it can land first. Device tables
+are a `ValueRecord` reader change plus a ppem the pass is not currently told.
+
+**Where.** `gui/font/src/gpos.rs` — `Adjust::apply` and its dispatch;
+`gui/font/src/gsub.rs` — `context_match` / `chain_match` / `chain_rule`, the
+matchers to be shared; `gui/font/src/mark.rs` — the anchor reader type 5
+would reuse.
+
 ## TD-FONT-DOES-NOT-RE-SORT-HEBREW-AND-ARABIC-MARKS
 
 **What.** Unicode gives Hebrew points the canonical combining classes 10–26

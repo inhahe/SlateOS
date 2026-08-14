@@ -1768,6 +1768,13 @@ fn installed_fonts_leave_a_tab_alone() {
 #[ignore = "depends on the host's installed fonts"]
 fn installed_fonts_place_combining_marks() {
     const ACUTE: char = '\u{0301}';
+    // `f`, not `e`, and the difference matters now that the sweep goes through
+    // the shaper rather than asking the face about a pair of glyph ids:
+    // `e` + U+0301 is canonically U+00E9, so a face that has an `é` would get
+    // one glyph back and have no mark left to place. `f` + acute has no
+    // precomposed form in Unicode at all, so it survives normalization as two
+    // characters on every face and still exercises attachment.
+    const BASE: char = 'f';
 
     let mut files = Vec::new();
     for dir in font_dirs() {
@@ -1788,42 +1795,60 @@ fn installed_fonts_place_combining_marks() {
             continue;
         }
         with_marks += 1;
-        let (Some(e), Some(acute)) = (face.glyph_index('e'), face.glyph_index(ACUTE)) else {
+        let (Some(base_gid), Some(acute)) = (face.glyph_index(BASE), face.glyph_index(ACUTE))
+        else {
             continue;
         };
+        let em = i32::from(face.units_per_em());
+        // One pixel per font unit, so that the shaper's pixel offsets come out
+        // in the face's own units and can be checked against its em. Nothing
+        // is rasterized here, so the nominally enormous size costs nothing.
+        let Ok(font) = ScaledFont::new(face, em as f32) else {
+            continue;
+        };
+        let run = font.shape(&format!("{BASE}{ACUTE}"));
+        if run.len() != 2 {
+            continue;
+        }
+        let mark = run.glyphs()[1];
         // A face can carry mark lookups that cover an entirely different
         // script: DejaVu Sans Mono's single `MarkBasePos` covers 15 Lao
         // glyphs and has never heard of `acutecomb`. That face has nothing
         // to say about a Latin accent, so it is skipped rather than failed —
         // the sweep's job is to check the faces that *do* answer.
-        let Some((dx, dy)) = face.mark_on_base(e, acute) else {
+        //
+        // A face whose anchors legitimately coincide is skipped with them: a
+        // monospace design draws its combining acute already at accent height
+        // inside its cell, so its displacement really is (0, 0) — Cascadia
+        // Code is exactly that — and is indistinguishable here from a face
+        // that said nothing. What the mark ends up over is checked below, on
+        // the run, where the glyph's own extents are available.
+        let (dx, dy) = mark.offset;
+        if dx == 0.0 && dy == 0.0 {
             continue;
-        };
+        }
         placed += 1;
         assert!(
-            face.is_mark(acute),
-            "{}: anchors an acute onto an 'e' yet does not class U+0301 as a \
-             mark — the mark would be kerned and advanced like a letter",
+            font.face().is_mark(acute),
+            "{}: anchors an acute onto an '{BASE}' yet does not class U+0301 \
+             as a mark — the mark would be kerned and advanced like a letter",
             path.display()
         );
         assert!(
-            !face.is_mark(e),
-            "{}: 'e' is classed as a combining mark",
+            !font.face().is_mark(base_gid),
+            "{}: '{BASE}' is classed as a combining mark",
+            path.display()
+        );
+        assert_eq!(
+            mark.advance, 0.0,
+            "{}: the acute advances the pen",
             path.display()
         );
         // A displacement is a placement within the glyph, so it is bounded by
         // the em; anything larger means a misread anchor and would put the
         // accent on a different letter.
-        //
-        // The *sign* is not an oracle here, unlike kerning's. A monospace face
-        // draws its combining acute already at accent height inside its cell,
-        // so its anchors coincide with the base's and the displacement is
-        // legitimately (0, 0) — Cascadia Code is exactly that. What the mark
-        // ends up over is checked below, on the run, where the glyph's own
-        // extents are available to check it against.
-        let em = i32::from(face.units_per_em());
         assert!(
-            i32::from(dx).abs() <= em && i32::from(dy).abs() <= em * 2,
+            dx.abs() <= em as f32 && dy.abs() <= (em * 2) as f32,
             "{}: acute displaced by ({dx}, {dy}) on a {em} unit em",
             path.display()
         );
@@ -1840,21 +1865,14 @@ fn installed_fonts_place_combining_marks() {
     );
     assert!(
         placed > 0,
-        "{with_marks} faces know about marks but not one places a combining \
-         acute on an 'e' — the anchors are returning nothing"
+        "{with_marks} faces know about marks but not one displaces a \
+         combining acute on an '{BASE}' — the anchors are returning nothing"
     );
 
-    // The oracle, driven all the way through shaping: the accent must be a
-    // zero-width glyph displaced onto the letter before it.
-    //
-    // The base is `f`, not the `e` the sweep above uses, and the difference
-    // matters. The sweep asks the *face* about a pair of glyph ids, which
-    // normalization never sees. This asks the *shaper* about a string — and
-    // `e` + U+0301 is canonically U+00E9, so a face that has an `é` now gets
-    // one glyph and has no mark left to place. `f` + acute has no precomposed
-    // form in Unicode at all, so it survives normalization as two characters
-    // on every face and still exercises attachment.
-    const BASE: char = 'f';
+    // The same oracle again on the well-known faces, but now with the ink: the
+    // accent must land *over* the letter, not merely somewhere within an em of
+    // it. This is the half that catches a placement that is the right size and
+    // the wrong sign.
     let mut checked = 0usize;
     for file in ["segoeui.ttf", "DejaVuSans.ttf", "calibri.ttf", "times.ttf"] {
         let Some(path) = files

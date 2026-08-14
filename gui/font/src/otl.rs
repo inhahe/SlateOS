@@ -759,3 +759,106 @@ pub(crate) fn value_size(format: u16) -> usize {
     // cannot lose anything on any target.
     (format.count_ones() as usize).saturating_mul(2)
 }
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::panic
+)]
+mod tests {
+    use super::*;
+    use alloc::vec;
+
+    fn be16(v: u16) -> [u8; 2] {
+        v.to_be_bytes()
+    }
+
+    /// A coverage format 1 table listing `glyphs`.
+    fn coverage1(glyphs: &[u16]) -> Vec<u8> {
+        let mut t = vec![];
+        t.extend(be16(1));
+        t.extend(be16(u16::try_from(glyphs.len()).unwrap()));
+        for g in glyphs {
+            t.extend(be16(*g));
+        }
+        t
+    }
+
+    #[test]
+    fn coverage_format_1_reports_the_position_in_the_list() {
+        let t = coverage1(&[10, 20, 30, 40]);
+        assert_eq!(coverage_index(&t, 0, 10), Some(0));
+        assert_eq!(coverage_index(&t, 0, 30), Some(2));
+        assert_eq!(coverage_index(&t, 0, 40), Some(3));
+        assert_eq!(coverage_index(&t, 0, 35), None);
+        assert_eq!(coverage_index(&t, 0, 0), None);
+        assert_eq!(coverage_index(&t, 0, 99), None);
+    }
+
+    #[test]
+    fn coverage_format_2_counts_through_the_ranges() {
+        // Two ranges: 10..=12 at coverage 0..=2, then 50..=51 at 3..=4.
+        let mut t = vec![];
+        t.extend(be16(2));
+        t.extend(be16(2));
+        t.extend(be16(10));
+        t.extend(be16(12));
+        t.extend(be16(0));
+        t.extend(be16(50));
+        t.extend(be16(51));
+        t.extend(be16(3));
+        assert_eq!(coverage_index(&t, 0, 10), Some(0));
+        assert_eq!(coverage_index(&t, 0, 12), Some(2));
+        assert_eq!(coverage_index(&t, 0, 50), Some(3));
+        assert_eq!(coverage_index(&t, 0, 51), Some(4));
+        assert_eq!(coverage_index(&t, 0, 13), None);
+    }
+
+    #[test]
+    fn a_glyph_no_class_definition_mentions_is_in_class_zero() {
+        // Format 1 covering 10..=12 with classes 1, 2, 1.
+        let mut t = vec![];
+        t.extend(be16(1));
+        t.extend(be16(10));
+        t.extend(be16(3));
+        t.extend(be16(1));
+        t.extend(be16(2));
+        t.extend(be16(1));
+        assert_eq!(glyph_class(&t, 0, 10), Some(1));
+        assert_eq!(glyph_class(&t, 0, 11), Some(2));
+        // Class 0 is a real class the grid can kern, so "not listed" must not
+        // become "no answer" — that would silently drop every pair whose
+        // second glyph is unclassed.
+        assert_eq!(glyph_class(&t, 0, 9), Some(0));
+        assert_eq!(glyph_class(&t, 0, 13), Some(0));
+    }
+
+    #[test]
+    fn class_definition_format_2_reads_its_ranges() {
+        let mut t = vec![];
+        t.extend(be16(2));
+        t.extend(be16(2));
+        t.extend(be16(10));
+        t.extend(be16(19));
+        t.extend(be16(3));
+        t.extend(be16(30));
+        t.extend(be16(30));
+        t.extend(be16(7));
+        assert_eq!(glyph_class(&t, 0, 15), Some(3));
+        assert_eq!(glyph_class(&t, 0, 30), Some(7));
+        assert_eq!(glyph_class(&t, 0, 25), Some(0));
+    }
+
+    #[test]
+    fn a_value_records_size_is_two_bytes_per_set_flag() {
+        assert_eq!(value_size(0), 0);
+        // XAdvance alone.
+        assert_eq!(value_size(0x0004), 2);
+        // XPlacement + YPlacement + XAdvance.
+        assert_eq!(value_size(0x0007), 6);
+        assert_eq!(value_size(0xFFFF), 32);
+    }
+}

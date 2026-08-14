@@ -31,6 +31,7 @@ use alloc::vec::Vec;
 use crate::FontMetrics;
 use crate::bidi::{self, Base, Level};
 use crate::fallback::{self, Extents};
+use crate::gpos::{Adjust, Run};
 use crate::gsub::SubGlyph;
 use crate::joining::{self, Form};
 use crate::norm;
@@ -123,6 +124,23 @@ impl core::fmt::Debug for ScaledFont {
             // would make `{:?}` on a font unusable.
             .finish_non_exhaustive()
     }
+}
+
+/// One stretch of glyphs that shapes as a unit, in post-substitution glyph
+/// indices.
+///
+/// The output of the substitution pass and the input to the positioning one.
+/// A segment never spans a tab or a script change, and never contains one: a
+/// layout table's lookups may not reach across either, so the two passes cut
+/// the run the same way and the cut is made once.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Segment {
+    /// Index of the segment's first glyph.
+    start: usize,
+    /// One past its last.
+    end: usize,
+    /// The script the stretch was opened under, which chooses its features.
+    script: Option<ScriptTags>,
 }
 
 impl ScaledFont {
@@ -398,6 +416,17 @@ impl ScaledFont {
         f32::from(self.face.kern_across(left, right, between)) * self.scale
     }
 
+    /// Font units to pixels.
+    ///
+    /// The cast is exact for anything a layout table can produce: font units
+    /// are bounded by the em square times a few, and a whole run's accumulated
+    /// advance by the length of the run — both orders of magnitude inside the
+    /// range where `f32` counts integers one at a time.
+    #[must_use]
+    fn px(&self, units: i32) -> f32 {
+        units as f32 * self.scale
+    }
+
     /// The glyphs `text` turns into, with final advances.
     ///
     /// Everything that walks text goes through here — measuring, drawing,
@@ -499,9 +528,7 @@ impl ScaledFont {
             tabs.push(tab);
         }
 
-        if self.face.has_substitutions() {
-            self.substitute_runs(&runs, &mut glyphs, &mut tabs);
-        }
+        let segments = self.substitute_runs(&runs, &mut glyphs, &mut tabs);
 
         let marked = self.face.has_marks();
         // The combining classes, one per glyph, kept aside for the placement
@@ -513,6 +540,38 @@ impl ScaledFont {
         } else {
             Vec::new()
         };
+        // Which glyphs are combining marks, and what each one's nominal width
+        // is. Both are wanted twice — once by the positioning pass, which is
+        // handed whole runs, and once by the loop below, which walks one glyph
+        // at a time — so they are settled here rather than recomputed.
+        //
+        // Two ways to be a mark, because two different things are being asked.
+        // A face with anchors is asked about the *glyph*, since that is what
+        // the anchors are indexed by and what `GDEF` classes. A face with no
+        // `GPOS` can only be asked about the *character*: it has said nothing
+        // about any glyph, so the combining class is the only evidence there
+        // is. The two never both apply — `synthesize` means there is no `GPOS`
+        // and so nothing for `marked` to have come from but `GDEF` — which is
+        // why one vector can serve the pass and the fallback both.
+        let marks: Vec<bool> = glyphs
+            .iter()
+            .enumerate()
+            .map(|(i, glyph)| {
+                let tab = tabs.get(i).copied().unwrap_or(false);
+                (marked && !tab && self.face.is_mark(glyph.gid))
+                    || (synthesize && glyph.klass != 0)
+            })
+            .collect();
+        let advances: Vec<i32> = glyphs
+            .iter()
+            .map(|g| i32::from(self.face.advance(g.gid).unwrap_or(0)))
+            .collect();
+        let adjusted = self.position_segments(&segments, &glyphs, &advances, &marks, &levels);
+        // Whether pairs still have to be kerned one at a time here. They do
+        // only for a face whose kerning is the legacy `kern` table, which the
+        // positioning pass cannot read; a `GPOS` face's pairs have already been
+        // charged by the pass, in the company of every other lookup.
+        let legacy_kerning = self.face.kerns_outside_gpos();
         let mut out: Vec<ShapedGlyph> = Vec::with_capacity(glyphs.len());
         // Where in `out` the left half of the next kerning pair sits, and the
         // glyphs standing between it and the position being filled. A tab is
@@ -529,14 +588,11 @@ impl ScaledFont {
             // and the face decides from its own lookup flags whether to read
             // across it; kerning *against* the mark instead would shove the
             // accent off the letter it belongs to.
-            // Two ways to be a mark, because two different things are being
-            // asked. A face with anchors is asked about the *glyph*, since
-            // that is what the anchors are indexed by and what `GDEF` classes.
-            // A face with no `GPOS` can only be asked about the *character*:
-            // it has said nothing about any glyph, so the combining class is
-            // the only evidence there is.
-            let mark = (marked && !tab && self.face.is_mark(gid))
-                || (synthesize && glyph.klass != 0);
+            let mark = marks.get(i).copied().unwrap_or(false);
+            let adjust = adjusted
+                .get(i)
+                .copied()
+                .unwrap_or_else(|| Adjust::plain(advances.get(i).copied().unwrap_or(0)));
             // Kerning is part of the width, not a drawing-time flourish: a
             // measurement that leaves it out is one that disagrees with what
             // the compositor puts on the screen, which is how a label ends up
@@ -544,7 +600,8 @@ impl ScaledFont {
             // charged to the pair's *left* glyph — not to whatever was pushed
             // last — so that the advances still sum to the run's width when
             // the pair was read across a mark.
-            if !tab
+            if legacy_kerning
+                && !tab
                 && !mark
                 && let Some(last) = kern_left.and_then(|at| out.get_mut(at))
             {
@@ -552,10 +609,7 @@ impl ScaledFont {
                 last.advance += kern;
                 last.kern_next = kern;
             }
-            let advance = self
-                .face
-                .advance(gid)
-                .map_or(0.0, |a| f32::from(a) * self.scale);
+            let advance = self.px(adjust.x_advance);
             out.push(ShapedGlyph {
                 key: GlyphKey::outline(gid),
                 // Substitution carried this along: a ligature reports its
@@ -568,7 +622,8 @@ impl ScaledFont {
                 // an `e` — because the same outline doubles as the spacing
                 // acute; honouring it would put a gap after every accented
                 // letter and make `é` measure wider than `e`. HarfBuzz zeroes
-                // mark advances for the same reason.
+                // mark advances for the same reason. The positioning pass has
+                // already done it for the glyphs it saw; this catches the rest.
                 advance: if mark {
                     0.0
                 } else if tab {
@@ -576,8 +631,15 @@ impl ScaledFont {
                 } else {
                     advance
                 },
-                kern_next: 0.0,
-                offset: (0.0, 0.0),
+                kern_next: self.px(adjust.kern),
+                // Where `GPOS` put the glyph's image relative to the pen: a
+                // mark's displacement onto its base, and the odd letter a
+                // single adjustment nudges. Zero for everything the pass did
+                // not touch, and for every glyph when there is no pass — the
+                // fallback fills those in below. `y` points up, which is both
+                // `GPOS`'s convention and `ShapedGlyph`'s, so it passes through
+                // unflipped; the flip happens once, at the blit.
+                offset: (self.px(adjust.x_offset), self.px(adjust.y_offset)),
             });
             if mark {
                 // Keep the mark in the run between the pair, but only while
@@ -607,7 +669,9 @@ impl ScaledFont {
                 .map(|g| levels.get(g.cluster).copied().unwrap_or(0))
                 .collect();
             let order = bidi::visual_order(&per_glyph);
-            recharge_kerns(&mut out, &order);
+            if legacy_kerning {
+                recharge_kerns(&mut out, &order);
+            }
             order
                 .into_iter()
                 .map(|i| u32::try_from(i).unwrap_or(u32::MAX))
@@ -615,20 +679,28 @@ impl ScaledFont {
         };
 
         if synthesize {
-            // Not `else if`-chained with the anchors on purpose: the two are
-            // mutually exclusive by construction, since `marks` can only come
-            // from `GPOS` or `GDEF` and `GDEF` alone yields no anchors. Asking
-            // the face for an anchor it cannot have would be dead code that
-            // reads as a fallthrough.
+            // The only mark pass left here. A face *with* `GPOS` had its marks
+            // placed by the positioning pass, in font units and before the
+            // reordering — which is where the placement belongs, since a
+            // mark's offset is measured against a pen the lookups themselves
+            // were still moving. The two are mutually exclusive by
+            // construction: `synthesize` means the face has no `GPOS`, and a
+            // face with no `GPOS` has no anchors to place anything by.
             self.synthesize_marks(&mut out, &visual, &klasses, &levels);
-        } else if marked {
-            self.attach_marks(&mut out, &visual);
         }
         ShapedRun::reordered(out, visual)
     }
 
-    /// Substitute each stretch of `glyphs` between tabs and script changes,
-    /// separately and each under its own script.
+    /// Cut `glyphs` into the stretches that shape together — between tabs and
+    /// script changes — substitute each under its own script, and report where
+    /// the survivors landed.
+    ///
+    /// Runs even for a face with no `GSUB`, because the cut is wanted by more
+    /// than the substitution: the returned [`Segment`]s are what
+    /// [`position_segments`](Self::position_segments) hands to `GPOS`, and a
+    /// positioning lookup may no more reach across a tab or a script change
+    /// than a substitution one may. `Face::substitute` is a no-op on a face
+    /// with nothing to substitute, so the extra call costs a branch.
     ///
     /// Two boundaries, for two reasons.
     ///
@@ -652,16 +724,46 @@ impl ScaledFont {
     /// yet — which is why this is the pass that consumes them.
     ///
     /// Both vectors are rewritten, since a run that ligates comes out shorter
-    /// and `tabs` has to keep lining up with it.
+    /// and `tabs` has to keep lining up with it — which is the other reason the
+    /// segments have to come from here. A caller could not compute them
+    /// afterwards: once a stretch has ligated, nothing left in `glyphs` says
+    /// where it began.
     fn substitute_runs(
         &self,
         runs: &[(usize, Option<ScriptTags>)],
         glyphs: &mut Vec<SubGlyph>,
         tabs: &mut Vec<bool>,
-    ) {
+    ) -> Vec<Segment> {
         let mut out: Vec<SubGlyph> = Vec::with_capacity(glyphs.len());
         let mut out_tabs: Vec<bool> = Vec::with_capacity(tabs.len());
+        let mut segments: Vec<Segment> = Vec::new();
         let mut run: Vec<SubGlyph> = Vec::new();
+        /// Shape the open stretch and append it, recording where it landed.
+        ///
+        /// A nested function rather than a closure because it needs the face
+        /// *and* four separate `&mut`s to locals the loop also touches, which
+        /// a closure would have to capture and so hold for its whole lifetime.
+        fn flush(
+            font: &ScaledFont,
+            script: Option<ScriptTags>,
+            run: &mut Vec<SubGlyph>,
+            out: &mut Vec<SubGlyph>,
+            out_tabs: &mut Vec<bool>,
+            segments: &mut Vec<Segment>,
+        ) {
+            if run.is_empty() {
+                return;
+            }
+            font.face.substitute(script, run);
+            let start = out.len();
+            segments.push(Segment {
+                start,
+                end: start.saturating_add(run.len()),
+                script,
+            });
+            out_tabs.extend(core::iter::repeat_n(false, run.len()));
+            out.append(run);
+        }
         // Which script run `i` falls in. Advanced rather than searched: `i`
         // only moves forward, and there are a handful of runs at most.
         let mut at = 0usize;
@@ -677,11 +779,7 @@ impl ScaledFont {
             // Ends are exclusive: `end == i` means the run stopped *before*
             // this glyph, so the stretch closes and `i` opens the next one.
             if runs.get(at).is_some_and(|&(end, _)| end <= i) {
-                if !run.is_empty() {
-                    self.face.substitute(open, &mut run);
-                    out_tabs.extend(core::iter::repeat_n(false, run.len()));
-                    out.append(&mut run);
-                }
+                flush(self, open, &mut run, &mut out, &mut out_tabs, &mut segments);
                 while runs.get(at).is_some_and(|&(end, _)| end <= i) {
                     at = at.saturating_add(1);
                 }
@@ -693,11 +791,7 @@ impl ScaledFont {
                 }
                 continue;
             }
-            if !run.is_empty() {
-                self.face.substitute(open, &mut run);
-                out_tabs.extend(core::iter::repeat_n(false, run.len()));
-                out.append(&mut run);
-            }
+            flush(self, open, &mut run, &mut out, &mut out_tabs, &mut segments);
             if let Some(glyph) = glyphs.get(i) {
                 out.push(*glyph);
                 out_tabs.push(true);
@@ -705,77 +799,85 @@ impl ScaledFont {
         }
         *glyphs = out;
         *tabs = out_tabs;
+        segments
     }
 
-    /// Displace every combining mark in `glyphs` onto the glyph it belongs to.
+    /// Position each of `segments` with the face's `GPOS`, into one adjustment
+    /// per glyph in `glyphs`.
     ///
-    /// Runs after advances are final, because a mark's placement is expressed
-    /// relative to its base glyph's *origin* while the mark is drawn at the
-    /// pen — and the distance between those two is the sum of the advances in
-    /// between, kerning included.
+    /// Whole segments at a time, because that is the unit a `GPOS` lookup
+    /// applies to, exactly as for `GSUB`: each lookup runs across the segment
+    /// before the next begins, and a mark's attachment is measured against the
+    /// advances the earlier lookups left behind. See [`gpos`](crate::gpos).
     ///
-    /// Marks whose face offers no anchor for them are left at the pen. That
-    /// is visibly wrong, but it is wrong in the way the font asked for: the
-    /// alternative is inventing a placement, which would be wrong in a way
-    /// nobody could trace back to the font. A face that carries no `GPOS` at
-    /// all has asked for nothing, and goes through
-    /// [`synthesize_marks`](Self::synthesize_marks) instead.
-    fn attach_marks(&self, glyphs: &mut [ShapedGlyph], visual: &[u32]) {
-        let pens = pens(glyphs, visual);
-
-        // What a mark attaches to: the last ordinary glyph for the first mark
-        // of a stack, the mark before it for the rest.
-        let mut base: Option<usize> = None;
-        let mut stacked: Option<usize> = None;
-        for i in 0..glyphs.len() {
-            let Some(gid) = glyphs.get(i).map(|g| g.key.gid()) else {
-                break;
-            };
-            if !self.face.is_mark(gid) {
-                base = Some(i);
-                stacked = None;
+    /// A glyph no segment covers — a tab, and every glyph when the face has no
+    /// `GPOS` — keeps its nominal advance and no displacement, which is the
+    /// same answer the pass would give for a glyph no lookup matched.
+    fn position_segments(
+        &self,
+        segments: &[Segment],
+        glyphs: &[SubGlyph],
+        advances: &[i32],
+        marks: &[bool],
+        levels: &[Level],
+    ) -> Vec<Adjust> {
+        let mut out: Vec<Adjust> = advances.iter().copied().map(Adjust::plain).collect();
+        if !self.face.has_gpos_lookups() {
+            return out;
+        }
+        for segment in segments {
+            let span = segment.start..segment.end;
+            let (Some(run), Some(widths), Some(is_mark)) = (
+                glyphs.get(span.clone()),
+                advances.get(span.clone()),
+                marks.get(span.clone()),
+            ) else {
                 continue;
-            }
-            // Stacking first: the second accent of a pair belongs above the
-            // first, not on the letter. A face with `mark` but no `mkmk` falls
-            // back to the base, which puts both accents in one place — its
-            // own tables ask for nothing better.
-            let onto = stacked
-                .and_then(|at| {
-                    let below = glyphs.get(at)?.key.gid();
-                    Some((at, self.face.mark_on_mark(below, gid)?))
-                })
-                .or_else(|| {
-                    let at = base?;
-                    let under = glyphs.get(at)?.key.gid();
-                    Some((at, self.face.mark_on_base(under, gid)?))
-                });
-            if let Some((at, (dx, dy))) = onto {
-                // The anchor glyph may itself be a displaced mark, so start
-                // from where it actually ended up rather than from its pen.
-                let from = glyphs.get(at).map_or((0.0, 0.0), |g| g.offset);
-                let back =
-                    pens.get(at).copied().unwrap_or(0.0) - pens.get(i).copied().unwrap_or(0.0);
-                if let Some(glyph) = glyphs.get_mut(i) {
-                    glyph.offset = (
-                        from.0 + f32::from(dx) * self.scale + back,
-                        from.1 + f32::from(dy) * self.scale,
-                    );
+            };
+            // Which way the segment reads, taken from its first glyph's level.
+            // One level for the whole segment is sound because a script run is
+            // already a bidi run: `script::runs` splits on a level change as
+            // well as on a script change, which is what makes this the pass
+            // that can ask.
+            let rtl = run.first().is_some_and(|glyph| {
+                levels
+                    .get(glyph.cluster)
+                    .is_some_and(|level| !level.is_multiple_of(2))
+            });
+            let Some(done) = self.face.position(&Run {
+                glyphs: run,
+                advances: widths,
+                marks: is_mark,
+                rtl,
+                script: segment.script,
+            }) else {
+                continue;
+            };
+            for (offset, adjust) in done.into_iter().enumerate() {
+                if let Some(slot) = segment
+                    .start
+                    .checked_add(offset)
+                    .and_then(|at| out.get_mut(at))
+                {
+                    *slot = adjust;
                 }
             }
-            stacked = Some(i);
         }
+        out
     }
 
     /// Place every combining mark in `glyphs` by measuring it against the
     /// glyph it follows, for a face that carries no `GPOS` at all.
     ///
-    /// The counterpart to [`attach_marks`](Self::attach_marks), and reached on
-    /// the same terms: after advances are final, offsets measured from the
-    /// base glyph's origin with the pen travel taken back off. What differs is
-    /// where the numbers come from — two ink boxes and a combining class
-    /// rather than a pair of anchors. [`fallback`] holds the geometry and
-    /// explains why it is HarfBuzz's geometry and not something invented here.
+    /// The counterpart to what [`gpos`](crate::gpos) does with a face's mark
+    /// anchors, and reached on the same terms: offsets measured from the base
+    /// glyph's origin with the pen travel taken back off. What differs is where
+    /// the numbers come from — two ink boxes and a combining class rather than
+    /// a pair of anchors — and when: this runs *after* reordering, because the
+    /// ink boxes it measures have to be the ones on the line, whereas `GPOS`
+    /// runs before it, in the logical order its lookups are written against.
+    /// [`fallback`] holds the geometry and explains why it is HarfBuzz's
+    /// geometry and not something invented here.
     ///
     /// `klass` is one combining class per glyph, `0` for anything that is not
     /// a mark; `levels` is [`byte_levels`]'s output, consulted only for the
@@ -858,8 +960,9 @@ impl ScaledFont {
             let (dx, dy) = fallback::place(&mut grown, &mark, k, gap, rtl);
             // The offset is from the base's origin; the mark is drawn at its
             // own pen, which is however far the line has moved since. Same
-            // subtraction as `attach_marks`, and right in a right-to-left run
-            // for the same reason: both pens are real positions on the line.
+            // subtraction `gpos`'s attachment propagation makes, and right in a
+            // right-to-left run for the same reason: both pens are real
+            // positions on the line.
             let back = pens.get(at).copied().unwrap_or(0.0) - pens.get(i).copied().unwrap_or(0.0);
             if let Some(glyph) = glyphs.get_mut(i) {
                 #[allow(clippy::cast_precision_loss)]
@@ -1046,6 +1149,17 @@ fn num(v: f32) -> i32 {
 /// through reordering — the two glyphs either side of a direction boundary —
 /// gets nothing, which is right: they were never kerned as a pair, and
 /// HarfBuzz does not kern across a run boundary either.
+///
+/// This is for the legacy `kern` table only, and the caller gates it on
+/// [`kerns_outside_gpos`](crate::sfnt::Face::kerns_outside_gpos). A legacy
+/// value is a pure gap with no direction in it, so it genuinely belongs to
+/// whichever glyph ends up on the left. A `GPOS` pair is not: a font
+/// expressing a right-to-left adjustment writes XPlacement *and* XAdvance
+/// into the same value record — the placement opens the gap by moving the
+/// ink, the advance keeps the rest of the line where it was — so the font
+/// author has already written the correction for the reversal, and the value
+/// belongs exactly where the record put it. Moving it again would apply the
+/// same correction twice.
 fn recharge_kerns(glyphs: &mut [ShapedGlyph], order: &[usize]) {
     let kerns: Vec<f32> = glyphs.iter().map(|g| g.kern_next).collect();
     if kerns.iter().all(|&k| k == 0.0) {

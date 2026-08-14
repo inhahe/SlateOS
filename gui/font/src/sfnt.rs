@@ -61,6 +61,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 use core::fmt;
 
+use crate::gpos::{Adjust, Positioning, Run};
 use crate::gsub::{SubGlyph, Substitutions};
 use crate::kern::Kerning;
 use crate::mark::MarkPositioning;
@@ -432,10 +433,19 @@ pub struct Face {
     /// one whose `GSUB` carries no default-on feature reaching a lookup type
     /// this can apply.
     substitutions: Option<Substitutions>,
-    /// Where combining marks attach, from `GPOS` `mark`/`mkmk` and `GDEF`.
-    /// `None` for the many faces that only ever expect precomposed
-    /// characters.
+    /// Which glyphs this face calls combining marks, from `GPOS` mark coverage
+    /// and `GDEF` glyph classes. `None` for the many faces that only ever
+    /// expect precomposed characters.
+    ///
+    /// Kept apart from [`positioning`](Self::positioning) because the two
+    /// answer different questions: this one is asked about a bare glyph — *is
+    /// this a mark, whose advance must be dropped* — which is a property of the
+    /// face, while the pass is asked about a whole run.
     marks: Option<MarkPositioning>,
+    /// Every `GPOS` lookup the positioning pass can apply, resolved once per
+    /// script the face registers. `None` for a face with no `GPOS`, or one
+    /// whose `GPOS` reaches nothing of a type the pass knows.
+    positioning: Option<Positioning>,
     /// Whether the file carries a `GPOS` table at all — which is a different
     /// question from whether any of the three things this crate reads out of
     /// it (kerning, `mark`, `mkmk`) is present. See
@@ -663,6 +673,8 @@ impl Face {
         // something has said which glyphs are marks.
         let substitutions = Substitutions::parse(&data, gsub, gdef);
         let marks = MarkPositioning::parse(&data, gpos, gdef);
+        // And again: the feature walk is per face, the selection per run.
+        let positioning = gpos.and_then(|span| Positioning::parse(&data, span, gdef));
 
         Ok(Self {
             metrics: FaceMetrics {
@@ -682,6 +694,7 @@ impl Face {
             kerning,
             substitutions,
             marks,
+            positioning,
             has_positioning: gpos.is_some(),
             data,
         })
@@ -1099,6 +1112,18 @@ impl Face {
         self.kerning.is_some()
     }
 
+    /// Whether this face's kerning lives somewhere [`position`](Self::position)
+    /// cannot reach — that is, in the legacy `kern` table.
+    ///
+    /// A shaper that runs the positioning pass must ask before also walking
+    /// pairs through [`kern_across`](Self::kern_across): a `GPOS` face's pairs
+    /// have already been charged by the pass, and charging them again would
+    /// double every kern.
+    #[must_use]
+    pub fn kerns_outside_gpos(&self) -> bool {
+        self.kerning.as_ref().is_some_and(Kerning::is_legacy)
+    }
+
     /// Apply this face's `GSUB` substitutions to `glyphs`, in place.
     ///
     /// The whole run goes in at once, because that is the unit a `GSUB` lookup
@@ -1149,26 +1174,27 @@ impl Face {
             .is_some_and(|m| m.is_mark(&self.data, glyph))
     }
 
-    /// How far `mark` must move from `base`'s origin to sit where the face
-    /// wants it, in font units, `y` upwards.
+    /// Position one run of glyphs with this face's `GPOS`.
     ///
-    /// The displacement is from the *base glyph's origin*, not from the pen
-    /// the mark would otherwise be drawn at — the caller knows how far the
-    /// pen has moved since the base and subtracts it.
+    /// One adjustment per glyph, in font units: what its advance became and how
+    /// far its image sits from the pen. Every lookup the run's script reaches is
+    /// applied, in the order the table lists them — see [`gpos`](crate::gpos)
+    /// for why that has to be one pass rather than one pass per effect.
+    ///
+    /// `None` when the face has no `GPOS` the pass can use, which leaves the
+    /// caller with the nominal advances it already had.
     #[must_use]
-    pub fn mark_on_base(&self, base: u16, mark: u16) -> Option<(i16, i16)> {
-        self.marks
-            .as_ref()
-            .and_then(|m| m.on_base(&self.data, base, mark))
+    pub(crate) fn position(&self, run: &Run<'_>) -> Option<Vec<Adjust>> {
+        Some(self.positioning.as_ref()?.apply(&self.data, run))
     }
 
-    /// The same, for a mark stacked on another mark, so that the second
-    /// accent of a pair clears the first instead of overprinting it.
+    /// Whether this face has any `GPOS` lookup the positioning pass can apply.
+    ///
+    /// Lets a shaper skip building the pass's inputs — an advance and a
+    /// mark flag per glyph — for the faces that would do nothing with them.
     #[must_use]
-    pub fn mark_on_mark(&self, below: u16, mark: u16) -> Option<(i16, i16)> {
-        self.marks
-            .as_ref()
-            .and_then(|m| m.on_mark(&self.data, below, mark))
+    pub(crate) fn has_gpos_lookups(&self) -> bool {
+        self.positioning.is_some()
     }
 
     /// Whether this face can tell a combining mark from a letter — because it

@@ -140,24 +140,6 @@ impl MarkPositioning {
             .any(|&sub| in_mark_coverage(data, sub, glyph))
     }
 
-    /// How far to move `mark` from the pen so that it sits on `base`, in font
-    /// units, `y` upwards.
-    ///
-    /// The displacement is measured from the base glyph's *origin*, not from
-    /// the pen the mark would otherwise be drawn at; the caller knows the
-    /// distance between those two and subtracts it.
-    pub(crate) fn on_base(&self, data: &[u8], base: u16, mark: u16) -> Option<(i16, i16)> {
-        self.base
-            .iter()
-            .find_map(|&sub| attachment(data, sub, base, mark))
-    }
-
-    /// The same, for a mark stacked on another mark.
-    pub(crate) fn on_mark(&self, data: &[u8], below: u16, mark: u16) -> Option<(i16, i16)> {
-        self.mkmk
-            .iter()
-            .find_map(|&sub| attachment(data, sub, below, mark))
-    }
 }
 
 /// Read one MarkBasePos or MarkMarkPos subtable.
@@ -166,7 +148,11 @@ impl MarkPositioning {
 /// *to*, the coverage of the mark, the mark-class count, then the mark array
 /// and the array of attachment points. Only the names differ (`base` vs
 /// `mark2`), so only one reader is needed.
-fn attachment(data: &[u8], sub: usize, base: u16, mark: u16) -> Option<(i16, i16)> {
+///
+/// The result is the mark's displacement from the base glyph's origin: where
+/// the base offers the attachment point, less where on the mark that point is
+/// meant to land.
+pub(crate) fn attachment(data: &[u8], sub: usize, base: u16, mark: u16) -> Option<(i16, i16)> {
     if u16_at(data, sub)? != 1 {
         return None;
     }
@@ -221,7 +207,7 @@ fn attachment(data: &[u8], sub: usize, base: u16, mark: u16) -> Option<(i16, i16
 /// (format 3), both of which are corrections at specific pixel sizes that
 /// this rasterizer does not apply. Ignoring them costs a fraction of a pixel
 /// at small sizes; misreading the format would cost the whole placement.
-fn anchor(data: &[u8], from: usize, offset: u16) -> Option<(i16, i16)> {
+pub(crate) fn anchor(data: &[u8], from: usize, offset: u16) -> Option<(i16, i16)> {
     if offset == 0 {
         return None;
     }
@@ -420,6 +406,26 @@ mod tests {
         out
     }
 
+    /// The mark-to-base attachment this face offers for `mark` on `base`.
+    ///
+    /// The lookup *walk* is [`gpos`](crate::gpos)'s job now — it has to be, so
+    /// that mark attachment is applied in lookup order alongside every other
+    /// kind of positioning. What is under test in this file is the subtable
+    /// reader, so these two helpers do the one thing the walk would do with a
+    /// fixture that has exactly one lookup: try each subtable in order.
+    fn on_base(m: &MarkPositioning, data: &[u8], base: u16, mark: u16) -> Option<(i16, i16)> {
+        m.base
+            .iter()
+            .find_map(|&sub| attachment(data, sub, base, mark))
+    }
+
+    /// The same, for a mark stacked on another mark.
+    fn on_mark(m: &MarkPositioning, data: &[u8], below: u16, mark: u16) -> Option<(i16, i16)> {
+        m.mkmk
+            .iter()
+            .find_map(|&sub| attachment(data, sub, below, mark))
+    }
+
     /// Base glyph 1 with an anchor at (500, 700); mark glyph 2 whose own
     /// anchor is at (100, 0), so it should move by (400, 700).
     fn acute_font() -> Vec<u8> {
@@ -431,7 +437,7 @@ mod tests {
     fn a_mark_moves_to_the_base_anchor() {
         let data = acute_font();
         let m = MarkPositioning::parse(&data, Some(span(0, data.len())), None).unwrap();
-        assert_eq!(m.on_base(&data, 1, 2), Some((400, 700)));
+        assert_eq!(on_base(&m, &data, 1, 2), Some((400, 700)));
     }
 
     #[test]
@@ -439,8 +445,8 @@ mod tests {
         let data = acute_font();
         let m = MarkPositioning::parse(&data, Some(span(0, data.len())), None).unwrap();
         // Glyph 3 is in neither coverage table.
-        assert_eq!(m.on_base(&data, 3, 2), None);
-        assert_eq!(m.on_base(&data, 1, 3), None);
+        assert_eq!(on_base(&m, &data, 3, 2), None);
+        assert_eq!(on_base(&m, &data, 1, 3), None);
     }
 
     #[test]
@@ -449,7 +455,7 @@ mod tests {
         let sub = mark_subtable(1, &[(2, 0, (100, 0))], &[(1, vec![None])]);
         let data = gpos_table(b"mark", LOOKUP_MARK_BASE, &sub);
         let m = MarkPositioning::parse(&data, Some(span(0, data.len())), None).unwrap();
-        assert_eq!(m.on_base(&data, 1, 2), None);
+        assert_eq!(on_base(&m, &data, 1, 2), None);
     }
 
     #[test]
@@ -462,8 +468,8 @@ mod tests {
         );
         let data = gpos_table(b"mark", LOOKUP_MARK_BASE, &sub);
         let m = MarkPositioning::parse(&data, Some(span(0, data.len())), None).unwrap();
-        assert_eq!(m.on_base(&data, 1, 2), Some((500, 700)));
-        assert_eq!(m.on_base(&data, 1, 3), Some((500, -200)));
+        assert_eq!(on_base(&m, &data, 1, 2), Some((500, 700)));
+        assert_eq!(on_base(&m, &data, 1, 3), Some((500, -200)));
     }
 
     #[test]
@@ -471,9 +477,9 @@ mod tests {
         let sub = mark_subtable(1, &[(3, 0, (0, 0))], &[(2, vec![Some((0, 900))])]);
         let data = gpos_table(b"mkmk", LOOKUP_MARK_MARK, &sub);
         let m = MarkPositioning::parse(&data, Some(span(0, data.len())), None).unwrap();
-        assert_eq!(m.on_mark(&data, 2, 3), Some((0, 900)));
+        assert_eq!(on_mark(&m, &data, 2, 3), Some((0, 900)));
         // …and is not reachable through the mark-to-base path.
-        assert_eq!(m.on_base(&data, 2, 3), None);
+        assert_eq!(on_base(&m, &data, 2, 3), None);
     }
 
     #[test]
@@ -541,8 +547,8 @@ mod tests {
         for len in 0..data.len() {
             let cut = &data[..len];
             if let Some(m) = MarkPositioning::parse(cut, Some(span(0, len)), None) {
-                let _ = m.on_base(cut, 1, 2);
-                let _ = m.on_mark(cut, 1, 2);
+                let _ = on_base(&m, cut, 1, 2);
+                let _ = on_mark(&m, cut, 1, 2);
                 let _ = m.is_mark(cut, 2);
             }
         }
@@ -562,7 +568,7 @@ mod tests {
         data[base_array + 3] = 0xF0;
         let m = MarkPositioning::parse(&data, Some(span(0, data.len())), None).unwrap();
         assert_eq!(
-            m.on_base(&data, 1, 2),
+            on_base(&m, &data, 1, 2),
             None,
             "an anchor offset past the end of the font must not resolve"
         );

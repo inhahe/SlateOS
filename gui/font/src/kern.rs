@@ -63,17 +63,10 @@
 
 use alloc::vec::Vec;
 
-use crate::otl::{
-    MAX_SUBTABLES, binary_search, coverage_index, feature_lookups, glyph_class, value_size,
-};
+use crate::gpos::pair_values;
+use crate::otl::{MAX_SUBTABLES, binary_search, feature_lookups};
 use crate::sfnt::{Span, i16_at, u16_at};
 use crate::skip::{Definitions, Skipper};
-
-/// Value-record flag for a horizontal advance adjustment on the first glyph.
-const X_ADVANCE: u16 = 0x0004;
-/// The value-record flags that come *before* `X_ADVANCE`, whose presence
-/// shifts where the advance sits within the record.
-const BEFORE_X_ADVANCE: u16 = 0x0003;
 
 /// `GPOS` lookup type for pair positioning.
 const LOOKUP_PAIR_POS: u16 = 2;
@@ -172,6 +165,22 @@ impl Kerning {
     /// OpenType applies lookups in order — a later lookup positions the output
     /// of an earlier one, so for a single adjustment the earliest match is the
     /// one that would have been applied.
+    /// Whether this kerning came from the legacy `kern` table rather than from
+    /// `GPOS`.
+    ///
+    /// The distinction decides whether a shaper that runs the full `GPOS`
+    /// positioning pass should *also* walk pairs through here. It should not
+    /// when the pairs are `GPOS`'s: the pass has already applied those lookups,
+    /// in order and with every other lookup interleaved, and charging them a
+    /// second time would double every kern. It must when they are the legacy
+    /// table's, since the pass cannot see that table at all — which is also
+    /// where HarfBuzz draws the line (`hb_ot_layout_has_kerning`, consulted
+    /// only when `GPOS` carries no `kern` feature).
+    #[must_use]
+    pub(crate) fn is_legacy(&self) -> bool {
+        self.kind == Kind::Legacy
+    }
+
     pub(crate) fn pair(&self, data: &[u8], left: u16, right: u16, between: &[u16]) -> i16 {
         for group in &self.lookups {
             if !between.is_empty() {
@@ -222,89 +231,22 @@ fn parse_gpos(data: &[u8], span: Span) -> Option<Vec<Group>> {
     (!out.is_empty()).then_some(out)
 }
 
-/// Look `left`/`right` up in one `PairPos` subtable.
+/// Look `left`/`right` up in one `PairPos` subtable, keeping only the first
+/// glyph's advance adjustment — which is the whole of kerning, and all a
+/// pair-at-a-time interface can express.
+///
+/// The subtable itself is decoded by [`pair_values`], which is the same reader
+/// the run-based positioning pass uses. Two readers for one table format is one
+/// too many: a disagreement between them would show up as a label that measures
+/// differently from the way it draws.
+///
+/// A subtable that has a record for the pair ends the search even when the
+/// value is zero, and even when its value format carries no advance at all: the
+/// font has stated what happens to this pair, and a later subtable restating it
+/// would never have been reached.
 fn pair_pos(data: &[u8], sub: usize, left: u16, right: u16) -> Option<i16> {
-    let format = u16_at(data, sub)?;
-    let coverage = sub.checked_add(usize::from(u16_at(data, sub.checked_add(2)?)?))?;
-    let index = coverage_index(data, coverage, left)?;
-    let value1 = u16_at(data, sub.checked_add(4)?)?;
-    let value2 = u16_at(data, sub.checked_add(6)?)?;
-    match format {
-        1 => pair_pos_1(data, sub, index, right, value1, value2),
-        2 => pair_pos_2(data, sub, left, right, value1, value2),
-        _ => None,
-    }
-}
-
-/// Format 1: one explicit list of second glyphs per covered first glyph.
-fn pair_pos_1(
-    data: &[u8],
-    sub: usize,
-    index: u16,
-    right: u16,
-    value1: u16,
-    value2: u16,
-) -> Option<i16> {
-    let count = u16_at(data, sub.checked_add(8)?)?;
-    if index >= count {
-        return None;
-    }
-    let at = sub
-        .checked_add(10)?
-        .checked_add(usize::from(index).checked_mul(2)?)?;
-    let set = sub.checked_add(usize::from(u16_at(data, at)?))?;
-    let pairs = u16_at(data, set)?;
-    let stride = 2usize
-        .checked_add(value_size(value1))?
-        .checked_add(value_size(value2))?;
-    let records = set.checked_add(2)?;
-
-    // The second glyphs are sorted, which is what makes a font with thousands
-    // of pairs per glyph affordable to look up.
-    let found = binary_search(usize::from(pairs), |i| {
-        let rec = records.checked_add(i.checked_mul(stride)?)?;
-        Some(u16_at(data, rec)?.cmp(&right))
-    })?;
-    let record = records.checked_add(found.checked_mul(stride)?)?;
-    x_advance(data, record.checked_add(2)?, value1)
-}
-
-/// Format 2: a grid indexed by two glyph classes, which is how a font
-/// expresses "every capital before every round lowercase" without listing the
-/// product of the two sets.
-fn pair_pos_2(
-    data: &[u8],
-    sub: usize,
-    left: u16,
-    right: u16,
-    value1: u16,
-    value2: u16,
-) -> Option<i16> {
-    let class_def1 = sub.checked_add(usize::from(u16_at(data, sub.checked_add(8)?)?))?;
-    let class_def2 = sub.checked_add(usize::from(u16_at(data, sub.checked_add(10)?)?))?;
-    let class1_count = u16_at(data, sub.checked_add(12)?)?;
-    let class2_count = u16_at(data, sub.checked_add(14)?)?;
-    let c1 = glyph_class(data, class_def1, left)?;
-    let c2 = glyph_class(data, class_def2, right)?;
-    if c1 >= class1_count || c2 >= class2_count {
-        return None;
-    }
-    let stride = value_size(value1).checked_add(value_size(value2))?;
-    let cell = usize::from(c1)
-        .checked_mul(usize::from(class2_count))?
-        .checked_add(usize::from(c2))?
-        .checked_mul(stride)?;
-    x_advance(data, sub.checked_add(16)?.checked_add(cell)?, value1)
-}
-
-/// Read the horizontal advance adjustment out of a value record, or `None` if
-/// the record does not carry one.
-fn x_advance(data: &[u8], record: usize, format: u16) -> Option<i16> {
-    if format & X_ADVANCE == 0 {
-        return None;
-    }
-    let skip = value_size(format & BEFORE_X_ADVANCE);
-    i16_at(data, record.checked_add(skip)?)
+    let (first, _, _) = pair_values(data, sub, left, right)?;
+    Some(first.x_advance)
 }
 
 // ---------------------------------------------------------------------------
@@ -393,6 +335,12 @@ mod tests {
         Span { off, len }
     }
 
+    /// The `valueFormat` bit for XAdvance, which is the only field these
+    /// fixtures carry. Written out here rather than imported because it is
+    /// part of the *bytes being built*, not of the code under test — the
+    /// fixture has to say what it wrote even if the reader's name for it moves.
+    const X_ADVANCE: u16 = 0x0004;
+
     /// A coverage format 1 table listing `glyphs`.
     fn coverage1(glyphs: &[u16]) -> Vec<u8> {
         let mut t = vec![];
@@ -402,94 +350,6 @@ mod tests {
             t.extend(be16(*g));
         }
         t
-    }
-
-    #[test]
-    fn coverage_format_1_reports_the_position_in_the_list() {
-        let t = coverage1(&[10, 20, 30, 40]);
-        assert_eq!(coverage_index(&t, 0, 10), Some(0));
-        assert_eq!(coverage_index(&t, 0, 30), Some(2));
-        assert_eq!(coverage_index(&t, 0, 40), Some(3));
-        assert_eq!(coverage_index(&t, 0, 35), None);
-        assert_eq!(coverage_index(&t, 0, 0), None);
-        assert_eq!(coverage_index(&t, 0, 99), None);
-    }
-
-    #[test]
-    fn coverage_format_2_counts_through_the_ranges() {
-        // Two ranges: 10..=12 at coverage 0..=2, then 50..=51 at 3..=4.
-        let mut t = vec![];
-        t.extend(be16(2));
-        t.extend(be16(2));
-        t.extend(be16(10));
-        t.extend(be16(12));
-        t.extend(be16(0));
-        t.extend(be16(50));
-        t.extend(be16(51));
-        t.extend(be16(3));
-        assert_eq!(coverage_index(&t, 0, 10), Some(0));
-        assert_eq!(coverage_index(&t, 0, 12), Some(2));
-        assert_eq!(coverage_index(&t, 0, 50), Some(3));
-        assert_eq!(coverage_index(&t, 0, 51), Some(4));
-        assert_eq!(coverage_index(&t, 0, 13), None);
-    }
-
-    #[test]
-    fn a_glyph_no_class_definition_mentions_is_in_class_zero() {
-        // Format 1 covering 10..=12 with classes 1, 2, 1.
-        let mut t = vec![];
-        t.extend(be16(1));
-        t.extend(be16(10));
-        t.extend(be16(3));
-        t.extend(be16(1));
-        t.extend(be16(2));
-        t.extend(be16(1));
-        assert_eq!(glyph_class(&t, 0, 10), Some(1));
-        assert_eq!(glyph_class(&t, 0, 11), Some(2));
-        // Class 0 is a real class the grid can kern, so "not listed" must not
-        // become "no answer" — that would silently drop every pair whose
-        // second glyph is unclassed.
-        assert_eq!(glyph_class(&t, 0, 9), Some(0));
-        assert_eq!(glyph_class(&t, 0, 13), Some(0));
-    }
-
-    #[test]
-    fn class_definition_format_2_reads_its_ranges() {
-        let mut t = vec![];
-        t.extend(be16(2));
-        t.extend(be16(2));
-        t.extend(be16(10));
-        t.extend(be16(19));
-        t.extend(be16(3));
-        t.extend(be16(30));
-        t.extend(be16(30));
-        t.extend(be16(7));
-        assert_eq!(glyph_class(&t, 0, 15), Some(3));
-        assert_eq!(glyph_class(&t, 0, 30), Some(7));
-        assert_eq!(glyph_class(&t, 0, 25), Some(0));
-    }
-
-    #[test]
-    fn a_value_records_size_is_two_bytes_per_set_flag() {
-        assert_eq!(value_size(0), 0);
-        assert_eq!(value_size(X_ADVANCE), 2);
-        // XPlacement + YPlacement + XAdvance.
-        assert_eq!(value_size(0x0007), 6);
-        assert_eq!(value_size(0xFFFF), 32);
-    }
-
-    #[test]
-    fn the_advance_is_found_past_whatever_precedes_it_in_the_record() {
-        // A record carrying XPlacement then XAdvance: the advance is second.
-        let mut rec = vec![];
-        rec.extend(be16(111));
-        rec.extend((-40_i16).to_be_bytes());
-        assert_eq!(x_advance(&rec, 0, 0x0005), Some(-40));
-        // The same bytes read as an advance-only record give the placement,
-        // which is why the flags have to be honoured rather than assumed.
-        assert_eq!(x_advance(&rec, 0, X_ADVANCE), Some(111));
-        // A record with no advance at all contributes nothing.
-        assert_eq!(x_advance(&rec, 0, 0x0001), None);
     }
 
     /// A `PairPos` format 1 subtable kerning 'A' (gid 1) before 'V' (gid 2) by

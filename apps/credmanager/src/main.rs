@@ -24,6 +24,7 @@ use guitk::color::Color;
 use guitk::event::{Event, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
 use guitk::style::CornerRadii;
+use guitk::text;
 
 // =============================================================================
 // Catppuccin Mocha palette
@@ -1600,17 +1601,32 @@ fn draw_separator(rt: &mut RenderTree, x: f32, y: f32, width: f32) {
     });
 }
 
-/// Render a small colored badge with text.
+/// Width of the badge `draw_badge` draws for `label`.
+///
+/// Callers that lay something out beside a badge — the "* Starred" marker, the
+/// entry name in the audit list, the tag strip's wrap test — need the badge's
+/// width *before* it exists on screen. Each of them used to re-derive it from
+/// `label.len()`, and they had already drifted apart: the tag strip advanced by
+/// `len * 7.5 + 16` while the badge it was pacing was drawn `len * 7.0 + 12`
+/// wide, and the audit list allowed 20 px of padding for a badge drawn with 12.
+/// One function, measured in the weight the label is actually drawn in, is the
+/// only arrangement in which the two can't disagree.
+fn badge_width(label: &str) -> f32 {
+    text::measure(label, SMALL_FONT_SIZE, FontWeightHint::Bold) + 12.0
+}
+
+/// Render a small colored badge with text. Returns the width it drew, so a
+/// caller can lay out whatever follows without guessing at it.
 fn draw_badge(
     rt: &mut RenderTree,
     x: f32, y: f32,
-    text: &str, bg: Color, fg: Color,
-) {
-    let text_width = text.len() as f32 * 7.0;
-    let badge_w = text_width + 12.0;
+    label: &str, bg: Color, fg: Color,
+) -> f32 {
+    let badge_w = badge_width(label);
     let badge_h = 20.0;
     draw_rect(rt, x, y, badge_w, badge_h, bg, 4.0);
-    draw_text(rt, x + 6.0, y + 3.0, text, fg, SMALL_FONT_SIZE, FontWeightHint::Bold, None);
+    draw_text(rt, x + 6.0, y + 3.0, label, fg, SMALL_FONT_SIZE, FontWeightHint::Bold, None);
+    badge_w
 }
 
 /// Render a toolbar-style button.
@@ -1620,7 +1636,7 @@ fn draw_badge(
 fn draw_button(
     rt: &mut RenderTree,
     x: f32, y: f32, w: f32, h: f32,
-    text: &str, bg: Color, fg: Color,
+    label: &str, bg: Color, fg: Color,
     hovered: bool,
 ) {
     let actual_bg = if hovered {
@@ -1629,9 +1645,17 @@ fn draw_button(
         bg
     };
     draw_rect(rt, x, y, w, h, actual_bg, CORNER_RADIUS);
-    let text_x = x + (w - text.len() as f32 * 7.5) / 2.0;
+    // Centring is where a guessed width shows up worst: half the error goes
+    // into the offset, and it grows with the label, so the longest label on a
+    // toolbar is the one that visibly sits off-centre.
+    let text_x = text::center_x(label, x + w / 2.0, DEFAULT_FONT_SIZE, FontWeightHint::Regular);
     let text_y = y + (h - DEFAULT_FONT_SIZE) / 2.0;
-    draw_text(rt, text_x, text_y, text, fg, DEFAULT_FONT_SIZE, FontWeightHint::Regular, None);
+    draw_text(rt, text_x, text_y, label, fg, DEFAULT_FONT_SIZE, FontWeightHint::Regular, None);
+}
+
+/// Width of a `draw_button` sized to fit `label` with `pad` px each side.
+fn button_width(label: &str, pad: f32) -> f32 {
+    text::measure(label, DEFAULT_FONT_SIZE, FontWeightHint::Regular) + pad * 2.0
 }
 
 /// Render a progress/strength bar.
@@ -1947,8 +1971,11 @@ fn render_entry_detail(rt: &mut RenderTree, state: &AppState, width: f32, height
         Some(e) => e,
         None => {
             // Empty state
-            draw_text(rt, x_start + panel_width / 2.0 - 80.0, y_start + panel_height / 2.0,
-                      "Select an entry", OVERLAY0, HEADING_FONT_SIZE,
+            let empty = "Select an entry";
+            let empty_x = text::center_x(empty, x_start + panel_width / 2.0,
+                                         HEADING_FONT_SIZE, FontWeightHint::Light);
+            draw_text(rt, empty_x, y_start + panel_height / 2.0,
+                      empty, OVERLAY0, HEADING_FONT_SIZE,
                       FontWeightHint::Light, None);
             return;
         }
@@ -1964,10 +1991,11 @@ fn render_entry_detail(rt: &mut RenderTree, state: &AppState, width: f32, height
 
     // Entry type badge + name
     let badge_color = entry.entry_type().badge_color();
-    draw_badge(rt, x_start + pad, y, entry.entry_type().label(), badge_color, BASE);
+    let type_badge_w =
+        draw_badge(rt, x_start + pad, y, entry.entry_type().label(), badge_color, BASE);
 
     if entry.starred {
-        draw_text(rt, x_start + pad + entry.entry_type().label().len() as f32 * 7.0 + 24.0,
+        draw_text(rt, x_start + pad + type_badge_w + 12.0,
                   y + 2.0, "* Starred", YELLOW, SMALL_FONT_SIZE,
                   FontWeightHint::Regular, None);
     }
@@ -2174,7 +2202,7 @@ fn render_entry_detail(rt: &mut RenderTree, state: &AppState, width: f32, height
 
         let mut tag_x = field_label_x;
         for tag in &entry.tags {
-            let tag_w = tag.len() as f32 * 7.5 + 16.0;
+            let tag_w = badge_width(tag);
             if tag_x + tag_w > x_start + panel_width - pad {
                 tag_x = field_label_x;
                 y += 26.0;
@@ -2306,7 +2334,7 @@ fn render_generator_panel(rt: &mut RenderTree, state: &AppState, width: f32, hei
         let is_active = state.password_generator.mode == *mode;
         let bg = if is_active { BLUE } else { SURFACE1 };
         let fg = if is_active { BASE } else { TEXT_COLOR };
-        let btn_w = label.len() as f32 * 8.5 + 20.0;
+        let btn_w = button_width(label, 10.0);
         draw_button(rt, mode_x, y, btn_w, 28.0, label, bg, fg, false);
         mode_x += btn_w + 8.0;
     }
@@ -2541,15 +2569,14 @@ fn render_audit_panel(rt: &mut RenderTree, state: &AppState, width: f32, height:
                   SURFACE0, 4.0);
 
         // Issue severity badge
-        draw_badge(rt, x_start + pad + 8.0, y + 8.0, issue.issue.label(),
-                   issue_color, BASE);
+        let severity_w = draw_badge(rt, x_start + pad + 8.0, y + 8.0, issue.issue.label(),
+                                    issue_color, BASE);
 
-        // Entry name
-        let badge_width = issue.issue.label().len() as f32 * 7.0 + 20.0;
-        draw_text(rt, x_start + pad + badge_width + 16.0, y + 10.0,
+        // Entry name, laid out from the width the badge actually drew.
+        draw_text(rt, x_start + pad + 8.0 + severity_w + 16.0, y + 10.0,
                   &issue.entry_name, TEXT_COLOR, DEFAULT_FONT_SIZE,
                   FontWeightHint::Regular,
-                  Some(panel_width - pad * 2.0 - badge_width - 24.0));
+                  Some(panel_width - pad * 2.0 - severity_w - 32.0));
 
         y += 42.0;
     }
@@ -2585,16 +2612,22 @@ fn render_lock_screen(rt: &mut RenderTree, state: &AppState, width: f32, height:
     draw_rect(rt, px, py, panel_w, panel_h, SURFACE0, 12.0);
 
     // Lock icon
-    draw_text(rt, center_x - 10.0, py + 30.0, "[=]", BLUE, 24.0,
-              FontWeightHint::Bold, None);
+    draw_text(rt, text::center_x("[=]", center_x, 24.0, FontWeightHint::Bold), py + 30.0,
+              "[=]", BLUE, 24.0, FontWeightHint::Bold, None);
 
-    // Vault name
-    draw_text(rt, center_x - state.vault.name.len() as f32 * 5.0, py + 70.0,
+    // Vault name. A vault named in any non-ASCII script used to drift left of
+    // centre by half its excess byte count, since the offset was `len * 5.0`.
+    let name_x = text::center_x(&state.vault.name, center_x,
+                                HEADING_FONT_SIZE, FontWeightHint::Bold);
+    draw_text(rt, name_x, py + 70.0,
               &state.vault.name, TEXT_COLOR, HEADING_FONT_SIZE,
               FontWeightHint::Bold, None);
 
     // Instruction
-    draw_text(rt, center_x - 80.0, py + 100.0, "Enter master password",
+    let instruction = "Enter master password";
+    let instruction_x =
+        text::center_x(instruction, center_x, DEFAULT_FONT_SIZE, FontWeightHint::Regular);
+    draw_text(rt, instruction_x, py + 100.0, instruction,
               SUBTEXT0, DEFAULT_FONT_SIZE, FontWeightHint::Regular, None);
 
     // Password input field
@@ -2616,8 +2649,10 @@ fn render_lock_screen(rt: &mut RenderTree, state: &AppState, width: f32, height:
 
     // Error message
     if state.unlock_failed {
-        draw_text(rt, center_x - 60.0, input_y + input_h + 8.0,
-                  "Incorrect password", RED, SMALL_FONT_SIZE,
+        let error = "Incorrect password";
+        let error_x = text::center_x(error, center_x, SMALL_FONT_SIZE, FontWeightHint::Regular);
+        draw_text(rt, error_x, input_y + input_h + 8.0,
+                  error, RED, SMALL_FONT_SIZE,
                   FontWeightHint::Regular, None);
     }
 
@@ -4062,6 +4097,67 @@ mod tests {
     fn test_wordlist_all_lowercase() {
         for word in WORDLIST {
             assert_eq!(*word, word.to_ascii_lowercase(), "Word not lowercase: {}", word);
+        }
+    }
+
+    // == Text measurement ======================================================
+
+    /// A badge's label has to fit inside it with its 6 px of padding on each
+    /// side, in the bold weight the label is actually drawn in.
+    #[test]
+    fn badge_labels_fit_their_badges() {
+        for label in ["Login", "Note", "Card", "Identity", "SSH Key", "Weak", "Reused"] {
+            let w = badge_width(label);
+            let drawn = text::measure(label, SMALL_FONT_SIZE, FontWeightHint::Bold);
+            assert!(drawn + 12.0 <= w + 0.01, "{label:?} overflows its badge");
+            assert!(w > 12.0, "{label:?} produced an empty badge");
+        }
+    }
+
+    /// Everything laid out beside a badge sizes it with the same function the
+    /// badge itself uses. Two separate estimates had already drifted apart:
+    /// the tag strip paced its wrap at `len * 7.5 + 16` while the badge it was
+    /// pacing was drawn `len * 7.0 + 12` wide, so a row of tags wrapped one
+    /// tag early and left a gap on the right.
+    #[test]
+    fn a_badge_is_measured_the_same_way_wherever_it_is_measured() {
+        let mut rt = RenderTree::new();
+        for label in ["Login", "Identity", "Compromised"] {
+            let drawn = draw_badge(&mut rt, 0.0, 0.0, label, BLUE, BASE);
+            assert!(
+                (drawn - badge_width(label)).abs() < f32::EPSILON,
+                "{label:?}: drawn {drawn} but laid out {}",
+                badge_width(label)
+            );
+        }
+    }
+
+    /// A badge is measured in characters, not UTF-8 bytes.
+    #[test]
+    fn badge_width_is_not_driven_by_byte_length() {
+        // Six characters, nine bytes. A byte-count estimate would make this
+        // half again as wide as the six-character ASCII label beside it.
+        let accented = badge_width("Résumé");
+        let ascii = badge_width("Resume");
+        assert!(
+            (accented - ascii).abs() < ascii * 0.25,
+            "an accented label ({accented}) should measure close to its \
+             unaccented twin ({ascii}), not to its byte count"
+        );
+    }
+
+    /// A button label is centred by measuring it, so the offset does not carry
+    /// half of a guessed width's error — which is what made the longest label
+    /// on a toolbar the one that visibly sat off-centre.
+    #[test]
+    fn button_labels_are_centred_on_their_buttons() {
+        for label in ["Random", "Pronounceable", "Passphrase", "Unlock"] {
+            let (x, w) = (100.0, button_width(label, 10.0));
+            let tx = text::center_x(label, x + w / 2.0, DEFAULT_FONT_SIZE, FontWeightHint::Regular);
+            let left = tx - x;
+            let right = (x + w) - (tx + text::measure(label, DEFAULT_FONT_SIZE, FontWeightHint::Regular));
+            assert!((left - right).abs() < 0.01, "{label:?} sits off-centre by {}", left - right);
+            assert!(left >= 0.0, "{label:?} overflows its button");
         }
     }
 }

@@ -61913,3 +61913,47 @@ Instrumentation is still the majority: `ktrace_pair` 86 + `sclatency_pair` 79 =
 and close to the ~2× measurement floor above, so further work here should
 target *whether* both tracers run on every syscall by default rather than
 shaving either one.
+
+### CORRECTION — `isr_latency` and `pick_next` were never regressions
+
+I flagged `isr_latency` ×2.34 and `pick_next` ×1.76 above as movements "far
+exceeding the +29% suite drift, so not explained by it". **That was wrong, and
+the error was mine: I treated a two-boot comparison as if one of the two boots
+were a baseline.** Normalising the last six boots against their own median
+shows one boot was globally, anomalously *fast*:
+
+| boot | whole-suite factor (64 benchmarks) | `syscall_dispatch` |
+|---|---|---|
+| −6 | ×1.040 | 691 |
+| −5 | ×1.026 | 697 |
+| −4 | ×0.990 | 699 |
+| **−3** | **×0.775** | **525** |
+| −2 | ×1.000 | 393 |
+| −1 | ×1.000 | 303 |
+
+Boot −3 ran ~23% faster than every other boot *across the board* — host-side,
+not ours. Per-benchmark, `isr_latency` reads 45493, 44683, 35843, **19065**,
+44619, 44413 and `pick_next` reads 955, 1037, 684, **443**, 781, 749. Neither
+regressed; both returned to normal from an outlier. The flag is withdrawn, and
+`sched_pick_next` (40, 41, 40, **31**, 40, 41) shows the same signature.
+
+**Two consequences, both worth keeping.**
+
+*The drift adjustment was right for the right reason.* Boot −3's ×0.775 is the
+reciprocal of the ×1.290 median I measured going −3 → −2, and 525 ÷ 0.775 ≈ 677
+lands squarely in the 691–699 band the three preceding boots recorded for
+`syscall_dispatch`. Median-of-suite normalisation recovered the true baseline
+from a boot that was uniformly wrong by 23%.
+
+*The headline number is bigger than any single step suggested.* Measured in
+comparable units, `syscall_dispatch` has gone from a stable ~695 ns (three
+consecutive boots: 691, 697, 699) to **303 ns — a 2.3× speedup, −392 ns** —
+across the scfilter and instrumentation fixes together. Against the 200 ns
+target that is 348% → **152%**. The per-change figures reported above (−132,
+−90) are each correct within their own boot pair; they simply do not add up to
+the total because one of the pairs was measured against the fast boot.
+
+**Rule going forward: never baseline against a single boot.** Normalise the
+candidate boot against the median of the recent history before calling anything
+a regression or an improvement. A single boot on this host can be off by ±25%
+uniformly, which is larger than most of the effects being chased.

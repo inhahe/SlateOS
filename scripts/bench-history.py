@@ -494,6 +494,128 @@ def global_drift(previous_entries, current):
     return statistics.median(ratios)
 
 
+#: How many recent same-host/same-profile records form the median that a single
+#: run is judged against.  Enough to outvote one or two odd boots; short enough
+#: that a real, permanent speed-up stops being treated as an anomaly after a
+#: few runs.
+SPEED_WINDOW = 8
+
+#: A run whose whole-suite factor sits this far from the historical median is an
+#: outlier: not wrong, but every *absolute* number in it is scaled, so it must
+#: not be used as a baseline without saying so.
+OUTLIER_PCT = 15.0
+
+
+def per_benchmark_median(records):
+    """Median value of each benchmark across `records`.
+
+    The point of a *per-benchmark* median (rather than one global factor per
+    record) is that it survives benchmarks appearing and disappearing across
+    the window, which happens whenever the suite grows.
+    """
+    acc = {}
+    for record in records:
+        for name, value in record.get("entries", {}).items():
+            if value and value > 0:
+                acc.setdefault(name, []).append(value)
+    return {name: statistics.median(vals) for name, vals in acc.items()}
+
+
+def speed_factor(entries, medians):
+    """This run's whole-suite speed relative to `medians`, or None.
+
+    `1.0` means typical for this host; `0.8` means the whole suite ran 20%
+    faster than usual, which is a property of the *machine*, not the code.
+    """
+    ratios = [
+        value / median
+        for name, value in entries.items()
+        if value and value > 0 and (median := medians.get(name)) and median > 0
+    ]
+    if len(ratios) < MIN_SAMPLES_FOR_DRIFT:
+        return None
+    return statistics.median(ratios)
+
+
+def report_run_position(records, host, profile, current, previous):
+    """Say where this run and its baseline sit against the recent history.
+
+    Why this exists on top of `global_drift`
+    ----------------------------------------
+    `global_drift` compares this run to *the single previous run* and removes
+    the uniform factor between them.  That is the right correction and it
+    works -- but it is silent about which of the two runs was the odd one, and
+    it leaves the reader looking at raw before/after numbers drawn from a
+    baseline that may itself have been anomalous.
+
+    This is not hypothetical.  Replaying the committed release history through
+    this function gives x1.009, x1.010, x1.001, x0.975, **x0.759**, x1.000,
+    x1.000: the 2026-08-14T19:05 boot ran ~24% faster across all 64
+    benchmarks, for host-side reasons.  Two benchmarks were duly written up as
+    regressions (`isr_latency` x2.34, `pick_next` x1.76) on the *next* run,
+    when both had merely returned to normal from that boot, and a genuine 2.3x
+    improvement in `syscall_dispatch` was reported in pieces that did not add
+    up, because one piece was measured against the fast boot.  The drift
+    correction had done its job in every individual comparison; what was
+    missing was anybody saying "that baseline was 24% off".  (Both of those
+    write-ups now carry a CORRECTION in known-issues.md.)
+
+    So: label the outlier at the moment it is recorded, and label it again the
+    next time it is used as a baseline.  On that history the second rule fires
+    on exactly the run that produced the bogus write-ups.
+
+    The window is *causal* -- only records preceding the run being judged --
+    so a verdict never changes retroactively as later runs arrive, and the
+    number printed at boot is the number still printed a week later.
+    """
+    window = [
+        record for record in records
+        if record.get("host") == host and record_profile(record) == profile
+    ][-SPEED_WINDOW:]
+    if len(window) < 2:
+        return
+
+    medians = per_benchmark_median(window)
+    here = speed_factor(current, medians)
+    if here is None:
+        return
+
+    print(
+        f"  This run vs the median of the last {len(window)} run(s) on this "
+        # ASCII 'x', not the multiplication sign: this script's output is read
+        # on a cp1252 Windows console, where U+00D7 arrives as a replacement
+        # character and turns the one number that matters into "?0.041".
+        f"host: x{here:.3f} whole-suite."
+    )
+    if abs(here - 1.0) * 100.0 >= OUTLIER_PCT:
+        faster = "faster" if here < 1.0 else "slower"
+        print(
+            f"  !! OUTLIER RUN: everything measured {faster} than usual by "
+            f"{abs(here - 1.0) * 100.0:.0f}%."
+        )
+        print(
+            "     Treat every absolute number below as scaled by that factor. "
+            "Do not quote them"
+        )
+        print("     as the cost of anything, and do not use this run as a baseline.")
+
+    if previous is not None:
+        there = speed_factor(previous.get("entries", {}), medians)
+        if there is not None and abs(there - 1.0) * 100.0 >= OUTLIER_PCT:
+            print(
+                f"  !! The baseline this run is diffed against was itself an "
+                f"outlier (x{there:.3f})."
+            )
+            print(
+                "     Drift correction still cancels the uniform part, so the "
+                "percentages are"
+            )
+            print(
+                "     usable -- but the raw before/after values are not a fair "
+                "picture of either run."
+            )
+
+
 def diff(previous, current, threshold_pct):
     """Split benchmarks into regressed / improved / added / removed.
 
@@ -535,8 +657,17 @@ def diff(previous, current, threshold_pct):
     return regressed, improved, added, removed, drift
 
 
-def report(previous, current_entries, threshold_pct):
-    """Print the run-over-run comparison. Returns True if anything regressed."""
+def report(previous, current_entries, threshold_pct,
+           records=None, host=None, profile=LEGACY_PROFILE):
+    """Print the run-over-run comparison. Returns True if anything regressed.
+
+    `records`/`host`/`profile` are optional only so that callers interested
+    purely in the run-over-run diff (the tests, chiefly) need not construct a
+    history.  When they are supplied, the diff is additionally placed against
+    the recent history for this host -- see `report_run_position`, and note
+    that the run-over-run diff alone is what produced two written-up
+    regressions that never existed.
+    """
     current = {name: vals[0] for name, vals in current_entries.items()}
 
     # Run before the early return: the target cross-check is independent of
@@ -594,6 +725,12 @@ def report(previous, current_entries, threshold_pct):
             "  benchmark that moved relative to its peers is reported. See "
             "global_drift()."
         )
+
+    # After the drift line, because it answers the question the drift line
+    # raises ("drifted relative to what?") and before the regressed/improved
+    # lists, because it says whether those lists can be trusted at all.
+    if records is not None and host is not None:
+        report_run_position(records, host, profile, current, previous)
 
     if regressed:
         print(f"  REGRESSED (>{threshold_pct:g}% slower than the suite):")
@@ -698,7 +835,8 @@ def main(argv=None):
                   f"different optimisation level, different numbers).")
 
     canary = parse_canary(args.serial)
-    regressed = report(previous, current_entries, args.threshold)
+    regressed = report(previous, current_entries, args.threshold,
+                       records=records, host=host, profile=args.profile)
 
     # Reported *after* the comparison, so it qualifies the verdict the reader
     # has just seen rather than being buried above it.

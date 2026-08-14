@@ -357,6 +357,131 @@ def test_drift_needs_samples(bh):
           sorted(e[0] for e in regressed), ["b0", "b1", "b2"])
 
 
+def _run_position(bh, records, current, previous, host="h", profile="debug"):
+    """Capture what `report_run_position` prints, as a single string."""
+    import io
+    import contextlib
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        bh.report_run_position(records, host, profile, current, previous)
+    return buf.getvalue()
+
+
+def _history(bh, host, profile, *factors):
+    """Synthetic same-host history: one record per whole-suite speed factor.
+
+    Every benchmark in a record is scaled by the same factor, which is exactly
+    the shape of host-side drift: TCG is CPU-bound, so a loaded machine moves
+    the entire suite together.
+    """
+    base = {f"b{i}": 1000 + 10 * i for i in range(20)}
+    return [
+        {"host": host, "profile": profile,
+         "entries": {name: int(v * f) for name, v in base.items()}}
+        for f in factors
+    ]
+
+
+def test_run_position_flags_outlier_run(bh):
+    """A run that is uniformly fast must be labelled before it is quoted.
+
+    This is the regression test for the mistake that motivated the function:
+    six boots scored x1.040, x1.026, x0.990, *x0.775*, x1.000, x1.000 against
+    their own median, and two benchmarks were written up as regressions purely
+    for having returned to normal afterwards. The correction was never wrong;
+    nothing was *saying* that one of the two runs compared was 23% off.
+    """
+    records = _history(bh, "h", "debug", 1.0, 1.0, 1.0, 1.0)
+    typical = {name: v for name, v in records[-1]["entries"].items()}
+    fast = {name: int(v * 0.775) for name, v in typical.items()}
+
+    out = _run_position(bh, records, fast, records[-1])
+    check("uniformly fast run is called an outlier", "OUTLIER RUN" in out, True)
+    check("outlier run reports the direction", "faster" in out, True)
+    check("outlier run is refused as a baseline",
+          "do not use this run as a baseline" in out, True)
+    check("outlier run reports its factor", "x0.77" in out, True)
+    # The one number that matters must survive the terminal. This output is
+    # read on a cp1252 Windows console, where a U+00D7 multiplication sign
+    # arrives as a replacement character: "?0.041". Assert ASCII rather than
+    # normalising it away, or the test passes on output the reader cannot read.
+    check("the verdict is ASCII-only", out.isascii(), True)
+
+    out = _run_position(bh, records, typical, records[-1])
+    check("a typical run raises no warning", "!!" in out, False)
+    check("a typical run still states its position", "x1.000" in out, True)
+
+
+def test_run_position_flags_outlier_baseline(bh):
+    """An anomalous *baseline* must be called out too.
+
+    The reader is shown `before -> after` values in raw nanoseconds. If the
+    `before` came from a boot that ran 23% fast, those nanoseconds describe no
+    machine that exists, even though the percentages beside them are correct.
+    Labelling only the current run would catch this one boot and miss it on
+    every subsequent run that diffs against it.
+    """
+    records = _history(bh, "h", "debug", 1.0, 1.0, 1.0, 0.775)
+    # records[-1] *is* the fast boot, and is what the next run diffs against.
+    typical = {name: int(v / 0.775) for name, v in records[-1]["entries"].items()}
+    out = _run_position(bh, records, typical, records[-1])
+    check("an outlier baseline is called out",
+          "baseline this run is diffed against was itself an outlier" in out,
+          True)
+    check("outlier baseline keeps the percentages usable",
+          "percentages" in out, True)
+    check("the outlier-baseline verdict is ASCII-only", out.isascii(), True)
+
+
+def test_run_position_needs_history(bh):
+    """Below the evidence floor, say nothing rather than something shaky."""
+    single = _history(bh, "h", "debug", 1.0)
+    check("one record is not a median",
+          _run_position(bh, single, single[0]["entries"], None), "")
+
+    # Enough records, but too few benchmarks in common to average over: the
+    # same floor `global_drift` uses, for the same reason.
+    thin = [{"host": "h", "profile": "debug", "entries": {"a": 100, "b": 200}}
+            for _ in range(4)]
+    check("too few comparable benchmarks yields no verdict",
+          _run_position(bh, thin, {"a": 100, "b": 200}, thin[-1]), "")
+
+    # Other hosts and other profiles are not evidence about this one.
+    foreign = (_history(bh, "other", "debug", 1.0, 1.0, 1.0)
+               + _history(bh, "h", "release", 1.0, 1.0, 1.0))
+    check("another host's or profile's runs are not a baseline",
+          _run_position(bh, foreign, foreign[0]["entries"], None), "")
+
+
+def test_run_position_wired_into_report(bh):
+    """The check must actually run in the real path, not merely exist.
+
+    A diagnostic that is defined and never called is indistinguishable from
+    one that always passes -- which is how the bug it detects survived in the
+    first place.
+    """
+    import io
+    import contextlib
+    records = _history(bh, "h", "debug", 1.0, 1.0, 1.0, 1.0)
+    previous = records[-1]
+    fast = {name: (int(v * 0.775), 700, "OK", None, None)
+            for name, v in previous["entries"].items()}
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        bh.report(previous, fast, 25.0, records=records, host="h",
+                  profile="debug")
+    check("report() surfaces the outlier verdict",
+          "OUTLIER RUN" in buf.getvalue(), True)
+
+    # And without a history it must stay silent rather than fail: the
+    # parameters are optional.
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        bh.report(previous, fast, 25.0)
+    check("report() without a history omits the verdict",
+          "OUTLIER RUN" in buf.getvalue(), False)
+
+
 def test_baselines_crosscheck(bh, tmpdir):
     """The target cross-check must distinguish its three failure modes.
 
@@ -512,6 +637,10 @@ def main():
     test_history_still_loads(bh)
     test_drift_is_subtracted(bh)
     test_drift_needs_samples(bh)
+    test_run_position_flags_outlier_run(bh)
+    test_run_position_flags_outlier_baseline(bh)
+    test_run_position_needs_history(bh)
+    test_run_position_wired_into_report(bh)
     test_baselines_is_valid_toml()
     with tempfile.TemporaryDirectory() as tmpdir:
         test_baselines_crosscheck(bh, tmpdir)

@@ -1446,23 +1446,27 @@ pub(crate) fn gobbler_word(word: &Word, opts: crate::lexer::ParseOpts) -> Word {
 /// [`crate::interp::Shell::gobbled_subs`]'s existing `SingleQuoted` arm collects
 /// what is inside.
 ///
-/// [`crate::parser::dquote_word_from_source`] is the right reader twice over:
-/// double-quoted text is exactly what the run is to the scan, and every body it
-/// builds is [`crate::ast::CmdSubBody::Unread`] — nothing in here was read by a
-/// parser, so a body that will not parse must not be a parse error. Two runs are
-/// left alone: a backslash-escaped character (`a\*b`), whose source is not a
-/// quoted run at all and would re-print wrong, and one whose reading does not
-/// re-print to the very same bytes, which would move every tail after it.
+/// The reading is *not* one flat run, because the scan's state is not: a `"`
+/// inside the text clears its `quoted` outright — nothing about it nests — and
+/// after that a `'` or a `` ` `` opens a stretch the `$(` row cannot fire in.
+/// So [`crate::wordscan::gobbler_readable`] says which stretches the scan is
+/// reading in, only those are lexed, and what is between them is put back
+/// verbatim as [`WordPart::Literal`]: text the scan skipped holds nothing for
+/// it, and keeping the bytes is what lets the run re-print to its own source.
+///
+/// Two runs are left alone. A backslash-escaped character (`a\*b`) is a
+/// `SingleQuoted` whose source is not a quoted run at all, and would re-print
+/// wrong; and a reading that does not re-print to the very same bytes would
+/// move every tail after it, so it is dropped rather than trusted.
 fn fill_quoted_runs(parts: &mut [WordPart], dquoted: bool, opts: crate::lexer::ParseOpts) {
     for p in parts.iter_mut() {
         if let WordPart::SingleQuoted { text, escaped, parts: sub } = p {
             if dquoted
                 && sub.is_none()
                 && !*escaped
-                && let Ok(w) = crate::parser::dquote_word_from_source(text, opts)
-                && parts_src(&w.parts) == *text
+                && let Some(read) = gobbler_reading(text, opts)
             {
-                *sub = Some(w.parts);
+                *sub = Some(read);
             }
             // A run that has one already is a subscript's or a bound's, and its
             // reading is the same one — there is nothing further in to fill.
@@ -1472,6 +1476,34 @@ fn fill_quoted_runs(parts: &mut [WordPart], dquoted: bool, opts: crate::lexer::P
             fill_quoted_runs(w, dquoted || kind == Nested::Quoted, opts);
         }
     }
+}
+
+/// `text` as the gobbler reads it from inside `" … "`: each stretch
+/// [`crate::wordscan::gobbler_readable`] names lexed as double-quoted text, each
+/// stretch between them kept verbatim, or `None` when that does not re-print to
+/// the very bytes it was read from.
+fn gobbler_reading(text: BStr<'_>, opts: crate::lexer::ParseOpts) -> Option<Vec<WordPart>> {
+    let mut out: Vec<WordPart> = Vec::new();
+    let mut at = 0usize;
+    for r in crate::wordscan::gobbler_readable(text, true) {
+        // Whatever the last stretch ended before is inside `' … '` or
+        // `` ` … ` `` as far as the scan is concerned: it was skipped, so it
+        // holds nothing to collect and is carried as its own bytes.
+        if let Some(skipped) = text.get(at..r.start).filter(|s| !s.is_empty()) {
+            out.push(WordPart::Literal(Str::from(skipped)));
+        }
+        at = r.end;
+        // Double-quoted text is what the stretch *is* to the scan, and every
+        // body this builds is [`crate::ast::CmdSubBody::Unread`] — nothing here
+        // was read by a parser, so a body that will not parse must not be a
+        // parse error, only a diagnostic when the scan reaches it.
+        let w = crate::parser::dquote_word_from_source(text.get(r)?, opts).ok()?;
+        out.extend(w.parts);
+    }
+    if let Some(skipped) = text.get(at..).filter(|s| !s.is_empty()) {
+        out.push(WordPart::Literal(Str::from(skipped)));
+    }
+    (parts_src(&out) == text).then_some(out)
 }
 
 /// The sentinel-swap [`attach_tails_scoped`] runs once per kind of part that
@@ -2586,6 +2618,30 @@ mod tests {
         // quoted run in the source at all: filling it would change the text.
         let (plain, scoped) = words(r#""${z#\$(fi)}""#);
         assert_eq!(filled(&scoped), filled(&plain));
+        assert_eq!(word_src(&plain), word_src(&scoped));
+
+        // The `"` in this run clears the scan's `quoted`, and the `` ` `` then
+        // opens a stretch its `$(` row cannot fire in. So the run is read in
+        // stretches: the substitution is inside the skipped one and comes back
+        // as its own bytes, with nothing for the scan to collect.
+        let (plain, scoped) = words("\"${z#'a\"`$(fi)`'}\"");
+        let one = filled(&scoped);
+        let inner = one.first().and_then(Option::as_ref).expect("filled");
+        assert!(
+            !inner.iter().any(|p| matches!(p, WordPart::CommandSub { .. })),
+            "the substitution is in a stretch the scan skips: {inner:?}",
+        );
+        assert_eq!(word_src(&plain), word_src(&scoped));
+
+        // …and one character later the backquote has closed again, so the very
+        // same body *is* read.
+        let (plain, scoped) = words("\"${z#'a\"`x`$(fi)'}\"");
+        let one = filled(&scoped);
+        let inner = one.first().and_then(Option::as_ref).expect("filled");
+        assert!(
+            inner.iter().any(|p| matches!(p, WordPart::CommandSub { .. })),
+            "past the backquote the scan is reading again: {inner:?}",
+        );
         assert_eq!(word_src(&plain), word_src(&scoped));
     }
 }

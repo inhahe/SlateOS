@@ -4188,7 +4188,52 @@ Corpus: `a-backquote-body-inside-double-quotes-is-read-by-the-brace-scanner.sh`.
 Note the same walk reaches nothing inside a `<( … )` / `>( … )` body either,
 because `crate::unparse::nested_parts` returns no scope for a `ProcSub`.
 
-### TD-OILS-A-QUOTE-INSIDE-A-GOBBLED-BACKQUOTE-BODY-DOES-NOT-END-THE-RUN. `brace_gobbler`'s quoting state is flat, and osh's is nested — 2026-08-14 — ⚠️ OPEN
+### TD-OILS-AN-UNPARSEABLE-SUBSTITUTION-IN-AN-UNTERMINATED-DQUOTE-LOSES-TO-THE-EOF. bash blames the `$( … )`, osh blames the quote — 2026-08-14 — ⚠️ OPEN
+
+**Where:** `userspace/oils/src/lexer.rs`, `Lexer::read_double_quote_until` — it
+scans a `" … "` for its closing quote and raises the unterminated-quote error at
+end of input, having lexed the `$( … )` inside it as an *unread* body that no
+one ever parses. bash's `parse_matched_pair` instead calls `parse_comsub` the
+moment it meets `$(` (parse.y), so the substitution's own syntax error is raised
+first and the missing `"` is never reached.
+
+**Reproduce.**
+
+```sh
+( eval 'echo " $(fi)' ) 2>&1; echo "rc=$?"
+```
+
+| | bash 5.2.37 | osh |
+|---|---|---|
+| stderr | ``syntax error near unexpected token `fi'`` + ``` `echo " $(fi)' ``` | ``unexpected EOF while looking for matching `"'`` |
+| `$?` | 1 | 2 |
+
+The same with a `'` in the way (`echo " ' $(fi)`) — the `'` is inside the quotes,
+so it is an ordinary character to both, and the disagreement is unchanged.
+
+A backquote is *not* affected: `` echo `x $(fi) `` gives both shells
+``unexpected EOF while looking for matching ``'`` and `$?` 2, because a
+backquote body is read as text to its mate and nothing inside it is parsed on
+the way.
+
+**Why the difference matters beyond the message.** The exit status differs too —
+2 (a lexer-level unterminated construct) against 1 (a parse error) — so a script
+branching on `$?` from an `eval` of untrusted text sees a different value.
+
+**The fix.** Parse a `$( … )` met inside a double-quoted body as bash does,
+where its error is raised as it is met rather than deferred to an unread body.
+The care needed is that `$( … )` bodies are deliberately left *unread* in many
+places (`CmdSubBody::Unread` exists because a body that will not parse must not
+be a parse error when nobody reads it — see
+TD-OILS-A-QUOTE-RUN-IN-A-PATTERN-OPERAND-IS-NOT-GOBBLED); this is the one case
+where the enclosing construct never closes, so there is no word to defer to and
+bash's own reader has already committed to the substitution.
+
+**Found by** the flat-state gobbler fix below: the repro there
+(``echo "p`echo " ' $(fi)`q{,}"``) agrees on the *scan* now, and what is left of
+its divergence is entirely this.
+
+### TD-OILS-A-QUOTE-INSIDE-A-GOBBLED-BACKQUOTE-BODY-DOES-NOT-END-THE-RUN. `brace_gobbler`'s quoting state is flat, and osh's is nested — 2026-08-14 — ✅ FIXED 2026-08-14
 
 **Where:** `userspace/oils/src/interp.rs`, `Shell::gobbled_backtick_subs`. It
 lexes a backquote body as **one** double-quoted run, so `quoted` stays `"` for
@@ -4263,6 +4308,42 @@ verbatim text from a given starting `quoted` and hands back the stretches the
 `WordPart::Literal`, which keeps the run re-printing to its own bytes — the
 property every tail measured against it depends on.
 
+**Fixed 2026-08-14, both sites, exactly that way.**
+`crate::wordscan::gobbler_readable(text, dquoted)` is the flat loop itself —
+braces.c:637-682 transcribed, `skip_matched` for the `extract_command_subst`
+row so a quote inside a `$( … )` extent flips nothing — answering with the
+stretches in which `quoted` is `0` or `"`. Its ranges are in order, disjoint,
+and cover the text; a stretch may be empty, and an empty text answers with one
+empty stretch rather than none.
+
+Both readers then lex per stretch instead of whole:
+
+* `unparse::gobbler_reading` (used by `fill_quoted_runs`) lexes each readable
+  stretch with `dquote_word_from_source` and puts each skipped one back as a
+  `WordPart::Literal` of its own bytes, so the filled run still re-prints to its
+  source and every tail measured against it lands where it did. It declines the
+  whole run if that does not hold.
+* `Shell::gobbled_backtick_subs` lexes each readable stretch of the body and
+  glues `rest-of-body` + `` ` `` + the word's own remainder onto every
+  substitution the stretch contributes — the scan was handed the whole word, so
+  a diagnostic raised inside a stretch still quotes everything after it.
+
+The regression above is gone with it: `echo "A[${z#'a"`$(fi)`'}]"` gives `A[]`
+and `$?` 0 as bash does, while `'a"`x`$(fi)'` — where the backquote closes again
+and reading resumes — reports, also as bash does. Covered by
+`tests/corpus/the-brace-gobblers-quoting-is-flat-so-it-reads-inside-a-quote-run.sh`
+(12 rows) and
+`tests/corpus/a-backquote-body-inside-double-quotes-is-gobbled-in-stretches.sh`
+(9 rows), both matching bash 5.2.37 exactly.
+
+**Residual, and it is a different bug.** The original repro's *scan* now agrees
+— `pq{,}`, `$?` 0, no diagnostic from the gobbler — but its stderr still
+differs, because the backquote then runs and its body (`echo " ' $(fi)`) has an
+unterminated `"` around an unparseable `$( … )`. bash reports the substitution's
+own syntax error; osh reports the unterminated quote. That is
+TD-OILS-AN-UNPARSEABLE-SUBSTITUTION-IN-AN-UNTERMINATED-DQUOTE-LOSES-TO-THE-EOF,
+which has nothing to do with brace expansion.
+
 ### TD-OILS-A-QUOTE-RUN-IN-A-PATTERN-OPERAND-IS-NOT-GOBBLED. `"${z#'$(fi)'}"` runs where bash drops the command — 2026-08-14 — ✅ FIXED 2026-08-14
 
 **Where:** `userspace/oils/src/interp.rs`, `Shell::has_gobbled_sub` (~27065) and
@@ -4281,7 +4362,7 @@ readers disagree by design, and only one of them is modelled here.
 
 This is the same disagreement as
 TD-OILS-A-SINGLE-QUOTED-RUN-IN-A-BARE-SUB-WORD-OF-A-BRACE-IS-A-QUOTE (fixed) and
-TD-OILS-A-QUOTE-INSIDE-A-GOBBLED-BACKQUOTE-BODY-DOES-NOT-END-THE-RUN (open), in
+TD-OILS-A-QUOTE-INSIDE-A-GOBBLED-BACKQUOTE-BODY-DOES-NOT-END-THE-RUN (fixed), in
 a third place.
 
 **Reproduce.** With `z` unset:
@@ -4329,14 +4410,17 @@ tail after them: a backslash-escaped character (`a\*b`, which is a
 whose reading does not re-print to the very same bytes, which `fill_quoted_runs`
 checks for and declines.
 
-**Carries the same flat-state limitation as the backquote fix.** The run's text
-is lexed as *one* double-quoted word, so `quoted` stays `"` for the whole of it
-— where bash's loop would let a `"` **inside** the run set `quoted = 0`, after
-which a following `'` opens a skip the `$(` row cannot fire in. That is exactly
-TD-OILS-A-QUOTE-INSIDE-A-GOBBLED-BACKQUOTE-BODY-DOES-NOT-END-THE-RUN, now
-reachable through a second construct (`"${z#'a" '"'"'$(fi)'}"` rather than a
-backquote body), and the fix named there — splitting on the gobbler's own state
-machine before lexing — is the one fix for both places.
+**Carried the same flat-state limitation as the backquote fix, for one commit.**
+The run's text was lexed as *one* double-quoted word, so `quoted` stayed `"` for
+the whole of it — where bash's loop lets a `"` **inside** the run set
+`quoted = 0`, after which a following `'` or `` ` `` opens a skip the `$(` row
+cannot fire in. That was
+TD-OILS-A-QUOTE-INSIDE-A-GOBBLED-BACKQUOTE-BODY-DOES-NOT-END-THE-RUN reached
+through a second construct, and it is fixed there (2026-08-14) for both places
+at once: `wordscan::gobbler_readable` runs the flat loop over the verbatim text
+and names the stretches the `$(` row can fire in, `unparse::gobbler_reading`
+lexes those and keeps the rest as `WordPart::Literal`, and the run still
+re-prints to its own bytes.
 
 **Found by** the `$' … '` bare-splice work
 (TD-OILS-A-SINGLE-QUOTED-COMMAND-SUBSTITUTION-IN-A-BRACE-OPERAND-IS-PARSED): the

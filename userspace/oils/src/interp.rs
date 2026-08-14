@@ -27129,12 +27129,11 @@ impl Shell {
     /// ``echo "p`echo "$(fi)"`q{,}"`` quotes ``fi)"`q{,}"``: the body's `"`, the
     /// closing backquote, and the rest of the word.
     ///
-    /// One state flip is not followed: a `"` **inside** the body closes the
-    /// gobbler's `quoted`, after which a `'` opens a skip and a `<(`/`>(` starts
-    /// reading. Lexing the body as one double-quoted run keeps `quoted` at `"`
-    /// throughout instead. See
-    /// TD-OILS-A-QUOTE-INSIDE-A-GOBBLED-BACKQUOTE-BODY-DOES-NOT-END-THE-RUN in
-    /// known-issues.md.
+    /// Neither a body nor a run is lexed whole, because the scan's state does
+    /// not nest: a `"` inside either one is `c == quoted` and clears it, after
+    /// which a `'` or a `` ` `` opens a stretch the `$(` row cannot fire in.
+    /// Both readers ask [`crate::wordscan::gobbler_readable`] which stretches
+    /// the scan is reading in and lex only those.
     fn gobbled_subs(&mut self, parts: &[WordPart], dquoted: bool, out: &mut Vec<WordPart>) {
         for p in parts {
             if Self::gobbler_reads(p) {
@@ -27178,24 +27177,40 @@ impl Shell {
     /// read in the `"` state. A body that will not lex holds nothing this scan
     /// can read — the same answer [`Shell::extent_read_of_rest`] gives its own
     /// remainder, and not a diagnostic of its own.
+    ///
+    /// It is lexed in stretches rather than whole, because the scan's state is
+    /// flat: a `"` **inside** the body is `c == quoted` and clears it, after
+    /// which a `'` or a `` ` `` opens a stretch the `$(` row cannot fire in.
+    /// [`crate::wordscan::gobbler_readable`] says which stretches those are, and
+    /// only they are read. What follows a stretch is still part of every
+    /// diagnostic raised inside it, though — `extract_command_subst` was handed
+    /// the whole word — so the glue carries the rest of the body as well as the
+    /// closing backquote and the word's own remainder.
     fn gobbled_backtick_subs(
         &mut self,
         verbatim: BStr<'_>,
         tail: BStr<'_>,
         out: &mut Vec<WordPart>,
     ) {
-        let Ok(body) = crate::parser::dquote_word_from_source(verbatim, self.parse_opts()) else {
-            return;
-        };
-        // Re-scoped for the gobbler like the enclosing word was: its brackets
-        // are not a scope either, and a backquote nested in this one wants the
-        // remainder of *this* body before the glue below carries it further out.
-        let body = crate::unparse::gobbler_word(&body, self.parse_opts());
-        let start = out.len();
-        self.gobbled_subs(&body.parts, true, out);
-        let suffix = bfmt![b"`", tail];
-        for p in out.iter_mut().skip(start) {
-            Self::extend_gobbled_tail(p, &suffix);
+        for r in crate::wordscan::gobbler_readable(verbatim, true) {
+            let Some(piece) = verbatim.get(r.clone()) else {
+                continue;
+            };
+            let Ok(body) = crate::parser::dquote_word_from_source(piece, self.parse_opts()) else {
+                continue;
+            };
+            // Re-scoped for the gobbler like the enclosing word was: its
+            // brackets are not a scope either, and a backquote nested in this
+            // stretch wants the remainder of *this* stretch before the glue
+            // below carries it further out.
+            let body = crate::unparse::gobbler_word(&body, self.parse_opts());
+            let start = out.len();
+            self.gobbled_subs(&body.parts, true, out);
+            let rest = verbatim.get(r.end..).unwrap_or_default();
+            let suffix = bfmt![rest, b"`", tail];
+            for p in out.iter_mut().skip(start) {
+                Self::extend_gobbled_tail(p, &suffix);
+            }
         }
     }
 

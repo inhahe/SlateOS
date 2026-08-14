@@ -58222,18 +58222,69 @@ into two families, and the split is deliberate, not accidental.
   is. A zero-length send is a common idiom for probing a socket's liveness;
   ours could not distinguish a live socket from a closed one.
 
-**What remains.** The ~200 surviving `is_null() -> EFAULT` sites have not been
+**Seventh pass, 2026-08-14 — `spawn.rs` (16 sites).** The prediction going in
+was that `spawn.rs` would be an ordinary §300 lookup with the constants right
+and the ordering wrong. Half true: the ordering was indeed wrong at five call
+sites, but here the *constants* were wrong too, and one check was missing
+outright. `posix_spawn` is a pure-userspace API — no syscall is involved in
+building a file-actions object — so every answer came from glibc, and all five
+`add*`/`setflags` entry points turn out to hinge on a single 4-line helper.
+
+- **`__spawn_valid_fd` is the whole story, and we had reimplemented it wrong.**
+  posix/spawn_valid_fd.c is
+  `fd >= 0 && (maxfd < 0 || fd < maxfd)`, with `maxfd = __sysconf
+  (_SC_OPEN_MAX)`. Ours was `fd < 0` and returned `EINVAL`. Two independent
+  bugs: **the errno is `EBADF`**, and **the upper bound was missing entirely**,
+  so `addclose(acts, 1_000_000)` was accepted and would only fail later, in the
+  child, after the fork. It is now one `spawn_valid_fd()` helper carrying the
+  citation once, used by all four `add*` calls.
+- **The descriptor check comes first, before the object and before the path.**
+  `spawn_faction_addclose.c`, `spawn_faction_adddup2.c:32`,
+  `spawn_faction_addopen.c` and `spawn_faction_addclosefrom.c:31` all open with
+  `if (!__spawn_valid_fd (fd)) return EBADF;` — ahead of any read of
+  `file_actions->__used` and, in `addopen`, ahead of `__strdup (path)`. We
+  checked the pointers first, so `addopen(acts, -1, NULL, …)` reported the
+  *path* when glibc reports the *descriptor*. `adddup2` tests both fds in the
+  same expression, so an out-of-range `newfd` is `EBADF` on the same footing as
+  a bad `fd`.
+- **`addclosefrom_np` already had the right constant and the wrong order** —
+  the one site where a previous pass got `EBADF` right by inspection but still
+  put it below the NULL check.
+- **`posix_spawnattr_setflags` had the order inverted *and a doc comment
+  justifying the inversion*.** `__posix_spawnattr_setflags`
+  (posix/spawnattr_setflags.c) is two statements — the `flags & ~ALL_FLAGS`
+  rejection, then the store — with no NULL check at all; a NULL `attr` faults
+  on the store, so the flag word is decided while the pointer is still
+  untouched. Ours checked `attr` first and explained that this gave the caller
+  "the more informative `EFAULT`". That is the **second** invented
+  justification this audit has found in a doc comment, after `bind`'s in the
+  sixth pass, and it is the more dangerous failure mode of the two: a wrong
+  constant looks like an oversight and invites checking, whereas a wrong
+  constant with a rationale attached reads as deliberate and deflects it. Both
+  are now replaced by the upstream text, and the misnamed test
+  (`test_setflags_null_attr_precedes_flag_check`, which asserted the opposite)
+  is renamed with a note in its body recording what it used to claim.
+
+The habit this pass adds: **when a check is duplicated across sibling
+functions, find the shared helper upstream and port *it*, not the check.** All
+four `add*` bugs were one bug, replicated four times by four separate readings
+of four man pages that each say only "EBADF … the value specified by fildes is
+negative".
+
+**What remains.** The ~185 surviving `is_null() -> EFAULT` sites have not been
 individually classified. This entry stays open for coverage, not because any
-specific remaining site is known wrong. The densest remaining concentrations
-are `file.rs` (28) and `spawn.rs` (16). Neither needs §303's reasoning, which
-is specific to NPTL's shape — they are ordinary §300 lookups: does the pointer
-reach a syscall or not, and in what order relative to the call's other
-arguments. The xattr, unistd and socket passes are the template: expect the
-constants to be right and the *ordering* to be wrong, and expect the reading to
-turn up an adjacent behavioural bug or two on the way. `socket.rs` adds one
-more habit worth keeping — **do not generalise a rule from one sibling call to
-the next**; `bind` and `connect` order `ENOTSOCK` oppositely, and `sendmsg` and
-`sendto` order `EBADF` oppositely, in the same file.
+specific remaining site is known wrong. The densest remaining concentration is
+`file.rs` (28) — an ordinary §300 lookup: does the pointer reach a syscall or
+not, and in what order relative to the call's other arguments. The xattr,
+unistd, socket and spawn passes are the template: expect the *ordering* to be
+wrong, expect the reading to turn up an adjacent behavioural bug or two on the
+way, and do not assume the constants are right just because the previous four
+files mostly had them right. Two habits carry forward. From `socket.rs`: **do
+not generalise a rule from one sibling call to the next** — `bind` and
+`connect` order `ENOTSOCK` oppositely, and `sendmsg` and `sendto` order
+`EBADF` oppositely, in the same file. From `spawn.rs`: **when sibling
+functions share a check, port the upstream helper rather than the check**, and
+**distrust a doc comment that argues for an errno instead of citing one.**
 
 **Reproduce.** Not a runtime failure. `rg -A3 'is_null\(\)' posix/src`, filtered
 for `EFAULT` in the following lines, enumerates the candidate sites; each has to

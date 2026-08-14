@@ -18,7 +18,8 @@ mod highlight;
 mod syntree;
 
 use guitk::color::Color;
-use guitk::render::RenderTree;
+use guitk::render::{FontWeightHint, RenderTree};
+use guitk::text;
 use syntree::{Pos, SyntaxTree};
 
 use diffcore::{
@@ -891,8 +892,12 @@ pub struct EditorState {
     pub gutter_width: f32,
     /// Font size.
     pub font_size: f32,
-    /// Character dimensions (approximate).
-    pub char_width: f32,
+    /// Line-to-line spacing of the text area.
+    ///
+    /// There is deliberately no matching `char_width`: horizontal positions
+    /// come from measuring the text with `guitk::text`, because a nominal
+    /// per-character width is only ever right for one font at one size, and
+    /// wrong by a compounding amount along every line for all the others.
     pub line_height: f32,
     /// Pending external-change prompt (file edited/deleted outside the editor).
     pub external_prompt: Option<ExternalChangePrompt>,
@@ -943,7 +948,6 @@ impl EditorState {
             window_height: 600,
             gutter_width: 50.0,
             font_size,
-            char_width: font_size * 0.6,
             line_height: font_size * 1.5,
             external_prompt: None,
         }
@@ -1255,13 +1259,28 @@ impl EditorState {
             );
         }
 
-        // Cursor
+        // Cursor. Placed by measuring the text actually to its left, not by
+        // multiplying a column count by a nominal character width. A column
+        // count only lands on the right pixel if every glyph is exactly as
+        // wide as the guess, and the error compounds along the line, so on a
+        // long line the caret drifts visibly away from the character it is on
+        // — and it drifts differently for every font the user picks.
         if doc.cursor_line >= doc.scroll_line && doc.cursor_line < end_line {
             let cursor_y =
                 editor_y + (doc.cursor_line - doc.scroll_line) as f32 * self.line_height;
+            let before_cursor: String = doc
+                .lines
+                .get(doc.cursor_line)
+                .map(|line| {
+                    line.chars()
+                        .skip(doc.scroll_col)
+                        .take(doc.cursor_col.saturating_sub(doc.scroll_col))
+                        .collect()
+                })
+                .unwrap_or_default();
             let cursor_x = self.gutter_width
                 + 8.0
-                + (doc.cursor_col.saturating_sub(doc.scroll_col)) as f32 * self.char_width;
+                + text::measure(&before_cursor, self.font_size, FontWeightHint::Regular);
             tree.fill_rect(cursor_x, cursor_y + 2.0, 2.0, self.line_height - 4.0, Color::from_hex(0x89B4FA));
         }
     }
@@ -1584,6 +1603,108 @@ fn main() {
     }
 
     println!("\nText editor ready.");
+}
+
+// ============================================================================
+// Caret placement
+// ============================================================================
+
+#[cfg(test)]
+mod caret_tests {
+    use super::*;
+    use guitk::render::RenderCommand;
+
+    /// Colour of the caret, which is what identifies it in the command list.
+    const CARET: u32 = 0x89B4FA;
+
+    fn editor_with(line: &str, cursor_col: usize) -> EditorState {
+        let mut editor = EditorState::new();
+        editor.active_document_mut().lines = vec![line.to_string()];
+        editor.active_document_mut().cursor_line = 0;
+        editor.active_document_mut().cursor_col = cursor_col;
+        editor
+    }
+
+    /// The x of the caret in a rendered frame.
+    fn caret_x(editor: &EditorState) -> f32 {
+        let tree = editor.render();
+        tree.commands
+            .iter()
+            .find_map(|c| match c {
+                RenderCommand::FillRect {
+                    x, width, color, ..
+                } if *color == Color::from_hex(CARET) && (*width - 2.0).abs() < 0.01 => {
+                    Some(*x)
+                }
+                _ => None,
+            })
+            .expect("the caret is drawn")
+    }
+
+    #[test]
+    fn the_caret_sits_where_the_text_before_it_ends() {
+        let editor = editor_with("hello world", 5);
+        let expected = editor.gutter_width
+            + 8.0
+            + text::measure("hello", editor.font_size, FontWeightHint::Regular);
+        assert!(
+            (caret_x(&editor) - expected).abs() < 0.01,
+            "the caret is at {}, but the text before it ends at {expected}",
+            caret_x(&editor)
+        );
+    }
+
+    #[test]
+    fn the_caret_starts_at_the_left_edge_of_the_text() {
+        let editor = editor_with("hello world", 0);
+        assert!(
+            (caret_x(&editor) - (editor.gutter_width + 8.0)).abs() < 0.01,
+            "the caret at column 0 is not at the text's left edge"
+        );
+    }
+
+    #[test]
+    fn the_caret_tracks_the_font_rather_than_a_nominal_width() {
+        // The regression this replaces: the caret's x was the column count
+        // times `font_size * 0.6`, so it only landed on the right pixel for a
+        // font whose glyphs happened to be exactly that wide, and the error
+        // compounded along the line.
+        //
+        // The obvious test — that ten W's put the caret further right than ten
+        // i's — cannot run here. With no system font installed, `osfont` falls
+        // back to a built-in *monospace bitmap* face, so every glyph has the
+        // same advance and the two are legitimately equal. What is checkable
+        // in either backend is that the caret moves with what the font
+        // reports, and not with the old constant.
+        let editor = editor_with("xxxxxxxxxx", 10);
+        let measured = text::measure("xxxxxxxxxx", editor.font_size, FontWeightHint::Regular);
+        let old_guess = 10.0 * editor.font_size * 0.6;
+        assert!(
+            (measured - old_guess).abs() > 0.01,
+            "the fallback font's advance now equals the constant this test \
+             exists to rule out, so the assertion below proves nothing"
+        );
+        assert!(
+            (caret_x(&editor) - (editor.gutter_width + 8.0 + measured)).abs() < 0.01,
+            "the caret is not at the measured width of the text before it"
+        );
+    }
+
+    #[test]
+    fn a_horizontally_scrolled_line_measures_only_what_is_shown() {
+        let mut editor = editor_with("hello world", 8);
+        editor.active_document_mut().scroll_col = 6;
+        // Columns 6..8 are "wo": the caret is two characters into the visible
+        // text, not eight.
+        let expected = editor.gutter_width
+            + 8.0
+            + text::measure("wo", editor.font_size, FontWeightHint::Regular);
+        assert!(
+            (caret_x(&editor) - expected).abs() < 0.01,
+            "a scrolled line put the caret at {}, not {expected}",
+            caret_x(&editor)
+        );
+    }
 }
 
 // ============================================================================

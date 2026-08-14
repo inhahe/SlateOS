@@ -320,9 +320,13 @@ Roadmap:
 
 - `[C]` Vulkan loader and basic GPU command submission (line ~4596)
 - `[C]` OpenGL via Mesa (line ~4601) — see joint task
-- `[C]` 2D drawing library: Vello + HarfBuzz (line ~4602) — font engine done;
-  next unblocked steps are wiring `ScaledFont` into the compositor/toolkit and
-  the CFF outline interpreter. Vello itself waits on `[A]`'s GPU driver.
+- `[C]` 2D drawing library: Vello + HarfBuzz (line ~4602) — font engine done
+  (TrueType *and* CFF outlines); family lookup (`guitk::fontdb`) and CSS-4
+  face matching (`osfont::select`) done; the toolkit and the compositor now
+  both draw in a real system face, resolved through one shared function so
+  they cannot diverge (§400). Next unblocked step is shaping: the layout path
+  is still one advance per `char`, so there is no kerning, no ligature, and no
+  combining-mark positioning. Vello itself waits on `[A]`'s GPU driver.
 - `[C]` Wayland-inspired compositor: GPU acceleration, currently a software
   rasterizer (lines ~4605, ~4619)
 - `[C]` Video-encoded capture fallback, H.264/VP9 (lines ~4623, ~5060)

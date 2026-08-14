@@ -58352,3 +58352,46 @@ should be settled before spending the churn.
 `lib.rs` now state the real position, so nobody is misled into thinking the
 invariant is enforced. Keep writing `alloc::` paths: the point of doing so is
 that closing this stays a small change.
+
+---
+
+## TD-APPEARANCE-SETTINGS-ARE-NEVER-WRITTEN-TO-DISK
+
+**What.** `gui/desktop/src/appearance_settings.rs` presents a full settings
+model — `FontSettings { ui_font, mono_font, ui_size, mono_size, hinting,
+subpixel, smoothing }`, theme, wallpaper — with an apply/revert flow built on
+a pending-vs-saved pair. But `save()` is:
+
+```rust
+pub fn save(&mut self) { self.saved = self.settings.clone(); }
+```
+
+It copies one field into another. Nothing is serialized, nothing is written,
+and nothing is read back at startup, so every setting reverts the moment the
+process exits and no *other* process can ever see it.
+
+**Why it matters now.** It is the reason `ui_font` is inert. The toolkit and
+the compositor pick the UI font by walking a compiled-in fallback list
+(design-decisions.md §400), which is deliberate but is a *fallback*, not a
+setting. Driving the font from configuration is a one-line call to
+`guitk::text::set_font_family` in each process — and would be actively wrong
+today, because the app that changed the setting would be the only process that
+could observe it, so it would measure in the chosen font while the compositor
+kept drawing in the fallback. Font divergence across processes is precisely
+the failure mode §400 exists to avoid.
+
+It is not only the font: theme, wallpaper and text-rendering options have the
+same problem and the same blast radius.
+
+**Proper fix.** Persist to a YAML file under the user's config directory —
+YAML with comment preservation is the project-wide rule (`design.txt`) — and
+load it during desktop startup, before the first frame. Then have the
+compositor read the same file, or (better) have the desktop push the resolved
+family to the compositor over the existing protocol, so there is one writer
+and the compositor never has to guess. `set_font_family` already returns
+`false` and changes nothing on a bad value, so a stale or hand-edited config
+naming an uninstalled family degrades to the fallback rather than to
+un-drawable text.
+
+**Where.** `gui/desktop/src/appearance_settings.rs` (`save`, and the absent
+`load`); `gui/toolkit/src/text.rs::set_font_family` is the ready-made sink.

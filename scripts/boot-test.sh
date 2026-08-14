@@ -215,6 +215,8 @@ to_win_path() {
     fi
 }
 
+# Default (debug) artefact path.  --bench overrides this to the release path
+# after arg parsing — see the CARGO_PROFILE_ARGS block below for why.
 KERNEL_BIN="$PROJECT_ROOT/target/x86_64-unknown-none/debug/kernel"
 ESP_DIR="$PROJECT_ROOT/build/esp"
 SERIAL_FILE="$PROJECT_ROOT/build/serial-test.txt"
@@ -334,6 +336,39 @@ done
 # timeout themselves — an explicit --timeout= always wins, in either direction.
 if [ "$BENCH" = "1" ] && [ "$TIMEOUT_EXPLICIT" = "0" ]; then
     TIMEOUT="$BENCH_TIMEOUT"
+fi
+
+# --bench builds --release; every other run stays on the debug profile.
+#
+# WHY: a benchmark that does not measure the shipped build is not a benchmark.
+# Until 2026-08-14 this script ran a bare `cargo build` for every mode, so all
+# 63 benchmarks were measured at `opt-level = 0` (there is no
+# `[profile.dev.package.kernel]` override) and then scored against
+# `baselines.toml` targets taken from *optimised* Linux/Fuchsia/L4/jemalloc
+# implementations — a comparison with no meaning.  Meanwhile
+# `[profile.release.package.kernel]` had been sitting in Cargo.toml the whole
+# time with `opt-level = 3, codegen-units = 1, strip = "none"`, tuned for
+# exactly this and never used.  See known-issues.md
+# B-BENCH-ENTIRE-SUITE-MEASURES-AN-UNOPTIMISED-KERNEL.
+#
+# It also cuts the largest *noise* source in the suite.  Under TCG a hot loop
+# that straddles a 4 KiB guest page costs ~1.7x, deterministically per build,
+# and that penalty is invisible to both the canary and the mean/min check
+# because it does not vary within a run.  Straddle probability scales with the
+# loop's byte length: ~500 bytes at opt-level 0 versus a few dozen optimised.
+# See B-BENCH-TCP-CHECKSUM-PAIR-BIMODAL-1.7x.
+#
+# The default boot test deliberately stays on debug — faster rebuilds and
+# readable panics matter most when a boot *fails*, and --bench already roughly
+# doubles the cycle.  Whether that split is right is Q46 in open-questions.md;
+# if it is resolved toward "release everywhere", collapse these two branches.
+if [ "$BENCH" = "1" ]; then
+    CARGO_PROFILE_ARGS=("--release")
+    KERNEL_BIN="$PROJECT_ROOT/target/x86_64-unknown-none/release/kernel"
+    BENCH_PROFILE="release"
+else
+    CARGO_PROFILE_ARGS=()
+    BENCH_PROFILE="debug"
 fi
 
 # Optional hard-lockup NMI watchdog device (see --hard-lockup-watchdog above and
@@ -547,10 +582,16 @@ print_bench_results() {
 
     # Record and diff.  Never fatal: a missing python or a write failure must
     # not turn a healthy boot into a failed one.
+    #
+    # --profile stamps the record with the build profile it was measured on.
+    # Numbers from different profiles are not comparable — opt-level 0 vs 3 on
+    # this code is a multiple, not a percentage — so the comparator must never
+    # diff across the boundary.  The 5 records written before 2026-08-14 carry
+    # no profile field and are read as "debug".
     if command -v python &>/dev/null; then
-        python "$SCRIPT_DIR/bench-history.py" --serial "$file" || true
+        python "$SCRIPT_DIR/bench-history.py" --serial "$file" --profile "$BENCH_PROFILE" || true
     elif command -v python3 &>/dev/null; then
-        python3 "$SCRIPT_DIR/bench-history.py" --serial "$file" || true
+        python3 "$SCRIPT_DIR/bench-history.py" --serial "$file" --profile "$BENCH_PROFILE" || true
     else
         echo "(python not found; skipping benchmark history diff)"
     fi
@@ -599,8 +640,8 @@ if [ "$NO_BUILD" -eq 0 ]; then
     if ! command -v "$CARGO" &>/dev/null; then
         CARGO="/c/Users/${USER:-${USERNAME:-$(whoami)}}/.cargo/bin/cargo.exe"
     fi
-    (cd "$PROJECT_ROOT" && "$CARGO" build)
-    echo "Build OK."
+    (cd "$PROJECT_ROOT" && "$CARGO" build ${CARGO_PROFILE_ARGS[@]+"${CARGO_PROFILE_ARGS[@]}"})
+    echo "Build OK ($BENCH_PROFILE profile)."
 fi
 
 if [ "$NO_STAGE" -eq 0 ] && [ ! -f "$KERNEL_BIN" ]; then

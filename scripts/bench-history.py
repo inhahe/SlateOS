@@ -254,15 +254,35 @@ def append_record(path, record):
     return True
 
 
-def previous_for_host(records, host):
-    """Most recent record from the same host, or None.
+#: Profile assumed for records written before the field existed.
+#:
+#: Every record up to 2026-08-14 was produced by a boot-test.sh that ran a bare
+#: `cargo build`, so they are all debug. Defaulting the absent key this way
+#: keeps them comparable with each other instead of stranding them.
+LEGACY_PROFILE = "debug"
+
+
+def record_profile(record):
+    """Build profile a record was measured on, defaulting old records."""
+    return record.get("profile", LEGACY_PROFILE)
+
+
+def previous_for_host(records, host, profile=LEGACY_PROFILE):
+    """Most recent record from the same host *and build profile*, or None.
 
     Cross-host comparison is meaningless here -- a different machine or QEMU
     build moves every number at once -- so we would rather report "no baseline"
     than report a diff that is really a hardware difference.
+
+    The same argument applies, harder, across build profiles. `opt-level = 0`
+    versus `3` on this code is a multiple rather than a percentage, so diffing
+    a release run against a debug one would report every benchmark as a
+    spectacular improvement and drown any real signal. It is not even rescued
+    by the drift correction: that removes a *uniform* factor, and the
+    debug-to-release ratio is anything but uniform across the suite.
     """
     for record in reversed(records):
-        if record.get("host") == host:
+        if record.get("host") == host and record_profile(record) == profile:
             return record
     return None
 
@@ -475,6 +495,10 @@ def main(argv=None):
                         help="exit 1 if any benchmark regressed past the threshold")
     parser.add_argument("--list", action="store_true",
                         help="list stored records and exit")
+    parser.add_argument("--profile", default=LEGACY_PROFILE,
+                        help="cargo build profile these numbers were measured "
+                             "on (default: debug). Records are only ever "
+                             "compared within one profile.")
     args = parser.parse_args(argv)
 
     if args.list:
@@ -488,7 +512,21 @@ def main(argv=None):
 
     host = platform.node() or "unknown"
     records = load_history(args.history)
-    previous = previous_for_host(records, host)
+    previous = previous_for_host(records, host, args.profile)
+
+    # If there is no same-profile baseline but there *are* same-host records on
+    # another profile, say so explicitly. Otherwise the reader sees the generic
+    # "no baseline" line and reasonably concludes the history is empty, when in
+    # fact it is full of numbers that were deliberately not used.
+    if previous is None:
+        other = [r for r in records
+                 if r.get("host") == host and record_profile(r) != args.profile]
+        if other:
+            profiles = sorted({record_profile(r) for r in other})
+            print(f"  No baseline on the '{args.profile}' profile yet "
+                  f"({len(other)} record(s) exist for this host on "
+                  f"{', '.join(profiles)}, deliberately not compared: "
+                  f"different optimisation level, different numbers).")
 
     canary = parse_canary(args.serial)
     regressed = report(previous, current_entries, args.threshold)
@@ -520,6 +558,9 @@ def main(argv=None):
                 datetime.timezone.utc
             ).replace(microsecond=0).isoformat(),
             "host": host,
+            # Sibling key, absent on pre-2026-08-14 records, which
+            # record_profile() reads as "debug". See LEGACY_PROFILE.
+            "profile": args.profile,
             "commit": git_commit(),
             # The target is static and already lives in baselines.toml, so
             # only the measured number goes here.

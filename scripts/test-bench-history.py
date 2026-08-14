@@ -193,6 +193,52 @@ def test_canary(bh, tmpdir):
           bh.parse_canary(twice), {"start": 300, "end": 900, "pct": 300})
 
 
+def test_profile_isolation(bh, tmpdir):
+    """Records are only ever compared within one build profile.
+
+    Until 2026-08-14 the bench suite was measured on an `opt-level = 0` kernel
+    and scored against targets drawn from optimised implementations. The fix
+    builds `--bench` as `--release`, which makes every stored number
+    incomparable with every new one -- not by a percentage but by a multiple.
+    So the baseline lookup must be profile-scoped, and the 5 legacy records
+    (which carry no `profile` key at all) must keep working rather than being
+    stranded or, worse, silently diffed against release numbers.
+    """
+    debug_old = {"host": "H", "commit": "aaa", "entries": {"x": 100}}
+    debug_new = {"host": "H", "commit": "bbb", "profile": "debug",
+                 "entries": {"x": 110}}
+    release = {"host": "H", "commit": "ccc", "profile": "release",
+               "entries": {"x": 12}}
+    other_host = {"host": "OTHER", "commit": "ddd", "profile": "release",
+                  "entries": {"x": 9}}
+
+    check("a record with no profile key reads as debug",
+          bh.record_profile(debug_old), "debug")
+    check("an explicit profile key is honoured",
+          bh.record_profile(release), "release")
+
+    # The load-bearing case: a release run must NOT pick up a debug baseline,
+    # even though it is the most recent record for this host.
+    check("a release run finds no baseline among debug-only records",
+          bh.previous_for_host([debug_old, debug_new], "H", "release"), None)
+    check("a debug run does not pick up a release baseline",
+          bh.previous_for_host([debug_old, release], "H", "debug"), debug_old)
+    check("a release run finds the release record past a later debug one",
+          bh.previous_for_host([release, debug_new], "H", "release"), release)
+    check("legacy profile-less records are still matched by a debug run",
+          bh.previous_for_host([debug_old], "H", "debug"), debug_old)
+    check("the host filter still applies within a profile",
+          bh.previous_for_host([other_host], "H", "release"), None)
+    check("the newest same-profile record wins",
+          bh.previous_for_host([debug_old, debug_new], "H", "debug"), debug_new)
+
+    # The default must stay "debug" so an old caller that passes no --profile
+    # keeps comparing against the legacy records rather than silently finding
+    # nothing.
+    check("the profile argument defaults to debug",
+          bh.previous_for_host([debug_old], "H"), debug_old)
+
+
 def test_missing_log(bh, tmpdir):
     """A boot without --bench emits no scorecard; that is not an error."""
     check("absent serial log yields no entries",
@@ -274,6 +320,7 @@ def main():
         test_parse_formats(bh, tmpdir)
         test_malformed_rejected(bh, tmpdir)
         test_canary(bh, tmpdir)
+        test_profile_isolation(bh, tmpdir)
         test_missing_log(bh, tmpdir)
     test_history_still_loads(bh)
     test_drift_is_subtracted(bh)

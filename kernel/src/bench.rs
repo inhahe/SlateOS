@@ -645,6 +645,120 @@ fn print_scorecard() {
 // Standard kernel benchmarks
 // ---------------------------------------------------------------------------
 
+/// Interleaved A/B rounds per reference measurement.
+const CANARY_ROUNDS: u32 = 500;
+
+/// Stores per timed window. The per-window delta is ~N x one access, so at
+/// N=64 a ~200-cycle access shows up as ~13k cycles — an order of magnitude
+/// clear of the few-hundred-cycle harness wander.
+const CANARY_STORES_PER_WINDOW: u64 = 64;
+
+/// Percent by which the end-of-suite reference may differ from the
+/// start-of-suite one before the run is called contaminated.
+///
+/// Deliberately loose. The honest position is that the run-to-run spread of
+/// this measurement has never been quantified, so any tight bound would be a
+/// number invented rather than observed — and this project has already been
+/// bitten by a benchmark check whose threshold was picked from reasoning
+/// instead of data. The raw pair is printed unconditionally, so the threshold
+/// can be tightened from real records later without changing what is
+/// recorded. Until then it only has to catch the gross case this exists for:
+/// `crypto_ed25519_verify` moved 5.1x when the host got busy.
+const CANARY_TOLERANCE_PCT: u64 = 25;
+
+/// One amplified A/B measurement of a guest memory access, in cycles.
+///
+/// Returns `(measured, nop, store)` — the per-access cost, and the two raw
+/// arm totals behind it.
+///
+/// Factored into its own function because this same measurement is taken
+/// **twice** per suite: once before the benchmarks, to calibrate the budgets,
+/// and once after, as the contamination canary. The comparison is only
+/// meaningful if both ends measure precisely the same thing, so there is
+/// deliberately one implementation and no parameters to let the two drift
+/// apart.
+fn measure_access_cost() -> (u64, u64, u64) {
+    static CALIBRATION_BYTE: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
+    let n = CANARY_STORES_PER_WINDOW;
+    let (nop, store) = ab_interleaved(
+        CANARY_ROUNDS,
+        || {
+            timed(|| {
+                let mut i = 0u64;
+                while i < n {
+                    core::hint::black_box(i);
+                    i = i.wrapping_add(1);
+                }
+            })
+        },
+        || {
+            timed(|| {
+                let mut i = 0u64;
+                while i < n {
+                    CALIBRATION_BYTE.store(core::hint::black_box(1u8), Ordering::Relaxed);
+                    i = i.wrapping_add(1);
+                }
+            })
+        },
+    );
+    (store.saturating_sub(nop) / n, nop, store)
+}
+
+/// Re-measure the reference access cost and report whether the host stayed
+/// quiet for the whole suite.
+///
+/// # Why this exists
+///
+/// The suite runs under QEMU TCG, which is pure emulation and entirely
+/// CPU-bound, so any other load on the host scales the measurements. The
+/// existing median-ratio drift correction in `scripts/bench-history.py`
+/// removes a *uniform* whole-suite factor, but contention from a handful of
+/// short commands is not uniform: it lands on whichever benchmark happens to
+/// be executing and leaves the rest untouched, which is indistinguishable
+/// from a real regression — one or two benchmarks clear of an unchanged
+/// median.
+///
+/// "Remember to keep the machine idle" is not a fix; it already failed once,
+/// the same day it was written down. This makes contamination a property the
+/// data itself can verify, which is the same principle as the stall
+/// detectors: a check that cannot fire is indistinguishable from a check that
+/// passes.
+///
+/// Emits `[bench] CANARY <start> <end> <pct>` where `pct` is `end` as a
+/// percentage of `start`, so 100 means the host was equally loaded at both
+/// ends. The pair is recorded unconditionally rather than only on failure —
+/// a verdict alone would leave no way to ever calibrate the threshold.
+fn report_canary(start: u64) {
+    let (end, _, _) = measure_access_cost();
+    // Guard the division: a zero start would mean the calibration itself
+    // failed, and the run's budgets are already untrustworthy in that case.
+    let pct = if start > 0 {
+        end.saturating_mul(100) / start
+    } else {
+        0
+    };
+    serial_println!("[bench] CANARY {} {} {}", start, end, pct);
+
+    let contaminated =
+        start == 0 || pct > 100u64.saturating_add(CANARY_TOLERANCE_PCT)
+            || pct < 100u64.saturating_sub(CANARY_TOLERANCE_PCT);
+    if contaminated {
+        serial_println!(
+            "[bench] CONTAMINATED: the reference access cost moved {}% across the \
+             suite ({} -> {} cycles, tolerance {}%). Host load changed mid-run, so \
+             a single-benchmark outlier in this run is unproven — do not read it as \
+             a regression.",
+            pct, start, end, CANARY_TOLERANCE_PCT
+        );
+    } else {
+        serial_println!(
+            "[bench] Canary OK: reference access cost stable across the suite \
+             ({} -> {} cycles, {}%).",
+            start, end, pct
+        );
+    }
+}
+
 /// Run all standard kernel micro-benchmarks.
 ///
 /// Call after all subsystems are initialized.  Results are printed to
@@ -716,49 +830,25 @@ pub fn run_all() {
     // calibration incapable of manufacturing a false alarm. Erring toward
     // false negatives is the right direction for a check whose entire purpose
     // is to stop crying wolf at correct code.
-    let access_floor = {
-        static CALIBRATION_BYTE: core::sync::atomic::AtomicU8 =
-            core::sync::atomic::AtomicU8::new(0);
-        const ROUNDS: u32 = 500;
-        /// Stores per timed window. The per-window delta is ~N x one access,
-        /// so at N=64 a ~200-cycle access shows up as ~13k cycles — an order
-        /// of magnitude clear of the few-hundred-cycle harness wander.
-        const N: u64 = 64;
-        let (nop, store) = ab_interleaved(
-            ROUNDS,
-            || {
-                timed(|| {
-                    let mut i = 0u64;
-                    while i < N {
-                        core::hint::black_box(i);
-                        i = i.wrapping_add(1);
-                    }
-                })
-            },
-            || {
-                timed(|| {
-                    let mut i = 0u64;
-                    while i < N {
-                        CALIBRATION_BYTE.store(core::hint::black_box(1u8), Ordering::Relaxed);
-                        i = i.wrapping_add(1);
-                    }
-                })
-            },
-        );
+    //
+    // The mechanics live in `measure_access_cost` because this exact
+    // measurement is taken a second time at the end of the suite, as the
+    // contamination canary (see `report_canary`).
+    let (access_floor, canary_start) = {
+        let (measured, nop, store) = measure_access_cost();
         // Still clamped: if the two arms somehow land equal the budgets below
         // must not all collapse to 0 and turn every check into a guaranteed
         // failure. With the amplification above this should never bind, and if
         // the printed `measured` is ever at or below it, treat the run's
         // budget-based verdicts as unreliable rather than as findings.
-        let measured = store.saturating_sub(nop) / N;
         let floor = core::cmp::max(measured, 100);
         serial_println!(
             "[bench]   memory_access_floor: {} cycles/guest byte-store (measured={} \
              over {} stores/window: nop={} store={}, {} interleaved rounds) — budgets \
              below are multiples of this",
-            floor, measured, N, nop, store, ROUNDS
+            floor, measured, CANARY_STORES_PER_WINDOW, nop, store, CANARY_ROUNDS
         );
-        floor
+        (floor, measured)
     };
 
     // --- CPU index lookup (the per-CPU-data primitive under every hot path) ---
@@ -1443,6 +1533,13 @@ pub fn run_all() {
     //
     // Target from baselines.toml: < 10 µs (37000 cycles).
     bench_isr_latency();
+
+    // --- Contamination canary ---
+    //
+    // Re-measure the same reference the budgets were calibrated against. Runs
+    // *before* the scorecard so the verdict is already on the log next to the
+    // SCORE lines it qualifies.
+    report_canary(canary_start);
 
     // --- Print scorecard summary ---
     print_scorecard();

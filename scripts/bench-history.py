@@ -70,6 +70,21 @@ SCORE_RE = re.compile(
     r"(?:\s+(\d+)\s+(\d+))?\s*$"
 )
 
+# `[bench] CANARY <start_cycles> <end_cycles> <pct>`
+#
+# The reference memory-access cost measured at both ends of the suite. `pct`
+# is `end` as a percentage of `start`, so 100 means the host was equally
+# loaded throughout. Optional for the same reason as the dispersion pair: it
+# postdates existing records, and a log without it simply has unknown
+# contamination rather than being unparseable.
+CANARY_RE = re.compile(r"^\[bench\]\s+CANARY\s+(\d+)\s+(\d+)\s+(\d+)\s*$")
+
+# Percent deviation at which a run is called contaminated. Must match
+# `CANARY_TOLERANCE_PCT` in `kernel/src/bench.rs`; the kernel prints its own
+# verdict, and this recomputes it so a replayed/old log is judged by the same
+# rule as a live one.
+CANARY_TOLERANCE_PCT = 25
+
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_SERIAL = os.path.join(REPO_ROOT, "build", "serial-test.txt")
 DEFAULT_HISTORY = os.path.join(REPO_ROOT, "bench", "history.jsonl")
@@ -104,6 +119,47 @@ def parse_serial(path):
         print(f"bench-history: cannot read {path}: {exc}", file=sys.stderr)
         return {}
     return entries
+
+
+def parse_canary(path):
+    """Extract the contamination canary as `(start, end, pct)`, or None.
+
+    None means the log predates the canary (or the suite never finished), in
+    which case contamination is *unknown* for that run -- which is materially
+    different from "known clean", and callers must not conflate the two.
+
+    The last CANARY line wins, matching `parse_serial`'s last-wins behaviour
+    for SCORE, so a concatenated/replayed log reports its final suite.
+    """
+    result = None
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                match = CANARY_RE.match(line.strip())
+                if match:
+                    start, end, pct = match.groups()
+                    result = (int(start), int(end), int(pct))
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        print(f"bench-history: cannot read {path}: {exc}", file=sys.stderr)
+        return None
+    return result
+
+
+def canary_is_contaminated(canary):
+    """True if the canary shows the host load changed mid-suite.
+
+    None (no canary in the log) is *not* contaminated -- it is unknown. This
+    returns False so that old records keep comparing as they always have;
+    the caller distinguishes the two by testing for None itself.
+    """
+    if canary is None:
+        return False
+    start, _end, pct = canary
+    if start <= 0:
+        return True
+    return abs(pct - 100) > CANARY_TOLERANCE_PCT
 
 
 def git_commit():
@@ -404,7 +460,26 @@ def main(argv=None):
     records = load_history(args.history)
     previous = previous_for_host(records, host)
 
+    canary = parse_canary(args.serial)
     regressed = report(previous, current_entries, args.threshold)
+
+    # Reported *after* the comparison, so it qualifies the verdict the reader
+    # has just seen rather than being buried above it.
+    if canary is None:
+        print("  Contamination canary: absent (log predates it) - unknown, "
+              "not clean.")
+    elif canary_is_contaminated(canary):
+        start, end, pct = canary
+        print(f"  CONTAMINATED: reference access cost moved {pct}% across the "
+              f"suite ({start} -> {end} cycles, tolerance "
+              f"{CANARY_TOLERANCE_PCT}%).")
+        print("  Host load changed mid-run. A single-benchmark outlier here is "
+              "unproven - the drift correction removes a uniform factor, and "
+              "this is not one.")
+    else:
+        start, end, pct = canary
+        print(f"  Canary OK: host load stable across the suite "
+              f"({start} -> {end} cycles, {pct}%).")
 
     if not args.no_record:
         record = {
@@ -431,6 +506,14 @@ def main(argv=None):
             record["mean_ns"] = mean_ns
         if iters:
             record["iterations"] = iters
+        # Same append-only reasoning: a sibling key, absent on older records.
+        # Recorded even when clean, because a stored verdict with no stored
+        # measurement could never be re-judged if the tolerance is retuned --
+        # and the tolerance is explicitly a placeholder awaiting real data.
+        if canary is not None:
+            start, end, pct = canary
+            record["canary"] = {"start": start, "end": end, "pct": pct}
+            record["contaminated"] = canary_is_contaminated(canary)
         if append_record(args.history, record):
             print(f"  Recorded {len(current_entries)} benchmarks to "
                   f"{os.path.relpath(args.history, REPO_ROOT)}")

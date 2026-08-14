@@ -111,6 +111,57 @@ def test_malformed_rejected(bh, tmpdir):
     check("malformed SCORE lines are rejected", bh.parse_serial(bad), {})
 
 
+def test_canary(bh, tmpdir):
+    """The contamination canary parses, and 'absent' stays distinct from 'clean'.
+
+    That distinction is the whole point of the canary: a run with no canary
+    has *unknown* contamination, and silently treating it as clean would
+    recreate the failure the canary exists to prevent -- a check that cannot
+    fire being indistinguishable from a check that passes.
+    """
+    clean = write(tmpdir, "canary-clean.txt",
+                  "[bench] SCORE a 10 1 PASS\n"
+                  "[bench] CANARY 200 204 102\n")
+    check("canary parses", bh.parse_canary(clean), (200, 204, 102))
+    check("a stable canary is not contaminated",
+          bh.canary_is_contaminated((200, 204, 102)), False)
+
+    # 5.1x is the real observed case: crypto_ed25519_verify, 30.7M -> 158.6M.
+    check("a large mid-suite shift is contaminated",
+          bh.canary_is_contaminated((200, 1020, 510)), True)
+    # Faster at the end counts too -- the host got *less* busy mid-run, which
+    # contaminates just as thoroughly as getting busier.
+    check("a downward shift is also contaminated",
+          bh.canary_is_contaminated((200, 100, 50)), True)
+    # Exactly at the tolerance is allowed; one percent past it is not.
+    check("deviation at the tolerance is allowed",
+          bh.canary_is_contaminated((100, 125, 125)), False)
+    check("deviation past the tolerance is contaminated",
+          bh.canary_is_contaminated((100, 126, 126)), True)
+    # A zero start means the calibration itself failed.
+    check("a zero-start canary is contaminated",
+          bh.canary_is_contaminated((0, 200, 0)), True)
+
+    # Absent canary: distinct from clean, and must not be reported as dirty.
+    absent = write(tmpdir, "canary-absent.txt", "[bench] SCORE a 10 1 PASS\n")
+    check("a log with no canary yields None", bh.parse_canary(absent), None)
+    check("None is not reported as contaminated",
+          bh.canary_is_contaminated(None), False)
+
+    # Malformed canary lines must not be coerced into a record.
+    bad = write(tmpdir, "canary-bad.txt",
+                "[bench] CANARY 200 204\n"        # missing pct
+                "[bench] CANARY x 204 102\n"      # non-numeric
+                "[bench] CANARY 200 204 102 7\n")  # trailing junk
+    check("malformed canary lines are rejected", bh.parse_canary(bad), None)
+
+    # Last wins, matching parse_serial, so a replayed log reports its final run.
+    twice = write(tmpdir, "canary-twice.txt",
+                  "[bench] CANARY 200 204 102\n"
+                  "[bench] CANARY 300 900 300\n")
+    check("the last canary wins", bh.parse_canary(twice), (300, 900, 300))
+
+
 def test_missing_log(bh, tmpdir):
     """A boot without --bench emits no scorecard; that is not an error."""
     check("absent serial log yields no entries",
@@ -191,6 +242,7 @@ def main():
     with tempfile.TemporaryDirectory() as tmpdir:
         test_parse_formats(bh, tmpdir)
         test_malformed_rejected(bh, tmpdir)
+        test_canary(bh, tmpdir)
         test_missing_log(bh, tmpdir)
     test_history_still_loads(bh)
     test_drift_is_subtracted(bh)

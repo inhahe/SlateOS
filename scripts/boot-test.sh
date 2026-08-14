@@ -537,8 +537,12 @@ print_bench_results() {
     local file="$1"
     [ -f "$file" ] || return 0
     echo "=== Benchmark results ==="
-    # The machine-readable SCORE lines are for bench-history.py, not the reader.
-    grep -E '^\[bench\]' "$file" | grep -v '^\[bench\] SCORE ' \
+    # The machine-readable SCORE and CANARY lines are for bench-history.py,
+    # not the reader; the kernel prints a prose verdict for each alongside
+    # them, and that is what stays here. Note this only filters the *display*
+    # -- bench-history.py re-reads the raw file, so nothing is lost.
+    grep -E '^\[bench\]' "$file" \
+        | grep -v -E '^\[bench\] (SCORE|CANARY) ' \
         || echo "(no [bench] lines found)"
 
     # Record and diff.  Never fatal: a missing python or a write failure must

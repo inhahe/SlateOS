@@ -227,10 +227,16 @@ pub extern "C" fn readdir(dirp: *mut Dir) -> *mut Dirent {
 /// Close a directory stream.
 ///
 /// Returns 0 on success, -1 on error.
+///
+/// A NULL `dirp` gives `EINVAL`, not `EBADF`: glibc's Linux `closedir`
+/// (`sysdeps/unix/sysv/linux/closedir.c`, checked against 2.39) opens
+/// with `if (dirp == NULL) { __set_errno (EINVAL); return -1; }` before
+/// it reaches the descriptor, so a Linux caller never sees `EBADF` for
+/// this case — the descriptor is not consulted at all.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn closedir(dirp: *mut Dir) -> i32 {
     if dirp.is_null() {
-        errno::set_errno(errno::EBADF);
+        errno::set_errno(errno::EINVAL);
         return -1;
     }
 
@@ -1570,10 +1576,14 @@ mod tests {
     }
 
     #[test]
-    fn test_closedir_null() {
+    fn test_closedir_null_einval_not_ebadf() {
+        // glibc's Linux closedir rejects a NULL stream with EINVAL before
+        // it ever looks at a descriptor, so EBADF is unreachable here.
+        // (sysdeps/unix/sysv/linux/closedir.c, glibc 2.39.)
+        errno::set_errno(0);
         let ret = closedir(core::ptr::null_mut());
         assert_eq!(ret, -1);
-        assert_eq!(errno::get_errno(), errno::EBADF);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
     }
 
     #[test]

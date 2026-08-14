@@ -1270,10 +1270,14 @@ fn pending_signals_low() -> u64 {
 }
 
 /// Initialize a signal set to empty.
+///
+/// Errors: `EINVAL` if `set` is NULL — the sigsetops never enter the
+/// kernel, and glibc's `signal/sigempty.c` rejects a NULL `set` itself
+/// with `EINVAL`.  See `sigaddset` for the full note.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn sigemptyset(set: *mut SigsetT) -> i32 {
     if set.is_null() {
-        errno::set_errno(errno::EFAULT);
+        errno::set_errno(errno::EINVAL);
         return -1;
     }
     unsafe {
@@ -1283,10 +1287,12 @@ pub unsafe extern "C" fn sigemptyset(set: *mut SigsetT) -> i32 {
 }
 
 /// Initialize a signal set to full.
+///
+/// Errors: `EINVAL` if `set` is NULL (glibc `signal/sigfillset.c`).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn sigfillset(set: *mut SigsetT) -> i32 {
     if set.is_null() {
-        errno::set_errno(errno::EFAULT);
+        errno::set_errno(errno::EINVAL);
         return -1;
     }
     unsafe {
@@ -1298,13 +1304,34 @@ pub unsafe extern "C" fn sigfillset(set: *mut SigsetT) -> i32 {
 /// Add a signal to a signal set.
 ///
 /// Errors (Linux-matching):
-/// * `EFAULT` — `set` is NULL (glibc would segfault; kernel uses
-///   `copy_to_user` → `-EFAULT`).
-/// * `EINVAL` — `signum` is out of the valid range `[1, NSIG)`.
+/// * `EINVAL` — `set` is NULL, **or** `signum` is out of the valid
+///   range `[1, NSIG)`.
+///
+/// Both are the same error because glibc makes them the same test.
+/// `signal/sigaddset.c` (checked against glibc 2.39) reads:
+///
+/// ```c
+/// if (set == NULL || signo <= 0 || signo >= NSIG
+///     || is_internal_signal (signo))
+///   { __set_errno (EINVAL); return -1; }
+/// ```
+///
+/// Note what this rules out: `EFAULT` is not available here. The
+/// sigsetops are pure bit-twiddling on a caller-owned `sigset_t` and
+/// issue no syscall at all, so there is no `copy_to_user` to fault and
+/// no kernel to report one — the only errno a Linux program can ever
+/// observe from these five functions is `EINVAL`.  (An earlier sweep
+/// set `EFAULT` here and justified it in a comment claiming glibc
+/// would segfault; glibc does not, and the claim was never checked
+/// against the source.)
+///
+/// We do not implement glibc's `is_internal_signal` rejection of
+/// SIGCANCEL/SIGSETXID: those numbers are NPTL's private property on
+/// Linux, and we have no equivalent to protect.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn sigaddset(set: *mut SigsetT, signum: i32) -> i32 {
     if set.is_null() {
-        errno::set_errno(errno::EFAULT);
+        errno::set_errno(errno::EINVAL);
         return -1;
     }
     if !(1..NSIG).contains(&signum) {
@@ -1324,12 +1351,13 @@ pub unsafe extern "C" fn sigaddset(set: *mut SigsetT, signum: i32) -> i32 {
 /// Remove a signal from a signal set.
 ///
 /// Errors (Linux-matching):
-/// * `EFAULT` — `set` is NULL.
-/// * `EINVAL` — `signum` is out of range.
+/// * `EINVAL` — `set` is NULL, or `signum` is out of range.  glibc
+///   `signal/sigdelset.c` uses the same combined test as `sigaddset`;
+///   see the note there for why `EFAULT` cannot arise.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn sigdelset(set: *mut SigsetT, signum: i32) -> i32 {
     if set.is_null() {
-        errno::set_errno(errno::EFAULT);
+        errno::set_errno(errno::EINVAL);
         return -1;
     }
     if !(1..NSIG).contains(&signum) {
@@ -1349,12 +1377,14 @@ pub unsafe extern "C" fn sigdelset(set: *mut SigsetT, signum: i32) -> i32 {
 /// Test whether a signal is in a signal set.
 ///
 /// Errors (Linux-matching):
-/// * `EFAULT` — `set` is NULL.
-/// * `EINVAL` — `signum` is out of range.
+/// * `EINVAL` — `set` is NULL, or `signum` is out of range.  glibc
+///   `signal/sigismem.c` combines the two; see the note on `sigaddset`
+///   for why `EFAULT` cannot arise.  (Unlike `sigaddset`/`sigdelset`,
+///   glibc does *not* reject internal signals here.)
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn sigismember(set: *const SigsetT, signum: i32) -> i32 {
     if set.is_null() {
-        errno::set_errno(errno::EFAULT);
+        errno::set_errno(errno::EINVAL);
         return -1;
     }
     if !(1..NSIG).contains(&signum) {
@@ -4844,13 +4874,68 @@ mod tests {
     //   NULL set → EFAULT, bad signum → EINVAL.
     // =================================================================
 
-    /// sigaddset: NULL set → EFAULT.
+    /// sigaddset: NULL set → EINVAL (glibc `signal/sigaddset.c`).
     #[test]
-    fn test_phase212_sigaddset_null_efault() {
+    fn test_sigaddset_null_einval() {
         crate::errno::set_errno(0);
         let ret = unsafe { sigaddset(core::ptr::null_mut(), SIGINT) };
         assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    /// sigemptyset: NULL set → EINVAL (glibc `signal/sigempty.c`).
+    #[test]
+    fn test_sigemptyset_null_einval() {
+        crate::errno::set_errno(0);
+        let ret = unsafe { sigemptyset(core::ptr::null_mut()) };
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    /// sigfillset: NULL set → EINVAL (glibc `signal/sigfillset.c`).
+    #[test]
+    fn test_sigfillset_null_einval() {
+        crate::errno::set_errno(0);
+        let ret = unsafe { sigfillset(core::ptr::null_mut()) };
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    /// No sigsetop can ever report EFAULT: they issue no syscall, so
+    /// there is no `copy_to_user` to fault.  This test exists to fail
+    /// loudly if a future NULL-pointer sweep reintroduces EFAULT here.
+    #[test]
+    fn test_sigsetops_never_report_efault_on_null() {
+        for errno_after in [
+            {
+                crate::errno::set_errno(0);
+                let _ = unsafe { sigemptyset(core::ptr::null_mut()) };
+                crate::errno::get_errno()
+            },
+            {
+                crate::errno::set_errno(0);
+                let _ = unsafe { sigfillset(core::ptr::null_mut()) };
+                crate::errno::get_errno()
+            },
+            {
+                crate::errno::set_errno(0);
+                let _ = unsafe { sigaddset(core::ptr::null_mut(), SIGINT) };
+                crate::errno::get_errno()
+            },
+            {
+                crate::errno::set_errno(0);
+                let _ = unsafe { sigdelset(core::ptr::null_mut(), SIGINT) };
+                crate::errno::get_errno()
+            },
+            {
+                crate::errno::set_errno(0);
+                let _ = unsafe { sigismember(core::ptr::null(), SIGINT) };
+                crate::errno::get_errno()
+            },
+        ] {
+            assert_ne!(errno_after, crate::errno::EFAULT);
+            assert_eq!(errno_after, crate::errno::EINVAL);
+        }
     }
 
     /// sigaddset: bad signum → EINVAL.
@@ -4863,22 +4948,23 @@ mod tests {
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 
-    /// sigaddset: NULL + bad signum → EFAULT (NULL wins).
+    /// sigaddset: NULL + bad signum → EINVAL either way.  glibc tests
+    /// both in one `||` chain, so there is no priority to get wrong.
     #[test]
-    fn test_phase212_sigaddset_null_beats_bad_signum() {
+    fn test_sigaddset_null_and_bad_signum_agree_on_einval() {
         crate::errno::set_errno(0);
         let ret = unsafe { sigaddset(core::ptr::null_mut(), 0) };
         assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 
-    /// sigdelset: NULL set → EFAULT.
+    /// sigdelset: NULL set → EINVAL (glibc `signal/sigdelset.c`).
     #[test]
-    fn test_phase212_sigdelset_null_efault() {
+    fn test_sigdelset_null_einval() {
         crate::errno::set_errno(0);
         let ret = unsafe { sigdelset(core::ptr::null_mut(), SIGINT) };
         assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 
     /// sigdelset: bad signum → EINVAL.
@@ -4893,13 +4979,13 @@ mod tests {
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 
-    /// sigismember: NULL set → EFAULT.
+    /// sigismember: NULL set → EINVAL (glibc `signal/sigismem.c`).
     #[test]
-    fn test_phase212_sigismember_null_efault() {
+    fn test_sigismember_null_einval() {
         crate::errno::set_errno(0);
         let ret = unsafe { sigismember(core::ptr::null(), SIGINT) };
         assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 
     /// sigismember: bad signum → EINVAL.
@@ -4914,12 +5000,12 @@ mod tests {
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 
-    /// sigismember: NULL + bad signum → EFAULT (NULL wins).
+    /// sigismember: NULL + bad signum → EINVAL either way.
     #[test]
-    fn test_phase212_sigismember_null_beats_bad_signum() {
+    fn test_sigismember_null_and_bad_signum_agree_on_einval() {
         crate::errno::set_errno(0);
         let ret = unsafe { sigismember(core::ptr::null(), -1) };
         assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 }

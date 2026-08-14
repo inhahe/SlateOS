@@ -9236,6 +9236,17 @@ documented errno instead — and say so at the site.
   `EINVAL`; it was checking `buf` before the descriptor, which changes the
   answer for every NULL-buf caller regardless of which errno the check sets.
   The audit below has to look at order, not only at the constant.
+- A cheap mechanical form of the audit exists and was run the same day:
+  search *glibc* for `if (x == NULL) { __set_errno (E…) … }` and intersect the
+  results with our entry points, rather than reading our 289 sites one by one.
+  The one trap is that many hits — most of `io/*.c` and `posix/*.c` — are the
+  generic `ENOSYS` stubs that no Linux build uses; filter them by looking for
+  `stub_warning`/`ENOSYS` in the same file. That sweep found nine further
+  divergences (the five sigsetops, `closedir`, and the three `cfset*speed`
+  functions), which are listed in the known-issues entry. The `pthread.rs`
+  cluster is explicitly *not* answerable this way: glibc has no checks there
+  to copy, so what we return in place of its segfault is a decision, not a
+  lookup, and it is left for a separate pass.
 - A future audit should sweep the remaining `is_null() -> EFAULT` sites in
   `posix/` and classify each as syscall-forwarding (keep `EFAULT`) or
   userspace-pre-check (switch to glibc's errno). The `xattr`, `stat`, and

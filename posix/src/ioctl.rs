@@ -1007,13 +1007,18 @@ pub unsafe extern "C" fn cfgetospeed(termios_p: *const Termios) -> u32 {
 ///
 /// Returns 0 on success, -1 on error.
 ///
+/// A NULL `termios_p` gives `EINVAL`: `cfsetispeed` only writes a field
+/// of a caller-owned `struct termios` and issues no syscall, and glibc
+/// `termios/speed.c` (checked against 2.39) rejects NULL itself with
+/// `if (termios_p == NULL) { __set_errno (EINVAL); return -1; }`.
+///
 /// # Safety
 ///
 /// `termios_p` must be non-null and point to a valid `Termios`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn cfsetispeed(termios_p: *mut Termios, speed: u32) -> i32 {
     if termios_p.is_null() {
-        errno::set_errno(errno::EFAULT);
+        errno::set_errno(errno::EINVAL);
         return -1;
     }
     // SAFETY: Caller guarantees termios_p is valid.
@@ -1025,7 +1030,8 @@ pub unsafe extern "C" fn cfsetispeed(termios_p: *mut Termios, speed: u32) -> i32
 
 /// Set output baud rate in termios.
 ///
-/// Returns 0 on success, -1 on error.
+/// Returns 0 on success, -1 on error.  A NULL `termios_p` gives
+/// `EINVAL` — see `cfsetispeed` for the glibc citation.
 ///
 /// # Safety
 ///
@@ -1033,7 +1039,7 @@ pub unsafe extern "C" fn cfsetispeed(termios_p: *mut Termios, speed: u32) -> i32
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn cfsetospeed(termios_p: *mut Termios, speed: u32) -> i32 {
     if termios_p.is_null() {
-        errno::set_errno(errno::EFAULT);
+        errno::set_errno(errno::EINVAL);
         return -1;
     }
     // SAFETY: Caller guarantees termios_p is valid.
@@ -1090,7 +1096,17 @@ pub unsafe extern "C" fn cfmakeraw(termios_p: *mut Termios) {
 ///
 /// Convenience function (non-POSIX but widely available).
 ///
-/// Returns 0 on success, -1 on error.
+/// Returns 0 on success, -1 on error.  A NULL `termios_p` sets `EINVAL`.
+///
+/// **Deliberate divergence in the return value.** glibc's `cfsetspeed`
+/// (`termios/cfsetspeed.c`) forwards to `cfsetispeed`/`cfsetospeed` and
+/// *ignores their return values*, so for a recognised `speed` it returns
+/// **0** on a NULL `termios_p` while leaving `errno` set to `EINVAL` —
+/// a silent failure the caller has no reason to look for. We report the
+/// same errno but return -1, because copying a "succeeded, except it
+/// didn't" answer would turn a caller's bug into corrupted state later.
+/// A caller that checks the return value is helped; one that ignores it
+/// is no worse off than on glibc.
 ///
 /// # Safety
 ///
@@ -1098,7 +1114,7 @@ pub unsafe extern "C" fn cfmakeraw(termios_p: *mut Termios) {
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn cfsetspeed(termios_p: *mut Termios, speed: u32) -> i32 {
     if termios_p.is_null() {
-        errno::set_errno(errno::EFAULT);
+        errno::set_errno(errno::EINVAL);
         return -1;
     }
     // SAFETY: Caller guarantees termios_p is valid.
@@ -1417,8 +1433,14 @@ mod tests {
 
     #[test]
     fn test_cfset_null() {
+        // EINVAL, not EFAULT: these write a caller-owned struct and issue
+        // no syscall; glibc termios/speed.c checks NULL itself.
+        errno::set_errno(0);
         assert_eq!(unsafe { cfsetispeed(core::ptr::null_mut(), 0) }, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+        errno::set_errno(0);
         assert_eq!(unsafe { cfsetospeed(core::ptr::null_mut(), 0) }, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
     }
 
     // -- ioctl request code tests --
@@ -1492,7 +1514,13 @@ mod tests {
 
     #[test]
     fn test_cfsetspeed_null() {
+        // errno matches glibc (EINVAL); the -1 return is a deliberate
+        // divergence — glibc returns 0 here while setting EINVAL, because
+        // cfsetspeed discards cfsetispeed/cfsetospeed's return values.
+        // See the doc comment on `cfsetspeed`.
+        errno::set_errno(0);
         assert_eq!(unsafe { cfsetspeed(core::ptr::null_mut(), B9600) }, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
     }
 
     // -- ctermid tests --

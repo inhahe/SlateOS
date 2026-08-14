@@ -57791,17 +57791,43 @@ checked `buf` *before* the descriptor, whereas glibc's `__ptsname_r` issues
 ordering — not the errno constant — was the divergence. It now matches glibc,
 and the function has no NULL check at all. Full analysis in §300.
 
-**What remains.** 289 `is_null() -> EFAULT` sites across 56 files in
-`posix/src/` have *not* been individually classified. This entry is open for
-coverage, not because any specific remaining site is known wrong: the `xattr`,
-`stat`, and `file` NULL-path checks spot-checked during the fix are all
-syscall-forwarding and correctly `EFAULT`. The densest concentrations, and so
-the places to start, are `pthread.rs` (47), `file.rs` (28), `spawn.rs` (16),
-`socket.rs` (15), `unistd.rs` (13), `xattr.rs` (11), and `ioctl.rs` /
-`process.rs` (10 each). `pthread.rs` deserves the first look: NPTL is pure
-userspace, so none of its 47 sites can be justified by "the kernel would say
-`EFAULT`" — but glibc mostly does not check at all there and simply faults, so
-the right answer per function needs deciding, not merely looking up.
+**Second pass, 2026-08-13 — the mechanical sweep.** Rather than reading all 289
+sites, glibc's tree was searched for the inverse pattern: explicit
+`if (x == NULL) { __set_errno (E…); … }` checks in *non-stub* translation units
+(many `io/*.c` and `posix/*.c` hits are the generic `ENOSYS` stubs that Linux
+never uses — those were filtered out by looking for `stub_warning`/`ENOSYS` in
+the file). Cross-referencing the survivors against our entry points found nine
+more divergences, all fixed:
+
+- `sigemptyset`, `sigfillset`, `sigaddset`, `sigdelset`, `sigismember` — NULL
+  `set` was `EFAULT`, is now `EINVAL` (`posix/src/signal.rs`; glibc
+  `signal/sigempty.c`, `sigfillset.c`, `sigaddset.c`, `sigdelset.c`,
+  `sigismem.c`). These issue no syscall at all, so `EFAULT` was not merely the
+  wrong constant — it was an errno the function cannot physically produce on
+  Linux. The old doc comments asserted "glibc would segfault"; glibc does not.
+- `closedir(NULL)` — was `EBADF`, now `EINVAL` (`posix/src/dirent.rs`; glibc
+  `sysdeps/unix/sysv/linux/closedir.c`, which checks before touching the fd).
+- `cfsetispeed`, `cfsetospeed`, `cfsetspeed` — NULL `termios_p` was `EFAULT`,
+  now `EINVAL` (`posix/src/ioctl.rs`; glibc `termios/speed.c`).
+
+Checked and found already correct in the same pass — recorded so they are not
+re-examined: `nanosleep`/`setitimer` check only the mandatory argument;
+`timer_create` treats a NULL `sevp` as SIGEV_SIGNAL per POSIX; `aio_suspend`
+leaves `timeout` optional; `posix_spawn` leaves `pid`/`file_actions`/`attrp`
+optional; `iconv` treats a NULL `inbuf` as a state reset. `telldir`/`seekdir`
+looked like hits but the EINVAL there is in glibc's *stub*; Linux's versions
+(`sysdeps/unix/sysv/linux/`) have no check.
+
+**What remains.** The ~280 surviving `is_null() -> EFAULT` sites have not been
+individually classified. This entry stays open for coverage, not because any
+specific remaining site is known wrong. The densest concentrations are
+`pthread.rs` (47), `file.rs` (28), `spawn.rs` (16), `socket.rs` (15),
+`unistd.rs` (13) and `xattr.rs` (11). `pthread.rs` is the one that still needs
+a decision rather than a lookup: NPTL is pure userspace, so none of its 47
+sites can be justified by "the kernel would say `EFAULT`" — but glibc mostly
+does not check at all there and simply faults, so there is no upstream errno to
+copy and the question is what we *should* return in glibc's place. That is a
+judgement call across 47 functions and wants its own pass.
 
 **Reproduce.** Not a runtime failure. `rg -A3 'is_null\(\)' posix/src`, filtered
 for `EFAULT` in the following lines, enumerates the candidate sites; each has to

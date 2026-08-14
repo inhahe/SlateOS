@@ -28,6 +28,7 @@ from a check that passes".
 from __future__ import annotations
 
 import importlib.util
+import inspect
 import math
 import os
 import sys
@@ -687,6 +688,65 @@ def test_baseline_canary_is_reported(bh):
           "predates" in header(None), True)
 
 
+def test_canary_summary_names_both_causes(bh):
+    """The current run's canary paragraph must say the right thing.
+
+    This test could not be written before 2026-08-14: the paragraph was 55
+    lines inline in `main()`, reachable only by running the whole tool against
+    a real serial log. So the one piece of prose in this repo whose entire job
+    is to stop a reader misattributing a benchmark result had nothing asserting
+    what it said -- and it said the wrong thing for the length of this thread,
+    naming the optimiser as the sole cause of an arm-separation failure. A
+    check nobody can exercise is indistinguishable from a check that passes,
+    which is the lesson this file keeps relearning; extracting
+    `print_canary_summary` is that lesson applied to the diagnostic itself.
+    """
+    import io
+    import contextlib
+
+    def summary(canary):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            bh.print_canary_summary(canary)
+        return buf.getvalue()
+
+    broken = {"start": 271, "end": 275, "pct": 101, "min": 271, "max": 279,
+              "spread": 2, "samples": 9, "invalid": 3}
+    out = summary(broken)
+    check("a broken run is UNKNOWN, not clean", "UNKNOWN" in out, True)
+    check("the broken paragraph names the optimiser cause",
+          "optimised away" in out, True)
+    check("the broken paragraph also names the host-load cause",
+          "host load exceeded" in out, True)
+    check("and points at the check that tells them apart",
+          "scale check" in out, True)
+
+    # The real P20 wire record: nine valid samples at 53%, one failed arm.
+    loaded = {"start": 0, "end": 10, "pct": 0, "min": 8, "max": 12,
+              "spread": 53, "samples": 9, "invalid": 1,
+              "min_centi": 826, "max_centi": 1269}
+    out = summary(loaded)
+    check("a loaded run is reported as contamination",
+          "CONTAMINATED" in out, True)
+    check("its failed sample is called corroboration, not doubt",
+          "corroborates" in out, True)
+    check("and the loaded run is not filed as instrument failure",
+          "CANARY BROKEN" in out, False)
+
+    # A clean run must not borrow the corroboration line, and must still refuse
+    # to claim more than a sampled check can support.
+    ok = {"start": 5, "end": 5, "pct": 99, "min": 5, "max": 5, "spread": 0,
+          "samples": 10, "invalid": 0, "min_centi": 516, "max_centi": 517}
+    out = summary(ok)
+    check("a clean run says OK", "Canary OK" in out, True)
+    check("a clean run does not claim per-benchmark quiet",
+          "sampled" in out, True)
+    check("a clean run mentions no corroboration",
+          "corroborates" in out, False)
+    check("an absent canary is not silently clean",
+          "not clean" in summary(None), True)
+
+
 def test_baselines_crosscheck(bh, tmpdir):
     """The target cross-check must distinguish its three failure modes.
 
@@ -831,26 +891,40 @@ def test_baselines_is_valid_toml():
 
 
 def main():
+    """Run every `test_*` in this file, in definition order.
+
+    # Why discovery rather than a hand-written call list
+
+    There used to be one: eighteen explicit calls, one per test. A test added
+    without a matching line ran zero times and reported nothing -- silently, and
+    indistinguishably from a test that passed. That is the exact failure this
+    whole suite exists to catch one level down (a canary that measured zero and
+    certified nine runs clean), reproduced in the harness meant to catch it.
+    Discovery removes the second place a test has to be listed, so forgetting is
+    no longer possible.
+
+    Signatures are dispatched by parameter name: `bh` gets the loaded module,
+    `tmpdir` a fresh temporary directory. Each test gets its *own* tmpdir rather
+    than a shared one, so a stray filename collision between two tests cannot
+    make one depend on another's leftovers. Module dicts preserve insertion
+    order, so the run order still matches the file.
+    """
     bh = load_module()
-    with tempfile.TemporaryDirectory() as tmpdir:
-        test_parse_formats(bh, tmpdir)
-        test_malformed_rejected(bh, tmpdir)
-        test_canary(bh, tmpdir)
-        test_canary_broken_is_not_contamination(bh, tmpdir)
-        test_dispersion(bh, tmpdir)
-        test_profile_isolation(bh, tmpdir)
-        test_missing_log(bh, tmpdir)
-    test_history_still_loads(bh)
-    test_drift_is_subtracted(bh)
-    test_drift_needs_samples(bh)
-    test_run_position_flags_outlier_run(bh)
-    test_run_position_flags_outlier_baseline(bh)
-    test_run_position_needs_history(bh)
-    test_run_position_wired_into_report(bh)
-    test_baseline_canary_is_reported(bh)
-    test_baselines_is_valid_toml()
-    with tempfile.TemporaryDirectory() as tmpdir:
-        test_baselines_crosscheck(bh, tmpdir)
+    tests = [
+        (name, fn) for name, fn in list(globals().items())
+        if name.startswith("test_") and callable(fn)
+    ]
+    # A discovery mechanism that discovers nothing looks exactly like a suite
+    # that passes, which is the bug this docstring is about. Assert a floor.
+    if len(tests) < 15:
+        print(f"FATAL: test discovery found only {len(tests)} tests; the "
+              f"suite has at least 15. Discovery is broken, not the code.")
+        return 1
+    for name, fn in tests:
+        params = inspect.signature(fn).parameters
+        with tempfile.TemporaryDirectory() as tmpdir:
+            args = {"bh": bh, "tmpdir": tmpdir}
+            fn(**{p: args[p] for p in params if p in args})
 
     print()
     if _FAILURES:

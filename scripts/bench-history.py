@@ -332,6 +332,88 @@ def canary_is_contaminated(canary):
     return canary_verdict(canary) == CANARY_CONTAMINATED
 
 
+def print_canary_summary(canary):
+    """Print the current run's canary verdict and what it does and does not mean.
+
+    # Why this is a function
+
+    It was 55 lines inline in `main()`, which made it unreachable from the test
+    suite: the only way to exercise it was to run the whole tool against a real
+    log. So the one paragraph in this repo whose entire job is to stop a reader
+    misattributing a benchmark result had no test asserting what it says --
+    and it spent this whole thread saying the wrong thing. The BROKEN branch
+    named the optimiser as the sole cause of an arm-separation failure until
+    the P20 load test produced the identical symptom from host load instead.
+
+    That is the same shape as the bug this file exists to document: a check
+    nobody could exercise is indistinguishable from a check that passes.
+    Extracting it costs nothing and makes the wording assertable.
+    """
+    verdict = canary_verdict(canary)
+    if verdict == CANARY_ABSENT:
+        print("  Contamination canary: absent (log predates it) - unknown, "
+              "not clean.")
+        return
+
+    if "spread" in canary:
+        detail = (f"spread {canary['spread']}% over {canary['samples']} "
+                  f"samples ({canary['min']}-{canary['max']} cycles)")
+    else:
+        detail = (f"endpoints {canary['start']} -> {canary['end']} cycles, "
+                  f"{canary['pct']}% (no mid-suite sampling in this log)")
+
+    if verdict == CANARY_BROKEN:
+        failed = canary.get("invalid")
+        how = (f"{failed} measurement(s) failed"
+               if failed else "it measured zero cycles per access")
+        print(f"  CANARY BROKEN: {how} - contamination is UNKNOWN for this "
+              f"run, not clean ({detail}).")
+        print("  A reference access cost of zero is not a fast machine, it is "
+              "a failed measurement: the A/B arms did not separate.")
+        # Two causes, not one. This used to name only the optimiser, which is
+        # what happened the first time and was written from that single
+        # instance -- and the P20 load test then produced the identical
+        # symptom from the opposite cause, on a binary whose store the
+        # scale-invariance check had proven intact in the same run. Sending
+        # the reader to disassemble a correct function is how a diagnostic
+        # becomes a wild-goose chase. The kernel's report_arm_failure_causes
+        # carries the same pair; keep them in step.
+        print("  Two causes need opposite responses: (1) the store was "
+              "optimised away, so there is no signal - check the 'canary "
+              "scale check' line in that run's log; or (2) host load exceeded "
+              "the ~5-cycle A/B signal and inverted the arms, as demonstrated "
+              "by scripts/canary-load-test.sh.")
+        print("  Do not read this as host load *by default*. See "
+              "known-issues.md "
+              "B-BENCH-CANARY-MEASURES-ZERO-IN-RELEASE-AND-BLAMES-THE-HOST.")
+    elif verdict == CANARY_CONTAMINATED:
+        print(f"  CONTAMINATED: reference access cost {detail}, tolerance "
+              f"{CANARY_TOLERANCE_PCT}%.")
+        print("  Host load changed during the run. A single-benchmark outlier "
+              "here is unproven - the drift correction removes a uniform "
+              "factor, and this is not one.")
+        # Failures alongside an over-tolerance spread corroborate it: noise big
+        # enough to invert a 5-cycle A/B split is load. Say so, or a reader
+        # seeing both facts reconciles them the wrong way round.
+        failed = canary.get("invalid") or 0
+        if failed:
+            print(f"  {failed} measurement(s) also failed to separate their "
+                  f"arms outright, which corroborates this verdict rather "
+                  f"than weakening it.")
+    else:
+        # NOT "host load stable" -- that is a claim the canary cannot support
+        # and which was measurably false every time it was made. All three runs
+        # that carried dispersion data were certified clean here while each
+        # contained 5-8 benchmarks with >=5x in-run dispersion. See
+        # known-issues.md
+        # B-BENCH-CANARY-CERTIFIES-CLEAN-RUNS-THAT-CONTAIN-MULTI-X-STALLS.
+        print(f"  Canary OK: reference access cost steady between benchmarks, "
+              f"{detail}.")
+        print("  That is a *sampled* check, ~1 sample per 8 benchmarks. It "
+              "does not mean individual benchmarks ran undisturbed - see the "
+              "dispersion line below.")
+
+
 def git_commit():
     """Short HEAD hash, or 'unknown' outside a working repo."""
     try:
@@ -1055,46 +1137,7 @@ def main(argv=None):
 
     # Reported *after* the comparison, so it qualifies the verdict the reader
     # has just seen rather than being buried above it.
-    verdict = canary_verdict(canary)
-    if verdict == CANARY_ABSENT:
-        print("  Contamination canary: absent (log predates it) - unknown, "
-              "not clean.")
-    else:
-        if "spread" in canary:
-            detail = (f"spread {canary['spread']}% over {canary['samples']} "
-                      f"samples ({canary['min']}-{canary['max']} cycles)")
-        else:
-            detail = (f"endpoints {canary['start']} -> {canary['end']} cycles, "
-                      f"{canary['pct']}% (no mid-suite sampling in this log)")
-        if verdict == CANARY_BROKEN:
-            failed = canary.get("invalid")
-            how = (f"{failed} measurement(s) failed"
-                   if failed else "it measured zero cycles per access")
-            print(f"  CANARY BROKEN: {how} - contamination is UNKNOWN for this "
-                  f"run, not clean ({detail}).")
-            print("  A reference access cost of zero is not a fast machine, it "
-                  "is a failed measurement: the A/B arms did not separate, so "
-                  "the store being timed was probably optimised away.")
-            print("  Do not read this as host load. See known-issues.md "
-                  "B-BENCH-CANARY-MEASURES-ZERO-IN-RELEASE-AND-BLAMES-THE-HOST.")
-        elif verdict == CANARY_CONTAMINATED:
-            print(f"  CONTAMINATED: reference access cost {detail}, tolerance "
-                  f"{CANARY_TOLERANCE_PCT}%.")
-            print("  Host load changed during the run. A single-benchmark "
-                  "outlier here is unproven - the drift correction removes a "
-                  "uniform factor, and this is not one.")
-        else:
-            # NOT "host load stable" -- that is a claim the canary cannot
-            # support and which was measurably false every time it was made.
-            # All three runs that carried dispersion data were certified clean
-            # here while each contained 5-8 benchmarks with >=5x in-run
-            # dispersion. See known-issues.md
-            # B-BENCH-CANARY-CERTIFIES-CLEAN-RUNS-THAT-CONTAIN-MULTI-X-STALLS.
-            print(f"  Canary OK: reference access cost steady between "
-                  f"benchmarks, {detail}.")
-            print("  That is a *sampled* check, ~1 sample per 8 benchmarks. It "
-                  "does not mean individual benchmarks ran undisturbed - see "
-                  "the dispersion line below.")
+    print_canary_summary(canary)
 
     report_dispersion(current_entries)
 

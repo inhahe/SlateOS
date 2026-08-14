@@ -60009,7 +60009,7 @@ where a construct *ends*; see
 
 ---
 
-### TD-OILS-AN-UNMATED-DOUBLE-QUOTE-GROWS-A-MATE-WHEN-THE-WORD-IS-PRINTED-BACK — 2026-08-14
+### TD-OILS-AN-UNMATED-DOUBLE-QUOTE-GROWS-A-MATE-WHEN-THE-WORD-IS-PRINTED-BACK — 2026-08-14 — ✅ FIXED 2026-08-14
 
 **Where:** `userspace/oils/src/unparse.rs` — `part_src`'s
 `WordPart::DoubleQuoted` arm, which writes a `"` on both ends unconditionally;
@@ -60066,11 +60066,121 @@ Not worth reaching for a cheaper trick: an unmated run always extends to the
 end of its text, so "omit the quote when the part is last" would be *nearly*
 right, and nearly-right quoting is how a word stops re-parsing.
 
-**Impact.** Diagnostics only, as measured — one spurious `"` in the two lines
+**Fixed 2026-08-14**, along the lines above. `read_double_quote_until` now
+reports whether a `"` really ended the run — it has exactly two `Ok` returns,
+one per case, so the flag falls straight out of the existing control flow — and
+that rides on `Seg::Dq(Vec<Seg>, bool)` into
+`WordPart::DoubleQuoted { parts, closed }`. `part_src` writes the trailing quote
+only when `closed`. The single-quote half is the same edit:
+`read_single_quote`'s tolerant arm answers `false`, `Seg::Sq` became a struct
+variant `{ text, escaped, closed }` rather than grow a second unnamed `bool`,
+and an unmated run prints as `'` + text instead of going through
+`sh_single_quote`, whose whole job is to supply the mate.
+
+Two returns needed thought rather than transcription: the pair inside
+`read_double_quote_until` that end the run on an *unclosed construct* absorbed
+into a `Seg::Unclosed` answer `false`, since the run ended on the construct and
+not on a quote; and the backslash spelling of `Seg::Sq` is unconditionally
+`closed: true`, having no quotes to match.
+
+Corpus case:
+`userspace/oils/tests/corpus/a-double-quote-with-no-mate-does-not-grow-one-when-the-word-is-printed-back.sh`
+— 8 shapes including `PS4` and a here-document body, byte-identical to bash
+5.2.37 including stderr.
+
+**Impact while it stood.** Diagnostics only — one spurious `"` in the two lines
 bash prints for a malformed `${ … }` whose operand holds a `"` opened inside a
-`' … '` run. Pre-existing since the unmated-`"` fix of 2026-08-14 (before it,
-the same word was condemned outright, which was worse). Reachable only through
-`@P`/`PS4`/here-doc text.
+`' … '` run. Reachable only through `@P`/`PS4`/here-doc text.
+
+---
+
+### TD-OILS-AN-UNMATED-SQUOTE-IN-A-SUBSCRIPT-LOSES-ITS-QUOTE-BYTES-FROM-THE-WORD-PRINTED-BACK — 2026-08-14
+
+**Where:** the `` bad substitution: no closing `}' `` path —
+`userspace/oils/src/wordscan.rs` (`word_fault`, which re-scans
+`crate::unparse::word_src`) and `Shell::unclosed_in_word`
+(`userspace/oils/src/interp.rs`).
+
+**Repro** (bash 5.2.37, `build/pr15.sh` x1):
+
+```sh
+declare -a arr=(10 20 30)
+echo A${arr['1]}B
+echo GUARD1
+```
+
+bash and osh agree on how far the runaway `' … '` run reaches — both swallow
+the following lines, because a `'` in a `${ … }` the gobbler is scanning opens
+a run that ends only at its mate, wherever in the remaining input that is. They
+disagree on the **text they then print back**:
+
+| | bash 5.2.37 | osh |
+|---|---|---|
+| named word begins | `` `'1]}B` `` | `` `1]}B` `` |
+| named word ends | ``echo "A${arr['1`` | ``echo "A${arr[`` |
+
+So osh drops the run's opening `'` and stops its tail two bytes early. The
+extent is right and the value is unaffected; only the echoed text is wrong.
+
+**Not** the defect fixed the same day by
+`TD-OILS-AN-UNMATED-DOUBLE-QUOTE-GROWS-A-MATE-WHEN-THE-WORD-IS-PRINTED-BACK`:
+that one *added* a byte at print time and this one *drops* two, and the two
+binaries were compared directly (`target-baseline` built from the commit before
+that fix) — byte-identical on this repro, so the defect is older and
+independent.
+
+**What the proper fix looks like.** The text is `crate::unparse::word_src(w)`
+and nothing else: `Shell::begin_word` computes it once, hands it to
+`crate::wordscan::word_fault`, and the `WordFault::Brace(s.to_vec())` raised at
+`wordscan.rs:221`/`:229` carries that same string through to
+`Shell::dq_unclosed_brace`. So this *is* a `part_src` result — the "text taken
+from a source span" alternative is ruled out — and the run must be reaching
+print as something other than an unmated `WordPart::SingleQuoted`, because that
+arm now writes a leading `'`.
+
+Note the shape of the difference before assuming it is one bug: bash's name is
+`'` + osh's name + `'1`. The missing tail is two bytes *past* where osh's word
+ends, which is an **extent** difference, not a printing one — so there are
+plausibly two faults here, one dropping the opening quote and one stopping the
+scan early. Measure them apart first.
+
+**Impact.** Diagnostics only. Reachable through any `${ … }` whose subscript or
+substring bound holds a `'` with no mate.
+
+---
+
+### TD-OILS-AN-UNTERMINATED-DQUOTE-IN-A-SUBSCRIPT-IS-BLAMED-ON-THE-WRONG-LINE — 2026-08-14
+
+**Where:** the `` unexpected EOF while looking for matching `"' `` diagnostic;
+the line it carries comes from the lexer's `open` capture in
+`Lexer::read_double_quote_until` (`userspace/oils/src/lexer.rs`).
+
+**Repro** (bash 5.2.37, `build/pr15.sh` x5) — the script's line 11 opens a `"`
+that never closes:
+
+```sh
+echo A${arr["1]}B
+```
+
+| | bash 5.2.37 | osh |
+|---|---|---|
+| reports | ``line 11: unexpected EOF while looking for matching `"' `` | same text, **line 15** |
+
+bash blames the line the `"` opened on; osh blames the line the input ran out
+on. Same message, same exit, wrong number.
+
+Pre-existing and independent of the two reprint defects above — same
+`target-baseline` comparison, byte-identical.
+
+**What the proper fix looks like.** `read_double_quote_until` already captures
+`let open = self.cur_line();` and hands it to `eof_matching('"').at(open)`, so
+the number is right where that error is *raised*. Follow where it is re-raised:
+a `.at(self.eof_line())` on the way out will overwrite it. The brace-scan work
+of the same day added one such site deliberately, for a different error, which
+is a good place to start looking.
+
+**Impact.** Diagnostics only — one wrong line number in a message whose text
+and status already match.
 
 ---
 

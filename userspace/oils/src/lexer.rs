@@ -2390,9 +2390,17 @@ pub fn tokenize_spanned_strict(src: BStr<'_>, opts: ParseOpts) -> Result<Spanned
 /// operator — and differ only here.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Verbatim {
-    /// A pattern (`${var#pat}`, `${var/pat/…}`) or a subscript: written bare, so
-    /// `'…'` quotes and every backslash escapes the character after it.
+    /// A pattern (`${var#pat}`, `${var/pat/…}`) or a *bare* operand: written
+    /// bare, so `'…'` quotes and every backslash escapes the character after it,
+    /// and a `<( … )` in it is performed.
     Bare,
+    /// A subscript or a substring bound — text the arithmetic evaluator will
+    /// read. Exactly [`Verbatim::Bare`], except that a `<( … )` is *not*
+    /// performed: `arrayfunc.c` expands both with `Q_DOUBLE_QUOTES|Q_ARITH`, and
+    /// the quoting flag is what `expand_word_internal` branches on
+    /// (subst.c:11079). So `${a[<(echo 1)]}` is an arithmetic error naming the
+    /// nine characters, not one naming a `/dev/fd/N`.
+    Arith,
     /// The *replacement* of `${var/pat/repl}`: as [`Verbatim::Bare`], except that
     /// `\&` and `\\` keep their backslash for the later `&`-scan.
     Replacement,
@@ -2442,6 +2450,22 @@ pub fn lex_word_verbatim_opts(
     let mut lx = Lexer::new(src, opts);
     lx.apply_ctx(ctx);
     lx.read_word_verbatim(Verbatim::Bare, &[])
+}
+
+/// [`lex_word_verbatim_opts`] for an **array subscript** or a **substring
+/// bound** — a fragment read exactly as a pattern is, except that a `<( … )`
+/// written in it is not performed. See [`Verbatim::Arith`].
+///
+/// # Errors
+/// Returns [`LexError`] on an unterminated quote or substitution.
+pub fn lex_subscript_verbatim(
+    src: BStr<'_>,
+    opts: ParseOpts,
+    ctx: ReadCtx,
+) -> Result<Vec<Seg>, LexError> {
+    let mut lx = Lexer::new(src, opts);
+    lx.apply_ctx(ctx);
+    lx.read_word_verbatim(Verbatim::Arith, &[])
 }
 
 /// Lex `src` as if it were the body of a double-quoted string that runs to the
@@ -5151,19 +5175,44 @@ impl Lexer {
                         }
                     }
                 }
-                // A `<(` is *not* read here, though the `${ … }` scan that
-                // produced this text did read one. bash performs a process
-                // substitution from `expand_word_internal`, which takes a `<(`
-                // for an ordinary character under `Q_DOUBLE_QUOTES` — and every
-                // fragment this loop reads that is not a pattern or a
-                // replacement is expanded that way (a double-quoted operand,
-                // an array subscript, a substring bound). osh decides at lex
-                // time whether a process substitution is live, so the one place
-                // it can be read is the one place it is always performed, and
-                // that is not here. What the parse *did* to it — the body's
-                // error, and the re-print that replaces the source — reaches
-                // this text through [`CmdSubSpan`] instead; see
-                // `parser::procsub_reprints`.
+                // A `<( … )` is *performed* from `expand_word_internal`
+                // (subst.c:11094), and the one thing that stops it there is the
+                // quoting the expansion runs under: `if (string[++sindex] !=
+                // LPAREN || (quoted & (Q_HERE_DOCUMENT|Q_DOUBLE_QUOTES)) || …)`
+                // takes the `<` for an ordinary character (subst.c:11079). So
+                // the fragments this loop reads split two ways. A **pattern**
+                // and a **replacement** are re-entered without
+                // `Q_DOUBLE_QUOTES` whatever surrounded the `${ … }`, so both
+                // run it — measured, `z=/dev/fd/63; echo "[${z#<(echo hi)}]"`
+                // prints `[]`, the pattern having become the very path `z`
+                // holds. A **bare operand** inherits the bare expansion and runs
+                // it too. The two that do not are a double-quoted operand
+                // (which is [`Verbatim::Dquote`], read by
+                // [`lex_operand_in_dquote`], and reaches this loop with the arm
+                // off) and the arithmetic fragments ([`Verbatim::Arith`]).
+                //
+                // What the *parse* did to it — the body's syntax error, and the
+                // re-print that replaces the source — happened before this scan
+                // and reaches this text through [`CmdSubSpan`]; see
+                // `parser::procsub_reprints`. So the body read here is already
+                // the re-print, which is what bash performs too: the token
+                // buffer a `${ … }` scan leaves behind holds the re-print and
+                // nothing else, as `declare -f` shows.
+                '<' | '>'
+                    if matches!(mode, Verbatim::Bare | Verbatim::Replacement)
+                        && self.at(self.pos + 1) == Some('(') =>
+                {
+                    flush_lit(&mut segs, &mut lit);
+                    let input = c == '<';
+                    let open_line = self.cur_line();
+                    // Past the `<`/`>` and the `(`, leaving the cursor where
+                    // `read_subst_body` wants it. Word level here as in
+                    // [`Lexer::read_word_inner`], so the body's delimiter is
+                    // that `(` and never an enclosing `"`.
+                    self.pos += 2;
+                    let raw = self.read_subst_body(false).map_err(|e| e.at(self.eof_line()))?;
+                    segs.push(Seg::ProcSub(input, raw, open_line));
+                }
                 '$' => match self.read_dollar(false) {
                     Ok(Some(seg)) => {
                         flush_lit(&mut segs, &mut lit);

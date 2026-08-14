@@ -7754,6 +7754,29 @@ pub(crate) fn word_verbatim_from_source_at(
     q: Quoting,
     line: u32,
 ) -> Result<Word, ParseError> {
+    verbatim_word_at(s, opts, q, line, Frag::Word)
+}
+
+/// Which of the two verbatim readings a fragment gets. They differ in one
+/// thing: whether a `<( … )` written in the fragment is performed. See
+/// [`crate::lexer::lex_subscript_verbatim`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Frag {
+    /// A pattern, a replacement or a bare operand — expanded as a word, so a
+    /// process substitution in it runs.
+    Word,
+    /// A subscript or a substring bound — expanded as an arithmetic string
+    /// (`Q_DOUBLE_QUOTES|Q_ARITH`), so one does not.
+    Arith,
+}
+
+fn verbatim_word_at(
+    s: BStr<'_>,
+    opts: ParseOpts,
+    q: Quoting,
+    line: u32,
+    frag: Frag,
+) -> Result<Word, ParseError> {
     if s.is_empty() {
         return Ok(Word::default());
     }
@@ -7763,8 +7786,11 @@ pub(crate) fn word_verbatim_from_source_at(
     // changes nothing else.
     let lex_opts =
         ParseOpts { reread: opts.reread, tolerant: opts.tolerant, ..ParseOpts::default() };
-    let mut segs = crate::lexer::lex_word_verbatim_opts(s, lex_opts, q.read_ctx())
-        .map_err(|e| ParseError::new(&e.msg))?;
+    let read = match frag {
+        Frag::Word => crate::lexer::lex_word_verbatim_opts,
+        Frag::Arith => crate::lexer::lex_subscript_verbatim,
+    };
+    let mut segs = read(s, lex_opts, q.read_ctx()).map_err(|e| ParseError::new(&e.msg))?;
     map_frag_segs(&mut segs, line);
     let mut parts: Vec<WordPart> = Vec::with_capacity(segs.len());
     for seg in &segs {
@@ -7825,7 +7851,7 @@ pub(crate) fn word_subscript_from_source_at(
     q: Quoting,
     line: u32,
 ) -> Result<Word, ParseError> {
-    let mut w = word_verbatim_from_source_at(s, opts, q, line)?;
+    let mut w = verbatim_word_at(s, opts, q, line, Frag::Arith)?;
     attach_subscript_reads(&mut w, opts, q, line)?;
     Ok(w)
 }
@@ -7852,7 +7878,11 @@ fn attach_subscript_reads(
         // Tolerant, because the run's interior can be cut short of a quote it
         // opened — `'"'` is a `"` with no mate, and bash's expander runs it to
         // the end of the string rather than complaining.
-        *parts = Some(word_tolerant_from_source_at(text, opts, inner_q, line)?.parts);
+        // Still arithmetic text: `Q_DOUBLE_QUOTES` merely switches the single
+        // quote off, so a `<( … )` inside the run is no more performed than one
+        // beside it.
+        let tolerant = ParseOpts { tolerant: true, ..opts };
+        *parts = Some(verbatim_word_at(text, tolerant, inner_q, line, Frag::Arith)?.parts);
         any = true;
     }
     // The interior was parsed on its own and so knows nothing of what follows
@@ -7979,6 +8009,17 @@ fn word_replacement_from_source(
     Ok(Word { parts })
 }
 
+/// Tokenize `s` and join what it holds into one word — the reader for the two
+/// bounds of `${x:off:len}`, which bash tokenizes rather than reads verbatim.
+///
+/// A `<( … )` in a bound is *not* performed. The bound goes to
+/// `expand_arith_string` under `Q_DOUBLE_QUOTES`, which is precisely what stops
+/// `expand_word_internal` reading one (subst.c:11079) — the same reason a
+/// subscript beside it does not, and osh's two arithmetic fragments used to
+/// disagree about this. The tokenizer that runs here has no mode for it, so the
+/// segment is turned back into the characters it was read from; the body it
+/// holds has already been parsed and re-printed by the `${ … }` scan that
+/// produced this text, so nothing is lost by not parsing it again.
 fn word_from_source(
     s: BStr<'_>,
     opts: ParseOpts,
@@ -8003,6 +8044,11 @@ fn word_from_source(
             }
             first = false;
             for seg in segs {
+                if let Seg::ProcSub(input, raw, _) = seg {
+                    let open: BStr<'_> = if *input { b"<(" } else { b">(" };
+                    parts.push(WordPart::Literal(bfmt![open, raw, b")"]));
+                    continue;
+                }
                 parts.push(seg_to_part(seg, opts, q)?);
             }
         }
@@ -10550,6 +10596,47 @@ mod tests {
         // Numbered from the `<(`, and so landing on the physical line `fi` is
         // written on.
         assert_eq!(parse("echo one\necho \"${z:-<(\nfi)}\"").unwrap_err().line, Some(3));
+    }
+
+    /// Having parsed it, whether bash *performs* it is one test:
+    /// `expand_word_internal` reads a process substitution only when the
+    /// expansion is not under `Q_DOUBLE_QUOTES` (subst.c:11079). So the
+    /// fragments a `${ … }` body is cut into split two ways — a pattern, a
+    /// replacement and a bare operand run one, while a double-quoted operand
+    /// and the two arithmetic fragments keep the characters — and the split is
+    /// taken at lex time, which is where osh knows the quoting. Every row is
+    /// measured from bash 5.2.37; see the corpus case
+    /// `a-process-substitution-in-a-brace-body-is-performed-unless-the-expansion-is-quoted.sh`.
+    #[test]
+    fn whether_a_brace_bodys_process_substitution_is_performed_is_the_quoting() {
+        let opts = ParseOpts::default();
+        let live = |w: &Word| w.parts.iter().any(|p| matches!(p, WordPart::ProcSub { .. }));
+        let show = |f: &[u8]| String::from_utf8_lossy(f).into_owned();
+        // A pattern and a bare operand are read by the same scan, and it
+        // performs.
+        for frag in [b"<(echo hi)".as_slice(), b"a<(echo hi)b", b"<(echo a)<(echo b)", b">(cat)"] {
+            let w = verbatim_word_at(frag, opts, Quoting::Bare, 1, Frag::Word).unwrap();
+            assert!(live(&w), "{}", show(frag));
+        }
+        // …and the replacement's own reader agrees, `\&` handling aside.
+        assert!(live(&word_replacement_from_source(b"<(echo hi)", opts, Quoting::Bare, 1).unwrap()));
+        // The arithmetic fragments do not: `Q_DOUBLE_QUOTES|Q_ARITH` is exactly
+        // what stops the read, so the evaluator meets the characters and its
+        // error names them.
+        assert!(!live(&verbatim_word_at(b"<(echo 1)", opts, Quoting::Bare, 1, Frag::Arith).unwrap()));
+        assert!(!live(&word_subscript_from_source(b"<(echo 1)", opts, Quoting::Bare).unwrap()));
+        // A substring bound is the other arithmetic fragment, and is tokenized
+        // rather than read verbatim — it used to be the one context that
+        // disagreed with the subscript beside it.
+        assert!(!live(&word_from_source(b"<(echo 1)", opts, Quoting::Bare, 1).unwrap()));
+        // A double-quoted operand keeps the characters. So does a quoted run
+        // inside a *bare* one — the quotes are what the test is about, not
+        // which fragment it is.
+        assert!(!live(&operand_from_source(b"<(echo hi)", opts, Quoting::Dquote, 1, &[]).unwrap()));
+        for frag in [b"\"<(echo hi)\"".as_slice(), b"'<(echo hi)'", b"\\<\\(echo hi\\)"] {
+            let w = verbatim_word_at(frag, opts, Quoting::Bare, 1, Frag::Word).unwrap();
+            assert!(!live(&w), "{}", show(frag));
+        }
     }
 
     /// A line the reader cannot finish lexing still offers the parser every

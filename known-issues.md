@@ -1415,7 +1415,7 @@ Without the stub `cld`, the first assertion is the only visible failure; the
 real symptom is silent corruption somewhere else entirely, which is why a direct
 test earns its keep here.
 
-### B-KASAN-INSTRUMENTED-BOOT-WEDGES-MID-PRINT-ON-A-PAGE-FAULT. The instrumented kernel spins forever with a half-printed `#PF` line, and the report path has no way to say anything more — 2026-08-12 — OPEN
+### B-KASAN-INSTRUMENTED-BOOT-WEDGES-MID-PRINT-ON-A-PAGE-FAULT. The instrumented kernel spins forever with a half-printed `#PF` line, and the report path has no way to say anything more — 2026-08-12 — WATCHLIST (did not reproduce 2026-08-14; harness now armed to capture the RIP)
 
 **Reproduce.** `./scripts/kasan-build.sh --boot`. Observed once so far, at the
 same place; not yet known whether it is deterministic.
@@ -1504,6 +1504,60 @@ wedge is a distinct, later failure.
 **Not caused by `mm::rawmem`.** An ordinary (uninstrumented) boot of the same
 tree — which compiles and exercises `rawmem` identically — reached `BOOT_OK` in
 273 s.
+
+---
+
+**Capture run 2026-08-14 — DID NOT REPRODUCE. Downgraded OPEN → WATCHLIST.**
+
+The re-run fix (b) asked for was finally *requestable* once `2db09232a` taught
+`kasan-build.sh` to forward flags, and it was run as:
+
+```bash
+./scripts/kasan-build.sh --boot -- --hard-lockup-watchdog --stall-secs=180
+```
+
+**Result: the instrumented kernel booted clean, end to end.** `BOOT_OK` after
+**1938 s**, 26094 lines of serial (`build/serial-kasan-pass.txt`), exit 0. This
+is, as far as the logs show, the **first complete KASAN-instrumented boot this
+project has achieved** — the shadow was live for the entire run, and the `[kasan]`
+self-test battery passed all five checks with `violations=7, shadow_frames=3,
+poisoned=112B, unpoisoned=60B, map_lock_giveups=0` (all seven violations are the
+self-test's own deliberate probes; there was not one unexpected shadow report in
+the whole boot). The instrumented kernel binary is preserved at
+`build/kernel-kasan-capture.elf` for symbolizing any future recurrence.
+
+The decisive detail is **where** it got past. The original wedge died at ~line
+5560, mid-print, inside the `ftype` test. This run printed that same test's
+result complete at line **5562** and continued for another twenty thousand
+lines.
+
+**Fix (a) did not rescue it — the fault simply did not happen.** This matters,
+because "the fix worked" and "the bug is nondeterministic" predict different
+logs and only the second one matches. Had a nested fault occurred and been
+caught by the `IN_PRINT` fallback, the emergency port would have emitted the
+*complete* `EXCEPTION: Page Fault` line; that is the entire purpose of fix (a).
+No such line exists anywhere in the 26094. The only `#PF` in the log is line
+1258, the intentional ring-3 fault-handling self-test. So the page fault that
+truncated the original run never occurred here at all.
+
+That answers the entry's own open question — *"not yet known whether it is
+deterministic"* — with **nondeterministic**, and it answers it without yielding
+a root cause. A one-in-N fault under a profile that takes ~32 min per attempt is
+not something to chase blind.
+
+**Why WATCHLIST rather than FIXED.** Nothing was diagnosed. What changed is that
+the failure is now *survivable evidence* instead of a dead end: the harness is
+armed (watchdog + `--stall-secs`), fix (a) guarantees a nested fault escapes to
+the emergency port with its RIP intact, and the matching instrumented binary is
+kept. If it recurs, one run yields the faulting instruction. Until then there is
+nothing actionable, and re-running a 32-minute boot hoping to lose a coin flip
+is not a use of the boot lock.
+
+**Secondary result — the KASAN profile is now a usable routine tool.** It had
+never survived a full boot before, so it could only ever be pointed at a
+suspected bug and hoped at. A clean 26094-line baseline means a future KASAN run
+can be *diffed* against this one, which is a categorically better instrument
+than "did it crash".
 
 ### TD-HARNESS-RUN-TIMEOUT-COULD-NOT-LAUNCH-A-SHELL-SCRIPT-AND-BARE-BASH-MEANT-WSL. The documented boot-test invocation never ran the boot test — 2026-08-12 — ✅ FIXED 2026-08-12 (`scripts/proctree.py`)
 

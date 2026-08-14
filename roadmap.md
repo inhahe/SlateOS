@@ -257,8 +257,11 @@ Roadmap:
 - `[B]` `/proc` emulation completeness (line ~5415)
 - `[B]` ALSA/PulseAudio compatibility shim — userspace half (line ~5418)
 
-Known-issues (open, userland-owned): the whole **`TD-OILS-*` family** (~35
-entries) plus `TD-FASTPY-PURE-MODE-FVALUE`, `BUG-DASH-CMDSUB-INTERMITTENT-HANG`,
+Known-issues (open, userland-owned): the whole **`TD-OILS-*` family** — 631
+entries as of 2026-08-14, of which ~325 are still open (the count is a heading
+scan: an entry is "closed" only when its title carries `✅ FIXED`, so a few
+closed-in-the-body ones inflate it) — plus `TD-FASTPY-PURE-MODE-FVALUE`,
+`BUG-DASH-CMDSUB-INTERMITTENT-HANG`,
 `B-DASH-STDIN-FLAKE`, `TD-NO-SYSTEM-DEFAULT-ZONE-WITHOUT-TZ`,
 `TD-REPO-IS-NOT-RUSTFMT-CLEAN-SO-RUNNING-CARGO-FMT-IS-A-TRAP`,
 `TD-POSIX-SLOT-POOLS`.

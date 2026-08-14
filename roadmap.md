@@ -22,13 +22,43 @@ without waiting on another lane.
 "edit any file freely" (CLAUDE.md, "Single Session") is **suspended** while
 three agents are live; the ownership map below replaces it.
 
+### Step 0 — which agent am I?
+
+**Run this first, at the start of every session, before touching a file:**
+
+```bash
+python scripts/which-lane.py
+```
+
+It prints your lane letter, your branch, and the globs you may and may not
+write. `--letter` prints just `A`, `B` or `C` for scripting.
+
+**How it knows.** There is one agent per Claude account, and Claude Code
+sets `CLAUDE_CONFIG_DIR` to that account's configuration directory. The
+operator keeps all three under `C:\Users\inhah\.claude*`:
+
+| `CLAUDE_CONFIG_DIR` | Account | Lane | Branch |
+|---|---|---|---|
+| `C:\Users\inhah\.claude` — *or unset*, the default account | default | **A** | `lane-a` |
+| `C:\Users\inhah\.claude-account-b` | b | **B** | `lane-b` |
+| `C:\Users\inhah\.claude-account-c` | c | **C** | `lane-c` |
+
+Matching is on the directory's suffix, so renaming or relocating the tree
+does not break it. You can also check by hand with `echo $CLAUDE_CONFIG_DIR`,
+but prefer the script — it also prints the ownership globs.
+
+**If the script exits 2 (`lane: UNKNOWN`), stop.** Do not guess a lane and
+do not edit anything shared; ask the operator, then add the mapping to
+`SUFFIX_TO_LANE` in `scripts/which-lane.py`. Writing outside your lane is
+the one failure mode that silently destroys another agent's work.
+
 ### The three lanes
 
-| Lane | Name | Owns (writes freely) | Never writes |
-|------|------|----------------------|--------------|
-| **A** | **Kernel & Core** | `kernel/**`, `bench/**`, `toolchain/x86_64-slateos.json`, `scripts/boot-test.sh`, `scripts/run-timeout.py`, `scripts/wedge-soak.sh` | `posix/**`, `userspace/**`, `gui/**`, `apps/**`, `net/**`, `services/**` |
-| **B** | **POSIX & Userland** | `posix/**`, `userspace/**`, `services/**`, `init/**`, `toolchain/stubs/**`, `toolchain/build-sysroot.ps1`, `scripts/create-ext4-rootfs.sh` | `kernel/**`, `gui/**`, `apps/**`, `net/**` |
-| **C** | **Graphics, Apps & Net** | `gui/**`, `apps/**`, `net/**`, `netipc/**`, `netproto/**`, `netring/**`, `pkg/**` | `kernel/**`, `posix/**`, `userspace/**`, `services/**` |
+| Lane | Name | You are this lane if `CLAUDE_CONFIG_DIR` is… | Owns (writes freely) | Never writes |
+|------|------|---|----------------------|--------------|
+| **A** | **Kernel & Core** | `.claude` (or unset) | `kernel/**`, `bench/**`, `toolchain/x86_64-slateos.json`, `scripts/boot-test.sh`, `scripts/run-timeout.py`, `scripts/wedge-soak.sh` | `posix/**`, `userspace/**`, `gui/**`, `apps/**`, `net/**`, `services/**` |
+| **B** | **POSIX & Userland** | `.claude-account-b` | `posix/**`, `userspace/**`, `services/**`, `init/**`, `toolchain/stubs/**`, `toolchain/build-sysroot.ps1`, `scripts/create-ext4-rootfs.sh` | `kernel/**`, `gui/**`, `apps/**`, `net/**` |
+| **C** | **Graphics, Apps & Net** | `.claude-account-c` | `gui/**`, `apps/**`, `net/**`, `netipc/**`, `netproto/**`, `netring/**`, `pkg/**` | `kernel/**`, `posix/**`, `userspace/**`, `services/**` |
 
 Rationale for the cut: the workspace already splits three ways almost
 exactly along these lines. `kernel` and `posix` are the two `no_std`

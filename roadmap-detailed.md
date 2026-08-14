@@ -10,6 +10,7 @@ This is the fine-grained companion to `roadmap.md`. Every actionable feature fro
 > (**A** = `kernel/**`, **B** = `posix/**` + `userspace/**` + `services/**` +
 > `init/**`, **C** = `gui/**` + `apps/**` + `net*/**` + `pkg/**`). Annotate
 > only sections your lane owns; never reflow or reorder.
+> Run `python scripts/which-lane.py` to find out which lane you are.
 
 Status key: `[ ]` not started, `[-]` in progress, `[x]` done, `[~]` deferred
 

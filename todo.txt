@@ -14,6 +14,8 @@
 ## add new entries under your own '## Lane A/B/C' heading at the END of the
 ## file, and edit only entries under your own heading. To change another
 ## lane's entry, file a request in requests/<from>-<to>-<slug>.md instead.
+## Which lane am I?  ->  python scripts/which-lane.py   (keys off the
+## per-account CLAUDE_CONFIG_DIR; see roadmap.md "Step 0").
 ##   Lane A = kernel & core   (kernel/**, bench/**, boot test)
 ##   Lane B = POSIX & userland(posix/**, userspace/**, services/**, init/**)
 ##   Lane C = graphics, apps & net (gui/**, apps/**, net*/**, pkg/**)

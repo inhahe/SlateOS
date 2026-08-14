@@ -254,6 +254,68 @@ def append_record(path, record):
     return True
 
 
+#: `mean/min` at or above which a benchmark's own number is called unreliable.
+#:
+#: This is a *reporting* threshold, not a pass/fail gate, and it is deliberately
+#: not fitted. Measured over the three records that carry mean data (63
+#: benchmarks each): the median benchmark sits at 1.26-1.59 and the great
+#: majority are under 2, while excursions land at 5-25x with nothing much in
+#: between. 5 sits in that empty band. Only `ipc_channel_sync` is *persistently*
+#: above it (6.0/3.9/4.6 across the three runs), i.e. plausibly intrinsic rather
+#: than disturbed; every other high reading was spiky, high in one run and ~1.1
+#: in another, which is the signature of a transient stall rather than the
+#: benchmark's own behaviour.
+#:
+#: Retune once release-profile records exist -- optimised benchmarks are shorter
+#: and so present a smaller target to a burst, which should move this.
+DISPERSION_SUSPECT_RATIO = 5.0
+
+
+def suspect_dispersion(current_entries, ratio=DISPERSION_SUSPECT_RATIO):
+    """Benchmarks whose mean/min reaches `ratio`, worst first.
+
+    Returns `[(ratio, name), ...]`. Entries with no recorded mean (logs from
+    before the mean_ns extension) are skipped rather than assumed clean: an
+    absent measurement is not evidence of a quiet run, which is the same
+    distinction the canary's "absent != clean" handling makes.
+    """
+    suspect = []
+    for name, value in current_entries.items():
+        measured, mean_ns = value[0], value[3]
+        if mean_ns is None or not measured:
+            continue
+        observed = mean_ns / measured
+        if observed >= ratio:
+            suspect.append((observed, name))
+    suspect.sort(reverse=True)
+    return suspect
+
+
+def report_dispersion(current_entries):
+    """Report benchmarks whose own mean/min says they were stalled mid-run.
+
+    Why this exists alongside the canary: the canary samples the host *between*
+    benchmarks, roughly once per 8, so a stall confined to one benchmark falls
+    between samples and is certified clean. `mean/min` is computed from the
+    benchmark's own iterations, so it sees exactly what the canary cannot.
+
+    Note this is not the stronger claim that a flagged number is wrong. A high
+    ratio means the run contained large stalls; because the recorded figure is
+    the *minimum* over all iterations, the number can still be sound. What it
+    rules out is reading such a benchmark's movement as a clean signal.
+    """
+    suspect = suspect_dispersion(current_entries)
+    if not suspect:
+        print("  Dispersion OK: every benchmark's mean is within "
+              f"{DISPERSION_SUSPECT_RATIO:g}x of its own minimum.")
+        return
+    print(f"  Dispersion: {len(suspect)} benchmark(s) stalled during their own "
+          f"run (mean/min >= {DISPERSION_SUSPECT_RATIO:g}x) - treat any "
+          f"movement in these as unproven:")
+    for ratio, name in suspect:
+        print(f"    {name}: mean is {ratio:.0f}x its min")
+
+
 #: Profile assumed for records written before the field existed.
 #:
 #: Every record up to 2026-08-14 was produced by a boot-test.sh that ran a bare
@@ -550,7 +612,19 @@ def main(argv=None):
                   "outlier here is unproven - the drift correction removes a "
                   "uniform factor, and this is not one.")
         else:
-            print(f"  Canary OK: host load stable, {detail}.")
+            # NOT "host load stable" -- that is a claim the canary cannot
+            # support and which was measurably false every time it was made.
+            # All three runs that carried dispersion data were certified clean
+            # here while each contained 5-8 benchmarks with >=5x in-run
+            # dispersion. See known-issues.md
+            # B-BENCH-CANARY-CERTIFIES-CLEAN-RUNS-THAT-CONTAIN-MULTI-X-STALLS.
+            print(f"  Canary OK: reference access cost steady between "
+                  f"benchmarks, {detail}.")
+            print("  That is a *sampled* check, ~1 sample per 8 benchmarks. It "
+                  "does not mean individual benchmarks ran undisturbed - see "
+                  "the dispersion line below.")
+
+    report_dispersion(current_entries)
 
     if not args.no_record:
         record = {

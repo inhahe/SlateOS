@@ -193,6 +193,49 @@ def test_canary(bh, tmpdir):
           bh.parse_canary(twice), {"start": 300, "end": 900, "pct": 300})
 
 
+def test_dispersion(bh, tmpdir):
+    """A benchmark's own mean/min catches stalls the canary certifies as clean.
+
+    The canary samples the host *between* benchmarks, ~1 sample per 8, so a
+    stall confined to one benchmark falls between samples. Measured over the
+    three records carrying mean data: the canary reported all three clean, and
+    every one contained 5-8 benchmarks at >=5x mean/min. This check is what
+    sees them.
+    """
+    # parse_serial's value tuple is (measured, target, verdict, mean_ns, iters).
+    entries = {
+        "quiet":      (100, 10, "OVER", 120, 2000),   # 1.2x - normal
+        "borderline": (100, 10, "OVER", 500, 2000),   # exactly 5x - flagged
+        "stalled":    (100, 10, "OVER", 2400, 2000),  # 24x
+        "worse":      (100, 10, "OVER", 5000, 2000),  # 50x
+        "no_mean":    (100, 10, "OVER", None, None),  # legacy log
+    }
+    suspect = bh.suspect_dispersion(entries)
+    names = [n for _, n in suspect]
+
+    check("a quiet benchmark is not flagged", "quiet" in names, False)
+    check("exactly at the ratio is flagged", "borderline" in names, True)
+    check("a stalled benchmark is flagged", "stalled" in names, True)
+    check("worst-first ordering", names[0], "worse")
+    check("three of five are flagged", len(suspect), 3)
+
+    # An absent mean is not evidence of a quiet run -- same distinction the
+    # canary makes between "absent" and "clean". It must not be flagged (we
+    # have no measurement) nor silently counted as fine.
+    check("a benchmark with no recorded mean is skipped",
+          "no_mean" in names, False)
+
+    # The real regression this guards: the run that the canary called clean
+    # with spread 2% did contain page_alloc_free at 24x. Feed that shape in.
+    real = {"page_alloc_free": (298, 1000, "PASS", 7280, 500)}
+    check("the run the canary called clean is flagged here",
+          len(bh.suspect_dispersion(real)), 1)
+
+    # Nothing to report is reported as such, not as silence.
+    check("an all-quiet suite yields an empty list",
+          bh.suspect_dispersion({"a": (100, 10, "PASS", 110, 500)}), [])
+
+
 def test_profile_isolation(bh, tmpdir):
     """Records are only ever compared within one build profile.
 
@@ -320,6 +363,7 @@ def main():
         test_parse_formats(bh, tmpdir)
         test_malformed_rejected(bh, tmpdir)
         test_canary(bh, tmpdir)
+        test_dispersion(bh, tmpdir)
         test_profile_isolation(bh, tmpdir)
         test_missing_log(bh, tmpdir)
     test_history_still_loads(bh)

@@ -895,6 +895,7 @@ fn installed_fonts_ligate_fi() {
     let mut opened = 0usize;
     let mut with_gsub = 0usize;
     let mut ligated_fi = 0usize;
+    let mut contextual_fi = 0usize;
 
     for path in &files {
         let Ok(data) = fs::read(path) else { continue };
@@ -914,15 +915,39 @@ fn installed_fonts_ligate_fi() {
         for (name, pair) in [("fi", [f, i]), ("fl", [f, l]), ("ff", [f, f])] {
             let out = substitute(&face, &pair);
             if out.len() != 1 {
-                // Not every face ligates every pair, and one that leaves a
-                // pair alone must leave it *whole*.
+                // A pair that does not ligate must come back as two glyphs
+                // standing where they went in. It need not come back as the
+                // *same* two: a face may resolve the collision contextually
+                // instead, swapping in a short-hooked `f` before the `i`
+                // rather than carrying a joined glyph. Cambria does exactly
+                // that, and HarfBuzz shapes its `fi` as two glyphs too.
                 assert_eq!(
-                    out.iter().map(|g| g.gid).collect::<Vec<_>>(),
-                    pair.to_vec(),
-                    "{}: {name} came back as neither one glyph nor the two it \
-                     went in as",
+                    out.len(),
+                    pair.len(),
+                    "{}: {name} came back as {} glyphs, neither joined into \
+                     one nor left as the two it went in as",
+                    path.display(),
+                    out.len()
+                );
+                assert_eq!(
+                    out.iter().map(|g| g.cluster).collect::<Vec<_>>(),
+                    (0..pair.len()).collect::<Vec<_>>(),
+                    "{}: {name} came back with its characters renumbered",
                     path.display()
                 );
+                for g in &out {
+                    assert!(
+                        g.gid < face.num_glyphs(),
+                        "{}: {name} substituted to glyph {}, past the face's \
+                         {} glyphs",
+                        path.display(),
+                        g.gid,
+                        face.num_glyphs()
+                    );
+                }
+                if out.iter().map(|g| g.gid).ne(pair.iter().copied()) && name == "fi" {
+                    contextual_fi += 1;
+                }
                 continue;
             }
             let lig = out[0].gid;
@@ -962,6 +987,7 @@ fn installed_fonts_ligate_fi() {
     println!("faces opened:        {opened}");
     println!("faces with GSUB liga:{with_gsub}");
     println!("faces ligating fi:   {ligated_fi}");
+    println!("faces with a contextual fi: {contextual_fi}");
 
     assert!(
         with_gsub > 0,

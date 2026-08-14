@@ -123,6 +123,42 @@ pub(crate) fn feature_lookups(
     (!out.is_empty()).then_some(out)
 }
 
+/// Where a `GSUB`/`GPOS` table's LookupList begins.
+///
+/// Contextual lookups name the lookups they invoke by *index into this list*,
+/// and the index may be any lookup in the font — including one no feature
+/// reaches, which is the usual way a font hides a helper lookup. So a caller
+/// that applies them needs the list itself, not just the lookups a feature
+/// walk found.
+pub(crate) fn lookup_list(data: &[u8], base: usize) -> Option<usize> {
+    base.checked_add(usize::from(u16_at(data, base.checked_add(8)?)?))
+}
+
+/// One lookup of a LookupList by index, of a type in `want`, extensions
+/// unwrapped.
+///
+/// This is the lookup-by-index that types 5 and 6 need. It re-reads the lookup
+/// on every invocation rather than caching it: the alternative is decoding the
+/// whole LookupList up front, most of which a run never reaches, and the read
+/// is a header and a handful of offsets.
+pub(crate) fn lookup_at(
+    data: &[u8],
+    lookup_list: usize,
+    index: u16,
+    want: &[u16],
+    extension: u16,
+    budget: &mut usize,
+) -> Option<Lookup> {
+    if index >= u16_at(data, lookup_list)? {
+        return None;
+    }
+    let at = lookup_list
+        .checked_add(2)?
+        .checked_add(usize::from(index).checked_mul(2)?)?;
+    let lookup = lookup_list.checked_add(usize::from(u16_at(data, at)?))?;
+    read_lookup(data, lookup, want, extension, budget)
+}
+
 /// Which lookups the features tagged `tags` use, and where the LookupList is.
 ///
 /// Ascending and deduplicated, because lookups apply in LookupList order
@@ -130,7 +166,7 @@ pub(crate) fn feature_lookups(
 /// may share one.
 fn lookup_indices(data: &[u8], base: usize, tags: &[&[u8; 4]]) -> Option<(usize, Vec<u16>)> {
     let feature_list = base.checked_add(usize::from(u16_at(data, base.checked_add(6)?)?))?;
-    let lookup_list = base.checked_add(usize::from(u16_at(data, base.checked_add(8)?)?))?;
+    let lookup_list = lookup_list(data, base)?;
 
     let mut indices = Vec::new();
     let feature_count = u16_at(data, feature_list)?;

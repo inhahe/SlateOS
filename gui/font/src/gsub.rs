@@ -70,7 +70,9 @@
 
 use alloc::vec::Vec;
 
-use crate::otl::{Lookup, coverage_index, feature_lookups};
+use crate::otl::{
+    Lookup, MAX_SUBTABLES, coverage_index, feature_lookups, glyph_class, lookup_at, lookup_list,
+};
 use crate::sfnt::{Span, u16_at};
 
 /// `GSUB` lookup type for single substitution: one glyph for one glyph.
@@ -79,10 +81,27 @@ const LOOKUP_SINGLE: u16 = 1;
 const LOOKUP_MULTIPLE: u16 = 2;
 /// `GSUB` lookup type for ligature substitution: several glyphs for one.
 const LOOKUP_LIGATURE: u16 = 4;
+/// `GSUB` lookup type for contextual substitution: a rule that fires only
+/// where a given sequence of glyphs stands, and then invokes other lookups.
+const LOOKUP_CONTEXT: u16 = 5;
+/// `GSUB` lookup type for chaining contextual substitution: like
+/// [`LOOKUP_CONTEXT`], but the context extends either side of what is
+/// substituted.
+const LOOKUP_CHAIN_CONTEXT: u16 = 6;
 /// `GSUB` lookup type for an extension, which wraps a subtable of another type
 /// at a 32-bit offset. `GPOS` numbers its own extension 9; the two tables
 /// number their lookup types independently.
 const LOOKUP_EXTENSION: u16 = 7;
+
+/// The lookup types a nested invocation may reach, which is every type this
+/// module applies — a contextual lookup may invoke another contextual one.
+const NESTABLE: &[u16] = &[
+    LOOKUP_SINGLE,
+    LOOKUP_MULTIPLE,
+    LOOKUP_LIGATURE,
+    LOOKUP_CONTEXT,
+    LOOKUP_CHAIN_CONTEXT,
+];
 
 /// A ceiling on how many glyphs one ligature may swallow.
 ///
@@ -99,6 +118,31 @@ const MAX_COMPONENTS: usize = 16;
 /// bounds the growth of the buffer, which is otherwise the one place
 /// substitution can allocate without limit.
 const MAX_SEQUENCE: usize = 16;
+
+/// A ceiling on how long a context — backtrack, input or lookahead — may be.
+///
+/// Every glyph of a context is compared at every position of the run, so an
+/// unbounded one makes matching quadratic in the run length. Real contexts are
+/// two or three glyphs; the longest in common use are the Indic reordering
+/// rules, still well inside this.
+const MAX_CONTEXT: usize = 16;
+
+/// A ceiling on how many lookups one context match may invoke.
+const MAX_NESTED: usize = 16;
+
+/// A ceiling on how many rules one rule set may hold.
+///
+/// A rule set is already keyed by the first glyph or its class, so a real one
+/// holds a handful; the cap is what stops a corrupt `seqRuleCount` from making
+/// every position in a line scan tens of thousands of rules.
+const MAX_RULES: usize = 256;
+
+/// How deep a contextual lookup's invocations may nest.
+///
+/// A contextual lookup may invoke another contextual lookup, and nothing in
+/// the format forbids that from being a cycle — lookup 3 invoking lookup 3.
+/// Matching HarfBuzz's limit, which real fonts stay far inside.
+const MAX_NESTING: usize = 6;
 
 /// A glyph on its way through substitution.
 ///
@@ -128,6 +172,10 @@ pub(crate) struct Substitutions {
     /// The lookups reachable from the default-on features, in the order the
     /// font's LookupList puts them, which is the order they apply in.
     lookups: Vec<Lookup>,
+    /// Where the font's LookupList begins. Kept because a contextual lookup
+    /// names the lookups it invokes by index into it, and those may be lookups
+    /// no feature reaches — which is exactly how a font hides a helper.
+    lookup_list: usize,
 }
 
 impl Substitutions {
@@ -138,14 +186,18 @@ impl Substitutions {
     /// an error. Monospace faces in particular have no ligatures by design: a
     /// ligature would break the grid.
     pub(crate) fn parse(data: &[u8], gsub: Option<Span>) -> Option<Self> {
+        let base = gsub?.off;
         let lookups = feature_lookups(
             data,
-            gsub?.off,
-            &[b"ccmp", b"liga", b"rlig"],
-            &[LOOKUP_SINGLE, LOOKUP_MULTIPLE, LOOKUP_LIGATURE],
+            base,
+            &[b"ccmp", b"liga", b"rlig", b"clig", b"calt"],
+            NESTABLE,
             LOOKUP_EXTENSION,
         )?;
-        Some(Self { lookups })
+        Some(Self {
+            lookups,
+            lookup_list: lookup_list(data, base)?,
+        })
     }
 
     /// Apply every lookup to `glyphs`, in order, rewriting it in place.
@@ -155,36 +207,99 @@ impl Substitutions {
     /// boundary of its own — a tab, a style change, a bidi run edge — passes
     /// the pieces separately rather than the whole line.
     pub(crate) fn apply(&self, data: &[u8], glyphs: &mut Vec<SubGlyph>) {
+        let mut ctx = Ctx {
+            lookup_list: self.lookup_list,
+            depth: MAX_NESTING,
+            scratch: Vec::new(),
+        };
         for lookup in &self.lookups {
-            match lookup.kind {
-                LOOKUP_SINGLE => apply_single(data, &lookup.subtables, glyphs),
-                LOOKUP_MULTIPLE => apply_multiple(data, &lookup.subtables, glyphs),
-                LOOKUP_LIGATURE => apply_ligature(data, &lookup.subtables, glyphs),
-                // `feature_lookups` was asked for these three types only, so
-                // there is nothing else to reach here; ignoring anything that
-                // does is what keeps adding a type to that list from being
-                // able to silently corrupt a run.
-                _ => {}
-            }
+            apply_lookup(data, lookup, glyphs, &mut ctx);
         }
     }
 }
 
-/// Run one `SingleSubst` lookup across the whole run.
+/// What a lookup needs beyond the run it is rewriting.
 ///
-/// Every position is independent — nothing here can look at a neighbour — so
-/// this is a map, and the run's length and clusters come out unchanged.
-fn apply_single(data: &[u8], subtables: &[usize], glyphs: &mut [SubGlyph]) {
-    for glyph in glyphs.iter_mut() {
-        // First subtable that covers the glyph wins, and the result is not
-        // offered to the rest: within one lookup a glyph is substituted once.
-        if let Some(gid) = subtables
-            .iter()
-            .find_map(|&sub| single_at(data, sub, glyph.gid))
-        {
-            glyph.gid = gid;
-        }
+/// Exists because of types 5 and 6: a contextual lookup invokes *other*
+/// lookups by index, so applying one needs the LookupList to resolve them in
+/// and a bound on how far the invocations may nest.
+struct Ctx {
+    /// Where the font's LookupList begins, for resolving a nested lookup's
+    /// index.
+    lookup_list: usize,
+    /// How many more levels of nested invocation are allowed. A contextual
+    /// lookup may invoke another contextual lookup; nothing in the format
+    /// stops that from being a cycle.
+    depth: usize,
+    /// A buffer for a multiple substitution's replacement sequence, hoisted to
+    /// the pass so that a run of ordinary text — where nothing matches — does
+    /// not allocate once per position.
+    scratch: Vec<u16>,
+}
+
+/// Run one lookup across the whole run, left to right.
+///
+/// Each lookup type is a rule about *one position*; this is what turns a rule
+/// into a pass. After a match, walking resumes past what the match produced
+/// rather than at the next glyph, so a lookup is never offered its own output.
+/// That is what stops a font whose output is also its input — a ligature of
+/// itself, a glyph that decomposes to itself — from looping, and it lives here
+/// rather than in each type so that no type can forget it.
+fn apply_lookup(data: &[u8], lookup: &Lookup, glyphs: &mut Vec<SubGlyph>, ctx: &mut Ctx) {
+    let mut i = 0usize;
+    while i < glyphs.len() {
+        // A match that somehow produced nothing would leave `i` where it was;
+        // the floor of one is what makes the walk terminate regardless.
+        let step = apply_at(data, lookup, glyphs, i, ctx).unwrap_or(0).max(1);
+        i = i.saturating_add(step);
     }
+}
+
+/// Apply one lookup at exactly one position, if it matches there.
+///
+/// Returns how many glyphs now stand where `glyphs[i]` stood: one for a single
+/// substitution, the sequence length for a multiple one, one for a ligature
+/// that swallowed several, and the rewritten length of the matched span for a
+/// contextual one. `None` means nothing matched and the run is untouched.
+///
+/// This is also the entry point a contextual lookup calls back into, which is
+/// why it is "at a position" rather than "across the run": a nested lookup
+/// applies where the context matched and nowhere else.
+fn apply_at(
+    data: &[u8],
+    lookup: &Lookup,
+    glyphs: &mut Vec<SubGlyph>,
+    i: usize,
+    ctx: &mut Ctx,
+) -> Option<usize> {
+    let subs = &lookup.subtables;
+    match lookup.kind {
+        LOOKUP_SINGLE => apply_single(data, subs, glyphs, i),
+        LOOKUP_MULTIPLE => apply_multiple(data, subs, glyphs, i, ctx),
+        LOOKUP_LIGATURE => apply_ligature(data, subs, glyphs, i),
+        LOOKUP_CONTEXT => apply_context(data, subs, glyphs, i, ctx),
+        LOOKUP_CHAIN_CONTEXT => apply_chain_context(data, subs, glyphs, i, ctx),
+        // `feature_lookups` and `lookup_at` are both asked for these types
+        // only, so there is nothing else to reach here; ignoring anything that
+        // does is what keeps adding a type to those lists from being able to
+        // silently corrupt a run.
+        _ => None,
+    }
+}
+
+/// Apply a `SingleSubst` lookup at one position.
+///
+/// The position is independent of every other — nothing here can look at a
+/// neighbour — so the run's length and clusters come out unchanged.
+fn apply_single(data: &[u8], subtables: &[usize], glyphs: &mut [SubGlyph], i: usize) -> Option<usize> {
+    let glyph = glyphs.get_mut(i)?;
+    // First subtable that covers the glyph wins, and the result is not offered
+    // to the rest: within one lookup a glyph is substituted once.
+    let gid = subtables
+        .iter()
+        .find_map(|&sub| single_at(data, sub, glyph.gid))?;
+    glyph.gid = gid;
+    Some(1)
 }
 
 /// The glyph one `SingleSubst` subtable puts in place of `glyph`.
@@ -215,44 +330,35 @@ fn single_at(data: &[u8], sub: usize, glyph: u16) -> Option<u16> {
     }
 }
 
-/// Run one `MultipleSubst` lookup across the whole run.
+/// Apply a `MultipleSubst` lookup at one position.
 ///
-/// The run grows: each replaced glyph becomes a sequence, and every glyph of
-/// that sequence carries the cluster of the one it replaced, because they all
-/// came from the same character. That is what makes `ShapedGlyph::cluster` a
+/// The run grows: the glyph becomes a sequence, and every glyph of that
+/// sequence carries the cluster of the one it replaced, because they all came
+/// from the same character. That is what makes `ShapedGlyph::cluster` a
 /// many-to-many mapping, and why the queries on
 /// [`ShapedRun`](crate::shape::ShapedRun) work in whole clusters.
-///
-/// Walking resumes *after* the inserted glyphs, so what this lookup produced
-/// is not offered back to it — the same rule as everywhere else here, and the
-/// reason a font that decomposes A into A cannot loop.
-fn apply_multiple(data: &[u8], subtables: &[usize], glyphs: &mut Vec<SubGlyph>) {
-    let mut i = 0usize;
-    let mut sequence: Vec<u16> = Vec::new();
-    while i < glyphs.len() {
-        let Some(glyph) = glyphs.get(i).copied() else {
-            break;
-        };
-        if subtables
-            .iter()
-            .find_map(|&sub| sequence_at(data, sub, glyph.gid, &mut sequence))
-            .is_none()
-        {
-            i = i.saturating_add(1);
-            continue;
-        }
-        // `sequence_at` owns the buffer: it clears on entry and only returns
-        // `Some` after pushing at least one glyph, so a match here is never
-        // empty and never carries a failed subtable's partial read. Checking
-        // emptiness again would be dead code that hides the guard inside.
-        let cluster = glyph.cluster;
-        let grown = i.saturating_add(sequence.len());
-        glyphs.splice(
-            i..=i,
-            sequence.iter().map(|&gid| SubGlyph { gid, cluster }),
-        );
-        i = grown;
-    }
+fn apply_multiple(
+    data: &[u8],
+    subtables: &[usize],
+    glyphs: &mut Vec<SubGlyph>,
+    i: usize,
+    ctx: &mut Ctx,
+) -> Option<usize> {
+    let glyph = *glyphs.get(i)?;
+    subtables
+        .iter()
+        .find_map(|&sub| sequence_at(data, sub, glyph.gid, &mut ctx.scratch))?;
+    // `sequence_at` owns the buffer: it clears on entry and only returns
+    // `Some` after pushing at least one glyph, so a match here is never empty
+    // and never carries a failed subtable's partial read. Checking emptiness
+    // again would be dead code that hides the guard inside.
+    let cluster = glyph.cluster;
+    let grown = ctx.scratch.len();
+    glyphs.splice(
+        i..=i,
+        ctx.scratch.iter().map(|&gid| SubGlyph { gid, cluster }),
+    );
+    Some(grown)
 }
 
 /// The sequence one `MultipleSubst` subtable puts in place of `glyph`, written
@@ -301,33 +407,32 @@ fn sequence_at(data: &[u8], sub: usize, glyph: u16, out: &mut Vec<u16>) -> Optio
     Some(())
 }
 
-/// Run one `LigatureSubst` lookup across the whole run.
+/// Apply a `LigatureSubst` lookup at one position.
 ///
-/// Walks left to right, and after joining a ligature carries on from the glyph
-/// *after* it: a ligature never feeds itself back into the same lookup, which
-/// is what stops a font whose output is also its input from looping.
-fn apply_ligature(data: &[u8], subtables: &[usize], glyphs: &mut Vec<SubGlyph>) {
-    let mut i = 0usize;
-    while let Some(window) = glyphs.get(i..).filter(|w| w.len() >= 2) {
-        let Some((gid, count)) = subtables
-            .iter()
-            .find_map(|&sub| ligature_at(data, sub, window))
-        else {
-            i = i.saturating_add(1);
-            continue;
-        };
-        let next = i.saturating_add(1);
-        if let Some(first) = glyphs.get_mut(i) {
-            // The cluster stays as it was: it is the first component's, and
-            // the components that follow are being swallowed, not moved.
-            first.gid = gid;
-        }
-        // `ligature_at` never reports more components than the window holds,
-        // so this range is inside the run; the clamp is belt and braces.
-        let end = i.saturating_add(count).min(glyphs.len());
-        glyphs.drain(next.min(end)..end);
-        i = next;
+/// The run shrinks to one glyph, which keeps the first component's cluster:
+/// the joined glyph has no interior boundary a caret could point at, so the
+/// characters it swallowed all answer with the offset of the first.
+fn apply_ligature(
+    data: &[u8],
+    subtables: &[usize],
+    glyphs: &mut Vec<SubGlyph>,
+    i: usize,
+) -> Option<usize> {
+    let window = glyphs.get(i..).filter(|w| w.len() >= 2)?;
+    let (gid, count) = subtables
+        .iter()
+        .find_map(|&sub| ligature_at(data, sub, window))?;
+    let next = i.saturating_add(1);
+    if let Some(first) = glyphs.get_mut(i) {
+        // The cluster stays as it was: it is the first component's, and the
+        // components that follow are being swallowed, not moved.
+        first.gid = gid;
     }
+    // `ligature_at` never reports more components than the window holds, so
+    // this range is inside the run; the clamp is belt and braces.
+    let end = i.saturating_add(count).min(glyphs.len());
+    glyphs.drain(next.min(end)..end);
+    Some(1)
 }
 
 /// Look for a ligature starting at `glyphs[0]` in one `LigatureSubst`
@@ -384,6 +489,501 @@ fn ligature_matches(data: &[u8], lig: usize, glyphs: &[SubGlyph]) -> Option<(u16
         }
     }
     Some((glyph, components))
+}
+
+/// A `SequenceLookupRecord`: run lookup `lookup` at input position `at`.
+#[derive(Clone, Copy, Debug)]
+struct Nested {
+    /// Which glyph *of the matched input* to run the lookup at — not a
+    /// position in the run. The two differ once an earlier record has changed
+    /// the run's length.
+    at: u16,
+    /// Index into the font's LookupList.
+    lookup: u16,
+}
+
+/// Apply a `SequenceContext` (type 5) lookup at one position.
+fn apply_context(
+    data: &[u8],
+    subtables: &[usize],
+    glyphs: &mut Vec<SubGlyph>,
+    i: usize,
+    ctx: &mut Ctx,
+) -> Option<usize> {
+    // These two buffers are locals rather than fields of `Ctx` on purpose: a
+    // nested lookup may be another contextual one, which would be using the
+    // same buffers a level up. Reentrancy is worth an allocation on the rare
+    // position where a coverage matched.
+    let mut rules = Vec::new();
+    let mut records = Vec::new();
+    for &sub in subtables {
+        // First subtable that matches wins, as everywhere else in a lookup.
+        let Some((input, at, count)) = context_match(data, sub, glyphs, i, &mut rules) else {
+            continue;
+        };
+        read_records(data, at, count, &mut records);
+        return Some(apply_nested(data, &records, glyphs, i, input, ctx));
+    }
+    None
+}
+
+/// Apply a `ChainedSequenceContext` (type 6) lookup at one position.
+fn apply_chain_context(
+    data: &[u8],
+    subtables: &[usize],
+    glyphs: &mut Vec<SubGlyph>,
+    i: usize,
+    ctx: &mut Ctx,
+) -> Option<usize> {
+    let mut rules = Vec::new();
+    let mut records = Vec::new();
+    for &sub in subtables {
+        let Some((input, at, count)) = chain_match(data, sub, glyphs, i, &mut rules) else {
+            continue;
+        };
+        read_records(data, at, count, &mut records);
+        return Some(apply_nested(data, &records, glyphs, i, input, ctx));
+    }
+    None
+}
+
+/// Run the lookups a context match calls for, and report how many glyphs the
+/// matched input span occupies afterwards.
+///
+/// The bookkeeping is the whole of the difficulty. A record names a glyph *of
+/// the input as it was matched*, but the lookup it invokes may grow or shrink
+/// the run — so by the time a later record runs, the glyph it names has moved,
+/// or a ligature has swallowed it and it is not there at all. Tracking where
+/// each matched glyph now stands, and marking the ones that stopped existing,
+/// is what keeps a record from landing on a glyph the context never matched.
+fn apply_nested(
+    data: &[u8],
+    records: &[Nested],
+    glyphs: &mut Vec<SubGlyph>,
+    start: usize,
+    input: usize,
+    ctx: &mut Ctx,
+) -> usize {
+    // Out of depth: the context still counts as matched, so the caller steps
+    // over it, but nothing is invoked. Silently applying at depth zero is what
+    // would let a lookup that invokes itself run forever.
+    if ctx.depth == 0 {
+        return input.max(1);
+    }
+    let mut span = input;
+    let mut positions: Vec<Option<usize>> = (0..input)
+        .map(|k| Some(start.saturating_add(k)))
+        .collect();
+
+    for rec in records {
+        let idx = usize::from(rec.at);
+        let Some(Some(at)) = positions.get(idx).copied() else {
+            continue;
+        };
+        let before = glyphs.len();
+        let mut budget = MAX_SUBTABLES;
+        let resolved = lookup_at(
+            data,
+            ctx.lookup_list,
+            rec.lookup,
+            NESTABLE,
+            LOOKUP_EXTENSION,
+            &mut budget,
+        );
+        ctx.depth = ctx.depth.saturating_sub(1);
+        let applied = resolved.and_then(|lookup| apply_at(data, &lookup, glyphs, at, ctx));
+        ctx.depth = ctx.depth.saturating_add(1);
+        if applied.is_none() {
+            continue;
+        }
+        let after = glyphs.len();
+        if after >= before {
+            let grew = after.saturating_sub(before);
+            span = span.saturating_add(grew);
+            for p in positions.iter_mut().skip(idx.saturating_add(1)) {
+                *p = p.map(|v| v.saturating_add(grew));
+            }
+        } else {
+            let shrank = before.saturating_sub(after);
+            span = span.saturating_sub(shrank);
+            // The glyphs the shrink swallowed are gone. A later record naming
+            // one of them is naming something that no longer exists, so mark
+            // them absent rather than let the index slide onto a glyph the
+            // context never matched.
+            let gone = idx.saturating_add(shrank);
+            for (k, p) in positions.iter_mut().enumerate() {
+                if k <= idx {
+                    continue;
+                }
+                *p = if k <= gone {
+                    None
+                } else {
+                    p.map(|v| v.saturating_sub(shrank))
+                };
+            }
+        }
+    }
+    span.max(1)
+}
+
+/// The `SequenceLookupRecord` array at `at`.
+fn read_records(data: &[u8], at: usize, count: usize, out: &mut Vec<Nested>) {
+    out.clear();
+    for i in 0..count.min(MAX_NESTED) {
+        let Some(rec) = i.checked_mul(4).and_then(|d| at.checked_add(d)) else {
+            return;
+        };
+        // A record that cannot be read ends the list rather than discarding
+        // the ones already found: a truncated table should lose what it
+        // truncated, not what came before it.
+        let (Some(at), Some(lookup)) = (u16_at(data, rec), rec.checked_add(2).and_then(|o| u16_at(data, o)))
+        else {
+            return;
+        };
+        out.push(Nested { at, lookup });
+    }
+}
+
+/// How a context names the glyphs it matches.
+///
+/// Format 1 and format 2 of both contextual types are the same rule layout
+/// read one way or the other — ids, or the classes a ClassDef sorts glyphs
+/// into — so they share one walk rather than two nearly-identical ones.
+#[derive(Clone, Copy)]
+enum By {
+    /// Entries are glyph ids.
+    Glyph,
+    /// Entries are classes, assigned by the ClassDef at this offset.
+    Class(usize),
+}
+
+/// Does the glyph at `pos` answer to `want` under `by`?
+fn answers(data: &[u8], by: By, want: u16, glyphs: &[SubGlyph], pos: usize) -> Option<bool> {
+    let gid = glyphs.get(pos)?.gid;
+    Some(match by {
+        By::Glyph => gid == want,
+        By::Class(table) => glyph_class(data, table, gid)? == want,
+    })
+}
+
+/// Match `count` entries read from `at` against the glyphs running forward
+/// from `from`, and report the position just past the last one.
+fn forward(
+    data: &[u8],
+    at: usize,
+    count: usize,
+    by: By,
+    glyphs: &[SubGlyph],
+    from: usize,
+) -> Option<usize> {
+    for k in 0..count {
+        let want = u16_at(data, at.checked_add(k.checked_mul(2)?)?)?;
+        if !answers(data, by, want, glyphs, from.checked_add(k)?)? {
+            return None;
+        }
+    }
+    from.checked_add(count)
+}
+
+/// Match `count` entries read from `at` against the glyphs running *backward*
+/// from just before `from`.
+///
+/// A backtrack is stored closest-glyph-first, which is the reverse of reading
+/// order: entry 0 is the glyph immediately before the input, not the leftmost
+/// of the context.
+fn backward(
+    data: &[u8],
+    at: usize,
+    count: usize,
+    by: By,
+    glyphs: &[SubGlyph],
+    from: usize,
+) -> Option<()> {
+    for k in 0..count {
+        let want = u16_at(data, at.checked_add(k.checked_mul(2)?)?)?;
+        let pos = from.checked_sub(k.checked_add(1)?)?;
+        if !answers(data, by, want, glyphs, pos)? {
+            return None;
+        }
+    }
+    Some(())
+}
+
+/// Match `count` coverage offsets read from `at`, each measured from `sub`,
+/// against the glyphs running forward from `from`.
+fn forward_covered(
+    data: &[u8],
+    sub: usize,
+    at: usize,
+    count: usize,
+    glyphs: &[SubGlyph],
+    from: usize,
+) -> Option<usize> {
+    for k in 0..count {
+        let cov = sub_offset(data, sub, at.checked_add(k.checked_mul(2)?)?)?;
+        coverage_index(data, cov, glyphs.get(from.checked_add(k)?)?.gid)?;
+    }
+    from.checked_add(count)
+}
+
+/// The backward counterpart of [`forward_covered`].
+fn backward_covered(
+    data: &[u8],
+    sub: usize,
+    at: usize,
+    count: usize,
+    glyphs: &[SubGlyph],
+    from: usize,
+) -> Option<()> {
+    for k in 0..count {
+        let cov = sub_offset(data, sub, at.checked_add(k.checked_mul(2)?)?)?;
+        let pos = from.checked_sub(k.checked_add(1)?)?;
+        coverage_index(data, cov, glyphs.get(pos)?.gid)?;
+    }
+    Some(())
+}
+
+/// Follow an offset stored at `field` and measured from `sub`, refusing a null
+/// one.
+///
+/// Zero means "absent" everywhere in OpenType, and following it lands back on
+/// the subtable's own header — where a format number would be read as a
+/// coverage format and answer nonsense.
+fn sub_offset(data: &[u8], sub: usize, field: usize) -> Option<usize> {
+    let off = u16_at(data, field)?;
+    if off == 0 {
+        return None;
+    }
+    sub.checked_add(usize::from(off))
+}
+
+/// The rule set at `index` of an array of `count` offsets starting at `at`.
+///
+/// A null offset means this glyph, or this class, has no rules — which format
+/// 2 tables are mostly made of, since a ClassDef sorts every glyph in the font
+/// into some class and only a few classes start a context.
+fn rule_set(data: &[u8], sub: usize, at: usize, count: u16, index: u16) -> Option<usize> {
+    if index >= count {
+        return None;
+    }
+    sub_offset(data, sub, at.checked_add(usize::from(index).checked_mul(2)?)?)
+}
+
+/// The rules of a rule set, in the font's order — which is the order they are
+/// tried in, first match winning.
+fn read_rules(data: &[u8], set: usize, out: &mut Vec<usize>) {
+    out.clear();
+    let Some(count) = u16_at(data, set) else {
+        return;
+    };
+    for i in 0..usize::from(count).min(MAX_RULES) {
+        let Some(at) = i
+            .checked_mul(2)
+            .and_then(|d| set.checked_add(2).and_then(|s| s.checked_add(d)))
+        else {
+            return;
+        };
+        let Some(rule) = u16_at(data, at).and_then(|o| set.checked_add(usize::from(o))) else {
+            return;
+        };
+        out.push(rule);
+    }
+}
+
+/// Match a `SequenceRule` or `ClassSequenceRule` starting at `i`.
+///
+/// Returns the input length and where its lookup records are. The rule stores
+/// its input from the *second* glyph onwards: the first is the one the
+/// subtable's coverage — or, for format 2, its class — has already matched.
+fn seq_rule(
+    data: &[u8],
+    rule: usize,
+    by: By,
+    glyphs: &[SubGlyph],
+    i: usize,
+) -> Option<(usize, usize, usize)> {
+    let count = usize::from(u16_at(data, rule)?);
+    let records = usize::from(u16_at(data, rule.checked_add(2)?)?);
+    if count == 0 || count > MAX_CONTEXT {
+        return None;
+    }
+    let rest = count.checked_sub(1)?;
+    let at = rule.checked_add(4)?;
+    forward(data, at, rest, by, glyphs, i.checked_add(1)?)?;
+    Some((count, at.checked_add(rest.checked_mul(2)?)?, records))
+}
+
+/// Match a `ChainedSequenceRule` or `ChainedClassSequenceRule` starting at `i`.
+///
+/// The three parts have three different `By`s because format 2 gives backtrack,
+/// input and lookahead their own ClassDefs: a glyph may be class 3 as a
+/// lookahead and class 1 as an input, which is how a font expresses "any vowel
+/// follows" without listing them.
+fn chain_rule(
+    data: &[u8],
+    rule: usize,
+    by: (By, By, By),
+    glyphs: &[SubGlyph],
+    i: usize,
+) -> Option<(usize, usize, usize)> {
+    let (back_by, in_by, ahead_by) = by;
+
+    let back = usize::from(u16_at(data, rule)?);
+    if back > MAX_CONTEXT {
+        return None;
+    }
+    let at = rule.checked_add(2)?;
+    backward(data, at, back, back_by, glyphs, i)?;
+
+    let at = at.checked_add(back.checked_mul(2)?)?;
+    let count = usize::from(u16_at(data, at)?);
+    if count == 0 || count > MAX_CONTEXT {
+        return None;
+    }
+    let rest = count.checked_sub(1)?;
+    let at = at.checked_add(2)?;
+    let end = forward(data, at, rest, in_by, glyphs, i.checked_add(1)?)?;
+
+    let at = at.checked_add(rest.checked_mul(2)?)?;
+    let ahead = usize::from(u16_at(data, at)?);
+    if ahead > MAX_CONTEXT {
+        return None;
+    }
+    let at = at.checked_add(2)?;
+    forward(data, at, ahead, ahead_by, glyphs, end)?;
+
+    let at = at.checked_add(ahead.checked_mul(2)?)?;
+    let records = usize::from(u16_at(data, at)?);
+    Some((count, at.checked_add(2)?, records))
+}
+
+/// Match one `SequenceContext` subtable at `i`, in any of its three formats.
+///
+/// Returns the matched input length, where its lookup records are, and how
+/// many there are.
+fn context_match(
+    data: &[u8],
+    sub: usize,
+    glyphs: &[SubGlyph],
+    i: usize,
+    rules: &mut Vec<usize>,
+) -> Option<(usize, usize, usize)> {
+    let gid = glyphs.get(i)?.gid;
+    match u16_at(data, sub)? {
+        // Format 1: rules keyed by the first glyph, listed by id. The most
+        // direct form and the least compact, so fonts use it for the handful
+        // of contexts that do not generalise.
+        1 => {
+            let coverage = sub_offset(data, sub, sub.checked_add(2)?)?;
+            let index = coverage_index(data, coverage, gid)?;
+            let count = u16_at(data, sub.checked_add(4)?)?;
+            let set = rule_set(data, sub, sub.checked_add(6)?, count, index)?;
+            read_rules(data, set, rules);
+            rules
+                .iter()
+                .find_map(|&rule| seq_rule(data, rule, By::Glyph, glyphs, i))
+        }
+        // Format 2: rules keyed by the first glyph's *class*, so one rule
+        // covers every glyph that behaves alike. The coverage is only a gate —
+        // it says which glyphs are worth computing a class for.
+        2 => {
+            let coverage = sub_offset(data, sub, sub.checked_add(2)?)?;
+            coverage_index(data, coverage, gid)?;
+            let classdef = sub_offset(data, sub, sub.checked_add(4)?)?;
+            let class = glyph_class(data, classdef, gid)?;
+            let count = u16_at(data, sub.checked_add(6)?)?;
+            let set = rule_set(data, sub, sub.checked_add(8)?, count, class)?;
+            read_rules(data, set, rules);
+            rules
+                .iter()
+                .find_map(|&rule| seq_rule(data, rule, By::Class(classdef), glyphs, i))
+        }
+        // Format 3: a single context, each position given its own coverage
+        // table. No rule sets, so nothing is keyed by the first glyph.
+        3 => {
+            let count = usize::from(u16_at(data, sub.checked_add(2)?)?);
+            let records = usize::from(u16_at(data, sub.checked_add(4)?)?);
+            if count == 0 || count > MAX_CONTEXT {
+                return None;
+            }
+            let at = sub.checked_add(6)?;
+            forward_covered(data, sub, at, count, glyphs, i)?;
+            Some((count, at.checked_add(count.checked_mul(2)?)?, records))
+        }
+        _ => None,
+    }
+}
+
+/// Match one `ChainedSequenceContext` subtable at `i`, in any of its three
+/// formats.
+fn chain_match(
+    data: &[u8],
+    sub: usize,
+    glyphs: &[SubGlyph],
+    i: usize,
+    rules: &mut Vec<usize>,
+) -> Option<(usize, usize, usize)> {
+    let gid = glyphs.get(i)?.gid;
+    match u16_at(data, sub)? {
+        1 => {
+            let coverage = sub_offset(data, sub, sub.checked_add(2)?)?;
+            let index = coverage_index(data, coverage, gid)?;
+            let count = u16_at(data, sub.checked_add(4)?)?;
+            let set = rule_set(data, sub, sub.checked_add(6)?, count, index)?;
+            read_rules(data, set, rules);
+            let by = (By::Glyph, By::Glyph, By::Glyph);
+            rules
+                .iter()
+                .find_map(|&rule| chain_rule(data, rule, by, glyphs, i))
+        }
+        2 => {
+            let coverage = sub_offset(data, sub, sub.checked_add(2)?)?;
+            coverage_index(data, coverage, gid)?;
+            let back = sub_offset(data, sub, sub.checked_add(4)?)?;
+            let input = sub_offset(data, sub, sub.checked_add(6)?)?;
+            let ahead = sub_offset(data, sub, sub.checked_add(8)?)?;
+            let class = glyph_class(data, input, gid)?;
+            let count = u16_at(data, sub.checked_add(10)?)?;
+            let set = rule_set(data, sub, sub.checked_add(12)?, count, class)?;
+            read_rules(data, set, rules);
+            let by = (By::Class(back), By::Class(input), By::Class(ahead));
+            rules
+                .iter()
+                .find_map(|&rule| chain_rule(data, rule, by, glyphs, i))
+        }
+        // Format 3 has no coverage gate of its own: the first input coverage
+        // is the gate.
+        3 => {
+            let at = sub.checked_add(2)?;
+            let back = usize::from(u16_at(data, at)?);
+            if back > MAX_CONTEXT {
+                return None;
+            }
+            let at = at.checked_add(2)?;
+            backward_covered(data, sub, at, back, glyphs, i)?;
+
+            let at = at.checked_add(back.checked_mul(2)?)?;
+            let count = usize::from(u16_at(data, at)?);
+            if count == 0 || count > MAX_CONTEXT {
+                return None;
+            }
+            let at = at.checked_add(2)?;
+            let end = forward_covered(data, sub, at, count, glyphs, i)?;
+
+            let at = at.checked_add(count.checked_mul(2)?)?;
+            let ahead = usize::from(u16_at(data, at)?);
+            if ahead > MAX_CONTEXT {
+                return None;
+            }
+            let at = at.checked_add(2)?;
+            forward_covered(data, sub, at, ahead, glyphs, end)?;
+
+            let at = at.checked_add(ahead.checked_mul(2)?)?;
+            let records = usize::from(u16_at(data, at)?);
+            Some((count, at.checked_add(2)?, records))
+        }
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -639,6 +1239,226 @@ mod tests {
         }
         for (_, _, subtable) in features {
             out.extend_from_slice(subtable);
+        }
+        out
+    }
+
+    /// `ClassDefFormat1`: a class per glyph over a contiguous range.
+    fn class_def(start: u16, classes: &[u16]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&be16(1));
+        out.extend_from_slice(&be16(start));
+        out.extend_from_slice(&be16(u16::try_from(classes.len()).unwrap()));
+        for c in classes {
+            out.extend_from_slice(&be16(*c));
+        }
+        out
+    }
+
+    /// The `SequenceLookupRecord` array: `(input position, lookup index)`.
+    fn records(recs: &[(u16, u16)]) -> Vec<u8> {
+        let mut out = Vec::new();
+        for (at, lookup) in recs {
+            out.extend_from_slice(&be16(*at));
+            out.extend_from_slice(&be16(*lookup));
+        }
+        out
+    }
+
+    /// One `SequenceRule`/`ClassSequenceRule`. `rest` is the input from the
+    /// *second* entry on, the first being the one coverage already matched.
+    fn rule(rest: &[u16], recs: &[(u16, u16)]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&be16(u16::try_from(rest.len() + 1).unwrap()));
+        out.extend_from_slice(&be16(u16::try_from(recs.len()).unwrap()));
+        for g in rest {
+            out.extend_from_slice(&be16(*g));
+        }
+        out.extend_from_slice(&records(recs));
+        out
+    }
+
+    /// One `ChainedSequenceRule`/`ChainedClassSequenceRule`.
+    fn chained(back: &[u16], rest: &[u16], ahead: &[u16], recs: &[(u16, u16)]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&be16(u16::try_from(back.len()).unwrap()));
+        for g in back {
+            out.extend_from_slice(&be16(*g));
+        }
+        out.extend_from_slice(&be16(u16::try_from(rest.len() + 1).unwrap()));
+        for g in rest {
+            out.extend_from_slice(&be16(*g));
+        }
+        out.extend_from_slice(&be16(u16::try_from(ahead.len()).unwrap()));
+        for g in ahead {
+            out.extend_from_slice(&be16(*g));
+        }
+        out.extend_from_slice(&be16(u16::try_from(recs.len()).unwrap()));
+        out.extend_from_slice(&records(recs));
+        out
+    }
+
+    /// A rule set: count, one offset per rule, then the rules.
+    fn rule_set_of(rules: &[Vec<u8>]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&be16(u16::try_from(rules.len()).unwrap()));
+        let mut at = 2 + rules.len() * 2;
+        for r in rules {
+            out.extend_from_slice(&be16(u16::try_from(at).unwrap()));
+            at += r.len();
+        }
+        for r in rules {
+            out.extend_from_slice(r);
+        }
+        out
+    }
+
+    /// A table of offsets from the subtable start, laid out as
+    /// `header | coverage-ish blocks | sets`. Shared by the format-1 and
+    /// format-2 builders, which differ only in how long the header is and
+    /// what sits between it and the sets.
+    fn sets_after(header: usize, blocks: &[&[u8]], sets: &[Vec<u8>]) -> (Vec<u16>, Vec<u16>) {
+        let mut at = header;
+        let mut block_at = Vec::new();
+        for b in blocks {
+            block_at.push(u16::try_from(at).unwrap());
+            at += b.len();
+        }
+        let mut set_at = Vec::new();
+        for s in sets {
+            set_at.push(u16::try_from(at).unwrap());
+            at += s.len();
+        }
+        (block_at, set_at)
+    }
+
+    /// `SequenceContextFormat1`, and — the layout being identical —
+    /// `ChainedSequenceContextFormat1` too.
+    fn context1(glyphs: &[u16], sets: &[Vec<u8>]) -> Vec<u8> {
+        assert_eq!(glyphs.len(), sets.len());
+        let coverage = coverage1(glyphs);
+        let (blocks, offs) = sets_after(6 + sets.len() * 2, &[&coverage], sets);
+        let mut out = Vec::new();
+        out.extend_from_slice(&be16(1));
+        out.extend_from_slice(&be16(blocks[0]));
+        out.extend_from_slice(&be16(u16::try_from(sets.len()).unwrap()));
+        for o in &offs {
+            out.extend_from_slice(&be16(*o));
+        }
+        out.extend_from_slice(&coverage);
+        for s in sets {
+            out.extend_from_slice(s);
+        }
+        out
+    }
+
+    /// `SequenceContextFormat2`: rule sets keyed by the first glyph's class.
+    fn context2(glyphs: &[u16], classes: &[u8], sets: &[Vec<u8>]) -> Vec<u8> {
+        let coverage = coverage1(glyphs);
+        let (blocks, offs) = sets_after(8 + sets.len() * 2, &[&coverage, classes], sets);
+        let mut out = Vec::new();
+        out.extend_from_slice(&be16(2));
+        out.extend_from_slice(&be16(blocks[0]));
+        out.extend_from_slice(&be16(blocks[1]));
+        out.extend_from_slice(&be16(u16::try_from(sets.len()).unwrap()));
+        for o in &offs {
+            out.extend_from_slice(&be16(*o));
+        }
+        out.extend_from_slice(&coverage);
+        out.extend_from_slice(classes);
+        for s in sets {
+            out.extend_from_slice(s);
+        }
+        out
+    }
+
+    /// `ChainedSequenceContextFormat2`: three ClassDefs, one per part.
+    fn chain_context2(
+        glyphs: &[u16],
+        back: &[u8],
+        input: &[u8],
+        ahead: &[u8],
+        sets: &[Vec<u8>],
+    ) -> Vec<u8> {
+        let coverage = coverage1(glyphs);
+        let (blocks, offs) = sets_after(
+            12 + sets.len() * 2,
+            &[&coverage, back, input, ahead],
+            sets,
+        );
+        let mut out = Vec::new();
+        out.extend_from_slice(&be16(2));
+        for b in &blocks {
+            out.extend_from_slice(&be16(*b));
+        }
+        out.extend_from_slice(&be16(u16::try_from(sets.len()).unwrap()));
+        for o in &offs {
+            out.extend_from_slice(&be16(*o));
+        }
+        out.extend_from_slice(&coverage);
+        out.extend_from_slice(back);
+        out.extend_from_slice(input);
+        out.extend_from_slice(ahead);
+        for s in sets {
+            out.extend_from_slice(s);
+        }
+        out
+    }
+
+    /// `SequenceContextFormat3`: one coverage table per input position.
+    fn context3(covers: &[&[u16]], recs: &[(u16, u16)]) -> Vec<u8> {
+        let tables: Vec<Vec<u8>> = covers.iter().map(|c| coverage1(c)).collect();
+        let mut at = 6 + covers.len() * 2 + recs.len() * 4;
+        let mut out = Vec::new();
+        out.extend_from_slice(&be16(3));
+        out.extend_from_slice(&be16(u16::try_from(covers.len()).unwrap()));
+        out.extend_from_slice(&be16(u16::try_from(recs.len()).unwrap()));
+        for t in &tables {
+            out.extend_from_slice(&be16(u16::try_from(at).unwrap()));
+            at += t.len();
+        }
+        out.extend_from_slice(&records(recs));
+        for t in &tables {
+            out.extend_from_slice(t);
+        }
+        out
+    }
+
+    /// `ChainedSequenceContextFormat3`: the format nearly every real chaining
+    /// context in a Latin face uses.
+    fn chain_context3(
+        back: &[&[u16]],
+        input: &[&[u16]],
+        ahead: &[&[u16]],
+        recs: &[(u16, u16)],
+    ) -> Vec<u8> {
+        let all: Vec<Vec<u8>> = back
+            .iter()
+            .chain(input.iter())
+            .chain(ahead.iter())
+            .map(|c| coverage1(c))
+            .collect();
+        let header = 2 + 2 + back.len() * 2 + 2 + input.len() * 2 + 2 + ahead.len() * 2 + 2;
+        let mut at = header + recs.len() * 4;
+        let mut offs = Vec::new();
+        for t in &all {
+            offs.push(u16::try_from(at).unwrap());
+            at += t.len();
+        }
+        let mut out = Vec::new();
+        out.extend_from_slice(&be16(3));
+        let mut next = offs.iter();
+        for (n, part) in [back.len(), input.len(), ahead.len()].into_iter().enumerate() {
+            let _ = n;
+            out.extend_from_slice(&be16(u16::try_from(part).unwrap()));
+            for _ in 0..part {
+                out.extend_from_slice(&be16(*next.next().unwrap()));
+            }
+        }
+        out.extend_from_slice(&be16(u16::try_from(recs.len()).unwrap()));
+        out.extend_from_slice(&records(recs));
+        for t in &all {
+            out.extend_from_slice(t);
         }
         out
     }
@@ -1073,6 +1893,345 @@ mod tests {
             let short = &data[..cut];
             let _ = Substitutions::parse(short, Some(span(0, short.len())));
             let _ = subst(short, &subs, &[10, 11, 12]);
+        }
+    }
+
+    /// A contextual lookup and the helper it invokes.
+    ///
+    /// The helper is tagged `dlig`, which is *off* by default, so the only way
+    /// it can reach a run is by being invoked — which is the arrangement real
+    /// fonts use and the thing that makes these tests test the invocation
+    /// rather than the helper.
+    fn context_font(kind: u16, sub: Vec<u8>, helpers: &[(u16, Vec<u8>)]) -> (Vec<u8>, Substitutions) {
+        let mut lookups: Vec<(&[u8; 4], u16, Vec<u8>)> = alloc::vec![(b"calt", kind, sub)];
+        // Three off-by-default tags, so a helper is never reachable on its own.
+        for (tag, (kind, sub)) in [b"dlig", b"hlig", b"swsh"].iter().zip(helpers) {
+            lookups.push((tag, *kind, sub.clone()));
+        }
+        let data = gsub_lookups(&lookups);
+        let subs = Substitutions::parse(&data, Some(span(0, data.len()))).unwrap();
+        (data, subs)
+    }
+
+    /// Single substitution 10 -> 30, the usual helper below.
+    fn helper_10_to_30() -> (u16, Vec<u8>) {
+        (LOOKUP_SINGLE, single_list(&[10], &[30]))
+    }
+
+    #[test]
+    fn a_context_substitutes_only_where_the_context_stands() {
+        // 10 becomes 30, but only when an 11 follows it.
+        let set = rule_set_of(&[rule(&[11], &[(0, 1)])]);
+        let (data, subs) = context_font(
+            LOOKUP_CONTEXT,
+            context1(&[10], &[set]),
+            &[helper_10_to_30()],
+        );
+        assert_eq!(subst(&data, &subs, &[10, 11]), [30, 11]);
+        assert_eq!(subst(&data, &subs, &[10, 12]), [10, 12]);
+        assert_eq!(subst(&data, &subs, &[11, 10, 11]), [11, 30, 11]);
+        // The context is the whole of the input, so a 10 with nothing after it
+        // is not one.
+        assert_eq!(subst(&data, &subs, &[10]), [10]);
+    }
+
+    #[test]
+    fn a_lookup_no_feature_reaches_is_still_invocable() {
+        // The helper alone would turn every 10 into a 30. It is tagged `dlig`,
+        // which is off by default, so it must do nothing until the context
+        // calls for it — the arrangement by which a font keeps a rule private
+        // to one context.
+        let set = rule_set_of(&[rule(&[11], &[(0, 1)])]);
+        let (data, subs) = context_font(
+            LOOKUP_CONTEXT,
+            context1(&[10], &[set]),
+            &[helper_10_to_30()],
+        );
+        assert_eq!(subst(&data, &subs, &[10, 10, 10]), [10, 10, 10]);
+        assert_eq!(subst(&data, &subs, &[10, 11, 10]), [30, 11, 10]);
+    }
+
+    #[test]
+    fn a_rule_set_tries_its_rules_in_the_fonts_order() {
+        // Longest first, as with ligatures: the font decides, and the first
+        // rule that matches wins rather than the most specific one.
+        let set = rule_set_of(&[
+            rule(&[11, 12], &[(0, 1)]),
+            rule(&[11], &[(0, 2)]),
+        ]);
+        let (data, subs) = context_font(
+            LOOKUP_CONTEXT,
+            context1(&[10], &[set]),
+            &[helper_10_to_30(), (LOOKUP_SINGLE, single_list(&[10], &[40]))],
+        );
+        assert_eq!(subst(&data, &subs, &[10, 11, 12]), [30, 11, 12]);
+        assert_eq!(subst(&data, &subs, &[10, 11, 13]), [40, 11, 13]);
+    }
+
+    #[test]
+    fn a_class_based_context_matches_every_glyph_of_a_class() {
+        // Glyphs 10 and 11 are class 1; 12 and 13 are class 2. One rule —
+        // "class 1 then class 2" — covers all four pairings, which is the
+        // whole reason format 2 exists.
+        let classes = class_def(10, &[1, 1, 2, 2]);
+        let sets = alloc::vec![
+            rule_set_of(&[]),
+            rule_set_of(&[rule(&[2], &[(0, 1)])]),
+            rule_set_of(&[]),
+        ];
+        let (data, subs) = context_font(
+            LOOKUP_CONTEXT,
+            context2(&[10, 11, 12, 13], &classes, &sets),
+            &[(LOOKUP_SINGLE, single_list(&[10, 11], &[30, 31]))],
+        );
+        assert_eq!(subst(&data, &subs, &[10, 12]), [30, 12]);
+        assert_eq!(subst(&data, &subs, &[11, 13]), [31, 13]);
+        // Two glyphs of the same class are not "class 1 then class 2".
+        assert_eq!(subst(&data, &subs, &[10, 11]), [10, 11]);
+        // And a glyph outside the coverage never reaches the class lookup at
+        // all, even though the ClassDef would put it in class 0.
+        assert_eq!(subst(&data, &subs, &[20, 12]), [20, 12]);
+    }
+
+    #[test]
+    fn a_null_rule_set_offset_is_not_followed() {
+        // Zero means absent, and a format-2 table is mostly zeroes: a ClassDef
+        // sorts every glyph in the font into some class, and only a few
+        // classes start a context. Following one would land back on the
+        // subtable's own header and read its format as a rule count.
+        let classes = class_def(10, &[1, 1]);
+        // Both glyphs are class 1, and a format-2 rule names classes.
+        let sets = alloc::vec![
+            rule_set_of(&[]),
+            rule_set_of(&[rule(&[1], &[(0, 1)])]),
+        ];
+        let mut sub = context2(&[10, 11], &classes, &sets);
+        // The class-1 rule set is the second offset, at byte 10 of the header.
+        assert_eq!(subst_with(&sub, &[10, 11]), [30, 11]);
+        sub[10..12].copy_from_slice(&be16(0));
+        assert_eq!(subst_with(&sub, &[10, 11]), [10, 11]);
+    }
+
+    /// Build a context font around `sub` with the usual 10 -> 30 helper and
+    /// run it, for the tests that only care about whether the context fired.
+    fn subst_with(sub: &[u8], gids: &[u16]) -> Vec<u16> {
+        let (data, subs) = context_font(
+            LOOKUP_CONTEXT,
+            sub.to_vec(),
+            &[helper_10_to_30()],
+        );
+        subst(&data, &subs, gids)
+    }
+
+    #[test]
+    fn a_coverage_based_context_matches_a_fixed_sequence() {
+        // Format 3 is one context, not a set of them: every position gets its
+        // own coverage table and there is nothing keyed by the first glyph.
+        let (data, subs) = context_font(
+            LOOKUP_CONTEXT,
+            context3(&[&[10, 11], &[20]], &[(0, 1)]),
+            &[(LOOKUP_SINGLE, single_list(&[10, 11], &[30, 31]))],
+        );
+        assert_eq!(subst(&data, &subs, &[10, 20]), [30, 20]);
+        assert_eq!(subst(&data, &subs, &[11, 20]), [31, 20]);
+        assert_eq!(subst(&data, &subs, &[10, 21]), [10, 21]);
+    }
+
+    #[test]
+    fn a_chaining_context_looks_behind_and_ahead() {
+        // Only the input is substituted; the backtrack and lookahead are
+        // conditions, and come out of the run exactly as they went in.
+        let (data, subs) = context_font(
+            LOOKUP_CHAIN_CONTEXT,
+            chain_context3(&[&[5]], &[&[10]], &[&[20]], &[(0, 1)]),
+            &[helper_10_to_30()],
+        );
+        assert_eq!(subst(&data, &subs, &[5, 10, 20]), [5, 30, 20]);
+        assert_eq!(subst(&data, &subs, &[10, 20]), [10, 20]);
+        assert_eq!(subst(&data, &subs, &[5, 10, 21]), [5, 10, 21]);
+        assert_eq!(subst(&data, &subs, &[6, 10, 20]), [6, 10, 20]);
+        // The backtrack may sit anywhere in the run, not just at its start.
+        assert_eq!(subst(&data, &subs, &[9, 5, 10, 20]), [9, 5, 30, 20]);
+    }
+
+    #[test]
+    fn a_backtrack_is_stored_closest_glyph_first() {
+        // The one part of the format that reads backwards: entry 0 is the
+        // glyph immediately before the input, not the leftmost of the context.
+        // Reading it in text order would match the reversed run instead.
+        let (data, subs) = context_font(
+            LOOKUP_CHAIN_CONTEXT,
+            chain_context3(&[&[6], &[5]], &[&[10]], &[], &[(0, 1)]),
+            &[helper_10_to_30()],
+        );
+        assert_eq!(subst(&data, &subs, &[5, 6, 10]), [5, 6, 30]);
+        assert_eq!(subst(&data, &subs, &[6, 5, 10]), [6, 5, 10]);
+    }
+
+    #[test]
+    fn a_chaining_context_by_glyph_and_by_class() {
+        // Format 1: rule sets keyed by the input's first glyph.
+        let set = rule_set_of(&[chained(&[5], &[], &[20], &[(0, 1)])]);
+        let (data, subs) = context_font(
+            LOOKUP_CHAIN_CONTEXT,
+            context1(&[10], &[set]),
+            &[helper_10_to_30()],
+        );
+        assert_eq!(subst(&data, &subs, &[5, 10, 20]), [5, 30, 20]);
+        assert_eq!(subst(&data, &subs, &[5, 10, 21]), [5, 10, 21]);
+
+        // Format 2: three ClassDefs, one per part — and a glyph may sit in a
+        // different class in each. Here 5 and 6 are backtrack class 1, 10 is
+        // input class 1, and 20 and 21 are lookahead class 1.
+        let back = class_def(5, &[1, 1]);
+        let input = class_def(10, &[1]);
+        let ahead = class_def(20, &[1, 1]);
+        let sets = alloc::vec![
+            rule_set_of(&[]),
+            rule_set_of(&[chained(&[1], &[], &[1], &[(0, 1)])]),
+        ];
+        let (data, subs) = context_font(
+            LOOKUP_CHAIN_CONTEXT,
+            chain_context2(&[10], &back, &input, &ahead, &sets),
+            &[helper_10_to_30()],
+        );
+        assert_eq!(subst(&data, &subs, &[5, 10, 20]), [5, 30, 20]);
+        assert_eq!(subst(&data, &subs, &[6, 10, 21]), [6, 30, 21]);
+        assert_eq!(subst(&data, &subs, &[7, 10, 20]), [7, 10, 20]);
+        assert_eq!(subst(&data, &subs, &[5, 10, 22]), [5, 10, 22]);
+    }
+
+    #[test]
+    fn a_nested_decomposition_moves_the_records_that_follow_it() {
+        // Record 0 turns glyph 10 into two glyphs. Record 1 names input
+        // position 1 — glyph 11 — which by then stands one place further
+        // right. Naming the position as it was matched, rather than as it now
+        // is, is the whole difficulty of running several records.
+        let (data, subs) = context_font(
+            LOOKUP_CONTEXT,
+            context3(&[&[10], &[11]], &[(0, 1), (1, 2)]),
+            &[
+                (LOOKUP_MULTIPLE, multiple(&[10], &[&[30, 31]])),
+                (LOOKUP_SINGLE, single_list(&[11], &[41])),
+            ],
+        );
+        // Without the shift, record 1 would land on glyph 31 — which lookup 2
+        // does not cover — and the 11 would come out unchanged.
+        assert_eq!(subst(&data, &subs, &[10, 11]), [30, 31, 41]);
+        assert_eq!(clusters(&data, &subs, &[10, 11]), [0, 0, 1]);
+    }
+
+    #[test]
+    fn a_nested_ligature_moves_the_records_that_follow_it() {
+        // The mirror case: record 0 joins two glyphs into one, so everything
+        // to its right stands one place further left.
+        let set = ligature_set(&[ligature(40, &[11])]);
+        let (data, subs) = context_font(
+            LOOKUP_CONTEXT,
+            context3(&[&[10], &[11], &[12], &[13]], &[(0, 1), (2, 2)]),
+            &[
+                (LOOKUP_LIGATURE, ligature_subst(&[10], &[set])),
+                (LOOKUP_SINGLE, single_list(&[12], &[50])),
+            ],
+        );
+        assert_eq!(subst(&data, &subs, &[10, 11, 12, 13]), [40, 50, 13]);
+    }
+
+    #[test]
+    fn a_record_naming_a_glyph_a_ligature_swallowed_is_dropped() {
+        // Record 0 joins 10 and 11. Record 1 names input position 1 — the 11,
+        // which no longer exists. Sliding the index instead would apply the
+        // lookup to the 12, a glyph the context matched but this record never
+        // named.
+        let set = ligature_set(&[ligature(40, &[11])]);
+        let (data, subs) = context_font(
+            LOOKUP_CONTEXT,
+            context3(&[&[10], &[11], &[12]], &[(0, 1), (1, 2)]),
+            &[
+                (LOOKUP_LIGATURE, ligature_subst(&[10], &[set])),
+                (LOOKUP_SINGLE, single_list(&[11, 12], &[51, 52])),
+            ],
+        );
+        assert_eq!(subst(&data, &subs, &[10, 11, 12]), [40, 12]);
+    }
+
+    #[test]
+    fn a_context_that_invokes_itself_terminates() {
+        // Nothing in the format forbids lookup 0 from naming lookup 0. The
+        // depth cap is the only thing that ends it, and a run that never
+        // returns is not a rendering fault a user can work around.
+        let (data, subs) = context_font(LOOKUP_CONTEXT, context3(&[&[10]], &[(0, 0)]), &[]);
+        assert_eq!(subst(&data, &subs, &[10, 10]), [10, 10]);
+
+        // And two lookups that name each other, which the per-invocation
+        // depth has to bound just the same.
+        let data = gsub_lookups(&[
+            (b"calt", LOOKUP_CONTEXT, context3(&[&[10]], &[(0, 1)])),
+            (b"dlig", LOOKUP_CONTEXT, context3(&[&[10]], &[(0, 0)])),
+        ]);
+        let subs = Substitutions::parse(&data, Some(span(0, data.len()))).unwrap();
+        assert_eq!(subst(&data, &subs, &[10]), [10]);
+    }
+
+    #[test]
+    fn a_context_longer_than_the_cap_is_refused() {
+        let covers: Vec<Vec<u16>> = (0..=MAX_CONTEXT)
+            .map(|i| alloc::vec![u16::try_from(i).unwrap() + 10])
+            .collect();
+        let refs: Vec<&[u16]> = covers.iter().map(alloc::vec::Vec::as_slice).collect();
+        let run: Vec<u16> = (0..u16::try_from(MAX_CONTEXT + 1).unwrap())
+            .map(|i| i + 10)
+            .collect();
+        let (data, subs) = context_font(
+            LOOKUP_CONTEXT,
+            context3(&refs, &[(0, 1)]),
+            &[helper_10_to_30()],
+        );
+        assert_eq!(subst(&data, &subs, &run), run);
+
+        // Exactly the cap is still allowed: the bound is on absurdity, not on
+        // a font sitting at the limit.
+        let (data, subs) = context_font(
+            LOOKUP_CONTEXT,
+            context3(&refs[..MAX_CONTEXT], &[(0, 1)]),
+            &[helper_10_to_30()],
+        );
+        assert_eq!(subst(&data, &subs, &run)[0], 30);
+    }
+
+    #[test]
+    fn a_contextual_substitution_of_an_unknown_format_is_refused() {
+        for kind in [LOOKUP_CONTEXT, LOOKUP_CHAIN_CONTEXT] {
+            let mut sub = context3(&[&[10], &[11]], &[(0, 1)]);
+            sub[0..2].copy_from_slice(&be16(4));
+            let (data, subs) = context_font(kind, sub, &[helper_10_to_30()]);
+            assert_eq!(subst(&data, &subs, &[10, 11]), [10, 11]);
+        }
+    }
+
+    #[test]
+    fn a_truncated_contextual_substitution_is_survivable() {
+        let subtables = alloc::vec![
+            (LOOKUP_CONTEXT, context1(&[10], &[rule_set_of(&[rule(&[11], &[(0, 1)])])])),
+            (LOOKUP_CONTEXT, context2(&[10, 11], &class_def(10, &[1, 1]), &[
+                rule_set_of(&[]),
+                rule_set_of(&[rule(&[1], &[(0, 1)])]),
+            ])),
+            (LOOKUP_CONTEXT, context3(&[&[10], &[11]], &[(0, 1)])),
+            (LOOKUP_CHAIN_CONTEXT, context1(&[10], &[rule_set_of(&[chained(&[5], &[], &[20], &[(0, 1)])])])),
+            (LOOKUP_CHAIN_CONTEXT, chain_context2(&[10], &class_def(5, &[1]), &class_def(10, &[1]), &class_def(20, &[1]), &[
+                rule_set_of(&[]),
+                rule_set_of(&[chained(&[1], &[], &[1], &[(0, 1)])]),
+            ])),
+            (LOOKUP_CHAIN_CONTEXT, chain_context3(&[&[5]], &[&[10]], &[&[20]], &[(0, 1)])),
+        ];
+        for (kind, sub) in subtables {
+            let (data, subs) = context_font(kind, sub, &[helper_10_to_30()]);
+            for cut in 0..data.len() {
+                let short = &data[..cut];
+                let _ = Substitutions::parse(short, Some(span(0, short.len())));
+                let _ = subst(short, &subs, &[5, 10, 11, 20]);
+            }
         }
     }
 }

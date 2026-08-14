@@ -176,7 +176,7 @@ pub(crate) struct Skipper<'a> {
     filter: u16,
     /// The set of feature bits that reached this lookup. A glyph whose own
     /// mask does not intersect it is not a match.
-    mask: u32,
+    mask: u64,
 }
 
 impl<'a> Skipper<'a> {
@@ -187,7 +187,7 @@ impl<'a> Skipper<'a> {
         defs: Definitions,
         flag: u16,
         filter: u16,
-        mask: u32,
+        mask: u64,
     ) -> Self {
         Self {
             data,
@@ -206,7 +206,7 @@ impl<'a> Skipper<'a> {
     #[must_use]
     pub(crate) fn context(self) -> Self {
         Self {
-            mask: u32::MAX,
+            mask: u64::MAX,
             ..self
         }
     }
@@ -514,7 +514,7 @@ mod tests {
     fn a_lookup_with_no_flag_skips_nothing() {
         let data = gdef(2, None, None);
         let defs = Definitions::parse(&data, Some(span(data.len())));
-        let skip = Skipper::new(&data, defs, 0, 0, u32::MAX);
+        let skip = Skipper::new(&data, defs, 0, 0, u64::MAX);
         assert!(skip.is_trivial());
         let glyphs = run(&[1, 10, 2]);
         // The mark at 1 is visible: nothing asked for it to be hidden.
@@ -525,7 +525,7 @@ mod tests {
     fn ignore_marks_steps_over_a_mark_and_finds_the_letter_past_it() {
         let data = gdef(2, None, None);
         let defs = Definitions::parse(&data, Some(span(data.len())));
-        let skip = Skipper::new(&data, defs, IGNORE_MARKS, 0, u32::MAX);
+        let skip = Skipper::new(&data, defs, IGNORE_MARKS, 0, u64::MAX);
         assert!(!skip.is_trivial());
         // beh, fatha, beh — which is what a vowelled Arabic ligature has to
         // match across, and the whole reason this module exists.
@@ -557,9 +557,9 @@ mod tests {
         let defs = Definitions::parse(&data, Some(span(data.len())));
         let glyphs = run(&[1, 5, 10]);
 
-        let bases = Skipper::new(&data, defs, IGNORE_BASE_GLYPHS, 0, u32::MAX);
+        let bases = Skipper::new(&data, defs, IGNORE_BASE_GLYPHS, 0, u64::MAX);
         assert_eq!(bases.at_or_after(&glyphs, 0), Some(1));
-        let ligs = Skipper::new(&data, defs, IGNORE_LIGATURES, 0, u32::MAX);
+        let ligs = Skipper::new(&data, defs, IGNORE_LIGATURES, 0, u64::MAX);
         assert_eq!(ligs.at_or_after(&glyphs, 0), Some(0));
         assert_eq!(ligs.next(&glyphs, 0), Some(2));
     }
@@ -567,7 +567,7 @@ mod tests {
     #[test]
     fn a_face_with_no_gdef_hides_nothing_however_the_flag_reads() {
         let defs = Definitions::parse(&[], None);
-        let skip = Skipper::new(&[], defs, IGNORE_MARKS, 0, u32::MAX);
+        let skip = Skipper::new(&[], defs, IGNORE_MARKS, 0, u64::MAX);
         let glyphs = run(&[1, 10, 2]);
         // A flag that says "ignore marks" over a face that never said which
         // glyphs are marks has named the empty set, not every glyph.
@@ -578,7 +578,7 @@ mod tests {
     fn a_mark_filtering_set_admits_only_the_marks_it_lists() {
         let data = gdef(2, Some(&[11]), None);
         let defs = Definitions::parse(&data, Some(span(data.len())));
-        let skip = Skipper::new(&data, defs, USE_MARK_FILTERING_SET, 0, u32::MAX);
+        let skip = Skipper::new(&data, defs, USE_MARK_FILTERING_SET, 0, u64::MAX);
         // 10 is a mark and not in the set, so it is hidden; 11 is in it.
         let hidden = run(&[1, 10, 2]);
         assert_eq!(skip.next(&hidden, 0), Some(2));
@@ -601,7 +601,7 @@ mod tests {
         let data = gdef(2, None, Some(&[(10, 14, 1), (15, 19, 2)]));
         let defs = Definitions::parse(&data, Some(span(data.len())));
         // The class travels in the high byte of the flag.
-        let skip = Skipper::new(&data, defs, 1 << 8, 0, u32::MAX);
+        let skip = Skipper::new(&data, defs, 1 << 8, 0, u64::MAX);
         let glyphs = run(&[1, 15, 11, 2]);
         // 15 is class 2 and hidden; 11 is class 1 and visible.
         assert_eq!(skip.next(&glyphs, 0), Some(2));
@@ -609,7 +609,7 @@ mod tests {
 
     /// A run whose glyphs carry the masks given, so the feature gate can be
     /// exercised independently of what any real face would produce.
-    fn masked(entries: &[(u16, u32)]) -> Vec<SubGlyph> {
+    fn masked(entries: &[(u16, u64)]) -> Vec<SubGlyph> {
         entries
             .iter()
             .enumerate()
@@ -648,7 +648,7 @@ mod tests {
     fn a_forward_walk_reports_where_the_match_ended_not_where_it_would_have() {
         let data = gdef(2, None, None);
         let defs = Definitions::parse(&data, Some(span(data.len())));
-        let skip = Skipper::new(&data, defs, IGNORE_MARKS, 0, u32::MAX);
+        let skip = Skipper::new(&data, defs, IGNORE_MARKS, 0, u64::MAX);
         let glyphs = run(&[1, 10, 2, 10, 3]);
         let mut seen = Vec::new();
         let end = skip.walk_forward(&glyphs, 0, 3, |_, pos| {
@@ -665,7 +665,7 @@ mod tests {
     fn a_backward_walk_counts_outward_from_the_input() {
         let data = gdef(2, None, None);
         let defs = Definitions::parse(&data, Some(span(data.len())));
-        let skip = Skipper::new(&data, defs, IGNORE_MARKS, 0, u32::MAX);
+        let skip = Skipper::new(&data, defs, IGNORE_MARKS, 0, u64::MAX);
         let glyphs = run(&[3, 10, 2, 10, 1]);
         let mut seen = Vec::new();
         let ok = skip.walk_backward(&glyphs, 4, 2, |_, pos| {
@@ -681,7 +681,7 @@ mod tests {
     fn a_walk_that_runs_out_of_run_fails_rather_than_matching_short() {
         let data = gdef(2, None, None);
         let defs = Definitions::parse(&data, Some(span(data.len())));
-        let skip = Skipper::new(&data, defs, 0, 0, u32::MAX);
+        let skip = Skipper::new(&data, defs, 0, 0, u64::MAX);
         let glyphs = run(&[1, 2]);
         assert_eq!(skip.walk_forward(&glyphs, 0, 3, |_, _| Some(())), None);
         assert!(skip.walk_backward(&glyphs, 1, 2, |_, _| Some(())).is_none());

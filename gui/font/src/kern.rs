@@ -188,7 +188,7 @@ impl Kerning {
     pub(crate) fn pair(&self, data: &[u8], left: u16, right: u16, between: &[u16]) -> i16 {
         for group in &self.gpos {
             if !between.is_empty() {
-                let skip = Skipper::new(data, self.defs, group.flag, group.filter, u32::MAX);
+                let skip = Skipper::new(data, self.defs, group.flag, group.filter, u64::MAX);
                 if !between.iter().all(|&g| skip.skips(g)) {
                     continue;
                 }

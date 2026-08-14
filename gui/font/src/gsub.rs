@@ -157,21 +157,21 @@ const FEATURES: &[&[u8; 4]] = &[
 /// subtraction appears in a path the arithmetic lints police. The two are
 /// kept in step by `the_masks_match_the_feature_list`, which fails if an
 /// entry is ever inserted or reordered.
-const ALWAYS: u32 = 0b0011_1111_1111_1111;
+const ALWAYS: u64 = 0b0011_1111_1111_1111;
 /// The bit for `isol`, the fifteenth entry of [`FEATURES`].
-const ISOL: u32 = 0b0100_0000_0000_0000;
+const ISOL: u64 = 0b0100_0000_0000_0000;
 /// The bit for `init`, the sixteenth.
-const INIT: u32 = 0b1000_0000_0000_0000;
+const INIT: u64 = 0b1000_0000_0000_0000;
 /// The bit for `medi`, the seventeenth.
-const MEDI: u32 = 0b1_0000_0000_0000_0000;
+const MEDI: u64 = 0b1_0000_0000_0000_0000;
 /// The bit for `fina`, the eighteenth.
-const FINA: u32 = 0b10_0000_0000_0000_0000;
+const FINA: u64 = 0b10_0000_0000_0000_0000;
 
 /// The mask for a glyph whose cursive form is `form`.
 ///
 /// `None` — a space, a mark, a Latin letter, anything in a face with no
 /// cursive script at all — gets the unconditional features only.
-fn form_mask(form: Option<Form>) -> u32 {
+fn form_mask(form: Option<Form>) -> u64 {
     ALWAYS
         | match form {
             None => 0,
@@ -252,7 +252,7 @@ pub struct SubGlyph {
     /// would silently disable ligatures. [`skip`](crate::skip) reads it because
     /// it is the module that decides, for every matcher, whether a position is
     /// eligible.
-    pub(crate) mask: u32,
+    pub(crate) mask: u64,
     /// Where this glyph's character attaches, if it is a combining mark —
     /// [`fallback::attach_class`](crate::fallback::attach_class) of the
     /// character `cmap` looked it up from, and `0` for anything that is not a
@@ -454,7 +454,7 @@ impl SubGlyph {
     /// which is precisely the case that cannot show the gate working.
     #[cfg(test)]
     #[must_use]
-    pub(crate) fn masked(gid: u16, cluster: usize, mask: u32) -> Self {
+    pub(crate) fn masked(gid: u16, cluster: usize, mask: u64) -> Self {
         Self {
             gid,
             cluster,
@@ -562,7 +562,7 @@ struct Ctx {
     /// the helper's own coverage is what decides whether it fires. The flag,
     /// by contrast, is the nested lookup's own — which is why a skipper is
     /// built per invocation rather than passed down.
-    mask: u32,
+    mask: u64,
     /// How many ligature ids have been handed out so far in this run, for
     /// [`next_lig_id`](Ctx::next_lig_id).
     serial: u8,
@@ -2392,7 +2392,7 @@ mod tests {
                 .iter()
                 .position(|f| *f == tag)
                 .unwrap_or_else(|| panic!("{tag:?} is not in FEATURES"));
-            1u32 << i
+            1u64 << i
         };
         assert_eq!(bit(b"isol"), ISOL);
         assert_eq!(bit(b"init"), INIT);
@@ -2400,7 +2400,8 @@ mod tests {
         assert_eq!(bit(b"fina"), FINA);
         // `ALWAYS` is exactly the features that are not positional.
         let positional = ISOL | INIT | MEDI | FINA;
-        let all = (1u32 << FEATURES.len()) - 1;
+        assert!(FEATURES.len() < u64::BITS as usize, "a feature past the 64th gets no bit");
+        let all = (1u64 << FEATURES.len()) - 1;
         assert_eq!(ALWAYS, all & !positional);
         // And they really are a prefix: no unconditional feature may sit
         // after a positional one, or `ALWAYS` would not be contiguous.

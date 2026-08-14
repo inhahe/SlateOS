@@ -77,7 +77,7 @@ use crate::sfnt::{u16_at, u32_at};
 /// The number is a LookupList index before the lookups are decoded and a
 /// position in [`ByScript::lookups`] afterwards. The two are never mixed: the
 /// translation happens exactly once, at the end of [`ByScript::parse`].
-type Masked = (u16, u32);
+type Masked = (u16, u64);
 
 /// One script's tag and the lookups it selects, each with its mask.
 type Selection = ([u8; 4], Vec<Masked>);
@@ -449,7 +449,7 @@ impl ByScript {
     pub(crate) fn for_script(
         &self,
         script: Option<ScriptTags>,
-    ) -> impl Iterator<Item = (&Lookup, u32)> {
+    ) -> impl Iterator<Item = (&Lookup, u64)> {
         let positions = fallback_chain(script)
             .find_map(|want| {
                 self.scripts
@@ -576,9 +576,10 @@ fn lookup_indices(
             continue;
         };
         // Bit per tag, in the order the caller listed them. A caller asking
-        // for more than 32 gets no bit for the rest, which would silently
-        // disable them — so it must not; nothing here comes close.
-        let mask = u32::try_from(which).ok().and_then(|b| 1u32.checked_shl(b));
+        // for more than 64 gets no bit for the rest, which would silently
+        // disable them — so it must not; the longest list is `GSUB`'s, and it
+        // is checked against the width by `the_masks_match_the_feature_list`.
+        let mask = u32::try_from(which).ok().and_then(|b| 1u64.checked_shl(b));
         let Some(mask) = mask else { continue };
         let Some(feature) = u16_at(data, rec.checked_add(4)?)
             .and_then(|o| feature_list.checked_add(usize::from(o)))

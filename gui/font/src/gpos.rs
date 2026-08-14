@@ -134,7 +134,7 @@ const FEATURES: [&[u8; 4]; 14] = [
 const KERN_FEATURE: usize = 7;
 
 /// That position as a mask bit.
-const KERN_MASK: u32 = 1 << KERN_FEATURE;
+const KERN_MASK: u64 = 1 << KERN_FEATURE;
 
 /// `lookupFlag` bit 0. On a cursive lookup it says which end of the join is
 /// anchored — not, despite the name, which way the text runs.
@@ -344,7 +344,7 @@ impl Positioning {
     /// a pair that consumed its second glyph resumes past it, everything else
     /// resumes at the next glyph.
     fn run_lookup(&self, data: &[u8], lookup: &Lookup, run: &Run<'_>, out: &mut [Adjust]) {
-        let skip = Skipper::new(data, self.defs, lookup.flag, lookup.filter, u32::MAX);
+        let skip = Skipper::new(data, self.defs, lookup.flag, lookup.filter, u64::MAX);
         let mut i = 0usize;
         while i < run.glyphs.len() {
             let next = if skip.considers(run.glyphs, i) {
@@ -402,11 +402,11 @@ impl Positioning {
         match lookup.kind {
             SINGLE_POS => single(data, sub, run.glyphs, i, out),
             PAIR_POS => {
-                let skip = Skipper::new(data, self.defs, lookup.flag, lookup.filter, u32::MAX);
+                let skip = Skipper::new(data, self.defs, lookup.flag, lookup.filter, u64::MAX);
                 pair(data, sub, skip, run.glyphs, i, out)
             }
             CURSIVE_POS => {
-                let skip = Skipper::new(data, self.defs, lookup.flag, lookup.filter, u32::MAX);
+                let skip = Skipper::new(data, self.defs, lookup.flag, lookup.filter, u64::MAX);
                 cursive(data, sub, skip, lookup.flag, run, i, out)
             }
             MARK_BASE_POS => {
@@ -414,13 +414,13 @@ impl Positioning {
                 // lookup's own flag: a mark-to-base lookup that did not ignore
                 // marks would attach the second accent of a stack to the first
                 // and call it a base.
-                let skip = Skipper::new(data, self.defs, IGNORE_MARKS, 0, u32::MAX);
+                let skip = Skipper::new(data, self.defs, IGNORE_MARKS, 0, u64::MAX);
                 let j = skip.prev(run.glyphs, i)?;
                 attach(data, sub, run.glyphs, i, j, out)
             }
             MARK_LIG_POS => {
                 // Same search as mark-to-base, for the same reason.
-                let skip = Skipper::new(data, self.defs, IGNORE_MARKS, 0, u32::MAX);
+                let skip = Skipper::new(data, self.defs, IGNORE_MARKS, 0, u64::MAX);
                 let j = skip.prev(run.glyphs, i)?;
                 attach_to_lig(data, sub, run.glyphs, i, j, out)
             }
@@ -434,7 +434,7 @@ impl Positioning {
                     self.defs,
                     lookup.flag & !IGNORE_FLAGS,
                     lookup.filter,
-                    u32::MAX,
+                    u64::MAX,
                 );
                 let j = skip.prev(run.glyphs, i)?;
                 let below = run.glyphs.get(j)?.gid;
@@ -444,7 +444,7 @@ impl Positioning {
                 attach(data, sub, run.glyphs, i, j, out)
             }
             CONTEXT_POS => {
-                let skip = Skipper::new(data, self.defs, lookup.flag, lookup.filter, u32::MAX);
+                let skip = Skipper::new(data, self.defs, lookup.flag, lookup.filter, u64::MAX);
                 // A local rather than a field, so that a nested contextual
                 // lookup does not reuse the buffer its caller is matching in.
                 let mut rules = Vec::new();
@@ -452,7 +452,7 @@ impl Positioning {
                 Some(self.nested(data, run, i, &hit, out, depth))
             }
             CHAIN_CONTEXT_POS => {
-                let skip = Skipper::new(data, self.defs, lookup.flag, lookup.filter, u32::MAX);
+                let skip = Skipper::new(data, self.defs, lookup.flag, lookup.filter, u64::MAX);
                 let mut rules = Vec::new();
                 let hit = chain_match(data, sub, run.glyphs, i, skip, &mut rules)?;
                 Some(self.nested(data, run, i, &hit, out, depth))
@@ -948,7 +948,7 @@ mod tests {
     #[test]
     fn the_kern_bit_names_the_kern_feature() {
         assert_eq!(FEATURES.get(KERN_FEATURE), Some(&b"kern"));
-        assert_eq!(KERN_MASK, 1 << KERN_FEATURE);
+        assert_eq!(KERN_MASK, 1u64 << KERN_FEATURE);
     }
 
     fn be16(v: u16) -> [u8; 2] {
@@ -1074,7 +1074,7 @@ mod tests {
         let run = glyphs(&[1, 2, 1]);
         let mut out = alloc::vec![Adjust::plain(500); 3];
         let defs = Definitions::default();
-        let skip = Skipper::new(&data, defs, 0, 0, u32::MAX);
+        let skip = Skipper::new(&data, defs, 0, 0, u64::MAX);
         // No second record, so the second glyph may still open the next pair.
         assert_eq!(pair(&data, 0, skip, &run, 0, &mut out), Some(1));
         assert_eq!(out[0].x_advance, 440);
@@ -1087,7 +1087,7 @@ mod tests {
         let data = pair_pos1(1, 2, -60, Some(-10));
         let run = glyphs(&[1, 2]);
         let mut out = alloc::vec![Adjust::plain(500); 2];
-        let skip = Skipper::new(&data, Definitions::default(), 0, 0, u32::MAX);
+        let skip = Skipper::new(&data, Definitions::default(), 0, 0, u64::MAX);
         assert_eq!(pair(&data, 0, skip, &run, 0, &mut out), Some(2));
         assert_eq!(out[0].x_advance, 440);
         assert_eq!(out[1].x_advance, 490);

@@ -60002,7 +60002,7 @@ every one of these was *my own* freshly-written tooling, reporting success.
 When adding a guard, the first test should be "does it fire on a case I know
 is positive?", not "does it run cleanly?".
 
-### [A] B-BENCH-TCP-CHECKSUM-PAIR-BIMODAL-1.7x. `tcp_checksum_v4`/`v6` each swing ~1.7x between runs, and which member is elevated varies — OPEN
+### [A] B-BENCH-TCP-CHECKSUM-PAIR-BIMODAL-1.7x. A hot loop that straddles a 4 KiB guest page costs ~1.7x under TCG, deterministically per build — ROOT-CAUSED 2026-08-14, fix pending
 
 **Where:** `kernel/src/bench.rs`, `bench_net_tcp_checksum_v4` (3281) /
 `bench_net_tcp_checksum_v6` (3340) and their bench-local kernels
@@ -60071,9 +60071,63 @@ contamination episode predict exactly what is in the table above.
 1 is a property of the binary and must reproduce: same member elevated, same
 factor. Hypothesis 2 re-rolls: the elevated member moves, or neither is
 elevated. This needs no new code, just a second `--bench` boot on an unchanged
-tree, and it is the next step for this entry. Until that run exists, the
-mechanism is **unknown** and this entry must not be cited as evidence for
-either explanation.
+tree.
+
+**RESOLVED 2026-08-14 — hypothesis 1, decisively.** That run was done on a
+byte-identical binary (only markdown had changed since `5a2002bac`):
+
+| | `5a2002bac` | re-run, same binary | agreement |
+|---|---|---|---|
+| `tcp_checksum_v4` | 20182 | 20687 | 2.5% |
+| `tcp_checksum_v6` | **35039** | **35048** | **0.03%** |
+
+The same member is elevated, at the same value — and the host was *noisier*
+this run, not quieter (canary spread 16% over 10 samples, against 2% before),
+which rules out the contamination reading rather than merely failing to
+support it. It is a deterministic property of the binary.
+
+**Mechanism: the elevated member's hot loop straddles a 4 KiB guest page.**
+Disassembling the staged binary and locating the backward branch in each fold
+loop:
+
+| | fold loop | span | pages |
+|---|---|---|---|
+| `tcp_checksum_bench` (v4, fast) | `ffffffff805d7202` → `ffffffff805d73f7` | 501 B | `…805d7` → `…805d7`, **one page** |
+| `tcp_checksum_v6_bench` (v6, elevated) | `ffffffff805d9ea9` → `ffffffff805da086` | 477 B | `…805d9` → `…805da`, **straddles** |
+
+Under TCG a translation block is bounded by the guest page — a loop that
+crosses a page boundary cannot stay a single directly-chained TB, so every
+iteration pays a dispatcher round-trip instead of a direct jump. That predicts
+exactly what is observed: a *uniform* per-iteration penalty (so `mean/min` is
+untouched), perfectly reproducible on the same binary, and re-rolled whenever
+unrelated code shifts the function's address — which is why runs 1 and 2 show
+neither member elevated (in those builds neither loop straddled).
+
+**Falsifiable prediction, to be checked on the next bench run:** disassemble
+first, and whichever of the two fold loops straddles a page is the one that
+will come back elevated — with neither elevated if neither straddles. This
+entry should be treated as provisional until that prediction has been made
+*before* a run and held.
+
+**This generalises to the whole suite, and that is the real finding.** Nothing
+about the mechanism is specific to `tcp_checksum`. Any benchmark whose hot loop
+happens to straddle a 4 KiB page pays the same penalty, and which benchmarks do
+re-rolls at every build. So commit-to-commit comparison under TCG carries an
+irreducible per-benchmark noise floor of up to ~1.7x that is *deterministic
+within a run* — meaning neither the canary nor `mean/min` can ever detect it,
+because both look for variation and there is none. Every noise-suppression
+mechanism built for this suite so far is structurally blind to it.
+
+**It is also mostly the same bug as
+`B-BENCH-ENTIRE-SUITE-MEASURES-AN-UNOPTIMISED-KERNEL`, and mostly the same
+fix.** The straddle probability scales with the byte length of the hot loop. At
+`opt-level = 0` this fold loop is 117 instructions / ~500 bytes, giving it
+roughly a 1-in-8 chance of crossing any given page; optimised it would be a
+few dozen bytes, closer to 1-in-100. Building the bench kernel `--release`
+therefore shrinks this noise source by about an order of magnitude as a side
+effect. Do that first and re-measure before considering anything more invasive
+(forced function alignment via `-Z align-functions` costs padding across the
+whole kernel and would only paper over the loop-length problem).
 
 **Why it matters.** Both are on the `over_target` list (targets 2000/2200 ns,
 measured 20000–35000), so the absolute numbers are already known-bad under TCG
@@ -60084,21 +60138,25 @@ band from exactly this history. If the band is fitted without knowing this
 pair is bimodal, it will either be stretched wide enough to hide real
 regressions everywhere else, or it will keep flagging these two forever.
 
-**Diagnostic plan.**
+**Remaining plan.** Steps 1 and 2 are done (above). What is left:
 
-1. **Re-run `--bench` on an unchanged tree** (above). Decides between the two
-   hypotheses; everything below is only worth doing if hypothesis 1 survives.
-2. If it does: check alignment. The symbols are present and reachable without
-   installing binutils — `llvm-nm` / `llvm-objdump` ship with the rustup
-   toolchain at
-   `~/.rustup/toolchains/stable-x86_64-pc-windows-gnu/lib/rustlib/x86_64-pc-windows-gnu/bin/`.
-   On the `5a2002bac` binary the two kernels sit at `ffffffff805d7130`
-   (`tcp_checksum_bench`) and `ffffffff805d9df0` (`tcp_checksum_v6_bench`).
-   Compare against a build where the other member is elevated and see whether
-   the elevated one correlates with its hot loop crossing a 4 KiB boundary. If
-   it does, the fix is to align both loops rather than chase the benchmark.
-3. If neither hypothesis holds, mark the pair TCG-unreliable and exclude it
-   from comparator diffs.
+1. Build the bench kernel `--release` (see
+   `B-BENCH-ENTIRE-SUITE-MEASURES-AN-UNOPTIMISED-KERNEL`) and re-measure.
+2. Make the straddle prediction *before* that run and record it, so the
+   mechanism is confirmed prospectively rather than fitted after the fact.
+3. If page straddling still moves benchmarks materially at `opt-level = 3`,
+   teach the comparator about it: the check is mechanical (disassemble, locate
+   the backward branch, compare `addr >> 12` at both ends) and could be emitted
+   alongside each score, which would turn an invisible deterministic bias into
+   a recorded per-benchmark flag.
+
+**Reproducing the disassembly.** `llvm-nm` / `llvm-objdump` ship with the
+rustup toolchain — no binutils install needed:
+`~/.rustup/toolchains/stable-x86_64-pc-windows-gnu/lib/rustlib/x86_64-pc-windows-gnu/bin/`.
+The two kernels are `_ZN6kernel5bench18tcp_checksum_bench…` at
+`ffffffff805d7130` and `_ZN6kernel5bench21tcp_checksum_v6_bench…` at
+`ffffffff805d9df0`. Note the symbol hash differs per build, so match on the
+demangled prefix rather than pasting a mangled name.
 
 **Incidental finding from the disassembly: the benchmarked kernel is built
 without optimisation.** `tcp_checksum_bench` spills every intermediate to the

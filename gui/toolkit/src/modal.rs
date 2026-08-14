@@ -62,6 +62,11 @@ const PROGRESS_BAR_RADIUS: f32 = 4.0;
 const FONT_SIZE: f32 = 14.0;
 const FONT_SIZE_TITLE: f32 = 16.0;
 const FONT_SIZE_SMALL: f32 = 12.0;
+/// Baseline-to-baseline spacing of a wrapped dialog message, in pixels.
+///
+/// Named because the height calculation and the per-line draw both depend on
+/// it; as two separate literals they could disagree and clip the last line.
+const MESSAGE_LINE_HEIGHT: f32 = 20.0;
 const SHADOW_BLUR: f32 = 24.0;
 const SHADOW_OFFSET_Y: f32 = 8.0;
 const SHADOW_COLOR: Color = Color::rgba(0, 0, 0, 100);
@@ -648,20 +653,37 @@ impl AlertDialog {
             text_x = icon_x + ICON_SIZE + ICON_PADDING;
         }
 
-        // Message text.
-        let text_max_width = layout.x + layout.width - text_x - CONTENT_PADDING;
-        tree.push(RenderCommand::Text {
-            x: text_x,
-            y: content_y + (ICON_SIZE - FONT_SIZE) / 2.0,
-            text: self.message.clone(),
-            color: COLOR_SUBTEXT1,
-            font_size: FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(text_max_width),
-        });
+        let buttons_y = layout.y + layout.height - BUTTON_HEIGHT - CONTENT_PADDING;
+
+        // Message text, one command per wrapped line.
+        let text_max_width = self.message_max_width();
+        let lines = self.message_lines();
+        // Centred against the icon while the message is the shorter of the
+        // two, then top-aligned once it is taller — so a one-line message
+        // still sits level with its icon.
+        let block_height = lines.len() as f32 * MESSAGE_LINE_HEIGHT;
+        let first_line_y = content_y + (ICON_SIZE - block_height).max(0.0) / 2.0;
+        for (n, line) in lines.iter().enumerate() {
+            let line_y = first_line_y + n as f32 * MESSAGE_LINE_HEIGHT;
+            // The dialog height is clamped at `DIALOG_MAX_HEIGHT`, so a message
+            // can be longer than the box it is given. Lines that do not fit are
+            // dropped rather than drawn over the button row: text on top of the
+            // controls that dismiss the dialog is worse than text not shown.
+            if line_y + MESSAGE_LINE_HEIGHT > buttons_y {
+                break;
+            }
+            tree.push(RenderCommand::Text {
+                x: text_x,
+                y: line_y,
+                text: line.clone(),
+                color: COLOR_SUBTEXT1,
+                font_size: FONT_SIZE,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(text_max_width),
+            });
+        }
 
         // Buttons (bottom-right aligned).
-        let buttons_y = layout.y + layout.height - BUTTON_HEIGHT - CONTENT_PADDING;
         self.render_buttons(tree, &layout, buttons_y);
     }
 
@@ -724,9 +746,39 @@ impl AlertDialog {
         }
     }
 
+    /// The dialog's outer width.
+    fn dialog_width(&self) -> f32 {
+        self.width.unwrap_or(DIALOG_MIN_WIDTH).clamp(DIALOG_MIN_WIDTH, DIALOG_MAX_WIDTH)
+    }
+
+    /// Horizontal room the message has, after the padding and any icon.
+    fn message_max_width(&self) -> f32 {
+        let text_offset = if self.icon.glyph().is_some() {
+            CONTENT_PADDING + ICON_SIZE + ICON_PADDING
+        } else {
+            CONTENT_PADDING
+        };
+        self.dialog_width() - text_offset - CONTENT_PADDING
+    }
+
+    /// The message, broken into the lines it will be drawn as.
+    ///
+    /// `RenderCommand::Text` does not wrap — the compositor truncates at
+    /// `max_width` — so a message longer than one line has to be broken up
+    /// here and drawn a line at a time. `compute_height` sizes the dialog from
+    /// this same list, so the box is always as tall as the text it holds.
+    fn message_lines(&self) -> Vec<String> {
+        crate::text::wrap(
+            &self.message,
+            self.message_max_width(),
+            FONT_SIZE,
+            FontWeightHint::Regular,
+        )
+    }
+
     /// Compute dialog layout (position and size, centered in parent).
     fn compute_layout(&self, parent_width: f32, parent_height: f32) -> DialogLayout {
-        let width = self.width.unwrap_or(DIALOG_MIN_WIDTH).clamp(DIALOG_MIN_WIDTH, DIALOG_MAX_WIDTH);
+        let width = self.dialog_width();
         let height = self.compute_height();
         let x = (parent_width - width) / 2.0;
         let y = (parent_height - height) / 2.0;
@@ -750,7 +802,12 @@ impl AlertDialog {
     /// Compute the height needed for the dialog content.
     fn compute_height(&self) -> f32 {
         // Title bar + content padding + icon/message area + padding + buttons + padding
-        let content_height = ICON_SIZE.max(FONT_SIZE * 3.0); // Estimate message height
+        //
+        // The message area is as tall as the message's own wrapped lines. It
+        // used to be a flat three-line guess, which left a band of empty space
+        // under a one-line message and clipped anything longer than three.
+        let message_height = self.message_lines().len() as f32 * MESSAGE_LINE_HEIGHT;
+        let content_height = ICON_SIZE.max(message_height);
         (TITLE_BAR_HEIGHT + CONTENT_PADDING + content_height + CONTENT_PADDING + BUTTON_HEIGHT + CONTENT_PADDING)
             .clamp(DIALOG_MIN_HEIGHT, DIALOG_MAX_HEIGHT)
     }
@@ -2334,6 +2391,125 @@ mod tests {
 
         // Should produce multiple commands (scrim, shadow, bg, title bar, text, buttons).
         assert!(tree.len() > 5);
+    }
+
+    /// Every message line an alert drew, as (y, text), in draw order.
+    fn alert_message_lines(dialog: &AlertDialog) -> Vec<(f32, String)> {
+        let mut tree = RenderTree::new();
+        dialog.render(800.0, 600.0, &mut tree);
+        tree.commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text {
+                    y,
+                    text,
+                    font_size,
+                    color,
+                    ..
+                } if (*font_size - FONT_SIZE).abs() < 0.01 && *color == COLOR_SUBTEXT1 => {
+                    Some((*y, text.clone()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_long_alert_message_is_wrapped_not_truncated() {
+        // The compositor truncates at `max_width` instead of wrapping, so a
+        // message sent as one command lost everything past its first line.
+        let message = "The file could not be saved because the destination \
+                       volume is read-only. Choose another location and try \
+                       again, or unlock the volume first.";
+        let mut dialog = AlertDialog::error("Save failed", message);
+        dialog.show();
+        dialog.overlay.opacity = 1.0;
+
+        let lines = alert_message_lines(&dialog);
+        assert!(
+            lines.len() > 1,
+            "a {} character message was drawn as {} line(s)",
+            message.len(),
+            lines.len()
+        );
+        assert_eq!(
+            lines
+                .iter()
+                .flat_map(|(_, l)| l.split_whitespace())
+                .collect::<Vec<_>>(),
+            message.split_whitespace().collect::<Vec<_>>(),
+            "the drawn lines are not the message"
+        );
+    }
+
+    #[test]
+    fn an_alert_message_stays_inside_its_dialog() {
+        // Both directions: every line fits the width it was wrapped for, and
+        // the block of lines fits between the title bar and the buttons.
+        let message = "Deleting this project removes every file it contains, \
+                       including any work that has not been backed up, and this \
+                       cannot be undone afterwards.";
+        let mut dialog = AlertDialog::warning("Delete project?", message);
+        dialog.show();
+        dialog.overlay.opacity = 1.0;
+        let layout = dialog.compute_layout(800.0, 600.0);
+
+        let lines = alert_message_lines(&dialog);
+        for (_, line) in &lines {
+            if line.split_whitespace().count() < 2 {
+                continue;
+            }
+            assert!(
+                crate::text::width(line, FONT_SIZE) <= dialog.message_max_width(),
+                "{line:?} is wider than the dialog that contains it"
+            );
+        }
+        let last_y = lines.iter().map(|&(y, _)| y).fold(f32::MIN, f32::max);
+        let buttons_y = layout.y + layout.height - BUTTON_HEIGHT - CONTENT_PADDING;
+        assert!(
+            last_y + MESSAGE_LINE_HEIGHT <= buttons_y,
+            "the last message line at {last_y} runs into the buttons at {buttons_y}"
+        );
+    }
+
+    #[test]
+    fn an_oversized_message_is_not_drawn_over_the_buttons() {
+        // The dialog height is clamped, so a message can be longer than any box
+        // it can be given. It must lose its tail rather than cover the controls
+        // that dismiss it.
+        let message = "word ".repeat(600);
+        let mut dialog = AlertDialog::error("Failed", &message);
+        dialog.show();
+        dialog.overlay.opacity = 1.0;
+        let layout = dialog.compute_layout(800.0, 600.0);
+        let buttons_y = layout.y + layout.height - BUTTON_HEIGHT - CONTENT_PADDING;
+
+        let lines = alert_message_lines(&dialog);
+        assert!(!lines.is_empty(), "the message vanished entirely");
+        for (y, line) in &lines {
+            assert!(
+                y + MESSAGE_LINE_HEIGHT <= buttons_y,
+                "{line:?} at {y} is drawn into the button row at {buttons_y}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_alert_grows_for_a_longer_message() {
+        // The height used to be a flat three-line guess, so these were equal.
+        let short = AlertDialog::info("T", "Done.");
+        let long = AlertDialog::info(
+            "T",
+            "The operation finished, but several items were skipped because \
+             they were already present at the destination and the overwrite \
+             option was not enabled for this run.",
+        );
+        assert!(
+            long.compute_height() > short.compute_height(),
+            "a long message ({}) got no more room than a short one ({})",
+            long.compute_height(),
+            short.compute_height()
+        );
     }
 
     #[test]

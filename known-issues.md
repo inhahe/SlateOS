@@ -57948,17 +57948,27 @@ the first attempt at this fix went wrong.
 
 ## TD-APPS-ESTIMATE-TEXT-WIDTH — apps still guess at text width instead of measuring it
 
-**Status.** Open, in progress. **`gui/**` is now clean** — the toolkit and the
-compositor were converted on 2026-08-13 (`fa5135c36`, `f2d74c8a2`), the desktop
-shell's 18 files on 2026-08-14 (`210172279`), and `gui/notifications`
-(`b654d2cd0`). Fourteen applications have followed: `lockscreen`
-(`1523f7412`), `filediff` (`353a41211`), `tmux` (`99198808c`),
-`markdowneditor` (`77bf7bf14`), `regextester` (`504c67bc0`), `jsonviewer`
-(`0c107cce7`), `logviewer` (`f5befec99`), `snippets` (`537a9eaa8`),
-`credmanager` (`dba94444d`), `diskimager` (`1e5dc7edb`), `netscan`
-(`1b436c341`), `netmanager` (`a3669e178`), `hexeditor` (`50c6b17a5`) and
-`defrag` (`45aa280d1`). Roughly 90 sites across 52 files remain, all under
-`apps/`.
+**Status.** **Closed for the original defect** as of 2026-08-14. `gui/**` was
+converted on 2026-08-13 (`fa5135c36`, `f2d74c8a2`), the desktop shell's 18 files
+and `gui/notifications` on 2026-08-14 (`210172279`, `b654d2cd0`), fourteen
+applications after that (`1523f7412`, `353a41211`, `99198808c`, `77bf7bf14`,
+`504c67bc0`, `0c107cce7`, `f5befec99`, `537a9eaa8`, `dba94444d`, `1e5dc7edb`,
+`1b436c341`, `a3669e178`, `50c6b17a5`, `45aa280d1`), and the remaining tail in
+two sweeps — seven surveyed files (`68d477601`) and the last 26 crates
+(`6f4dd870e`). The last non-app site, the About dialog's licence list, went with
+`7948cf8d5`.
+
+Every survivor of `rg 'len\(\) as f32\)? \* [0-9]'` under `apps/` and `gui/` is
+now either a comment, a genuine collection-length calculation, or a grid view
+that legitimately counts characters against a cell derived from the face
+(`textview`'s line-number gutter). Two follow-ups are tracked separately below:
+`apps/editor`'s own `char_width` config field, and the wrapping defect the last
+sweep uncovered.
+
+Of ~90 apparent sites in the final survey, ~41 were real; the rest were false
+positives from the naive pattern (`filediff`, `videoplayer`, `devicemanager`,
+`benchmark` and `unitconverter` turned out to have none at all). Refine the
+grep with an identifier-based pattern before trusting a count.
 
 **What it is.** Roughly 322 sites across ~90 files under `apps/` and
 `gui/desktop/` size and position text with a per-app fudge factor —
@@ -58095,3 +58105,79 @@ Three things came out of converting it:
   single digit is narrower than the badge is tall, so it rendered as a squashed
   oval. `max(BADGE_HEIGHT)` — the old byte estimate had been hiding this by
   being too wide.
+
+**And what the final sweep turned up.** The tail was mostly mechanical, but it
+surfaced three things worth carrying forward:
+
+- **Three carets, not cosmetics.** `sysmonitor` and `procexplorer` both placed
+  their process-filter caret from a byte count, and `pdfviewer`'s search
+  highlight spread a span's document-supplied width over its *bytes* while
+  indexing it by a byte offset — so on any span holding a two-byte character
+  the highlight was both too narrow and displaced left by one cell per
+  preceding accent. `screenshot` stored a text annotation's bounding box from
+  an estimate, so the box did not contain its own text. This confirms the
+  earlier finding: an estimate feeding anything other than a box width is a
+  correctness bug.
+- **A whole app with no tests.** `apps/procexplorer` had no `#[cfg(test)]`
+  module at all. Worth a sweep for others: an app with no tests is not
+  "untested here", it is untested.
+- **`RenderCommand::Text` does not wrap — it truncates.** See the next entry;
+  this is the successor defect and the reason this one is not simply closed.
+
+## TD-GUI-TEXT-COMMAND-DOES-NOT-WRAP — callers assume `max_width` wraps, but it clips
+
+**Status.** Open. The two worst instances are fixed (`7948cf8d5` and the
+`AlertDialog` fix in the same series); the rest of the tree is unaudited.
+
+**What it is.** `RenderCommand::Text` carries a `max_width`, and the obvious
+reading is that the compositor wraps to it. It does not. `Compositor::draw_text`
+walks the string one glyph at a time and `break`s at the limit:
+
+```rust
+if let Some(mx) = max_x && pen + advance > mx as f32 {
+    break;
+}
+```
+
+So `max_width` is a **clip**, and it produces exactly one line. Any caller that
+hands a paragraph to a single `Text` command is showing only its first line's
+worth of characters — silently, with no marker that anything was dropped.
+
+**What it broke.** Two found so far, both user-visible:
+
+- `gui/desktop/src/about.rs` — each open-source licence went out as one command,
+  so the About dialog's Licences tab showed roughly the first line of each
+  licence and nothing else. It compounded with the byte-count defect above: the
+  item height was reserved as `text.len() / 80` lines, so the list also left
+  gaps or overlapped, depending on the licence.
+- `gui/toolkit/src/modal.rs` — every `AlertDialog` in the system. The message was
+  one command, and `compute_height` reserved a flat `FONT_SIZE * 3.0` for it
+  regardless of length, so a long error message was cut to one line inside a box
+  sized for three.
+
+**Proper fix.** `guitk::text::wrap(text, max_width, size, weight)` (added in
+`7948cf8d5`) breaks a string into the lines it will actually be drawn as; emit
+one `Text` command per line and derive any reserved height from that same list,
+never from a second calculation. It is a thin wrapper over the `SystemFont::wrap`
+that already existed at the font layer, so it measures with the cache the
+compositor draws with. `menu.rs`'s tooltip wrapper was repointed at it rather
+than left as a second implementation.
+
+Two things the fixes had to get right, and any further one will too:
+
+- **Reserve height from the lines you drew.** The whole defect class is two
+  calculations for one quantity. `about.rs` and `modal.rs` both now call
+  `wrap` once and use its `len()` for the height.
+- **A clamped box still needs a clip.** `AlertDialog`'s height is clamped at
+  `DIALOG_MAX_HEIGHT`, so a message can be longer than any box it can be given.
+  Wrapping alone would then draw the overflow straight through the button row —
+  text on top of the controls that dismiss the dialog. The render loop breaks
+  once a line would reach the buttons.
+
+**Where to look next.** Unaudited callers passing prose to a single command,
+found by grepping for a `Text` command whose body is a `description` / `body` /
+`message` / `notes` / `content` field with `max_width: Some(..)`. Candidates:
+`gui/notifications` (toast body), `apps/contacts` (the notes field),
+`apps/whiteboard` (sticky-note content), `apps/weather` (alert descriptions),
+`InputDialog`'s prompt in `modal.rs`. Status-bar messages are *not* in scope —
+truncating those to one line is the intended behaviour.

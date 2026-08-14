@@ -31,10 +31,52 @@
 
 use std::sync::{Mutex, OnceLock, PoisonError};
 
+use osfont::select::Query;
 use osfont::system::{FontCache, Weight};
 
 use crate::color::Color;
+use crate::fontdb::FontDb;
 use crate::render::{FontWeightHint, RenderCommand};
+
+/// The families tried, in order, when nothing has chosen one.
+///
+/// The first is the design's intended UI font; the rest are the default sans
+/// of each platform this is developed or run on, ending with the two that are
+/// installed almost everywhere. The list exists because the alternative to
+/// finding *a* face is the built-in 8x16 bitmap font, which is legible but
+/// looks nothing like the system it is standing in for — so a host missing
+/// Inter should fall to Segoe UI or DejaVu Sans, not all the way back to
+/// bitmaps.
+pub const DEFAULT_UI_FAMILIES: &[&str] = &[
+    "Inter",
+    "Segoe UI",
+    "Cantarell",
+    "Noto Sans",
+    "DejaVu Sans",
+    "Liberation Sans",
+    "Helvetica",
+    "Arial",
+];
+
+/// The index of installed fonts, built once per process.
+///
+/// Separate from the cache so that changing the UI font later does not
+/// re-walk the font directories.
+fn font_db() -> &'static FontDb {
+    static DB: OnceLock<FontDb> = OnceLock::new();
+    DB.get_or_init(FontDb::scan_system)
+}
+
+/// The process-wide font state: rasterized glyphs, and which family they came
+/// from.
+#[derive(Debug)]
+struct Fonts {
+    cache: FontCache,
+    /// The family currently installed, or `None` while the built-in bitmap
+    /// face is in use. Held here rather than in a second static so it cannot
+    /// disagree with what the cache actually holds.
+    family: Option<String>,
+}
 
 /// The process-wide font cache.
 ///
@@ -42,9 +84,90 @@ use crate::render::{FontWeightHint, RenderCommand};
 /// like": two widgets asking about 14 px regular text must get the same
 /// answer, and threading a cache through every `intrinsic_size` call would
 /// change the signature of most of the toolkit to say so.
-fn cache() -> &'static Mutex<FontCache> {
-    static CACHE: OnceLock<Mutex<FontCache>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(FontCache::new()))
+///
+/// # Why the system font is installed here, lazily
+///
+/// A UI process measures text and the compositor draws it, in two different
+/// processes with two different caches. They must resolve the same family to
+/// the same file or every centred label in the system is off by the
+/// difference between two fonts' metrics — and neither process looks wrong on
+/// its own, which makes it a miserable bug to find.
+///
+/// Installing on first use, from a list compiled into the toolkit, is what
+/// makes that agreement automatic: every process that draws any text at all
+/// runs the same resolution against the same directories, without each having
+/// to remember to opt in at startup. An explicit "call this at startup" API
+/// would be cheaper, and would be wrong the first time an app forgot.
+///
+/// The cost is one directory scan per process, on the first call that touches
+/// text — under a second on this host in a debug build — and a process that
+/// never draws text never pays it.
+fn cache() -> &'static Mutex<Fonts> {
+    static CACHE: OnceLock<Mutex<Fonts>> = OnceLock::new();
+    CACHE.get_or_init(|| {
+        let mut fonts = Fonts {
+            cache: FontCache::new(),
+            family: None,
+        };
+        for family in DEFAULT_UI_FAMILIES {
+            if install_into(&mut fonts, family) {
+                break;
+            }
+        }
+        Mutex::new(fonts)
+    })
+}
+
+/// Install `family` into `fonts`, reporting whether it worked.
+///
+/// Both weights must load, and the state is only changed once both have: a
+/// half-installed family would draw bold text in the old face and regular in
+/// the new one, which looks like a rendering fault rather than a missing
+/// font.
+fn install_into(fonts: &mut Fonts, family: &str) -> bool {
+    let db = font_db();
+    let (Ok(regular), Ok(bold)) = (
+        db.load(family, Query::regular()),
+        db.load(family, Query::bold()),
+    ) else {
+        return false;
+    };
+    fonts.cache.set_face(Weight::Regular, std::sync::Arc::new(regular));
+    fonts.cache.set_face(Weight::Bold, std::sync::Arc::new(bold));
+    fonts.family = Some(family.to_string());
+    true
+}
+
+/// Draw all UI text in `family` from now on.
+///
+/// Returns `false` and changes nothing if the family is not installed or its
+/// files cannot be read — the caller keeps whatever it had, which is a
+/// working font, rather than losing text to a bad setting.
+///
+/// Every already-rasterized glyph is dropped, so the next measurement and the
+/// next frame both use the new face. Callers must apply the same change in
+/// every process that draws, or measuring and drawing will disagree.
+pub fn set_font_family(family: &str) -> bool {
+    let mut fonts = cache().lock().unwrap_or_else(PoisonError::into_inner);
+    install_into(&mut fonts, family)
+}
+
+/// The family UI text is currently drawn in, or `None` if no installed font
+/// could be found and the built-in bitmap face is in use.
+#[must_use]
+pub fn font_family() -> Option<String> {
+    cache()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .family
+        .clone()
+}
+
+/// Every font family installed on this system, sorted — what a font picker
+/// lists.
+#[must_use]
+pub fn available_families() -> Vec<String> {
+    font_db().families()
 }
 
 /// Runs `f` with the font for `size` and `weight`.
@@ -59,8 +182,8 @@ fn with_font<R>(
     weight: FontWeightHint,
     f: impl FnOnce(&mut osfont::system::SystemFont) -> R,
 ) -> R {
-    let mut cache = cache().lock().unwrap_or_else(PoisonError::into_inner);
-    f(cache.get(size, weight_of(weight)))
+    let mut fonts = cache().lock().unwrap_or_else(PoisonError::into_inner);
+    f(fonts.cache.get(size, weight_of(weight)))
 }
 
 /// Translates the toolkit's weight hint into the one `osfont` understands.

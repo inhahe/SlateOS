@@ -2497,6 +2497,47 @@ fn split_next_word(s: &str) -> (&str, &str) {
 mod tests {
     use super::*;
 
+    /// Width of one grid cell in the tests below, in pixels.
+    const TEST_CELL_W: f32 = 8.0;
+    /// Height of one grid row in the tests below, in pixels.
+    const TEST_CELL_H: f32 = 16.0;
+
+    /// A [`SimpleTextView`] whose grid is pinned to a known cell size.
+    ///
+    /// The default config takes its cell from whichever face the process has
+    /// installed — correct for a widget, wrong for a test. These tests are
+    /// about scrolling and selection *arithmetic*, so they have to own their
+    /// geometry: a view 160 px tall must mean ten lines whatever font is
+    /// present. They used to construct with `new`, which only agreed with
+    /// those numbers while the built-in 16 px bitmap face was the only one
+    /// available, and started failing the moment a real proportional face
+    /// was installed.
+    fn simple_view(width: f32, height: f32) -> SimpleTextView {
+        SimpleTextView::with_config(
+            width,
+            height,
+            SimpleTextViewConfig {
+                char_width: TEST_CELL_W,
+                line_height: TEST_CELL_H,
+                ..SimpleTextViewConfig::default()
+            },
+        )
+    }
+
+    /// A [`RichTextView`] with the same pinned cell, for the wrap tests that
+    /// state a width in characters.
+    fn rich_view(width: f32, height: f32) -> RichTextView {
+        RichTextView::with_config(
+            width,
+            height,
+            RichTextViewConfig {
+                char_width: TEST_CELL_W,
+                line_height: TEST_CELL_H,
+                ..RichTextViewConfig::default()
+            },
+        )
+    }
+
     // --- ANSI parsing tests ---
 
     #[test]
@@ -2580,7 +2621,7 @@ mod tests {
 
     #[test]
     fn test_simple_scroll_basics() {
-        let mut view = SimpleTextView::new(400.0, 160.0); // 10 visible lines
+        let mut view = simple_view(400.0, 160.0); // 10 visible lines
         let text = (0..50).map(|i| format!("Line {}", i)).collect::<Vec<_>>().join("\n");
         view.set_text(&text);
 
@@ -2598,7 +2639,7 @@ mod tests {
 
     #[test]
     fn test_simple_scroll_by() {
-        let mut view = SimpleTextView::new(400.0, 160.0);
+        let mut view = simple_view(400.0, 160.0);
         let text = (0..50).map(|i| format!("Line {}", i)).collect::<Vec<_>>().join("\n");
         view.set_text(&text);
 
@@ -2619,7 +2660,7 @@ mod tests {
 
     #[test]
     fn test_simple_auto_scroll_on_append() {
-        let mut view = SimpleTextView::new(400.0, 160.0);
+        let mut view = simple_view(400.0, 160.0);
         // Fill to capacity
         for i in 0..20 {
             view.append_line(&format!("Line {}", i));
@@ -2638,7 +2679,7 @@ mod tests {
 
     #[test]
     fn test_simple_max_lines() {
-        let mut view = SimpleTextView::new(400.0, 160.0);
+        let mut view = simple_view(400.0, 160.0);
         view.config.max_lines = 20;
 
         for i in 0..50 {
@@ -2674,7 +2715,7 @@ mod tests {
 
     #[test]
     fn test_simple_select_all_and_copy() {
-        let mut view = SimpleTextView::new(400.0, 160.0);
+        let mut view = simple_view(400.0, 160.0);
         view.set_text("hello\nworld");
 
         view.select_all();
@@ -2684,7 +2725,7 @@ mod tests {
 
     #[test]
     fn test_simple_selected_text_partial() {
-        let mut view = SimpleTextView::new(400.0, 160.0);
+        let mut view = simple_view(400.0, 160.0);
         view.set_text("abcdef\nghijkl\nmnopqr");
 
         view.selection = Some(Selection::new(
@@ -2699,7 +2740,7 @@ mod tests {
 
     #[test]
     fn test_simple_search_basic() {
-        let mut view = SimpleTextView::new(400.0, 160.0);
+        let mut view = simple_view(400.0, 160.0);
         view.set_text("hello world\nhello rust\ngoodbye world");
 
         view.find("hello", true);
@@ -2709,7 +2750,7 @@ mod tests {
 
     #[test]
     fn test_simple_search_case_insensitive() {
-        let mut view = SimpleTextView::new(400.0, 160.0);
+        let mut view = simple_view(400.0, 160.0);
         view.set_text("Hello World\nhello world\nHELLO WORLD");
 
         view.find("hello", false);
@@ -2718,7 +2759,7 @@ mod tests {
 
     #[test]
     fn test_simple_search_navigation() {
-        let mut view = SimpleTextView::new(400.0, 160.0);
+        let mut view = simple_view(400.0, 160.0);
         view.set_text("aaa\naaa\naaa");
 
         view.find("aaa", true);
@@ -2742,7 +2783,7 @@ mod tests {
 
     #[test]
     fn test_simple_search_no_results() {
-        let mut view = SimpleTextView::new(400.0, 160.0);
+        let mut view = simple_view(400.0, 160.0);
         view.set_text("hello world");
 
         view.find("xyz", true);
@@ -2762,7 +2803,7 @@ mod tests {
 
     #[test]
     fn test_rich_word_wrap() {
-        let mut view = RichTextView::new(80.0, 200.0); // 10 chars wide at 8px
+        let mut view = rich_view(80.0, 200.0); // 10 chars wide at 8px
         view.set_blocks(vec![RichBlock::Paragraph {
             spans: vec![RichSpan::plain("hello world foo bar")],
             spacing_above: 0.0,
@@ -2779,7 +2820,7 @@ mod tests {
         // count, so a long multi-byte word panicked outright. It must now be
         // cut between characters, and no text may be lost in the process.
         let word = "ééééééééééééééééééééééééééééééééé";
-        let mut view = RichTextView::new(40.0, 200.0);
+        let mut view = rich_view(40.0, 200.0);
         view.set_blocks(vec![RichBlock::Paragraph {
             spans: vec![RichSpan::plain(word)],
             spacing_above: 0.0,
@@ -2909,7 +2950,7 @@ mod tests {
 
     #[test]
     fn test_simple_render_produces_commands() {
-        let mut view = SimpleTextView::new(400.0, 160.0);
+        let mut view = simple_view(400.0, 160.0);
         view.set_text("hello\nworld");
 
         let mut tree = RenderTree::new();
@@ -2935,7 +2976,7 @@ mod tests {
 
     #[test]
     fn test_simple_render_with_line_numbers() {
-        let mut view = SimpleTextView::new(400.0, 160.0);
+        let mut view = simple_view(400.0, 160.0);
         view.config.show_line_numbers = true;
         view.set_text("line 1\nline 2\nline 3");
 
@@ -2954,7 +2995,7 @@ mod tests {
 
     #[test]
     fn test_simple_render_with_selection() {
-        let mut view = SimpleTextView::new(400.0, 160.0);
+        let mut view = simple_view(400.0, 160.0);
         view.set_text("hello world");
         view.selection = Some(Selection::new(
             TextPosition::new(0, 2),
@@ -2998,7 +3039,7 @@ mod tests {
 
     #[test]
     fn test_hit_test_simple() {
-        let mut view = SimpleTextView::new(400.0, 160.0);
+        let mut view = simple_view(400.0, 160.0);
         view.set_text("hello world");
 
         // Click at (24.0, 0.0) should be col 3 (24/8)
@@ -3008,7 +3049,7 @@ mod tests {
 
     #[test]
     fn test_hit_test_with_scroll() {
-        let mut view = SimpleTextView::new(400.0, 160.0);
+        let mut view = simple_view(400.0, 160.0);
         let text = (0..50).map(|i| format!("Line {}", i)).collect::<Vec<_>>().join("\n");
         view.set_text(&text);
         view.scroll_offset = 10;

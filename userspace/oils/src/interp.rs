@@ -38754,6 +38754,11 @@ impl Shell {
         // `kill -TERM -9 1` signals process group 9. And nothing is judged
         // here: a spec's validity only matters once there is a signal to
         // deliver, which is why `kill -l -x 15` still answers `TERM`.
+        // Posix mode takes the `SIG` prefix away from every spelling `kill`
+        // reads — `-SIGTERM`, `-s SIGTERM` and `kill -l SIGTERM` alike — while
+        // leaving `-n 15` and `trap ':' SIGTERM` alone. Read once, before the
+        // run, because reading it borrows the shell.
+        let posix = self.shell_option_enabled("posix");
         let mut signum: Option<u16> = Some(15);
         let mut sigspec: Option<BStr<'_>> = None;
         let mut list_names = false;
@@ -38812,7 +38817,7 @@ impl Shell {
             sigspec = Some(spec);
             // bash reads a lone `0` as the existence check without consulting
             // the table at all.
-            signum = if spec == b"0" { Some(0) } else { decode_signal(spec) };
+            signum = if spec == b"0" { Some(0) } else { decode_signal_flags(spec, !posix) };
             i += width;
         }
 
@@ -39037,18 +39042,24 @@ impl Shell {
         true
     }
 
-    /// `kill -l [sigspec…]` — with no specs, print the columnar signal table;
-    /// otherwise answer each spec with its counterpart, a number for a name and
-    /// a name for a number.
+    /// `kill -l [sigspec…]` — with no specs, print the signal table; otherwise
+    /// answer each spec with its counterpart, a number for a name and a name
+    /// for a number.
     ///
     /// The translation is not [`decode_signal`] run backwards and forwards: a
     /// number here may also be the *exit status* a signal produces, so
     /// `kill -l $?` names what killed the last command. A name, on the other
     /// hand, is looked up in the whole table, pseudo signals included — which
     /// is the one place their numbers can be seen.
+    ///
+    /// Posix mode changes both halves: the table prints as one line of bare
+    /// names ([`signal_list_posix`]), and a `SIG`-prefixed name stops being a
+    /// name at all (see [`decode_signal_flags`]). The *number*→name direction
+    /// is untouched, because it never printed the prefix in either mode.
     fn kill_list(&mut self, specs: &[Str], out: &mut Out, redir: &RedirPlan) -> i32 {
+        let posix = self.shell_option_enabled("posix");
         if specs.is_empty() {
-            let buf = signal_list_columns();
+            let buf = if posix { signal_list_posix() } else { signal_list_columns() };
             return self.write_bytes(out, redir, buf.as_bytes());
         }
         let mut status = 0;
@@ -39057,7 +39068,7 @@ impl Shell {
                 let n = if n > 128 && n < 128 + i64::from(NSIG) { n - 128 } else { n };
                 u16::try_from(n).ok().filter(|n| *n < NSIG).and_then(signal_spec_name)
             } else {
-                decode_signal(spec).map(|n| n.to_string())
+                decode_signal_flags(spec, !posix).map(|n| n.to_string())
             };
             match answer {
                 Some(text) => {
@@ -58691,6 +58702,27 @@ fn signal_list_columns() -> String {
     buf
 }
 
+/// Render the full signal table the way posix mode spells it: every bare name
+/// on one line, single-space separated, one closing newline and no trailing
+/// space.
+///
+/// POSIX spells a signal without its `SIG`, and gives `kill -l` no numbers to
+/// print — so the columnar `N) SIGNAME` layout goes entirely, taking the
+/// numbering with it. Measured against bash 5.2.37: `kill -L`, whose whole
+/// purpose is to *force* the columns, takes this form too, so the mode wins
+/// over the option rather than the other way round.
+fn signal_list_posix() -> String {
+    let mut buf = String::new();
+    for (idx, (_, name)) in SIGNALS.iter().enumerate() {
+        if idx != 0 {
+            buf.push(' ');
+        }
+        buf.push_str(name);
+    }
+    buf.push('\n');
+    buf
+}
+
 /// bash's `NUMBER_LEN` macro: the decimal digit count of `n`, saturating at
 /// six digits (bash's own comment concedes it "does not handle numbers >
 /// 1000000 at all"). Zero is one digit wide, as in bash.
@@ -58900,6 +58932,23 @@ fn sh_invalidnum_kind(word: BStr<'_>) -> &'static str {
 /// is spelled with the prefix, so `SIG` may be dropped from `SIGTERM` but never
 /// added to `EXIT`. Case is not significant either way.
 fn decode_signal(spec: BStr<'_>) -> Option<u16> {
+    decode_signal_flags(spec, true)
+}
+
+/// [`decode_signal`] with bash's `DSIG_SIGPREFIX` made explicit: when
+/// `sig_prefix` is false, the `SIG`-prefixed spelling of a real signal is not a
+/// name the table answers to.
+///
+/// bash compares the spec against both `SIGHUP` and `HUP` and drops the first
+/// comparison in posix mode, which is why `SIGHUP` becomes an "invalid signal
+/// specification" there while `HUP` keeps working. Only `kill` passes false —
+/// `trap ':' SIGUSR1` is accepted in posix mode too, measured against bash
+/// 5.2.37.
+///
+/// The pseudo signals are untouched by the flag: none of them has a `SIG`
+/// spelling to lose, so `kill -l EXIT` and `kill -l DEBUG` answer in both modes
+/// and `SIGEXIT` is refused in both.
+fn decode_signal_flags(spec: BStr<'_>, sig_prefix: bool) -> Option<u16> {
     if let Some(n) = legal_number(spec) {
         // A number names a slot in the table directly, and the table's real
         // entries stop at NSIG — so no number reaches the pseudo signals.
@@ -58914,7 +58963,13 @@ fn decode_signal(spec: BStr<'_>) -> Option<u16> {
     if let Some((num, _)) = PSEUDO_SIGNALS.iter().find(|(_, name)| name.as_bytes() == upper) {
         return Some(*num);
     }
-    let bare = upper.strip_prefix(b"SIG".as_slice()).unwrap_or(&upper);
+    let bare = match upper.strip_prefix(b"SIG".as_slice()) {
+        Some(bare) if sig_prefix => bare,
+        // A refused prefix must not fall through to the whole word: `SIGHUP`
+        // has to fail, not be looked up as the signal named `SIGHUP`.
+        Some(_) => return None,
+        None => &upper,
+    };
     SIGNALS.iter().find(|(_, name)| name.as_bytes() == bare).map(|(num, _)| u16::from(*num))
 }
 
@@ -89271,6 +89326,87 @@ st=1
         let (o, s) = run("kill -l 99 2>&1");
         assert!(o.contains("kill: 99: invalid signal specification"), "got {o:?}");
         assert_eq!(s, 1);
+    }
+
+    /// Posix mode prints the signal table as one line of bare names.
+    ///
+    /// Checked in a lib test rather than the corpus because the *set* of
+    /// signals is the target's, not the host's — see
+    /// TD-OILS-SIGNAL-TABLE-IS-LINUXS-NOT-THE-HOSTS. The layout is what is
+    /// being pinned, and every figure below was measured against bash 5.2.37.
+    #[test]
+    fn posix_mode_lists_signals_on_one_line_without_the_sig_prefix() {
+        let (o, s) = run("set -o posix; kill -l");
+        assert_eq!(s, 0);
+        // One line, and it is the whole table.
+        assert_eq!(o.lines().count(), 1, "got {o:?}");
+        assert!(o.ends_with('\n'), "got {o:?}");
+        let names: Vec<&str> = o.trim_end_matches('\n').split(' ').collect();
+        assert_eq!(names.len(), SIGNALS.len(), "got {o:?}");
+        for (name, (_, expected)) in names.iter().zip(SIGNALS) {
+            assert_eq!(name, expected);
+        }
+        // Single-space separated with no trailing space, and no numbers, no
+        // tabs and no `SIG` anywhere — the columnar layout is gone entirely.
+        assert!(!o.contains("  ") && !o.contains(" \n"), "got {o:?}");
+        assert!(!o.contains('\t') && !o.contains(')') && !o.contains("SIG"), "got {o:?}");
+        // `-L` exists to *force* the columns, and the mode wins over it.
+        assert_eq!(run("set -o posix; kill -L").0, o);
+        // The mode is `$POSIXLY_CORRECT`, so the environment spelling agrees.
+        assert_eq!(run("POSIXLY_CORRECT=1 kill -l").0, o);
+        // Leaving the mode restores the columns.
+        assert_eq!(run("set -o posix; set +o posix; kill -l").0, run("kill -l").0);
+        // `trap -l` is *not* in this rule: bash moves only `kill`'s listing.
+        assert_eq!(run("set -o posix; trap -l").0, run("trap -l").0);
+    }
+
+    /// Posix mode takes the `SIG` prefix away from every spelling `kill` reads
+    /// a signal in, and from nothing else.
+    #[test]
+    fn posix_mode_refuses_a_sig_prefixed_name_to_kill() {
+        // Both directions of `kill -l`: the prefixed name stops resolving…
+        assert_eq!(run("kill -l SIGTERM").0, "15\n");
+        let (o, s) = run("set -o posix; kill -l SIGTERM 2>&1");
+        assert!(o.contains("kill: SIGTERM: invalid signal specification"), "got {o:?}");
+        assert_eq!(s, 1);
+        // …while the bare name still does, and case is still insignificant for
+        // it. The refusal is case-insensitive too: it is the prefix that is
+        // gone, not one spelling of it.
+        assert_eq!(run("set -o posix; kill -l TERM").0, "15\n");
+        assert_eq!(run("set -o posix; kill -l term").0, "15\n");
+        let (o, _) = run("set -o posix; kill -l sIgTeRm 2>&1");
+        assert!(o.contains("kill: sIgTeRm: invalid signal specification"), "got {o:?}");
+        // The number → name direction never printed the prefix, so it is
+        // unmoved — including the exit-status form and `0`.
+        assert_eq!(run("set -o posix; kill -l 9").0, "KILL\n");
+        assert_eq!(run("set -o posix; kill -l 137").0, "KILL\n");
+        assert_eq!(run("set -o posix; kill -l 0").0, "EXIT\n");
+        // A pseudo signal has no `SIG` spelling to lose, so it answers in both
+        // modes — and `SIGEXIT` is refused in both, for the same reason.
+        assert_eq!(run("set -o posix; kill -l EXIT").0, run("kill -l EXIT").0);
+        assert_eq!(run("set -o posix; kill -l DEBUG").0, run("kill -l DEBUG").0);
+        let (o, s) = run("kill -l SIGEXIT 2>&1");
+        assert!(o.contains("kill: SIGEXIT: invalid signal specification"), "got {o:?}");
+        assert_eq!(s, 1);
+        // Every sending spelling takes the same gate: `-SIG…`, `-s SIG…` and
+        // `-n SIG…`. (`kill -0` on the shell's own pid is the harmless probe;
+        // what is asserted is which spec was refused, not the delivery.)
+        for form in ["-SIGCONT", "-s SIGCONT", "-sSIGCONT", "-n SIGCONT"] {
+            let (o, _) = run(&format!("set -o posix; kill {form} $$ 2>&1"));
+            assert!(
+                o.contains("kill: SIGCONT: invalid signal specification"),
+                "{form}: got {o:?}"
+            );
+        }
+        // …and the bare spellings, plus a number, are untouched.
+        for form in ["-CONT", "-s CONT", "-sCONT", "-n 18", "-18"] {
+            let (o, _) = run(&format!("set -o posix; kill {form} $$ 2>&1"));
+            assert!(!o.contains("invalid signal specification"), "{form}: got {o:?}");
+        }
+        // `trap` is not in this rule at all — measured against bash 5.2.37.
+        let (o, s) = run("set -o posix; trap ':' SIGUSR1; trap -p");
+        assert!(o.contains("USR1"), "got {o:?}");
+        assert_eq!(s, 0);
     }
 
     #[test]

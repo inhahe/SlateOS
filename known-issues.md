@@ -18871,10 +18871,45 @@ printed — `Shell::is_null_command` gates a `shell_times` argument to
 TD-OILS-TIMEFORMAT-IS-UNIMPLEMENTED and the CPU accounting with TD-OILS10 — so
 the case counts lines and matches rather than showing them.)
 
+**Also done since — posix mode respells `kill`'s signal names, both ways.** The
+manual gives this as two items and they turned out to be independent, so both
+were probed separately against bash 5.2.37:
+
+* **The listing.** `kill -l` with no operands prints every *bare* name on one
+  line, single-space separated, one closing newline and no trailing space —
+  POSIX spells a signal without its `SIG`, and gives the listing no numbers, so
+  the columnar `N) SIGNAME` layout goes entirely and takes the numbering with
+  it. `kill -L`, whose whole purpose is to force the columns, takes this form
+  too: the mode wins over the option. `trap -l` is **not** in the rule and keeps
+  its columns in both modes, which a reading of the manual's one-line item would
+  miss.
+* **The lookup.** A `SIG`-prefixed name stops being a name, in every spelling
+  `kill` reads one: `-SIGTERM`, `-s SIGTERM`, `-sSIGTERM`, `-n SIGTERM` and
+  `kill -l SIGTERM` all become `invalid signal specification` (status 1), while
+  `-TERM`, `-s TERM`, `-n 15` and `-18` keep working. The refusal is
+  case-insensitive (`sIgTeRm` too) — it is the prefix that is gone, not one
+  spelling of it. Three things it does *not* touch: the number→name direction
+  (which never printed a prefix — `kill -l 9` is `KILL` and `kill -l 0` is
+  `EXIT` in both modes), the pseudo signals (none has a `SIG` spelling to lose,
+  so `EXIT`/`DEBUG` answer in both modes and `SIGEXIT` is refused in both), and
+  `trap`, which accepts `trap ':' SIGUSR1` in posix mode.
+
+Implemented as `signal_list_posix` next to `signal_list_columns`, plus bash's
+`DSIG_SIGPREFIX` made explicit as `decode_signal_flags(spec, sig_prefix)` —
+`decode_signal` is now the `sig_prefix = true` wrapper, so `trap` and everything
+else are unchanged and only `kill` passes `false`. `builtin_kill` reads the mode
+once before its option run and `kill_list` once at entry.
+
+Covered by two lib tests, `posix_mode_lists_signals_on_one_line_without_the_sig_prefix`
+and `posix_mode_refuses_a_sig_prefixed_name_to_kill` — lib rather than corpus
+because the signal *set* is the target's, not the host's (see
+TD-OILS-SIGNAL-TABLE-IS-LINUXS-NOT-THE-HOSTS). That entry blocks *differential*
+cases only; the layout and the lookup rule are osh-internal and check fine
+against osh's own table, which is why this was implementable after all.
+
 **Still open:** the rest of bash's posix-mode list. It has now been *surveyed*
 rather than guessed at — the GNU manual's "Bash POSIX Mode" page gives 75 items,
-and a 42-case probe of them against osh leaves these real gaps, roughly in
-increasing order of size:
+and a 42-case probe of them against osh leaves this one real gap:
 
 * `cd` in logical mode validates the resulting path and falls back to physical.
   (Probed and **not reproducible** on the reference bash: with `lnk -> a/b` and
@@ -18882,9 +18917,6 @@ increasing order of size:
   falling back to the physical `a/b/../c`. Either this Cygwin build already
   behaves the posix way, or the fallback needs a trigger the probe missed —
   there is nothing to make match until a case that *does* differ is found.)
-* `kill -l` prints one line with no `SIG` prefixes, and `kill` rejects a
-  `SIG`-prefixed signal name. (Blocked by
-  TD-OILS-SIGNAL-TABLE-IS-LINUXS-NOT-THE-HOSTS.)
 
 ### TD-OILS-PATH-IS-SPLIT-ON-THE-HOSTS-SEPARATOR, so a `:`-separated `$PATH` is one entry — 2026-08-03 — ✅ **FIXED 2026-08-04**
 

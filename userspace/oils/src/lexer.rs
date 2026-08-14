@@ -137,29 +137,52 @@ pub struct LexError {
     /// only text no parser read can set it, so the allocation never happens
     /// while lexing a script, and every other error stays cheap to move.
     pub unclosed: Option<Box<UnreadEof>>,
-    /// The `$( … )` bodies read inside a `" … "` that never closed, in the
-    /// order the reader met them, each with the line its `)` sat on — the pair
-    /// [`crate::parser::parse_cmdsub_body`] takes.
+    /// The substitution bodies the word this error gave up on had already read
+    /// *and parsed where it met them*, in that order. See [`EagerBody`].
     ///
     /// The same reason as [`SubstBail`], one construct further out. bash's
     /// `parse_matched_pair` parses a `$( … )` where it meets it, so a body that
-    /// will not parse is reported *there* and the quote never gets to miss its
-    /// closing `"`: `echo " $(fi)` is ``syntax error near unexpected token
-    /// `fi'``, not ``unexpected EOF while looking for matching `"'``. osh scans
-    /// the quote first and parses bodies afterwards, which is the opposite
-    /// order, so the bodies are carried out on the error to be given their say.
+    /// will not parse is reported *there* and whatever was open around it never
+    /// gets to miss its own delimiter: `echo " $(fi)` is ``syntax error near
+    /// unexpected token `fi'``, not ``unexpected EOF while looking for matching
+    /// `"'``. osh scans the enclosing construct first and parses bodies
+    /// afterwards, which is the opposite order, so the bodies are carried out on
+    /// the error to be given their say.
     ///
-    /// Only an unterminated quote sets it: while the quote closes, the word is
-    /// built and each body is parsed in its ordinary place.
+    /// Only a word that never finished sets it: a word that does finish becomes
+    /// a token, and each body in it is parsed in its ordinary place. The scope
+    /// is exactly that one word, because an *earlier* word already completed and
+    /// is a token the parser reaches on its own — `echo a$(fi) b$(` and
+    /// `echo a$(fi); echo b$(` both name `fi` without any of this.
     ///
-    /// It rides a [`SubstBail`] too, and outranks it, because the quote can run
+    /// It rides a [`SubstBail`] too, and outranks it, because the word can run
     /// out of input *inside* a later substitution: the bodies collected here
     /// were read before that one, and bash reports the first failure it meets.
     /// Measured: `echo " $(fi) $(done` names `fi`, not `done`.
     ///
     /// Boxed for the same reason as `unclosed` — nothing is allocated on a path
     /// that succeeds.
-    pub quoted_subs: Option<Box<Vec<(Str, u32)>>>,
+    pub eager_bodies: Option<Box<Vec<EagerBody>>>,
+}
+
+/// One substitution body a scan read *and parsed where it met it*, carried out
+/// on a [`LexError`] so that the parse's error can be raised instead of the
+/// error the scan gave up with. See [`LexError::eager_bodies`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EagerBody {
+    /// The body, without its delimiters.
+    pub src: Str,
+    /// The line the body is numbered from, in the enclosing source — which end
+    /// of the construct that is depends on `procsub`, exactly as it does for
+    /// [`crate::parser::parse_cmdsub_body`] and
+    /// [`crate::parser::parse_procsub_body`].
+    pub line: u32,
+    /// True for `<( … )` / `>( … )`, whose body is numbered from its *opening*
+    /// delimiter because it runs as a child command rather than as a body bash
+    /// re-reads after the enclosing scan. False for `$( … )`, numbered from its
+    /// `)`. Measured: `echo <(fi)x$(` and `echo >(fi)x$(` both name `fi`, so a
+    /// process substitution is as eager as a command substitution here.
+    pub procsub: bool,
 }
 
 /// Which segment a scan that ran out of input in unread text becomes.
@@ -286,7 +309,7 @@ impl LexError {
             recoverable: false,
             bail: None,
             unclosed: None,
-            quoted_subs: None,
+            eager_bodies: None,
         }
     }
 
@@ -313,14 +336,13 @@ impl LexError {
         self
     }
 
-    /// Carry out the substitution bodies read inside the quote this error ran
-    /// out of input inside, so that the parser can give them their say. Never
-    /// overwrites: an enclosing quote's list must not replace an inner one's,
-    /// which was read first and holds what bash would have parsed first. See
-    /// [`Self::quoted_subs`].
-    pub(crate) fn quoted_subs(mut self, subs: Vec<(Str, u32)>) -> Self {
-        if self.quoted_subs.is_none() && !subs.is_empty() {
-            self.quoted_subs = Some(Box::new(subs));
+    /// Carry out the substitution bodies read before this error, so that the
+    /// parser can give them their say. Never overwrites: an enclosing scan's
+    /// list must not replace an inner one's, which was read first and holds
+    /// what bash would have parsed first. See [`Self::eager_bodies`].
+    pub(crate) fn eager_bodies(mut self, subs: Vec<EagerBody>) -> Self {
+        if self.eager_bodies.is_none() && !subs.is_empty() {
+            self.eager_bodies = Some(Box::new(subs));
         }
         self
     }
@@ -348,7 +370,7 @@ fn eof_matching(close: char) -> LexError {
         recoverable: false,
         bail: None,
         unclosed: None,
-        quoted_subs: None,
+        eager_bodies: None,
     }
 }
 
@@ -5180,6 +5202,25 @@ impl Lexer {
         extpat: bool,
     ) -> Result<Vec<Seg>, LexError> {
         let mut segs: Vec<Seg> = Vec::new();
+        match self.read_word_segs(&mut segs, assign_ok, array_elem, extpat) {
+            Ok(()) => Ok(segs),
+            // A word that never finished yields no token, so the substitution
+            // bodies it did read are never parsed in their ordinary place. They
+            // go out with the error instead, ahead of whatever the word finally
+            // gave up on. See [`LexError::eager_bodies`].
+            Err(e) => Err(e.eager_bodies(eager_bodies_in(&segs))),
+        }
+    }
+
+    /// [`Self::read_word_inner`]'s scan, writing into the caller's `segs` so
+    /// that a word which gives up part way still leaves behind what it read.
+    fn read_word_segs(
+        &mut self,
+        segs: &mut Vec<Seg>,
+        assign_ok: bool,
+        array_elem: bool,
+        extpat: bool,
+    ) -> Result<(), LexError> {
         let mut lit = Str::new();
         // Bracket-nesting depth while consuming a leading `name[subscript]`
         // subscript. While > 0, unquoted whitespace and operator characters are
@@ -5295,7 +5336,7 @@ impl Lexer {
                 // substitution (see [`Lexer::eat_conts`]).
                 self.adv();
                 self.pos += 1;
-                flush_lit(&mut segs, &mut lit);
+                flush_lit(segs, &mut lit);
                 // Like `$( … )`, an unterminated process substitution is
                 // reported at the *end of input*, not at the line it opened on
                 // (verified against bash 5.2: `cat <(echo a` on line 2 of a
@@ -5316,19 +5357,19 @@ impl Lexer {
                 // `n=16#ff`) the `#` is a literal character, matching bash/POSIX.
                 ' ' | '\t' | '\n' | '\r' | '|' | '&' | ';' | '(' | ')' | '<' | '>' => break,
                 '\'' => {
-                    flush_lit(&mut segs, &mut lit);
+                    flush_lit(segs, &mut lit);
                     self.pos += 1;
                     let s = self.read_single_quote()?;
                     segs.push(Seg::Sq(s, false));
                 }
                 '"' => {
-                    flush_lit(&mut segs, &mut lit);
+                    flush_lit(segs, &mut lit);
                     self.pos += 1;
                     let inner = self.read_double_quote()?;
                     segs.push(Seg::Dq(inner));
                 }
                 '`' => {
-                    flush_lit(&mut segs, &mut lit);
+                    flush_lit(segs, &mut lit);
                     self.pos += 1;
                     let (raw, src) = self.read_backtick(false)?;
                     let close = self.cur_line();
@@ -5370,7 +5411,7 @@ impl Lexer {
                         if ext_depth > 0 {
                             next.push_to(&mut lit);
                         } else {
-                            flush_lit(&mut segs, &mut lit);
+                            flush_lit(segs, &mut lit);
                             segs.push(Seg::Sq(next.to_str(), true));
                         }
                     } else {
@@ -5379,7 +5420,7 @@ impl Lexer {
                 }
                 '$' => {
                     if let Some(seg) = self.read_dollar(false)? {
-                        flush_lit(&mut segs, &mut lit);
+                        flush_lit(segs, &mut lit);
                         segs.push(seg);
                     } else {
                         lit.push(b'$');
@@ -5399,8 +5440,8 @@ impl Lexer {
         if sub_depth > 0 {
             return Err(eof_matching(']').at(sub_line));
         }
-        flush_lit(&mut segs, &mut lit);
-        Ok(segs)
+        flush_lit(segs, &mut lit);
+        Ok(())
     }
 
     fn read_single_quote(&mut self) -> Result<Str, LexError> {
@@ -5492,8 +5533,8 @@ impl Lexer {
                     // The bodies read on the way here go out with the error:
                     // bash parsed each where it met it, so one that will not
                     // parse is reported instead of this. See
-                    // [`LexError::quoted_subs`].
-                    return Err(eof_matching('"').at(open).quoted_subs(eager_subs(&segs)));
+                    // [`LexError::eager_bodies`].
+                    return Err(eof_matching('"').at(open).eager_bodies(eager_bodies_in(&segs)));
                 }
                 flush_lit(&mut segs, &mut lit);
                 return Ok(segs);
@@ -5539,7 +5580,7 @@ impl Lexer {
                         Err(e) => {
                             match self.unclosed_seg(e) {
                                 Ok(seg) => segs.push(seg),
-                                Err(e) => return Err(e.quoted_subs(eager_subs(&segs))),
+                                Err(e) => return Err(e.eager_bodies(eager_bodies_in(&segs))),
                             }
                             return Ok(segs);
                         }
@@ -5555,7 +5596,7 @@ impl Lexer {
                         flush_lit(&mut segs, &mut lit);
                         match self.unclosed_seg(e) {
                             Ok(seg) => segs.push(seg),
-                            Err(e) => return Err(e.quoted_subs(eager_subs(&segs))),
+                            Err(e) => return Err(e.eager_bodies(eager_bodies_in(&segs))),
                         }
                         return Ok(segs);
                     }
@@ -7665,34 +7706,47 @@ fn flush_lit(segs: &mut Vec<Seg>, lit: &mut Str) {
     }
 }
 
-/// The `$( … )` bodies a finished run of segments had *parsed where they were
-/// met*, in that order, each with the line its `)` sat on — the pair
-/// [`crate::parser::parse_cmdsub_body`] takes.
+/// The substitution bodies a run of segments had *parsed where they were met*,
+/// in that order. See [`EagerBody`].
 ///
-/// Only [`SubBody::Eager`] qualifies, and that is the whole distinction: a
-/// backquote body is read as text and parsed at expansion time, so a body that
-/// will not parse is not this scan's error. Measured, with the quote left open
-/// so that the scan fails too: `echo " $(fi)` reports `` near unexpected token
-/// `fi' ``, while `` echo " `fi` `` reports the unterminated quote.
+/// Only [`SubBody::Eager`] qualifies among the `$( … )`, and that is the whole
+/// distinction: a backquote body is read as text and parsed at expansion time,
+/// so a body that will not parse is not this scan's error. Measured, with the
+/// enclosing quote left open so that the scan fails too: `echo " $(fi)` reports
+/// `` near unexpected token `fi' ``, while `` echo " `fi` `` reports the
+/// unterminated quote.
 ///
 /// A `${ … }` and a `$(( … ))` carry their own stepped-over spans and are
 /// searched as well — bash parsed those where it met them for the same reason,
 /// and measures the same: `echo " ${x:-$(fi)}` and `echo " $(( $(fi) ))` both
-/// name `fi`.
-fn eager_subs(segs: &[Seg]) -> Vec<(Str, u32)> {
-    let spans = |v: &[CmdSubSpan]| {
-        v.iter()
-            .filter(|s| s.kind == SubBody::Eager)
-            .map(|s| (s.src.clone(), s.close_line))
-            .collect::<Vec<_>>()
-    };
-    segs.iter()
-        .flat_map(|seg| match seg {
-            Seg::CmdSub(raw, close, SubBody::Eager) => vec![(raw.clone(), *close)],
-            Seg::ParamBraced(_, _, subs, _) | Seg::Arith(_, _, subs) => spans(subs),
-            _ => Vec::new(),
-        })
-        .collect()
+/// name `fi`. A `" … "` that *closed* nests as a [`Seg::Dq`], and is descended
+/// into for the same reason again (`echo "a$(fi)"x$(`).
+fn eager_bodies_in(segs: &[Seg]) -> Vec<EagerBody> {
+    fn spans(v: &[CmdSubSpan], out: &mut Vec<EagerBody>) {
+        out.extend(v.iter().filter(|s| s.kind == SubBody::Eager).map(|s| EagerBody {
+            src: s.src.clone(),
+            line: s.close_line,
+            procsub: false,
+        }));
+    }
+    fn walk(segs: &[Seg], out: &mut Vec<EagerBody>) {
+        for seg in segs {
+            match seg {
+                Seg::CmdSub(raw, close, SubBody::Eager) => {
+                    out.push(EagerBody { src: raw.clone(), line: *close, procsub: false });
+                }
+                Seg::ProcSub(_, raw, open) => {
+                    out.push(EagerBody { src: raw.clone(), line: *open, procsub: true });
+                }
+                Seg::ParamBraced(_, _, subs, _) | Seg::Arith(_, _, subs) => spans(subs, out),
+                Seg::Dq(inner) => walk(inner, out),
+                _ => {}
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(segs, &mut out);
+    out
 }
 
 /// Lower a here-document body into segments. When `expand` is false (quoted

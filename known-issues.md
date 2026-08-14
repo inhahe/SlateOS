@@ -4231,29 +4231,53 @@ bash's own reader has already committed to the substitution.
 
 **Fixed 2026-08-14, along exactly the [`SubstBail`] line one construct further
 out.** The bodies are still lexed where they were, and are carried *out on the
-error* to be parsed by the one place that has `ParseOpts` in hand:
+error* to be parsed by the one place that has `ParseOpts` in hand.
 
-- `LexError::quoted_subs: Option<Box<Vec<(Str, u32)>>>` — the eager `$( … )`
-  bodies a `" … "` read before it ran out, in reading order, each with the line
-  its `)` sat on. Filled by `lexer::eager_subs`, which searches the finished
-  segments for `Seg::CmdSub(_, _, SubBody::Eager)` and for the spans a
-  `Seg::ParamBraced`/`Seg::Arith` stepped over — measured, `echo " ${x:-$(fi)}`
-  and `echo " $(( $(fi) ))` both name `fi` too. A `SubBody::Backtick` is
-  deliberately not collected: that body is read as text now and parsed only at
-  expansion time, which is exactly why the backquote row disagreed with nothing.
-- It is attached at all three of `read_double_quote_until`'s failing exits, not
-  just the end-of-input one, because the quote can run out *inside* a later
-  substitution and the bodies read before that one still win:
-  `echo " $(fi) $(done` names `fi`.
-- `parser::quoted_sub_error`, consulted by `resolve_subst_bail` *before* the
+**The scope is the whole word, not the quote.** The quote is not what makes the
+body eager — the *word* is, because a word that never finished yields no token
+at all, so its bodies would otherwise be parsed by nobody. Measured:
+`echo $(fi)x$(`, `echo $(fi)x${y`, `echo $(fi)x$((1+`, `echo $(fi)x"y`,
+`echo $(fi)x'y` and ``echo $(fi)x`y`` all name `fi`, with no quote in sight. An
+*earlier* word needs none of this — it finished, so it is a token the parser
+reaches on its own (`echo a$(fi) b$(`, `echo a$(fi); echo b$(`).
+
+- `LexError::eager_bodies: Option<Box<Vec<EagerBody>>>` — the substitution
+  bodies the word already read *and parsed where it met them*, in reading order.
+  `EagerBody { src, line, procsub }`: `procsub` picks the reference line, since
+  a `$( … )` body is numbered from its `)` (`parse_cmdsub_body`) while a
+  `<( … )` / `>( … )` body is numbered from its *opening* delimiter
+  (`parse_procsub_body`), a procsub being a child command. Both land on the line
+  the offending token is physically written on.
+- Filled by `lexer::eager_bodies_in`, which walks the finished segments for
+  `Seg::CmdSub(_, _, SubBody::Eager)`, for `Seg::ProcSub` (measured:
+  `echo <(fi)x$(` and `echo >(fi)x$(` both name `fi`), and for the spans a
+  `Seg::ParamBraced`/`Seg::Arith` stepped over (`echo " ${x:-$(fi)}`,
+  `echo " $(( $(fi) ))`), recursing into a closed `Seg::Dq` (`echo "a$(fi)"x$(`).
+  A `SubBody::Backtick` is deliberately *not* collected: that body is read as
+  text now and parsed only at expansion time, which is exactly why the backquote
+  rows disagree with nothing (``echo " `fi` ``, ``echo `fi`x$(``).
+- Attached by the `read_word_inner` wrapper, which was split so that
+  `read_word_segs` writes into the caller's `segs` — a word that gives up part
+  way therefore still leaves behind what it read. `read_double_quote_until`
+  attaches at all three of its failing exits too, not just the end-of-input one,
+  because the scan can run out *inside* a later substitution and the bodies read
+  before that one still win: `echo " $(fi) $(done` names `fi`.
+- `parser::eager_body_error`, consulted by `resolve_subst_bail` *before* the
   `bail` path for the same reason, returns the first body error that is not
-  `is_incomplete()` — a body that merely ran out said nothing, which is where
-  `echo " $(a |` keeps its `` matching `)' ``.
+  `is_incomplete()` — a body that merely ran out said nothing (bash's
+  `EOF_Reached` path), which is where `echo " $(a |` keeps its
+  `` matching `)' ``.
 
 Verified by
-`userspace/oils/tests/corpus/a-substitution-inside-an-unterminated-quote-is-parsed-before-the-quote-is-missed.sh`
-(14 rows, all matching bash 5.2.37 in message *and* rc) and the unit test
-`parser::tests::a_body_read_inside_a_quote_that_ran_out_is_parsed_anyway`.
+`userspace/oils/tests/corpus/a-substitution-inside-an-unfinished-word-is-parsed-before-the-word-gives-up.sh`
+(27 rows, all matching bash 5.2.37 in message *and* rc) and the unit test
+`parser::tests::a_body_read_inside_a_word_that_ran_out_is_parsed_anyway`. That
+test cannot cover the *earlier-word* rows: its `parse` helper goes through
+`tokenize_spanned`, which fails hard, where the shell uses `tokenize_deferred`,
+which keeps a failing line's completed tokens. Those rows are corpus-only.
+
+The same change closed the last two shapes of
+TD-OILS-A-COMSUB-THAT-NEVER-CLOSES-HIDES-THE-ERROR-INSIDE-IT below.
 
 **Found by** the flat-state gobbler fix below: the repro there
 (``echo "p`echo " ' $(fi)`q{,}"``) agrees on the *scan* now, and what is left of
@@ -12913,7 +12937,7 @@ which measures all four halves of the rule: the thirteen command positions,
 the six word positions, the four quoted spellings, and that `[[ … ]]` still
 closes.
 
-### TD-OILS-A-COMSUB-THAT-NEVER-CLOSES-HIDES-THE-ERROR-INSIDE-IT. bash parses a `$( … )` body as it reads it; osh scans for the `)` first — 2026-08-06 — ✅ MOSTLY FIXED 2026-08-07 (two shapes left, below)
+### TD-OILS-A-COMSUB-THAT-NEVER-CLOSES-HIDES-THE-ERROR-INSIDE-IT. bash parses a `$( … )` body as it reads it; osh scans for the `)` first — 2026-08-06 — ✅ FIXED 2026-08-07, last two shapes 2026-08-14
 
 **Where:** `userspace/oils/src/lexer.rs` — the command-substitution scanner
 (the balanced-paren scan that raises ``unexpected EOF while looking for
@@ -13012,10 +13036,11 @@ stands. Three details that are not obvious and that the tests pin:
 **Pinned by** `parser.rs::an_unterminated_substitutions_body_is_parsed_anyway`
 and `tests/corpus/a-substitution-body-is-read-before-its-closing-paren-is-missed.sh`.
 
-**What is left (two shapes), 2026-08-07.** Both want the same thing: a
-`$( … )` body parsed at the moment the `$(` is *scanned*, closed or not.
+**The last two shapes, 2026-08-07 — ✅ fixed 2026-08-14.** Both wanted the
+same thing: a `$( … )` body parsed at the moment the `$(` is *scanned*, closed
+or not.
 
-| script | bash | osh |
+| script | bash | osh before |
 |---|---|---|
 | `echo "$(fi)` | `` near `fi' `` | ``EOF matching `"' `` |
 | `echo $(fi)x$(` | `` near `fi' `` | ``EOF matching `)' `` L2 |
@@ -13024,10 +13049,15 @@ In both the substitution bash blames **closes**, so no `SubstBail` is raised
 for it, and it sits inside a word the outer scan never finished — an unclosed
 `"` in the first, an unclosed `$(` in the second — so the word yields no token
 and the eager body parse the parser does per word never happens either. bash
-has already run its nested `yyparse` over `fi` by then. Reaching it means
-lifting that parse out of the parser and into the scan: every `$( … )`,
-`<( … )` and `>( … )` body parsed left to right as it is read, its error raised
-there and then, instead of after the enclosing word is complete.
+has already run its nested `yyparse` over `fi` by then.
+
+Both now agree, by the same carry-out-on-the-error device one construct further
+out rather than by lifting the parse into the scan: a word that gives up leaves
+its already-read eager bodies behind, and they ride out on the `LexError` to be
+parsed by `parser::eager_body_error` ahead of whatever the word finally ran out
+inside. See TD-OILS-AN-UNPARSEABLE-SUBSTITUTION-IN-AN-UNTERMINATED-DQUOTE-
+LOSES-TO-THE-EOF for the design, the procsub and `Seg::Dq` details, and the
+27-row corpus that pins it.
 
 `echo $(fi) $(done` — previously listed here as a third shape — was fixed by
 the `tokenize_deferred` change under
@@ -13037,14 +13067,15 @@ parser to reach it and raise `` near `fi' `` before the parked error is due.
 The same change fixed `fi; $(done`, which was the proof that half of this
 entry was never really about substitutions.
 
-**Proper fix for the residue:** move the eager body parse out of the parser
-and into the scan. `read_balanced_body` already knows where each nested
-`$( … )` / `<( … )` / `>( … )` body begins and ends; parsing each one as the
-scan closes it — and raising its error there, before the enclosing word is
-finished, let alone tokenized — is bash's own order and is what both shapes
-need. The `SubstBail` path then becomes the special case it should always
-have been: the *last*, unterminated body, parsed on the way out because there
-is no `)` to close it on.
+**The fix considered and not taken:** moving the eager body parse out of the
+parser and into the scan — `read_balanced_body` already knows where each nested
+`$( … )` / `<( … )` / `>( … )` body begins and ends, so it could parse each one
+as it closes it, which is bash's own order. It was not needed: the scan has no
+`ParseOpts`, and carrying the read bodies out on the error reaches the same
+measured behaviour with a strictly smaller change along the line `SubstBail`
+already established. `SubstBail` accordingly stays what it is — the *last*,
+unterminated body, parsed on the way out because there is no `)` to close it
+on — and `eager_bodies` covers every body that did close.
 
 ### TD-OILS-A-CONDITIONAL-RHS-THAT-DIES-AT-EOF-GETS-ONLY-ONE-OF-BASHS-TWO-DIAGNOSTICS. `[[ x =~ ( ]]` — 2026-08-06 — ✅ FIXED 2026-08-07
 

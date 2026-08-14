@@ -6,6 +6,7 @@
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand};
 use guitk::style::CornerRadii;
+use guitk::text;
 
 // ============================================================================
 // Catppuccin Mocha palette
@@ -503,7 +504,7 @@ impl LanguageSettingsUI {
         let mut tx = 24.0;
         for &tab in &tabs {
             let active = tab == self.active_tab;
-            let tw = tab.label().len() as f32 * 8.0 + 20.0;
+            let tw = text::padded_width_any_weight(tab.label(), 10.0, 13.0);
             cmds.push(RenderCommand::FillRect {
                 x: tx,
                 y: tab_y,

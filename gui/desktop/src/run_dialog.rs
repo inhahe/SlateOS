@@ -33,6 +33,7 @@
 use guitk::event::{EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::render::{FontWeightHint, RenderCommand};
 use guitk::style::CornerRadii;
+use guitk::text;
 
 // ============================================================================
 // Theme — Catppuccin Mocha palette
@@ -778,8 +779,8 @@ impl RunDialog {
             let (start, end) = self.input.selection_range();
             let text_before_start = &self.input.text[..start];
             let text_selection = &self.input.text[start..end];
-            let start_px = estimate_text_width(text_before_start, INPUT_FONT_SIZE);
-            let sel_width = estimate_text_width(text_selection, INPUT_FONT_SIZE);
+            let start_px = text::width(text_before_start, INPUT_FONT_SIZE);
+            let sel_width = text::width(text_selection, INPUT_FONT_SIZE);
             cmds.push(RenderCommand::FillRect {
                 x: input_x + 4.0 + start_px,
                 y: y + INPUT_Y_OFFSET + 3.0,
@@ -803,7 +804,7 @@ impl RunDialog {
 
         // Cursor.
         let cursor_text = &self.input.text[..self.input.cursor];
-        let cursor_px = estimate_text_width(cursor_text, INPUT_FONT_SIZE);
+        let cursor_px = text::width(cursor_text, INPUT_FONT_SIZE);
         cmds.push(RenderCommand::Line {
             x1: input_x + 4.0 + cursor_px,
             y1: y + INPUT_Y_OFFSET + 4.0,
@@ -948,7 +949,7 @@ impl RunDialog {
         });
 
         cmds.push(RenderCommand::Text {
-            x: bx + BUTTON_WIDTH / 2.0 - estimate_text_width(label, BODY_FONT_SIZE) / 2.0,
+            x: text::center_x(label, bx + BUTTON_WIDTH / 2.0, BODY_FONT_SIZE, FontWeightHint::Regular),
             y: by + 7.0,
             text: label.to_string(),
             color: fg,
@@ -1203,17 +1204,6 @@ fn fuzzy_score(query: &str, target: &str) -> Option<u32> {
     score = score.saturating_add(length_bonus);
 
     Some(score)
-}
-
-// ============================================================================
-// Text width estimation
-// ============================================================================
-
-/// Rough text width estimation for cursor/selection positioning.
-/// In a real system this would query the font rasterizer metrics.
-fn estimate_text_width(text: &str, font_size: f32) -> f32 {
-    // Approximate: average char width ~0.55 of font size for a monospace-ish font.
-    text.len() as f32 * font_size * 0.55
 }
 
 // ============================================================================

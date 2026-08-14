@@ -67,6 +67,7 @@ use guitk::event::{Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::event::Modifiers;
 use guitk::render::{FontWeightHint, RenderCommand};
 use guitk::style::CornerRadii;
+use guitk::text;
 
 // ============================================================================
 // Theme — Catppuccin Mocha palette
@@ -854,7 +855,7 @@ impl SecurityDialog {
 
         // Risk level badge
         let risk_label = risk.label();
-        let badge_width = risk_label.len() as f32 * 7.0 + 16.0;
+        let badge_width = text::padded_width(risk_label, 8.0, SMALL_FONT_SIZE, FontWeightHint::Bold);
         cmds.push(RenderCommand::FillRect {
             x: dx + PADDING,
             y: body_y,
@@ -1163,7 +1164,7 @@ impl SecurityDialog {
             corner_radii: CornerRadii::all(BUTTON_RADIUS),
         });
         // Center text in button
-        let text_x = x + (width - label.len() as f32 * 7.0) / 2.0;
+        let text_x = text::center_x(label, x + width / 2.0, BODY_FONT_SIZE, FontWeightHint::Bold);
         let text_y = y + (BUTTON_HEIGHT - BODY_FONT_SIZE) / 2.0;
         cmds.push(RenderCommand::Text {
             x: text_x,
@@ -1253,6 +1254,28 @@ fn truncate_str(s: &str, max: usize) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- button and badge measurement ---
+
+    #[test]
+    fn a_button_label_is_centred_on_its_button() {
+        let width = 120.0;
+        for label in ["Allow", "Deny", "Always Allow", "Immer zulassen"] {
+            let x = guitk::text::center_x(label, width / 2.0, BODY_FONT_SIZE, FontWeightHint::Bold);
+            let w = guitk::text::measure(label, BODY_FONT_SIZE, FontWeightHint::Bold);
+            assert!((x + w / 2.0 - width / 2.0).abs() < 0.01, "{label:?} is not centred");
+        }
+    }
+
+    #[test]
+    fn a_risk_badge_fits_its_label() {
+        for level in [RiskLevel::Low, RiskLevel::Medium, RiskLevel::High, RiskLevel::Critical] {
+            let label = level.label();
+            let w = guitk::text::padded_width(label, 8.0, SMALL_FONT_SIZE, FontWeightHint::Bold);
+            let drawn = guitk::text::measure(label, SMALL_FONT_SIZE, FontWeightHint::Bold);
+            assert!(drawn + 16.0 <= w + 0.01, "{label:?} overflows its badge");
+        }
+    }
 
     fn sample_request(id: u64) -> CapRequestInfo {
         CapRequestInfo {

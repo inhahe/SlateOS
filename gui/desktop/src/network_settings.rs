@@ -8,6 +8,7 @@
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand};
 use guitk::style::CornerRadii;
+use guitk::text;
 
 // ============================================================================
 // Catppuccin Mocha palette
@@ -1101,7 +1102,7 @@ impl NetworkSettingsUI {
         let mut tab_x = x + 16.0;
         for tab in NetworkSettingsTab::all() {
             let label = tab.label();
-            let tw = label.len() as f32 * 8.0 + 24.0;
+            let tw = text::padded_width_any_weight(label, 12.0, 13.0);
             let is_active = *tab == self.active_tab;
 
             if is_active {

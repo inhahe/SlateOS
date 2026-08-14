@@ -7,6 +7,7 @@
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand};
 use guitk::style::CornerRadii;
+use guitk::text;
 
 // ============================================================================
 // Catppuccin Mocha palette
@@ -689,7 +690,7 @@ impl BackupSettingsUI {
         let mut tab_x = x + 16.0;
         for tab in BackupSettingsTab::all() {
             let label = tab.label();
-            let tw = label.len() as f32 * 8.0 + 24.0;
+            let tw = text::padded_width_any_weight(label, 12.0, 13.0);
             let is_active = *tab == self.active_tab;
 
             if is_active {
@@ -1370,7 +1371,7 @@ impl BackupSettingsUI {
             cmds.push(RenderCommand::FillRect {
                 x: x + 56.0,
                 y: row_y + 8.0,
-                width: rule.pattern.len() as f32 * 7.0 + 16.0,
+                width: text::padded_width(&rule.pattern, 8.0, 11.0, FontWeightHint::Bold),
                 height: 20.0,
                 color: SURFACE1,
                 corner_radii: CornerRadii::all(3.0),

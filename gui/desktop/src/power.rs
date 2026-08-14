@@ -15,6 +15,7 @@
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand};
 use guitk::style::CornerRadii;
+use guitk::text;
 
 // ============================================================================
 // Catppuccin Mocha theme constants
@@ -1283,8 +1284,7 @@ pub fn render_power_profile_badge(
         PowerProfile::Custom => ("Custom", COL_LAVENDER),
     };
 
-    let text_width = label.len() as f32 * 7.0;
-    let badge_w = text_width + 16.0;
+    let badge_w = text::padded_width(label, 8.0, 12.0, FontWeightHint::Regular);
     let badge_h: f32 = 22.0;
 
     vec![

@@ -13,6 +13,7 @@
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand};
 use guitk::style::CornerRadii;
+use guitk::text;
 
 // ============================================================================
 // Catppuccin Mocha palette
@@ -434,7 +435,7 @@ pub fn render_drop_target_highlight(target: &DropTarget, effect: DropEffect) -> 
 
     // Label tooltip.
     if !target.label.is_empty() {
-        let label_w = target.label.len() as f32 * 7.0 + 16.0;
+        let label_w = text::padded_width(&target.label, 8.0, 11.0, FontWeightHint::Regular);
         let label_x = target.x + (target.width - label_w) / 2.0;
         let label_y = target.y + target.height + 4.0;
 

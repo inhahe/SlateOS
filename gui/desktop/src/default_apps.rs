@@ -7,6 +7,7 @@
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand};
 use guitk::style::CornerRadii;
+use guitk::text;
 
 // ============================================================================
 // Catppuccin Mocha palette
@@ -659,7 +660,7 @@ impl DefaultAppsUI {
         let mut tab_x = x + 16.0;
         for tab in DefaultAppsTab::all() {
             let label = tab.label();
-            let tw = label.len() as f32 * 8.0 + 24.0;
+            let tw = text::padded_width_any_weight(label, 12.0, 13.0);
             let is_active = *tab == self.active_tab;
 
             if is_active {
@@ -831,7 +832,10 @@ impl DefaultAppsUI {
 
                 for app in &alternatives {
                     let is_current = default_app.is_some_and(|d| d.id == app.id);
-                    let chip_w = app.name.len() as f32 * 7.0 + 24.0;
+                    // Any weight: the current default is drawn bold, and
+                    // sizing each chip to its own weight would slide the row
+                    // sideways whenever the default changed.
+                    let chip_w = text::padded_width_any_weight(&app.name, 12.0, 11.0);
 
                     cmds.push(RenderCommand::FillRect {
                         x: alt_x,

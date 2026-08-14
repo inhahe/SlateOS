@@ -6,6 +6,7 @@
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand};
 use guitk::style::CornerRadii;
+use guitk::text;
 
 // The same zone engine the libc's `localtime`, osh's `printf '%(…)T'` and the
 // taskbar clock use.  This panel is where the machine's zone is *chosen*, so of
@@ -467,7 +468,7 @@ impl DateTimeSettingsUI {
         let mut tx = 24.0;
         for &tab in &tabs {
             let active = tab == self.active_tab;
-            let tw = tab.label().len() as f32 * 7.5 + 20.0;
+            let tw = text::padded_width_any_weight(tab.label(), 10.0, 13.0);
             cmds.push(RenderCommand::FillRect {
                 x: tx, y: tab_y, width: tw, height: 32.0,
                 color: if active { BLUE } else { SURFACE0 },

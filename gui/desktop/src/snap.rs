@@ -30,6 +30,7 @@
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand};
 use guitk::style::CornerRadii;
+use guitk::text;
 
 use std::collections::HashMap;
 
@@ -813,7 +814,7 @@ impl SnapManager {
             // Zone label centred.
             let (cx, cy) = zone.center();
             cmds.push(RenderCommand::Text {
-                x: cx - zone.label.len() as f32 * 3.5,
+                x: text::center_x(&zone.label, cx, 13.0, FontWeightHint::Regular),
                 y: cy - 7.0,
                 text: zone.label.clone(),
                 color: theme::TEXT,
@@ -860,7 +861,7 @@ impl SnapManager {
         // Label.
         let (cx, cy) = zone.center();
         cmds.push(RenderCommand::Text {
-            x: cx - zone.label.len() as f32 * 4.0,
+            x: text::center_x(&zone.label, cx, 14.0, FontWeightHint::Bold),
             y: cy - 8.0,
             text: zone.label.clone(),
             color: Color::WHITE,
@@ -1024,6 +1025,30 @@ impl SnapManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- zone label centring ---
+
+    #[test]
+    fn a_zone_label_is_centred_on_its_zone() {
+        // These were centred by subtracting 3.5 px per *byte* — half a guessed
+        // seven-pixel character — so "Left Half" sat off-centre and a localised
+        // zone name sat off the zone entirely.
+        for (label, size, weight) in [
+            ("Left Half", 13.0, FontWeightHint::Regular),
+            ("Top Right Quarter", 13.0, FontWeightHint::Regular),
+            ("Maximise", 14.0, FontWeightHint::Bold),
+            ("Linke Hälfte", 14.0, FontWeightHint::Bold),
+        ] {
+            let centre = 640.0;
+            let x = guitk::text::center_x(label, centre, size, weight);
+            let w = guitk::text::measure(label, size, weight);
+            assert!(
+                (x + w / 2.0 - centre).abs() < 0.01,
+                "{label:?} is not centred: spans {x}..{}",
+                x + w
+            );
+        }
+    }
 
     // ======================================================================
     // SnapZone

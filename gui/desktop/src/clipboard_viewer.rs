@@ -7,6 +7,7 @@
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand};
 use guitk::style::CornerRadii;
+use guitk::text;
 
 // ============================================================================
 // Theme
@@ -589,7 +590,7 @@ impl ClipboardViewer {
         let mut tab_x = x + 8.0;
         for (fmt, label) in &filters {
             let is_active = self.format_filter == *fmt;
-            let tab_w = label.len() as f32 * 7.0 + 16.0;
+            let tab_w = text::padded_width(label, 8.0, 11.0, FontWeightHint::Regular);
             let bg = if is_active { COL_BLUE } else { COL_SURFACE0 };
             let fg = if is_active { COL_BASE } else { COL_SUBTEXT0 };
             cmds.push(RenderCommand::FillRect {

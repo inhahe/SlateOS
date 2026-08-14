@@ -34,6 +34,7 @@
 use guitk::event::{Key, Modifiers};
 use guitk::render::{FontWeightHint, RenderCommand};
 use guitk::style::CornerRadii;
+use guitk::text;
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -1093,7 +1094,7 @@ pub fn render_settings_panel(
 
         // Render badges right-to-left so they align to the right edge.
         for part in badge_parts.iter().rev() {
-            let text_width = part.len() as f32 * KEY_FONT_SIZE * 0.6 + 12.0;
+            let text_width = text::padded_width(part, 6.0, KEY_FONT_SIZE, FontWeightHint::Regular);
             badge_x -= text_width + 4.0;
 
             let badge_y = row_y + (ROW_HEIGHT - KEY_BADGE_HEIGHT) / 2.0;
@@ -1144,6 +1145,20 @@ pub fn render_settings_panel(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- key badge sizing ---
+
+    #[test]
+    fn a_key_badge_fits_its_key_name() {
+        // A hotkey display name is split on '+' and each part gets its own
+        // badge. Sized at 0.6 em per byte, "Backspace" fit but "Entf" (German
+        // Delete) or any accented key name did not.
+        for part in ["Ctrl", "Shift", "Backspace", "F11", "Entf", "→"] {
+            let w = guitk::text::padded_width(part, 6.0, KEY_FONT_SIZE, FontWeightHint::Regular);
+            let drawn = guitk::text::measure(part, KEY_FONT_SIZE, FontWeightHint::Regular);
+            assert!(drawn + 12.0 <= w + 0.01, "{part:?} overflows its badge");
+        }
+    }
     use guitk::event::{Key, Modifiers};
 
     // ====================================================================

@@ -34,6 +34,7 @@
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand};
 use guitk::style::CornerRadii;
+use guitk::text;
 // The same zone engine the libc's `localtime` and osh's `printf '%(…)T'` use.
 use tzrules::Tz;
 
@@ -1365,10 +1366,10 @@ impl CalendarView {
             max_width: None,
         });
 
-        // Centered month/year label.
-        // Approximate centering: assume ~8px per character.
-        let label_width = label.len() as f32 * 8.0;
-        let label_x = x + (grid_width - label_width) / 2.0;
+        // Centered month/year label. Month names are localised, so an
+        // eight-pixels-per-byte guess put "Februar" and "Fevereiro" visibly
+        // off-centre and pushed the longest ones under the > arrow.
+        let label_x = text::center_x(&label, x + grid_width / 2.0, 15.0, FontWeightHint::Bold);
         cmds.push(RenderCommand::Text {
             x: label_x,
             y: y + 10.0,
@@ -1383,8 +1384,12 @@ impl CalendarView {
         let is_viewing_today = self.view_year == self.today.0 && self.view_month == self.today.1;
         if !is_viewing_today {
             let today_label = "Today";
-            let tw = today_label.len() as f32 * 7.0;
-            let tx = x + (grid_width - tw) / 2.0;
+            let tx = text::center_x(
+                today_label,
+                x + grid_width / 2.0,
+                11.0,
+                FontWeightHint::Regular,
+            );
             cmds.push(RenderCommand::Text {
                 x: tx,
                 y: y + 30.0,
@@ -1626,8 +1631,12 @@ impl CalendarView {
 
         // Year navigation header.
         let year_label = format!("{}", self.view_year);
-        let label_w = year_label.len() as f32 * 10.0;
-        let center_x = x + (total_width - label_w) / 2.0;
+        let center_x = text::center_x(
+            &year_label,
+            x + total_width / 2.0,
+            16.0,
+            FontWeightHint::Bold,
+        );
 
         cmds.push(RenderCommand::Text {
             x: x + PADDING,
@@ -1759,6 +1768,24 @@ impl CalendarView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- header centring ---
+
+    #[test]
+    fn the_month_label_is_centred_in_the_grid() {
+        // Month names are localised and vary a lot in length; the old estimate
+        // of eight pixels a byte put the long ones under the ">" arrow.
+        let grid_width = 280.0;
+        for label in ["January 2026", "May 2026", "Fevereiro 2026", "十二月 2026"] {
+            let x = guitk::text::center_x(label, grid_width / 2.0, 15.0, FontWeightHint::Bold);
+            let w = guitk::text::measure(label, 15.0, FontWeightHint::Bold);
+            assert!(
+                (x + w / 2.0 - grid_width / 2.0).abs() < 0.01,
+                "{label:?} is not centred"
+            );
+            assert!(x >= 0.0, "{label:?} starts left of the grid");
+        }
+    }
 
     // ========================================================================
     // Date arithmetic tests

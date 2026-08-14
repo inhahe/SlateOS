@@ -57948,8 +57948,11 @@ the first attempt at this fix went wrong.
 
 ## TD-APPS-ESTIMATE-TEXT-WIDTH — apps still guess at text width instead of measuring it
 
-**Status.** Open. The toolkit and the compositor were converted on 2026-08-13
-(`fa5135c36`, `f2d74c8a2`); the applications were not.
+**Status.** Open, in progress. The toolkit and the compositor were converted on
+2026-08-13 (`fa5135c36`, `f2d74c8a2`). Six applications have followed:
+`lockscreen` (`1523f7412`), `filediff` (`353a41211`), `tmux` (`99198808c`),
+`markdowneditor` (`77bf7bf14`), `regextester` (`504c67bc0`) and `jsonviewer`
+(`0c107cce7`). Roughly 150 sites across ~73 files remain.
 
 **What it is.** Roughly 322 sites across ~90 files under `apps/` and
 `gui/desktop/` size and position text with a per-app fudge factor —
@@ -57969,14 +57972,19 @@ The visible symptoms are the same class the toolkit had: labels overflowing
 their buttons, text cursors landing between characters rather than on them, and
 centred text drifting off-centre in proportion to its length.
 
-**Where it lives.** Densest first: `apps/lockscreen/src/main.rs` (20 sites),
-`apps/filediff` (11), `apps/tmux` (10), `apps/markdowneditor` (10),
-`apps/regextester` (9), `apps/jsonviewer` (9), `apps/credmanager` (8),
-`apps/nonogram` (7), `apps/diskimager` (6). `apps/editor/src/main.rs` is a
-special case: it declares its own `char_width` config field, mirroring the
-`SimpleTextViewConfig` design that was just fixed in `guitk/textview`.
+**Where it lives.** Densest remaining, in order: `apps/logviewer` (8),
+`apps/snippets` (7), `apps/credmanager` (7), `apps/diskimager` (6),
+`apps/netscan` (5), `apps/netmanager` (5), `apps/hexeditor` (5), `apps/defrag`
+(5), then a long tail of four and fewer. `apps/editor/src/main.rs` is a special
+case: it declares its own `char_width` config field, mirroring the
+`SimpleTextViewConfig` design that was fixed in `guitk/textview`.
 
-**Reproduce.** `rg 'len\(\) as f32 \*|char_width|CHAR_W' apps/ gui/desktop/`.
+**Reproduce.** `rg 'len\(\) as f32\)? \* [0-9]|CHAR_WIDTH|char_width' apps/
+gui/desktop/`. Note the earlier version of this command missed two forms that
+turned out to be common: a parenthesised cast (`(label.len() as f32) * 7.0`)
+and a bare numeric factor with no named constant at all. Both are in the
+pattern above. Files that legitimately derive a cell (`fn char_width()`) will
+still match; check before converting.
 
 **Proper fix.** Call `guitk::text` — `measure`, `width`, `fit`, `elide`,
 `char_index_at`, `line_height`, `digit_advance` — which every app already has
@@ -57995,3 +58003,32 @@ judgement calls recur:
 
 Best done a few apps at a time, each with a test that a measured label fits the
 box drawn for it. It is mechanical, but it is 90 files, so it is not one commit.
+
+**What the first six conversions turned up.** The estimates were not the whole
+problem — they were a marker for four bugs that recur, and are worth looking
+for deliberately rather than only fixing the multiplication:
+
+- **Hit-test / render drift.** Where a clickable strip is laid out, the click
+  handler and the renderer each computed the item width, and the two had
+  already diverged independently of the fudge factor. In `jsonviewer` the click
+  test sized a tab from `doc.title` while the render sized it from the title
+  *plus* its dirty marker, so clicking a tab after a modified one selected its
+  neighbour. The fix is one shared function, not two corrected copies.
+- **Weight ignored.** An active tab or heading is drawn bold and was measured
+  regular, so the one item the user is looking at is the one that overflows.
+  Measure in the weight the text is actually drawn in — and for a strip of
+  tabs, measure them *all* bold, or the strip reflows every time the selection
+  moves.
+- **Byte offset used as a column.** Text buffers store cursor and selection
+  positions as byte offsets on character boundaries, which is correct; the
+  renderer then multiplied that offset by a cell width. On any line holding an
+  accent the caret sat two or three columns right of its character and the
+  selection band stretched with it (`markdowneditor`), and match highlights
+  slid off the text they mark (`regextester`). Convert with a helper that
+  counts characters in the prefix, and make it survive a mid-character or
+  past-the-end offset — slicing a `str` off a boundary is an abort, not a
+  glitch.
+- **Home-grown truncation.** Several apps carry a local `truncate_display`-style
+  helper comparing `s.len()` (bytes) against a character budget derived from
+  the nominal cell. These cut accented text short when it fitted *and* let wide
+  text overflow. Delete them for `text::elide`, which measures the ellipsis too.

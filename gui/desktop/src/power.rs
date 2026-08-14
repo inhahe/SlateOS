@@ -8,13 +8,16 @@
 //! - Power profiles (Balanced, Performance, Power Saver, Custom)
 //! - Lid close / power button actions
 //! - Wake-on-LAN configuration
+//! - The power menu the start menu opens (shutdown, restart, sleep, lock,
+//!   log out)
 //!
 //! Designed to integrate with the taskbar's power/battery indicator
 //! and the settings app's power management page.
 
+use crate::Rect;
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand};
-use guitk::style::CornerRadii;
+use guitk::style::{Border, CornerRadii};
 use guitk::text;
 
 // ============================================================================
@@ -1306,6 +1309,94 @@ pub fn render_power_profile_badge(
             max_width: Some(badge_w - 16.0),
         },
     ]
+}
+
+// ============================================================================
+// Power menu
+// ============================================================================
+
+/// One entry of the power menu — "Shutdown", "Restart", …
+///
+/// The rectangle is supplied rather than computed here because the shell's hit
+/// test has to agree with the drawing to the pixel, and the hit test lives with
+/// the rest of the shell's geometry. See the `Rect` documentation in `main.rs`.
+#[derive(Clone, Copy, Debug)]
+pub struct PowerMenuRow<'a> {
+    /// What the user reads.
+    pub label: &'a str,
+    /// Where the row is drawn, and where a click on it is accepted.
+    pub rect: Rect,
+}
+
+/// The colours and sizes a power menu is drawn with.
+///
+/// Passed in whole rather than taken from this module's own palette: the popup
+/// belongs to the start menu it opens from and has to follow the user's theme,
+/// font size and display scaling — all of which the shell owns and this module
+/// has no way to see.
+#[derive(Clone, Copy, Debug)]
+pub struct PowerMenuStyle {
+    /// The popup's panel colour.
+    pub background: Color,
+    /// Label colour.
+    pub foreground: Color,
+    /// The panel's outline.
+    pub border: Border,
+    /// Corner rounding of the panel.
+    pub radii: CornerRadii,
+    /// Label size in physical pixels — already scaled by the caller.
+    pub font_size: f32,
+    /// Distance from a row's left edge to the start of its label.
+    pub text_inset: f32,
+}
+
+/// Draw a power menu: a panel, and one label per row.
+///
+/// The drop shadow is not drawn here. Every floating surface in the shell casts
+/// the same one, and only when the user has shadows switched on — that is one
+/// decision belonging to the shell, not five surfaces each making it again.
+#[must_use]
+pub fn render_power_menu(
+    panel: Rect,
+    rows: &[PowerMenuRow<'_>],
+    style: PowerMenuStyle,
+) -> Vec<RenderCommand> {
+    // Panel, outline, and one label per row.
+    let mut cmds = Vec::with_capacity(2 + rows.len());
+
+    cmds.push(RenderCommand::FillRect {
+        x: panel.x,
+        y: panel.y,
+        width: panel.w,
+        height: panel.h,
+        color: style.background,
+        corner_radii: style.radii,
+    });
+    cmds.push(RenderCommand::StrokeRect {
+        x: panel.x,
+        y: panel.y,
+        width: panel.w,
+        height: panel.h,
+        color: style.border.color,
+        line_width: style.border.width,
+        corner_radii: style.radii,
+    });
+
+    for row in rows {
+        cmds.push(RenderCommand::Text {
+            x: row.rect.x + style.text_inset,
+            // Centred in the row rather than offset by a constant, so a larger
+            // font size does not drift the label towards the row's bottom edge.
+            y: row.rect.y + (row.rect.h - style.font_size).max(0.0) / 2.0,
+            text: row.label.to_string(),
+            color: style.foreground,
+            font_size: style.font_size,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some((row.rect.w - style.text_inset * 2.0).max(0.0)),
+        });
+    }
+
+    cmds
 }
 
 // ============================================================================

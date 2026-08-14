@@ -277,6 +277,21 @@ const START_MENU_FOOTER: f32 = 48.0;
 /// Width of the scroll indicator drawn when the list is longer than the menu.
 const START_MENU_SCROLLBAR_WIDTH: f32 = 4.0;
 
+// --- Power menu ------------------------------------------------------------
+
+/// Width of the power button in the start menu's footer.
+const POWER_BUTTON_WIDTH: f32 = 110.0;
+/// Inset of the power button from the menu's left and bottom edges.
+const POWER_BUTTON_INSET: f32 = 8.0;
+const POWER_MENU_WIDTH: f32 = 170.0;
+const POWER_MENU_ROW_HEIGHT: f32 = 32.0;
+/// Space above the first and below the last row of the popup.
+const POWER_MENU_PADDING: f32 = 6.0;
+/// Gap between the power button and the popup that rises from it.
+const POWER_MENU_GAP: f32 = 6.0;
+/// Distance from a popup row's left edge to the start of its label.
+const POWER_MENU_TEXT_INSET: f32 = 14.0;
+
 // --- Window decorations ----------------------------------------------------
 
 const TITLE_BAR_HEIGHT: f32 = 30.0;
@@ -447,6 +462,13 @@ pub enum Hit {
     StartMenuEntry(usize),
     /// The open start menu, but not one of its rows.
     StartMenuPanel,
+    /// The power button at the foot of the open start menu.
+    PowerButton,
+    /// An entry of the open power menu, by index into
+    /// [`power_menu_entries`](DesktopShell::power_menu_entries).
+    PowerMenuEntry(usize),
+    /// The open power menu, but not one of its rows.
+    PowerMenuPanel,
     /// A window button on the taskbar, by index into
     /// [`visible_windows`](DesktopShell::visible_windows).
     TaskbarButton(usize),
@@ -542,6 +564,14 @@ pub struct DesktopShell {
     /// stops at the eighth program makes the ninth unreachable rather than
     /// merely unseen.
     pub start_menu_scroll: usize,
+    /// Whether the power menu is showing.
+    ///
+    /// Only ever true while [`start_menu_open`](Self::start_menu_open) is: it
+    /// is a submenu of the start menu and rises from a button inside it, so a
+    /// power menu left over a closed start menu would be a popup with nothing
+    /// to have opened it. [`close_start_menu`](Self::close_start_menu) is what
+    /// keeps the two in step.
+    pub power_menu_open: bool,
     /// The programs this desktop can start, shared with the search launcher so
     /// that the two front ends cannot offer different applications.
     pub apps: Vec<AppEntry>,
@@ -786,6 +816,7 @@ impl DesktopShell {
             taskbar_height: 40,
             start_menu_open: false,
             start_menu_scroll: 0,
+            power_menu_open: false,
             apps: launcher::builtin_app_database(),
             alt_tab_active: false,
             alt_tab_index: 0,
@@ -1000,6 +1031,91 @@ impl DesktopShell {
         )
     }
 
+    /// The power button in the start menu's footer, which opens the power menu.
+    ///
+    /// The footer is the last [`START_MENU_FOOTER`] of the menu, or the whole
+    /// menu if the menu has been clamped shorter than that — a button drawn
+    /// above the menu's own top edge would be as unreachable as a row drawn off
+    /// the screen.
+    #[must_use]
+    pub fn power_button_rect(&self) -> Rect {
+        let menu = self.start_menu_rect();
+        let inset = self.scale(POWER_BUTTON_INSET);
+        let footer = self.scale(START_MENU_FOOTER).min(menu.h);
+        let h = (footer - inset * 2.0).max(0.0);
+        let w = self
+            .scale(POWER_BUTTON_WIDTH)
+            .min((menu.w - inset * 2.0).max(0.0));
+        Rect::new(menu.x + inset, menu.y + menu.h - footer + inset, w, h)
+    }
+
+    /// The power menu popup, rising from the power button.
+    ///
+    /// A submenu is allowed to cover the menu it opened from, so when there is
+    /// not enough room above the button the popup slides down over the
+    /// application list rather than shrinking: losing "Shutdown" off the top of
+    /// the screen would defeat the whole point of the menu. It is clamped to
+    /// the screen's height only because a popup taller than the display has
+    /// nowhere left to go — see
+    /// [`power_menu_visible_rows`](Self::power_menu_visible_rows).
+    #[must_use]
+    pub fn power_menu_rect(&self) -> Rect {
+        let button = self.power_button_rect();
+        let rows = self.power_menu_entries().len() as f32;
+        let pad = self.scale(POWER_MENU_PADDING);
+        let h = (rows * self.scale(POWER_MENU_ROW_HEIGHT) + pad * 2.0)
+            .min(self.screen_height as f32);
+        let w = self
+            .scale(POWER_MENU_WIDTH)
+            .min(self.screen_width as f32)
+            .max(0.0);
+        let y = (button.y - self.scale(POWER_MENU_GAP) - h).max(0.0);
+        Rect::new(button.x, y, w, h)
+    }
+
+    /// How many popup rows fit, which is every entry unless the popup had to be
+    /// clamped to a screen shorter than itself.
+    #[must_use]
+    pub fn power_menu_visible_rows(&self) -> usize {
+        let row = self.scale(POWER_MENU_ROW_HEIGHT);
+        if row <= 0.0 {
+            return 0;
+        }
+        let usable = self.power_menu_rect().h - self.scale(POWER_MENU_PADDING) * 2.0;
+        ((usable / row).max(0.0) as usize).min(self.power_menu_entries().len())
+    }
+
+    /// The `row`-th drawn row of the power menu.
+    #[must_use]
+    pub fn power_menu_row_rect(&self, row: usize) -> Rect {
+        let menu = self.power_menu_rect();
+        let height = self.scale(POWER_MENU_ROW_HEIGHT);
+        Rect::new(
+            menu.x,
+            menu.y + self.scale(POWER_MENU_PADDING) + row as f32 * height,
+            menu.w,
+            height,
+        )
+    }
+
+    /// The system actions the power menu lists, in menu order.
+    ///
+    /// Exactly the entries [`start_menu_entries`](Self::start_menu_entries)
+    /// leaves out, from the same database, so a system action can never be in
+    /// both lists or in neither.
+    #[must_use]
+    pub fn power_menu_entries(&self) -> Vec<&AppEntry> {
+        self.apps
+            .iter()
+            .filter(|app| matches!(app.category, Category::System))
+            .collect()
+    }
+
+    /// Open or close the power menu.
+    pub fn toggle_power_menu(&mut self) {
+        self.power_menu_open = !self.power_menu_open;
+    }
+
     /// Every rectangle of one window's decorations.
     ///
     /// The shell's, not the window's, because the sizes depend on the display
@@ -1077,10 +1193,22 @@ impl DesktopShell {
     /// Opening rewinds the list: a menu that reopens where it was last left
     /// hides the first application from a user who has no idea it scrolled.
     pub fn toggle_start_menu(&mut self) {
-        self.start_menu_open = !self.start_menu_open;
         if self.start_menu_open {
+            self.close_start_menu();
+        } else {
+            self.start_menu_open = true;
             self.start_menu_scroll = 0;
         }
+    }
+
+    /// Close the start menu, and the power menu with it.
+    ///
+    /// The single place the menu closes, so that the submenu cannot be left
+    /// open over an empty desktop. Clearing `start_menu_open` directly is what
+    /// would strand it.
+    pub fn close_start_menu(&mut self) {
+        self.start_menu_open = false;
+        self.power_menu_open = false;
     }
 
     // ======================================================================
@@ -1090,8 +1218,26 @@ impl DesktopShell {
     /// What is under a point, topmost surface first.
     #[must_use]
     pub fn hit_test(&self, x: f32, y: f32) -> Hit {
+        // The power menu is tested first because it is drawn last: it rises
+        // over the start menu's own rows, and a point inside both belongs to
+        // the surface on top.
+        if self.power_menu_open {
+            let menu = self.power_menu_rect();
+            if menu.contains(x, y) {
+                for row in 0..self.power_menu_visible_rows() {
+                    if self.power_menu_row_rect(row).contains(x, y) {
+                        return Hit::PowerMenuEntry(row);
+                    }
+                }
+                return Hit::PowerMenuPanel;
+            }
+        }
+
         if self.start_menu_open {
             let menu = self.start_menu_rect();
+            if self.power_button_rect().contains(x, y) {
+                return Hit::PowerButton;
+            }
             if menu.contains(x, y) {
                 for row in 0..self.start_menu_visible_rows() {
                     if self.start_menu_row_rect(row).contains(x, y) {
@@ -1173,6 +1319,23 @@ impl DesktopShell {
         }
     }
 
+    /// Whether a click here is part of the start menu rather than outside it.
+    ///
+    /// The start button counts because clicking it while the menu is open is
+    /// how the menu is closed again, and that path has to reach the toggle
+    /// rather than the dismiss-on-click-outside rule above it.
+    fn keeps_start_menu_open(hit: Hit) -> bool {
+        matches!(
+            hit,
+            Hit::StartButton
+                | Hit::StartMenuEntry(_)
+                | Hit::StartMenuPanel
+                | Hit::PowerButton
+                | Hit::PowerMenuEntry(_)
+                | Hit::PowerMenuPanel
+        )
+    }
+
     fn handle_press(&mut self, x: f32, y: f32, button: MouseButton, double: bool) -> ShellAction {
         let hit = self.hit_test(x, y);
 
@@ -1180,13 +1343,22 @@ impl DesktopShell {
         // doing so rather than also reaching what it landed on. Dismissing is
         // what the user aimed at; acting as well would make the click do
         // something they could not see coming.
-        if self.start_menu_open
-            && !matches!(
-                hit,
-                Hit::StartButton | Hit::StartMenuEntry(_) | Hit::StartMenuPanel
-            )
+        //
+        // The submenu is dismissed first and on its own: a click that lands on
+        // the application list while the power menu is open closes the power
+        // menu without also launching the program underneath it.
+        if self.power_menu_open
+            && !matches!(hit, Hit::PowerMenuEntry(_) | Hit::PowerMenuPanel)
         {
-            self.start_menu_open = false;
+            self.power_menu_open = false;
+            if !Self::keeps_start_menu_open(hit) {
+                self.start_menu_open = false;
+            }
+            return ShellAction::Consumed;
+        }
+
+        if self.start_menu_open && !Self::keeps_start_menu_open(hit) {
+            self.close_start_menu();
             return ShellAction::Consumed;
         }
 
@@ -1212,13 +1384,36 @@ impl DesktopShell {
                     .map(|entry| entry.executable_path.clone());
                 match path {
                     Some(path) => {
-                        self.start_menu_open = false;
+                        self.close_start_menu();
                         ShellAction::Launch(path)
                     }
                     None => ShellAction::Consumed,
                 }
             }
-            Hit::StartMenuPanel | Hit::TaskbarPanel => ShellAction::Consumed,
+            Hit::PowerButton => {
+                self.toggle_power_menu();
+                ShellAction::Consumed
+            }
+            // A system action starts a program like any other menu entry: the
+            // shell has no more business shutting the machine down itself than
+            // it has starting a text editor itself. `/sbin/shutdown` and its
+            // neighbours are what actually do it.
+            Hit::PowerMenuEntry(index) => {
+                let path = self
+                    .power_menu_entries()
+                    .get(index)
+                    .map(|entry| entry.executable_path.clone());
+                match path {
+                    Some(path) => {
+                        self.close_start_menu();
+                        ShellAction::Launch(path)
+                    }
+                    None => ShellAction::Consumed,
+                }
+            }
+            Hit::StartMenuPanel | Hit::PowerMenuPanel | Hit::TaskbarPanel => {
+                ShellAction::Consumed
+            }
             Hit::TaskbarButton(index) => {
                 let id = self.visible_windows().get(index).map(|w| w.id);
                 if let Some(id) = id {
@@ -1262,7 +1457,13 @@ impl DesktopShell {
     }
 
     fn handle_scroll(&mut self, x: f32, y: f32, dy: f32) -> ShellAction {
-        if self.start_menu_open && self.start_menu_rect().contains(x, y) {
+        // Asked of the hit test rather than of `start_menu_rect` directly, so
+        // that a wheel over the power menu — which covers part of the list —
+        // does not scroll the rows hidden behind it.
+        if matches!(
+            self.hit_test(x, y),
+            Hit::StartMenuEntry(_) | Hit::StartMenuPanel | Hit::PowerButton
+        ) {
             self.scroll_start_menu(scroll_rows(dy));
             return ShellAction::Consumed;
         }
@@ -1566,7 +1767,7 @@ impl DesktopShell {
 
         // Super key: toggle start menu
         if key.key == Key::LeftSuper || key.key == Key::RightSuper {
-            self.start_menu_open = !self.start_menu_open;
+            self.toggle_start_menu();
             return true;
         }
 
@@ -1959,16 +2160,72 @@ impl DesktopShell {
             );
         }
 
-        // Power options at bottom
+        // The power button. Drawn as pressed while its menu is showing, so the
+        // popup that appears over the list has something visible that it came
+        // from.
+        let button = self.power_button_rect();
+        let button_radii = CornerRadii::all(radii.top_left.min(button.h / 2.0));
+        if self.power_menu_open {
+            fill_round(&mut tree, button, self.theme.accent_color, button_radii);
+        }
+        let label_size = self.font_size(TextRole::Body);
         tree.text(
-            menu.x + self.scale(16.0),
-            menu.y + menu.h - self.scale(40.0),
+            button.x + self.scale(POWER_MENU_TEXT_INSET),
+            button.y + (button.h - label_size).max(0.0) / 2.0,
             "Power",
-            Color::GRAY,
-            self.font_size(TextRole::Caption),
+            if self.power_menu_open {
+                self.theme.start_menu_bg
+            } else {
+                self.theme.start_menu_fg
+            },
+            label_size,
         );
 
+        if self.power_menu_open {
+            self.render_power_menu(&mut tree);
+        }
+
         Some(tree)
+    }
+
+    /// Draw the power menu into the start menu's tree.
+    ///
+    /// The popup itself is drawn by [`power`], which owns everything about
+    /// system power; this method's job is only to hand it the geometry the hit
+    /// test uses and the colours the user chose.
+    fn render_power_menu(&self, tree: &mut RenderTree) {
+        let panel = self.power_menu_rect();
+        let radii = self.corner_radii();
+
+        if self.appearance.drop_shadows {
+            shadow(tree, panel, radii);
+        }
+
+        let entries = self.power_menu_entries();
+        let rows: Vec<power::PowerMenuRow<'_>> = (0..self.power_menu_visible_rows())
+            .filter_map(|row| {
+                entries.get(row).map(|entry| power::PowerMenuRow {
+                    label: &entry.name,
+                    rect: self.power_menu_row_rect(row),
+                })
+            })
+            .collect();
+
+        tree.extend(power::render_power_menu(
+            panel,
+            &rows,
+            power::PowerMenuStyle {
+                background: self.theme.start_menu_bg,
+                foreground: self.theme.start_menu_fg,
+                border: Border {
+                    width: self.scale(1.0),
+                    color: self.theme.window_border_color,
+                },
+                radii,
+                font_size: self.font_size(TextRole::Item),
+                text_inset: self.scale(POWER_MENU_TEXT_INSET),
+            },
+        ));
     }
 
     // ======================================================================
@@ -2063,6 +2320,23 @@ fn main() {
         match desktop.handle_mouse(&click(rect.x + 8.0, rect.y + 8.0)) {
             ShellAction::Launch(path) => println!("Start menu asked to launch: {path}"),
             other => println!("Start menu returned {other:?}"),
+        }
+    }
+
+    // Open the power menu from the start menu's footer and pick Shutdown, the
+    // way a user reaching for the power button would.
+    desktop.handle_mouse(&click(start.x + 8.0, start.y + 8.0));
+    let power = desktop.power_button_rect();
+    desktop.handle_mouse(&click(power.x + 8.0, power.y + 8.0));
+    let shutdown_row = desktop
+        .power_menu_entries()
+        .iter()
+        .position(|entry| entry.name == "Shutdown");
+    if let Some(row) = shutdown_row {
+        let rect = desktop.power_menu_row_rect(row);
+        match desktop.handle_mouse(&click(rect.x + 8.0, rect.y + 8.0)) {
+            ShellAction::Launch(path) => println!("Power menu asked to launch: {path}"),
+            other => println!("Power menu returned {other:?}"),
         }
     }
 

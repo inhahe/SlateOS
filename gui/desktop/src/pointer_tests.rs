@@ -205,6 +205,252 @@ fn a_click_on_the_menu_but_not_on_a_row_does_nothing_but_stay_open() {
     assert!(shell.start_menu_open);
 }
 
+// ---- the power menu -------------------------------------------------------
+
+/// The whole point: the machine can be shut down from the desktop. Before this
+/// the foot of the start menu drew the word "Power" in grey and did nothing,
+/// and the five system actions were in no menu at all.
+#[test]
+fn the_power_menu_offers_every_system_action_and_launches_them() {
+    let names: Vec<String> = {
+        let shell = shell();
+        shell
+            .power_menu_entries()
+            .iter()
+            .map(|entry| entry.name.clone())
+            .collect()
+    };
+    assert!(
+        names.iter().any(|name| name == "Shutdown"),
+        "no way to shut the machine down: {names:?}"
+    );
+
+    for row in 0..names.len() {
+        let mut shell = shell();
+        shell.toggle_start_menu();
+        let button = shell.power_button_rect();
+        assert_eq!(click_at(&mut shell, button), ShellAction::Consumed);
+        assert!(shell.power_menu_open);
+
+        let expected = shell.power_menu_entries()[row].executable_path.clone();
+        let rect = shell.power_menu_row_rect(row);
+        let action = click_at(&mut shell, rect);
+        assert_eq!(action, ShellAction::Launch(expected), "row {row}");
+        // Both menus go: the machine is about to shut down behind them.
+        assert!(!shell.power_menu_open);
+        assert!(!shell.start_menu_open);
+    }
+}
+
+/// The two menus divide the one database between them. An entry in neither list
+/// is an unreachable program; an entry in both puts "Shutdown" one mis-click
+/// below "Screenshot", which is why the split exists.
+#[test]
+fn the_two_menus_between_them_offer_every_program_exactly_once() {
+    let shell = shell();
+    let database = launcher::builtin_app_database();
+    let mut offered: Vec<&str> = shell
+        .start_menu_entries()
+        .iter()
+        .chain(shell.power_menu_entries().iter())
+        .map(|entry| entry.executable_path.as_str())
+        .collect();
+    offered.sort_unstable();
+    let before = offered.len();
+    offered.dedup();
+    assert_eq!(before, offered.len(), "a program is in both menus");
+    assert_eq!(offered.len(), database.len(), "a program is in neither");
+
+    for entry in shell.power_menu_entries() {
+        assert_eq!(entry.category, Category::System, "{}", entry.name);
+    }
+}
+
+#[test]
+fn the_power_button_toggles_its_menu_and_leaves_the_start_menu_open() {
+    let mut shell = shell();
+    shell.toggle_start_menu();
+    let button = shell.power_button_rect();
+
+    assert_eq!(shell.hit_test(button.x, button.y), Hit::PowerButton);
+    assert_eq!(click_at(&mut shell, button), ShellAction::Consumed);
+    assert!(shell.power_menu_open);
+    assert!(shell.start_menu_open);
+
+    assert_eq!(click_at(&mut shell, button), ShellAction::Consumed);
+    assert!(!shell.power_menu_open);
+    assert!(shell.start_menu_open, "closing the submenu is not closing both");
+}
+
+/// A submenu is allowed to cover the list it opened from — but then a click in
+/// the overlap has to reach the popup, not the row buried under it.
+#[test]
+fn the_power_menu_takes_the_clicks_on_the_rows_it_covers() {
+    let mut shell = shell();
+    shell.toggle_start_menu();
+    shell.toggle_power_menu();
+
+    let (x, y) = centre(shell.power_menu_row_rect(0));
+    let covered = (0..shell.start_menu_visible_rows())
+        .any(|row| shell.start_menu_row_rect(row).contains(x, y));
+    assert!(covered, "the fixture must actually overlap a row");
+    assert_eq!(shell.hit_test(x, y), Hit::PowerMenuEntry(0));
+}
+
+/// Clicking the list behind an open submenu dismisses the submenu and is spent
+/// doing so — launching the program underneath as well would start something
+/// the user could not see when they aimed.
+#[test]
+fn a_click_on_the_list_behind_the_power_menu_only_dismisses_it() {
+    let mut shell = shell();
+    shell.toggle_start_menu();
+    shell.toggle_power_menu();
+
+    let row = shell.start_menu_row_rect(0);
+    assert!(
+        !shell.power_menu_rect().contains(row.x + row.w / 2.0, row.y + row.h / 2.0),
+        "the fixture must pick a row the popup does not cover"
+    );
+    assert_eq!(click_at(&mut shell, row), ShellAction::Consumed);
+    assert!(!shell.power_menu_open);
+    assert!(shell.start_menu_open);
+}
+
+/// The popup rises from a button inside the start menu, so it can never outlive
+/// it: one left over a closed menu is a floating panel with no visible cause.
+#[test]
+fn closing_the_start_menu_any_way_at_all_takes_the_power_menu_with_it() {
+    let open = |shell: &mut DesktopShell| {
+        shell.start_menu_open = true;
+        shell.power_menu_open = true;
+    };
+
+    let mut by_toggle = shell();
+    open(&mut by_toggle);
+    by_toggle.toggle_start_menu();
+    assert!(!by_toggle.power_menu_open, "toggle");
+
+    let mut by_start_button = shell();
+    open(&mut by_start_button);
+    let start = by_start_button.start_button_rect();
+    click_at(&mut by_start_button, start);
+    assert!(!by_start_button.power_menu_open, "start button");
+
+    let mut by_click_away = shell();
+    open(&mut by_click_away);
+    by_click_away.handle_mouse(&click(900.0, 300.0));
+    assert!(!by_click_away.power_menu_open, "click on the desktop");
+    assert!(!by_click_away.start_menu_open);
+
+    let mut by_launching = shell();
+    open(&mut by_launching);
+    let row = by_launching.start_menu_row_rect(0);
+    // The first click dismisses the popup; the second launches.
+    click_at(&mut by_launching, row);
+    assert!(matches!(
+        click_at(&mut by_launching, row),
+        ShellAction::Launch(_)
+    ));
+    assert!(!by_launching.power_menu_open, "launching a program");
+    assert!(!by_launching.start_menu_open);
+}
+
+#[test]
+fn a_wheel_over_the_power_menu_does_not_scroll_the_list_behind_it() {
+    let mut shell = shell();
+    shell.toggle_start_menu();
+    shell.toggle_power_menu();
+
+    let (x, y) = centre(shell.power_menu_row_rect(0));
+    assert_eq!(
+        shell.handle_mouse(&scroll(x, y, -3.0 * START_MENU_ROW_HEIGHT)),
+        ShellAction::Consumed
+    );
+    assert_eq!(shell.start_menu_scroll, 0, "the hidden rows moved");
+}
+
+/// Scaling must not put a system action off the screen or out from under the
+/// pointer: unlike the application list the power menu has no scroll to rescue
+/// a row it fails to fit.
+#[test]
+fn every_power_action_is_clickable_where_it_is_drawn_at_every_scale() {
+    for percent in [100, 125, 150, 200] {
+        let mut shell = scaled(percent);
+        shell.toggle_start_menu();
+        shell.toggle_power_menu();
+
+        let menu = shell.power_menu_rect();
+        assert!(menu.y >= 0.0, "the popup ran off the top at {percent}%");
+        assert!(
+            menu.x + menu.w <= shell.screen_width as f32,
+            "the popup ran off the side at {percent}%"
+        );
+
+        let button = shell.power_button_rect();
+        let start = shell.start_menu_rect();
+        assert!(
+            button.x >= start.x
+                && button.y >= start.y
+                && button.y + button.h <= start.y + start.h,
+            "the power button escaped the menu at {percent}%"
+        );
+
+        assert_eq!(
+            shell.power_menu_visible_rows(),
+            shell.power_menu_entries().len(),
+            "a system action was dropped at {percent}%"
+        );
+        for row in 0..shell.power_menu_visible_rows() {
+            let (x, y) = centre(shell.power_menu_row_rect(row));
+            assert_eq!(
+                shell.hit_test(x, y),
+                Hit::PowerMenuEntry(row),
+                "row {row} at {percent}% scaling"
+            );
+        }
+    }
+}
+
+/// The popup is drawn by `power.rs` but themed by the shell: a menu in its own
+/// hard-coded palette would stay dark on a light desktop.
+#[test]
+fn the_power_menu_follows_the_theme_and_the_corner_setting() {
+    let mut shell = with_corners(WindowCorners::ExtraRounded);
+    shell.toggle_start_menu();
+    shell.toggle_power_menu();
+    let tree = shell.render_start_menu().expect("the menu is open");
+
+    let panel = tree
+        .commands
+        .iter()
+        .filter_map(|cmd| match cmd {
+            RenderCommand::FillRect {
+                color,
+                corner_radii,
+                width,
+                ..
+            } => Some((*color, *corner_radii, *width)),
+            _ => None,
+        })
+        .find(|(_, _, width)| (*width - shell.power_menu_rect().w).abs() < 0.01)
+        .expect("the popup's panel");
+    assert_eq!(panel.0, shell.theme.start_menu_bg);
+    assert_eq!(panel.1, CornerRadii::all(16.0));
+
+    // Every system action is on screen, spelled as the database spells it.
+    let drawn: Vec<String> = tree
+        .commands
+        .iter()
+        .filter_map(|cmd| match cmd {
+            RenderCommand::Text { text, .. } => Some(text.clone()),
+            _ => None,
+        })
+        .collect();
+    for entry in shell.power_menu_entries() {
+        assert!(drawn.contains(&entry.name), "{} was not drawn", entry.name);
+    }
+}
+
 // ---- the taskbar ----------------------------------------------------------
 
 #[test]
@@ -792,6 +1038,7 @@ fn every_drawn_string_follows_the_users_font_size() {
     let render = |shell: &mut DesktopShell| {
         shell.add_window("Terminal", 100, 100, 400, 300, 1);
         shell.start_menu_open = true;
+        shell.power_menu_open = true;
         shell.alt_tab_active = true;
         let mut sizes = text_sizes(&shell.render_taskbar());
         sizes.extend(text_sizes(&shell.render_window_decorations()));

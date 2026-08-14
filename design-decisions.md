@@ -11416,7 +11416,7 @@ whose doc records why matching real classes still selects the right characters.
 
 ---
 
-## 412. The HarfBuzz sweep reports mixed-script strings apart from its verdict
+## §420 — The HarfBuzz sweep reports mixed-script strings apart from its verdict
 
 **Date:** 2026-08-14
 **Decided by:** Claude (autonomous)

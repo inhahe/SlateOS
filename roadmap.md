@@ -470,7 +470,7 @@ Roadmap:
   two mixed-script corpus strings apart from its verdict, since HarfBuzz
   guesses one script for the whole buffer where we itemize — the Hebrew and
   Arabic buckets were the itemizer, not the shaper, and each had cost a
-  diagnosis to dismiss (design-decisions §412). `misplaced` 19 → 13, and all
+  diagnosis to dismiss (design-decisions §420). `misplaced` 19 → 13, and all
   13 are the one Devanagari string.
   Next unblocked step is the rest of shaping: no Indic reordering
   (`TD-FONT-HAS-NO-JOINING-OR-REORDERING-SHAPER`), no language selection

@@ -1083,7 +1083,103 @@ pub fn self_test() -> KernelResult<()> {
     test_join_self_fails()?;
     test_detached_exit_not_retained()?;
     test_killed_thread_does_not_join_normally()?;
+    test_kill_thread_cleans_up()?;
 
+    Ok(())
+}
+
+/// Test 9: [`kill_thread`] deregisters the victim, and a refused kill
+/// leaves no phantom marker.
+///
+/// Regression test for `TD-KERNEL-KILL-THREAD-DEAD-CODE`, which was not the
+/// harmless dead code it was filed as: `kill_thread` existed precisely so
+/// that killing one thread from outside would *also* deregister it and
+/// record the involuntary death, and its own doc comment said the shell's
+/// `kill` command "used to" call `sched::kill_task` directly — but the shell
+/// was never switched over, so it still did, and every `kill <tid>` at the
+/// prompt leaked a `THREAD_OWNERS` entry and left any joiner parked forever.
+/// Nothing exercised `kill_thread`, which is why the wiring gap showed up
+/// only as a `dead_code` warning.
+///
+/// The victim is killed **before it is ever scheduled**. That is not just
+/// convenience: it makes the test incapable of leaving a runaway task behind
+/// if the kill is refused, and it lets the entry function's untouched
+/// counter prove the task really never ran (so the `&counter` it was handed
+/// can never outlive this stack frame).
+fn test_kill_thread_cleans_up() -> KernelResult<()> {
+    use core::sync::atomic::{AtomicU64, Ordering};
+
+    let pid = pcb::create("thread-test-kill", 0);
+    let counter = AtomicU64::new(0);
+    let counter_ptr = &counter as *const AtomicU64 as u64;
+
+    let task_id = spawn(
+        pid,
+        b"kill-victim",
+        sched::task::DEFAULT_PRIORITY,
+        test_thread_entry,
+        counter_ptr,
+    )?;
+
+    // No `yield_now` between spawn and here, so the victim is still Ready
+    // and has not executed an instruction.
+    let fail = |msg: &str| -> KernelResult<()> {
+        serial_println!("[thread]   FAIL: {}", msg);
+        Err(KernelError::InternalError)
+    };
+
+    if !kill_thread(task_id) {
+        pcb::destroy(pid);
+        return fail("kill_thread should accept a Ready task");
+    }
+
+    if counter.load(Ordering::Relaxed) != 0 {
+        pcb::destroy(pid);
+        return fail("victim ran despite never being scheduled");
+    }
+
+    // The whole point of going through `kill_thread`: the thread→process
+    // mapping is gone. `sched::kill_task` alone would leave it registered.
+    if owner_process(task_id).is_some() {
+        pcb::destroy(pid);
+        return fail("kill_thread left the thread registered in THREAD_OWNERS");
+    }
+
+    // ...and the death was recorded, so a joiner learns it was cancelled
+    // rather than reading a fabricated normal return.
+    match join(task_id) {
+        Err(KernelError::Cancelled) => {}
+        other => {
+            let mut outcomes = THREAD_OUTCOMES.lock();
+            outcomes.remove(&task_id);
+            drop(outcomes);
+            pcb::destroy(pid);
+            serial_println!(
+                "[thread]   FAIL: join after kill_thread should be Cancelled, got {:?}",
+                other
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // A second kill is refused, and — this is the branch that exists only in
+    // `kill_thread` — it must withdraw the `Killed` marker it speculatively
+    // wrote, or a later legitimate join would trip over a death that never
+    // happened.
+    if kill_thread(task_id) {
+        pcb::destroy(pid);
+        return fail("kill_thread should refuse an already-dead task");
+    }
+    if join(task_id) != Err(KernelError::NoSuchProcess) {
+        let mut outcomes = THREAD_OUTCOMES.lock();
+        outcomes.remove(&task_id);
+        drop(outcomes);
+        pcb::destroy(pid);
+        return fail("a refused kill_thread left a phantom Killed marker");
+    }
+
+    pcb::destroy(pid);
+    serial_println!("[thread]   kill_thread deregisters, refused kill leaves no marker: OK");
     Ok(())
 }
 

@@ -185,6 +185,52 @@ pub fn spawn_with_tls(
     fs_base: u64,
     gs_base: u64,
 ) -> KernelResult<TaskId> {
+    let task_id = spawn_suspended_with_tls(pid, name, priority, entry, arg, fs_base, gs_base)?;
+    admit(pid, task_id)?;
+    Ok(task_id)
+}
+
+/// Phase 1 of the two-phase spawn: create a thread that is fully registered
+/// with its process but **not yet runnable**.
+///
+/// The returned task is `Blocked` and enqueued nowhere, so it cannot run — and
+/// therefore cannot *exit* — until [`admit`] is called. That gives the caller a
+/// quiescent window in which to perform any registration that
+/// [`on_thread_exit_hook`](super::thread_clone::on_thread_exit_hook) will later
+/// need to find.
+///
+/// # Why the two phases are separate (B-PTHREAD-JOIN-LOST-CTID)
+///
+/// The set of per-thread state that must be in place *before* the child can run
+/// keeps growing — `THREAD_OWNERS`, `pcb::add_thread`, the `%fs`/`%gs` bases,
+/// and the `CLONE_CHILD_CLEARTID` ctid registration. Threading every one of
+/// them through a widening parameter list does not scale, and each new one that
+/// gets registered *after* the spawn call re-opens the same race.
+///
+/// The concrete failure this closed: `clone_thread` admitted the child and only
+/// then called `register_clear_child_tid`. A child that ran to completion inside
+/// that window exited with no ctid registered, so `on_thread_exit_hook` took its
+/// `None => return` path and performed **neither** the zero-write to `*ctid`
+/// **nor** the `futex_wake` on it. glibc's `pthread_join` then blocked forever
+/// on a tid word that would never be cleared, the process never zombified, and
+/// the Path-Z pthread self-test timed out (~1-in-10 boots). The late
+/// registration also leaked a permanent `CLEAR_CHILD_TID` entry for a dead task.
+///
+/// Callers that need no extra registration should use [`spawn`] /
+/// [`spawn_with_tls`], which are just phase 1 followed immediately by phase 2.
+///
+/// # Errors
+///
+/// Same as [`spawn`].
+pub fn spawn_suspended_with_tls(
+    pid: ProcessId,
+    name: &[u8],
+    priority: u8,
+    entry: extern "C" fn(u64),
+    arg: u64,
+    fs_base: u64,
+    gs_base: u64,
+) -> KernelResult<TaskId> {
     // Verify the process exists before allocating resources.
     let proc_state = pcb::state(pid)
         .ok_or(KernelError::NoSuchProcess)?;
@@ -261,6 +307,23 @@ pub fn spawn_with_tls(
         sched::set_task_gs_base(task_id, gs_base);
     }
 
+    Ok(task_id)
+}
+
+/// Phase 2 of the two-phase spawn: make a thread created by
+/// [`spawn_suspended_with_tls`] runnable.
+///
+/// Must be called exactly once per successful `spawn_suspended_with_tls`. Only
+/// after this returns can the child run — and exit — so every registration the
+/// exit path depends on must already be installed. On failure the thread's
+/// registration is unwound and the task destroyed, so the caller must not
+/// reference `task_id` again.
+///
+/// # Errors
+///
+/// - [`KernelError::InternalError`] if the task was concurrently killed and so
+///   could not be admitted.
+pub fn admit(pid: ProcessId, task_id: TaskId) -> KernelResult<()> {
     // All ownership is now registered — admit the task so it can be
     // scheduled.  Only after this point can the child run (and possibly
     // exit), guaranteeing `THREAD_OWNERS`/`add_thread` are already in place.
@@ -286,7 +349,7 @@ pub fn spawn_with_tls(
         return Err(KernelError::InternalError);
     }
 
-    Ok(task_id)
+    Ok(())
 }
 
 /// Spawn a new **userspace** thread within an existing process.

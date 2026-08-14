@@ -60002,15 +60002,16 @@ every one of these was *my own* freshly-written tooling, reporting success.
 When adding a guard, the first test should be "does it fire on a case I know
 is positive?", not "does it run cleanly?".
 
-### [A] B-BENCH-TCP-CHECKSUM-PAIR-ALTERNATES-1.7x. One of `tcp_checksum_v4`/`v6` runs ~1.7x slow every build, and which one flips — OPEN
+### [A] B-BENCH-TCP-CHECKSUM-PAIR-BIMODAL-1.7x. `tcp_checksum_v4`/`v6` each swing ~1.7x between runs, and which member is elevated varies — OPEN
 
 **Where:** `kernel/src/bench.rs`, `bench_net_tcp_checksum_v4` (3281) /
 `bench_net_tcp_checksum_v6` (3340) and their bench-local kernels
 `tcp_checksum_bench` (3309) / `tcp_checksum_v6_bench` (3366).
 
-**What.** Across all five recorded runs on host `Logoplex3`, exactly one
-member of the pair sits near ~35000 ns while the other sits near ~20000 ns,
-and *which* member is the slow one changes from build to build:
+**What.** In 3 of the 5 recorded runs on host `Logoplex3`, one member of the
+pair sits near ~35000 ns while the other sits near ~20000 ns; in the other 2
+runs both sit in the 20000–26000 band. Which member is the elevated one
+varies:
 
 | commit | `tcp_checksum_v4` | `tcp_checksum_v6` |
 |---|---|---|
@@ -60025,33 +60026,54 @@ The two kernels are near-identical byte-at-a-time fold loops over the same
 more work. A 1.7x gap between them — in either direction — is not explicable
 by the work they do.
 
-**Why this is NOT host contamination** (the interesting part). The recorded
-figure is `result.min_ns`, the **minimum** over 2000 iterations, and since the
-append-only `mean_ns` extension landed we also record the mean, so
-`mean/min` is available as a within-run dispersion measure. A transient host
-burst inflates the mean far more than the min. It does not do that here:
+**What the dispersion data does and does not show.** The recorded figure is
+`result.min_ns`, the **minimum** over 2000 iterations, and since the
+append-only `mean_ns` extension landed we also record the mean, so `mean/min`
+is available as a within-run dispersion measure:
 
 | commit | benchmark | min | mean/min |
 |---|---|---|---|
-| `be167dd90` | `tcp_checksum_v4` (slow one) | 35410 | 1.16 |
-| `be167dd90` | `tcp_checksum_v6` (fast one) | 20953 | 1.20 |
-| `5a2002bac` | `tcp_checksum_v4` (fast one) | 20182 | 1.21 |
-| `5a2002bac` | `tcp_checksum_v6` (slow one) | 35039 | 1.33 |
+| `be167dd90` | `tcp_checksum_v4` (elevated) | 35410 | 1.16 |
+| `be167dd90` | `tcp_checksum_v6` | 20953 | 1.20 |
+| `5a2002bac` | `tcp_checksum_v4` | 20182 | 1.21 |
+| `5a2002bac` | `tcp_checksum_v6` (elevated) | 35039 | 1.33 |
 
-In both runs the slow member's dispersion is indistinguishable from the fast
-member's. Compare the genuinely burst-hit numbers in the same records:
+In both runs the elevated member's dispersion is indistinguishable from the
+other member's. Compare the visibly burst-hit numbers in the same records:
 `net_ethernet_parse` at 2.86 and `context_switch` at 10.62 in `be167dd90`.
-So the slow member is uniformly ~1.7x slower across all 2000 iterations with
-perfectly normal spread — a *steady-state* property of that build, not an
-event that happened during it.
+So the elevated member is uniformly ~1.7x slower across all 2000 iterations
+with normal spread.
 
-**Leading hypothesis.** Code-layout sensitivity under QEMU TCG. The two loops
-are compiled separately (deliberately duplicated "to avoid depending on tcp
-module internals"), so their alignment and translation-block boundaries shift
-with every unrelated code change. Whichever one lands unluckily — hot loop
-straddling a TB boundary or a host page — pays a fixed per-iteration penalty.
-That model predicts exactly what is observed: a uniform multiplier, stable
-within a run, re-rolled at each build.
+**This rules out a sub-benchmark burst, and nothing more — do not read it as
+"not contamination".** A first draft of this entry concluded that a normal
+`mean/min` proved the slowdown was a steady-state property of the build. That
+does not follow. 2000 iterations at ~20 µs is only ~40 ms of wall time, and a
+host load episode that spans the *entire* 40 ms window inflates the min and
+the mean by the same factor, leaving `mean/min` untouched. Such an episode is
+entirely ordinary on a desktop. So the dispersion data distinguishes "a spike
+during part of the benchmark" from "uniformly slower", and is silent on
+*why* it was uniformly slower. Both a build property and a benchmark-length
+contamination episode predict exactly what is in the table above.
+
+**Two live hypotheses, and the test that separates them.**
+
+1. *Code-layout sensitivity under QEMU TCG.* The two loops are compiled
+   separately (deliberately duplicated "to avoid depending on tcp module
+   internals"), so their alignment and translation-block boundaries shift with
+   every unrelated code change; whichever lands unluckily pays a fixed
+   per-iteration penalty.
+2. *A contamination episode long enough to cover one whole benchmark.* The
+   mid-suite canary samples every 8 scored benchmarks, so an episode lasting
+   one benchmark can slip between two samples and be reported as a quiet run —
+   which is what `5a2002bac` reported.
+
+**These are separated by re-running the bench on the *same commit*.** Hypothesis
+1 is a property of the binary and must reproduce: same member elevated, same
+factor. Hypothesis 2 re-rolls: the elevated member moves, or neither is
+elevated. This needs no new code, just a second `--bench` boot on an unchanged
+tree, and it is the next step for this entry. Until that run exists, the
+mechanism is **unknown** and this entry must not be cited as evidence for
+either explanation.
 
 **Why it matters.** Both are on the `over_target` list (targets 2000/2200 ns,
 measured 20000–35000), so the absolute numbers are already known-bad under TCG
@@ -60062,25 +60084,45 @@ band from exactly this history. If the band is fitted without knowing this
 pair is bimodal, it will either be stretched wide enough to hide real
 regressions everywhere else, or it will keep flagging these two forever.
 
-**Next diagnostic** (cheap, no boot needed for step 1): dump the symbol
-addresses of the two bench kernels across two builds
-(`nm`/`objdump -t` on the kernel ELF, filter `tcp_checksum.*bench`) and check
-whether the slow member correlates with alignment — e.g. its hot loop crossing
-a 4 KiB host page. If it does, the fix is to force alignment on both loops
-rather than to chase the benchmark. If it does not, the next suspect is the
-TCG translation cache and the honest resolution is to mark the pair as
-TCG-unreliable and exclude it from comparator diffs.
+**Diagnostic plan.**
 
-**Broader finding this exposes — `mean/min` is a better contamination
-discriminator than the canary.** The canary called run `5a2002bac` clean
-(spread 2% over 10 samples). In that same run `crypto_ed25519_verify` had
-mean 323487129 against min 31875588 — a **10.15x** ratio — and
-`context_switch` had 10.62x in the run before it. The canary samples the host
-between benchmarks; `mean/min` measures dispersion *inside* the benchmark that
-was actually running, which is where the burst lands. The data is already
-being recorded per benchmark and needs no cross-record history to interpret,
-so a per-benchmark "this number is suspect" flag is available now and is
-strictly more sensitive than the suite-wide canary flag. Note this does not
-retire the canary: `mean/min` cannot see a *sustained* load change that slows
-every iteration equally, which is precisely the case the canary endpoints
-catch. They are complementary, and the comparator should consult both.
+1. **Re-run `--bench` on an unchanged tree** (above). Decides between the two
+   hypotheses; everything below is only worth doing if hypothesis 1 survives.
+2. If it does: check alignment. The symbols are present and reachable without
+   installing binutils — `llvm-nm` / `llvm-objdump` ship with the rustup
+   toolchain at
+   `~/.rustup/toolchains/stable-x86_64-pc-windows-gnu/lib/rustlib/x86_64-pc-windows-gnu/bin/`.
+   On the `5a2002bac` binary the two kernels sit at `ffffffff805d7130`
+   (`tcp_checksum_bench`) and `ffffffff805d9df0` (`tcp_checksum_v6_bench`).
+   Compare against a build where the other member is elevated and see whether
+   the elevated one correlates with its hot loop crossing a 4 KiB boundary. If
+   it does, the fix is to align both loops rather than chase the benchmark.
+3. If neither hypothesis holds, mark the pair TCG-unreliable and exclude it
+   from comparator diffs.
+
+**Incidental finding from the disassembly: the benchmarked kernel is built
+without optimisation.** `tcp_checksum_bench` spills every intermediate to the
+stack (`movl %eax, -0x64(%rbp)` after each add). That is consistent with the
+whole suite sitting ~10x over targets that were set from optimised reference
+implementations, and it means the absolute numbers measure debug codegen under
+TCG, not the code that would ship. Worth confirming against the boot-test
+build flags and recording separately — it is a much larger effect than the
+1.7x this entry is about, and it is not this entry's subject.
+
+**Related observation — `mean/min` sees contamination the canary missed.** The
+canary called run `5a2002bac` clean (spread 2% over 10 samples). In that same
+run `crypto_ed25519_verify` had mean 323487129 against min 31875588, a
+**10.15x** ratio; `context_switch` had 10.62x in the run before it. The canary
+samples the host *between* benchmarks; `mean/min` measures dispersion *inside*
+the benchmark that was running, so it catches a burst that fell between two
+canary samples. The data is already recorded per benchmark and needs no
+cross-record history to interpret, so a per-benchmark "this number is suspect"
+flag is implementable now.
+
+Neither measure dominates the other, and the reason is exactly the failure
+above: `mean/min` is blind to any slowdown that covers a whole benchmark
+uniformly — including a sustained load change, which is what the canary
+endpoints exist to catch — while the canary is blind to bursts shorter than
+its sampling interval. The comparator should consult both, and should treat
+"canary quiet **and** `mean/min` normal" as the only combination that
+licenses reading a number as real.

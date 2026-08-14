@@ -553,6 +553,42 @@ pub fn get_global_scale() -> f32 {
 mod tests {
     use super::*;
 
+    /// Serialises the tests that touch [`SCALE_TABLE`].
+    ///
+    /// The scale table is process-wide and cargo runs tests in parallel
+    /// threads, so two tests that each set the global scale and then assert on
+    /// it will intermittently read the other's value — `per_monitor_clear_falls_back`
+    /// sets 1.5 and any concurrent `set_global_scale(1.0)` makes it fail. That
+    /// is a flake in the test harness, not in the code under test, but a suite
+    /// that fails at random teaches everyone to ignore it.
+    static SCALE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Take the scale lock and restore the table when the test ends.
+    ///
+    /// Restoring on drop rather than at the end of the test body means a test
+    /// that fails an assertion — which unwinds — still leaves the table clean
+    /// for the next one, instead of turning one failure into several.
+    struct ScaleGuard(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
+
+    impl ScaleGuard {
+        fn new() -> Self {
+            // A test that panicked while holding the lock poisons it. The state
+            // it guards is restored by this guard's own `Drop` regardless, so
+            // the poison carries no information worth failing the next test
+            // over.
+            Self(SCALE_LOCK.lock().unwrap_or_else(|e| e.into_inner()))
+        }
+    }
+
+    impl Drop for ScaleGuard {
+        fn drop(&mut self) {
+            set_global_scale(1.0);
+            for monitor in 0..MAX_MONITORS {
+                set_monitor_scale(monitor, 0.0);
+            }
+        }
+    }
+
     // --- Logical <-> Physical conversions ---
 
     #[test]
@@ -814,50 +850,46 @@ mod tests {
 
     #[test]
     fn global_scale_default_is_1() {
-        // Reset to known state.
+        let _guard = ScaleGuard::new();
         set_global_scale(1.0);
         assert_eq!(get_global_scale(), 1.0);
     }
 
     #[test]
     fn set_and_get_global_scale() {
+        let _guard = ScaleGuard::new();
         set_global_scale(2.0);
         assert_eq!(get_global_scale(), 2.0);
-        // Reset
-        set_global_scale(1.0);
     }
 
     #[test]
     fn global_scale_clamped() {
+        let _guard = ScaleGuard::new();
         set_global_scale(100.0);
         assert_eq!(get_global_scale(), 8.0);
         set_global_scale(0.01);
         assert_eq!(get_global_scale(), 0.25);
-        // Reset
-        set_global_scale(1.0);
     }
 
     #[test]
     fn per_monitor_override() {
+        let _guard = ScaleGuard::new();
         set_global_scale(1.0);
         set_monitor_scale(0, 2.5);
         assert_eq!(get_effective_scale(0), 2.5);
         // Other monitors fall back to global
         set_monitor_scale(1, 0.0); // clear
         assert_eq!(get_effective_scale(1), 1.0);
-        // Cleanup
-        set_monitor_scale(0, 0.0);
     }
 
     #[test]
     fn per_monitor_clear_falls_back() {
+        let _guard = ScaleGuard::new();
         set_global_scale(1.5);
         set_monitor_scale(2, 3.0);
         assert_eq!(get_effective_scale(2), 3.0);
         set_monitor_scale(2, 0.0); // clear override
         assert_eq!(get_effective_scale(2), 1.5);
-        // Reset
-        set_global_scale(1.0);
     }
 
     // --- Geometry type conversions ---

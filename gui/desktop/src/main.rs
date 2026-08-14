@@ -148,6 +148,7 @@ use appearance::{AppearanceSettings, TaskbarStyle, TransparencyLevel};
 use guitk::color::Color;
 use guitk::event::{Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
 use guitk::render::RenderTree;
+use guitk::style::{Border, CornerRadii, Shadow};
 use launcher::{AppEntry, Category};
 
 use std::collections::BTreeMap;
@@ -196,9 +197,33 @@ fn fill(tree: &mut RenderTree, rect: Rect, color: Color) {
     tree.fill_rect(rect.x, rect.y, rect.w, rect.h, color);
 }
 
+/// Paint a rectangle with rounded corners.
+fn fill_round(tree: &mut RenderTree, rect: Rect, color: Color, radii: CornerRadii) {
+    tree.fill_rounded_rect(rect.x, rect.y, rect.w, rect.h, color, radii);
+}
+
 /// Outline a rectangle.
-fn stroke(tree: &mut RenderTree, rect: Rect, color: Color, width: f32) {
-    tree.stroke_rect(rect.x, rect.y, rect.w, rect.h, color, width);
+///
+/// There is no square-cornered counterpart because there is nothing the shell
+/// outlines that does not follow the user's corner setting: pass
+/// [`CornerRadii::ZERO`] for a square one.
+fn stroke_round(tree: &mut RenderTree, rect: Rect, color: Color, width: f32, radii: CornerRadii) {
+    tree.stroke_rounded_rect(
+        rect.x,
+        rect.y,
+        rect.w,
+        rect.h,
+        Border { width, color },
+        radii,
+    );
+}
+
+/// Cast a drop shadow under a rectangle.
+///
+/// Emitted before the surface that casts it, since the command list is painted
+/// in order.
+fn shadow(tree: &mut RenderTree, rect: Rect, radii: CornerRadii) {
+    tree.box_shadow(rect.x, rect.y, rect.w, rect.h, WINDOW_SHADOW, radii);
 }
 
 /// How many whole rows a scroll of `dy` pixels moves a list of fixed-height
@@ -262,6 +287,54 @@ const WINDOW_BUTTON_PITCH: f32 = 24.0;
 const WINDOW_BUTTON_MARGIN_RIGHT: f32 = 30.0;
 const WINDOW_BUTTON_MARGIN_TOP: f32 = 7.0;
 
+// --- Drop shadows ----------------------------------------------------------
+
+/// The shadow every floating surface casts — windows, the start menu, the
+/// Alt+Tab overlay. One shadow rather than one per surface: they are all
+/// floating the same distance above the same desktop, and shadows that
+/// disagreed about the light source would look like a rendering fault.
+const WINDOW_SHADOW: Shadow = Shadow::drop(4.0, 12.0, Color::rgba(0, 0, 0, 90));
+
+// --- Type scale ------------------------------------------------------------
+
+/// What a piece of text is *for*, which is what decides how large it is drawn.
+///
+/// Sizes are multiples of the user's chosen UI font size rather than pixel
+/// literals. A literal `13.0` at a draw call silently ignores both the font
+/// size in the appearance panel and the display scaling, so raising either one
+/// enlarges the chrome around the text and leaves the text itself behind.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TextRole {
+    /// Icon glyphs — the start button's hamburger.
+    Glyph,
+    /// A panel heading, such as the start menu's "Applications".
+    Heading,
+    /// A row in a list the user picks from.
+    Item,
+    /// Ordinary interface text: window titles, the clock.
+    Body,
+    /// Secondary text: the desktop indicator, the power label.
+    Caption,
+}
+
+impl TextRole {
+    /// Size as a multiple of the base UI font size.
+    ///
+    /// Chosen so that at the default 13pt and 100% scaling the shell draws at
+    /// very nearly the sizes it always has (20/16/14/13/11.7 px), which keeps
+    /// this a generalisation of the old literals rather than a restyle.
+    #[must_use]
+    pub fn ratio(self) -> f32 {
+        match self {
+            Self::Glyph => 1.5,
+            Self::Heading => 1.25,
+            Self::Item => 1.1,
+            Self::Body => 1.0,
+            Self::Caption => 0.9,
+        }
+    }
+}
+
 // ============================================================================
 // Window Management
 // ============================================================================
@@ -311,6 +384,11 @@ pub struct WindowGeometry {
 
 impl ManagedWindow {
     /// The window's outer rectangle, title bar included.
+    ///
+    /// The only part of a window's geometry that is the window's own: it comes
+    /// from the compositor in physical pixels and is not the shell's to scale.
+    /// Everything drawn *around* it is — see
+    /// [`window_chrome`](DesktopShell::window_chrome).
     #[must_use]
     pub fn frame_rect(&self) -> Rect {
         Rect::new(
@@ -320,54 +398,25 @@ impl ManagedWindow {
             self.height as f32,
         )
     }
+}
 
+/// Every rectangle of one window's decorations, resolved together.
+///
+/// Resolved together, and by the shell rather than by the window, because the
+/// sizes depend on the user's display scaling: a `ManagedWindow` knows where it
+/// is but not how large a title bar this desktop draws.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WindowChrome {
+    /// The whole window, decorations included.
+    pub frame: Rect,
     /// The title bar, across the top of the frame.
-    #[must_use]
-    pub fn title_bar_rect(&self) -> Rect {
-        let frame = self.frame_rect();
-        Rect::new(frame.x, frame.y, frame.w, TITLE_BAR_HEIGHT.min(frame.h))
-    }
-
-    /// The area the client owns — everything below the title bar.
-    ///
-    /// Empty rather than negative for a window shorter than its own title bar,
-    /// which [`Rect::contains`] then correctly reports as containing nothing.
-    #[must_use]
-    pub fn content_rect(&self) -> Rect {
-        let frame = self.frame_rect();
-        let top = TITLE_BAR_HEIGHT.min(frame.h);
-        Rect::new(frame.x, frame.y + top, frame.w, frame.h - top)
-    }
-
-    /// The `slot`-th title-bar button, counting right to left from the close
-    /// button at slot 0.
-    fn title_button_rect(&self, slot: usize) -> Rect {
-        let frame = self.frame_rect();
-        Rect::new(
-            frame.x + frame.w - WINDOW_BUTTON_MARGIN_RIGHT - slot as f32 * WINDOW_BUTTON_PITCH,
-            frame.y + WINDOW_BUTTON_MARGIN_TOP,
-            WINDOW_BUTTON_SIZE,
-            WINDOW_BUTTON_SIZE,
-        )
-    }
-
-    /// The close button (rightmost).
-    #[must_use]
-    pub fn close_button_rect(&self) -> Rect {
-        self.title_button_rect(0)
-    }
-
-    /// The maximize/restore button.
-    #[must_use]
-    pub fn maximize_button_rect(&self) -> Rect {
-        self.title_button_rect(1)
-    }
-
-    /// The minimize button (leftmost of the three).
-    #[must_use]
-    pub fn minimize_button_rect(&self) -> Rect {
-        self.title_button_rect(2)
-    }
+    pub title_bar: Rect,
+    /// What the client owns — everything below the title bar.
+    pub content: Rect,
+    /// The buttons, right to left.
+    pub close: Rect,
+    pub maximize: Rect,
+    pub minimize: Rect,
 }
 
 /// Window state.
@@ -751,8 +800,24 @@ impl DesktopShell {
     ///
     /// The single door through which the palette changes, so that `theme` can
     /// never be a stale derivation of some earlier `appearance`.
+    ///
+    /// Also publishes the display scaling to the toolkit, which keeps its own
+    /// process-wide scale for the widgets it draws. Without this a `guitk`
+    /// widget hosted in the shell — a dialog, a menu — would lay itself out at
+    /// 100% inside chrome drawn at 200%. The shell is the right one to publish
+    /// it: it is the process that reads the user's setting.
+    ///
+    /// The shell still scales its *own* geometry from `self.appearance` rather
+    /// than reading the value back out of the toolkit. Geometry that depended
+    /// on process-global mutable state would be geometry that two shells (or
+    /// two tests) in one process could not disagree about safely — and that
+    /// same property is why the publish itself has no unit test: every test
+    /// that builds a shell would be writing the one value an assertion could
+    /// read. It is one line, and it is here rather than at the call sites so
+    /// that a later appearance change cannot forget it.
     pub fn set_appearance(&mut self, appearance: AppearanceSettings) {
         self.theme = DesktopTheme::from_settings(&appearance);
+        guitk::scaling::set_global_scale(appearance.scale_factor());
         self.appearance = appearance;
     }
 
@@ -773,43 +838,88 @@ impl DesktopShell {
     }
 
     /// Usable area for windows (excluding taskbar).
+    ///
+    /// The taskbar is subtracted at its drawn thickness, not its logical
+    /// height: a maximized window that stopped at the unscaled height would sit
+    /// under the bar on any display scaled above 100%.
     pub fn work_area(&self) -> (i32, i32, u32, u32) {
-        (
-            0,
-            0,
-            self.screen_width,
-            self.screen_height.saturating_sub(self.taskbar_height),
-        )
+        let bar = self.taskbar_rect();
+        (0, 0, self.screen_width, bar.y.max(0.0) as u32)
     }
 
     // ======================================================================
     // Chrome geometry
     //
     // Every rectangle the shell draws or clicks comes from here. See [`Rect`].
+    //
+    // The constants above are *logical* pixels — the size the chrome would be
+    // on a 100%-scaling display — and every one of them passes through
+    // [`scale`](Self::scale) on the way out. Only measurements that come from
+    // the compositor (the screen size, a window's frame) are already physical
+    // and must not be scaled a second time.
     // ======================================================================
+
+    /// A logical length in physical pixels, at the user's display scaling.
+    #[must_use]
+    pub fn scale(&self, logical: f32) -> f32 {
+        logical * self.appearance.scale_factor()
+    }
+
+    /// The size to draw text of a given role at, in physical pixels.
+    #[must_use]
+    pub fn font_size(&self, role: TextRole) -> f32 {
+        self.scale(self.appearance.fonts.ui_size * role.ratio())
+    }
+
+    /// The corner rounding the user asked for, in physical pixels.
+    ///
+    /// Scaled like every other length: a 8px radius that stayed 8px at 200%
+    /// would look like a sharper corner on the larger chrome, not the same one.
+    #[must_use]
+    pub fn corner_radii(&self) -> CornerRadii {
+        CornerRadii::all(self.scale(self.appearance.window_corners.radius()))
+    }
+
+    /// [`corner_radii`](Self::corner_radii), rounded across the top only — for
+    /// a title bar, which shares its lower edge with the client area.
+    #[must_use]
+    pub fn top_corner_radii(&self) -> CornerRadii {
+        CornerRadii::top(self.scale(self.appearance.window_corners.radius()))
+    }
 
     /// The taskbar panel.
     #[must_use]
     pub fn taskbar_rect(&self) -> Rect {
+        let height = self.taskbar_thickness();
         Rect::new(
             0.0,
-            self.screen_height.saturating_sub(self.taskbar_height) as f32,
+            (self.screen_height as f32 - height).max(0.0),
             self.screen_width as f32,
-            self.taskbar_height as f32,
+            height.min(self.screen_height as f32),
         )
+    }
+
+    /// How thick the taskbar is on screen.
+    ///
+    /// [`taskbar_height`](Self::taskbar_height) is a logical height — what the
+    /// user (or the taskbar settings panel) asked for — so the bar grows with
+    /// the display scaling like the rest of the chrome.
+    #[must_use]
+    pub fn taskbar_thickness(&self) -> f32 {
+        self.scale(self.taskbar_height as f32)
     }
 
     /// The start button at the left end of the taskbar.
     #[must_use]
     pub fn start_button_rect(&self) -> Rect {
         let bar = self.taskbar_rect();
-        Rect::new(bar.x, bar.y, START_BUTTON_WIDTH.min(bar.w), bar.h)
+        Rect::new(bar.x, bar.y, self.scale(START_BUTTON_WIDTH).min(bar.w), bar.h)
     }
 
     /// Where the system tray begins.
     #[must_use]
     pub fn tray_x(&self) -> f32 {
-        self.taskbar_rect().w - TRAY_WIDTH
+        self.taskbar_rect().w - self.scale(TRAY_WIDTH)
     }
 
     /// How wide each taskbar window button is.
@@ -818,9 +928,10 @@ impl DesktopShell {
     /// in either the renderer or the hit test.
     fn taskbar_button_width(&self) -> f32 {
         let bar = self.taskbar_rect();
-        let available = (bar.w - START_BUTTON_WIDTH - TRAY_RESERVE).max(0.0);
+        let available =
+            (bar.w - self.scale(START_BUTTON_WIDTH) - self.scale(TRAY_RESERVE)).max(0.0);
         let count = self.visible_windows().len().max(1) as f32;
-        TASKBAR_BUTTON_MAX_WIDTH.min(available / count)
+        self.scale(TASKBAR_BUTTON_MAX_WIDTH).min(available / count)
     }
 
     /// The taskbar button for the `index`-th visible window.
@@ -828,38 +939,47 @@ impl DesktopShell {
     pub fn taskbar_button_rect(&self, index: usize) -> Rect {
         let bar = self.taskbar_rect();
         let w = self.taskbar_button_width();
+        let inset = self.scale(TASKBAR_BUTTON_INSET).min(bar.h / 2.0);
         let x = bar.x
-            + START_BUTTON_WIDTH
-            + TASKBAR_BUTTON_START_GAP
-            + index as f32 * (w + TASKBAR_BUTTON_GAP);
-        Rect::new(
-            x,
-            bar.y + TASKBAR_BUTTON_INSET,
-            w,
-            bar.h - TASKBAR_BUTTON_INSET * 2.0,
-        )
+            + self.scale(START_BUTTON_WIDTH)
+            + self.scale(TASKBAR_BUTTON_START_GAP)
+            + index as f32 * (w + self.scale(TASKBAR_BUTTON_GAP));
+        Rect::new(x, bar.y + inset, w, bar.h - inset * 2.0)
     }
 
     /// The start menu panel, anchored to the start button's corner.
+    ///
+    /// Clamped to the room above the taskbar and to the screen's width. At 200%
+    /// scaling the menu's nominal height is 800px, which on an 800px screen
+    /// would start above the top edge — and a row drawn off-screen cannot be
+    /// clicked at all, which is the same unreachable-program bug that
+    /// [`start_menu_scroll`](Self::start_menu_scroll) exists to prevent. A
+    /// shorter menu simply shows fewer rows and scrolls for the rest.
     #[must_use]
     pub fn start_menu_rect(&self) -> Rect {
         let bar = self.taskbar_rect();
-        Rect::new(
-            0.0,
-            bar.y - START_MENU_HEIGHT,
-            START_MENU_WIDTH,
-            START_MENU_HEIGHT,
-        )
+        let h = self.scale(START_MENU_HEIGHT).min(bar.y.max(0.0));
+        let w = self
+            .scale(START_MENU_WIDTH)
+            .min(self.screen_width as f32)
+            .max(0.0);
+        Rect::new(0.0, bar.y - h, w, h)
     }
 
     /// How many application rows fit between the heading and the power options.
+    ///
+    /// Scale-invariant: it divides one scaled length by another, so the same
+    /// programs are on screen at 200% as at 100% — they are simply larger.
     #[must_use]
     pub fn start_menu_visible_rows(&self) -> usize {
-        let usable = self.start_menu_rect().h - START_MENU_TOP_PADDING - START_MENU_FOOTER;
-        if usable < START_MENU_ROW_HEIGHT {
+        let usable = self.start_menu_rect().h
+            - self.scale(START_MENU_TOP_PADDING)
+            - self.scale(START_MENU_FOOTER);
+        let row = self.scale(START_MENU_ROW_HEIGHT);
+        if row <= 0.0 || usable < row {
             return 0;
         }
-        (usable / START_MENU_ROW_HEIGHT) as usize
+        (usable / row) as usize
     }
 
     /// The `row`-th drawn row of the start menu.
@@ -871,12 +991,45 @@ impl DesktopShell {
     #[must_use]
     pub fn start_menu_row_rect(&self, row: usize) -> Rect {
         let menu = self.start_menu_rect();
+        let height = self.scale(START_MENU_ROW_HEIGHT);
         Rect::new(
             menu.x,
-            menu.y + START_MENU_TOP_PADDING + row as f32 * START_MENU_ROW_HEIGHT,
+            menu.y + self.scale(START_MENU_TOP_PADDING) + row as f32 * height,
             menu.w,
-            START_MENU_ROW_HEIGHT,
+            height,
         )
+    }
+
+    /// Every rectangle of one window's decorations.
+    ///
+    /// The shell's, not the window's, because the sizes depend on the display
+    /// scaling — see [`WindowChrome`].
+    #[must_use]
+    pub fn window_chrome(&self, window: &ManagedWindow) -> WindowChrome {
+        let frame = window.frame_rect();
+
+        // A window shorter than the title bar it would be given gets a title
+        // bar the height of the window and an empty content area, rather than
+        // a content rect of negative height that `contains` would answer for
+        // no point at all — or worse, that a renderer would draw inverted.
+        let bar_h = self.scale(TITLE_BAR_HEIGHT).min(frame.h);
+        let title_bar = Rect::new(frame.x, frame.y, frame.w, bar_h);
+        let content = Rect::new(frame.x, frame.y + bar_h, frame.w, frame.h - bar_h);
+
+        let size = self.scale(WINDOW_BUTTON_SIZE);
+        let pitch = self.scale(WINDOW_BUTTON_PITCH);
+        let button_y = frame.y + self.scale(WINDOW_BUTTON_MARGIN_TOP);
+        let close_x = frame.x + frame.w - self.scale(WINDOW_BUTTON_MARGIN_RIGHT);
+        let button = |slot: f32| Rect::new(close_x - slot * pitch, button_y, size, size);
+
+        WindowChrome {
+            frame,
+            title_bar,
+            content,
+            close: button(0.0),
+            maximize: button(1.0),
+            minimize: button(2.0),
+        }
     }
 
     /// The programs the start menu lists, in menu order.
@@ -970,19 +1123,20 @@ impl DesktopShell {
         // `visible_windows` is sorted bottom-to-top, and the topmost window is
         // the one that receives the click.
         for window in self.visible_windows().into_iter().rev() {
-            if !window.frame_rect().contains(x, y) {
+            let chrome = self.window_chrome(window);
+            if !chrome.frame.contains(x, y) {
                 continue;
             }
-            if window.close_button_rect().contains(x, y) {
+            if chrome.close.contains(x, y) {
                 return Hit::WindowClose(window.id);
             }
-            if window.maximize_button_rect().contains(x, y) {
+            if chrome.maximize.contains(x, y) {
                 return Hit::WindowMaximize(window.id);
             }
-            if window.minimize_button_rect().contains(x, y) {
+            if chrome.minimize.contains(x, y) {
                 return Hit::WindowMinimize(window.id);
             }
-            if window.title_bar_rect().contains(x, y) {
+            if chrome.title_bar.contains(x, y) {
                 return Hit::WindowTitleBar(window.id);
             }
             return Hit::WindowContent(window.id);
@@ -1503,14 +1657,16 @@ impl DesktopShell {
         };
         fill(&mut tree, start, start_bg);
         tree.text(
-            start.x + 12.0,
-            start.y + 12.0,
+            start.x + self.scale(12.0),
+            start.y + self.scale(12.0),
             "\u{2261}", // hamburger menu icon
             self.theme.taskbar_accent,
-            20.0,
+            self.font_size(TextRole::Glyph),
         );
 
-        // Window buttons
+        // Window buttons. Rounded like the windows they stand for — the corner
+        // style is a property of the desktop, not of one surface in it.
+        let radii = self.corner_radii();
         for (index, window) in self.visible_windows().iter().enumerate() {
             let button = self.taskbar_button_rect(index);
 
@@ -1520,17 +1676,20 @@ impl DesktopShell {
                 self.theme.taskbar_bg
             };
 
-            fill(&mut tree, button, bg);
+            fill_round(&mut tree, button, bg, radii);
 
-            // Window title (truncated)
-            let max_chars = (button.w / 8.0) as usize;
+            // Window title, truncated to what the button can hold. The
+            // per-character estimate scales with the font, or a larger font
+            // would be cut at the same character count and overflow.
+            let title_size = self.font_size(TextRole::Caption);
+            let max_chars = (button.w / (title_size * 0.62)).max(0.0) as usize;
             let title: String = window.title.chars().take(max_chars).collect();
             tree.text(
-                button.x + 8.0,
-                button.y + 8.0,
+                button.x + self.scale(8.0),
+                button.y + self.scale(8.0),
                 &title,
                 self.theme.taskbar_fg,
-                12.0,
+                title_size,
             );
         }
 
@@ -1540,21 +1699,21 @@ impl DesktopShell {
         // Clock
         let time_str = self.current_time_string();
         tree.text(
-            tray_x + 100.0,
-            bar.y + 12.0,
+            tray_x + self.scale(100.0),
+            bar.y + self.scale(12.0),
             &time_str,
             self.theme.taskbar_fg,
-            13.0,
+            self.font_size(TextRole::Body),
         );
 
         // Desktop indicator
         let desk_str = format!("Desktop {}", self.current_desktop + 1);
         tree.text(
-            tray_x + 8.0,
-            bar.y + 12.0,
+            tray_x + self.scale(8.0),
+            bar.y + self.scale(12.0),
             &desk_str,
             self.theme.taskbar_fg,
-            11.0,
+            self.font_size(TextRole::Caption),
         );
 
         tree
@@ -1564,8 +1723,27 @@ impl DesktopShell {
     pub fn render_window_decorations(&self) -> RenderTree {
         let mut tree = RenderTree::new();
 
+        let radii = self.corner_radii();
+        let top_radii = self.top_corner_radii();
+        // The buttons are round when the windows are: a circular close button
+        // beside a square corner is the mismatch, not the consistency.
+        let button_radii = CornerRadii::all(radii.top_left.min(self.scale(WINDOW_BUTTON_SIZE) / 2.0));
+
         for window in self.visible_windows() {
-            let title_bar = window.title_bar_rect();
+            let chrome = self.window_chrome(window);
+
+            // A shadow under the whole frame, before anything that casts it.
+            // Maximized and fullscreen windows have no edge to cast from —
+            // there is nothing beside them for a shadow to fall on, and one
+            // drawn anyway would bleed over the screen border.
+            if self.appearance.drop_shadows
+                && !matches!(
+                    window.state,
+                    WindowState::Maximized | WindowState::Fullscreen
+                )
+            {
+                shadow(&mut tree, chrome.frame, radii);
+            }
 
             // Title bar. The foreground travels with the background: with
             // accented title bars the two differ by more than a shade, so one
@@ -1579,33 +1757,52 @@ impl DesktopShell {
                 )
             };
 
-            fill(&mut tree, title_bar, title_bg);
+            fill_round(&mut tree, chrome.title_bar, title_bg, top_radii);
 
             // Title text
             let title: String = window.title.chars().take(40).collect();
-            tree.text(title_bar.x + 12.0, title_bar.y + 8.0, &title, title_fg, 13.0);
+            tree.text(
+                chrome.title_bar.x + self.scale(12.0),
+                chrome.title_bar.y + self.scale(8.0),
+                &title,
+                title_fg,
+                self.font_size(TextRole::Body),
+            );
 
             // Window control buttons, right to left.
-            let close = window.close_button_rect();
-            fill(&mut tree, close, Color::from_hex(0xF38BA8));
-            tree.text(close.x + 3.0, close.y + 1.0, "x", Color::WHITE, 12.0);
-            fill(
+            fill_round(
                 &mut tree,
-                window.maximize_button_rect(),
-                Color::from_hex(0xA6E3A1),
+                chrome.close,
+                Color::from_hex(0xF38BA8),
+                button_radii,
             );
-            fill(
+            tree.text(
+                chrome.close.x + self.scale(3.0),
+                chrome.close.y + self.scale(1.0),
+                "x",
+                Color::WHITE,
+                self.font_size(TextRole::Caption),
+            );
+            fill_round(
                 &mut tree,
-                window.minimize_button_rect(),
+                chrome.maximize,
+                Color::from_hex(0xA6E3A1),
+                button_radii,
+            );
+            fill_round(
+                &mut tree,
+                chrome.minimize,
                 Color::from_hex(0xF9E2AF),
+                button_radii,
             );
 
             // Border
-            stroke(
+            stroke_round(
                 &mut tree,
-                window.frame_rect(),
+                chrome.frame,
                 self.theme.window_border_color,
-                1.0,
+                self.scale(1.0),
+                radii,
             );
         }
 
@@ -1626,49 +1823,57 @@ impl DesktopShell {
         }
 
         // Overlay background
-        let overlay_w = 400.0f32.min(self.screen_width as f32 - 100.0);
-        let overlay_h = 80.0;
+        let overlay_w = self
+            .scale(400.0)
+            .min(self.screen_width as f32 - self.scale(100.0))
+            .max(0.0);
+        let overlay_h = self.scale(80.0);
         let overlay_x = (self.screen_width as f32 - overlay_w) / 2.0;
         let overlay_y = (self.screen_height as f32 - overlay_h) / 2.0;
+        let overlay = Rect::new(overlay_x, overlay_y, overlay_w, overlay_h);
+        let radii = self.corner_radii();
 
-        tree.fill_rect(
-            overlay_x,
-            overlay_y,
-            overlay_w,
-            overlay_h,
-            self.theme.overlay_bg,
-        );
-        tree.stroke_rect(
-            overlay_x,
-            overlay_y,
-            overlay_w,
-            overlay_h,
+        // The switcher floats over whatever is behind it, so it casts a shadow
+        // for the same reason a window does.
+        if self.appearance.drop_shadows {
+            shadow(&mut tree, overlay, radii);
+        }
+        fill_round(&mut tree, overlay, self.theme.overlay_bg, radii);
+        stroke_round(
+            &mut tree,
+            overlay,
             self.theme.accent_color,
-            2.0,
+            self.scale(2.0),
+            radii,
         );
 
         // Window entries
         let item_w = overlay_w / windows.len().max(1) as f32;
+        let inset = self.scale(4.0);
         for (i, window) in windows.iter().enumerate() {
             let ix = overlay_x + i as f32 * item_w;
 
             if i == self.alt_tab_index {
-                tree.fill_rect(
-                    ix + 4.0,
-                    overlay_y + 4.0,
-                    item_w - 8.0,
-                    overlay_h - 8.0,
+                fill_round(
+                    &mut tree,
+                    Rect::new(
+                        ix + inset,
+                        overlay_y + inset,
+                        (item_w - inset * 2.0).max(0.0),
+                        (overlay_h - inset * 2.0).max(0.0),
+                    ),
                     self.theme.overlay_selected_bg,
+                    radii,
                 );
             }
 
             let title: String = window.title.chars().take(12).collect();
             tree.text(
-                ix + 10.0,
-                overlay_y + overlay_h / 2.0 - 6.0,
+                ix + self.scale(10.0),
+                overlay_y + overlay_h / 2.0 - self.scale(6.0),
                 &title,
                 self.theme.overlay_fg,
-                12.0,
+                self.font_size(TextRole::Caption),
             );
         }
 
@@ -1683,18 +1888,28 @@ impl DesktopShell {
 
         let mut tree = RenderTree::new();
         let menu = self.start_menu_rect();
+        let radii = self.corner_radii();
 
         // Background
-        fill(&mut tree, menu, self.theme.start_menu_bg);
-        stroke(&mut tree, menu, self.theme.window_border_color, 1.0);
+        if self.appearance.drop_shadows {
+            shadow(&mut tree, menu, radii);
+        }
+        fill_round(&mut tree, menu, self.theme.start_menu_bg, radii);
+        stroke_round(
+            &mut tree,
+            menu,
+            self.theme.window_border_color,
+            self.scale(1.0),
+            radii,
+        );
 
         // Title
         tree.text(
-            menu.x + 16.0,
-            menu.y + 16.0,
+            menu.x + self.scale(16.0),
+            menu.y + self.scale(16.0),
             "Applications",
             self.theme.accent_color,
-            16.0,
+            self.font_size(TextRole::Heading),
         );
 
         // Application entries. Which entry a row shows is asked of
@@ -1712,11 +1927,11 @@ impl DesktopShell {
             };
             let rect = self.start_menu_row_rect(row);
             tree.text(
-                rect.x + 24.0,
-                rect.y + 8.0,
+                rect.x + self.scale(24.0),
+                rect.y + self.scale(8.0),
                 &entry.name,
                 self.theme.start_menu_fg,
-                14.0,
+                self.font_size(TextRole::Item),
             );
         }
 
@@ -1724,30 +1939,33 @@ impl DesktopShell {
         // so. Sized and placed in proportion to the part of the list on screen.
         let total = entries.len();
         if total > rows && rows > 0 {
+            let row_h = self.scale(START_MENU_ROW_HEIGHT);
+            let bar_w = self.scale(START_MENU_SCROLLBAR_WIDTH);
             let track_top = self.start_menu_row_rect(0).y;
-            let track_h = rows as f32 * START_MENU_ROW_HEIGHT;
-            let thumb_h = (track_h * rows as f32 / total as f32).max(START_MENU_ROW_HEIGHT / 2.0);
+            let track_h = rows as f32 * row_h;
+            let thumb_h = (track_h * rows as f32 / total as f32).max(row_h / 2.0);
             let max_scroll = self.start_menu_max_scroll().max(1) as f32;
             let progress = self.start_menu_scroll as f32 / max_scroll;
-            fill(
+            fill_round(
                 &mut tree,
                 Rect::new(
-                    menu.x + menu.w - START_MENU_SCROLLBAR_WIDTH - 2.0,
+                    menu.x + menu.w - bar_w - self.scale(2.0),
                     track_top + (track_h - thumb_h) * progress,
-                    START_MENU_SCROLLBAR_WIDTH,
+                    bar_w,
                     thumb_h,
                 ),
                 self.theme.accent_color,
+                CornerRadii::all(bar_w / 2.0),
             );
         }
 
         // Power options at bottom
         tree.text(
-            menu.x + 16.0,
-            menu.y + menu.h - 40.0,
+            menu.x + self.scale(16.0),
+            menu.y + menu.h - self.scale(40.0),
             "Power",
             Color::GRAY,
-            12.0,
+            self.font_size(TextRole::Caption),
         );
 
         Some(tree)

@@ -6,7 +6,7 @@
 //! graphics API.
 
 use crate::color::Color;
-use crate::style::CornerRadii;
+use crate::style::{Border, CornerRadii, Shadow};
 
 /// A render command — one drawing primitive.
 #[derive(Clone, Debug)]
@@ -175,6 +175,59 @@ impl RenderTree {
             color,
             line_width,
             corner_radii: CornerRadii::ZERO,
+        });
+    }
+
+    /// Outline a rounded rectangle.
+    ///
+    /// Takes the [`Border`] whole rather than a colour and a width side by
+    /// side: a stroke's colour and thickness are one decision, and the pair is
+    /// what the style system already hands around.
+    pub fn stroke_rounded_rect(
+        &mut self,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        border: Border,
+        radii: CornerRadii,
+    ) {
+        self.push(RenderCommand::StrokeRect {
+            x,
+            y,
+            width,
+            height,
+            color: border.color,
+            line_width: border.width,
+            corner_radii: radii,
+        });
+    }
+
+    /// A drop shadow cast by the rectangle `(x, y, width, height)`.
+    ///
+    /// The shadow is emitted *before* the surface that casts it, since the
+    /// command list is painted in order — a shadow pushed afterwards would be
+    /// drawn on top of the thing it is supposed to sit behind.
+    pub fn box_shadow(
+        &mut self,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        shadow: Shadow,
+        radii: CornerRadii,
+    ) {
+        self.push(RenderCommand::BoxShadow {
+            x,
+            y,
+            width,
+            height,
+            offset_x: shadow.offset_x,
+            offset_y: shadow.offset_y,
+            blur: shadow.blur,
+            spread: shadow.spread,
+            color: shadow.color,
+            corner_radii: radii,
         });
     }
 

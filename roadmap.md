@@ -347,13 +347,19 @@ Roadmap:
   form, as two layers so that canonically equivalent spellings render
   identically (§410). The same sweep found symbol-encoded `cmap` subtables
   going unread, which had made every string in Wingdings and four other
-  faces a row of empty boxes. Agreement with HarfBuzz over the corpus is
-  now 9368/10008 runs, and every remaining disagreement is a documented
-  deliberate divergence. Next unblocked step is the rest of shaping: no
-  script/language selection (`TD-GSUB-APPLIES-EVERY-SCRIPTS-FEATURES`), no
-  Alternate Substitution (GSUB 3), no mark-to-ligature attachment
-  (GPOS 5), no bidi, no complex-script reordering. Vello itself waits on
-  `[A]`'s GPU driver.
+  faces a row of empty boxes. Script selection done: features are chosen
+  from the ScriptList for the run's own script rather than by tag from the
+  FeatureList, so a face's Arabic rules can no longer rewrite Latin text —
+  which is what Calibri's `calt` had been doing to the slash in `1/2` and
+  Ebrima's `ccmp` to the space in English prose. `locl` became safe to read
+  in the same change (§411). Agreement with HarfBuzz over an 18-string
+  corpus is 9066/10008 runs, and every remaining disagreement is either a
+  documented deliberate divergence or a shaper not yet written. Next
+  unblocked step is the rest of shaping: no Arabic joining or Indic
+  reordering (`TD-FONT-HAS-NO-JOINING-OR-REORDERING-SHAPER`), no language
+  selection (`TD-FONT-IGNORES-LANGSYS-OVERRIDES`), no Alternate
+  Substitution (GSUB 3), no mark-to-ligature attachment (GPOS 5), no bidi.
+  Vello itself waits on `[A]`'s GPU driver.
 - `[C]` Wayland-inspired compositor: GPU acceleration, currently a software
   rasterizer (lines ~4605, ~4619)
 - `[C]` Video-encoded capture fallback, H.264/VP9 (lines ~4623, ~5060)

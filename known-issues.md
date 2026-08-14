@@ -43382,7 +43382,7 @@ boots (128/128 total) keep them closed.  See F6 and F7 in Fixed Bugs.
 The two items discovered 2026-06-10 — quota Test 5 and FS interceptor
 deny — are now fixed; see F8 and F9.)_
 
-### B-FONT-CALIBRI-SHAPES-A-FRACTION-SLASH-DIFFERENTLY-FROM-HARFBUZZ. Three faces disagree by one glyph on `1/2` — 2026-08-14 — OPEN
+### B-FONT-CALIBRI-SHAPES-A-FRACTION-SLASH-DIFFERENTLY-FROM-HARFBUZZ. Three faces disagree by one glyph on `1/2` — 2026-08-14 — ✅ FIXED 2026-08-14 (`gui/font/src/otl.rs`, `gui/font/src/gsub.rs`)
 
 **Where:** `gui/font/src/gsub.rs`, the substitution pass; the disagreement is
 in whichever lookup rewrites `/` (or the digits around it) in Calibri's
@@ -43417,6 +43417,24 @@ apply that it does not), and either implement the missing type or fix the
 rule ordering. Then add the pair to
 `installed_fonts_reach_lookups_past_the_subtable_budget`'s table of faces
 with known answers.
+
+**What it actually was.** Not a Calibri quirk and not a missing lookup type:
+the shaper was applying another script's rules. Glyph 877 is produced by
+`GSUB` lookup 92, which is reached only by `calt` feature 7 and `rclt` feature
+153, both registered under **`arab`**. No `latn` feature reaches it. The
+FeatureList-first walk matched on the tag `calt` alone and so ran Calibri's
+Arabic contextual alternates over a Latin string, rewriting its slash.
+
+**Fixed by** the script-selection change (design-decisions.md §411): the walk
+now starts at the ScriptList, and a Latin run only sees features the `latn`
+ScriptRecord selects. All three faces now shape `1/2` as `[1005, 876, 1006]`,
+byte-identical to HarfBuzz, and the string has left the sweep report entirely.
+
+**Lesson for the next one.** The entry above guessed at causes inside Calibri
+(alternate substitution, rule ordering, fraction slash versus solidus) and all
+of them were wrong, because the fault was not in the face. When an oracle
+disagreement is concentrated in one *family*, ask which script the offending
+lookup is filed under before asking what the lookup does.
 
 
 ---
@@ -58844,7 +58862,7 @@ animating.
 `gui/desktop/src/main.rs` — `DesktopShell::render_*`;
 `gui/desktop/src/icons.rs`, `gui/desktop/src/animations.rs`.
 
-## TD-GSUB-APPLIES-EVERY-SCRIPTS-FEATURES
+## TD-GSUB-APPLIES-EVERY-SCRIPTS-FEATURES — ✅ FIXED 2026-08-14
 
 **What.** The `GSUB`/`GPOS` walk in `gui/font/src/otl.rs` starts at the
 FeatureList and takes *every* feature carrying a wanted tag, rather than
@@ -58894,3 +58912,176 @@ ligature is correct.
 the module doc's "What is not here"); `gui/font/src/gsub.rs` — the feature tag
 list in `Substitutions::parse`; `gui/font/tests/host_fonts.rs` —
 `installed_fonts_leave_plain_latin_alone`.
+
+**Fixed 2026-08-14** (commit `6e0746636`), both parts, as designed above and
+recorded in design-decisions.md §411.
+
+1. `ByScript` in `otl.rs` walks the ScriptList, resolves every script the face
+   registers once at parse time, and shares the decoded lookups keyed by
+   LookupList index. `Substitutions::apply` takes the run's script and binary
+   searches for it, falling back `dev2`→`deva`→`DFLT`→`dflt`.
+2. `gui/font/src/script.rs` carries the Unicode Script property (generated
+   into `script_tables.rs` from `fontTools.unicodedata`) and `script::runs`
+   splits a piece list into maximal same-script stretches. The split happens
+   in `ScaledFont::shape` *before* substitution, while glyphs are still one
+   per piece — after anything ligates, a boundary counted in pieces is no
+   longer a boundary counted in glyphs.
+
+Ebrima no longer substitutes the space, and the same change fixed
+`B-FONT-CALIBRI-SHAPES-A-FRACTION-SLASH-DIFFERENTLY-FROM-HARFBUZZ`, whose
+cause turned out to be identical.
+
+**The prediction in this entry was wrong, and the correction is the
+interesting part.** It said the plain-Latin count "should drop from eight to
+the six Linux Libertine files". It is *nine*, and all three non-Libertine
+faces are correct: `segoesc`/`segoescb` have genuine Latin `calt`, and
+`SansSerifCollection` maps `space` through its Latin `locl` — a feature this
+crate had been skipping, and which was only safe to add once features were
+script-scoped. All nine now agree with HarfBuzz glyph for glyph. The test's
+bound is a proportion, not a list, which is why it kept working; a hard-coded
+expected count would have had to be relaxed for a change that made the shaper
+*more* correct.
+
+**Successors.** Four narrower gaps remain and are filed separately:
+`TD-FONT-IGNORES-LANGSYS-OVERRIDES`,
+`TD-GPOS-APPLIES-EVERY-SCRIPTS-FEATURES`,
+`TD-FONT-SCRIPT-RUNS-IGNORE-SCRIPT-EXTENSIONS` and
+`TD-FONT-HAS-NO-JOINING-OR-REORDERING-SHAPER`.
+
+## TD-FONT-IGNORES-LANGSYS-OVERRIDES
+
+**What.** `otl::select` reads each ScriptRecord's DefaultLangSys and ignores
+its LangSysRecords entirely. The per-language overrides — Turkish dotless `i`
+under `TRK `, Serbian Cyrillic italic letterforms under `SRB `, Moldovan
+comma-below under `MOL ` — are never reached, and a face whose *only* route to
+a feature is a language system contributes nothing at all.
+
+**Why it bites.** It is invisible until it is not. A Turkish reader gets the
+wrong dot on `i`/`ı`; a Serbian reader gets Russian italics for бгпт. Both are
+the kind of wrongness a native reader notices immediately and nobody else ever
+does.
+
+**Why it is filed rather than fixed.** There is nothing to select *with*.
+Language is a property of the text's provenance, not of its characters — the
+same Cyrillic codepoints are Serbian or Russian depending on who typed them —
+so it cannot be derived the way script is. It needs a language carried on the
+text down to `ScaledFont::shape`, which means an API change reaching the
+toolkit and the locale system, neither of which has a language to hand yet.
+
+**Proper fix.** Add an optional BCP 47 language to the shaping call, map it to
+an OpenType language system tag (the registry is a fixed table, `tr` → `TRK `,
+`sr` → `SRB `), and have `select` prefer that LangSysRecord over the
+DefaultLangSys. Default stays "no language", which is what every shaper does
+when not told and what this crate does now — so the change is additive and
+cannot regress text that names no language.
+
+**Reproduce.** `gsub::tests::a_feature_only_a_language_system_reaches_is_not_applied`
+pins the current behaviour: a `locl` reachable only through `TRK ` yields no
+`Substitutions` at all.
+
+**Where.** `gui/font/src/otl.rs` — `select`, `LangSys`, and the module doc's
+"What is not here".
+
+## TD-GPOS-APPLIES-EVERY-SCRIPTS-FEATURES
+
+**What.** The `GSUB` half of the table walk now selects features by the run's
+script. The `GPOS` half does not: `otl::feature_subtables` takes the union over
+every script the face registers, which is the behaviour
+`TD-GSUB-APPLIES-EVERY-SCRIPTS-FEATURES` was filed against.
+
+**Why this is a smaller problem than it sounds.** `GPOS` only *moves* glyphs;
+it cannot change what the text says. And every positioning subtable is gated on
+glyph coverage, so a face's Arabic `kern` does not cover Latin glyphs and its
+pairs never fire on a Latin run. The failure mode is therefore a wasted
+coverage lookup, not a wrong glyph — unlike `GSUB`, where the same fault
+rewrote Calibri's slash.
+
+**Why it is filed rather than fixed.** `GPOS` is reached through
+`ScaledFont::kern(left, right)`, a public API handed two glyph ids with no run,
+no string and no script behind them. There is nothing to select with without
+changing that signature, and the signature is what the layout code wants: it
+asks about a pair while walking a shaped run it has already produced.
+
+**How it could actually bite.** A face registering `kern` pairs under two
+scripts whose coverage sets *overlap* — shared punctuation is the realistic
+case — could take the wrong script's value. Not observed on any of the 556
+faces installed here.
+
+**Proper fix.** Give positioning the same treatment as substitution: build a
+`ByScript` for `GPOS` too, and change `kern` to take the script — or replace it
+with a whole-run positioning pass, which is what mark attachment will need
+anyway for GPOS type 5. The second is the better shape and should be done when
+mark-to-ligature lands.
+
+**Where.** `gui/font/src/otl.rs` — `feature_subtables`;
+`gui/font/src/kern.rs`; `gui/font/src/mark.rs`;
+`ScaledFont::kern` in `gui/font/src/scaled.rs`.
+
+## TD-FONT-SCRIPT-RUNS-IGNORE-SCRIPT-EXTENSIONS
+
+**What.** `script::runs` resolves a character's script from the Unicode
+`Script` property alone. UAX #24 defines the real algorithm over
+`Script_Extensions`, which lists *every* script a shared character is used
+with — the danda U+0964 is `Script=Common` but `Script_Extensions` names
+Devanagari, Bengali, Gurmukhi and a dozen more.
+
+**What the difference actually is.** Our rule is the one UAX #24 calls the
+starting point: a scriptless character extends whatever run is open, and a
+scriptless prefix joins the first real script after it. That gives the right
+answer whenever a shared character is adjacent to text of a script it belongs
+to, which is nearly always. The full algorithm differs only for a character
+that is ambiguous *and* sits at a boundary between two scripts that both claim
+it — then it should join the one it is actually adjacent to under the
+extension set, rather than simply continuing the open run.
+
+**Why it is filed rather than fixed.** It needs a second generated table
+(`Script_Extensions` is a set per character, not a scalar) and a resolution
+pass that carries a candidate set forward, and it changes the answer only for
+cases that are already vanishingly rare in the text this OS renders. The
+generator already reads `fontTools.unicodedata`, which exposes
+`script_extension`, so the data side is small; the algorithm side is not.
+
+**Proper fix.** Emit a second table of extension sets, and replace the
+"extends whatever is open" rule with UAX #24's: carry the intersection of the
+open run's script set with each new character's, and close the run when the
+intersection empties.
+
+**Where.** `gui/font/src/script.rs` — `runs` and the module doc;
+`gui/font/tools/gen_script_tables.py`.
+
+## TD-FONT-HAS-NO-JOINING-OR-REORDERING-SHAPER
+
+**What.** Features are chosen by tag from a fixed list — `ccmp`, `locl`,
+`liga`, `rlig`, `clig`, `calt`. The features every complex script actually
+needs are not chosen that way: Arabic's `init`/`medi`/`fina`/`isol` are decided
+by a joining-type state machine over the run, and Indic's
+`rphf`/`half`/`pref`/`blwf`/`abvs`/`psts` by a per-cluster reordering pass. A
+tag list cannot express either.
+
+**Symptom, measured.** In the HarfBuzz sweep
+(`gui/font/tools/harfbuzz_sweep.py`), 44 of 556 faces disagree on
+`العربية` and 5 on `हिन्दी`. On `Amiri-Bold.ttf` we give
+`[55, 84, 73, 65, 56, 90, 57]` — the isolated forms, every letter drawn as if
+standing alone — where HarfBuzz gives the joined ones. Arabic rendered
+unjoined is not "slightly off"; it is close to unreadable to someone who reads
+Arabic. Devanagari is worse: ours is 6 glyphs to HarfBuzz's 4, because the
+`i`-matra has not been reordered before its consonant and the conjunct has not
+formed.
+
+**Why it is filed rather than fixed.** It is a shaper per script family, not a
+fix: HarfBuzz has separate `hb-ot-shaper-arabic`, `-indic`, `-khmer`,
+`-myanmar` and `-use` modules for exactly this reason. Script selection was
+the prerequisite — there is no point running an Arabic state machine over a
+run until the run knows it is Arabic — and is now done.
+
+**Proper fix.** Two shapers, in this order, since they cover the scripts a
+desktop is most likely to meet: an Arabic joining pass (a joining-type table
+plus the four positional features — mechanical and well-specified), then a
+Universal Shaping Engine pass for Indic and South-East Asian, which is
+substantially larger. Both hang off the run boundaries `script::runs` already
+produces.
+
+**Where.** `gui/font/src/gsub.rs` — the feature tag list in
+`Substitutions::parse` and the module doc's "What is deliberately not
+implemented"; `gui/font/src/scaled.rs` — `substitute_runs`, which is where a
+per-script shaper would be dispatched.

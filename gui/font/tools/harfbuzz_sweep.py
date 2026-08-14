@@ -77,6 +77,11 @@ CORPUS = [
     "abc \\u0627\\u0644\\u0639\\u0631\\u0628\\u064a\\u0629 xyz",
     # Arabic on its own, where a face with Arabic features should use them.
     "\\u0627\\u0644\\u0639\\u0631\\u0628\\u064a\\u0629",
+    # Fully vowelled Arabic — `bismi`, a letter and a mark alternating. Every
+    # lookup here has to step over the marks to see the letters, so this is
+    # the string that exercises `IgnoreMarks`; the unvowelled entry above
+    # cannot, because it has no marks to ignore.
+    "\\u0628\\u0650\\u0633\\u0652\\u0645\\u0650",
     # Devanagari, the reason script tags have two spellings.
     "\\u0939\\u093f\\u0928\\u094d\\u0926\\u0940",
     # Scriptless text, which selects the font's default features.

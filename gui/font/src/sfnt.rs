@@ -649,7 +649,10 @@ impl Face {
         let kerning = Kerning::parse(&data, gpos, kern);
         // Same reasoning: a list of subtable offsets, found once, rather than
         // a `GSUB` walk per glyph.
-        let substitutions = Substitutions::parse(&data, gsub);
+        // `GDEF` comes along because a lookup's flag is expressed in terms of
+        // the glyph classes it defines: "ignore marks" means nothing until
+        // something has said which glyphs are marks.
+        let substitutions = Substitutions::parse(&data, gsub, gdef);
         let marks = MarkPositioning::parse(&data, gpos, gdef);
 
         Ok(Self {

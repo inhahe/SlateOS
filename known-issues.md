@@ -59173,8 +59173,33 @@ moves through it instead of `i + 1`. `UseMarkFilteringSet` additionally reads
 `GDEF`'s `MarkGlyphSetsDef`.
 
 **Where.** `gui/font/src/otl.rs` — `Lookup`, which holds the flag; every
-`apply_*` in `gui/font/src/gsub.rs`; the same in `gui/font/src/gpos.rs`. The
-module doc of `gsub.rs` names this ID under "not implemented".
+`apply_*` in `gui/font/src/gsub.rs`. (An earlier version of this entry said
+"the same in `gui/font/src/gpos.rs`" — there is no such file: positioning
+lives in `kern.rs` and `mark.rs`.) The module doc of `gsub.rs` names this ID
+under "not implemented".
+
+**Resolved for GSUB (2026-08-14).** `gui/font/src/skip.rs` is the skipping
+iterator this asked for. `Skipper::new(data, defs, flag, filter, mask)` is
+built once per lookup from the flag, the `markFilteringSet` index and the
+`GDEF` class definitions; `next` / `prev` / `at_or_after` / `walk_forward` /
+`walk_backward` replace every `i + 1` in `gsub.rs`, so the single, ligature,
+context and chaining matchers all skip the same glyphs. `IgnoreBaseGlyphs`,
+`IgnoreLigatures`, `IgnoreMarks`, `UseMarkFilteringSet` and the
+mark-attachment class are all honoured; `otl.rs` now also reads
+`markFilteringSet`, which sits after the subtable-offset array rather than in
+the Lookup header. Twelve unit tests in `skip.rs` and six end-to-end GSUB
+tests (`ignore_marks_forms_the_ligature_across_the_mark` and its neighbours)
+cover it.
+
+**Still open — the GPOS half.** `RightToLeft` is still not honoured (it
+governs cursive attachment, which we do not implement) and neither kerning
+nor mark attachment consults the flag at all. Both reach their subtables
+through `otl::feature_subtables`, which returns a flat list and discards the
+`Lookup` the flag came from; honouring it there means changing that function
+to hand back the lookup rather than its subtables, and threading a `Skipper`
+into `kern.rs` and `mark.rs`. The practical cost today is small — mark
+attachment already positions relative to the base it finds — but it will
+matter for GPOS 5 (mark-to-ligature).
 
 ## TD-FONT-CHECKS-FEATURE-MASKS-ONLY-AT-THE-APPLIED-POSITION
 
@@ -59200,3 +59225,13 @@ every matcher gets it for free.
 
 **Where.** `gui/font/src/gsub.rs` — `apply_lookup`, which is the single place
 the mask is consulted today.
+
+**Resolved (2026-08-14).** Folded into `Skipper` as intended: the mask is a
+field of the iterator, and `at_or_after` / `prev` return `None` for a glyph
+whose mask does not intersect the lookup's, so every matched position is
+gated, not just the applied one. One thing the fold had to get right that the
+entry above did not anticipate: the gate applies to the *input* only.
+`Skipper::context()` returns the same iterator with an all-ones mask, and the
+backtrack and lookahead walks use it — a neighbour is a neighbour whatever
+feature reached the rule, and gating context on the mask made every chaining
+`fina` rule fail when its lookahead was a medial letter.

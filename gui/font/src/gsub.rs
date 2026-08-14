@@ -126,6 +126,7 @@ use crate::otl::{
 };
 use crate::script::ScriptTags;
 use crate::sfnt::{Span, u16_at};
+use crate::skip::{Definitions, Skipper};
 
 /// The features read, in the order whose positions become the mask bits.
 ///
@@ -262,10 +263,12 @@ pub struct SubGlyph {
     /// boundary to point at.
     pub cluster: usize,
     /// Which features this glyph is eligible for, one bit per entry of
-    /// `FEATURES`. Private because it is this module's own bookkeeping: a
-    /// caller has no way to know which bit is which, and setting it wrongly
-    /// would silently disable ligatures.
-    mask: u32,
+    /// `FEATURES`. Crate-private because it is this module's own bookkeeping:
+    /// a caller has no way to know which bit is which, and setting it wrongly
+    /// would silently disable ligatures. [`skip`](crate::skip) reads it because
+    /// it is the module that decides, for every matcher, whether a position is
+    /// eligible.
+    pub(crate) mask: u32,
 }
 
 impl SubGlyph {
@@ -292,6 +295,18 @@ impl SubGlyph {
             mask: form_mask(form),
         }
     }
+
+    /// A glyph eligible for exactly `mask`.
+    ///
+    /// For tests of the eligibility gate itself, which need masks that do not
+    /// correspond to any real form: the two production constructors between
+    /// them can only make a glyph eligible for every unconditional feature,
+    /// which is precisely the case that cannot show the gate working.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn masked(gid: u16, cluster: usize, mask: u32) -> Self {
+        Self { gid, cluster, mask }
+    }
 }
 
 /// The substitutions of one face, as the lookups to run and in what order.
@@ -309,6 +324,10 @@ pub(crate) struct Substitutions {
     /// names the lookups it invokes by index into it, and those may be lookups
     /// no feature reaches — which is exactly how a font hides a helper.
     lookup_list: usize,
+    /// The `GDEF` class definitions a lookup flag consults to decide which
+    /// glyphs it is allowed to see. Kept here rather than looked up per lookup
+    /// because they are a property of the face, not of the rule.
+    defs: Definitions,
 }
 
 impl Substitutions {
@@ -318,12 +337,13 @@ impl Substitutions {
     /// default-on feature reaching a lookup type this can apply — which is not
     /// an error. Monospace faces in particular have no ligatures by design: a
     /// ligature would break the grid.
-    pub(crate) fn parse(data: &[u8], gsub: Option<Span>) -> Option<Self> {
+    pub(crate) fn parse(data: &[u8], gsub: Option<Span>, gdef: Option<Span>) -> Option<Self> {
         let base = gsub?.off;
         let lookups = ByScript::parse(data, base, FEATURES, NESTABLE, LOOKUP_EXTENSION)?;
         Some(Self {
             lookups,
             lookup_list: lookup_list(data, base)?,
+            defs: Definitions::parse(data, gdef),
         })
     }
 
@@ -347,9 +367,12 @@ impl Substitutions {
             lookup_list: self.lookup_list,
             depth: MAX_NESTING,
             scratch: Vec::new(),
+            defs: self.defs,
+            mask: ALWAYS,
         };
         for (lookup, mask) in self.lookups.for_script(script) {
-            apply_lookup(data, lookup, mask, glyphs, &mut ctx);
+            ctx.mask = mask;
+            apply_lookup(data, lookup, glyphs, &mut ctx);
         }
     }
 }
@@ -371,6 +394,17 @@ struct Ctx {
     /// the pass so that a run of ordinary text — where nothing matches — does
     /// not allocate once per position.
     scratch: Vec<u16>,
+    /// The face's `GDEF` class definitions, which a lookup's flag consults to
+    /// decide which glyphs it may see.
+    defs: Definitions,
+    /// The features that reached the lookup currently being applied.
+    ///
+    /// It does *not* change on the way into a nested lookup: a contextual rule
+    /// reached by `fina` is still a `fina` rule when it invokes a helper, and
+    /// the helper's own coverage is what decides whether it fires. The flag,
+    /// by contrast, is the nested lookup's own — which is why a skipper is
+    /// built per invocation rather than passed down.
+    mask: u32,
 }
 
 /// Run one lookup across the whole run, left to right.
@@ -382,15 +416,16 @@ struct Ctx {
 /// itself, a glyph that decomposes to itself — from looping, and it lives here
 /// rather than in each type so that no type can forget it.
 ///
-/// `mask` is the set of features that reached this lookup; a position whose
-/// glyph is eligible for none of them is stepped over. For every feature but
-/// the cursive four that is no restriction at all — their bits are set on
-/// every glyph — so this is a comparison, not a branch a run of Latin pays
-/// for.
-fn apply_lookup(data: &[u8], lookup: &Lookup, mask: u32, glyphs: &mut Vec<SubGlyph>, ctx: &mut Ctx) {
+/// A position the lookup does not consider — because its flag hides the glyph,
+/// or because the glyph is not eligible for the features that reached the
+/// lookup — is stepped over. For every feature but the cursive four the
+/// eligibility half is no restriction at all, since their bits are set on
+/// every glyph, so ordinary text pays a comparison rather than a branch.
+fn apply_lookup(data: &[u8], lookup: &Lookup, glyphs: &mut Vec<SubGlyph>, ctx: &mut Ctx) {
+    let skip = skipper(lookup, data, ctx);
     let mut i = 0usize;
     while i < glyphs.len() {
-        if glyphs.get(i).is_some_and(|g| g.mask & mask == 0) {
+        if !skip.considers(glyphs, i) {
             i = i.saturating_add(1);
             continue;
         }
@@ -399,6 +434,12 @@ fn apply_lookup(data: &[u8], lookup: &Lookup, mask: u32, glyphs: &mut Vec<SubGly
         let step = apply_at(data, lookup, glyphs, i, ctx).unwrap_or(0).max(1);
         i = i.saturating_add(step);
     }
+}
+
+/// The view of the run that `lookup` is entitled to, under the features
+/// currently being applied.
+fn skipper<'a>(lookup: &Lookup, data: &'a [u8], ctx: &Ctx) -> Skipper<'a> {
+    Skipper::new(data, ctx.defs, lookup.flag, lookup.filter, ctx.mask)
 }
 
 /// Apply one lookup at exactly one position, if it matches there.
@@ -419,13 +460,16 @@ fn apply_at(
     ctx: &mut Ctx,
 ) -> Option<usize> {
     let subs = &lookup.subtables;
+    // Built from *this* lookup's flag, not the caller's: a contextual lookup
+    // that invokes a helper does not lend the helper its own view of the run.
+    let skip = skipper(lookup, data, ctx);
     match lookup.kind {
         LOOKUP_SINGLE => apply_single(data, subs, glyphs, i),
         LOOKUP_MULTIPLE => apply_multiple(data, subs, glyphs, i, ctx),
         LOOKUP_ALTERNATE => apply_alternate(data, subs, glyphs, i),
-        LOOKUP_LIGATURE => apply_ligature(data, subs, glyphs, i),
-        LOOKUP_CONTEXT => apply_context(data, subs, glyphs, i, ctx),
-        LOOKUP_CHAIN_CONTEXT => apply_chain_context(data, subs, glyphs, i, ctx),
+        LOOKUP_LIGATURE => apply_ligature(data, subs, glyphs, i, skip),
+        LOOKUP_CONTEXT => apply_context(data, subs, glyphs, i, skip, ctx),
+        LOOKUP_CHAIN_CONTEXT => apply_chain_context(data, subs, glyphs, i, skip, ctx),
         // `feature_lookups` and `lookup_at` are both asked for these types
         // only, so there is nothing else to reach here; ignoring anything that
         // does is what keeps adding a type to those lists from being able to
@@ -616,39 +660,64 @@ fn sequence_at(data: &[u8], sub: usize, glyph: u16, out: &mut Vec<u16>) -> Optio
 
 /// Apply a `LigatureSubst` lookup at one position.
 ///
-/// The run shrinks to one glyph, which keeps the first component's cluster:
-/// the joined glyph has no interior boundary a caret could point at, so the
-/// characters it swallowed all answer with the offset of the first.
+/// The matched components collapse to one glyph, which keeps the first one's
+/// cluster: the joined glyph has no interior boundary a caret could point at,
+/// so the characters it swallowed all answer with the offset of the first.
+///
+/// Glyphs the lookup's flag hid — marks, typically — stand *between* the
+/// components and are not part of the match. They are left where they are and
+/// simply close up behind the removed components, so a vowelled Arabic word
+/// keeps its vowels after its letters ligate. That is a simplification of what
+/// HarfBuzz does, which is to reposition each skipped mark against the
+/// component it belonged to; ours leaves them in run order, which is right
+/// whenever the marks sit at the end of the ligature's own span and is what
+/// almost every face produces.
 fn apply_ligature(
     data: &[u8],
     subtables: &[usize],
     glyphs: &mut Vec<SubGlyph>,
     i: usize,
+    skip: Skipper<'_>,
 ) -> Option<usize> {
-    let window = glyphs.get(i..).filter(|w| w.len() >= 2)?;
+    let mut at = [0usize; MAX_COMPONENTS];
     let (gid, count) = subtables
         .iter()
-        .find_map(|&sub| ligature_at(data, sub, window))?;
-    let next = i.saturating_add(1);
+        .find_map(|&sub| ligature_at(data, sub, glyphs, i, skip, &mut at))?;
     if let Some(first) = glyphs.get_mut(i) {
         // The cluster stays as it was: it is the first component's, and the
         // components that follow are being swallowed, not moved.
         first.gid = gid;
     }
-    // `ligature_at` never reports more components than the window holds, so
-    // this range is inside the run; the clamp is belt and braces.
-    let end = i.saturating_add(count).min(glyphs.len());
-    glyphs.drain(next.min(end)..end);
-    Some(1)
+    // Removed from the back so that the earlier indices stay valid. Component
+    // zero is the glyph just rewritten and stays.
+    let end = at.get(count.checked_sub(1)?).copied()?;
+    for k in (1..count).rev() {
+        let Some(&pos) = at.get(k) else { continue };
+        if pos < glyphs.len() {
+            glyphs.remove(pos);
+        }
+    }
+    // How many glyphs now stand where the match stood: the span it covered,
+    // less the components taken out of it. Anything the flag skipped is still
+    // in there, which is why this is not simply one.
+    let span = end.checked_sub(i)?.checked_add(1)?;
+    Some(span.saturating_sub(count.saturating_sub(1)).max(1))
 }
 
-/// Look for a ligature starting at `glyphs[0]` in one `LigatureSubst`
-/// subtable.
-fn ligature_at(data: &[u8], sub: usize, glyphs: &[SubGlyph]) -> Option<(u16, usize)> {
+/// Look for a ligature starting at `glyphs[i]` in one `LigatureSubst`
+/// subtable, recording each matched component's position in `at`.
+fn ligature_at(
+    data: &[u8],
+    sub: usize,
+    glyphs: &[SubGlyph],
+    i: usize,
+    skip: Skipper<'_>,
+    at: &mut [usize; MAX_COMPONENTS],
+) -> Option<(u16, usize)> {
     if u16_at(data, sub)? != 1 {
         return None;
     }
-    let first = glyphs.first()?.gid;
+    let first = glyphs.get(i)?.gid;
     let coverage = sub.checked_add(usize::from(u16_at(data, sub.checked_add(2)?)?))?;
     let index = coverage_index(data, coverage, first)?;
 
@@ -656,44 +725,58 @@ fn ligature_at(data: &[u8], sub: usize, glyphs: &[SubGlyph]) -> Option<(u16, usi
     if index >= set_count {
         return None;
     }
-    let at = sub
+    let off = sub
         .checked_add(6)?
         .checked_add(usize::from(index).checked_mul(2)?)?;
-    let set = sub.checked_add(usize::from(u16_at(data, at)?))?;
+    let set = sub.checked_add(usize::from(u16_at(data, off)?))?;
 
     // The set is ordered by the font, longest first by convention, and the
     // first match wins — which is what makes `ffi` beat `ff` in one pass.
     let count = u16_at(data, set)?;
-    for i in 0..usize::from(count) {
-        let at = set.checked_add(2)?.checked_add(i.checked_mul(2)?)?;
-        let Some(lig) = u16_at(data, at).and_then(|o| set.checked_add(usize::from(o))) else {
+    for k in 0..usize::from(count) {
+        let off = set.checked_add(2)?.checked_add(k.checked_mul(2)?)?;
+        let Some(lig) = u16_at(data, off).and_then(|o| set.checked_add(usize::from(o))) else {
             continue;
         };
-        if let Some(hit) = ligature_matches(data, lig, glyphs) {
+        if let Some(hit) = ligature_matches(data, lig, glyphs, i, skip, at) {
             return Some(hit);
         }
     }
     None
 }
 
-/// Test one `Ligature` record against the start of `glyphs`.
+/// Test one `Ligature` record against the run from `i`, stepping over whatever
+/// the lookup's flag hides.
 ///
 /// The record lists its components from the *second* onwards: the first is
 /// the one the coverage table already matched, so storing it again would be
 /// storing it twice.
-fn ligature_matches(data: &[u8], lig: usize, glyphs: &[SubGlyph]) -> Option<(u16, usize)> {
+fn ligature_matches(
+    data: &[u8],
+    lig: usize,
+    glyphs: &[SubGlyph],
+    i: usize,
+    skip: Skipper<'_>,
+    at: &mut [usize; MAX_COMPONENTS],
+) -> Option<(u16, usize)> {
     let glyph = u16_at(data, lig)?;
     let components = usize::from(u16_at(data, lig.checked_add(2)?)?);
-    if components < 2 || components > MAX_COMPONENTS || components > glyphs.len() {
+    if components < 2 || components > MAX_COMPONENTS {
         return None;
     }
-    for i in 1..components {
-        let at = lig
-            .checked_add(4)?
-            .checked_add(i.checked_sub(1)?.checked_mul(2)?)?;
-        if u16_at(data, at)? != glyphs.get(i)?.gid {
+    *at.get_mut(0)? = i;
+    let mut pos = i;
+    for k in 1..components {
+        let want = u16_at(
+            data,
+            lig.checked_add(4)?
+                .checked_add(k.checked_sub(1)?.checked_mul(2)?)?,
+        )?;
+        pos = skip.next(glyphs, pos)?;
+        if glyphs.get(pos)?.gid != want {
             return None;
         }
+        *at.get_mut(k)? = pos;
     }
     Some((glyph, components))
 }
@@ -709,12 +792,46 @@ struct Nested {
     lookup: u16,
 }
 
+/// What a contextual subtable matched.
+///
+/// `at` is what makes this a struct rather than a pair of counts: once the
+/// lookup's flag can hide a glyph, the matched input is no longer the run of
+/// positions `i..i + input`, and the nested lookups have to be told where the
+/// glyphs they name actually are.
+struct Matched {
+    /// Absolute positions of the matched input glyphs, in order.
+    at: [usize; MAX_CONTEXT],
+    /// How many entries of `at` are real.
+    input: usize,
+    /// One past the last matched input position: the span the match covers is
+    /// `i..end`, which includes anything the flag skipped inside it.
+    end: usize,
+    /// Where the `SequenceLookupRecord` array is.
+    records: usize,
+    /// How many records it holds.
+    count: usize,
+}
+
+impl Matched {
+    /// An empty match, for a walk to fill in.
+    fn blank() -> Self {
+        Self {
+            at: [0; MAX_CONTEXT],
+            input: 0,
+            end: 0,
+            records: 0,
+            count: 0,
+        }
+    }
+}
+
 /// Apply a `SequenceContext` (type 5) lookup at one position.
 fn apply_context(
     data: &[u8],
     subtables: &[usize],
     glyphs: &mut Vec<SubGlyph>,
     i: usize,
+    skip: Skipper<'_>,
     ctx: &mut Ctx,
 ) -> Option<usize> {
     // These two buffers are locals rather than fields of `Ctx` on purpose: a
@@ -725,11 +842,11 @@ fn apply_context(
     let mut records = Vec::new();
     for &sub in subtables {
         // First subtable that matches wins, as everywhere else in a lookup.
-        let Some((input, at, count)) = context_match(data, sub, glyphs, i, &mut rules) else {
+        let Some(hit) = context_match(data, sub, glyphs, i, skip, &mut rules) else {
             continue;
         };
-        read_records(data, at, count, &mut records);
-        return Some(apply_nested(data, &records, glyphs, i, input, ctx));
+        read_records(data, hit.records, hit.count, &mut records);
+        return Some(apply_nested(data, &records, glyphs, i, &hit, ctx));
     }
     None
 }
@@ -740,16 +857,17 @@ fn apply_chain_context(
     subtables: &[usize],
     glyphs: &mut Vec<SubGlyph>,
     i: usize,
+    skip: Skipper<'_>,
     ctx: &mut Ctx,
 ) -> Option<usize> {
     let mut rules = Vec::new();
     let mut records = Vec::new();
     for &sub in subtables {
-        let Some((input, at, count)) = chain_match(data, sub, glyphs, i, &mut rules) else {
+        let Some(hit) = chain_match(data, sub, glyphs, i, skip, &mut rules) else {
             continue;
         };
-        read_records(data, at, count, &mut records);
-        return Some(apply_nested(data, &records, glyphs, i, input, ctx));
+        read_records(data, hit.records, hit.count, &mut records);
+        return Some(apply_nested(data, &records, glyphs, i, &hit, ctx));
     }
     None
 }
@@ -768,23 +886,29 @@ fn apply_nested(
     records: &[Nested],
     glyphs: &mut Vec<SubGlyph>,
     start: usize,
-    input: usize,
+    hit: &Matched,
     ctx: &mut Ctx,
 ) -> usize {
+    // The span the match covers, which is not the number of glyphs it matched:
+    // anything the lookup's flag skipped stands inside it and still occupies a
+    // position the caller must step over.
+    let mut span = hit.end.saturating_sub(start);
     // Out of depth: the context still counts as matched, so the caller steps
     // over it, but nothing is invoked. Silently applying at depth zero is what
     // would let a lookup that invokes itself run forever.
     if ctx.depth == 0 {
-        return input.max(1);
+        return span.max(1);
     }
-    let mut span = input;
-    let mut positions: Vec<Option<usize>> = (0..input)
-        .map(|k| Some(start.saturating_add(k)))
+    let mut positions: Vec<Option<usize>> = hit
+        .at
+        .get(..hit.input)
+        .unwrap_or_default()
+        .iter()
+        .map(|&p| Some(p))
         .collect();
 
     for rec in records {
-        let idx = usize::from(rec.at);
-        let Some(Some(at)) = positions.get(idx).copied() else {
+        let Some(Some(at)) = positions.get(usize::from(rec.at)).copied() else {
             continue;
         };
         let before = glyphs.len();
@@ -804,28 +928,33 @@ fn apply_nested(
             continue;
         }
         let after = glyphs.len();
+        // Everything is tracked by absolute position rather than by index into
+        // the record list, because with skipping the two stopped agreeing: a
+        // ligature at position `at` swallows the glyphs that *follow* it in the
+        // run, which may include ones the match stepped over and never named.
         if after >= before {
             let grew = after.saturating_sub(before);
             span = span.saturating_add(grew);
-            for p in positions.iter_mut().skip(idx.saturating_add(1)) {
-                *p = p.map(|v| v.saturating_add(grew));
+            for p in &mut positions {
+                *p = p.map(|v| if v > at { v.saturating_add(grew) } else { v });
             }
         } else {
             let shrank = before.saturating_sub(after);
             span = span.saturating_sub(shrank);
             // The glyphs the shrink swallowed are gone. A later record naming
             // one of them is naming something that no longer exists, so mark
-            // them absent rather than let the index slide onto a glyph the
+            // it absent rather than let the position slide onto a glyph the
             // context never matched.
-            let gone = idx.saturating_add(shrank);
-            for (k, p) in positions.iter_mut().enumerate() {
-                if k <= idx {
+            let gone = at.saturating_add(shrank);
+            for p in &mut positions {
+                let Some(v) = *p else { continue };
+                if v <= at {
                     continue;
                 }
-                *p = if k <= gone {
+                *p = if v <= gone {
                     None
                 } else {
-                    p.map(|v| v.saturating_sub(shrank))
+                    Some(v.saturating_sub(shrank))
                 };
             }
         }
@@ -873,8 +1002,13 @@ fn answers(data: &[u8], by: By, want: u16, glyphs: &[SubGlyph], pos: usize) -> O
     })
 }
 
-/// Match `count` entries read from `at` against the glyphs running forward
-/// from `from`, and report the position just past the last one.
+/// Match `count` entries read from `at` against the glyphs the lookup
+/// considers running forward from `from`, and report the position just past
+/// the last one.
+///
+/// `record` is handed each matched entry's index and the absolute position it
+/// landed on. Callers matching a *context* discard it; callers matching the
+/// *input* keep it, because that is what the nested lookups will be run at.
 fn forward(
     data: &[u8],
     at: usize,
@@ -882,14 +1016,15 @@ fn forward(
     by: By,
     glyphs: &[SubGlyph],
     from: usize,
+    skip: Skipper<'_>,
+    mut record: impl FnMut(usize, usize),
 ) -> Option<usize> {
-    for k in 0..count {
+    skip.walk_forward(glyphs, from, count, |k, pos| {
         let want = u16_at(data, at.checked_add(k.checked_mul(2)?)?)?;
-        if !answers(data, by, want, glyphs, from.checked_add(k)?)? {
-            return None;
-        }
-    }
-    from.checked_add(count)
+        answers(data, by, want, glyphs, pos)?.then_some(())?;
+        record(k, pos);
+        Some(())
+    })
 }
 
 /// Match `count` entries read from `at` against the glyphs running *backward*
@@ -905,19 +1040,16 @@ fn backward(
     by: By,
     glyphs: &[SubGlyph],
     from: usize,
+    skip: Skipper<'_>,
 ) -> Option<()> {
-    for k in 0..count {
+    skip.walk_backward(glyphs, from, count, |k, pos| {
         let want = u16_at(data, at.checked_add(k.checked_mul(2)?)?)?;
-        let pos = from.checked_sub(k.checked_add(1)?)?;
-        if !answers(data, by, want, glyphs, pos)? {
-            return None;
-        }
-    }
-    Some(())
+        answers(data, by, want, glyphs, pos)?.then_some(())
+    })
 }
 
 /// Match `count` coverage offsets read from `at`, each measured from `sub`,
-/// against the glyphs running forward from `from`.
+/// against the glyphs the lookup considers running forward from `from`.
 fn forward_covered(
     data: &[u8],
     sub: usize,
@@ -925,12 +1057,15 @@ fn forward_covered(
     count: usize,
     glyphs: &[SubGlyph],
     from: usize,
+    skip: Skipper<'_>,
+    mut record: impl FnMut(usize, usize),
 ) -> Option<usize> {
-    for k in 0..count {
+    skip.walk_forward(glyphs, from, count, |k, pos| {
         let cov = sub_offset(data, sub, at.checked_add(k.checked_mul(2)?)?)?;
-        coverage_index(data, cov, glyphs.get(from.checked_add(k)?)?.gid)?;
-    }
-    from.checked_add(count)
+        coverage_index(data, cov, glyphs.get(pos)?.gid)?;
+        record(k, pos);
+        Some(())
+    })
 }
 
 /// The backward counterpart of [`forward_covered`].
@@ -941,13 +1076,13 @@ fn backward_covered(
     count: usize,
     glyphs: &[SubGlyph],
     from: usize,
+    skip: Skipper<'_>,
 ) -> Option<()> {
-    for k in 0..count {
+    skip.walk_backward(glyphs, from, count, |k, pos| {
         let cov = sub_offset(data, sub, at.checked_add(k.checked_mul(2)?)?)?;
-        let pos = from.checked_sub(k.checked_add(1)?)?;
         coverage_index(data, cov, glyphs.get(pos)?.gid)?;
-    }
-    Some(())
+        Some(())
+    })
 }
 
 /// Follow an offset stored at `field` and measured from `sub`, refusing a null
@@ -1008,16 +1143,40 @@ fn seq_rule(
     by: By,
     glyphs: &[SubGlyph],
     i: usize,
-) -> Option<(usize, usize, usize)> {
+    skip: Skipper<'_>,
+) -> Option<Matched> {
     let count = usize::from(u16_at(data, rule)?);
     let records = usize::from(u16_at(data, rule.checked_add(2)?)?);
     if count == 0 || count > MAX_CONTEXT {
         return None;
     }
+    let mut hit = Matched::blank();
+    *hit.at.get_mut(0)? = i;
     let rest = count.checked_sub(1)?;
     let at = rule.checked_add(4)?;
-    forward(data, at, rest, by, glyphs, i.checked_add(1)?)?;
-    Some((count, at.checked_add(rest.checked_mul(2)?)?, records))
+    let mut fill = [0usize; MAX_CONTEXT];
+    let end = forward(
+        data,
+        at,
+        rest,
+        by,
+        glyphs,
+        i.checked_add(1)?,
+        skip,
+        |k, pos| {
+            if let Some(slot) = fill.get_mut(k) {
+                *slot = pos;
+            }
+        },
+    )?;
+    hit.at
+        .get_mut(1..count)?
+        .copy_from_slice(fill.get(..rest)?);
+    hit.input = count;
+    hit.end = end;
+    hit.records = at.checked_add(rest.checked_mul(2)?)?;
+    hit.count = records;
+    Some(hit)
 }
 
 /// Match a `ChainedSequenceRule` or `ChainedClassSequenceRule` starting at `i`.
@@ -1032,24 +1191,48 @@ fn chain_rule(
     by: (By, By, By),
     glyphs: &[SubGlyph],
     i: usize,
-) -> Option<(usize, usize, usize)> {
+    skip: Skipper<'_>,
+) -> Option<Matched> {
     let (back_by, in_by, ahead_by) = by;
+    // Backtrack and lookahead describe the neighbourhood, not the thing being
+    // rewritten, so they skip what the flag skips but are not gated by the
+    // features. See the `skip` module doc.
+    let context = skip.context();
 
     let back = usize::from(u16_at(data, rule)?);
     if back > MAX_CONTEXT {
         return None;
     }
     let at = rule.checked_add(2)?;
-    backward(data, at, back, back_by, glyphs, i)?;
+    backward(data, at, back, back_by, glyphs, i, context)?;
 
     let at = at.checked_add(back.checked_mul(2)?)?;
     let count = usize::from(u16_at(data, at)?);
     if count == 0 || count > MAX_CONTEXT {
         return None;
     }
+    let mut hit = Matched::blank();
+    *hit.at.get_mut(0)? = i;
     let rest = count.checked_sub(1)?;
     let at = at.checked_add(2)?;
-    let end = forward(data, at, rest, in_by, glyphs, i.checked_add(1)?)?;
+    let mut fill = [0usize; MAX_CONTEXT];
+    let end = forward(
+        data,
+        at,
+        rest,
+        in_by,
+        glyphs,
+        i.checked_add(1)?,
+        skip,
+        |k, pos| {
+            if let Some(slot) = fill.get_mut(k) {
+                *slot = pos;
+            }
+        },
+    )?;
+    hit.at
+        .get_mut(1..count)?
+        .copy_from_slice(fill.get(..rest)?);
 
     let at = at.checked_add(rest.checked_mul(2)?)?;
     let ahead = usize::from(u16_at(data, at)?);
@@ -1057,11 +1240,14 @@ fn chain_rule(
         return None;
     }
     let at = at.checked_add(2)?;
-    forward(data, at, ahead, ahead_by, glyphs, end)?;
+    forward(data, at, ahead, ahead_by, glyphs, end, context, |_, _| {})?;
 
     let at = at.checked_add(ahead.checked_mul(2)?)?;
-    let records = usize::from(u16_at(data, at)?);
-    Some((count, at.checked_add(2)?, records))
+    hit.input = count;
+    hit.end = end;
+    hit.records = at.checked_add(2)?;
+    hit.count = usize::from(u16_at(data, at)?);
+    Some(hit)
 }
 
 /// Match one `SequenceContext` subtable at `i`, in any of its three formats.
@@ -1073,8 +1259,9 @@ fn context_match(
     sub: usize,
     glyphs: &[SubGlyph],
     i: usize,
+    skip: Skipper<'_>,
     rules: &mut Vec<usize>,
-) -> Option<(usize, usize, usize)> {
+) -> Option<Matched> {
     let gid = glyphs.get(i)?.gid;
     match u16_at(data, sub)? {
         // Format 1: rules keyed by the first glyph, listed by id. The most
@@ -1088,7 +1275,7 @@ fn context_match(
             read_rules(data, set, rules);
             rules
                 .iter()
-                .find_map(|&rule| seq_rule(data, rule, By::Glyph, glyphs, i))
+                .find_map(|&rule| seq_rule(data, rule, By::Glyph, glyphs, i, skip))
         }
         // Format 2: rules keyed by the first glyph's *class*, so one rule
         // covers every glyph that behaves alike. The coverage is only a gate —
@@ -1103,7 +1290,7 @@ fn context_match(
             read_rules(data, set, rules);
             rules
                 .iter()
-                .find_map(|&rule| seq_rule(data, rule, By::Class(classdef), glyphs, i))
+                .find_map(|&rule| seq_rule(data, rule, By::Class(classdef), glyphs, i, skip))
         }
         // Format 3: a single context, each position given its own coverage
         // table. No rule sets, so nothing is keyed by the first glyph.
@@ -1114,8 +1301,18 @@ fn context_match(
                 return None;
             }
             let at = sub.checked_add(6)?;
-            forward_covered(data, sub, at, count, glyphs, i)?;
-            Some((count, at.checked_add(count.checked_mul(2)?)?, records))
+            let mut hit = Matched::blank();
+            let mut fill = [0usize; MAX_CONTEXT];
+            hit.end = forward_covered(data, sub, at, count, glyphs, i, skip, |k, pos| {
+                if let Some(slot) = fill.get_mut(k) {
+                    *slot = pos;
+                }
+            })?;
+            hit.at.get_mut(..count)?.copy_from_slice(fill.get(..count)?);
+            hit.input = count;
+            hit.records = at.checked_add(count.checked_mul(2)?)?;
+            hit.count = records;
+            Some(hit)
         }
         _ => None,
     }
@@ -1128,8 +1325,9 @@ fn chain_match(
     sub: usize,
     glyphs: &[SubGlyph],
     i: usize,
+    skip: Skipper<'_>,
     rules: &mut Vec<usize>,
-) -> Option<(usize, usize, usize)> {
+) -> Option<Matched> {
     let gid = glyphs.get(i)?.gid;
     match u16_at(data, sub)? {
         1 => {
@@ -1141,7 +1339,7 @@ fn chain_match(
             let by = (By::Glyph, By::Glyph, By::Glyph);
             rules
                 .iter()
-                .find_map(|&rule| chain_rule(data, rule, by, glyphs, i))
+                .find_map(|&rule| chain_rule(data, rule, by, glyphs, i, skip))
         }
         2 => {
             let coverage = sub_offset(data, sub, sub.checked_add(2)?)?;
@@ -1156,18 +1354,19 @@ fn chain_match(
             let by = (By::Class(back), By::Class(input), By::Class(ahead));
             rules
                 .iter()
-                .find_map(|&rule| chain_rule(data, rule, by, glyphs, i))
+                .find_map(|&rule| chain_rule(data, rule, by, glyphs, i, skip))
         }
         // Format 3 has no coverage gate of its own: the first input coverage
         // is the gate.
         3 => {
+            let context = skip.context();
             let at = sub.checked_add(2)?;
             let back = usize::from(u16_at(data, at)?);
             if back > MAX_CONTEXT {
                 return None;
             }
             let at = at.checked_add(2)?;
-            backward_covered(data, sub, at, back, glyphs, i)?;
+            backward_covered(data, sub, at, back, glyphs, i, context)?;
 
             let at = at.checked_add(back.checked_mul(2)?)?;
             let count = usize::from(u16_at(data, at)?);
@@ -1175,7 +1374,12 @@ fn chain_match(
                 return None;
             }
             let at = at.checked_add(2)?;
-            let end = forward_covered(data, sub, at, count, glyphs, i)?;
+            let mut fill = [0usize; MAX_CONTEXT];
+            let end = forward_covered(data, sub, at, count, glyphs, i, skip, |k, pos| {
+                if let Some(slot) = fill.get_mut(k) {
+                    *slot = pos;
+                }
+            })?;
 
             let at = at.checked_add(count.checked_mul(2)?)?;
             let ahead = usize::from(u16_at(data, at)?);
@@ -1183,11 +1387,16 @@ fn chain_match(
                 return None;
             }
             let at = at.checked_add(2)?;
-            forward_covered(data, sub, at, ahead, glyphs, end)?;
+            forward_covered(data, sub, at, ahead, glyphs, end, context, |_, _| {})?;
 
             let at = at.checked_add(ahead.checked_mul(2)?)?;
-            let records = usize::from(u16_at(data, at)?);
-            Some((count, at.checked_add(2)?, records))
+            let mut hit = Matched::blank();
+            hit.at.get_mut(..count)?.copy_from_slice(fill.get(..count)?);
+            hit.input = count;
+            hit.end = end;
+            hit.records = at.checked_add(2)?;
+            hit.count = usize::from(u16_at(data, at)?);
+            Some(hit)
         }
         _ => None,
     }
@@ -1356,6 +1565,34 @@ mod tests {
         kind: u16,
         subtables: &[&[u8]],
     ) -> Vec<u8> {
+        gsub_flagged_from_scripts(script_block, tags, kind, 0, 0, subtables)
+    }
+
+    /// A `GSUB` like [`gsub_table`], but with a `lookupFlag` — and, when the
+    /// flag asks for one, a `markFilteringSet` index — on its single lookup.
+    ///
+    /// The flag is the whole point of a handful of tests below: every other
+    /// builder here writes a zero flag, so without this one the skipping walk
+    /// is only ever exercised in its do-nothing configuration.
+    fn gsub_flagged(tag: &[u8; 4], kind: u16, flag: u16, filter: u16, subtable: &[u8]) -> Vec<u8> {
+        gsub_flagged_from_scripts(
+            &script_list(&[(b"DFLT", &[0])]),
+            &[tag],
+            kind,
+            flag,
+            filter,
+            &[subtable],
+        )
+    }
+
+    fn gsub_flagged_from_scripts(
+        script_block: &[u8],
+        tags: &[&[u8; 4]],
+        kind: u16,
+        flag: u16,
+        filter: u16,
+        subtables: &[&[u8]],
+    ) -> Vec<u8> {
         let n = tags.len();
         let feature_list = 10 + script_block.len();
         // count(2) + one 6-byte FeatureRecord each, then the Features.
@@ -1387,15 +1624,21 @@ mod tests {
         out.extend_from_slice(&be16(1));
         out.extend_from_slice(&be16(4));
         out.extend_from_slice(&be16(kind));
-        out.extend_from_slice(&be16(0)); // flags
+        out.extend_from_slice(&be16(flag));
         out.extend_from_slice(&be16(u16::try_from(subtables.len()).unwrap()));
         let lookup = lookup_list + 4;
+        // `markFilteringSet` sits between the offset array and whatever the
+        // offsets point at, so its presence moves the subtables along by two.
+        let set = usize::from(flag & 0x0010 != 0) * 2;
         // Offsets are measured from the start of the Lookup, and the first
         // subtable begins after the whole offset array.
-        let mut at = out.len() + subtables.len() * 2 - lookup;
+        let mut at = out.len() + subtables.len() * 2 + set - lookup;
         for s in subtables {
             out.extend_from_slice(&be16(u16::try_from(at).unwrap()));
             at += s.len();
+        }
+        if set != 0 {
+            out.extend_from_slice(&be16(filter));
         }
         for s in subtables {
             out.extend_from_slice(s);
@@ -1482,6 +1725,12 @@ mod tests {
     /// single-feature builder is what nearly every test wants, and threading
     /// slices through it would obscure them all to serve two.
     fn gsub_lookups(features: &[(&[u8; 4], u16, Vec<u8>)]) -> Vec<u8> {
+        gsub_lookups_flagged(features, &[])
+    }
+
+    /// As [`gsub_lookups`], with `flags[i]` as lookup `i`'s `lookupFlag`. A
+    /// short `flags` leaves the rest of the lookups unflagged.
+    fn gsub_lookups_flagged(features: &[(&[u8; 4], u16, Vec<u8>)], flags: &[u16]) -> Vec<u8> {
         let n = features.len();
         // One default script that selects every feature, which is what a
         // Latin-only face ships and what leaves the feature order — the thing
@@ -1530,7 +1779,7 @@ mod tests {
         for (i, (_, kind, subtable)) in features.iter().enumerate() {
             let lookup = lookups_at + i * 8;
             out.extend_from_slice(&be16(*kind));
-            out.extend_from_slice(&be16(0)); // flags
+            out.extend_from_slice(&be16(flags.get(i).copied().unwrap_or(0)));
             out.extend_from_slice(&be16(1)); // subTableCount
             out.extend_from_slice(&be16(u16::try_from(sub_at - lookup).unwrap()));
             sub_at += subtable.len();
@@ -1551,6 +1800,63 @@ mod tests {
             out.extend_from_slice(&be16(*c));
         }
         out
+    }
+
+    /// A `MarkGlyphSetsDef`: one coverage per set, reached through a *32-bit*
+    /// offset — the one place in either layout table where an offset is not a
+    /// `u16`.
+    fn mark_glyph_sets(sets: &[&[u16]]) -> Vec<u8> {
+        let covers: Vec<Vec<u8>> = sets.iter().map(|s| coverage1(s)).collect();
+        let mut out = Vec::new();
+        out.extend_from_slice(&be16(1)); // format
+        out.extend_from_slice(&be16(u16::try_from(sets.len()).unwrap()));
+        let mut at = 4 + sets.len() * 4;
+        for c in &covers {
+            out.extend_from_slice(&u32::try_from(at).unwrap().to_be_bytes());
+            at += c.len();
+        }
+        for c in &covers {
+            out.extend_from_slice(c);
+        }
+        out
+    }
+
+    /// A `GDEF` whose `GlyphClassDef` is `classes`, plus the mark glyph sets in
+    /// `sets`.
+    ///
+    /// Declares itself 1.0 when there are no sets and 1.2 when there are,
+    /// because `markGlyphSetsDef` is a field 1.0 does not have: a reader that
+    /// took the offset from a 1.0 table would be reading whatever follows the
+    /// header.
+    fn gdef(classes: &[u8], sets: &[&[u16]]) -> Vec<u8> {
+        let header = if sets.is_empty() { 12 } else { 14 };
+        let mut out = Vec::new();
+        out.extend_from_slice(&be16(1)); // major
+        out.extend_from_slice(&be16(if sets.is_empty() { 0 } else { 2 }));
+        out.extend_from_slice(&be16(u16::try_from(header).unwrap())); // glyphClassDef
+        out.extend_from_slice(&be16(0)); // attachList
+        out.extend_from_slice(&be16(0)); // ligCaretList
+        out.extend_from_slice(&be16(0)); // markAttachClassDef
+        if !sets.is_empty() {
+            let at = header + classes.len();
+            out.extend_from_slice(&be16(u16::try_from(at).unwrap()));
+        }
+        out.extend_from_slice(classes);
+        if !sets.is_empty() {
+            out.extend_from_slice(&mark_glyph_sets(sets));
+        }
+        out
+    }
+
+    /// Parse a `GSUB` and a `GDEF` the way a face presents them: two spans into
+    /// one file, not two files.
+    fn with_gdef(gsub: &[u8], gdef: &[u8]) -> (Vec<u8>, Substitutions) {
+        let mut data = gsub.to_vec();
+        let at = data.len();
+        data.extend_from_slice(gdef);
+        let subs = Substitutions::parse(&data, Some(span(0, gsub.len())), Some(span(at, gdef.len())))
+            .expect("a flagged lookup must still parse");
+        (data, subs)
     }
 
     /// The `SequenceLookupRecord` array: `(input position, lookup index)`.
@@ -1792,7 +2098,7 @@ mod tests {
         ]);
         let sub = ligature_subst(&[10], &[set_f]);
         let data = gsub_table(b"liga", LOOKUP_LIGATURE, &sub);
-        let subs = Substitutions::parse(&data, Some(span(0, data.len()))).expect("liga must parse");
+        let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).expect("liga must parse");
         (data, subs)
     }
 
@@ -1850,6 +2156,107 @@ mod tests {
         assert!(subst(&data, &subs, &[]).is_empty());
     }
 
+    const IGNORE_MARKS: u16 = 0x0008;
+    const USE_MARK_FILTERING_SET: u16 = 0x0010;
+
+    /// `f`=10 plus `i`=11 becomes `fi`=20, and nothing else. The smallest
+    /// lookup that can tell a skipped glyph from a matched one.
+    fn fi_subtable() -> Vec<u8> {
+        ligature_subst(&[10], &[ligature_set(&[ligature(20, &[11])])])
+    }
+
+    #[test]
+    fn a_mark_between_the_components_defeats_an_unflagged_ligature() {
+        // The baseline the flagged tests below are measured against: with no
+        // flag the mark is an ordinary glyph, and `f` mark `i` is simply not
+        // the pair the face described. Without this test a passing
+        // `IgnoreMarks` test could just as well be a lookup that ignores its
+        // input entirely.
+        let gsub = gsub_flagged(b"liga", LOOKUP_LIGATURE, 0, 0, &fi_subtable());
+        let (data, subs) = with_gdef(&gsub, &gdef(&class_def(90, &[3]), &[]));
+        assert_eq!(subst(&data, &subs, &[10, 90, 11]), [10, 90, 11]);
+    }
+
+    #[test]
+    fn ignore_marks_forms_the_ligature_across_the_mark() {
+        // A face writing `fi` says "an f and an i", not "an f and an i with no
+        // vowel mark between them". The mark is skipped, not consumed, so it
+        // survives into the output — dropping it would delete a diacritic the
+        // user typed.
+        let gsub = gsub_flagged(b"liga", LOOKUP_LIGATURE, IGNORE_MARKS, 0, &fi_subtable());
+        let (data, subs) = with_gdef(&gsub, &gdef(&class_def(90, &[3]), &[]));
+        assert_eq!(subst(&data, &subs, &[10, 90, 11]), [20, 90]);
+    }
+
+    #[test]
+    fn ignore_marks_still_stops_at_a_glyph_that_is_not_a_mark() {
+        // Skipping is not the same as not matching: the flag lets the walk
+        // step over a mark, and over nothing else. A `12` between the
+        // components must end the match, or every lookup with this flag would
+        // reach across whole words.
+        let gsub = gsub_flagged(b"liga", LOOKUP_LIGATURE, IGNORE_MARKS, 0, &fi_subtable());
+        let (data, subs) = with_gdef(&gsub, &gdef(&class_def(90, &[3]), &[]));
+        assert_eq!(subst(&data, &subs, &[10, 12, 11]), [10, 12, 11]);
+    }
+
+    #[test]
+    fn a_flag_with_no_gdef_behind_it_hides_nothing() {
+        // "Ignore marks" is a statement about glyph classes, and a face with
+        // no `GDEF` has never said which glyphs are marks. Guessing — reading
+        // the flag as licence to skip whatever looks mark-like — would form
+        // ligatures the face did not ask for.
+        let gsub = gsub_flagged(b"liga", LOOKUP_LIGATURE, IGNORE_MARKS, 0, &fi_subtable());
+        let subs = Substitutions::parse(&gsub, Some(span(0, gsub.len())), None).unwrap();
+        assert_eq!(subst(&gsub, &subs, &[10, 90, 11]), [10, 90, 11]);
+    }
+
+    #[test]
+    fn a_mark_filtering_set_hides_every_mark_it_does_not_name() {
+        // `markFilteringSet` is the one lookup field that is not at a fixed
+        // offset — it follows the subtable-offset array, so its position
+        // depends on how many subtables the lookup declared. Reading it two
+        // bytes early would give a set index of whatever the first subtable
+        // offset happens to be.
+        //
+        // The sense of the flag is the opposite of `IgnoreMarks`: the lookup
+        // asked to *see* the marks in its set, so those stop the match and
+        // every other mark is skipped.
+        let gsub = gsub_flagged(
+            b"liga",
+            LOOKUP_LIGATURE,
+            USE_MARK_FILTERING_SET,
+            0,
+            &fi_subtable(),
+        );
+        let (data, subs) = with_gdef(&gsub, &gdef(&class_def(90, &[3, 3]), &[&[90]]));
+        assert_eq!(subst(&data, &subs, &[10, 90, 11]), [10, 90, 11]);
+        assert_eq!(subst(&data, &subs, &[10, 91, 11]), [20, 91]);
+    }
+
+    #[test]
+    fn a_chaining_rule_skips_marks_in_its_backtrack_too() {
+        // The flag governs the whole walk, context included: a neighbour is a
+        // neighbour whether the rule reached it as input or as backtrack. A
+        // shaper that honoured the flag only for the input would fail every
+        // chaining rule whose context happens to sit across a diacritic.
+        let chain = chain_context3(&[&[12]], &[&[10]], &[], &[(0, 1)]);
+        let lookups: Vec<(&[u8; 4], u16, Vec<u8>)> = alloc::vec![
+            (b"calt", LOOKUP_CHAIN_CONTEXT, chain),
+            // `dlig` is off by default, so the helper can only run by being
+            // invoked — which is what makes this a test of the chaining rule.
+            (b"dlig", LOOKUP_SINGLE, single_list(&[10], &[30])),
+        ];
+        let flagged = gsub_lookups_flagged(&lookups, &[IGNORE_MARKS]);
+        let plain = gsub_lookups(&lookups);
+        let classes = gdef(&class_def(90, &[3]), &[]);
+
+        let (data, subs) = with_gdef(&flagged, &classes);
+        assert_eq!(subst(&data, &subs, &[12, 90, 10]), [12, 90, 30]);
+        // …and with the flag off the same mark ends the backtrack.
+        let (data, subs) = with_gdef(&plain, &classes);
+        assert_eq!(subst(&data, &subs, &[12, 90, 10]), [12, 90, 10]);
+    }
+
     #[test]
     fn a_required_ligature_is_read_too() {
         // `rlig` is a different tag reaching the same machinery. Arabic needs
@@ -1857,7 +2264,7 @@ mod tests {
         let set = ligature_set(&[ligature(30, &[11])]);
         let sub = ligature_subst(&[10], &[set]);
         let data = gsub_table(b"rlig", LOOKUP_LIGATURE, &sub);
-        let subs = Substitutions::parse(&data, Some(span(0, data.len()))).unwrap();
+        let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
         assert_eq!(subst(&data, &subs, &[10, 11]), [30]);
     }
 
@@ -1868,7 +2275,7 @@ mod tests {
         let set = ligature_set(&[ligature(30, &[11])]);
         let sub = ligature_subst(&[10], &[set]);
         let data = gsub_table(b"dlig", LOOKUP_LIGATURE, &sub);
-        assert!(Substitutions::parse(&data, Some(span(0, data.len()))).is_none());
+        assert!(Substitutions::parse(&data, Some(span(0, data.len())), None).is_none());
     }
 
     #[test]
@@ -1879,7 +2286,7 @@ mod tests {
         // through its Latin `locl`, so skipping this feature turned every
         // space in every Latin string into the wrong glyph.
         let data = gsub_table(b"locl", LOOKUP_SINGLE, &single_delta(&[10], 5));
-        let subs = Substitutions::parse(&data, Some(span(0, data.len()))).unwrap();
+        let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
         assert_eq!(subst(&data, &subs, &[10]), &[15]);
     }
 
@@ -1906,7 +2313,7 @@ mod tests {
     fn a_positional_feature_reaches_only_the_glyph_that_takes_that_form() {
         // One `fina` lookup covering all three glyphs of the run.
         let data = gsub_table(b"fina", LOOKUP_SINGLE, &single_delta(&[10, 11, 12], 5));
-        let subs = Substitutions::parse(&data, Some(span(0, data.len()))).unwrap();
+        let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
         assert_eq!(
             subst_cursive(
                 &data,
@@ -1927,7 +2334,7 @@ mod tests {
     #[test]
     fn an_unconditional_feature_reaches_every_glyph_whatever_its_form() {
         let data = gsub_table(b"liga", LOOKUP_SINGLE, &single_delta(&[10, 11, 12], 5));
-        let subs = Substitutions::parse(&data, Some(span(0, data.len()))).unwrap();
+        let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
         assert_eq!(
             subst_cursive(
                 &data,
@@ -1974,7 +2381,7 @@ mod tests {
     fn a_glyph_with_no_form_is_reached_by_no_positional_feature() {
         for tag in [b"isol", b"init", b"medi", b"fina"] {
             let data = gsub_table(tag, LOOKUP_SINGLE, &single_delta(&[10], 5));
-            let subs = Substitutions::parse(&data, Some(span(0, data.len()))).unwrap();
+            let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
             assert_eq!(subst(&data, &subs, &[10]), &[10], "{:?}", *tag);
         }
     }
@@ -2003,12 +2410,12 @@ mod tests {
 
         let sub = single_delta(&[10], 5);
         let data = gsub_from_scripts(&scripts, &[b"locl"], LOOKUP_SINGLE, &[&sub]);
-        assert!(Substitutions::parse(&data, Some(span(0, data.len()))).is_none());
+        assert!(Substitutions::parse(&data, Some(span(0, data.len())), None).is_none());
     }
 
     #[test]
     fn no_gsub_means_no_substitutions() {
-        assert!(Substitutions::parse(&[], None).is_none());
+        assert!(Substitutions::parse(&[], None, None).is_none());
     }
 
     #[test]
@@ -2022,7 +2429,7 @@ mod tests {
         ext.extend_from_slice(&8u32.to_be_bytes());
         ext.extend_from_slice(&inner);
         let data = gsub_table(b"liga", LOOKUP_EXTENSION, &ext);
-        let subs = Substitutions::parse(&data, Some(span(0, data.len()))).unwrap();
+        let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
         assert_eq!(subst(&data, &subs, &[10, 11]), [20]);
     }
 
@@ -2033,7 +2440,7 @@ mod tests {
         // walk that ignored the lookup type would happily read it and
         // substitute the wrong glyph.
         let data = gsub_table(b"liga", 8, &single_list(&[10], &[42]));
-        assert!(Substitutions::parse(&data, Some(span(0, data.len()))).is_none());
+        assert!(Substitutions::parse(&data, Some(span(0, data.len())), None).is_none());
     }
 
     /// The first alternate is what an on-or-off feature selects: OpenType
@@ -2045,7 +2452,7 @@ mod tests {
             LOOKUP_ALTERNATE,
             &alternate(&[10], &[&[42, 43, 44]]),
         );
-        let subs = Substitutions::parse(&data, Some(span(0, data.len()))).unwrap();
+        let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
         assert_eq!(subst(&data, &subs, &[10]), &[42]);
         // An uncovered glyph is left alone.
         assert_eq!(subst(&data, &subs, &[11]), &[11]);
@@ -2056,7 +2463,7 @@ mod tests {
     #[test]
     fn an_empty_alternate_set_substitutes_nothing() {
         let data = gsub_table(b"liga", LOOKUP_ALTERNATE, &alternate(&[10], &[&[]]));
-        let Some(subs) = Substitutions::parse(&data, Some(span(0, data.len()))) else {
+        let Some(subs) = Substitutions::parse(&data, Some(span(0, data.len())), None) else {
             return;
         };
         assert_eq!(subst(&data, &subs, &[10]), &[10]);
@@ -2070,8 +2477,8 @@ mod tests {
         let bytes = alternate(&[10], &[&[42, 43, 44]]);
         let as_alt = gsub_table(b"liga", LOOKUP_ALTERNATE, &bytes);
         let as_mult = gsub_table(b"liga", LOOKUP_MULTIPLE, &bytes);
-        let alt = Substitutions::parse(&as_alt, Some(span(0, as_alt.len()))).unwrap();
-        let mult = Substitutions::parse(&as_mult, Some(span(0, as_mult.len()))).unwrap();
+        let alt = Substitutions::parse(&as_alt, Some(span(0, as_alt.len())), None).unwrap();
+        let mult = Substitutions::parse(&as_mult, Some(span(0, as_mult.len())), None).unwrap();
         assert_eq!(subst(&as_alt, &alt, &[10]), &[42]);
         assert_eq!(subst(&as_mult, &mult, &[10]), &[42, 43, 44]);
     }
@@ -2129,7 +2536,7 @@ mod tests {
             out.extend_from_slice(sub);
         }
 
-        let subs = Substitutions::parse(&out, Some(span(0, out.len()))).expect("two scripts");
+        let subs = Substitutions::parse(&out, Some(span(0, out.len())), None).expect("two scripts");
         (out, subs)
     }
 
@@ -2182,7 +2589,7 @@ mod tests {
     #[test]
     fn an_unregistered_script_falls_back_to_the_default_one() {
         let data = gsub_table(b"liga", LOOKUP_SINGLE, &single_list(&[10], &[42]));
-        let subs = Substitutions::parse(&data, Some(span(0, data.len()))).unwrap();
+        let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
         for script in [LATIN, ARABIC, None] {
             let mut glyphs = vec![SubGlyph::new(10, 0)];
             subs.apply(&data, script, &mut glyphs);
@@ -2238,7 +2645,7 @@ mod tests {
             out.extend_from_slice(sub);
         }
 
-        let subs = Substitutions::parse(&out, Some(span(0, out.len()))).unwrap();
+        let subs = Substitutions::parse(&out, Some(span(0, out.len())), None).unwrap();
         let mut glyphs = vec![
             SubGlyph::new(10, 0),
             SubGlyph::new(11, 1),
@@ -2256,14 +2663,14 @@ mod tests {
     #[test]
     fn a_single_substitution_replaces_by_delta() {
         let data = gsub_lookups(&[(b"ccmp", LOOKUP_SINGLE, single_delta(&[10, 11], 90))]);
-        let subs = Substitutions::parse(&data, Some(span(0, data.len()))).unwrap();
+        let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
         assert_eq!(subst(&data, &subs, &[10, 11, 12]), [100, 101, 12]);
     }
 
     #[test]
     fn a_single_substitution_replaces_by_list() {
         let data = gsub_lookups(&[(b"ccmp", LOOKUP_SINGLE, single_list(&[10, 12], &[70, 80]))]);
-        let subs = Substitutions::parse(&data, Some(span(0, data.len()))).unwrap();
+        let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
         // 11 is between the two covered glyphs and must be left alone: the
         // replacements are indexed by coverage order, not by glyph id.
         assert_eq!(subst(&data, &subs, &[10, 11, 12]), [70, 11, 80]);
@@ -2274,14 +2681,14 @@ mod tests {
         // The spec's arithmetic is modulo 65536. Saturating instead would
         // quietly substitute the face's last glyph for a whole covered range.
         let data = gsub_lookups(&[(b"ccmp", LOOKUP_SINGLE, single_delta(&[u16::MAX], 1))]);
-        let subs = Substitutions::parse(&data, Some(span(0, data.len()))).unwrap();
+        let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
         assert_eq!(subst(&data, &subs, &[u16::MAX]), [0]);
     }
 
     #[test]
     fn a_single_substitution_does_not_change_the_run_or_its_clusters() {
         let data = gsub_lookups(&[(b"ccmp", LOOKUP_SINGLE, single_delta(&[10], 90))]);
-        let subs = Substitutions::parse(&data, Some(span(0, data.len()))).unwrap();
+        let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
         assert_eq!(clusters(&data, &subs, &[10, 11, 10]), [0, 1, 2]);
     }
 
@@ -2298,7 +2705,7 @@ mod tests {
             (b"ccmp", LOOKUP_SINGLE, single_list(&[10], &[11])),
             (b"liga", LOOKUP_LIGATURE, ligature_subst(&[11], &[set])),
         ]);
-        let subs = Substitutions::parse(&data, Some(span(0, data.len()))).unwrap();
+        let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
         assert_eq!(subst(&data, &subs, &[10, 12]), [20]);
     }
 
@@ -2315,7 +2722,7 @@ mod tests {
             (b"liga", LOOKUP_LIGATURE, ligature_subst(&[11], &[set])),
             (b"ccmp", LOOKUP_SINGLE, single_list(&[10], &[11])),
         ]);
-        let subs = Substitutions::parse(&data, Some(span(0, data.len()))).unwrap();
+        let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
         assert_eq!(subst(&data, &subs, &[10, 12]), [11, 12]);
     }
 
@@ -2328,7 +2735,7 @@ mod tests {
             LOOKUP_SINGLE,
             single_list(&[10, 11], &[11, 12]),
         )]);
-        let subs = Substitutions::parse(&data, Some(span(0, data.len()))).unwrap();
+        let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
         assert_eq!(subst(&data, &subs, &[10]), [11]);
     }
 
@@ -2340,7 +2747,7 @@ mod tests {
         for cut in 0..data.len() {
             let short = &data[..cut];
             // Parsing what is left must not panic...
-            let _ = Substitutions::parse(short, Some(span(0, short.len())));
+            let _ = Substitutions::parse(short, Some(span(0, short.len())), None);
             // ...and neither must applying the lookups to it.
             let _ = subst(short, &subs, &[10, 11, 12]);
         }
@@ -2354,10 +2761,10 @@ mod tests {
             (b"ccmp", LOOKUP_SINGLE, single_delta(&[10], 1)),
             (b"liga", LOOKUP_LIGATURE, ligature_subst(&[11], &[set])),
         ]);
-        let subs = Substitutions::parse(&data, Some(span(0, data.len()))).unwrap();
+        let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
         for cut in 0..data.len() {
             let short = &data[..cut];
-            let _ = Substitutions::parse(short, Some(span(0, short.len())));
+            let _ = Substitutions::parse(short, Some(span(0, short.len())), None);
             let _ = subst(short, &subs, &[10, 11, 12]);
         }
     }
@@ -2372,7 +2779,7 @@ mod tests {
         let set = ligature_set(&[lig]);
         let sub = ligature_subst(&[10], &[set]);
         let data = gsub_table(b"liga", LOOKUP_LIGATURE, &sub);
-        let subs = Substitutions::parse(&data, Some(span(0, data.len()))).unwrap();
+        let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
         assert_eq!(subst(&data, &subs, &[10, 11, 12]), [10, 11, 12]);
     }
 
@@ -2380,7 +2787,7 @@ mod tests {
     fn a_multiple_substitution_decomposes_one_glyph_into_several() {
         // 10 is a precomposed letter the face draws as a base plus a mark.
         let data = gsub_table(b"ccmp", LOOKUP_MULTIPLE, &multiple(&[10], &[&[30, 31]]));
-        let subs = Substitutions::parse(&data, Some(span(0, data.len()))).unwrap();
+        let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
         assert_eq!(subst(&data, &subs, &[10]), [30, 31]);
         assert_eq!(subst(&data, &subs, &[9, 10, 11]), [9, 30, 31, 11]);
         // Uncovered glyphs are untouched.
@@ -2393,7 +2800,7 @@ mod tests {
         // came from the same character, so both must name its byte offset.
         // Anything else and a caret can be drawn between them.
         let data = gsub_table(b"ccmp", LOOKUP_MULTIPLE, &multiple(&[11], &[&[30, 31, 32]]));
-        let subs = Substitutions::parse(&data, Some(span(0, data.len()))).unwrap();
+        let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
         assert_eq!(subst(&data, &subs, &[10, 11, 12]), [10, 30, 31, 32, 12]);
         assert_eq!(clusters(&data, &subs, &[10, 11, 12]), [0, 1, 1, 1, 2]);
     }
@@ -2401,7 +2808,7 @@ mod tests {
     #[test]
     fn every_glyph_of_a_run_is_decomposed_not_just_the_first() {
         let data = gsub_table(b"ccmp", LOOKUP_MULTIPLE, &multiple(&[10, 12], &[&[30, 31], &[40, 41]]));
-        let subs = Substitutions::parse(&data, Some(span(0, data.len()))).unwrap();
+        let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
         assert_eq!(subst(&data, &subs, &[10, 11, 12]), [30, 31, 11, 40, 41]);
         assert_eq!(clusters(&data, &subs, &[10, 11, 12]), [0, 0, 1, 2, 2]);
     }
@@ -2417,7 +2824,7 @@ mod tests {
             LOOKUP_MULTIPLE,
             &multiple(&[10, 12], &[&[30, 12], &[40, 41]]),
         );
-        let subs = Substitutions::parse(&data, Some(span(0, data.len()))).unwrap();
+        let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
         assert_eq!(subst(&data, &subs, &[10]), [30, 12]);
         // A 12 that was in the run to begin with is still decomposed: the rule
         // is about what this lookup produced, not about the glyph id.
@@ -2428,7 +2835,7 @@ mod tests {
         // terminate here at all, which is why the rule is a rule and not a
         // tidiness preference.
         let data = gsub_table(b"ccmp", LOOKUP_MULTIPLE, &multiple(&[10], &[&[10, 30]]));
-        let subs = Substitutions::parse(&data, Some(span(0, data.len()))).unwrap();
+        let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
         assert_eq!(subst(&data, &subs, &[10]), [10, 30]);
     }
 
@@ -2444,7 +2851,7 @@ mod tests {
             (b"ccmp", LOOKUP_MULTIPLE, multiple(&[10], &[&[30, 31]])),
             (b"liga", LOOKUP_LIGATURE, ligature_subst(&[31], &[set])),
         ]);
-        let subs = Substitutions::parse(&data, Some(span(0, data.len()))).unwrap();
+        let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
         assert_eq!(subst(&data, &subs, &[10, 12]), [30, 40]);
         assert_eq!(clusters(&data, &subs, &[10, 12]), [0, 0]);
     }
@@ -2455,7 +2862,7 @@ mod tests {
         // anyway. Deleting takes the cluster with it, leaving a character no
         // caret position corresponds to, so this refuses instead.
         let data = gsub_table(b"ccmp", LOOKUP_MULTIPLE, &multiple(&[10], &[&[]]));
-        let subs = Substitutions::parse(&data, Some(span(0, data.len()))).unwrap();
+        let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
         assert_eq!(subst(&data, &subs, &[10, 11]), [10, 11]);
         assert_eq!(clusters(&data, &subs, &[10, 11]), [0, 1]);
     }
@@ -2468,7 +2875,7 @@ mod tests {
         let empty = multiple(&[10], &[&[]]);
         let real = multiple(&[10], &[&[30, 31]]);
         let data = gsub_subtables(b"ccmp", LOOKUP_MULTIPLE, &[&empty, &real]);
-        let subs = Substitutions::parse(&data, Some(span(0, data.len()))).unwrap();
+        let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
         assert_eq!(subst(&data, &subs, &[10]), [30, 31]);
         assert_eq!(clusters(&data, &subs, &[10]), [0, 0]);
     }
@@ -2497,7 +2904,7 @@ mod tests {
         let offset = be16(u16::try_from(tail - sub).unwrap());
         data[sub + 6..sub + 8].copy_from_slice(&offset);
 
-        let subs = Substitutions::parse(&data, Some(span(0, data.len()))).unwrap();
+        let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
         assert_eq!(subst(&data, &subs, &[10]), [30, 31]);
     }
 
@@ -2505,14 +2912,14 @@ mod tests {
     fn a_sequence_longer_than_the_cap_is_refused() {
         let long: Vec<u16> = (0..u16::try_from(MAX_SEQUENCE + 1).unwrap()).collect();
         let data = gsub_table(b"ccmp", LOOKUP_MULTIPLE, &multiple(&[10], &[&long]));
-        let subs = Substitutions::parse(&data, Some(span(0, data.len()))).unwrap();
+        let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
         assert_eq!(subst(&data, &subs, &[10]), [10]);
 
         // And exactly the cap is still allowed: the bound is on absurdity,
         // not on a font that happens to be at the limit.
         let at_cap: Vec<u16> = (0..u16::try_from(MAX_SEQUENCE).unwrap()).collect();
         let data = gsub_table(b"ccmp", LOOKUP_MULTIPLE, &multiple(&[10], &[&at_cap]));
-        let subs = Substitutions::parse(&data, Some(span(0, data.len()))).unwrap();
+        let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
         assert_eq!(subst(&data, &subs, &[10]).len(), MAX_SEQUENCE);
     }
 
@@ -2521,17 +2928,17 @@ mod tests {
         let mut sub = multiple(&[10], &[&[30, 31]]);
         sub[0..2].copy_from_slice(&be16(2));
         let data = gsub_table(b"ccmp", LOOKUP_MULTIPLE, &sub);
-        let subs = Substitutions::parse(&data, Some(span(0, data.len()))).unwrap();
+        let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
         assert_eq!(subst(&data, &subs, &[10]), [10]);
     }
 
     #[test]
     fn a_truncated_multiple_substitution_is_survivable() {
         let data = gsub_table(b"ccmp", LOOKUP_MULTIPLE, &multiple(&[10, 12], &[&[30, 31], &[40]]));
-        let subs = Substitutions::parse(&data, Some(span(0, data.len()))).unwrap();
+        let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
         for cut in 0..data.len() {
             let short = &data[..cut];
-            let _ = Substitutions::parse(short, Some(span(0, short.len())));
+            let _ = Substitutions::parse(short, Some(span(0, short.len())), None);
             let _ = subst(short, &subs, &[10, 11, 12]);
         }
     }
@@ -2549,7 +2956,7 @@ mod tests {
             lookups.push((tag, *kind, sub.clone()));
         }
         let data = gsub_lookups(&lookups);
-        let subs = Substitutions::parse(&data, Some(span(0, data.len()))).unwrap();
+        let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
         (data, subs)
     }
 
@@ -2809,7 +3216,7 @@ mod tests {
             (b"calt", LOOKUP_CONTEXT, context3(&[&[10]], &[(0, 1)])),
             (b"dlig", LOOKUP_CONTEXT, context3(&[&[10]], &[(0, 0)])),
         ]);
-        let subs = Substitutions::parse(&data, Some(span(0, data.len()))).unwrap();
+        let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
         assert_eq!(subst(&data, &subs, &[10]), [10]);
     }
 
@@ -2869,7 +3276,7 @@ mod tests {
             let (data, subs) = context_font(kind, sub, &[helper_10_to_30()]);
             for cut in 0..data.len() {
                 let short = &data[..cut];
-                let _ = Substitutions::parse(short, Some(span(0, short.len())));
+                let _ = Substitutions::parse(short, Some(span(0, short.len())), None);
                 let _ = subst(short, &subs, &[5, 10, 11, 20]);
             }
         }

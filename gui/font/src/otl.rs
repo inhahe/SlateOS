@@ -176,6 +176,11 @@ fn find_script(data: &[u8], script_list: usize, want: &[u8; 4]) -> Option<usize>
 /// better failure than a blank page.
 pub(crate) const MAX_SUBTABLES: usize = 8192;
 
+/// `lookupFlag` bit 4, the one bit this module has to understand: it is what
+/// decides whether a `markFilteringSet` field follows the subtable offsets, so
+/// the rest of the lookup header cannot be read without it.
+const USE_MARK_FILTERING_SET: u16 = 0x0010;
+
 /// One lookup: what it does, and where the subtables that do it live.
 ///
 /// Kept as a unit rather than flattened into one list of subtables because a
@@ -193,6 +198,15 @@ pub(crate) struct Lookup {
     /// any extension redirect already resolved: a caller never sees the
     /// extension type itself, only what it wrapped.
     pub(crate) kind: u16,
+    /// The `lookupFlag`: which glyphs this lookup is not allowed to see, plus
+    /// a mark-attachment class in the high byte. Interpreted by
+    /// [`Skipper`](crate::skip::Skipper), not here — this is the byte range's
+    /// only job.
+    pub(crate) flag: u16,
+    /// The `markFilteringSet` index, which follows the subtable offsets and is
+    /// present only when the flag's `UseMarkFilteringSet` bit is set. Zero
+    /// otherwise, which is harmless because nothing reads it unless the bit is.
+    pub(crate) filter: u16,
     /// Absolute byte offsets of this lookup's subtables, in the order the font
     /// lists them — which is the order they are tried in, first match winning.
     pub(crate) subtables: Vec<usize>,
@@ -540,6 +554,7 @@ fn read_lookup(
     budget: &mut usize,
 ) -> Option<Lookup> {
     let kind = u16_at(data, lookup)?;
+    let flag = u16_at(data, lookup.checked_add(2)?)?;
     let count = u16_at(data, lookup.checked_add(4)?)?;
     let extended = kind == extension;
     if !extended && !want.contains(&kind) {
@@ -588,7 +603,24 @@ fn read_lookup(
         }
     }
     let kind = effective?;
-    (!subtables.is_empty()).then_some(Lookup { kind, subtables })
+    // `markFilteringSet` follows the subtable-offset array, so its position
+    // depends on the *declared* count rather than on how many offsets were
+    // actually read — a truncated table must not move the field.
+    let filter = if flag & USE_MARK_FILTERING_SET == 0 {
+        0
+    } else {
+        lookup
+            .checked_add(6)
+            .and_then(|o| usize::from(count).checked_mul(2).and_then(|d| o.checked_add(d)))
+            .and_then(|at| u16_at(data, at))
+            .unwrap_or(0)
+    };
+    (!subtables.is_empty()).then_some(Lookup {
+        kind,
+        flag,
+        filter,
+        subtables,
+    })
 }
 
 /// Where `glyph` sits in a coverage table, or `None` if it is not covered.

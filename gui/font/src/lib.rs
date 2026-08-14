@@ -54,6 +54,7 @@ mod script_tables;
 pub mod select;
 pub mod sfnt;
 pub mod shape;
+mod skip;
 pub mod system;
 
 use alloc::collections::BTreeMap;

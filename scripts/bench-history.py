@@ -52,6 +52,7 @@ from __future__ import annotations
 import argparse
 import datetime
 import json
+import math
 import os
 import platform
 import re
@@ -85,9 +86,17 @@ SCORE_RE = re.compile(
 #
 # Optional so the one record written before mid-suite sampling existed still
 # parses -- and so a log without any canary at all is *unknown*, not clean.
+#
+# A ninth field, `<invalid>`, counts reference measurements whose two arms
+# failed to separate. It is its own field rather than a zero in `min`/`max`
+# because "the instrument failed" and "the instrument found nothing" are
+# different results: every release-profile run between 2026-08-14T15:57 and
+# 20:30 reported a serene 0% spread over 0-0 cycles while measuring nothing at
+# all. See known-issues.md
+# B-BENCH-CANARY-MEASURES-ZERO-IN-RELEASE-AND-BLAMES-THE-HOST.
 CANARY_RE = re.compile(
     r"^\[bench\]\s+CANARY\s+(\d+)\s+(\d+)\s+(\d+)"
-    r"(?:\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+))?\s*$"
+    r"(?:\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)(?:\s+(\d+))?)?\s*$"
 )
 
 # Percent deviation at which a run is called contaminated. Must match
@@ -95,6 +104,21 @@ CANARY_RE = re.compile(
 # verdict, and this recomputes it so a replayed/old log is judged by the same
 # rule as a live one.
 CANARY_TOLERANCE_PCT = 25
+
+#: Smallest per-access cost whose *spread* is measurable at all.
+#:
+#: Derived, not chosen. The per-access figure is an integer quotient, so its
+#: resolution is one cycle; at a minimum of `m` cycles, one cycle of
+#: quantisation is `100/m` percent. Once that exceeds the tolerance the spread
+#: verdict is reporting rounding, not host load -- so the measurement is
+#: unusable below `100 / CANARY_TOLERANCE_PCT` cycles.
+#:
+#: This is what the 15:57 and 16:16 release records look like: min=1, max=2,
+#: "spread 100%". They were classified as *contamination* on the strength of a
+#: single cycle of rounding, which is the same category error as calling a dead
+#: canary clean -- just in the other direction. For scale, the only honest
+#: measurement of this same quantity on this same host is 266-309 cycles.
+CANARY_MIN_RESOLVABLE = math.ceil(100 / CANARY_TOLERANCE_PCT)
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_SERIAL = os.path.join(REPO_ROOT, "build", "serial-test.txt")
@@ -151,7 +175,8 @@ def parse_canary(path):
             for line in handle:
                 match = CANARY_RE.match(line.strip())
                 if match:
-                    start, end, pct, lo, hi, spread, samples = match.groups()
+                    (start, end, pct, lo, hi, spread, samples,
+                     invalid) = match.groups()
                     result = {
                         "start": int(start),
                         "end": int(end),
@@ -164,6 +189,8 @@ def parse_canary(path):
                             "spread": int(spread),
                             "samples": int(samples),
                         })
+                    if invalid is not None:
+                        result["invalid"] = int(invalid)
     except FileNotFoundError:
         return None
     except OSError as exc:
@@ -172,24 +199,63 @@ def parse_canary(path):
     return result
 
 
-def canary_is_contaminated(canary):
-    """True if the canary shows host load changed during the suite.
+#: The canary's four possible outcomes. Four rather than two, because
+#: "no canary in the log", "the canary could not measure", "the canary
+#: measured contamination" and "the canary measured a quiet host" are four
+#: different findings and only the last one licenses trusting the run.
+CANARY_ABSENT = "absent"
+CANARY_BROKEN = "broken"
+CANARY_CONTAMINATED = "contaminated"
+CANARY_CLEAN = "clean"
+
+
+def canary_verdict(canary):
+    """Classify the canary into one of the four CANARY_* outcomes.
 
     Uses the mid-suite spread when the log has it, because that is the only
     figure that can see a transient burst; falls back to the endpoint
     comparison for records written before mid-suite sampling existed.
 
-    None (no canary in the log) is *not* contaminated -- it is unknown. This
-    returns False so that old records keep comparing as they always have;
-    the caller distinguishes the two by testing for None itself.
+    `broken` is the one that had to be split out. A reference measurement of
+    zero cycles is not a fast memory access, it is a failed measurement -- and
+    for nine consecutive release-profile runs it was reported as
+    *contamination*, sending the reader after host load that was never there
+    while the real fault (the optimiser had deleted the store being timed) went
+    unnamed. "The instrument failed" is not "the instrument found a problem".
     """
     if canary is None:
-        return False
-    if canary["start"] <= 0:
-        return True
+        return CANARY_ABSENT
+    # `invalid` is authoritative when present: the kernel counted the failures
+    # directly. Older logs have no such field, so a zero/absent start is still
+    # read as a failed measurement.
+    if canary.get("invalid", 0) > 0:
+        return CANARY_BROKEN
+    if canary["start"] <= 0 or canary.get("samples") == 0:
+        return CANARY_BROKEN
+    # A minimum below one cycle of usable resolution means the arms barely
+    # separated: `min == 0` is the fully-eliminated case the pre-`invalid` logs
+    # express, and `min` of 1-2 is the same failure caught mid-collapse. Either
+    # way the spread computed from it is quantisation noise. See
+    # CANARY_MIN_RESOLVABLE for why the bound is derived rather than picked.
+    low = canary.get("min")
+    if low is not None and low < CANARY_MIN_RESOLVABLE:
+        return CANARY_BROKEN
     if "spread" in canary:
-        return canary["spread"] > CANARY_TOLERANCE_PCT
-    return abs(canary["pct"] - 100) > CANARY_TOLERANCE_PCT
+        over = canary["spread"] > CANARY_TOLERANCE_PCT
+    else:
+        over = abs(canary["pct"] - 100) > CANARY_TOLERANCE_PCT
+    return CANARY_CONTAMINATED if over else CANARY_CLEAN
+
+
+def canary_is_contaminated(canary):
+    """True only if the canary *measured* host-load contamination.
+
+    Deliberately narrow, and deliberately False for `broken`: this answers the
+    question its name asks. Callers wanting "may I trust this run?" must test
+    `canary_verdict(...) != CANARY_CLEAN`, which is a different and stricter
+    question.
+    """
+    return canary_verdict(canary) == CANARY_CONTAMINATED
 
 
 def git_commit():
@@ -769,18 +835,37 @@ def report(previous, current_entries, threshold_pct,
 
 
 def cmd_list(history_path):
-    """Print a one-line summary of every stored record."""
+    """Print a one-line summary of every stored record.
+
+    The canary column is *recomputed* from each record's stored `canary` dict
+    rather than read from its stored `contaminated` boolean. Those two
+    disagree for every release record written before 2026-08-14T20:30: they
+    hold `contaminated: true` when the truth is that the canary measured
+    nothing at all. The records are append-only and are left exactly as
+    written; this view just declines to repeat their conclusion.
+    """
     records = load_history(history_path)
     if not records:
         print(f"bench-history: no records in {history_path}")
         return 0
+    broken = 0
     for record in records:
         entries = record.get("entries", {})
         over = record.get("over_target", "?")
+        verdict = canary_verdict(record.get("canary"))
+        if verdict == CANARY_BROKEN:
+            broken += 1
         print(
             f"{record.get('timestamp', '?')}  {record.get('host', '?'):<20} "
-            f"{record.get('commit', '?'):<12} {len(entries):>3} benchmarks, "
-            f"{over} over hardware target"
+            f"{record_profile(record):<8} {record.get('commit', '?'):<12} "
+            f"{len(entries):>3} benchmarks, {over} over hardware target, "
+            f"canary {verdict}"
+        )
+    if broken:
+        print(
+            f"\n  {broken} of {len(records)} record(s) have a canary that could "
+            f"not measure: contamination is UNKNOWN for those runs, and any "
+            f"single-benchmark movement in them is unproven."
         )
     return 0
 
@@ -840,7 +925,8 @@ def main(argv=None):
 
     # Reported *after* the comparison, so it qualifies the verdict the reader
     # has just seen rather than being buried above it.
-    if canary is None:
+    verdict = canary_verdict(canary)
+    if verdict == CANARY_ABSENT:
         print("  Contamination canary: absent (log predates it) - unknown, "
               "not clean.")
     else:
@@ -850,7 +936,18 @@ def main(argv=None):
         else:
             detail = (f"endpoints {canary['start']} -> {canary['end']} cycles, "
                       f"{canary['pct']}% (no mid-suite sampling in this log)")
-        if canary_is_contaminated(canary):
+        if verdict == CANARY_BROKEN:
+            failed = canary.get("invalid")
+            how = (f"{failed} measurement(s) failed"
+                   if failed else "it measured zero cycles per access")
+            print(f"  CANARY BROKEN: {how} - contamination is UNKNOWN for this "
+                  f"run, not clean ({detail}).")
+            print("  A reference access cost of zero is not a fast machine, it "
+                  "is a failed measurement: the A/B arms did not separate, so "
+                  "the store being timed was probably optimised away.")
+            print("  Do not read this as host load. See known-issues.md "
+                  "B-BENCH-CANARY-MEASURES-ZERO-IN-RELEASE-AND-BLAMES-THE-HOST.")
+        elif verdict == CANARY_CONTAMINATED:
             print(f"  CONTAMINATED: reference access cost {detail}, tolerance "
                   f"{CANARY_TOLERANCE_PCT}%.")
             print("  Host load changed during the run. A single-benchmark "
@@ -905,7 +1002,14 @@ def main(argv=None):
         # and the tolerance is explicitly a placeholder awaiting real data.
         if canary is not None:
             record["canary"] = dict(canary)
+            # Both, and they are not redundant. `contaminated` answers only the
+            # question its name asks and is False for a broken canary;
+            # `canary_verdict` is the one to test when what you mean is "may I
+            # trust this run?". Storing only the boolean is how nine release
+            # records ended up flagged as contaminated when the truth was that
+            # the instrument had died.
             record["contaminated"] = canary_is_contaminated(canary)
+            record["canary_verdict"] = verdict
         if append_record(args.history, record):
             print(f"  Recorded {len(current_entries)} benchmarks to "
                   f"{os.path.relpath(args.history, REPO_ROOT)}")

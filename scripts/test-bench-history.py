@@ -28,6 +28,7 @@ from a check that passes".
 from __future__ import annotations
 
 import importlib.util
+import math
 import os
 import sys
 import tempfile
@@ -166,10 +167,6 @@ def test_canary(bh, tmpdir):
           bh.canary_is_contaminated(
               {"start": 100, "end": 100, "pct": 100,
                "min": 100, "max": 126, "spread": 26, "samples": 9}), True)
-    # A zero start means the calibration itself failed.
-    check("a zero-start canary is contaminated",
-          bh.canary_is_contaminated({"start": 0, "end": 200, "pct": 0}), True)
-
     # Absent canary: distinct from clean, and must not be reported as dirty.
     absent = write(tmpdir, "canary-absent.txt", "[bench] SCORE a 10 1 PASS\n")
     check("a log with no canary yields None", bh.parse_canary(absent), None)
@@ -182,7 +179,7 @@ def test_canary(bh, tmpdir):
                 "[bench] CANARY x 204 102\n"          # non-numeric
                 "[bench] CANARY 200 204 102 7\n"      # half the extension
                 "[bench] CANARY 200 204 102 1 2 3\n"  # still half
-                "[bench] CANARY 1 2 3 4 5 6 7 8\n")   # trailing junk
+                "[bench] CANARY 1 2 3 4 5 6 7 8 9\n")  # trailing junk
     check("malformed canary lines are rejected", bh.parse_canary(bad), None)
 
     # Last wins, matching parse_serial, so a replayed log reports its final run.
@@ -191,6 +188,85 @@ def test_canary(bh, tmpdir):
                   "[bench] CANARY 300 900 300\n")
     check("the last canary wins",
           bh.parse_canary(twice), {"start": 300, "end": 900, "pct": 300})
+
+
+def test_canary_broken_is_not_contamination(bh, tmpdir):
+    """A failed measurement must not be reported as a busy host.
+
+    This is the regression test for
+    B-BENCH-CANARY-MEASURES-ZERO-IN-RELEASE-AND-BLAMES-THE-HOST. Every
+    release-profile run between 2026-08-14T15:57 and 20:30 emitted
+    `CANARY 0 0 0 0 0 0 10` -- the optimiser had deleted the store being timed,
+    so the A/B arms could not separate -- and the tooling announced host-load
+    contamination. It sent the reader after load that was never there while the
+    real fault, a contamination detector that had stopped detecting, went
+    unnamed for nine runs.
+    """
+    v = bh.canary_verdict
+
+    # The eighth field: the kernel counting its own failed measurements.
+    log = write(tmpdir, "canary-invalid.txt",
+                "[bench] CANARY 271 275 101 271 279 2 9 3\n")
+    check("the invalid count parses",
+          bh.parse_canary(log),
+          {"start": 271, "end": 275, "pct": 101, "min": 271, "max": 279,
+           "spread": 2, "samples": 9, "invalid": 3})
+    check("any failed measurement makes the canary broken",
+          v(bh.parse_canary(log)), bh.CANARY_BROKEN)
+    check("a broken canary is NOT reported as contamination",
+          bh.canary_is_contaminated(bh.parse_canary(log)), False)
+
+    # Zero invalid, otherwise identical: the field's presence alone must not
+    # condemn a run, or the fix would simply invert the old bug.
+    ok = write(tmpdir, "canary-valid.txt",
+               "[bench] CANARY 271 275 101 271 279 2 9 0\n")
+    check("invalid=0 reads as clean", v(bh.parse_canary(ok)), bh.CANARY_CLEAN)
+
+    # The exact shape the nine bad records carry, which predate the field.
+    dead = {"start": 0, "end": 0, "pct": 0, "min": 0, "max": 0,
+            "spread": 0, "samples": 10}
+    check("the historical dead canary is broken, not clean",
+          v(dead), bh.CANARY_BROKEN)
+    check("the historical dead canary is not blamed on the host",
+          bh.canary_is_contaminated(dead), False)
+
+    # A zero minimum with a plausible start: one sample measured nothing. The
+    # spread would compute as 0% -- maximally reassuring, entirely false.
+    partial = {"start": 271, "end": 275, "pct": 101, "min": 0, "max": 279,
+               "spread": 0, "samples": 9}
+    check("one zero sample is enough to break the canary",
+          v(partial), bh.CANARY_BROKEN)
+
+    # The collapse caught halfway: the 15:57 and 16:16 release records measured
+    # 1-2 cycles per guest store and were called *contaminated* on a "spread" of
+    # 100% that is one cycle of integer rounding. The honest measurement of the
+    # same quantity on the same host is 266-309 cycles.
+    quantised = {"start": 2, "end": 2, "pct": 100, "min": 1, "max": 2,
+                 "spread": 100, "samples": 10}
+    check("a 1-2 cycle canary is broken, not contaminated",
+          v(quantised), bh.CANARY_BROKEN)
+    # The bound is derived from the tolerance, not chosen: below it, one cycle
+    # of quantisation outweighs the tolerance the spread is judged against.
+    check("the resolution bound follows from the tolerance",
+          bh.CANARY_MIN_RESOLVABLE, math.ceil(100 / bh.CANARY_TOLERANCE_PCT))
+    at_bound = {"start": 100, "end": 100, "pct": 100,
+                "min": bh.CANARY_MIN_RESOLVABLE, "max": bh.CANARY_MIN_RESOLVABLE,
+                "spread": 0, "samples": 9}
+    check("exactly at the resolution bound is measurable",
+          v(at_bound), bh.CANARY_CLEAN)
+
+    check("a legacy zero-start canary is broken",
+          v({"start": 0, "end": 200, "pct": 0}), bh.CANARY_BROKEN)
+    check("an absent canary is its own verdict", v(None), bh.CANARY_ABSENT)
+    check("a real burst is still contamination",
+          v({"start": 283, "end": 275, "pct": 97, "min": 271, "max": 740,
+             "spread": 173, "samples": 9}), bh.CANARY_CONTAMINATED)
+
+    # And the four verdicts must be four distinct strings, or callers testing
+    # equality would silently collapse two of them.
+    check("the four verdicts are distinct",
+          len({bh.CANARY_ABSENT, bh.CANARY_BROKEN, bh.CANARY_CONTAMINATED,
+               bh.CANARY_CLEAN}), 4)
 
 
 def test_dispersion(bh, tmpdir):
@@ -631,6 +707,7 @@ def main():
         test_parse_formats(bh, tmpdir)
         test_malformed_rejected(bh, tmpdir)
         test_canary(bh, tmpdir)
+        test_canary_broken_is_not_contamination(bh, tmpdir)
         test_dispersion(bh, tmpdir)
         test_profile_isolation(bh, tmpdir)
         test_missing_log(bh, tmpdir)

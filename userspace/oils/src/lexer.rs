@@ -8962,8 +8962,13 @@ mod tests {
     /// eager read, which is what makes the window and not the operand the unit.
     #[test]
     fn a_splice_is_the_only_part_of_an_operand_no_parser_read() {
-        fn kinds(src: &str, unread: &[core::ops::Range<usize>]) -> Vec<SubBody> {
-            super::lex_operand_in_dquote(src.as_bytes(), ReadCtx::SOURCE, unread)
+        // The windows arrive as `(start, end)` pairs rather than ranges because
+        // clippy's `single_range_in_vec_init` reads a one-element array of
+        // `Range` as a mistyped slice index.
+        fn kinds(src: &str, unread: &[(usize, usize)]) -> Vec<SubBody> {
+            let unread: Vec<core::ops::Range<usize>> =
+                unread.iter().map(|&(a, b)| a..b).collect();
+            super::lex_operand_in_dquote(src.as_bytes(), ReadCtx::SOURCE, &unread)
                 .expect("operand lexes")
                 .iter()
                 .filter_map(|s| match s {
@@ -8974,13 +8979,13 @@ mod tests {
         }
         // `"${z:-$'$(echo Q)'}"`: the body is `z:-$(echo Q)` and the operand
         // `$(echo Q)`, all nine bytes of it spliced.
-        assert_eq!(kinds("$(echo Q)", &[0..9]), vec![SubBody::Unread { closed: true }]);
+        assert_eq!(kinds("$(echo Q)", &[(0, 9)]), vec![SubBody::Unread { closed: true }]);
         // The same operand with no splice behind it is read where it stands.
         assert_eq!(kinds("$(echo Q)", &[]), vec![SubBody::Eager]);
         // A window is a window: one written substitution and one spliced beside
         // it in the same operand keep their own answers.
         assert_eq!(
-            kinds("$(a)$(b)", &[4..8]),
+            kinds("$(a)$(b)", &[(4, 8)]),
             vec![SubBody::Eager, SubBody::Unread { closed: true }],
         );
         // A `' … '` run still speaks for what it covers, splices or none.

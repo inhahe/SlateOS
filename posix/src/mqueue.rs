@@ -70,7 +70,6 @@
 use crate::errno;
 use crate::perprocess::process_global;
 use crate::stat::Timespec;
-use core::sync::atomic::{AtomicBool, Ordering};
 
 // ---------------------------------------------------------------------------
 // Public types & constants
@@ -183,11 +182,10 @@ impl Descriptor {
 // Static state
 // ---------------------------------------------------------------------------
 
-static MQ_LOCK: AtomicBool = AtomicBool::new(false);
 process_global! {
     /// This process's POSIX message queues, keyed by name.
     ///
-    /// `MQ_LOCK` already makes concurrent access memory-safe; the per-thread
+    /// [`mq_lock`] already makes concurrent access memory-safe; the per-thread
     /// host storage is about test isolation.  A test that fills all
     /// `MAX_QUEUES` and asserts the next `mq_open` fails is broken by any
     /// concurrent `mq_unlink`, and no amount of locking fixes that.
@@ -197,32 +195,23 @@ process_global! {
     /// table, so it shares the queue table's scope.
     fn mq_descs_storage() -> [Descriptor; MAX_DESCRIPTORS] =
         [const { Descriptor::EMPTY }; MAX_DESCRIPTORS];
+
+    /// Serialises every scan of both tables above.
+    ///
+    /// Declared *inside* the `process_global!` block on purpose: it used to be
+    /// a plain `static AtomicBool`, which on the host is one shared lock over
+    /// per-thread tables — harmless in isolation, but it couples every test
+    /// thread to every other one, so a panic while holding it would wedge
+    /// threads that share no data.  A lock must have the same scope as the
+    /// table it guards; see [`crate::perprocess::PoolLock`].
+    fn mq_lock() -> crate::perprocess::PoolLock = crate::perprocess::PoolLock::new();
 }
 
-fn lock_acquire() {
-    while MQ_LOCK
-        .compare_exchange_weak(false, true, Ordering::AcqRel, Ordering::Relaxed)
-        .is_err()
-    {
-        core::hint::spin_loop();
-    }
-}
-
-fn lock_release() {
-    MQ_LOCK.store(false, Ordering::Release);
-}
-
-/// RAII guard that releases the global mqueue lock on drop.
-struct Guard;
-impl Drop for Guard {
-    fn drop(&mut self) {
-        lock_release();
-    }
-}
-
-fn lock() -> Guard {
-    lock_acquire();
-    Guard
+/// Take [`mq_lock`] for the duration of a queue- or descriptor-table scan.
+fn lock() -> crate::perprocess::PoolGuard<'static> {
+    // SAFETY: `mq_lock()` is this context's lock, valid as long as the tables
+    // it guards.
+    unsafe { crate::perprocess::lock_pool(mq_lock()) }
 }
 
 // ---------------------------------------------------------------------------

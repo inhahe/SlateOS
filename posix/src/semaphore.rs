@@ -380,11 +380,6 @@ struct NamedSem {
     sem: SemT,
 }
 
-// SAFETY: the table is only mutated under `SEM_LOCK`; readers also hold
-// the lock.  `NamedSem` itself contains `AtomicI32` for the value, so
-// once the lock is dropped concurrent `sem_wait`/`sem_post` are safe.
-static SEM_LOCK: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
-
 process_global! {
     /// This process's named-semaphore pool (`sem_open`/`sem_unlink`).
     ///
@@ -409,30 +404,30 @@ process_global! {
             },
         }
     }; MAX_NAMED_SEMS];
+
+    /// Serialises every scan of [`named_sems_ptr`].
+    ///
+    /// Declared *inside* the `process_global!` block on purpose.  It used to
+    /// be a plain `static AtomicBool` beside it, which is correct on the
+    /// target (where `process_global!` is a `static mut`, so both are
+    /// process-wide) but mismatched on the host: one shared lock over sixteen
+    /// per-thread tables.  That was merely slow — until a test panicked while
+    /// holding it, at which point every *other* test thread wedged on a lock
+    /// it had no logical relationship to.  A lock must have the same scope as
+    /// the table it guards; see [`crate::perprocess::PoolLock`].
+    fn sem_lock() -> crate::perprocess::PoolLock = crate::perprocess::PoolLock::new();
 }
 
-/// RAII guard that releases `SEM_LOCK` on drop.
-struct SemLockGuard;
-
-impl Drop for SemLockGuard {
-    fn drop(&mut self) {
-        SEM_LOCK.store(false, core::sync::atomic::Ordering::Release);
-    }
-}
-
-fn acquire_sem_lock() -> SemLockGuard {
-    while SEM_LOCK
-        .compare_exchange_weak(
-            false,
-            true,
-            core::sync::atomic::Ordering::Acquire,
-            core::sync::atomic::Ordering::Relaxed,
-        )
-        .is_err()
-    {
-        core::hint::spin_loop();
-    }
-    SemLockGuard
+/// Take [`sem_lock`] for the duration of a named-semaphore table scan.
+///
+/// The table is only mutated under this lock, and readers hold it too.
+/// `NamedSem` itself holds its value in an `AtomicI32`, so once the guard is
+/// dropped concurrent `sem_wait`/`sem_post` on the returned `sem_t*` are safe
+/// without it.
+fn acquire_sem_lock() -> crate::perprocess::PoolGuard<'static> {
+    // SAFETY: `sem_lock()` is this context's lock, valid as long as the table
+    // it guards.
+    unsafe { crate::perprocess::lock_pool(sem_lock()) }
 }
 
 /// Validate a POSIX semaphore name: starts with `/`, no further `/`,

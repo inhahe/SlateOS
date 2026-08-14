@@ -290,6 +290,24 @@ Give each lane its **own copy** — the kernel mounts it read-write, so lanes
 must not share one file. `build/swap.img` and `build/esp/` are recreated
 automatically and need no action.
 
+The kernel also `include_bytes!`s six **prebuilt service ELFs**, which live in
+those crates' git-ignored `target/` dirs. Without them the kernel does not
+compile at all (`error: couldn't read …/services/init/target/…/init`) — this
+half of the trap at least fails loudly. Copy them across too:
+
+```bash
+cd "D:/visual studio projects/os"
+for s in init hello ticker httpget udpget netstack; do
+    d="services/$s/target/x86_64-unknown-none/release"
+    mkdir -p "D:/visual studio projects/os-lane-a/$d"
+    cp "$d/$s" "D:/visual studio projects/os-lane-a/$d/$s"
+done
+```
+
+Copying build outputs across worktrees is fine — they are artifacts, not
+source, so this is not a cross-lane edit even though `services/**` is lane
+B's tree. Rebuild them from source instead if you need them current.
+
 To confirm the glibc tests actually ran, grep the serial log for
 `REAL glibc pthread` rather than trusting the PASSED line alone.
 

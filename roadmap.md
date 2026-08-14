@@ -269,6 +269,30 @@ other respect:
 - Never kill a QEMU or `cargo` process you did not start — it is probably
   another lane's boot test. Kill by PID, never by image name.
 
+**Provisioning a fresh lane worktree — do this before trusting a boot test.**
+A new worktree only contains *tracked* files, and the boot test's most
+valuable fixtures are git-ignored. The dangerous one is `rootfs.ext4` (the
+Path-Z glibc image, ~256 MiB): when it is absent, `boot-test.sh` simply omits
+the second virtio-blk disk and **the real-glibc self-tests silently no-op** —
+including the dynamic-execution and pthread/`pthread_join` coverage. The boot
+still prints `BOOT_OK` and the harness still reports PASSED, so a fresh
+worktree will happily green-light a change to the very code it never
+exercised.
+
+Copy it in from a provisioned worktree (or rebuild it with
+`wsl -d Ubuntu -- bash scripts/create-ext4-rootfs.sh`):
+
+```bash
+cp "D:/visual studio projects/os/rootfs.ext4" "D:/visual studio projects/os-lane-a/"
+```
+
+Give each lane its **own copy** — the kernel mounts it read-write, so lanes
+must not share one file. `build/swap.img` and `build/esp/` are recreated
+automatically and need no action.
+
+To confirm the glibc tests actually ran, grep the serial log for
+`REAL glibc pthread` rather than trusting the PASSED line alone.
+
 ### 7. When you are blocked, you are not blocked
 
 Each lane's backlog below is deep enough that "waiting on lane A" is never

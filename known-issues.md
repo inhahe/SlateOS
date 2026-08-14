@@ -60803,3 +60803,71 @@ can drift silently and at least one (`vfs_stat_root`: 700 ns in the file) should
 be re-derived anyway. The proper fix is for the kernel's scorecard to be checked
 against the parsed file by `bench-history.py`, so the file becomes the authority
 it already claims to be. Blocked on nothing but effort; tracked here.
+
+#### FOLLOW-UP 2026-08-14: with the file finally parseable, the drift is measurable — and it is near-total
+
+Making `baselines.toml` load was worth doing for its own sake, but the first
+thing a working parser bought was a number for the damage. Matching the 63
+benchmark names the kernel prints against the 57 baseline tables:
+
+| | count |
+|---|---|
+| benchmarks measured by the kernel | 63 |
+| baseline tables in the file | 57 |
+| **matched by name** | **30** |
+| measured with no baseline at all | 33 |
+| baselines naming a benchmark never measured | 27 |
+
+**Less than half of what runs has a baseline it can be compared to.** And the
+two lists are not describing different work — they are largely the *same*
+benchmarks under two names, drifted apart because nothing ever had to reconcile
+them:
+
+| kernel prints | baselines.toml calls it |
+|---|---|
+| `syscall_dispatch` | `syscall_trivial` |
+| `page_fault` | `page_fault_anon` |
+| `tcp_checksum_v4` | `net_tcp_checksum_v4_1460b` |
+| `tcp_checksum_v6` | `net_tcp_checksum_v6_1460b` |
+| `vfs_stat_deep` | `vfs_stat_deep_2comp` |
+| `vfs_throughput_16k_read`/`_write` | `vfs_throughput_16k` |
+| `heap_alloc_free_64` | `heap_alloc_small` |
+| `ipc_channel` | `ipc_channel_roundtrip` |
+| `ipc_pipe` | `ipc_pipe_roundtrip` |
+| `ipc_eventfd` | `eventfd_signal_read` |
+| `ipc_semaphore` | `semaphore_signal_wait` |
+| `firewall_check` | `net_firewall_inbound_check` |
+| `dns_build_query` | `net_dns_build_a_query` |
+| `io_ring_nop` | `iouring_sqe_submit` |
+| `isr_latency` | `interrupt_dispatch` |
+| `service_connect` | `service_connect_accept` |
+| `cp_notify_wait_rt` | `cp_notify_wait_roundtrip` |
+| `net_tcp_conn_lookup` | `net_tcp_conn_table_scan` |
+
+That is 18 of the 33 unmatched accounted for as pure renames. The remainder
+split into benchmarks genuinely lacking a baseline (`vfs_stat_root`,
+`vfs_read_256`, `vfs_write_256`, `vfs_readdir`, `vfs_stat_3comp`,
+`http_gzip_*`, `ipc_channel_sync`, `net_arp_lookup`, `net_checksum`,
+`net_ethernet_parse`, `net_ipv4_parse`, `pick_next`, `sched_pick_next`) and
+baselines for work that is not benchmarked at all (`futex_uncontended`,
+`futex_contended_wake`, `futex_wait_mismatch`, `compositor_frame_4k` — the last
+is Lane C's and is measured by a host-side `cargo test`, not by this suite).
+
+**Note what this does to the headline number.** The `over_target` count the
+kernel reports (15 of 63 on the release run) is computed from the literals in
+`bench.rs`, not from this file — so it is not wrong, but it is also not
+*checkable* against the stated baselines for the 33 unmatched. Ranking the
+release run against the parsed file yields only 7 over-target entries, and that
+smaller number is an artefact of the missing half, not good news. Notably
+`vfs_stat_root` — the benchmark currently under investigation at 8.5x over — has
+**no** table here at all; its 700 ns target exists only as a comment in
+`bench.rs` citing a file that does not mention it.
+
+**Proper fix, unchanged but now specified.** `bench-history.py` should parse
+this file and check each recorded entry against it, reporting unmatched names
+in both directions as a failure rather than silence. That requires first
+reconciling the names — one canonical name per benchmark, used by both the
+`run()` call in `bench.rs` and the table here. The rename table above is the
+work list. Until then the parse test added today guarantees only that the file
+is *loadable*, not that it is *true*.
+

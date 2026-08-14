@@ -507,6 +507,9 @@ pub enum SubBody {
 pub struct CmdSubSpan {
     /// The body, without the delimiters.
     pub src: Str,
+    /// Which of the substitution spellings opened it — the delimiter the
+    /// re-print is wrapped back in, and which parser reads the body.
+    pub open: SubOpen,
     /// The line the body's own `)` sits on, for the same *parse-time*
     /// renumbering an eager `$( … )` gets — the one that puts a syntax error in
     /// the body on its true physical line. What the body reports when it *runs*
@@ -536,6 +539,40 @@ pub struct CmdSubSpan {
     /// One collection is all of one kind: the question is [`Lexer::here_text`],
     /// which nothing changes under a scan that is already running.
     pub kind: SubBody,
+}
+
+/// Which spelling opened a [`CmdSubSpan`].
+///
+/// bash reads all three the same way and from the same place —
+/// `parse_matched_pair` sends a `$(`, a `<(` and a `>(` alike through
+/// `parse_comsub` (parse.y:5028–5042), so a body that will not parse is a
+/// syntax error in the enclosing unit whichever one wrote it, and what is
+/// spliced back over the source is the parse re-printed in the delimiters it
+/// was opened with. What differs is the *line* the body's own errors are
+/// numbered from, and which of the two body parsers reads it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubOpen {
+    /// `$( … )` — the body is renumbered from its closing `)`, being text bash
+    /// hands back to a reader after the enclosing scan. See
+    /// [`crate::parser::parse_cmdsub_body`].
+    Dollar,
+    /// `<( … )` (`input`) or `>( … )` — a process substitution. Its body runs
+    /// as a child command rather than as text the enclosing scan re-reads, so
+    /// it is renumbered from the line the *opening* delimiter sits on, which is
+    /// carried here because [`CmdSubSpan::close_line`] cannot supply it. See
+    /// [`crate::parser::parse_procsub_body`].
+    Proc { input: bool, open_line: u32 },
+}
+
+impl SubOpen {
+    /// The opening delimiter, as written — the bytes the re-print goes back in.
+    pub(crate) fn delim(self) -> &'static [u8] {
+        match self {
+            SubOpen::Dollar => b"$(",
+            SubOpen::Proc { input: true, .. } => b"<(",
+            SubOpen::Proc { input: false, .. } => b">(",
+        }
+    }
 }
 
 /// What [`Lexer::read_dollar_brace`] reads out of a `${ … }`: the body's raw
@@ -5114,6 +5151,19 @@ impl Lexer {
                         }
                     }
                 }
+                // A `<(` is *not* read here, though the `${ … }` scan that
+                // produced this text did read one. bash performs a process
+                // substitution from `expand_word_internal`, which takes a `<(`
+                // for an ordinary character under `Q_DOUBLE_QUOTES` — and every
+                // fragment this loop reads that is not a pattern or a
+                // replacement is expanded that way (a double-quoted operand,
+                // an array subscript, a substring bound). osh decides at lex
+                // time whether a process substitution is live, so the one place
+                // it can be read is the one place it is always performed, and
+                // that is not here. What the parse *did* to it — the body's
+                // error, and the re-print that replaces the source — reaches
+                // this text through [`CmdSubSpan`] instead; see
+                // `parser::procsub_reprints`.
                 '$' => match self.read_dollar(false) {
                     Ok(Some(seg)) => {
                         flush_lit(&mut segs, &mut lit);
@@ -6209,6 +6259,7 @@ impl Lexer {
                             raw.push(b')');
                             self.arith_comsubs.push(CmdSubSpan {
                                 src: inner,
+                                open: SubOpen::Dollar,
                                 close_line: self.cur_line(),
                                 range: start..raw.len(),
                                 kind: self.subst_kind(),
@@ -6300,6 +6351,7 @@ impl Lexer {
                 // there instead; see [`CmdSubSpan::kind`].
                 self.arith_comsubs.push(CmdSubSpan {
                     src: inner,
+                    open: SubOpen::Dollar,
                     close_line: self.cur_line(),
                     range: start..raw.len(),
                     kind: self.subst_kind(),
@@ -6950,6 +7002,43 @@ impl Lexer {
                         }
                     }
                 }
+                // A process substitution is a row of this scan exactly as `$(`
+                // is: `parse_matched_pair` names `<(`, `>(` and `$(` in one
+                // breath and sends all three through `parse_comsub`
+                // (parse.y:5028–5042). So the body is read *here*, parsed here
+                // and now, and its re-print — not its source — is what stays;
+                // `echo "${z:-<(fi)}"` is a syntax error at `fi` rather than a
+                // brace body holding the text `<(fi)`, and
+                // `f() { echo "${z:-<(echo   hi)}"; }` prints back with the run
+                // of spaces gone.
+                //
+                // Unlike `$[ … )` two arms down this holds under
+                // [`Lexer::here_text`] too: `extract_dollar_brace_string` has a
+                // `<(` row of its own (subst.c:1881-1950), so the construct is
+                // stepped over there as well. What it does *not* have is a
+                // parse, which [`Lexer::subst_kind`] records.
+                '<' | '>' if self.peek() == Some('(') => {
+                    let open_line = self.cur_line();
+                    let input = ch == '<';
+                    self.pos += 1;
+                    let start = raw.len();
+                    raw.extend_from_slice(if input { b"<(" } else { b">(" });
+                    // The same body read a `$(` in this position gets, and in
+                    // the same delimiter — so `"${z:-<(fi}"` runs out looking
+                    // for the `"`, exactly as `"${z:-$(fi}"` does.
+                    let inner = self
+                        .read_subst_body(in_dquote && !self.here_text)
+                        .map_err(|e| e.at(self.eof_line()))?;
+                    raw.extend_from_slice(&inner);
+                    raw.push(b')');
+                    self.arith_comsubs.push(CmdSubSpan {
+                        src: inner,
+                        open: SubOpen::Proc { input, open_line },
+                        close_line: self.cur_line(),
+                        range: start..raw.len(),
+                        kind: self.subst_kind(),
+                    });
+                }
                 // `$…` may begin a nested construct that must balance with its
                 // own terminator; consume it whole so a `}` or `)` inside it is
                 // not mistaken for our terminator.
@@ -7083,6 +7172,7 @@ impl Lexer {
                                 // [`Lexer::here_text`] and [`CmdSubSpan::kind`].
                                 self.arith_comsubs.push(CmdSubSpan {
                                     src: inner,
+                                    open: SubOpen::Dollar,
                                     close_line: self.cur_line(),
                                     range: start..raw.len(),
                                     kind: self.subst_kind(),

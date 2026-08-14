@@ -44,11 +44,12 @@ use crate::bfmt;
 use crate::bytes::{self, BStr, Ch, Str};
 use crate::lexer::{
     AliasExpansion, CmdSubSpan, DparenCopy, HeredocEof, ParseOpts, Op, ReaderWarning, Seg, Spanned,
-    Tok, SubBody, TokSpan, Tokenized, UngatheredHeredoc,
+    Tok, SubBody, SubOpen, TokSpan, Tokenized, UngatheredHeredoc,
     expand_aliases_tracked, tokenize,
     tokenize_paren_body, tokenize_deferred, tokenize_spanned, word_is_assignment,
 };
 use crate::wordscan::BraceEnd;
+use std::borrow::Cow;
 
 /// Whether `s` is a syntactically valid shell identifier.
 ///
@@ -2615,9 +2616,19 @@ fn map_segs(segs: &mut [Seg], map: &LineMap) {
 /// [`Seg::CmdSub`]'s own close line is renumbered: they are parsed in this token
 /// stream, so an error in one is blamed on the enclosing source's line and not
 /// on the line a fresh lex of the body would have counted.
+///
+/// Both of the lines a span may carry are renumbered, because the two spellings
+/// count from different ends: a `$( … )` body is numbered back from its closing
+/// `)` and a `<( … )` / `>( … )` body forward from its opening delimiter (see
+/// [`parse_procsub_body`]). Leaving the second one alone is why a procsub in a
+/// `${ … }` body used to be blamed on line 1 of an `eval` string while the `$(`
+/// spelling beside it named the line the `eval` was written on.
 fn map_arith_comsubs(nested: &mut [CmdSubSpan], map: &LineMap) {
     for sub in nested {
         sub.close_line = map.map(sub.close_line);
+        if let SubOpen::Proc { open_line, .. } = &mut sub.open {
+            *open_line = map.map(*open_line);
+        }
     }
 }
 
@@ -6149,8 +6160,9 @@ fn word_expanded_from_its_text(word: Word, segs: &[Seg]) -> Word {
     }
 }
 
-/// Parse the `$( … )` bodies an arithmetic scan stepped over, and return each
-/// one's re-print beside the range of the scan's text it replaces.
+/// Parse the substitution bodies an arithmetic or `${ … }` scan stepped over,
+/// and return each one's re-print beside the range of the scan's text it
+/// replaces.
 ///
 /// bash parses them where it meets them — `parse_matched_pair` under `P_ARITH`
 /// sends a `$(` to `parse_dollar_word` and from there to `parse_comsub`
@@ -6178,8 +6190,15 @@ fn parse_arith_comsubs(
         if sub.kind != SubBody::Eager {
             continue;
         }
-        let prog = parse_cmdsub_body(&sub.src, sub.close_line, opts)?;
-        out.push((sub.range.clone(), crate::unparse::comsub_reprint(b"$(", &prog)));
+        // A process substitution met by the same scan is parsed by the same
+        // rule and re-printed into the same buffer — only from its *opening*
+        // line, and by the parser that ends a body on a `)` that is not a
+        // `list_terminator`. See [`SubOpen`].
+        let prog = match sub.open {
+            SubOpen::Dollar => parse_cmdsub_body(&sub.src, sub.close_line, opts)?,
+            SubOpen::Proc { open_line, .. } => parse_procsub_body(&sub.src, open_line, opts)?,
+        };
+        out.push((sub.range.clone(), crate::unparse::comsub_reprint(sub.open.delim(), &prog)));
     }
     Ok(out)
 }
@@ -6211,8 +6230,14 @@ fn parse_arith_comsubs(
 /// however deeply spelled. Which of the two scans its own parts is the
 /// arithmetic's question, answered in `Shell::arith_extent_scan`.
 fn arith_unread_subs(expr: &Str, nested: &[CmdSubSpan]) -> Vec<WordPart> {
-    let mut spans: Vec<&CmdSubSpan> =
-        nested.iter().filter(|s| matches!(s.kind, SubBody::Unread { .. })).collect();
+    // Only the `$( … )` spelling. A `<( … )` reaches this collection from a
+    // `${ … }` the arithmetic scan stepped over, and the expansion-time scan
+    // does not recurse into one with a parse the way `extract_command_subst`
+    // does — it is text there, and stays text here. See [`SubOpen`].
+    let mut spans: Vec<&CmdSubSpan> = nested
+        .iter()
+        .filter(|s| matches!(s.kind, SubBody::Unread { .. }) && matches!(s.open, SubOpen::Dollar))
+        .collect();
     if spans.is_empty() {
         return vec![WordPart::Literal(expr.clone())];
     }
@@ -6242,6 +6267,84 @@ fn arith_unread_subs(expr: &Str, nested: &[CmdSubSpan]) -> Vec<WordPart> {
     }
     parts.push(WordPart::Literal(expr.get(at..).unwrap_or_default().to_vec()));
     parts
+}
+
+/// The re-prints of the *process* substitutions a `${ … }` scan stepped over —
+/// [`parse_arith_comsubs`] restricted to the `<( … )` / `>( … )` spelling.
+///
+/// The two spellings need separating because only one of them is read a second
+/// time. A `$( … )` in a `${ … }` body is met again by the re-lex that carves
+/// the operand, pattern or subscript out of the body's text, and the part that
+/// re-lex builds re-prints itself; splicing the re-print into the text as well
+/// would gather a nested here-document twice. A `<( … )` is not met again —
+/// `read_word_verbatim` leaves it as characters on purpose, since osh decides
+/// at lex time whether a process substitution is live and none of the fragments
+/// that re-lex is one bash performs it in — so for that spelling the splice
+/// here is the only thing that carries the parse into the body's text.
+///
+/// # Errors
+/// Returns the first body's [`ParseError`], which is the enclosing unit's:
+/// `echo "${z:-<(fi)}"` is a syntax error at `fi`.
+fn procsub_reprints(
+    nested: &[CmdSubSpan],
+    opts: ParseOpts,
+) -> Result<Vec<(core::ops::Range<usize>, Str)>, ParseError> {
+    let mut out = Vec::new();
+    for sub in nested {
+        let SubOpen::Proc { open_line, .. } = sub.open else { continue };
+        if sub.kind != SubBody::Eager {
+            continue;
+        }
+        let prog = parse_procsub_body(&sub.src, open_line, opts)?;
+        out.push((sub.range.clone(), crate::unparse::comsub_reprint(sub.open.delim(), &prog)));
+    }
+    Ok(out)
+}
+
+/// [`splice_reprints`], carrying a set of ranges measured against the same text
+/// across the change.
+///
+/// The ranges are the body's [bare splices](crate::lexer::Lexer::bare_splices) —
+/// stretches no parser read — and a re-print that is not the length of the
+/// source it replaces moves every one of them that sits after it. Nothing can
+/// sit *inside* a re-printed span (a substitution found in spliced text is not
+/// recorded, that text having been written rather than read), so each range
+/// only ever moves as a whole.
+///
+/// Returns the text and ranges untouched when there is nothing to splice, which
+/// is the overwhelmingly common case.
+fn splice_reprints_tracking<'a>(
+    text: &'a Str,
+    mut reprints: Vec<(core::ops::Range<usize>, Str)>,
+    splices: &'a [core::ops::Range<usize>],
+) -> (Cow<'a, Str>, Cow<'a, [core::ops::Range<usize>]>) {
+    if reprints.is_empty() {
+        return (Cow::Borrowed(text), Cow::Borrowed(splices));
+    }
+    reprints.sort_by_key(|(r, _)| r.start);
+    let mut out = text.clone();
+    let mut moved = splices.to_vec();
+    // Right to left, so a range still to be spliced is still valid; see
+    // [`splice_reprints`].
+    for (range, rep) in reprints.into_iter().rev() {
+        // A range that does not fit is not something a correct scan can
+        // produce; dropping the splice keeps the source text rather than
+        // corrupting it.
+        if range.start > range.end || range.end > out.len() {
+            continue;
+        }
+        let (at, old, new) = (range.start, range.end - range.start, rep.len());
+        out.splice(range, rep);
+        if new != old {
+            let shift = |p: usize| {
+                if p <= at { p } else { (p + new).saturating_sub(old) }
+            };
+            for s in &mut moved {
+                *s = shift(s.start)..shift(s.end);
+            }
+        }
+    }
+    (Cow::Owned(out), Cow::Owned(moved))
 }
 
 /// Write each re-print from [`parse_arith_comsubs`] back over the text it
@@ -6361,6 +6464,16 @@ fn seg_to_part(seg: &Seg, opts: ParseOpts, q: Quoting) -> Result<WordPart, Parse
         // fragment of it has to be told the physical line it starts on — see
         // [`frag_line`] and [`map_frag_segs`].
         Seg::ParamBraced(raw, open, nested, spliced) => {
+            // A process substitution the scan stepped over is parsed here and
+            // its re-print written over the source, because nothing downstream
+            // will do either — see [`procsub_reprints`]. So
+            // `echo "${z:-<(fi)}"` is a syntax error at `fi` rather than a
+            // brace body holding the text `<(fi)`, and
+            // `f() { echo "${z:-<(echo   hi)}"; }` prints back with the run of
+            // spaces gone.
+            let (raw, spliced) =
+                splice_reprints_tracking(raw, procsub_reprints(nested, opts)?, spliced);
+            let (raw, spliced) = (&*raw, &*spliced);
             let mut part = parse_braced_param_in(raw, opts, q, *open, spliced);
             // A `$( … )` in the body is parsed by bash where it *reads* it, so
             // its syntax error beats every verdict the `${ … }` could reach —
@@ -10387,6 +10500,56 @@ mod tests {
         // the shell's deferred tokenizer, which keeps a failing line's tokens,
         // and so is measured in the corpus rather than through this `parse`:
         // `echo $(fi)x <(` and `echo a$(fi) b$(` both name `fi` there.
+    }
+
+    /// `<(`, `>(` and `$(` are one row of `parse_matched_pair` (parse.y:5028)
+    /// and all three go through `parse_comsub`, so a `${ … }` body's scan reads
+    /// a process substitution exactly as it reads a command substitution: the
+    /// body is parsed there and then, and its error is the enclosing unit's.
+    /// Every row is measured from bash 5.2.37.
+    #[test]
+    fn a_process_substitution_in_a_brace_body_is_read_where_it_is_met() {
+        let near = |t: &str| format!("syntax error near unexpected token `{t}'");
+        for src in [
+            "echo \"${z:-<(fi)}\"",
+            // The quotes are not what make it eager, and neither is the `:-`.
+            "echo ${z:-<(fi)}",
+            "echo \"${z#<(fi)}\"",
+            "echo \"${z/x/<(fi)}\"",
+            "echo \"${a[<(fi)]}\"",
+            // `>(` is the same row.
+            "echo \"${z:-a>(fi)b}\"",
+            // Beside a `$( … )` the same scan already read.
+            "echo \"${z:-$(echo x)<(fi)}\"",
+            // A body kept as *text* — the `${#…}` shape has no operand word —
+            // is parsed all the same.
+            "echo \"${#x:-<(fi)}\"",
+            // A nested body's parses are the outer body's too.
+            "echo \"${x:-${y:-<(fi)}}\"",
+        ] {
+            let e = parse(src).unwrap_err();
+            assert_eq!(emsg(&e), near("fi"), "{src:?}");
+            // Found inside a body, so fatal to whoever was reading it.
+            assert!(e.fatal, "{src:?}");
+        }
+        // A `' … '` run at the top of a brace body is stepped over whole, and a
+        // `" … "` inside one is read by a scan that does not have this row at
+        // all — `echo "<(fi)"` is the word `<(fi)`. Neither is a parse error.
+        for src in ["echo \"${z:-'<(fi)'}\"", "echo \"<(fi)\"", "echo '<(fi)'"] {
+            assert!(parse(src).is_ok(), "{src:?}");
+        }
+        // A body that ran out says nothing, so the enclosing scan's own missing
+        // delimiter stands — and which one that is still comes from where the
+        // `${` was written, exactly as for a `$(` in the same place.
+        for (src, msg) in [
+            ("echo \"${z:-<(fi}\"", "unexpected EOF while looking for matching `\"'"),
+            ("echo ${z:-<(echo hi}", "unexpected EOF while looking for matching `)'"),
+        ] {
+            assert_eq!(emsg(&parse(src).unwrap_err()), msg, "{src:?}");
+        }
+        // Numbered from the `<(`, and so landing on the physical line `fi` is
+        // written on.
+        assert_eq!(parse("echo one\necho \"${z:-<(\nfi)}\"").unwrap_err().line, Some(3));
     }
 
     /// A line the reader cannot finish lexing still offers the parser every

@@ -59028,3 +59028,81 @@ under a naive "check it at the top of every function" fix:
 unimplemented. When they are added they need the same predicate plus
 `futex_abstimed_supported_clockid`, and the rwlocks check **eagerly** — see
 the comment at `pthread_rwlock_common.c:286-291`.
+
+---
+
+### [B] TD-OILS-A-PROCESS-SUBSTITUTION-IN-A-BRACE-BODY-IS-NEVER-PERFORMED. bash runs `${z:-<(echo hi)}` and substitutes `/dev/fd/63`; osh yields the nine characters `<(echo hi)` — 2026-08-14 — ⚠️ OPEN
+
+**Where:** `userspace/oils/src/interp.rs`, [`Shell::expand_dynamic_with`] — the
+sole `WordPart::ProcSub` expansion site — and `userspace/oils/src/lexer.rs`,
+[`Lexer::read_word_verbatim`], which reads the operand of a `${ … }` and has no
+`<`/`>` arm.
+
+bash splits this construct across two files, and osh now has one half of it.
+**Part (A) — the parse** — is `parse_matched_pair` naming `<(`, `>(` and `$(` in
+one breath (parse.y:5028) and sending all three through `parse_comsub`
+(parse.y:5042), so a `${ … }` body's scan parses a process substitution where it
+meets it, its syntax error is the enclosing unit's, and what survives is the
+parse *re-printed*. That half is implemented — see
+`userspace/oils/tests/corpus/a-process-substitution-in-a-brace-body-is-parsed-where-it-is-met.sh`
+and [`parser::procsub_reprints`]. **Part (B) — the performance** — is subst.c
+*running* the substitution when the expansion is not under `Q_DOUBLE_QUOTES`.
+That half is missing, and this entry is it.
+
+**Measured against bash 5.2.37** (`z` and `a` unset unless shown; osh's procsub
+path is a temp file, so `/dev/fd/N` below is osh's equivalent path):
+
+| written | bash 5.2.37 | osh |
+|---|---|---|
+| `echo ${z:-<(echo hi)}` | `/dev/fd/63` | `<(echo hi)` |
+| `echo "${z:-<(echo hi)}"` | `<(echo hi)` | `<(echo hi)` ✓ |
+| `echo ${z:=<(echo hi)}; echo "[$z]"` | `/dev/fd/63` / `[/dev/fd/63]` | `<(echo hi)` / `[<(echo hi)]` |
+| `echo ${z:-a<(echo hi)b}` | `a/dev/fd/63b` | `a<(echo hi)b` |
+| `echo ${z:-<(echo hi)<(echo ho)}` | `/dev/fd/63/dev/fd/62` | `<(echo hi)<(echo ho)` |
+| `z=/dev/fd/63; echo "[${z#<(echo hi)}]"` | `[]` | `[/dev/fd/63]` |
+| `z=/dev/fd/63; echo "[${z/\/dev*/<(echo hi)}]"` | `[/dev/fd/63]` | `[<(echo hi)]` |
+| `echo "${a[<(echo 1)]}"` | `<(echo 1): syntax error: operand expected` | same ✓ |
+| `z=abcdef; echo "${z:<(echo 1)}"` | `z: <(echo 1): syntax error: operand expected` | performs it, then errors on the temp path |
+
+The rule the table shows is bash's quoting flag, not the position: an **operand**
+performs when the expansion is bare and does not when it is double-quoted, while
+a **pattern** and a **replacement** perform either way (`expand_word_internal` is
+re-entered for those without `Q_DOUBLE_QUOTES`), and a **subscript** never does
+because `arrayfunc.c` expands with `Q_DOUBLE_QUOTES|Q_ARITH`.
+
+**Why osh cannot express it cheaply.** `expand_dynamic_with(&mut self, part:
+&WordPart, operand: Operand) -> Str` has no quoting parameter — osh decides
+quoting at *lex* time, so by the time a `WordPart::ProcSub` is in hand the
+information bash branches on is gone. Adding a runtime `bool` would not do
+either, because the double-quoted case is not "do not perform, emit the source
+text": nested substitutions inside it still expand (`"${z:-<(echo $(echo q))}"`
+is `<(echo q)`, not `<(echo $(echo q))`), which is exactly what today's splice of
+the *re-print* already gets right.
+
+**Proper fix.** Give the word scanner a third mode beside "bare" and
+"double-quoted" — call it `Verbatim` — that reads a `<(`/`>(` into a part which
+expands its own body normally but yields the substitution's source rather than
+performing it, and have [`Lexer::read_word_verbatim`] select between it and a
+real `WordPart::ProcSub` from the quoting the `${` stands in. Patterns and
+replacements then take the performing form and operands under `" … "` the
+verbatim one; subscripts and substring bounds keep neither and stay arithmetic
+text.
+
+**A pre-existing inconsistency the table exposes.** The substring bound
+(`${z:<(echo hi)}`, via `parse_slice_bounds`) *does* perform the procsub today
+while the subscript beside it does not — so the two arithmetic contexts, which
+bash expands identically, already disagree in osh. Whichever way part (B) is
+done, they should end up on the same side.
+
+**Two smaller residues of the same construct, also open:**
+
+* `echo "${z:-"<(fi)"}"` — bash's `brace_gobbler` reports two
+  `command substitution: line 2:` diagnostics where osh prints `<(fi)`. The
+  inner `"` re-opens a run the gobbler reads with a different rule than osh's.
+* `x='${z:-<(fi)}'; echo "${x@P}"` — bash's `extract_dollar_brace_string`
+  (subst.c:1881-1950) has a `<(` row of its own and recurses into it with a real
+  parse, so the `@P` re-read is a `bad substitution` and the text is printed
+  unchanged; osh splices the re-print and prints `<(fi)`.
+
+**How it was found:** implementing part (A) — the eager parse and re-print of a
+process substitution met by a `${ … }` body scan.

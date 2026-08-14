@@ -40,6 +40,44 @@ const SKY: Color = Color::from_hex(0x89DCFE);
 const SAPPHIRE: Color = Color::from_hex(0x74C7EC);
 
 // ============================================================================
+// Light-background accents — Catppuccin Latte hues, darkened to read as text
+// ============================================================================
+//
+// An accent is not one colour, it is a *role*: "the hue this desktop is themed
+// around". Mocha's accents are pastels tuned to sit on a near-black base, and
+// reusing them on a near-white one is not a stylistic compromise but an
+// unreadable result — Mocha blue `#89B4FA` on Latte base `#EFF1F5` is a
+// contrast ratio of about 1.9:1, against the 4.5:1 that body text needs.
+//
+// Catppuccin's own Latte accents are the right hues but are still published
+// for *decoration*, and measured against the Latte base most of them do not
+// carry text either: yellow 2.31:1, pink 2.34:1, rosewater 2.34:1, sky 2.47:1,
+// lavender 2.81:1 — only blue, mauve and red clear 4.5:1 unaided. The shell
+// draws the accent as text (the start glyph, the start-menu heading), so each
+// value below is its Latte hue scaled toward black by the smallest factor that
+// reaches 4.6:1 on `#EFF1F5`. Scaling all three channels together holds the
+// hue, so these still read as the colours Catppuccin named; blue, mauve and
+// red are barely touched because they already passed.
+//
+// The dark palette needs no such treatment — every Mocha accent is already
+// between 7:1 and 13:1 on the Mocha base.
+
+const LIGHT_BLUE: Color = Color::from_hex(0x1D62EC);
+const LIGHT_LAVENDER: Color = Color::from_hex(0x5565BE);
+const LIGHT_TEAL: Color = Color::from_hex(0x13787E);
+const LIGHT_GREEN: Color = Color::from_hex(0x317B21);
+const LIGHT_YELLOW: Color = Color::from_hex(0x976014);
+const LIGHT_PEACH: Color = Color::from_hex(0xB94908);
+const LIGHT_PINK: Color = Color::from_hex(0x9F508A);
+const LIGHT_MAUVE: Color = Color::from_hex(0x8839EF);
+const LIGHT_RED: Color = Color::from_hex(0xD20F39);
+const LIGHT_ROSEWATER: Color = Color::from_hex(0x965E52);
+const LIGHT_FLAMINGO: Color = Color::from_hex(0xA05757);
+const LIGHT_MAROON: Color = Color::from_hex(0xC33B47);
+const LIGHT_SKY: Color = Color::from_hex(0x0374A1);
+const LIGHT_SAPPHIRE: Color = Color::from_hex(0x187788);
+
+// ============================================================================
 // Configuration-file spellings
 // ============================================================================
 
@@ -99,6 +137,25 @@ impl ThemeMode {
             Self::System => "System (Auto)",
         }
     }
+
+    /// Whether this mode paints a light palette *right now*.
+    ///
+    /// [`System`](Self::System) is the interesting case: it means "follow the
+    /// system's light/dark schedule", and this desktop has no such schedule
+    /// yet — nothing computes sunrise, and nothing watches a time-of-day
+    /// trigger. Until something does, `System` answers dark, because dark is
+    /// what the shell has always painted and what every other default in
+    /// [`AppearanceSettings`] is tuned against; answering light would flip the
+    /// whole desktop for a user who asked only to be left on automatic.
+    ///
+    /// When the schedule exists, this is the one place that has to change:
+    /// every colour in the shell is derived from the answer.
+    pub fn is_light(self) -> bool {
+        match self {
+            Self::Light => true,
+            Self::Dark | Self::System => false,
+        }
+    }
 }
 
 // ============================================================================
@@ -146,7 +203,12 @@ impl AccentColor {
         }
     }
 
-    /// Get the actual Color for this accent.
+    /// This accent's value on a dark background.
+    ///
+    /// [`Custom`](Self::Custom) has no value of its own — the colour the user
+    /// picked lives in [`AppearanceSettings::custom_accent`], because it is a
+    /// setting rather than a property of the variant. Callers that may hold a
+    /// `Custom` want [`AppearanceSettings::effective_accent`] instead of this.
     pub fn color(self) -> Color {
         match self {
             Self::Blue => BLUE,
@@ -164,6 +226,31 @@ impl AccentColor {
             Self::Sky => SKY,
             Self::Sapphire => SAPPHIRE,
             Self::Custom => BLUE, // fallback
+        }
+    }
+
+    /// This accent's value on a light background.
+    ///
+    /// Same hue, same name, a darker value — see the light-accent palette
+    /// above for why neither the dark-background pastels nor Catppuccin's own
+    /// Latte accents can simply be reused.
+    pub fn color_light(self) -> Color {
+        match self {
+            Self::Blue => LIGHT_BLUE,
+            Self::Lavender => LIGHT_LAVENDER,
+            Self::Teal => LIGHT_TEAL,
+            Self::Green => LIGHT_GREEN,
+            Self::Yellow => LIGHT_YELLOW,
+            Self::Peach => LIGHT_PEACH,
+            Self::Pink => LIGHT_PINK,
+            Self::Mauve => LIGHT_MAUVE,
+            Self::Red => LIGHT_RED,
+            Self::Rosewater => LIGHT_ROSEWATER,
+            Self::Flamingo => LIGHT_FLAMINGO,
+            Self::Maroon => LIGHT_MAROON,
+            Self::Sky => LIGHT_SKY,
+            Self::Sapphire => LIGHT_SAPPHIRE,
+            Self::Custom => LIGHT_BLUE, // fallback
         }
     }
 
@@ -530,10 +617,19 @@ impl Default for AppearanceSettings {
 }
 
 impl AppearanceSettings {
-    /// Get the effective accent Color, resolving Custom if needed.
+    /// The accent colour to actually draw with.
+    ///
+    /// Resolves both things a caller would otherwise have to know: that
+    /// `Custom` keeps its value in [`custom_accent`](Self::custom_accent), and
+    /// that a preset accent has a different value on a light background than
+    /// on a dark one. A custom colour is used exactly as chosen in either mode
+    /// — the user picked a specific colour, and quietly darkening it would be
+    /// overriding the one choice that was stated in full.
     pub fn effective_accent(&self) -> Color {
         if self.accent_color == AccentColor::Custom {
             self.custom_accent
+        } else if self.theme_mode.is_light() {
+            self.accent_color.color_light()
         } else {
             self.accent_color.color()
         }

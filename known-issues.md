@@ -58426,10 +58426,47 @@ behind a newly added field the way the hand-written check did.
 
 **Still open (the reason this entry is narrowed, not closed):**
 
-1. **Nothing calls it yet.** `main.rs` does not construct an
-   `AppearanceSettingsUI`, so no startup path reads `appearance.yaml` and no
-   frame is affected by it. The panel is correct and tested in isolation; wiring
-   it into the shell's startup and its settings-window routing is the next step.
+1. ~~**Nothing calls it yet.**~~ **Fixed 2026-08-14 (second pass).** Startup now
+   reads the file: `DesktopShell::load_appearance()` loads `appearance.yaml` and
+   `set_appearance()` re-derives the palette, and `main()` calls it. Everything
+   the shell paints itself — taskbar, title bars, borders, start menu, Alt+Tab —
+   now follows the saved theme mode, accent, accent-on-taskbar/title-bars and
+   transparency. `DesktopTheme` gained `dark()`/`light()` base palettes and
+   `from_settings()`; the light palette is new (the shell had only ever had a
+   dark one). Reading the file is deliberately *not* in `DesktopShell::new()`:
+   a constructor that reads `$HOME` gives every test a machine-dependent result.
+
+   Three latent bugs surfaced while wiring it, all fixed here:
+   - The Alt+Tab overlay hard-coded `rgba(30, 30, 46, 230)` and drew
+     `taskbar_fg` on it. In light mode that is dark text on a dark overlay. The
+     overlay is now its own themed surface (`overlay_bg`/`overlay_fg`/
+     `overlay_selected_bg`).
+   - The start glyph is drawn in the accent colour *on the taskbar*, so turning
+     on "accent on taskbar" made it vanish into its own background. Hence the
+     separate `taskbar_accent`, which becomes the contrasting colour when the
+     taskbar itself is the accent.
+   - One `window_title_fg` served both the focused and the unfocused title bar.
+     That is only safe while the two backgrounds are a shade apart, which stops
+     being true under accented title bars, so there is now an
+     `window_title_inactive_fg`.
+
+   **Catppuccin's Latte accents turned out to be unusable as text** and are the
+   one place this deviates from the upstream palette. Measured against the Latte
+   base, only blue, mauve and red clear 4.5:1; yellow is 2.31:1, pink 2.34:1,
+   rosewater 2.34:1, sky 2.47:1, lavender 2.81:1. The shell draws the accent as
+   text (start glyph, start-menu heading), so `AccentColor::color_light()` uses
+   each Latte hue scaled toward black by the smallest factor reaching 4.6:1.
+   `every_accent_is_readable_as_text_in_both_modes` is the test that rejects the
+   unmodified palette; 14 theme tests in total.
+
+   **Still not wired:** the settings *window* itself. `main.rs` still has no
+   settings-window routing — "Settings" is a start-menu label with no handler —
+   so the only way to change the file is to edit it by hand. `set_appearance()`
+   is the entry point that routing will call once it exists. Also unread by any
+   renderer: `window_corners` (decorations still use square `fill_rect`),
+   `drop_shadows`, `animation_speed`, `icon_size`, `cursor_size`,
+   `cursor_scheme`, and `scaling_percent` — all now reachable on
+   `DesktopShell::appearance`, none consulted.
 2. **The compositor still cannot see the setting**, so driving `ui_font`
    through `guitk::text::set_font_family` remains wrong for the reason above:
    the desktop would measure in the chosen family while the compositor drew in
@@ -58441,4 +58478,6 @@ behind a newly added field the way the hand-written check did.
    none have been.
 
 **Where (updated).** `gui/desktop/src/config.rs` (new); the "Configuration
-file" section of `gui/desktop/src/appearance_settings.rs`; `yamldoc/src/lib.rs`.
+file" and light-accent sections of `gui/desktop/src/appearance_settings.rs`;
+`DesktopTheme` and `DesktopShell::{set_appearance, load_appearance}` in
+`gui/desktop/src/main.rs`; `yamldoc/src/lib.rs`.

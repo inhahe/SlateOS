@@ -512,6 +512,45 @@ pub fn run_all() {
     // boot under QEMU emulation.  For real hardware benchmarks, increase
     // counts 10-50x.
 
+    // --- CPU index lookup (the per-CPU-data primitive under every hot path) ---
+    //
+    // This is not an interesting operation in itself; it is benchmarked
+    // because it is a *multiplier*. `smp::fast_cpu_index` is called twice per
+    // frame alloc/free (per-CPU magazine + ownership tag) and twice per heap
+    // alloc/free, so its cost is paid several times over inside every
+    // benchmark below it, and a regression here shows up as a diffuse slowdown
+    // across the whole allocator rather than as an obvious local fault.
+    //
+    // It regressed exactly that way once: `frame_owner` tagging added a second
+    // call per alloc, and on CPU models that advertise neither RDPID nor
+    // rdtscp (`qemu64`, this harness) `fast_cpu_index` fell through to an
+    // uncached APIC MMIO read. The tier-0 uniprocessor fast path fixed it.
+    // Keeping a direct measurement here means the next such regression is
+    // visible in one line instead of being inferred from allocator noise.
+    {
+        let result = run("fast_cpu_index", 2000, || {
+            core::hint::black_box(crate::smp::fast_cpu_index());
+        });
+        // A tier-0/tier-1 lookup is a handful of cycles; an APIC MMIO
+        // round-trip under emulation is orders of magnitude more. The
+        // threshold is deliberately loose — it is there to catch "we fell
+        // back to MMIO", not to police single cycles.
+        let target_ns = 100u64;
+        score("fast_cpu_index", &result, target_ns);
+        if result.min_ns <= target_ns {
+            serial_println!(
+                "[bench]   fast_cpu_index: PASS (min {}ns / {} cycles <= target {}ns)",
+                result.min_ns, result.min_cycles, target_ns
+            );
+        } else {
+            serial_println!(
+                "[bench]   fast_cpu_index: ABOVE TARGET (min {}ns / {} cycles > target {}ns) \
+                 — suspect a fallback to the APIC MMIO path",
+                result.min_ns, result.min_cycles, target_ns
+            );
+        }
+    }
+
     // --- Page allocation (alloc + free cycle) ---
     {
         use crate::mm::frame;

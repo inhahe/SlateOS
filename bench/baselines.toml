@@ -87,6 +87,20 @@ walk, page zeroing, and PTE installation. Our 16 KiB pages zero 4x more \
 memory per fault, so expect ~1.5-2x Linux per fault but fewer total \
 faults for sequential workloads."""
 
+[fast_cpu_index]
+description  = "Resolve the running CPU's sequential index (per-CPU data lookup)"
+linux_ns     = 5
+target_ns    = 100
+source       = "Linux smp_processor_id() is a %gs-relative load, ~1-3 cycles"
+notes        = """
+Benchmarked not for its own sake but as a multiplier: it is called twice \
+per frame alloc/free and twice per heap alloc/free, so its cost is paid \
+several times inside every allocator benchmark. The target is deliberately \
+loose — it exists to detect a fall-through to the tier-3 APIC MMIO read \
+(hundreds of cycles under emulation), not to police single cycles. \
+Tier 0 (uniprocessor, no AP started) and tier 1 (RDPID) are both single- \
+digit cycles; tier 2 (rdtscp) is ~30-40."""
+
 [page_alloc_free]
 description  = "Physical page allocate + free cycle"
 linux_ns     = 300

@@ -49,6 +49,7 @@ pub mod scaling;
 pub mod signal;
 pub mod style;
 pub mod svg;
+pub mod table;
 pub mod tabs;
 pub mod text;
 pub mod textview;

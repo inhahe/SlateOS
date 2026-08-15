@@ -60633,6 +60633,55 @@ messages (`9ace36e4c`), `reminders` and `podcast` prose fields (`42359f6fc`),
 and `netmanager` diagnostic details. Reopen it if a new prose caller turns up;
 the survey below says how to find one.
 
+**Re-run 2026-08-15 — the survey was not exhaustive, and found two more.**
+Both had been missed, not introduced since:
+
+- `apps/kanban` card detail (`cac3e2969`) — the card *description* and every
+  comment *body*, both on the pane's one running cursor. The description
+  advanced a flat 30 px and each comment card was filled at a flat 36 px
+  *before* its body was drawn, so a wrapped comment overflowed a box sized
+  without reference to it and the next comment stacked on the overflow.
+- `apps/diskimager`'s write confirmation (`2df6e5b7f`) — the same shape as
+  `partmanager`, and just as sharp: the warning is "All data on <drive> will
+  be permanently destroyed. This operation cannot be undone", and the clip
+  landed mid-sentence, dropping the half that says it is irreversible.
+
+**Why the documented grep missed them.** It looks for a prose-named field
+(`description`/`body`/`message`/`notes`/`content`) in a `Text` command, which
+finds both of these — the problem is that it *also* finds ~30 status-bar and
+table-cell sites where clipping is correct, and the earlier pass evidently
+triaged the list and stopped. The distinguishing question is not the field's
+name but **what happens to the cursor afterwards**: a site that follows its
+`Text` command with a *constant* `cy += k` (or draws a container at a constant
+height around it) is a wrapping bug regardless of what the field is called, and
+a site whose text is the last thing in a fixed row is fine regardless. Grep for
+`max_width: Some(` followed within a few lines by a literal `+= ` and triage
+*that*; it is a much smaller and much higher-yield list.
+
+Intersecting both signals (a prose-named field **and** a constant advance
+within 14 lines) reduces the whole tree to 18 sites, listed here so the next
+pass starts from a triaged list rather than re-deriving one:
+
+*Probably real — the text is user- or device-supplied free prose:*
+`apps/systemrestore` snapshot descriptions (`:2891`, `y += 20.0`),
+`apps/sysmonitor` alert messages (`:1708`, `alert_y += 16.0`),
+`apps/renamer` operation detail (`:1173`, `oy += 34.0`),
+`apps/undelete` (`:2931`), `apps/passwordgen` pattern descriptions (`:1546`).
+`gui/desktop/src/notification_settings.rs` (`:1137`) is the interesting one:
+it wraps the body in a home-grown `truncate_text(&entry.body, 60)`, which is
+the byte-budget truncation class TD-APPS-ESTIMATE-TEXT-WIDTH found four of —
+check whether it counts bytes, and if so replace it with `text::elide`.
+
+*Probably fine — a fixed-height row whose subtitle is a developer-authored
+enum string, where clipping is the intended behaviour:*
+`gui/desktop/src/{focus_assist,power_settings,privacy_settings,
+backup_settings,default_apps}.rs`, and the `"Description"`/`"Notes"` section
+*headings* in `apps/{podcast,reminders,contacts}` (the headings are one word;
+the bodies beneath them were already converted).
+
+Confirm each against the three questions above before changing it — the point
+of the list is to make the triage cheap, not to pre-judge it.
+
 **What it is.** `RenderCommand::Text` carries a `max_width`, and the obvious
 reading is that the compositor wraps to it. It does not. `Compositor::draw_text`
 walks the string one glyph at a time and `break`s at the limit:

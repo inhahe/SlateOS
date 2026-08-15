@@ -2464,4 +2464,173 @@ mod tests {
         assert!(!glyphs[1].lig.ligated());
         assert!(!glyphs[1].lig.multiplied());
     }
+
+    // ---- The driver ----------------------------------------------------
+
+    /// The stamps a run carries after [`setup_syllables`], one per glyph.
+    fn stamps(glyphs: &[SubGlyph]) -> Vec<u8> {
+        glyphs.iter().map(|g| g.syllable).collect()
+    }
+
+    /// Two syllables written end to end are stamped apart, and every glyph of
+    /// one carries the same byte — which is the whole of what the boundaries
+    /// are, since the ranges themselves are thrown away.
+    #[test]
+    fn each_syllable_is_stamped_and_the_next_one_differently() {
+        // HA + vowel sign I, then HA again: two consonant syllables.
+        let mut glyphs = run("\u{939}\u{93f}\u{939}");
+        setup_syllables(&mut glyphs);
+        let s = stamps(&glyphs);
+        assert_eq!(s[0], s[1], "one syllable, one stamp");
+        assert_ne!(s[1], s[2], "the next syllable is stamped apart");
+        for stamp in s {
+            assert_ne!(stamp, 0, "no glyph a syllable covers keeps zero");
+            assert_eq!(Syllable::from_code(stamp), Syllable::Consonant);
+        }
+    }
+
+    /// The kind rides in the low nibble, so a cluster that is not a syllable
+    /// says so on every one of its glyphs.
+    #[test]
+    fn the_stamp_records_which_kind_of_cluster_it_is() {
+        // A lone vowel sign: a matra with nothing to attach to.
+        let mut glyphs = run("\u{93f}");
+        setup_syllables(&mut glyphs);
+        assert_eq!(Syllable::from_code(glyphs[0].syllable), Syllable::Broken);
+
+        // An independent vowel heads a syllable of its own kind.
+        let mut glyphs = run("\u{905}");
+        setup_syllables(&mut glyphs);
+        assert_eq!(Syllable::from_code(glyphs[0].syllable), Syllable::Vowel);
+    }
+
+    /// The serial is four bits and never takes zero, so it has fifteen values
+    /// and a long enough run must reuse them. Reuse is harmless as long as it
+    /// is never *adjacent* — which is what the wrap does, and what the walk in
+    /// [`for_each_syllable`] relies on to find a boundary at all.
+    #[test]
+    fn a_run_longer_than_the_serial_still_separates_its_syllables() {
+        let mut glyphs = run(&"\u{939}".repeat(20));
+        setup_syllables(&mut glyphs);
+        let s = stamps(&glyphs);
+        assert_eq!(s.len(), 20, "one syllable per consonant");
+        for pair in s.windows(2) {
+            assert_ne!(pair[0], pair[1], "neighbours must not share a stamp");
+        }
+        assert!(s.contains(&s[16]), "and the serial does come back around");
+        assert_eq!(s[0], s[15], "fifteen values, then the sixteenth repeats");
+    }
+
+    /// The walk hands each stamped run over once, whole and in order.
+    #[test]
+    fn every_syllable_is_visited_once() {
+        let mut glyphs = run("\u{939}\u{93f}\u{939}\u{905}");
+        setup_syllables(&mut glyphs);
+        let mut seen: Vec<(Syllable, Vec<usize>)> = Vec::new();
+        for_each_syllable(&mut glyphs, |kind, _, syllable| {
+            seen.push((kind, order_of(syllable)));
+        });
+        assert_eq!(seen, [
+            (Syllable::Consonant, vec![0, 1]),
+            (Syllable::Consonant, vec![2]),
+            (Syllable::Vowel, vec![3]),
+        ]);
+    }
+
+    /// A syllable begins a word when nothing that continues one precedes it —
+    /// which is what decides whether its left matra may ask for the
+    /// word-initial form.
+    #[test]
+    fn only_a_syllable_no_letter_precedes_begins_a_word() {
+        for (continues, expected) in [(true, [true, false]), (false, [true, true])] {
+            let mut glyphs = run("\u{939}\u{939}");
+            setup_syllables(&mut glyphs);
+            glyphs[0].word = continues;
+            let mut starts: Vec<bool> = Vec::new();
+            for_each_syllable(&mut glyphs, |_, word_start, _| starts.push(word_start));
+            assert_eq!(starts, expected, "preceded by a letter: {continues}");
+        }
+    }
+
+    /// The glyph id the dotted-circle tests hand the shaper for U+25CC. Past
+    /// everything [`run`] produces, so its arrival is unambiguous.
+    const CIRCLE: u16 = 900;
+
+    /// A broken cluster gains a circle to hang its marks on, in front of the
+    /// mark and carrying the cluster's own stamp — so the circle is inside the
+    /// syllable rather than a syllable of its own.
+    #[test]
+    fn a_broken_cluster_gains_a_dotted_circle() {
+        let mut glyphs = run("\u{93f}");
+        setup_syllables(&mut glyphs);
+        let stamp = glyphs[0].syllable;
+        insert_dotted_circles(&mut glyphs, Some(CIRCLE));
+        assert_eq!(glyphs.len(), 2);
+        assert_eq!(glyphs[0].gid, CIRCLE);
+        assert_eq!(glyphs[0].indic.category, Category::DottedCircle);
+        assert_eq!(glyphs[0].syllable, stamp, "the circle joins the cluster");
+        assert_eq!(glyphs[0].cluster, glyphs[1].cluster);
+    }
+
+    /// One circle per broken cluster, not one per mark, and the well-formed
+    /// syllable beside it gains nothing.
+    #[test]
+    fn a_well_formed_syllable_gains_nothing_and_a_broken_one_gains_one() {
+        // HA + I, a space to close the syllable, then two stray vowel signs.
+        let mut glyphs = run("\u{939}\u{93f} \u{93f}\u{93f}");
+        setup_syllables(&mut glyphs);
+        assert_eq!(Syllable::from_code(glyphs[3].syllable), Syllable::Broken);
+        insert_dotted_circles(&mut glyphs, Some(CIRCLE));
+        assert_eq!(
+            glyphs.iter().filter(|g| g.gid == CIRCLE).count(),
+            1,
+            "one circle for the whole broken cluster"
+        );
+        assert_eq!(glyphs[3].gid, CIRCLE, "and it goes in front of the marks");
+    }
+
+    /// A repha is drawn above the letter that follows it, so the circle it
+    /// needs goes after it rather than before.
+    #[test]
+    fn the_circle_goes_after_a_repha_not_before_it() {
+        let mut glyphs = run("\u{93f}\u{93f}");
+        setup_syllables(&mut glyphs);
+        glyphs[0].indic.category = Category::Repha;
+        insert_dotted_circles(&mut glyphs, Some(CIRCLE));
+        assert_eq!(glyphs.len(), 3);
+        assert_eq!(order_of(&glyphs)[0], 0, "the repha stays at the head");
+        assert_eq!(glyphs[1].gid, CIRCLE);
+    }
+
+    /// Nothing to draw, nothing drawn: a face with no U+25CC is left alone
+    /// rather than given a notdef box.
+    #[test]
+    fn a_face_with_no_dotted_circle_gains_nothing() {
+        let mut glyphs = run("\u{93f}");
+        setup_syllables(&mut glyphs);
+        insert_dotted_circles(&mut glyphs, None);
+        assert_eq!(glyphs.len(), 1);
+    }
+
+    /// End to end through [`shape`] with no `GSUB` at all: both reorderings
+    /// still run, because a left matra is drawn before its consonant whatever
+    /// the font does.
+    #[test]
+    fn a_face_with_no_gsub_is_still_reordered() {
+        let mut glyphs = run("\u{939}\u{93f}");
+        let tags = Some(ScriptTags::exactly(*b"dev2"));
+        shape(&[], None, tags, None, Script::Devanagari, &mut glyphs, |ch| {
+            (ch == '\u{25CC}').then_some(CIRCLE)
+        });
+        assert_eq!(order_of(&glyphs), [1, 0]);
+    }
+
+    /// And an empty run is not a special case anywhere: it comes back empty.
+    #[test]
+    fn an_empty_run_is_shaped_into_nothing() {
+        let mut glyphs: Vec<SubGlyph> = Vec::new();
+        let tags = Some(ScriptTags::exactly(*b"dev2"));
+        shape(&[], None, tags, None, Script::Devanagari, &mut glyphs, |_| None);
+        assert!(glyphs.is_empty());
+    }
 }

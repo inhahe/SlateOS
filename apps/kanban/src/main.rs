@@ -10,6 +10,7 @@ use guitk::event::{KeyEvent, Key};
 use guitk::layout::FlexDirection;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
 use guitk::style::CornerRadii;
+use guitk::text;
 use guitk::widget::{Widget, WidgetTree};
 
 use std::collections::HashMap;
@@ -1563,6 +1564,19 @@ fn render_board_view(tree: &mut RenderTree, app: &KanbanApp, width: f32, height:
     }
 }
 
+/// Vertical room the card description keeps even when it is a single line, so
+/// that adding wrapping does not shift the whole pane for the common case.
+const DESC_MIN_HEIGHT: f32 = 30.0;
+/// Horizontal padding inside a comment card, and its bottom padding.
+const COMMENT_PAD: f32 = 8.0;
+/// Offset of a comment's body below the top of its card, leaving room for the
+/// author line drawn at +4.
+const COMMENT_BODY_TOP: f32 = 18.0;
+/// The height a comment card keeps even when its body is a single short line.
+const COMMENT_MIN_HEIGHT: f32 = 36.0;
+/// Vertical gap between consecutive comment cards.
+const COMMENT_GAP: f32 = 6.0;
+
 /// Render card detail view.
 fn render_card_detail(tree: &mut RenderTree, app: &KanbanApp, width: f32, height: f32) {
     let card_id = match app.selected_card {
@@ -1769,20 +1783,24 @@ fn render_card_detail(tree: &mut RenderTree, app: &KanbanApp, width: f32, height
     } else {
         &card.description
     };
-    tree.push(RenderCommand::Text {
-        x: content_x,
-        y: cy,
-        text: desc_text.to_string(),
-        color: if card.description.is_empty() {
+    // A description is prose the user is meant to read in full, and everything
+    // below it sits on this running cursor -- so the height has to come from
+    // the lines actually drawn. `max_width` on a Text command clips to one
+    // line, it does not wrap (known-issues.md TD-GUI-TEXT-COMMAND-DOES-NOT-WRAP).
+    let desc_used = text::Paragraph::new(
+        desc_text,
+        if card.description.is_empty() {
             palette::OVERLAY0
         } else {
             palette::SUBTEXT0
         },
-        font_size: 12.0,
-        font_weight: FontWeightHint::Regular,
-        max_width: Some(content_w),
-    });
-    cy += 30.0;
+    )
+    .at(content_x, cy, content_w)
+    .font(12.0, FontWeightHint::Regular)
+    .draw(tree);
+    // Keep the original 30 px allowance for the common one-line case so the
+    // rest of the pane does not shift; grow only when it genuinely wraps.
+    cy += desc_used.max(DESC_MIN_HEIGHT);
 
     // Checklist
     if !card.checklist.is_empty() {
@@ -1856,16 +1874,28 @@ fn render_card_detail(tree: &mut RenderTree, app: &KanbanApp, width: f32, height
         cy += 20.0;
 
         for comment in &card.comments {
+            // A comment body is prose, and its card is drawn *before* the text
+            // it contains -- so the body is measured first and the card sized
+            // from that measurement, rather than the two being computed
+            // separately and left to disagree.
+            let body = text::Paragraph::new(&comment.text, palette::SUBTEXT0)
+                .at(
+                    content_x + COMMENT_PAD,
+                    cy + COMMENT_BODY_TOP,
+                    content_w - COMMENT_PAD * 2.0,
+                )
+                .font(11.0, FontWeightHint::Regular);
+            let card_h = (COMMENT_BODY_TOP + body.height() + COMMENT_PAD).max(COMMENT_MIN_HEIGHT);
             tree.push(RenderCommand::FillRect {
                 x: content_x,
                 y: cy,
                 width: content_w,
-                height: 36.0,
+                height: card_h,
                 color: palette::SURFACE0,
                 corner_radii: CornerRadii::all(4.0),
             });
             tree.push(RenderCommand::Text {
-                x: content_x + 8.0,
+                x: content_x + COMMENT_PAD,
                 y: cy + 4.0,
                 text: comment.author.clone(),
                 color: palette::BLUE,
@@ -1873,16 +1903,8 @@ fn render_card_detail(tree: &mut RenderTree, app: &KanbanApp, width: f32, height
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
             });
-            tree.push(RenderCommand::Text {
-                x: content_x + 8.0,
-                y: cy + 18.0,
-                text: comment.text.clone(),
-                color: palette::SUBTEXT0,
-                font_size: 11.0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(content_w - 16.0),
-            });
-            cy += 42.0;
+            body.draw(tree);
+            cy += card_h + COMMENT_GAP;
         }
     }
 }
@@ -3395,6 +3417,169 @@ mod tests {
         app.view = View::CardDetail;
         let tree = render_app(&app, 1200.0, 800.0);
         assert!(!tree.is_empty());
+    }
+
+    /// Select the first sample card and give it `description` and `comments`.
+    fn app_with_card_prose(description: &str, comments: &[&str]) -> KanbanApp {
+        let mut app = KanbanApp::new();
+        app.create_sample_data();
+        let card_id = app
+            .active_board()
+            .columns
+            .first()
+            .and_then(|c| c.card_ids.first().copied())
+            .expect("sample data has at least one card");
+        {
+            let board = app.active_board_mut();
+            let card = board.cards.get_mut(&card_id).expect("card exists");
+            card.description = description.to_string();
+            card.comments.clear();
+            for (i, body) in comments.iter().enumerate() {
+                card.add_comment("alice", body, i as u64);
+            }
+        }
+        app.selected_card = Some(card_id);
+        app.view = View::CardDetail;
+        app
+    }
+
+    /// Every `Text` command in `tree`, as (y, text).
+    fn text_rows(tree: &RenderTree) -> Vec<(f32, String)> {
+        tree.commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { y, text, .. } => Some((*y, text.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The comment cards, as (y, height), sorted top to bottom.
+    ///
+    /// Anchored to the "Comments (n)" header rather than matched on colour and
+    /// corner radius alone: the pane draws other rounded `SURFACE0` chips (a
+    /// label pill sits well above this section) and a looser filter picks them
+    /// up too.
+    fn comment_cards(tree: &RenderTree) -> Vec<(f32, f32)> {
+        let header_y = text_rows(tree)
+            .into_iter()
+            .find(|(_, t)| t.starts_with("Comments ("))
+            .expect("the comments section has a header")
+            .0;
+        let mut cards: Vec<(f32, f32)> = tree
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::FillRect {
+                    y,
+                    height,
+                    color,
+                    corner_radii,
+                    ..
+                } if *color == palette::SURFACE0
+                    && corner_radii.top_left == 4.0
+                    && *y > header_y =>
+                {
+                    Some((*y, *height))
+                }
+                _ => None,
+            })
+            .collect();
+        cards.sort_by(|a, b| a.0.total_cmp(&b.0));
+        cards
+    }
+
+    #[test]
+    fn a_wrapping_description_is_drawn_as_more_than_one_line() {
+        // `max_width` on a Text command clips to a single line rather than
+        // wrapping, so a long description used to be shown as its first line
+        // and nothing else, with no marker that anything was dropped.
+        let long = "wrap ".repeat(80);
+        let mut tree = RenderTree::new();
+        render_card_detail(&mut tree, &app_with_card_prose(&long, &[]), 1200.0, 800.0);
+        let desc_lines = text_rows(&tree)
+            .into_iter()
+            .filter(|(_, t)| t.contains("wrap"))
+            .count();
+        assert!(
+            desc_lines > 1,
+            "a long description should be drawn as several lines, got {desc_lines}"
+        );
+    }
+
+    #[test]
+    fn a_long_description_pushes_the_comments_below_it_down() {
+        // The whole pane hangs off one running cursor, so a description that
+        // reserves a flat height regardless of its length draws the section
+        // below it straight through its own last lines.
+        let short_y = {
+            let mut tree = RenderTree::new();
+            render_card_detail(&mut tree, &app_with_card_prose("short", &["c"]), 1200.0, 800.0);
+            text_rows(&tree)
+                .into_iter()
+                .find(|(_, t)| t == "c")
+                .expect("comment body drawn")
+                .0
+        };
+        let long_y = {
+            let mut tree = RenderTree::new();
+            let app = app_with_card_prose(&"wrap ".repeat(80), &["c"]);
+            render_card_detail(&mut tree, &app, 1200.0, 800.0);
+            text_rows(&tree)
+                .into_iter()
+                .find(|(_, t)| t == "c")
+                .expect("comment body drawn")
+                .0
+        };
+        assert!(
+            long_y > short_y,
+            "a wrapped description must move the comments below it down \
+             ({long_y} should exceed {short_y})"
+        );
+    }
+
+    #[test]
+    fn a_comment_card_contains_the_body_it_draws() {
+        // The card is filled before the body is drawn, so its height is a
+        // second calculation of the same quantity -- the defect class this
+        // whole sweep is about. Assert the box actually contains its text.
+        let mut tree = RenderTree::new();
+        let app = app_with_card_prose("d", &[&"comment ".repeat(40)]);
+        render_card_detail(&mut tree, &app, 1200.0, 800.0);
+
+        let cards = comment_cards(&tree);
+        let body_rows: Vec<f32> = text_rows(&tree)
+            .into_iter()
+            .filter(|(_, t)| t.contains("comment"))
+            .map(|(y, _)| y)
+            .collect();
+        assert!(body_rows.len() > 1, "the comment body should have wrapped");
+
+        for y in body_rows {
+            assert!(
+                cards.iter().any(|(cy, ch)| y >= *cy && y <= cy + ch),
+                "a comment body line at y={y} falls outside every comment card {cards:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn consecutive_comment_cards_do_not_overlap() {
+        let mut tree = RenderTree::new();
+        let app = app_with_card_prose("d", &[&"first ".repeat(40), "second", "third"]);
+        render_card_detail(&mut tree, &app, 1200.0, 800.0);
+
+        let cards = comment_cards(&tree);
+        assert_eq!(cards.len(), 3, "one card per comment: {cards:?}");
+        for pair in cards.windows(2) {
+            let (y, h) = pair[0];
+            assert!(
+                pair[1].0 >= y + h,
+                "comment card at {:?} overlaps the one at {:?}",
+                pair[1],
+                pair[0]
+            );
+        }
     }
 
     #[test]

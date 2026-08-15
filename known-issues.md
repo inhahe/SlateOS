@@ -60433,9 +60433,18 @@ two sweeps — seven surveyed files (`68d477601`) and the last 26 crates
 Every survivor of `rg 'len\(\) as f32\)? \* [0-9]'` under `apps/` and `gui/` is
 now either a comment, a genuine collection-length calculation, or a grid view
 that legitimately counts characters against a cell derived from the face
-(`textview`'s line-number gutter). Two follow-ups are tracked separately below:
-`apps/editor`'s own `char_width` config field, and the wrapping defect the last
-sweep uncovered.
+(`textview`'s line-number gutter). Of the two follow-ups this entry used to
+defer, one is done and one is tracked below:
+
+- `apps/editor`'s own `char_width` config field is **gone** — the field was
+  deleted and the doc comment in its place (`apps/editor/src/main.rs`, on
+  `line_height`) now records *why* there is deliberately no horizontal
+  counterpart: a nominal per-character width is only ever right for one font
+  at one size, and wrong by a compounding amount along every line for all the
+  others. There was never a separate `TD-` entry for it despite this sentence
+  once promising one.
+- The wrapping defect is `TD-GUI-TEXT-COMMAND-DOES-NOT-WRAP`, immediately
+  below.
 
 Of ~90 apparent sites in the final survey, ~41 were real; the rest were false
 positives from the naive pattern (`filediff`, `videoplayer`, `devicemanager`,

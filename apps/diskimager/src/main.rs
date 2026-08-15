@@ -77,6 +77,27 @@ const BUTTON_HEIGHT: f32 = 32.0;
 const ROW_HEIGHT: f32 = 28.0;
 const PROGRESS_BAR_HEIGHT: f32 = 20.0;
 const MAX_RECENT_IMAGES: usize = 20;
+
+// Destructive-confirmation dialog. Its two prose fields wrap, so the dialog
+// grows to hold them; these bound and floor that growth.
+/// Room between the dialog's title baseline and its message.
+const CONFIRM_TITLE_BLOCK: f32 = 28.0;
+/// Vertical room the message keeps even when it is one short line, so a
+/// typical confirmation looks exactly as it did before the fields wrapped.
+const CONFIRM_MESSAGE_MIN_HEIGHT: f32 = 24.0;
+/// Room below the warning for the Cancel/Write row and the padding under it.
+const CONFIRM_BUTTON_BLOCK: f32 = 62.0;
+/// The dialog never shrinks below the size it had when both fields were
+/// clipped to one line.
+const CONFIRM_MIN_HEIGHT: f32 = 200.0;
+/// A drive name is attacker-shaped input in the sense that matters here -- it
+/// comes from the device, not from us -- so neither field may grow the dialog
+/// without bound.
+const CONFIRM_MESSAGE_MAX_LINES: usize = 4;
+/// The warning is a fixed two-sentence form; four lines is generous for it at
+/// this width, and the cap keeps a pathological drive name from pushing the
+/// buttons off screen.
+const CONFIRM_DETAIL_MAX_LINES: usize = 4;
 const DEFAULT_BLOCK_SIZE: u64 = 4096;
 
 // ============================================================================
@@ -3127,7 +3148,37 @@ impl DiskImagerApp {
         );
 
         let dialog_w = 420.0_f32;
-        let dialog_h = 200.0_f32;
+
+        // The message and the warning are prose, and `max_width` on a Text
+        // command clips to one line rather than wrapping -- so the detail
+        // ("... will be permanently destroyed. This operation cannot be
+        // undone.") was being cut mid-sentence, dropping the half that says
+        // the action is irreversible. Both wrap now, and the dialog is sized
+        // from the lines they actually produce. The dialog is centred, so its
+        // height has to be known before anything can be positioned.
+        let text_w = dialog_w - PANEL_PADDING * 2.0;
+        let message = |x: f32, y: f32| {
+            text::Paragraph::new(&self.confirm_dialog.message, colors::TEXT)
+                .at(x, y, text_w)
+                .font(UI_FONT_SIZE, FontWeightHint::Regular)
+                .max_lines(CONFIRM_MESSAGE_MAX_LINES)
+        };
+        let detail = |x: f32, y: f32| {
+            text::Paragraph::new(&self.confirm_dialog.detail, colors::YELLOW)
+                .at(x, y, text_w)
+                .font(SMALL_FONT_SIZE, FontWeightHint::Regular)
+                .max_lines(CONFIRM_DETAIL_MAX_LINES)
+        };
+        // Keep the original single-line allowance as a floor so a short
+        // message leaves the dialog looking exactly as it did.
+        let message_block = message(0.0, 0.0).height().max(CONFIRM_MESSAGE_MIN_HEIGHT);
+        let detail_h = detail(0.0, 0.0).height();
+        let dialog_h = (PANEL_PADDING
+            + CONFIRM_TITLE_BLOCK
+            + message_block
+            + detail_h
+            + CONFIRM_BUTTON_BLOCK)
+            .max(CONFIRM_MIN_HEIGHT);
         let dialog_x = (self.window_width - dialog_w) / 2.0;
         let dialog_y = (self.window_height - dialog_h) / 2.0;
 
@@ -3175,27 +3226,11 @@ impl DiskImagerApp {
             max_width: Some(dialog_w - PANEL_PADDING * 2.0),
         });
 
-        // Message
-        rt.push(RenderCommand::Text {
-            x: dialog_x + PANEL_PADDING,
-            y: dialog_y + PANEL_PADDING + 28.0,
-            text: self.confirm_dialog.message.clone(),
-            color: colors::TEXT,
-            font_size: UI_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(dialog_w - PANEL_PADDING * 2.0),
-        });
-
-        // Detail/warning
-        rt.push(RenderCommand::Text {
-            x: dialog_x + PANEL_PADDING,
-            y: dialog_y + PANEL_PADDING + 52.0,
-            text: self.confirm_dialog.detail.clone(),
-            color: colors::YELLOW,
-            font_size: SMALL_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(dialog_w - PANEL_PADDING * 2.0),
-        });
+        // Message, then the warning beneath whatever the message actually
+        // occupied -- not beneath a fixed one-line allowance for it.
+        let message_y = dialog_y + PANEL_PADDING + CONFIRM_TITLE_BLOCK;
+        message(dialog_x + PANEL_PADDING, message_y).draw(rt);
+        detail(dialog_x + PANEL_PADDING, message_y + message_block).draw(rt);
 
         // Buttons
         let btn_y = dialog_y + dialog_h - 50.0;
@@ -4397,6 +4432,94 @@ mod tests {
         let mut rt = RenderTree::new();
         app.render(&mut rt);
         assert!(!rt.is_empty());
+    }
+
+    /// Every `Text` command drawn by the confirm dialog, joined in order.
+    fn confirm_dialog_text(drive_name: &str) -> (Vec<(f32, String)>, f32, f32) {
+        let mut app = DiskImagerApp::new();
+        app.confirm_dialog
+            .show_write_confirm("test.img", drive_name, 32_000_000_000);
+        let mut rt = RenderTree::new();
+        // Just the dialog, not the whole app: rendering the app also draws the
+        // window chrome, and "Disk Imager" in the title bar is not prose that
+        // belongs to this dialog.
+        app.render_confirm_dialog(&mut rt);
+        let rows: Vec<(f32, String)> = rt
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { y, text, .. } => Some((*y, text.clone())),
+                _ => None,
+            })
+            .collect();
+        // The dialog is the red-stroked rect; there is exactly one.
+        let (dialog_y, dialog_h) = rt
+            .commands
+            .iter()
+            .find_map(|c| match c {
+                RenderCommand::StrokeRect {
+                    y, height, color, ..
+                } if *color == colors::RED => Some((*y, *height)),
+                _ => None,
+            })
+            .expect("the confirm dialog draws a red border");
+        (rows, dialog_y, dialog_h)
+    }
+
+    #[test]
+    fn the_destructive_warning_is_shown_in_full() {
+        // `max_width` clips rather than wraps, so this warning used to be cut
+        // mid-sentence -- and the half that got dropped was the half saying
+        // the write cannot be undone.
+        let (rows, _, _) = confirm_dialog_text("USB Drive");
+        let drawn: String = rows
+            .iter()
+            .map(|(_, t)| t.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        for phrase in [
+            "permanently destroyed",
+            "cannot be undone",
+            "USB Drive",
+        ] {
+            assert!(
+                drawn.contains(phrase),
+                "the confirmation must show {phrase:?}; it drew: {drawn}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_warning_never_runs_through_the_button_row() {
+        // A dialog that grows its prose but not itself puts text on top of the
+        // controls that dismiss it -- here, on top of the destructive button.
+        let (rows, dialog_y, dialog_h) = confirm_dialog_text(&"Very Long Drive Name ".repeat(8));
+        let button_top = dialog_y + dialog_h - 50.0;
+        let prose: Vec<&(f32, String)> = rows
+            .iter()
+            .filter(|(_, t)| t != "Cancel" && t != "Write")
+            .collect();
+        assert!(!prose.is_empty(), "the dialog drew no prose at all");
+        for (y, t) in prose {
+            assert!(
+                *y < button_top,
+                "prose line {t:?} at y={y} reaches the button row at {button_top}"
+            );
+            assert!(
+                *y >= dialog_y,
+                "prose line {t:?} at y={y} is above the dialog at {dialog_y}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_short_confirmation_keeps_the_original_dialog_size() {
+        // Wrapping must not resize the dialog for the common case.
+        let (_, _, dialog_h) = confirm_dialog_text("USB");
+        assert!(
+            (dialog_h - 200.0).abs() < 0.01,
+            "a short confirmation should still be 200 px tall, got {dialog_h}"
+        );
     }
 
     #[test]

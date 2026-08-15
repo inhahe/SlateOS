@@ -325,13 +325,18 @@ impl EntryData {
         let name_match = self.display_name().to_ascii_lowercase().contains(&q);
         let sub_match = self.subtitle().to_ascii_lowercase().contains(&q);
         let extra = match self {
-            Self::Login(d) => d.url.to_ascii_lowercase().contains(&q)
-                || d.notes.to_ascii_lowercase().contains(&q),
+            Self::Login(d) => {
+                d.url.to_ascii_lowercase().contains(&q) || d.notes.to_ascii_lowercase().contains(&q)
+            }
             Self::SecureNote(d) => d.content.to_ascii_lowercase().contains(&q),
-            Self::CreditCard(d) => d.cardholder.to_ascii_lowercase().contains(&q)
-                || d.notes.to_ascii_lowercase().contains(&q),
-            Self::Identity(d) => d.phone.to_ascii_lowercase().contains(&q)
-                || d.address.to_ascii_lowercase().contains(&q),
+            Self::CreditCard(d) => {
+                d.cardholder.to_ascii_lowercase().contains(&q)
+                    || d.notes.to_ascii_lowercase().contains(&q)
+            }
+            Self::Identity(d) => {
+                d.phone.to_ascii_lowercase().contains(&q)
+                    || d.address.to_ascii_lowercase().contains(&q)
+            }
             Self::SshKey(d) => d.public_key.to_ascii_lowercase().contains(&q),
         };
         name_match || sub_match || extra
@@ -608,7 +613,10 @@ impl Vault {
     // -- Query helpers -------------------------------------------------------
 
     fn entries_in_folder(&self, folder_id: Option<u64>) -> Vec<&Entry> {
-        self.entries.iter().filter(|e| e.folder_id == folder_id).collect()
+        self.entries
+            .iter()
+            .filter(|e| e.folder_id == folder_id)
+            .collect()
     }
 
     fn starred_entries(&self) -> Vec<&Entry> {
@@ -616,23 +624,34 @@ impl Vault {
     }
 
     fn entries_with_tag(&self, tag: &str) -> Vec<&Entry> {
-        self.entries.iter().filter(|e| e.tags.iter().any(|t| t == tag)).collect()
+        self.entries
+            .iter()
+            .filter(|e| e.tags.iter().any(|t| t == tag))
+            .collect()
     }
 
     fn entries_of_type(&self, entry_type: EntryType) -> Vec<&Entry> {
-        self.entries.iter().filter(|e| e.entry_type() == entry_type).collect()
+        self.entries
+            .iter()
+            .filter(|e| e.entry_type() == entry_type)
+            .collect()
     }
 
     fn search_entries(&self, query: &str) -> Vec<&Entry> {
         if query.is_empty() {
             return self.entries.iter().collect();
         }
-        self.entries.iter().filter(|e| e.data.matches_search(query)).collect()
+        self.entries
+            .iter()
+            .filter(|e| e.data.matches_search(query))
+            .collect()
     }
 
     /// All unique tags across all entries.
     fn all_tags(&self) -> Vec<String> {
-        let mut tags: Vec<String> = self.entries.iter()
+        let mut tags: Vec<String> = self
+            .entries
+            .iter()
             .flat_map(|e| e.tags.iter().cloned())
             .collect::<HashSet<_>>()
             .into_iter()
@@ -700,10 +719,18 @@ impl CharsetOptions {
     /// Count of distinct characters in the pool.
     fn pool_size(&self) -> usize {
         let mut count = 0;
-        if self.uppercase { count += 26; }
-        if self.lowercase { count += 26; }
-        if self.digits { count += 10; }
-        if self.symbols { count += 30; }
+        if self.uppercase {
+            count += 26;
+        }
+        if self.lowercase {
+            count += 26;
+        }
+        if self.digits {
+            count += 10;
+        }
+        if self.symbols {
+            count += 30;
+        }
         count
     }
 }
@@ -822,7 +849,10 @@ impl PasswordGenerator {
         if bound == 0 {
             return 0;
         }
-        let mut x = self.seed.wrapping_add(offset).wrapping_mul(6364136223846793005);
+        let mut x = self
+            .seed
+            .wrapping_add(offset)
+            .wrapping_mul(6364136223846793005);
         x = x.wrapping_add(1442695040888963407);
         x ^= x >> 16;
         x = x.wrapping_mul(0x45d9f3b);
@@ -860,145 +890,840 @@ impl PasswordGenerator {
 
 /// Small word list for passphrase generation.
 const WORDLIST: &[&str] = &[
-    "abandon", "ability", "abstract", "account", "across", "action",
-    "adapt", "address", "adjust", "advance", "afford", "agree",
-    "airport", "alarm", "album", "alert", "alien", "allow",
-    "almost", "alpha", "already", "alter", "amazing", "amount",
-    "anchor", "angle", "animal", "annual", "answer", "antenna",
-    "apart", "apple", "approve", "arena", "armor", "army",
-    "arrange", "arrest", "arrive", "arrow", "artist", "aspect",
-    "assist", "attack", "attract", "auction", "author", "avoid",
-    "awake", "balance", "bamboo", "banner", "barely", "barrel",
-    "basket", "battle", "beach", "beauty", "become", "before",
-    "behind", "believe", "below", "bench", "benefit", "beyond",
-    "bicycle", "binder", "blanket", "blast", "bless", "blind",
-    "block", "blossom", "board", "border", "bottom", "bounce",
-    "branch", "brave", "breeze", "bridge", "bright", "broken",
-    "bronze", "brother", "brush", "bubble", "budget", "buffalo",
-    "burden", "burst", "butter", "cabin", "cable", "camera",
-    "cancel", "candle", "canvas", "capture", "carbon", "carpet",
-    "castle", "casual", "catalog", "caution", "ceiling", "cement",
-    "census", "center", "cereal", "certain", "chair", "change",
-    "chapter", "cherry", "chimney", "choice", "chronic", "circle",
-    "citizen", "civil", "claim", "clap", "clarify", "claw",
-    "clever", "clinic", "clock", "cluster", "coach", "coconut",
-    "coffee", "collect", "column", "comfort", "common", "company",
-    "concert", "conduct", "confirm", "connect", "consider", "control",
-    "convert", "copper", "coral", "correct", "costume", "cotton",
-    "couch", "country", "couple", "cousin", "cover", "cradle",
-    "craft", "crater", "crazy", "credit", "cricket", "crisis",
-    "crisp", "cross", "crouch", "crowd", "crucial", "cruel",
-    "cruise", "crystal", "culture", "curtain", "custom", "cycle",
-    "damage", "dance", "danger", "daring", "daughter", "dawn",
-    "debris", "decade", "decline", "decorate", "defense", "degree",
-    "deliver", "demand", "denial", "dentist", "depart", "deposit",
-    "depth", "derive", "desert", "design", "desktop", "destroy",
-    "detail", "detect", "device", "devote", "diagram", "diamond",
-    "diesel", "differ", "digital", "dinner", "direct", "discover",
-    "display", "distance", "divert", "doctor", "dolphin", "domain",
-    "donate", "double", "dragon", "drama", "dream", "dress",
-    "drift", "drink", "driver", "drop", "durable", "during",
-    "eagle", "early", "earth", "eclipse", "ecology", "economy",
-    "educate", "effort", "eighth", "either", "elbow", "elder",
-    "elegant", "element", "elephant", "elevator", "elite", "embark",
-    "embrace", "emerge", "emotion", "emperor", "enable", "endless",
-    "energy", "enforce", "engine", "enhance", "enjoy", "enough",
-    "entire", "episode", "equal", "erosion", "escape", "essence",
-    "estate", "eternal", "evening", "evidence", "evolve", "exact",
-    "example", "excess", "exclude", "execute", "exhaust", "exhibit",
-    "exotic", "expand", "expect", "explain", "expose", "extend",
-    "extra", "fabric", "faculty", "fading", "failure", "falcon",
-    "family", "fantasy", "fashion", "father", "feature", "federal",
-    "fiction", "figure", "filter", "final", "finger", "finish",
-    "fiscal", "fitness", "flavor", "flight", "float", "floor",
-    "flower", "fluid", "flutter", "focus", "follow", "forest",
-    "forget", "formal", "fortune", "fossil", "foster", "found",
-    "fragile", "frame", "freedom", "freeze", "fresh", "friend",
-    "frozen", "fruit", "future", "galaxy", "gallery", "garage",
-    "garden", "garlic", "gather", "general", "genius", "gentle",
-    "genuine", "gesture", "giant", "glacier", "glance", "glimpse",
-    "global", "gloom", "glory", "glove", "goddess", "golden",
-    "gossip", "govern", "grace", "grain", "grammar", "grant",
-    "gravity", "great", "grocery", "ground", "group", "growing",
-    "guard", "guitar", "hammer", "hamster", "harbor", "harvest",
-    "hazard", "health", "heaven", "helmet", "hidden", "holiday",
-    "hollow", "honey", "horror", "hospital", "hotel", "human",
-    "humor", "hunter", "hybrid", "kingdom", "kitchen", "kiwi",
-    "ladder", "language", "large", "later", "launch", "lava",
-    "leader", "lecture", "legend", "leisure", "lemon", "length",
-    "letter", "level", "liberty", "library", "license", "light",
-    "limit", "linear", "liquid", "little", "lively", "lobby",
-    "local", "logic", "lonely", "lottery", "luggage", "lumber",
-    "lunar", "luxury", "machine", "magnet", "maiden", "major",
-    "manage", "mandate", "manual", "maple", "marble", "margin",
-    "marine", "market", "master", "matter", "meadow", "measure",
-    "medium", "melody", "member", "memory", "mention", "mentor",
-    "mercy", "method", "middle", "migrate", "million", "minimum",
-    "mirror", "misery", "mission", "mixture", "mobile", "model",
-    "modify", "moment", "monitor", "monkey", "monster", "moral",
-    "morning", "motion", "mountain", "mouse", "muscle", "museum",
-    "mushroom", "mutual", "mystery", "narrow", "nation", "nature",
-    "nearby", "needle", "neither", "nephew", "nerve", "network",
-    "neutral", "noble", "normal", "notable", "nothing", "notice",
-    "novel", "number", "obvious", "ocean", "office", "olive",
-    "opinion", "option", "orange", "orbit", "origin", "orphan",
-    "outdoor", "output", "outside", "oxygen", "paddle", "palace",
-    "panda", "panel", "panic", "parcel", "parent", "partner",
-    "pattern", "pebble", "penalty", "people", "perfect", "permit",
-    "person", "phrase", "picture", "pilot", "pioneer", "pirate",
-    "planet", "plastic", "player", "please", "pledge", "plunge",
-    "pocket", "poetry", "pointer", "polar", "policy", "popular",
-    "portion", "poverty", "powder", "praise", "predict", "prepare",
-    "present", "pretty", "prevent", "primary", "print", "prison",
-    "private", "problem", "process", "produce", "profile", "program",
-    "project", "promote", "prosper", "protect", "proud", "provide",
-    "public", "purpose", "puzzle", "pyramid", "quality", "quantum",
-    "quarter", "question", "quickly", "rabbit", "raccoon", "radar",
-    "random", "rapid", "rather", "raven", "reason", "rebel",
-    "recall", "receive", "record", "reform", "region", "regret",
-    "reject", "release", "relief", "remain", "remind", "remove",
-    "render", "repair", "repeat", "replace", "report", "require",
-    "rescue", "resist", "resolve", "result", "retire", "retreat",
-    "return", "reveal", "review", "reward", "rhythm", "ribbon",
-    "right", "ritual", "river", "robust", "rocket", "romance",
-    "roster", "rotate", "royal", "rubber", "runway", "saddle",
-    "safari", "salmon", "salute", "sample", "satisfy", "scatter",
-    "scene", "scheme", "school", "science", "scissors", "search",
-    "season", "secret", "section", "security", "select", "seller",
-    "senior", "series", "service", "session", "settle", "shadow",
-    "shallow", "shelter", "sheriff", "shield", "shimmer", "shiver",
-    "shock", "shoulder", "shuffle", "sibling", "signal", "silent",
-    "silver", "similar", "simple", "sister", "situation", "sketch",
-    "skull", "slender", "slight", "slogan", "smart", "smooth",
-    "snack", "soccer", "social", "soldier", "solution", "someone",
-    "source", "spatial", "special", "sphere", "spirit", "sponsor",
-    "spring", "squeeze", "stable", "stadium", "staff", "stage",
-    "stamp", "stand", "start", "state", "station", "steady",
-    "stereo", "stick", "stomach", "story", "strategy", "street",
-    "strong", "student", "studio", "subject", "submit", "sudden",
-    "suffer", "suggest", "summer", "sunrise", "super", "supply",
-    "surface", "surplus", "surprise", "surround", "survey", "suspect",
-    "sustain", "symbol", "system", "table", "tackle", "talent",
-    "target", "tattoo", "teacher", "tenant", "tennis", "terminal",
-    "texture", "theory", "therapy", "thrive", "thunder", "ticket",
-    "timber", "tissue", "title", "toast", "tobacco", "today",
-    "together", "tomato", "tomorrow", "tongue", "topic", "tornado",
-    "tortoise", "tourist", "toward", "tower", "traffic", "tragedy",
-    "train", "transfer", "travel", "treasure", "trend", "trial",
-    "trigger", "triple", "trophy", "trouble", "truck", "truly",
-    "trumpet", "trust", "tunnel", "turtle", "twelve", "twenty",
-    "typical", "umbrella", "unable", "uncle", "under", "unfold",
-    "unique", "universe", "unknown", "unlock", "unusual", "upgrade",
-    "uphold", "upper", "urban", "useful", "usual", "utility",
-    "vacant", "vacuum", "valley", "valve", "vanish", "vapor",
-    "various", "vendor", "venture", "verify", "version", "vessel",
-    "veteran", "victory", "video", "village", "vintage", "violin",
-    "virtual", "virus", "vision", "visual", "vivid", "vocal",
-    "volcano", "voltage", "volume", "voyage", "wagon", "warrior",
-    "wealth", "weapon", "weather", "welcome", "western", "whisper",
-    "widen", "wildlife", "window", "winter", "wisdom", "witness",
-    "wonder", "world", "wreath", "wrestle", "wrist", "yellow",
-    "yield", "young", "zebra", "zero", "zigzag", "zombie",
+    "abandon",
+    "ability",
+    "abstract",
+    "account",
+    "across",
+    "action",
+    "adapt",
+    "address",
+    "adjust",
+    "advance",
+    "afford",
+    "agree",
+    "airport",
+    "alarm",
+    "album",
+    "alert",
+    "alien",
+    "allow",
+    "almost",
+    "alpha",
+    "already",
+    "alter",
+    "amazing",
+    "amount",
+    "anchor",
+    "angle",
+    "animal",
+    "annual",
+    "answer",
+    "antenna",
+    "apart",
+    "apple",
+    "approve",
+    "arena",
+    "armor",
+    "army",
+    "arrange",
+    "arrest",
+    "arrive",
+    "arrow",
+    "artist",
+    "aspect",
+    "assist",
+    "attack",
+    "attract",
+    "auction",
+    "author",
+    "avoid",
+    "awake",
+    "balance",
+    "bamboo",
+    "banner",
+    "barely",
+    "barrel",
+    "basket",
+    "battle",
+    "beach",
+    "beauty",
+    "become",
+    "before",
+    "behind",
+    "believe",
+    "below",
+    "bench",
+    "benefit",
+    "beyond",
+    "bicycle",
+    "binder",
+    "blanket",
+    "blast",
+    "bless",
+    "blind",
+    "block",
+    "blossom",
+    "board",
+    "border",
+    "bottom",
+    "bounce",
+    "branch",
+    "brave",
+    "breeze",
+    "bridge",
+    "bright",
+    "broken",
+    "bronze",
+    "brother",
+    "brush",
+    "bubble",
+    "budget",
+    "buffalo",
+    "burden",
+    "burst",
+    "butter",
+    "cabin",
+    "cable",
+    "camera",
+    "cancel",
+    "candle",
+    "canvas",
+    "capture",
+    "carbon",
+    "carpet",
+    "castle",
+    "casual",
+    "catalog",
+    "caution",
+    "ceiling",
+    "cement",
+    "census",
+    "center",
+    "cereal",
+    "certain",
+    "chair",
+    "change",
+    "chapter",
+    "cherry",
+    "chimney",
+    "choice",
+    "chronic",
+    "circle",
+    "citizen",
+    "civil",
+    "claim",
+    "clap",
+    "clarify",
+    "claw",
+    "clever",
+    "clinic",
+    "clock",
+    "cluster",
+    "coach",
+    "coconut",
+    "coffee",
+    "collect",
+    "column",
+    "comfort",
+    "common",
+    "company",
+    "concert",
+    "conduct",
+    "confirm",
+    "connect",
+    "consider",
+    "control",
+    "convert",
+    "copper",
+    "coral",
+    "correct",
+    "costume",
+    "cotton",
+    "couch",
+    "country",
+    "couple",
+    "cousin",
+    "cover",
+    "cradle",
+    "craft",
+    "crater",
+    "crazy",
+    "credit",
+    "cricket",
+    "crisis",
+    "crisp",
+    "cross",
+    "crouch",
+    "crowd",
+    "crucial",
+    "cruel",
+    "cruise",
+    "crystal",
+    "culture",
+    "curtain",
+    "custom",
+    "cycle",
+    "damage",
+    "dance",
+    "danger",
+    "daring",
+    "daughter",
+    "dawn",
+    "debris",
+    "decade",
+    "decline",
+    "decorate",
+    "defense",
+    "degree",
+    "deliver",
+    "demand",
+    "denial",
+    "dentist",
+    "depart",
+    "deposit",
+    "depth",
+    "derive",
+    "desert",
+    "design",
+    "desktop",
+    "destroy",
+    "detail",
+    "detect",
+    "device",
+    "devote",
+    "diagram",
+    "diamond",
+    "diesel",
+    "differ",
+    "digital",
+    "dinner",
+    "direct",
+    "discover",
+    "display",
+    "distance",
+    "divert",
+    "doctor",
+    "dolphin",
+    "domain",
+    "donate",
+    "double",
+    "dragon",
+    "drama",
+    "dream",
+    "dress",
+    "drift",
+    "drink",
+    "driver",
+    "drop",
+    "durable",
+    "during",
+    "eagle",
+    "early",
+    "earth",
+    "eclipse",
+    "ecology",
+    "economy",
+    "educate",
+    "effort",
+    "eighth",
+    "either",
+    "elbow",
+    "elder",
+    "elegant",
+    "element",
+    "elephant",
+    "elevator",
+    "elite",
+    "embark",
+    "embrace",
+    "emerge",
+    "emotion",
+    "emperor",
+    "enable",
+    "endless",
+    "energy",
+    "enforce",
+    "engine",
+    "enhance",
+    "enjoy",
+    "enough",
+    "entire",
+    "episode",
+    "equal",
+    "erosion",
+    "escape",
+    "essence",
+    "estate",
+    "eternal",
+    "evening",
+    "evidence",
+    "evolve",
+    "exact",
+    "example",
+    "excess",
+    "exclude",
+    "execute",
+    "exhaust",
+    "exhibit",
+    "exotic",
+    "expand",
+    "expect",
+    "explain",
+    "expose",
+    "extend",
+    "extra",
+    "fabric",
+    "faculty",
+    "fading",
+    "failure",
+    "falcon",
+    "family",
+    "fantasy",
+    "fashion",
+    "father",
+    "feature",
+    "federal",
+    "fiction",
+    "figure",
+    "filter",
+    "final",
+    "finger",
+    "finish",
+    "fiscal",
+    "fitness",
+    "flavor",
+    "flight",
+    "float",
+    "floor",
+    "flower",
+    "fluid",
+    "flutter",
+    "focus",
+    "follow",
+    "forest",
+    "forget",
+    "formal",
+    "fortune",
+    "fossil",
+    "foster",
+    "found",
+    "fragile",
+    "frame",
+    "freedom",
+    "freeze",
+    "fresh",
+    "friend",
+    "frozen",
+    "fruit",
+    "future",
+    "galaxy",
+    "gallery",
+    "garage",
+    "garden",
+    "garlic",
+    "gather",
+    "general",
+    "genius",
+    "gentle",
+    "genuine",
+    "gesture",
+    "giant",
+    "glacier",
+    "glance",
+    "glimpse",
+    "global",
+    "gloom",
+    "glory",
+    "glove",
+    "goddess",
+    "golden",
+    "gossip",
+    "govern",
+    "grace",
+    "grain",
+    "grammar",
+    "grant",
+    "gravity",
+    "great",
+    "grocery",
+    "ground",
+    "group",
+    "growing",
+    "guard",
+    "guitar",
+    "hammer",
+    "hamster",
+    "harbor",
+    "harvest",
+    "hazard",
+    "health",
+    "heaven",
+    "helmet",
+    "hidden",
+    "holiday",
+    "hollow",
+    "honey",
+    "horror",
+    "hospital",
+    "hotel",
+    "human",
+    "humor",
+    "hunter",
+    "hybrid",
+    "kingdom",
+    "kitchen",
+    "kiwi",
+    "ladder",
+    "language",
+    "large",
+    "later",
+    "launch",
+    "lava",
+    "leader",
+    "lecture",
+    "legend",
+    "leisure",
+    "lemon",
+    "length",
+    "letter",
+    "level",
+    "liberty",
+    "library",
+    "license",
+    "light",
+    "limit",
+    "linear",
+    "liquid",
+    "little",
+    "lively",
+    "lobby",
+    "local",
+    "logic",
+    "lonely",
+    "lottery",
+    "luggage",
+    "lumber",
+    "lunar",
+    "luxury",
+    "machine",
+    "magnet",
+    "maiden",
+    "major",
+    "manage",
+    "mandate",
+    "manual",
+    "maple",
+    "marble",
+    "margin",
+    "marine",
+    "market",
+    "master",
+    "matter",
+    "meadow",
+    "measure",
+    "medium",
+    "melody",
+    "member",
+    "memory",
+    "mention",
+    "mentor",
+    "mercy",
+    "method",
+    "middle",
+    "migrate",
+    "million",
+    "minimum",
+    "mirror",
+    "misery",
+    "mission",
+    "mixture",
+    "mobile",
+    "model",
+    "modify",
+    "moment",
+    "monitor",
+    "monkey",
+    "monster",
+    "moral",
+    "morning",
+    "motion",
+    "mountain",
+    "mouse",
+    "muscle",
+    "museum",
+    "mushroom",
+    "mutual",
+    "mystery",
+    "narrow",
+    "nation",
+    "nature",
+    "nearby",
+    "needle",
+    "neither",
+    "nephew",
+    "nerve",
+    "network",
+    "neutral",
+    "noble",
+    "normal",
+    "notable",
+    "nothing",
+    "notice",
+    "novel",
+    "number",
+    "obvious",
+    "ocean",
+    "office",
+    "olive",
+    "opinion",
+    "option",
+    "orange",
+    "orbit",
+    "origin",
+    "orphan",
+    "outdoor",
+    "output",
+    "outside",
+    "oxygen",
+    "paddle",
+    "palace",
+    "panda",
+    "panel",
+    "panic",
+    "parcel",
+    "parent",
+    "partner",
+    "pattern",
+    "pebble",
+    "penalty",
+    "people",
+    "perfect",
+    "permit",
+    "person",
+    "phrase",
+    "picture",
+    "pilot",
+    "pioneer",
+    "pirate",
+    "planet",
+    "plastic",
+    "player",
+    "please",
+    "pledge",
+    "plunge",
+    "pocket",
+    "poetry",
+    "pointer",
+    "polar",
+    "policy",
+    "popular",
+    "portion",
+    "poverty",
+    "powder",
+    "praise",
+    "predict",
+    "prepare",
+    "present",
+    "pretty",
+    "prevent",
+    "primary",
+    "print",
+    "prison",
+    "private",
+    "problem",
+    "process",
+    "produce",
+    "profile",
+    "program",
+    "project",
+    "promote",
+    "prosper",
+    "protect",
+    "proud",
+    "provide",
+    "public",
+    "purpose",
+    "puzzle",
+    "pyramid",
+    "quality",
+    "quantum",
+    "quarter",
+    "question",
+    "quickly",
+    "rabbit",
+    "raccoon",
+    "radar",
+    "random",
+    "rapid",
+    "rather",
+    "raven",
+    "reason",
+    "rebel",
+    "recall",
+    "receive",
+    "record",
+    "reform",
+    "region",
+    "regret",
+    "reject",
+    "release",
+    "relief",
+    "remain",
+    "remind",
+    "remove",
+    "render",
+    "repair",
+    "repeat",
+    "replace",
+    "report",
+    "require",
+    "rescue",
+    "resist",
+    "resolve",
+    "result",
+    "retire",
+    "retreat",
+    "return",
+    "reveal",
+    "review",
+    "reward",
+    "rhythm",
+    "ribbon",
+    "right",
+    "ritual",
+    "river",
+    "robust",
+    "rocket",
+    "romance",
+    "roster",
+    "rotate",
+    "royal",
+    "rubber",
+    "runway",
+    "saddle",
+    "safari",
+    "salmon",
+    "salute",
+    "sample",
+    "satisfy",
+    "scatter",
+    "scene",
+    "scheme",
+    "school",
+    "science",
+    "scissors",
+    "search",
+    "season",
+    "secret",
+    "section",
+    "security",
+    "select",
+    "seller",
+    "senior",
+    "series",
+    "service",
+    "session",
+    "settle",
+    "shadow",
+    "shallow",
+    "shelter",
+    "sheriff",
+    "shield",
+    "shimmer",
+    "shiver",
+    "shock",
+    "shoulder",
+    "shuffle",
+    "sibling",
+    "signal",
+    "silent",
+    "silver",
+    "similar",
+    "simple",
+    "sister",
+    "situation",
+    "sketch",
+    "skull",
+    "slender",
+    "slight",
+    "slogan",
+    "smart",
+    "smooth",
+    "snack",
+    "soccer",
+    "social",
+    "soldier",
+    "solution",
+    "someone",
+    "source",
+    "spatial",
+    "special",
+    "sphere",
+    "spirit",
+    "sponsor",
+    "spring",
+    "squeeze",
+    "stable",
+    "stadium",
+    "staff",
+    "stage",
+    "stamp",
+    "stand",
+    "start",
+    "state",
+    "station",
+    "steady",
+    "stereo",
+    "stick",
+    "stomach",
+    "story",
+    "strategy",
+    "street",
+    "strong",
+    "student",
+    "studio",
+    "subject",
+    "submit",
+    "sudden",
+    "suffer",
+    "suggest",
+    "summer",
+    "sunrise",
+    "super",
+    "supply",
+    "surface",
+    "surplus",
+    "surprise",
+    "surround",
+    "survey",
+    "suspect",
+    "sustain",
+    "symbol",
+    "system",
+    "table",
+    "tackle",
+    "talent",
+    "target",
+    "tattoo",
+    "teacher",
+    "tenant",
+    "tennis",
+    "terminal",
+    "texture",
+    "theory",
+    "therapy",
+    "thrive",
+    "thunder",
+    "ticket",
+    "timber",
+    "tissue",
+    "title",
+    "toast",
+    "tobacco",
+    "today",
+    "together",
+    "tomato",
+    "tomorrow",
+    "tongue",
+    "topic",
+    "tornado",
+    "tortoise",
+    "tourist",
+    "toward",
+    "tower",
+    "traffic",
+    "tragedy",
+    "train",
+    "transfer",
+    "travel",
+    "treasure",
+    "trend",
+    "trial",
+    "trigger",
+    "triple",
+    "trophy",
+    "trouble",
+    "truck",
+    "truly",
+    "trumpet",
+    "trust",
+    "tunnel",
+    "turtle",
+    "twelve",
+    "twenty",
+    "typical",
+    "umbrella",
+    "unable",
+    "uncle",
+    "under",
+    "unfold",
+    "unique",
+    "universe",
+    "unknown",
+    "unlock",
+    "unusual",
+    "upgrade",
+    "uphold",
+    "upper",
+    "urban",
+    "useful",
+    "usual",
+    "utility",
+    "vacant",
+    "vacuum",
+    "valley",
+    "valve",
+    "vanish",
+    "vapor",
+    "various",
+    "vendor",
+    "venture",
+    "verify",
+    "version",
+    "vessel",
+    "veteran",
+    "victory",
+    "video",
+    "village",
+    "vintage",
+    "violin",
+    "virtual",
+    "virus",
+    "vision",
+    "visual",
+    "vivid",
+    "vocal",
+    "volcano",
+    "voltage",
+    "volume",
+    "voyage",
+    "wagon",
+    "warrior",
+    "wealth",
+    "weapon",
+    "weather",
+    "welcome",
+    "western",
+    "whisper",
+    "widen",
+    "wildlife",
+    "window",
+    "winter",
+    "wisdom",
+    "witness",
+    "wonder",
+    "world",
+    "wreath",
+    "wrestle",
+    "wrist",
+    "yellow",
+    "yield",
+    "young",
+    "zebra",
+    "zero",
+    "zigzag",
+    "zombie",
     "zone",
 ];
 
@@ -1073,10 +1798,18 @@ fn evaluate_password_strength(password: &str) -> (PasswordStrength, f64) {
         }
     }
 
-    if has_lower { pool_size += 26; }
-    if has_upper { pool_size += 26; }
-    if has_digit { pool_size += 10; }
-    if has_symbol { pool_size += 30; }
+    if has_lower {
+        pool_size += 26;
+    }
+    if has_upper {
+        pool_size += 26;
+    }
+    if has_digit {
+        pool_size += 10;
+    }
+    if has_symbol {
+        pool_size += 30;
+    }
 
     let entropy = if pool_size > 0 {
         len as f64 * (pool_size as f64).log2()
@@ -1103,10 +1836,9 @@ fn evaluate_password_strength(password: &str) -> (PasswordStrength, f64) {
 fn is_common_pattern(password: &str) -> bool {
     let lower = password.to_ascii_lowercase();
     let common = [
-        "password", "123456", "qwerty", "letmein", "admin",
-        "welcome", "monkey", "master", "dragon", "login",
-        "abc123", "111111", "iloveyou", "sunshine", "princess",
-        "football", "shadow", "trustno1", "baseball", "access",
+        "password", "123456", "qwerty", "letmein", "admin", "welcome", "monkey", "master",
+        "dragon", "login", "abc123", "111111", "iloveyou", "sunshine", "princess", "football",
+        "shadow", "trustno1", "baseball", "access",
     ];
     common.iter().any(|c| lower.contains(c))
 }
@@ -1203,13 +1935,14 @@ fn audit_vault(vault: &Vault, now: u64) -> Vec<AuditIssue> {
 
             // Reuse check
             if let Some(ids) = password_counts.get(pw)
-                && ids.len() > 1 {
-                    issues.push(AuditIssue {
-                        entry_id: entry.id,
-                        entry_name: name.clone(),
-                        issue: AuditIssueKind::ReusedPassword,
-                    });
-                }
+                && ids.len() > 1
+            {
+                issues.push(AuditIssue {
+                    entry_id: entry.id,
+                    entry_name: name.clone(),
+                    issue: AuditIssueKind::ReusedPassword,
+                });
+            }
 
             // Old password check
             if entry.password_age_days(now) > PASSWORD_OLD_DAYS {
@@ -1222,13 +1955,14 @@ fn audit_vault(vault: &Vault, now: u64) -> Vec<AuditIssue> {
 
             // Missing TOTP
             if let EntryData::Login(ref login) = entry.data
-                && login.totp_secret.is_none() {
-                    issues.push(AuditIssue {
-                        entry_id: entry.id,
-                        entry_name: name.clone(),
-                        issue: AuditIssueKind::NoTotp,
-                    });
-                }
+                && login.totp_secret.is_none()
+            {
+                issues.push(AuditIssue {
+                    entry_id: entry.id,
+                    entry_name: name.clone(),
+                    issue: AuditIssueKind::NoTotp,
+                });
+            }
         }
     }
 
@@ -1259,10 +1993,16 @@ fn export_csv(vault: &Vault) -> String {
             EntryData::CreditCard(d) => escape_csv(&d.notes),
             _ => String::new(),
         };
-        let tags = entry.tags.join(";");
-        let folder = entry.folder_id
-            .and_then(|fid| vault.get_folder(fid))
-            .map_or(String::new(), |f| f.name.clone());
+        // Tag and folder names are free-form user text just like the other
+        // columns, so they need the same quoting; before this they were the
+        // only two fields interpolated raw.
+        let tags = escape_csv(&entry.tags.join(";"));
+        let folder = escape_csv(
+            &entry
+                .folder_id
+                .and_then(|fid| vault.get_folder(fid))
+                .map_or(String::new(), |f| f.name.clone()),
+        );
         let starred = if entry.starred { "true" } else { "false" };
 
         csv.push_str(&format!(
@@ -1274,31 +2014,50 @@ fn export_csv(vault: &Vault) -> String {
 }
 
 /// Escape a value for CSV output.
+/// Quote a CSV field per RFC 4180.
+///
+/// Delegates to the shared escaper so this app cannot drift from the other
+/// CSV writers again. The local version this replaced omitted `\r` from its
+/// trigger set; since RFC 4180 records are CRLF-terminated, a bare CR in an
+/// unquoted field splits the record for most readers.
 fn escape_csv(s: &str) -> String {
-    if s.contains(',') || s.contains('"') || s.contains('\n') {
-        let escaped = s.replace('"', "\"\"");
-        format!("\"{}\"", escaped)
-    } else {
-        s.to_string()
-    }
+    guitk::escape::csv_field(s)
 }
 
 /// Serialize vault to a backup string (simplified JSON-like format).
 fn serialize_backup(vault: &Vault) -> String {
     let mut out = String::from("{\n  \"vault_name\": ");
-    out.push_str(&format!("\"{}\",\n", vault.name));
+    // Every string below is user-chosen (vault/entry/folder/tag names). None
+    // of them was escaped before, so a `"` in any one of them produced a
+    // backup file that no JSON reader could load -- i.e. a silently
+    // unrestorable backup, which is the worst possible failure for a
+    // credential vault.
+    out.push_str(&format!(
+        "\"{}\",\n",
+        guitk::escape::json_string(&vault.name)
+    ));
     out.push_str(&format!("  \"entry_count\": {},\n", vault.entries.len()));
     out.push_str("  \"entries\": [\n");
     for (i, entry) in vault.entries.iter().enumerate() {
         out.push_str("    {\n");
         out.push_str(&format!("      \"id\": {},\n", entry.id));
-        out.push_str(&format!("      \"type\": \"{}\",\n", entry.entry_type().label()));
-        out.push_str(&format!("      \"name\": \"{}\",\n", entry.display_name()));
+        out.push_str(&format!(
+            "      \"type\": \"{}\",\n",
+            entry.entry_type().label()
+        ));
+        out.push_str(&format!(
+            "      \"name\": \"{}\",\n",
+            guitk::escape::json_string(entry.display_name())
+        ));
         out.push_str(&format!("      \"starred\": {},\n", entry.starred));
         out.push_str(&format!("      \"compromised\": {},\n", entry.compromised));
         out.push_str(&format!("      \"created_at\": {},\n", entry.created_at));
         out.push_str(&format!("      \"modified_at\": {},\n", entry.modified_at));
-        let tags_str: Vec<String> = entry.tags.iter().map(|t| format!("\"{}\"", t)).collect();
+        let tags_str: Vec<String> = entry
+            .tags
+            .iter()
+            .map(|t| format!("\"{}\"", guitk::escape::json_string(t)))
+            .collect();
         out.push_str(&format!("      \"tags\": [{}]\n", tags_str.join(", ")));
         if i + 1 < vault.entries.len() {
             out.push_str("    },\n");
@@ -1309,7 +2068,11 @@ fn serialize_backup(vault: &Vault) -> String {
     out.push_str("  ],\n");
     out.push_str("  \"folders\": [\n");
     for (i, folder) in vault.folders.iter().enumerate() {
-        out.push_str(&format!("    {{ \"id\": {}, \"name\": \"{}\" }}", folder.id, folder.name));
+        out.push_str(&format!(
+            "    {{ \"id\": {}, \"name\": \"{}\" }}",
+            folder.id,
+            guitk::escape::json_string(&folder.name)
+        ));
         if i + 1 < vault.folders.len() {
             out.push_str(",\n");
         } else {
@@ -1360,16 +2123,20 @@ impl SortOrder {
 fn sort_entries(entries: &mut [&Entry], order: SortOrder) {
     match order {
         SortOrder::NameAsc => entries.sort_by(|a, b| {
-            a.display_name().to_ascii_lowercase().cmp(&b.display_name().to_ascii_lowercase())
+            a.display_name()
+                .to_ascii_lowercase()
+                .cmp(&b.display_name().to_ascii_lowercase())
         }),
         SortOrder::NameDesc => entries.sort_by(|a, b| {
-            b.display_name().to_ascii_lowercase().cmp(&a.display_name().to_ascii_lowercase())
+            b.display_name()
+                .to_ascii_lowercase()
+                .cmp(&a.display_name().to_ascii_lowercase())
         }),
         SortOrder::DateNewest => entries.sort_by_key(|e| std::cmp::Reverse(e.modified_at)),
         SortOrder::DateOldest => entries.sort_by_key(|a| a.modified_at),
-        SortOrder::TypeAsc => entries.sort_by(|a, b| {
-            a.entry_type().label().cmp(b.entry_type().label())
-        }),
+        SortOrder::TypeAsc => {
+            entries.sort_by(|a, b| a.entry_type().label().cmp(b.entry_type().label()))
+        }
     }
 }
 
@@ -1544,13 +2311,12 @@ impl AppState {
 // =============================================================================
 
 /// Render a filled rounded rectangle.
-fn draw_rect(
-    rt: &mut RenderTree,
-    x: f32, y: f32, w: f32, h: f32,
-    color: Color, radius: f32,
-) {
+fn draw_rect(rt: &mut RenderTree, x: f32, y: f32, w: f32, h: f32, color: Color, radius: f32) {
     rt.push(RenderCommand::FillRect {
-        x, y, width: w, height: h,
+        x,
+        y,
+        width: w,
+        height: h,
         color,
         corner_radii: CornerRadii::all(radius),
     });
@@ -1562,12 +2328,21 @@ fn draw_rect(
 #[allow(clippy::too_many_arguments)]
 fn draw_stroke_rect(
     rt: &mut RenderTree,
-    x: f32, y: f32, w: f32, h: f32,
-    color: Color, line_width: f32, radius: f32,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    color: Color,
+    line_width: f32,
+    radius: f32,
 ) {
     rt.push(RenderCommand::StrokeRect {
-        x, y, width: w, height: h,
-        color, line_width,
+        x,
+        y,
+        width: w,
+        height: h,
+        color,
+        line_width,
         corner_radii: CornerRadii::all(radius),
     });
 }
@@ -1577,15 +2352,20 @@ fn draw_stroke_rect(
 #[allow(clippy::too_many_arguments)]
 fn draw_text(
     rt: &mut RenderTree,
-    x: f32, y: f32,
-    text: &str, color: Color, size: f32,
+    x: f32,
+    y: f32,
+    text: &str,
+    color: Color,
+    size: f32,
     weight: FontWeightHint,
     max_width: Option<f32>,
 ) {
     rt.push(RenderCommand::Text {
-        x, y,
+        x,
+        y,
         text: text.to_string(),
-        color, font_size: size,
+        color,
+        font_size: size,
         font_weight: weight,
         max_width,
     });
@@ -1594,8 +2374,10 @@ fn draw_text(
 /// Render a horizontal separator line.
 fn draw_separator(rt: &mut RenderTree, x: f32, y: f32, width: f32) {
     rt.push(RenderCommand::Line {
-        x1: x, y1: y,
-        x2: x + width, y2: y,
+        x1: x,
+        y1: y,
+        x2: x + width,
+        y2: y,
         color: SURFACE1,
         width: 1.0,
     });
@@ -1617,15 +2399,20 @@ fn badge_width(label: &str) -> f32 {
 
 /// Render a small colored badge with text. Returns the width it drew, so a
 /// caller can lay out whatever follows without guessing at it.
-fn draw_badge(
-    rt: &mut RenderTree,
-    x: f32, y: f32,
-    label: &str, bg: Color, fg: Color,
-) -> f32 {
+fn draw_badge(rt: &mut RenderTree, x: f32, y: f32, label: &str, bg: Color, fg: Color) -> f32 {
     let badge_w = badge_width(label);
     let badge_h = 20.0;
     draw_rect(rt, x, y, badge_w, badge_h, bg, 4.0);
-    draw_text(rt, x + 6.0, y + 3.0, label, fg, SMALL_FONT_SIZE, FontWeightHint::Bold, None);
+    draw_text(
+        rt,
+        x + 6.0,
+        y + 3.0,
+        label,
+        fg,
+        SMALL_FONT_SIZE,
+        FontWeightHint::Bold,
+        None,
+    );
     badge_w
 }
 
@@ -1635,12 +2422,22 @@ fn draw_badge(
 #[allow(clippy::too_many_arguments)]
 fn draw_button(
     rt: &mut RenderTree,
-    x: f32, y: f32, w: f32, h: f32,
-    label: &str, bg: Color, fg: Color,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    label: &str,
+    bg: Color,
+    fg: Color,
     hovered: bool,
 ) {
     let actual_bg = if hovered {
-        Color::rgba(bg.r.saturating_add(20), bg.g.saturating_add(20), bg.b.saturating_add(20), bg.a)
+        Color::rgba(
+            bg.r.saturating_add(20),
+            bg.g.saturating_add(20),
+            bg.b.saturating_add(20),
+            bg.a,
+        )
     } else {
         bg
     };
@@ -1648,9 +2445,23 @@ fn draw_button(
     // Centring is where a guessed width shows up worst: half the error goes
     // into the offset, and it grows with the label, so the longest label on a
     // toolbar is the one that visibly sits off-centre.
-    let text_x = text::center_x(label, x + w / 2.0, DEFAULT_FONT_SIZE, FontWeightHint::Regular);
+    let text_x = text::center_x(
+        label,
+        x + w / 2.0,
+        DEFAULT_FONT_SIZE,
+        FontWeightHint::Regular,
+    );
     let text_y = y + (h - DEFAULT_FONT_SIZE) / 2.0;
-    draw_text(rt, text_x, text_y, label, fg, DEFAULT_FONT_SIZE, FontWeightHint::Regular, None);
+    draw_text(
+        rt,
+        text_x,
+        text_y,
+        label,
+        fg,
+        DEFAULT_FONT_SIZE,
+        FontWeightHint::Regular,
+        None,
+    );
 }
 
 /// Width of a `draw_button` sized to fit `label` with `pad` px each side.
@@ -1661,8 +2472,12 @@ fn button_width(label: &str, pad: f32) -> f32 {
 /// Render a progress/strength bar.
 fn draw_strength_bar(
     rt: &mut RenderTree,
-    x: f32, y: f32, width: f32, height: f32,
-    fraction: f32, color: Color,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    fraction: f32,
+    color: Color,
 ) {
     draw_rect(rt, x, y, width, height, SURFACE0, 3.0);
     let fill_width = (width * fraction.clamp(0.0, 1.0)).max(0.0);
@@ -1694,27 +2509,71 @@ fn render_toolbar(rt: &mut RenderTree, state: &AppState, width: f32) {
     } else {
         &state.search_query
     };
-    let search_color = if state.search_query.is_empty() { OVERLAY0 } else { TEXT_COLOR };
-    draw_text(rt, x + 10.0, btn_y + 8.0, search_text, search_color, DEFAULT_FONT_SIZE,
-              FontWeightHint::Regular, Some(180.0));
+    let search_color = if state.search_query.is_empty() {
+        OVERLAY0
+    } else {
+        TEXT_COLOR
+    };
+    draw_text(
+        rt,
+        x + 10.0,
+        btn_y + 8.0,
+        search_text,
+        search_color,
+        DEFAULT_FONT_SIZE,
+        FontWeightHint::Regular,
+        Some(180.0),
+    );
     x += 212.0;
 
     // Sort button
-    draw_button(rt, x, btn_y, 80.0, btn_h, state.sort_order.label(), SURFACE1, TEXT_COLOR, false);
+    draw_button(
+        rt,
+        x,
+        btn_y,
+        80.0,
+        btn_h,
+        state.sort_order.label(),
+        SURFACE1,
+        TEXT_COLOR,
+        false,
+    );
     x += 92.0;
 
     // Generate password button
-    draw_button(rt, x, btn_y, 100.0, btn_h, "Generator", SURFACE1, LAVENDER, false);
+    draw_button(
+        rt,
+        x,
+        btn_y,
+        100.0,
+        btn_h,
+        "Generator",
+        SURFACE1,
+        LAVENDER,
+        false,
+    );
     x += 112.0;
 
     // Lock button
-    let lock_text = if state.vault.is_unlocked() { "Lock" } else { "Unlock" };
-    let lock_color = if state.vault.is_unlocked() { GREEN } else { RED };
-    draw_button(rt, x, btn_y, 70.0, btn_h, lock_text, SURFACE1, lock_color, false);
+    let lock_text = if state.vault.is_unlocked() {
+        "Lock"
+    } else {
+        "Unlock"
+    };
+    let lock_color = if state.vault.is_unlocked() {
+        GREEN
+    } else {
+        RED
+    };
+    draw_button(
+        rt, x, btn_y, 70.0, btn_h, lock_text, SURFACE1, lock_color, false,
+    );
     x += 82.0;
 
     // Settings button
-    draw_button(rt, x, btn_y, 80.0, btn_h, "Settings", SURFACE1, SUBTEXT0, false);
+    draw_button(
+        rt, x, btn_y, 80.0, btn_h, "Settings", SURFACE1, SUBTEXT0, false,
+    );
 
     // Bottom border
     draw_separator(rt, 0.0, TOOLBAR_HEIGHT - 1.0, width);
@@ -1736,21 +2595,45 @@ fn render_sidebar(rt: &mut RenderTree, state: &AppState, height: f32) {
     let text_x = 16.0;
 
     // Vault name header
-    draw_text(rt, text_x, y, &state.vault.name, TEXT_COLOR, HEADING_FONT_SIZE,
-              FontWeightHint::Bold, Some(SIDEBAR_WIDTH - 24.0));
+    draw_text(
+        rt,
+        text_x,
+        y,
+        &state.vault.name,
+        TEXT_COLOR,
+        HEADING_FONT_SIZE,
+        FontWeightHint::Bold,
+        Some(SIDEBAR_WIDTH - 24.0),
+    );
     y += 30.0;
 
     let entry_count_text = format!("{} items", state.vault.entry_count());
-    draw_text(rt, text_x, y, &entry_count_text, SUBTEXT0, SMALL_FONT_SIZE,
-              FontWeightHint::Regular, None);
+    draw_text(
+        rt,
+        text_x,
+        y,
+        &entry_count_text,
+        SUBTEXT0,
+        SMALL_FONT_SIZE,
+        FontWeightHint::Regular,
+        None,
+    );
     y += 24.0;
 
     draw_separator(rt, 8.0, y, SIDEBAR_WIDTH - 16.0);
     y += 12.0;
 
     // Categories section
-    draw_text(rt, text_x, y, "CATEGORIES", OVERLAY0, SMALL_FONT_SIZE,
-              FontWeightHint::Bold, None);
+    draw_text(
+        rt,
+        text_x,
+        y,
+        "CATEGORIES",
+        OVERLAY0,
+        SMALL_FONT_SIZE,
+        FontWeightHint::Bold,
+        None,
+    );
     y += 20.0;
 
     // All Items
@@ -1758,8 +2641,16 @@ fn render_sidebar(rt: &mut RenderTree, state: &AppState, height: f32) {
     if all_selected {
         draw_rect(rt, 4.0, y, SIDEBAR_WIDTH - 8.0, item_h, SURFACE0, 4.0);
     }
-    draw_text(rt, text_x + 4.0, y + 8.0, "All Items", if all_selected { BLUE } else { TEXT_COLOR },
-              DEFAULT_FONT_SIZE, FontWeightHint::Regular, None);
+    draw_text(
+        rt,
+        text_x + 4.0,
+        y + 8.0,
+        "All Items",
+        if all_selected { BLUE } else { TEXT_COLOR },
+        DEFAULT_FONT_SIZE,
+        FontWeightHint::Regular,
+        None,
+    );
     y += item_h + 2.0;
 
     // Favorites
@@ -1767,9 +2658,16 @@ fn render_sidebar(rt: &mut RenderTree, state: &AppState, height: f32) {
     if fav_selected {
         draw_rect(rt, 4.0, y, SIDEBAR_WIDTH - 8.0, item_h, SURFACE0, 4.0);
     }
-    draw_text(rt, text_x + 4.0, y + 8.0, "* Favorites",
-              if fav_selected { YELLOW } else { TEXT_COLOR },
-              DEFAULT_FONT_SIZE, FontWeightHint::Regular, None);
+    draw_text(
+        rt,
+        text_x + 4.0,
+        y + 8.0,
+        "* Favorites",
+        if fav_selected { YELLOW } else { TEXT_COLOR },
+        DEFAULT_FONT_SIZE,
+        FontWeightHint::Regular,
+        None,
+    );
     y += item_h + 2.0;
 
     // Audit
@@ -1777,17 +2675,32 @@ fn render_sidebar(rt: &mut RenderTree, state: &AppState, height: f32) {
     if audit_selected {
         draw_rect(rt, 4.0, y, SIDEBAR_WIDTH - 8.0, item_h, SURFACE0, 4.0);
     }
-    draw_text(rt, text_x + 4.0, y + 8.0, "! Audit",
-              if audit_selected { RED } else { TEXT_COLOR },
-              DEFAULT_FONT_SIZE, FontWeightHint::Regular, None);
+    draw_text(
+        rt,
+        text_x + 4.0,
+        y + 8.0,
+        "! Audit",
+        if audit_selected { RED } else { TEXT_COLOR },
+        DEFAULT_FONT_SIZE,
+        FontWeightHint::Regular,
+        None,
+    );
     y += item_h + 8.0;
 
     draw_separator(rt, 8.0, y, SIDEBAR_WIDTH - 16.0);
     y += 12.0;
 
     // Types section
-    draw_text(rt, text_x, y, "TYPES", OVERLAY0, SMALL_FONT_SIZE,
-              FontWeightHint::Bold, None);
+    draw_text(
+        rt,
+        text_x,
+        y,
+        "TYPES",
+        OVERLAY0,
+        SMALL_FONT_SIZE,
+        FontWeightHint::Bold,
+        None,
+    );
     y += 20.0;
 
     for etype in EntryType::all() {
@@ -1796,9 +2709,21 @@ fn render_sidebar(rt: &mut RenderTree, state: &AppState, height: f32) {
             draw_rect(rt, 4.0, y, SIDEBAR_WIDTH - 8.0, item_h, SURFACE0, 4.0);
         }
         let label = format!("{} {}", etype.icon_char(), etype.label());
-        let color = if type_selected { etype.badge_color() } else { TEXT_COLOR };
-        draw_text(rt, text_x + 4.0, y + 8.0, &label, color,
-                  DEFAULT_FONT_SIZE, FontWeightHint::Regular, None);
+        let color = if type_selected {
+            etype.badge_color()
+        } else {
+            TEXT_COLOR
+        };
+        draw_text(
+            rt,
+            text_x + 4.0,
+            y + 8.0,
+            &label,
+            color,
+            DEFAULT_FONT_SIZE,
+            FontWeightHint::Regular,
+            None,
+        );
         y += item_h + 2.0;
     }
 
@@ -1807,8 +2732,16 @@ fn render_sidebar(rt: &mut RenderTree, state: &AppState, height: f32) {
     y += 12.0;
 
     // Folders section
-    draw_text(rt, text_x, y, "FOLDERS", OVERLAY0, SMALL_FONT_SIZE,
-              FontWeightHint::Bold, None);
+    draw_text(
+        rt,
+        text_x,
+        y,
+        "FOLDERS",
+        OVERLAY0,
+        SMALL_FONT_SIZE,
+        FontWeightHint::Bold,
+        None,
+    );
     y += 20.0;
 
     for folder in &state.vault.folders {
@@ -1817,8 +2750,16 @@ fn render_sidebar(rt: &mut RenderTree, state: &AppState, height: f32) {
             draw_rect(rt, 4.0, y, SIDEBAR_WIDTH - 8.0, item_h, SURFACE0, 4.0);
         }
         let color = if folder_sel { BLUE } else { TEXT_COLOR };
-        draw_text(rt, text_x + 4.0, y + 8.0, &folder.name, color,
-                  DEFAULT_FONT_SIZE, FontWeightHint::Regular, None);
+        draw_text(
+            rt,
+            text_x + 4.0,
+            y + 8.0,
+            &folder.name,
+            color,
+            DEFAULT_FONT_SIZE,
+            FontWeightHint::Regular,
+            None,
+        );
         y += item_h + 2.0;
     }
 
@@ -1827,8 +2768,16 @@ fn render_sidebar(rt: &mut RenderTree, state: &AppState, height: f32) {
     y += 12.0;
 
     // Tags section
-    draw_text(rt, text_x, y, "TAGS", OVERLAY0, SMALL_FONT_SIZE,
-              FontWeightHint::Bold, None);
+    draw_text(
+        rt,
+        text_x,
+        y,
+        "TAGS",
+        OVERLAY0,
+        SMALL_FONT_SIZE,
+        FontWeightHint::Bold,
+        None,
+    );
     y += 20.0;
 
     let all_tags = state.vault.all_tags();
@@ -1838,15 +2787,25 @@ fn render_sidebar(rt: &mut RenderTree, state: &AppState, height: f32) {
             draw_rect(rt, 4.0, y, SIDEBAR_WIDTH - 8.0, item_h, SURFACE0, 4.0);
         }
         let color = if tag_sel { LAVENDER } else { TEXT_COLOR };
-        draw_text(rt, text_x + 4.0, y + 8.0, tag, color,
-                  DEFAULT_FONT_SIZE, FontWeightHint::Regular, None);
+        draw_text(
+            rt,
+            text_x + 4.0,
+            y + 8.0,
+            tag,
+            color,
+            DEFAULT_FONT_SIZE,
+            FontWeightHint::Regular,
+            None,
+        );
         y += item_h + 2.0;
     }
 
     // Right border
     rt.push(RenderCommand::Line {
-        x1: SIDEBAR_WIDTH, y1: y_start,
-        x2: SIDEBAR_WIDTH, y2: height,
+        x1: SIDEBAR_WIDTH,
+        y1: y_start,
+        x2: SIDEBAR_WIDTH,
+        y2: height,
         color: SURFACE1,
         width: 1.0,
     });
@@ -1866,14 +2825,24 @@ fn render_entry_list(rt: &mut RenderTree, state: &AppState, height: f32) {
 
     // List header
     let count_text = format!("{} entries", state.filtered_ids.len());
-    draw_text(rt, x_start + 12.0, y_start + 10.0, &count_text, SUBTEXT0,
-              SMALL_FONT_SIZE, FontWeightHint::Regular, None);
+    draw_text(
+        rt,
+        x_start + 12.0,
+        y_start + 10.0,
+        &count_text,
+        SUBTEXT0,
+        SMALL_FONT_SIZE,
+        FontWeightHint::Regular,
+        None,
+    );
 
     let mut y = y_start + 32.0;
 
     rt.push(RenderCommand::PushClip {
-        x: x_start, y: y_start,
-        width: ENTRY_LIST_WIDTH, height: h,
+        x: x_start,
+        y: y_start,
+        width: ENTRY_LIST_WIDTH,
+        height: h,
     });
 
     let effective_y = y - state.list_scroll;
@@ -1891,47 +2860,104 @@ fn render_entry_list(rt: &mut RenderTree, state: &AppState, height: f32) {
 
             // Row background
             if is_selected {
-                draw_rect(rt, x_start + 4.0, row_y, ENTRY_LIST_WIDTH - 8.0, ROW_HEIGHT - 2.0,
-                          SURFACE0, 4.0);
+                draw_rect(
+                    rt,
+                    x_start + 4.0,
+                    row_y,
+                    ENTRY_LIST_WIDTH - 8.0,
+                    ROW_HEIGHT - 2.0,
+                    SURFACE0,
+                    4.0,
+                );
             }
 
             let text_x = x_start + 16.0;
 
             // Type icon badge
             let badge_color = entry.entry_type().badge_color();
-            draw_rect(rt, text_x, row_y + 8.0, ICON_SIZE, ICON_SIZE, badge_color, 4.0);
-            draw_text(rt, text_x + 4.0, row_y + 10.0, entry.entry_type().icon_char(),
-                      BASE, SMALL_FONT_SIZE, FontWeightHint::Bold, None);
+            draw_rect(
+                rt,
+                text_x,
+                row_y + 8.0,
+                ICON_SIZE,
+                ICON_SIZE,
+                badge_color,
+                4.0,
+            );
+            draw_text(
+                rt,
+                text_x + 4.0,
+                row_y + 10.0,
+                entry.entry_type().icon_char(),
+                BASE,
+                SMALL_FONT_SIZE,
+                FontWeightHint::Bold,
+                None,
+            );
 
             // Entry name
             let name_color = if is_selected { BLUE } else { TEXT_COLOR };
-            draw_text(rt, text_x + 28.0, row_y + 8.0, entry.display_name(), name_color,
-                      DEFAULT_FONT_SIZE, FontWeightHint::Regular,
-                      Some(ENTRY_LIST_WIDTH - 60.0));
+            draw_text(
+                rt,
+                text_x + 28.0,
+                row_y + 8.0,
+                entry.display_name(),
+                name_color,
+                DEFAULT_FONT_SIZE,
+                FontWeightHint::Regular,
+                Some(ENTRY_LIST_WIDTH - 60.0),
+            );
 
             // Subtitle
             let sub = entry.subtitle();
             if !sub.is_empty() {
-                draw_text(rt, text_x + 28.0, row_y + 28.0, sub, SUBTEXT0,
-                          SMALL_FONT_SIZE, FontWeightHint::Regular,
-                          Some(ENTRY_LIST_WIDTH - 80.0));
+                draw_text(
+                    rt,
+                    text_x + 28.0,
+                    row_y + 28.0,
+                    sub,
+                    SUBTEXT0,
+                    SMALL_FONT_SIZE,
+                    FontWeightHint::Regular,
+                    Some(ENTRY_LIST_WIDTH - 80.0),
+                );
             }
 
             // Star indicator
             if entry.starred {
-                draw_text(rt, x_start + ENTRY_LIST_WIDTH - 30.0, row_y + 8.0, "*", YELLOW,
-                          DEFAULT_FONT_SIZE, FontWeightHint::Bold, None);
+                draw_text(
+                    rt,
+                    x_start + ENTRY_LIST_WIDTH - 30.0,
+                    row_y + 8.0,
+                    "*",
+                    YELLOW,
+                    DEFAULT_FONT_SIZE,
+                    FontWeightHint::Bold,
+                    None,
+                );
             }
 
             // Compromised indicator
             if entry.compromised {
-                draw_text(rt, x_start + ENTRY_LIST_WIDTH - 48.0, row_y + 8.0, "!", RED,
-                          DEFAULT_FONT_SIZE, FontWeightHint::Bold, None);
+                draw_text(
+                    rt,
+                    x_start + ENTRY_LIST_WIDTH - 48.0,
+                    row_y + 8.0,
+                    "!",
+                    RED,
+                    DEFAULT_FONT_SIZE,
+                    FontWeightHint::Bold,
+                    None,
+                );
             }
 
             // Bottom separator
-            draw_separator(rt, x_start + 12.0, row_y + ROW_HEIGHT - 2.0,
-                           ENTRY_LIST_WIDTH - 24.0);
+            draw_separator(
+                rt,
+                x_start + 12.0,
+                row_y + ROW_HEIGHT - 2.0,
+                ENTRY_LIST_WIDTH - 24.0,
+            );
         }
     }
 
@@ -1945,8 +2971,10 @@ fn render_entry_list(rt: &mut RenderTree, state: &AppState, height: f32) {
     // Right border
     let list_right = x_start + ENTRY_LIST_WIDTH;
     rt.push(RenderCommand::Line {
-        x1: list_right, y1: y_start,
-        x2: list_right, y2: height,
+        x1: list_right,
+        y1: y_start,
+        x2: list_right,
+        y2: height,
         color: SURFACE1,
         width: 1.0,
     });
@@ -1965,25 +2993,39 @@ fn render_entry_detail(rt: &mut RenderTree, state: &AppState, width: f32, height
     // Background
     draw_rect(rt, x_start, y_start, panel_width, panel_height, BASE, 0.0);
 
-    let entry = match state.selected_entry_id
+    let entry = match state
+        .selected_entry_id
         .and_then(|id| state.vault.get_entry(id))
     {
         Some(e) => e,
         None => {
             // Empty state
             let empty = "Select an entry";
-            let empty_x = text::center_x(empty, x_start + panel_width / 2.0,
-                                         HEADING_FONT_SIZE, FontWeightHint::Light);
-            draw_text(rt, empty_x, y_start + panel_height / 2.0,
-                      empty, OVERLAY0, HEADING_FONT_SIZE,
-                      FontWeightHint::Light, None);
+            let empty_x = text::center_x(
+                empty,
+                x_start + panel_width / 2.0,
+                HEADING_FONT_SIZE,
+                FontWeightHint::Light,
+            );
+            draw_text(
+                rt,
+                empty_x,
+                y_start + panel_height / 2.0,
+                empty,
+                OVERLAY0,
+                HEADING_FONT_SIZE,
+                FontWeightHint::Light,
+                None,
+            );
             return;
         }
     };
 
     rt.push(RenderCommand::PushClip {
-        x: x_start, y: y_start,
-        width: panel_width, height: panel_height,
+        x: x_start,
+        y: y_start,
+        width: panel_width,
+        height: panel_height,
     });
 
     let pad = 24.0;
@@ -1991,25 +3033,61 @@ fn render_entry_detail(rt: &mut RenderTree, state: &AppState, width: f32, height
 
     // Entry type badge + name
     let badge_color = entry.entry_type().badge_color();
-    let type_badge_w =
-        draw_badge(rt, x_start + pad, y, entry.entry_type().label(), badge_color, BASE);
+    let type_badge_w = draw_badge(
+        rt,
+        x_start + pad,
+        y,
+        entry.entry_type().label(),
+        badge_color,
+        BASE,
+    );
 
     if entry.starred {
-        draw_text(rt, x_start + pad + type_badge_w + 12.0,
-                  y + 2.0, "* Starred", YELLOW, SMALL_FONT_SIZE,
-                  FontWeightHint::Regular, None);
+        draw_text(
+            rt,
+            x_start + pad + type_badge_w + 12.0,
+            y + 2.0,
+            "* Starred",
+            YELLOW,
+            SMALL_FONT_SIZE,
+            FontWeightHint::Regular,
+            None,
+        );
     }
     y += 30.0;
 
-    draw_text(rt, x_start + pad, y, entry.display_name(), TEXT_COLOR, HEADING_FONT_SIZE,
-              FontWeightHint::Bold, Some(panel_width - pad * 2.0));
+    draw_text(
+        rt,
+        x_start + pad,
+        y,
+        entry.display_name(),
+        TEXT_COLOR,
+        HEADING_FONT_SIZE,
+        FontWeightHint::Bold,
+        Some(panel_width - pad * 2.0),
+    );
     y += 28.0;
 
     if entry.compromised {
-        draw_rect(rt, x_start + pad, y, panel_width - pad * 2.0, 28.0,
-                  Color::rgba(RED.r, RED.g, RED.b, 40), 4.0);
-        draw_text(rt, x_start + pad + 8.0, y + 6.0, "! This password may be compromised",
-                  RED, DEFAULT_FONT_SIZE, FontWeightHint::Bold, None);
+        draw_rect(
+            rt,
+            x_start + pad,
+            y,
+            panel_width - pad * 2.0,
+            28.0,
+            Color::rgba(RED.r, RED.g, RED.b, 40),
+            4.0,
+        );
+        draw_text(
+            rt,
+            x_start + pad + 8.0,
+            y + 6.0,
+            "! This password may be compromised",
+            RED,
+            DEFAULT_FONT_SIZE,
+            FontWeightHint::Bold,
+            None,
+        );
         y += 36.0;
     }
 
@@ -2025,15 +3103,31 @@ fn render_entry_detail(rt: &mut RenderTree, state: &AppState, width: f32, height
     match &entry.data {
         EntryData::Login(login) => {
             // Site
-            y = render_detail_field(rt, y, field_label_x, field_value_x, copy_btn_x,
-                                    panel_width - pad * 2.0,
-                                    "Site", &login.site, false);
+            y = render_detail_field(
+                rt,
+                y,
+                field_label_x,
+                field_value_x,
+                copy_btn_x,
+                panel_width - pad * 2.0,
+                "Site",
+                &login.site,
+                false,
+            );
             y += row_spacing;
 
             // Username
-            y = render_detail_field(rt, y, field_label_x, field_value_x, copy_btn_x,
-                                    panel_width - pad * 2.0,
-                                    "Username", &login.username, false);
+            y = render_detail_field(
+                rt,
+                y,
+                field_label_x,
+                field_value_x,
+                copy_btn_x,
+                panel_width - pad * 2.0,
+                "Username",
+                &login.username,
+                false,
+            );
             y += row_spacing;
 
             // Password
@@ -2042,45 +3136,109 @@ fn render_entry_detail(rt: &mut RenderTree, state: &AppState, width: f32, height
             } else {
                 "*".repeat(login.password.len().min(20))
             };
-            y = render_detail_field(rt, y, field_label_x, field_value_x, copy_btn_x,
-                                    panel_width - pad * 2.0,
-                                    "Password", &pw_display, true);
+            y = render_detail_field(
+                rt,
+                y,
+                field_label_x,
+                field_value_x,
+                copy_btn_x,
+                panel_width - pad * 2.0,
+                "Password",
+                &pw_display,
+                true,
+            );
 
             // Password strength
             let (strength, entropy) = evaluate_password_strength(&login.password);
             y += 8.0;
-            draw_strength_bar(rt, field_value_x, y, 160.0, 6.0,
-                              strength.fraction(), strength.color());
+            draw_strength_bar(
+                rt,
+                field_value_x,
+                y,
+                160.0,
+                6.0,
+                strength.fraction(),
+                strength.color(),
+            );
             let strength_text = format!("{} ({:.0} bits)", strength.label(), entropy);
-            draw_text(rt, field_value_x + 170.0, y - 2.0, &strength_text,
-                      strength.color(), SMALL_FONT_SIZE, FontWeightHint::Regular, None);
+            draw_text(
+                rt,
+                field_value_x + 170.0,
+                y - 2.0,
+                &strength_text,
+                strength.color(),
+                SMALL_FONT_SIZE,
+                FontWeightHint::Regular,
+                None,
+            );
             y += row_spacing;
 
             // Show/hide toggle
             let toggle_text = if state.show_password { "Hide" } else { "Show" };
-            draw_button(rt, field_value_x, y, 60.0, 24.0, toggle_text,
-                        SURFACE1, TEXT_COLOR, false);
+            draw_button(
+                rt,
+                field_value_x,
+                y,
+                60.0,
+                24.0,
+                toggle_text,
+                SURFACE1,
+                TEXT_COLOR,
+                false,
+            );
             y += row_spacing;
 
             // URL
             if !login.url.is_empty() {
-                y = render_detail_field(rt, y, field_label_x, field_value_x, copy_btn_x,
-                                        panel_width - pad * 2.0,
-                                        "URL", &login.url, false);
+                y = render_detail_field(
+                    rt,
+                    y,
+                    field_label_x,
+                    field_value_x,
+                    copy_btn_x,
+                    panel_width - pad * 2.0,
+                    "URL",
+                    &login.url,
+                    false,
+                );
                 y += row_spacing;
             }
 
             // TOTP
             if let Some(ref totp) = login.totp_secret {
-                y = render_detail_field(rt, y, field_label_x, field_value_x, copy_btn_x,
-                                        panel_width - pad * 2.0,
-                                        "TOTP", totp, false);
+                y = render_detail_field(
+                    rt,
+                    y,
+                    field_label_x,
+                    field_value_x,
+                    copy_btn_x,
+                    panel_width - pad * 2.0,
+                    "TOTP",
+                    totp,
+                    false,
+                );
                 y += row_spacing;
             } else {
-                draw_text(rt, field_label_x, y, "TOTP", SUBTEXT0, DEFAULT_FONT_SIZE,
-                          FontWeightHint::Regular, None);
-                draw_text(rt, field_value_x, y, "Not configured", OVERLAY0, DEFAULT_FONT_SIZE,
-                          FontWeightHint::Light, None);
+                draw_text(
+                    rt,
+                    field_label_x,
+                    y,
+                    "TOTP",
+                    SUBTEXT0,
+                    DEFAULT_FONT_SIZE,
+                    FontWeightHint::Regular,
+                    None,
+                );
+                draw_text(
+                    rt,
+                    field_value_x,
+                    y,
+                    "Not configured",
+                    OVERLAY0,
+                    DEFAULT_FONT_SIZE,
+                    FontWeightHint::Light,
+                    None,
+                );
                 y += row_spacing;
             }
 
@@ -2088,105 +3246,263 @@ fn render_entry_detail(rt: &mut RenderTree, state: &AppState, width: f32, height
             if !login.notes.is_empty() {
                 draw_separator(rt, field_label_x, y, panel_width - pad * 2.0);
                 y += 12.0;
-                draw_text(rt, field_label_x, y, "Notes", SUBTEXT0, DEFAULT_FONT_SIZE,
-                          FontWeightHint::Bold, None);
+                draw_text(
+                    rt,
+                    field_label_x,
+                    y,
+                    "Notes",
+                    SUBTEXT0,
+                    DEFAULT_FONT_SIZE,
+                    FontWeightHint::Bold,
+                    None,
+                );
                 y += 20.0;
-                draw_text(rt, field_label_x, y, &login.notes, TEXT_COLOR, DEFAULT_FONT_SIZE,
-                          FontWeightHint::Regular, Some(panel_width - pad * 2.0));
+                draw_text(
+                    rt,
+                    field_label_x,
+                    y,
+                    &login.notes,
+                    TEXT_COLOR,
+                    DEFAULT_FONT_SIZE,
+                    FontWeightHint::Regular,
+                    Some(panel_width - pad * 2.0),
+                );
                 y += 24.0;
             }
         }
         EntryData::SecureNote(note) => {
-            draw_text(rt, field_label_x, y, "Title", SUBTEXT0, DEFAULT_FONT_SIZE,
-                      FontWeightHint::Regular, None);
-            draw_text(rt, field_value_x, y, &note.title, TEXT_COLOR, DEFAULT_FONT_SIZE,
-                      FontWeightHint::Regular, Some(panel_width - pad * 2.0 - 120.0));
+            draw_text(
+                rt,
+                field_label_x,
+                y,
+                "Title",
+                SUBTEXT0,
+                DEFAULT_FONT_SIZE,
+                FontWeightHint::Regular,
+                None,
+            );
+            draw_text(
+                rt,
+                field_value_x,
+                y,
+                &note.title,
+                TEXT_COLOR,
+                DEFAULT_FONT_SIZE,
+                FontWeightHint::Regular,
+                Some(panel_width - pad * 2.0 - 120.0),
+            );
             y += row_spacing;
 
             draw_separator(rt, field_label_x, y, panel_width - pad * 2.0);
             y += 12.0;
 
-            draw_text(rt, field_label_x, y, &note.content, TEXT_COLOR, DEFAULT_FONT_SIZE,
-                      FontWeightHint::Regular, Some(panel_width - pad * 2.0));
+            draw_text(
+                rt,
+                field_label_x,
+                y,
+                &note.content,
+                TEXT_COLOR,
+                DEFAULT_FONT_SIZE,
+                FontWeightHint::Regular,
+                Some(panel_width - pad * 2.0),
+            );
             y += 24.0;
         }
         EntryData::CreditCard(card) => {
-            y = render_detail_field(rt, y, field_label_x, field_value_x, copy_btn_x,
-                                    panel_width - pad * 2.0,
-                                    "Card Name", &card.name, false);
+            y = render_detail_field(
+                rt,
+                y,
+                field_label_x,
+                field_value_x,
+                copy_btn_x,
+                panel_width - pad * 2.0,
+                "Card Name",
+                &card.name,
+                false,
+            );
             y += row_spacing;
 
-            y = render_detail_field(rt, y, field_label_x, field_value_x, copy_btn_x,
-                                    panel_width - pad * 2.0,
-                                    "Number", &card.number_masked, false);
+            y = render_detail_field(
+                rt,
+                y,
+                field_label_x,
+                field_value_x,
+                copy_btn_x,
+                panel_width - pad * 2.0,
+                "Number",
+                &card.number_masked,
+                false,
+            );
             y += row_spacing;
 
-            y = render_detail_field(rt, y, field_label_x, field_value_x, copy_btn_x,
-                                    panel_width - pad * 2.0,
-                                    "Expiry", &card.expiry, false);
+            y = render_detail_field(
+                rt,
+                y,
+                field_label_x,
+                field_value_x,
+                copy_btn_x,
+                panel_width - pad * 2.0,
+                "Expiry",
+                &card.expiry,
+                false,
+            );
             y += row_spacing;
 
-            y = render_detail_field(rt, y, field_label_x, field_value_x, copy_btn_x,
-                                    panel_width - pad * 2.0,
-                                    "Cardholder", &card.cardholder, false);
+            y = render_detail_field(
+                rt,
+                y,
+                field_label_x,
+                field_value_x,
+                copy_btn_x,
+                panel_width - pad * 2.0,
+                "Cardholder",
+                &card.cardholder,
+                false,
+            );
             y += row_spacing;
 
             if !card.notes.is_empty() {
                 draw_separator(rt, field_label_x, y, panel_width - pad * 2.0);
                 y += 12.0;
-                draw_text(rt, field_label_x, y, "Notes", SUBTEXT0, DEFAULT_FONT_SIZE,
-                          FontWeightHint::Bold, None);
+                draw_text(
+                    rt,
+                    field_label_x,
+                    y,
+                    "Notes",
+                    SUBTEXT0,
+                    DEFAULT_FONT_SIZE,
+                    FontWeightHint::Bold,
+                    None,
+                );
                 y += 20.0;
-                draw_text(rt, field_label_x, y, &card.notes, TEXT_COLOR, DEFAULT_FONT_SIZE,
-                          FontWeightHint::Regular, Some(panel_width - pad * 2.0));
+                draw_text(
+                    rt,
+                    field_label_x,
+                    y,
+                    &card.notes,
+                    TEXT_COLOR,
+                    DEFAULT_FONT_SIZE,
+                    FontWeightHint::Regular,
+                    Some(panel_width - pad * 2.0),
+                );
                 y += 24.0;
             }
         }
         EntryData::Identity(ident) => {
-            y = render_detail_field(rt, y, field_label_x, field_value_x, copy_btn_x,
-                                    panel_width - pad * 2.0,
-                                    "Name", &ident.name, false);
+            y = render_detail_field(
+                rt,
+                y,
+                field_label_x,
+                field_value_x,
+                copy_btn_x,
+                panel_width - pad * 2.0,
+                "Name",
+                &ident.name,
+                false,
+            );
             y += row_spacing;
 
-            y = render_detail_field(rt, y, field_label_x, field_value_x, copy_btn_x,
-                                    panel_width - pad * 2.0,
-                                    "Email", &ident.email, false);
+            y = render_detail_field(
+                rt,
+                y,
+                field_label_x,
+                field_value_x,
+                copy_btn_x,
+                panel_width - pad * 2.0,
+                "Email",
+                &ident.email,
+                false,
+            );
             y += row_spacing;
 
             if !ident.phone.is_empty() {
-                y = render_detail_field(rt, y, field_label_x, field_value_x, copy_btn_x,
-                                        panel_width - pad * 2.0,
-                                        "Phone", &ident.phone, false);
+                y = render_detail_field(
+                    rt,
+                    y,
+                    field_label_x,
+                    field_value_x,
+                    copy_btn_x,
+                    panel_width - pad * 2.0,
+                    "Phone",
+                    &ident.phone,
+                    false,
+                );
                 y += row_spacing;
             }
 
             if !ident.address.is_empty() {
-                y = render_detail_field(rt, y, field_label_x, field_value_x, copy_btn_x,
-                                        panel_width - pad * 2.0,
-                                        "Address", &ident.address, false);
+                y = render_detail_field(
+                    rt,
+                    y,
+                    field_label_x,
+                    field_value_x,
+                    copy_btn_x,
+                    panel_width - pad * 2.0,
+                    "Address",
+                    &ident.address,
+                    false,
+                );
                 y += row_spacing;
             }
         }
         EntryData::SshKey(key) => {
-            y = render_detail_field(rt, y, field_label_x, field_value_x, copy_btn_x,
-                                    panel_width - pad * 2.0,
-                                    "Key Name", &key.name, false);
+            y = render_detail_field(
+                rt,
+                y,
+                field_label_x,
+                field_value_x,
+                copy_btn_x,
+                panel_width - pad * 2.0,
+                "Key Name",
+                &key.name,
+                false,
+            );
             y += row_spacing;
 
-            y = render_detail_field(rt, y, field_label_x, field_value_x, copy_btn_x,
-                                    panel_width - pad * 2.0,
-                                    "Fingerprint", &key.fingerprint, false);
+            y = render_detail_field(
+                rt,
+                y,
+                field_label_x,
+                field_value_x,
+                copy_btn_x,
+                panel_width - pad * 2.0,
+                "Fingerprint",
+                &key.fingerprint,
+                false,
+            );
             y += row_spacing;
 
-            draw_text(rt, field_label_x, y, "Public Key", SUBTEXT0, DEFAULT_FONT_SIZE,
-                      FontWeightHint::Regular, None);
+            draw_text(
+                rt,
+                field_label_x,
+                y,
+                "Public Key",
+                SUBTEXT0,
+                DEFAULT_FONT_SIZE,
+                FontWeightHint::Regular,
+                None,
+            );
             y += 20.0;
 
-            draw_rect(rt, field_label_x, y, panel_width - pad * 2.0, 60.0,
-                      SURFACE0, 4.0);
-            draw_text(rt, field_label_x + 8.0, y + 8.0, &key.public_key, TEXT_COLOR,
-                      SMALL_FONT_SIZE, FontWeightHint::Regular,
-                      Some(panel_width - pad * 2.0 - 16.0));
+            draw_rect(
+                rt,
+                field_label_x,
+                y,
+                panel_width - pad * 2.0,
+                60.0,
+                SURFACE0,
+                4.0,
+            );
+            draw_text(
+                rt,
+                field_label_x + 8.0,
+                y + 8.0,
+                &key.public_key,
+                TEXT_COLOR,
+                SMALL_FONT_SIZE,
+                FontWeightHint::Regular,
+                Some(panel_width - pad * 2.0 - 16.0),
+            );
             y += 68.0;
         }
     }
@@ -2196,8 +3512,16 @@ fn render_entry_detail(rt: &mut RenderTree, state: &AppState, width: f32, height
         y += 8.0;
         draw_separator(rt, field_label_x, y, panel_width - pad * 2.0);
         y += 12.0;
-        draw_text(rt, field_label_x, y, "Tags", SUBTEXT0, DEFAULT_FONT_SIZE,
-                  FontWeightHint::Bold, None);
+        draw_text(
+            rt,
+            field_label_x,
+            y,
+            "Tags",
+            SUBTEXT0,
+            DEFAULT_FONT_SIZE,
+            FontWeightHint::Bold,
+            None,
+        );
         y += 22.0;
 
         let mut tag_x = field_label_x;
@@ -2218,22 +3542,56 @@ fn render_entry_detail(rt: &mut RenderTree, state: &AppState, width: f32, height
     draw_separator(rt, field_label_x, y, panel_width - pad * 2.0);
     y += 12.0;
 
-    let created_text = format!("Created: {} seconds ago", state.now.saturating_sub(entry.created_at));
-    draw_text(rt, field_label_x, y, &created_text, OVERLAY0, SMALL_FONT_SIZE,
-              FontWeightHint::Regular, None);
+    let created_text = format!(
+        "Created: {} seconds ago",
+        state.now.saturating_sub(entry.created_at)
+    );
+    draw_text(
+        rt,
+        field_label_x,
+        y,
+        &created_text,
+        OVERLAY0,
+        SMALL_FONT_SIZE,
+        FontWeightHint::Regular,
+        None,
+    );
     y += 18.0;
 
-    let modified_text = format!("Modified: {} seconds ago", state.now.saturating_sub(entry.modified_at));
-    draw_text(rt, field_label_x, y, &modified_text, OVERLAY0, SMALL_FONT_SIZE,
-              FontWeightHint::Regular, None);
+    let modified_text = format!(
+        "Modified: {} seconds ago",
+        state.now.saturating_sub(entry.modified_at)
+    );
+    draw_text(
+        rt,
+        field_label_x,
+        y,
+        &modified_text,
+        OVERLAY0,
+        SMALL_FONT_SIZE,
+        FontWeightHint::Regular,
+        None,
+    );
 
     if entry.entry_type() == EntryType::Login {
         y += 18.0;
         let age_days = entry.password_age_days(state.now);
-        let age_color = if age_days > PASSWORD_OLD_DAYS { YELLOW } else { OVERLAY0 };
+        let age_color = if age_days > PASSWORD_OLD_DAYS {
+            YELLOW
+        } else {
+            OVERLAY0
+        };
         let age_text = format!("Password age: {} days", age_days);
-        draw_text(rt, field_label_x, y, &age_text, age_color, SMALL_FONT_SIZE,
-                  FontWeightHint::Regular, None);
+        draw_text(
+            rt,
+            field_label_x,
+            y,
+            &age_text,
+            age_color,
+            SMALL_FONT_SIZE,
+            FontWeightHint::Regular,
+            None,
+        );
     }
 
     // Suppress unused y warning
@@ -2249,20 +3607,49 @@ fn render_entry_detail(rt: &mut RenderTree, state: &AppState, width: f32, height
 fn render_detail_field(
     rt: &mut RenderTree,
     y: f32,
-    label_x: f32, value_x: f32, copy_x: f32,
+    label_x: f32,
+    value_x: f32,
+    copy_x: f32,
     _width: f32,
-    label: &str, value: &str,
+    label: &str,
+    value: &str,
     is_password: bool,
 ) -> f32 {
-    draw_text(rt, label_x, y, label, SUBTEXT0, DEFAULT_FONT_SIZE,
-              FontWeightHint::Regular, None);
+    draw_text(
+        rt,
+        label_x,
+        y,
+        label,
+        SUBTEXT0,
+        DEFAULT_FONT_SIZE,
+        FontWeightHint::Regular,
+        None,
+    );
 
     let value_color = if is_password { PEACH } else { TEXT_COLOR };
-    draw_text(rt, value_x, y, value, value_color, DEFAULT_FONT_SIZE,
-              FontWeightHint::Regular, Some(copy_x - value_x - 8.0));
+    draw_text(
+        rt,
+        value_x,
+        y,
+        value,
+        value_color,
+        DEFAULT_FONT_SIZE,
+        FontWeightHint::Regular,
+        Some(copy_x - value_x - 8.0),
+    );
 
     // Copy button
-    draw_button(rt, copy_x, y - 4.0, 44.0, 24.0, "Copy", SURFACE1, SUBTEXT0, false);
+    draw_button(
+        rt,
+        copy_x,
+        y - 4.0,
+        44.0,
+        24.0,
+        "Copy",
+        SURFACE1,
+        SUBTEXT0,
+        false,
+    );
 
     y
 }
@@ -2282,46 +3669,116 @@ fn render_generator_panel(rt: &mut RenderTree, state: &AppState, width: f32, hei
     let pad = 24.0;
     let mut y = y_start + pad;
 
-    draw_text(rt, x_start + pad, y, "Password Generator", TEXT_COLOR, HEADING_FONT_SIZE,
-              FontWeightHint::Bold, None);
+    draw_text(
+        rt,
+        x_start + pad,
+        y,
+        "Password Generator",
+        TEXT_COLOR,
+        HEADING_FONT_SIZE,
+        FontWeightHint::Bold,
+        None,
+    );
     y += 36.0;
 
     // Generated password display
-    draw_rect(rt, x_start + pad, y, panel_width - pad * 2.0, 48.0, SURFACE0, CORNER_RADIUS);
+    draw_rect(
+        rt,
+        x_start + pad,
+        y,
+        panel_width - pad * 2.0,
+        48.0,
+        SURFACE0,
+        CORNER_RADIUS,
+    );
     let display_pw = if state.generated_password.is_empty() {
         "Click Generate to create a password"
     } else {
         &state.generated_password
     };
-    let pw_color = if state.generated_password.is_empty() { OVERLAY0 } else { GREEN };
-    draw_text(rt, x_start + pad + 12.0, y + 14.0, display_pw, pw_color,
-              DEFAULT_FONT_SIZE, FontWeightHint::Regular,
-              Some(panel_width - pad * 2.0 - 24.0));
+    let pw_color = if state.generated_password.is_empty() {
+        OVERLAY0
+    } else {
+        GREEN
+    };
+    draw_text(
+        rt,
+        x_start + pad + 12.0,
+        y + 14.0,
+        display_pw,
+        pw_color,
+        DEFAULT_FONT_SIZE,
+        FontWeightHint::Regular,
+        Some(panel_width - pad * 2.0 - 24.0),
+    );
     y += 56.0;
 
     // Strength bar for generated password
     if !state.generated_password.is_empty() {
         let (strength, entropy) = evaluate_password_strength(&state.generated_password);
-        draw_strength_bar(rt, x_start + pad, y, panel_width - pad * 2.0, 8.0,
-                          strength.fraction(), strength.color());
+        draw_strength_bar(
+            rt,
+            x_start + pad,
+            y,
+            panel_width - pad * 2.0,
+            8.0,
+            strength.fraction(),
+            strength.color(),
+        );
         y += 16.0;
         let label = format!("{} - {:.0} bits entropy", strength.label(), entropy);
-        draw_text(rt, x_start + pad, y, &label, strength.color(), SMALL_FONT_SIZE,
-                  FontWeightHint::Regular, None);
+        draw_text(
+            rt,
+            x_start + pad,
+            y,
+            &label,
+            strength.color(),
+            SMALL_FONT_SIZE,
+            FontWeightHint::Regular,
+            None,
+        );
         y += 24.0;
     }
 
     // Buttons row
-    draw_button(rt, x_start + pad, y, 100.0, 32.0, "Generate", BLUE, BASE, false);
-    draw_button(rt, x_start + pad + 112.0, y, 80.0, 32.0, "Copy", SURFACE1, TEXT_COLOR, false);
+    draw_button(
+        rt,
+        x_start + pad,
+        y,
+        100.0,
+        32.0,
+        "Generate",
+        BLUE,
+        BASE,
+        false,
+    );
+    draw_button(
+        rt,
+        x_start + pad + 112.0,
+        y,
+        80.0,
+        32.0,
+        "Copy",
+        SURFACE1,
+        TEXT_COLOR,
+        false,
+    );
     y += 48.0;
 
     draw_separator(rt, x_start + pad, y, panel_width - pad * 2.0);
     y += 16.0;
 
     // Mode selection
-    draw_text(rt, x_start + pad, y, "Mode", TEXT_COLOR, DEFAULT_FONT_SIZE,
-              FontWeightHint::Bold, None);
+    draw_text(
+        rt,
+        x_start + pad,
+        y,
+        "Mode",
+        TEXT_COLOR,
+        DEFAULT_FONT_SIZE,
+        FontWeightHint::Bold,
+        None,
+    );
     y += 24.0;
 
     let modes = [
@@ -2341,11 +3798,27 @@ fn render_generator_panel(rt: &mut RenderTree, state: &AppState, width: f32, hei
     y += 40.0;
 
     // Length setting
-    draw_text(rt, x_start + pad, y, "Length", TEXT_COLOR, DEFAULT_FONT_SIZE,
-              FontWeightHint::Regular, None);
+    draw_text(
+        rt,
+        x_start + pad,
+        y,
+        "Length",
+        TEXT_COLOR,
+        DEFAULT_FONT_SIZE,
+        FontWeightHint::Regular,
+        None,
+    );
     let len_text = format!("{}", state.password_generator.length);
-    draw_text(rt, x_start + pad + 100.0, y, &len_text, BLUE, DEFAULT_FONT_SIZE,
-              FontWeightHint::Bold, None);
+    draw_text(
+        rt,
+        x_start + pad + 100.0,
+        y,
+        &len_text,
+        BLUE,
+        DEFAULT_FONT_SIZE,
+        FontWeightHint::Bold,
+        None,
+    );
     y += 8.0;
 
     // Length slider track
@@ -2361,8 +3834,16 @@ fn render_generator_panel(rt: &mut RenderTree, state: &AppState, width: f32, hei
 
     // Character set toggles (for random mode)
     if state.password_generator.mode == GeneratorMode::Random {
-        draw_text(rt, x_start + pad, y, "Character Sets", TEXT_COLOR, DEFAULT_FONT_SIZE,
-                  FontWeightHint::Bold, None);
+        draw_text(
+            rt,
+            x_start + pad,
+            y,
+            "Character Sets",
+            TEXT_COLOR,
+            DEFAULT_FONT_SIZE,
+            FontWeightHint::Bold,
+            None,
+        );
         y += 24.0;
 
         let options = [
@@ -2375,27 +3856,75 @@ fn render_generator_panel(rt: &mut RenderTree, state: &AppState, width: f32, hei
         for (label, enabled) in &options {
             let check_color = if *enabled { GREEN } else { SURFACE2 };
             let check_char = if *enabled { "[x]" } else { "[ ]" };
-            draw_text(rt, x_start + pad, y, check_char, check_color, DEFAULT_FONT_SIZE,
-                      FontWeightHint::Regular, None);
-            draw_text(rt, x_start + pad + 32.0, y, label, TEXT_COLOR, DEFAULT_FONT_SIZE,
-                      FontWeightHint::Regular, None);
+            draw_text(
+                rt,
+                x_start + pad,
+                y,
+                check_char,
+                check_color,
+                DEFAULT_FONT_SIZE,
+                FontWeightHint::Regular,
+                None,
+            );
+            draw_text(
+                rt,
+                x_start + pad + 32.0,
+                y,
+                label,
+                TEXT_COLOR,
+                DEFAULT_FONT_SIZE,
+                FontWeightHint::Regular,
+                None,
+            );
             y += 26.0;
         }
     }
 
     // Passphrase options
     if state.password_generator.mode == GeneratorMode::Passphrase {
-        draw_text(rt, x_start + pad, y, "Word Count", TEXT_COLOR, DEFAULT_FONT_SIZE,
-                  FontWeightHint::Regular, None);
+        draw_text(
+            rt,
+            x_start + pad,
+            y,
+            "Word Count",
+            TEXT_COLOR,
+            DEFAULT_FONT_SIZE,
+            FontWeightHint::Regular,
+            None,
+        );
         let wc_text = format!("{}", state.password_generator.passphrase.word_count);
-        draw_text(rt, x_start + pad + 120.0, y, &wc_text, BLUE, DEFAULT_FONT_SIZE,
-                  FontWeightHint::Bold, None);
+        draw_text(
+            rt,
+            x_start + pad + 120.0,
+            y,
+            &wc_text,
+            BLUE,
+            DEFAULT_FONT_SIZE,
+            FontWeightHint::Bold,
+            None,
+        );
         y += 26.0;
 
-        draw_text(rt, x_start + pad, y, "Separator", TEXT_COLOR, DEFAULT_FONT_SIZE,
-                  FontWeightHint::Regular, None);
-        draw_text(rt, x_start + pad + 120.0, y, &state.password_generator.passphrase.separator,
-                  BLUE, DEFAULT_FONT_SIZE, FontWeightHint::Bold, None);
+        draw_text(
+            rt,
+            x_start + pad,
+            y,
+            "Separator",
+            TEXT_COLOR,
+            DEFAULT_FONT_SIZE,
+            FontWeightHint::Regular,
+            None,
+        );
+        draw_text(
+            rt,
+            x_start + pad + 120.0,
+            y,
+            &state.password_generator.passphrase.separator,
+            BLUE,
+            DEFAULT_FONT_SIZE,
+            FontWeightHint::Bold,
+            None,
+        );
         y += 26.0;
     }
 
@@ -2406,21 +3935,40 @@ fn render_generator_panel(rt: &mut RenderTree, state: &AppState, width: f32, hei
 
     let entropy = state.password_generator.entropy_bits();
     let entropy_text = format!("Estimated entropy: {:.1} bits", entropy);
-    draw_text(rt, x_start + pad, y, &entropy_text, SUBTEXT0, SMALL_FONT_SIZE,
-              FontWeightHint::Regular, None);
+    draw_text(
+        rt,
+        x_start + pad,
+        y,
+        &entropy_text,
+        SUBTEXT0,
+        SMALL_FONT_SIZE,
+        FontWeightHint::Regular,
+        None,
+    );
     y += 18.0;
 
     let pool_text = match state.password_generator.mode {
         GeneratorMode::Random => {
-            format!("Pool size: {} characters", state.password_generator.charset.pool_size())
+            format!(
+                "Pool size: {} characters",
+                state.password_generator.charset.pool_size()
+            )
         }
         GeneratorMode::Pronounceable => "Pool: alternating consonant/vowel".to_string(),
         GeneratorMode::Passphrase => {
             format!("Dictionary: {} words", WORDLIST.len())
         }
     };
-    draw_text(rt, x_start + pad, y, &pool_text, SUBTEXT0, SMALL_FONT_SIZE,
-              FontWeightHint::Regular, None);
+    draw_text(
+        rt,
+        x_start + pad,
+        y,
+        &pool_text,
+        SUBTEXT0,
+        SMALL_FONT_SIZE,
+        FontWeightHint::Regular,
+        None,
+    );
 
     let _ = y;
 }
@@ -2440,20 +3988,52 @@ fn render_settings_panel(rt: &mut RenderTree, state: &AppState, width: f32, heig
     let pad = 24.0;
     let mut y = y_start + pad;
 
-    draw_text(rt, x_start + pad, y, "Settings", TEXT_COLOR, HEADING_FONT_SIZE,
-              FontWeightHint::Bold, None);
+    draw_text(
+        rt,
+        x_start + pad,
+        y,
+        "Settings",
+        TEXT_COLOR,
+        HEADING_FONT_SIZE,
+        FontWeightHint::Bold,
+        None,
+    );
     y += 36.0;
 
     // Security section
-    draw_text(rt, x_start + pad, y, "SECURITY", OVERLAY0, SMALL_FONT_SIZE,
-              FontWeightHint::Bold, None);
+    draw_text(
+        rt,
+        x_start + pad,
+        y,
+        "SECURITY",
+        OVERLAY0,
+        SMALL_FONT_SIZE,
+        FontWeightHint::Bold,
+        None,
+    );
     y += 24.0;
 
-    draw_text(rt, x_start + pad, y, "Auto-lock timeout", TEXT_COLOR, DEFAULT_FONT_SIZE,
-              FontWeightHint::Regular, None);
+    draw_text(
+        rt,
+        x_start + pad,
+        y,
+        "Auto-lock timeout",
+        TEXT_COLOR,
+        DEFAULT_FONT_SIZE,
+        FontWeightHint::Regular,
+        None,
+    );
     let timeout_text = format!("{} minutes", state.settings_auto_lock);
-    draw_text(rt, x_start + pad + 200.0, y, &timeout_text, BLUE, DEFAULT_FONT_SIZE,
-              FontWeightHint::Bold, None);
+    draw_text(
+        rt,
+        x_start + pad + 200.0,
+        y,
+        &timeout_text,
+        BLUE,
+        DEFAULT_FONT_SIZE,
+        FontWeightHint::Bold,
+        None,
+    );
     y += 32.0;
 
     // Timeout slider
@@ -2465,57 +4045,164 @@ fn render_settings_panel(rt: &mut RenderTree, state: &AppState, width: f32, heig
     draw_rect(rt, knob_x - 6.0, y - 4.0, 12.0, 12.0, BLUE, 6.0);
     y += 24.0;
 
-    draw_text(rt, x_start + pad, y, "Clipboard auto-clear", TEXT_COLOR, DEFAULT_FONT_SIZE,
-              FontWeightHint::Regular, None);
+    draw_text(
+        rt,
+        x_start + pad,
+        y,
+        "Clipboard auto-clear",
+        TEXT_COLOR,
+        DEFAULT_FONT_SIZE,
+        FontWeightHint::Regular,
+        None,
+    );
     let clear_text = format!("{} seconds", state.clipboard.auto_clear_seconds);
-    draw_text(rt, x_start + pad + 200.0, y, &clear_text, BLUE, DEFAULT_FONT_SIZE,
-              FontWeightHint::Bold, None);
+    draw_text(
+        rt,
+        x_start + pad + 200.0,
+        y,
+        &clear_text,
+        BLUE,
+        DEFAULT_FONT_SIZE,
+        FontWeightHint::Bold,
+        None,
+    );
     y += 36.0;
 
     draw_separator(rt, x_start + pad, y, panel_width - pad * 2.0);
     y += 16.0;
 
     // Vault info section
-    draw_text(rt, x_start + pad, y, "VAULT INFO", OVERLAY0, SMALL_FONT_SIZE,
-              FontWeightHint::Bold, None);
+    draw_text(
+        rt,
+        x_start + pad,
+        y,
+        "VAULT INFO",
+        OVERLAY0,
+        SMALL_FONT_SIZE,
+        FontWeightHint::Bold,
+        None,
+    );
     y += 24.0;
 
     let info_items = [
         ("Vault name", state.vault.name.as_str()),
-        ("Status", if state.vault.is_unlocked() { "Unlocked" } else { "Locked" }),
+        (
+            "Status",
+            if state.vault.is_unlocked() {
+                "Unlocked"
+            } else {
+                "Locked"
+            },
+        ),
     ];
     for (label, value) in &info_items {
-        draw_text(rt, x_start + pad, y, label, SUBTEXT0, DEFAULT_FONT_SIZE,
-                  FontWeightHint::Regular, None);
-        draw_text(rt, x_start + pad + 160.0, y, value, TEXT_COLOR, DEFAULT_FONT_SIZE,
-                  FontWeightHint::Regular, None);
+        draw_text(
+            rt,
+            x_start + pad,
+            y,
+            label,
+            SUBTEXT0,
+            DEFAULT_FONT_SIZE,
+            FontWeightHint::Regular,
+            None,
+        );
+        draw_text(
+            rt,
+            x_start + pad + 160.0,
+            y,
+            value,
+            TEXT_COLOR,
+            DEFAULT_FONT_SIZE,
+            FontWeightHint::Regular,
+            None,
+        );
         y += 26.0;
     }
 
     let count_text = format!("{}", state.vault.entries.len());
-    draw_text(rt, x_start + pad, y, "Total entries", SUBTEXT0, DEFAULT_FONT_SIZE,
-              FontWeightHint::Regular, None);
-    draw_text(rt, x_start + pad + 160.0, y, &count_text, TEXT_COLOR, DEFAULT_FONT_SIZE,
-              FontWeightHint::Regular, None);
+    draw_text(
+        rt,
+        x_start + pad,
+        y,
+        "Total entries",
+        SUBTEXT0,
+        DEFAULT_FONT_SIZE,
+        FontWeightHint::Regular,
+        None,
+    );
+    draw_text(
+        rt,
+        x_start + pad + 160.0,
+        y,
+        &count_text,
+        TEXT_COLOR,
+        DEFAULT_FONT_SIZE,
+        FontWeightHint::Regular,
+        None,
+    );
     y += 26.0;
 
     let folder_count_text = format!("{}", state.vault.folders.len());
-    draw_text(rt, x_start + pad, y, "Folders", SUBTEXT0, DEFAULT_FONT_SIZE,
-              FontWeightHint::Regular, None);
-    draw_text(rt, x_start + pad + 160.0, y, &folder_count_text, TEXT_COLOR, DEFAULT_FONT_SIZE,
-              FontWeightHint::Regular, None);
+    draw_text(
+        rt,
+        x_start + pad,
+        y,
+        "Folders",
+        SUBTEXT0,
+        DEFAULT_FONT_SIZE,
+        FontWeightHint::Regular,
+        None,
+    );
+    draw_text(
+        rt,
+        x_start + pad + 160.0,
+        y,
+        &folder_count_text,
+        TEXT_COLOR,
+        DEFAULT_FONT_SIZE,
+        FontWeightHint::Regular,
+        None,
+    );
     y += 36.0;
 
     draw_separator(rt, x_start + pad, y, panel_width - pad * 2.0);
     y += 16.0;
 
     // Export section
-    draw_text(rt, x_start + pad, y, "DATA", OVERLAY0, SMALL_FONT_SIZE,
-              FontWeightHint::Bold, None);
+    draw_text(
+        rt,
+        x_start + pad,
+        y,
+        "DATA",
+        OVERLAY0,
+        SMALL_FONT_SIZE,
+        FontWeightHint::Bold,
+        None,
+    );
     y += 24.0;
 
-    draw_button(rt, x_start + pad, y, 120.0, 32.0, "Export CSV", SURFACE1, TEXT_COLOR, false);
-    draw_button(rt, x_start + pad + 132.0, y, 120.0, 32.0, "Backup", SURFACE1, TEXT_COLOR, false);
+    draw_button(
+        rt,
+        x_start + pad,
+        y,
+        120.0,
+        32.0,
+        "Export CSV",
+        SURFACE1,
+        TEXT_COLOR,
+        false,
+    );
+    draw_button(
+        rt,
+        x_start + pad + 132.0,
+        y,
+        120.0,
+        32.0,
+        "Backup",
+        SURFACE1,
+        TEXT_COLOR,
+        false,
+    );
 
     let _ = y;
 }
@@ -2535,27 +4222,53 @@ fn render_audit_panel(rt: &mut RenderTree, state: &AppState, width: f32, height:
     let pad = 24.0;
     let mut y = y_start + pad;
 
-    draw_text(rt, x_start + pad, y, "Password Audit", TEXT_COLOR, HEADING_FONT_SIZE,
-              FontWeightHint::Bold, None);
+    draw_text(
+        rt,
+        x_start + pad,
+        y,
+        "Password Audit",
+        TEXT_COLOR,
+        HEADING_FONT_SIZE,
+        FontWeightHint::Bold,
+        None,
+    );
     y += 28.0;
 
     if state.audit_issues.is_empty() {
-        draw_text(rt, x_start + pad, y, "No issues found. All passwords look good!",
-                  GREEN, DEFAULT_FONT_SIZE, FontWeightHint::Regular, None);
+        draw_text(
+            rt,
+            x_start + pad,
+            y,
+            "No issues found. All passwords look good!",
+            GREEN,
+            DEFAULT_FONT_SIZE,
+            FontWeightHint::Regular,
+            None,
+        );
         return;
     }
 
     let summary = format!("{} issues found", state.audit_issues.len());
-    draw_text(rt, x_start + pad, y, &summary, YELLOW, DEFAULT_FONT_SIZE,
-              FontWeightHint::Bold, None);
+    draw_text(
+        rt,
+        x_start + pad,
+        y,
+        &summary,
+        YELLOW,
+        DEFAULT_FONT_SIZE,
+        FontWeightHint::Bold,
+        None,
+    );
     y += 28.0;
 
     draw_separator(rt, x_start + pad, y, panel_width - pad * 2.0);
     y += 12.0;
 
     rt.push(RenderCommand::PushClip {
-        x: x_start, y,
-        width: panel_width, height: panel_height - (y - y_start),
+        x: x_start,
+        y,
+        width: panel_width,
+        height: panel_height - (y - y_start),
     });
 
     for issue in &state.audit_issues {
@@ -2565,18 +4278,37 @@ fn render_audit_panel(rt: &mut RenderTree, state: &AppState, width: f32, height:
 
         let issue_color = issue.issue.severity_color();
 
-        draw_rect(rt, x_start + pad, y, panel_width - pad * 2.0, 36.0,
-                  SURFACE0, 4.0);
+        draw_rect(
+            rt,
+            x_start + pad,
+            y,
+            panel_width - pad * 2.0,
+            36.0,
+            SURFACE0,
+            4.0,
+        );
 
         // Issue severity badge
-        let severity_w = draw_badge(rt, x_start + pad + 8.0, y + 8.0, issue.issue.label(),
-                                    issue_color, BASE);
+        let severity_w = draw_badge(
+            rt,
+            x_start + pad + 8.0,
+            y + 8.0,
+            issue.issue.label(),
+            issue_color,
+            BASE,
+        );
 
         // Entry name, laid out from the width the badge actually drew.
-        draw_text(rt, x_start + pad + 8.0 + severity_w + 16.0, y + 10.0,
-                  &issue.entry_name, TEXT_COLOR, DEFAULT_FONT_SIZE,
-                  FontWeightHint::Regular,
-                  Some(panel_width - pad * 2.0 - severity_w - 32.0));
+        draw_text(
+            rt,
+            x_start + pad + 8.0 + severity_w + 16.0,
+            y + 10.0,
+            &issue.entry_name,
+            TEXT_COLOR,
+            DEFAULT_FONT_SIZE,
+            FontWeightHint::Regular,
+            Some(panel_width - pad * 2.0 - severity_w - 32.0),
+        );
 
         y += 42.0;
     }
@@ -2602,33 +4334,68 @@ fn render_lock_screen(rt: &mut RenderTree, state: &AppState, width: f32, height:
 
     // Lock panel with shadow
     rt.push(RenderCommand::BoxShadow {
-        x: px, y: py,
-        width: panel_w, height: panel_h,
-        offset_x: 0.0, offset_y: 4.0,
-        blur: 24.0, spread: 0.0,
+        x: px,
+        y: py,
+        width: panel_w,
+        height: panel_h,
+        offset_x: 0.0,
+        offset_y: 4.0,
+        blur: 24.0,
+        spread: 0.0,
         color: Color::rgba(0, 0, 0, 100),
         corner_radii: CornerRadii::all(12.0),
     });
     draw_rect(rt, px, py, panel_w, panel_h, SURFACE0, 12.0);
 
     // Lock icon
-    draw_text(rt, text::center_x("[=]", center_x, 24.0, FontWeightHint::Bold), py + 30.0,
-              "[=]", BLUE, 24.0, FontWeightHint::Bold, None);
+    draw_text(
+        rt,
+        text::center_x("[=]", center_x, 24.0, FontWeightHint::Bold),
+        py + 30.0,
+        "[=]",
+        BLUE,
+        24.0,
+        FontWeightHint::Bold,
+        None,
+    );
 
     // Vault name. A vault named in any non-ASCII script used to drift left of
     // centre by half its excess byte count, since the offset was `len * 5.0`.
-    let name_x = text::center_x(&state.vault.name, center_x,
-                                HEADING_FONT_SIZE, FontWeightHint::Bold);
-    draw_text(rt, name_x, py + 70.0,
-              &state.vault.name, TEXT_COLOR, HEADING_FONT_SIZE,
-              FontWeightHint::Bold, None);
+    let name_x = text::center_x(
+        &state.vault.name,
+        center_x,
+        HEADING_FONT_SIZE,
+        FontWeightHint::Bold,
+    );
+    draw_text(
+        rt,
+        name_x,
+        py + 70.0,
+        &state.vault.name,
+        TEXT_COLOR,
+        HEADING_FONT_SIZE,
+        FontWeightHint::Bold,
+        None,
+    );
 
     // Instruction
     let instruction = "Enter master password";
-    let instruction_x =
-        text::center_x(instruction, center_x, DEFAULT_FONT_SIZE, FontWeightHint::Regular);
-    draw_text(rt, instruction_x, py + 100.0, instruction,
-              SUBTEXT0, DEFAULT_FONT_SIZE, FontWeightHint::Regular, None);
+    let instruction_x = text::center_x(
+        instruction,
+        center_x,
+        DEFAULT_FONT_SIZE,
+        FontWeightHint::Regular,
+    );
+    draw_text(
+        rt,
+        instruction_x,
+        py + 100.0,
+        instruction,
+        SUBTEXT0,
+        DEFAULT_FONT_SIZE,
+        FontWeightHint::Regular,
+        None,
+    );
 
     // Password input field
     let input_x = px + 30.0;
@@ -2638,27 +4405,69 @@ fn render_lock_screen(rt: &mut RenderTree, state: &AppState, width: f32, height:
 
     let border_color = if state.unlock_failed { RED } else { SURFACE2 };
     draw_rect(rt, input_x, input_y, input_w, input_h, BASE, CORNER_RADIUS);
-    draw_stroke_rect(rt, input_x, input_y, input_w, input_h, border_color, 1.0, CORNER_RADIUS);
+    draw_stroke_rect(
+        rt,
+        input_x,
+        input_y,
+        input_w,
+        input_h,
+        border_color,
+        1.0,
+        CORNER_RADIUS,
+    );
 
     // Masked input display
     let masked: String = "*".repeat(state.master_input.len());
-    let display = if masked.is_empty() { "Password..." } else { &masked };
-    let display_color = if masked.is_empty() { OVERLAY0 } else { TEXT_COLOR };
-    draw_text(rt, input_x + 12.0, input_y + 12.0, display, display_color,
-              DEFAULT_FONT_SIZE, FontWeightHint::Regular, Some(input_w - 24.0));
+    let display = if masked.is_empty() {
+        "Password..."
+    } else {
+        &masked
+    };
+    let display_color = if masked.is_empty() {
+        OVERLAY0
+    } else {
+        TEXT_COLOR
+    };
+    draw_text(
+        rt,
+        input_x + 12.0,
+        input_y + 12.0,
+        display,
+        display_color,
+        DEFAULT_FONT_SIZE,
+        FontWeightHint::Regular,
+        Some(input_w - 24.0),
+    );
 
     // Error message
     if state.unlock_failed {
         let error = "Incorrect password";
         let error_x = text::center_x(error, center_x, SMALL_FONT_SIZE, FontWeightHint::Regular);
-        draw_text(rt, error_x, input_y + input_h + 8.0,
-                  error, RED, SMALL_FONT_SIZE,
-                  FontWeightHint::Regular, None);
+        draw_text(
+            rt,
+            error_x,
+            input_y + input_h + 8.0,
+            error,
+            RED,
+            SMALL_FONT_SIZE,
+            FontWeightHint::Regular,
+            None,
+        );
     }
 
     // Unlock button
     let btn_y = py + 200.0;
-    draw_button(rt, center_x - 50.0, btn_y, 100.0, 36.0, "Unlock", BLUE, BASE, false);
+    draw_button(
+        rt,
+        center_x - 50.0,
+        btn_y,
+        100.0,
+        36.0,
+        "Unlock",
+        BLUE,
+        BASE,
+        false,
+    );
 }
 
 // =============================================================================
@@ -2741,10 +4550,11 @@ fn handle_key(state: &mut AppState, key: &KeyEvent) {
             }
             _ => {
                 if let Some(ch) = key.text
-                    && !ch.is_control() {
-                        state.master_input.push(ch);
-                        state.unlock_failed = false;
-                    }
+                    && !ch.is_control()
+                {
+                    state.master_input.push(ch);
+                    state.unlock_failed = false;
+                }
             }
         }
         return;
@@ -2784,10 +4594,11 @@ fn handle_key(state: &mut AppState, key: &KeyEvent) {
         _ => {
             // Text input for search
             if let Some(ch) = key.text
-                && !ch.is_control() {
-                    state.search_query.push(ch);
-                    state.refresh_filter();
-                }
+                && !ch.is_control()
+            {
+                state.search_query.push(ch);
+                state.refresh_filter();
+            }
             if key.key == Key::Backspace && !state.search_query.is_empty() {
                 state.search_query.pop();
                 state.refresh_filter();
@@ -2803,7 +4614,8 @@ fn navigate_entry_list(state: &mut AppState, direction: i32) {
         return;
     }
 
-    let current_idx = state.selected_entry_id
+    let current_idx = state
+        .selected_entry_id
         .and_then(|id| state.filtered_ids.iter().position(|&fid| fid == id));
 
     let new_idx = match current_idx {
@@ -3054,7 +4866,10 @@ mod tests {
 
     #[test]
     fn test_mask_number_normal() {
-        assert_eq!(CreditCardData::mask_number("4111111111111111"), "************1111");
+        assert_eq!(
+            CreditCardData::mask_number("4111111111111111"),
+            "************1111"
+        );
     }
 
     #[test]
@@ -3064,7 +4879,10 @@ mod tests {
 
     #[test]
     fn test_mask_number_with_spaces() {
-        assert_eq!(CreditCardData::mask_number("4111 1111 1111 1111"), "************1111");
+        assert_eq!(
+            CreditCardData::mask_number("4111 1111 1111 1111"),
+            "************1111"
+        );
     }
 
     #[test]
@@ -3420,8 +5238,14 @@ mod tests {
     #[test]
     fn test_vault_search() {
         let mut v = Vault::new("V", "pw");
-        v.add_entry(EntryData::Login(LoginData::new("github.com", "alice", "pass")), 100);
-        v.add_entry(EntryData::Login(LoginData::new("gitlab.com", "bob", "pass")), 100);
+        v.add_entry(
+            EntryData::Login(LoginData::new("github.com", "alice", "pass")),
+            100,
+        );
+        v.add_entry(
+            EntryData::Login(LoginData::new("gitlab.com", "bob", "pass")),
+            100,
+        );
         assert_eq!(v.search_entries("git").len(), 2);
         assert_eq!(v.search_entries("alice").len(), 1);
         assert_eq!(v.search_entries("").len(), 2);
@@ -3560,7 +5384,11 @@ mod tests {
         // Should alternate consonant/vowel
         for (i, ch) in pw.chars().enumerate() {
             if i % 2 == 0 {
-                assert!(!"aeiou".contains(ch), "Even idx should be consonant: {}", ch);
+                assert!(
+                    !"aeiou".contains(ch),
+                    "Even idx should be consonant: {}",
+                    ch
+                );
             } else {
                 assert!("aeiou".contains(ch), "Odd idx should be vowel: {}", ch);
             }
@@ -3613,8 +5441,10 @@ mod tests {
     fn test_generator_entropy_empty_charset() {
         let mut pg = PasswordGenerator::new();
         pg.charset = CharsetOptions {
-            uppercase: false, lowercase: false,
-            digits: false, symbols: false,
+            uppercase: false,
+            lowercase: false,
+            digits: false,
+            symbols: false,
         };
         assert_eq!(pg.entropy_bits(), 0.0);
     }
@@ -3703,16 +5533,27 @@ mod tests {
         let mut v = Vault::new("V", "pw");
         v.add_entry(EntryData::Login(LoginData::new("site", "user", "abc")), 100);
         let issues = audit_vault(&v, 200);
-        assert!(issues.iter().any(|i| i.issue == AuditIssueKind::WeakPassword));
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.issue == AuditIssueKind::WeakPassword)
+        );
     }
 
     #[test]
     fn test_audit_reused_password() {
         let mut v = Vault::new("V", "pw");
-        v.add_entry(EntryData::Login(LoginData::new("site1", "u1", "same_pass")), 100);
-        v.add_entry(EntryData::Login(LoginData::new("site2", "u2", "same_pass")), 100);
+        v.add_entry(
+            EntryData::Login(LoginData::new("site1", "u1", "same_pass")),
+            100,
+        );
+        v.add_entry(
+            EntryData::Login(LoginData::new("site2", "u2", "same_pass")),
+            100,
+        );
         let issues = audit_vault(&v, 200);
-        let reused: Vec<_> = issues.iter()
+        let reused: Vec<_> = issues
+            .iter()
             .filter(|i| i.issue == AuditIssueKind::ReusedPassword)
             .collect();
         assert_eq!(reused.len(), 2);
@@ -3728,13 +5569,20 @@ mod tests {
         );
         let now = 100 + 91 * 86400;
         let issues = audit_vault(&v, now);
-        assert!(issues.iter().any(|i| i.issue == AuditIssueKind::OldPassword));
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.issue == AuditIssueKind::OldPassword)
+        );
     }
 
     #[test]
     fn test_audit_no_totp() {
         let mut v = Vault::new("V", "pw");
-        v.add_entry(EntryData::Login(LoginData::new("site", "user", "longpassword99")), 100);
+        v.add_entry(
+            EntryData::Login(LoginData::new("site", "user", "longpassword99")),
+            100,
+        );
         let issues = audit_vault(&v, 200);
         assert!(issues.iter().any(|i| i.issue == AuditIssueKind::NoTotp));
     }
@@ -3742,18 +5590,32 @@ mod tests {
     #[test]
     fn test_audit_compromised() {
         let mut v = Vault::new("V", "pw");
-        let id = v.add_entry(EntryData::Login(LoginData::new("site", "u", "longpass123!")), 100);
+        let id = v.add_entry(
+            EntryData::Login(LoginData::new("site", "u", "longpass123!")),
+            100,
+        );
         v.set_compromised(id, true);
         let issues = audit_vault(&v, 200);
-        assert!(issues.iter().any(|i| i.issue == AuditIssueKind::Compromised));
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.issue == AuditIssueKind::Compromised)
+        );
     }
 
     #[test]
     fn test_audit_common_pattern() {
         let mut v = Vault::new("V", "pw");
-        v.add_entry(EntryData::Login(LoginData::new("site", "user", "password123")), 100);
+        v.add_entry(
+            EntryData::Login(LoginData::new("site", "user", "password123")),
+            100,
+        );
         let issues = audit_vault(&v, 200);
-        assert!(issues.iter().any(|i| i.issue == AuditIssueKind::CommonPattern));
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.issue == AuditIssueKind::CommonPattern)
+        );
     }
 
     #[test]
@@ -3764,13 +5626,17 @@ mod tests {
         v.add_entry(EntryData::Login(login), 100);
         let issues = audit_vault(&v, 200);
         // Should have no weak/common/reused/old issues, only possibly no-totp is cleared
-        let critical: Vec<_> = issues.iter()
-            .filter(|i| matches!(i.issue,
-                AuditIssueKind::WeakPassword
-                | AuditIssueKind::ReusedPassword
-                | AuditIssueKind::CommonPattern
-                | AuditIssueKind::Compromised
-            ))
+        let critical: Vec<_> = issues
+            .iter()
+            .filter(|i| {
+                matches!(
+                    i.issue,
+                    AuditIssueKind::WeakPassword
+                        | AuditIssueKind::ReusedPassword
+                        | AuditIssueKind::CommonPattern
+                        | AuditIssueKind::Compromised
+                )
+            })
             .collect();
         assert!(critical.is_empty());
     }
@@ -3793,7 +5659,10 @@ mod tests {
     #[test]
     fn test_export_csv_entry() {
         let mut v = Vault::new("V", "pw");
-        v.add_entry(EntryData::Login(LoginData::new("site", "user", "pass")), 100);
+        v.add_entry(
+            EntryData::Login(LoginData::new("site", "user", "pass")),
+            100,
+        );
         let csv = export_csv(&v);
         assert!(csv.contains("Login"));
         assert!(csv.contains("site"));
@@ -3813,6 +5682,64 @@ mod tests {
     #[test]
     fn test_escape_csv_with_quotes() {
         assert_eq!(escape_csv("say \"hi\""), "\"say \"\"hi\"\"\"");
+    }
+
+    #[test]
+    fn a_carriage_return_forces_a_quoted_csv_field() {
+        // RFC 4180 records are CRLF-terminated, so a bare CR in an unquoted
+        // field splits the record for most readers.
+        assert_eq!(escape_csv("a\rb"), "\"a\rb\"");
+    }
+
+    #[test]
+    fn a_hostile_entry_name_cannot_forge_a_backup_field() {
+        let mut v = Vault::new("My \"Vault\"", "pw");
+        v.add_entry(
+            EntryData::Login(LoginData::new(
+                "svc\",\n      \"starred\": true,\n      \"x\": \"",
+                "u",
+                "p",
+            )),
+            100,
+        );
+        v.add_folder("Home\\Work");
+        let backup = serialize_backup(&v);
+        // The forged key must not appear as a second `starred` field.
+        assert_eq!(
+            backup.matches("\"starred\":").count(),
+            1,
+            "entry name forged a key: {backup}"
+        );
+        // Quotes in the vault name and backslashes in a folder name survive
+        // as data rather than terminating their strings.
+        assert!(
+            backup.contains("\"vault_name\": \"My \\\"Vault\\\"\""),
+            "vault name not escaped: {backup}"
+        );
+        assert!(
+            backup.contains("\"name\": \"Home\\\\Work\""),
+            "folder name not escaped: {backup}"
+        );
+    }
+
+    #[test]
+    fn a_hostile_tag_cannot_forge_a_backup_tag() {
+        let mut v = Vault::new("V", "pw");
+        v.add_entry(EntryData::Login(LoginData::new("s", "u", "p")), 100);
+        if let Some(e) = v.entries.first_mut() {
+            e.tags.push("a\", \"injected".to_string());
+        }
+        let backup = serialize_backup(&v);
+        let tags_line = backup
+            .lines()
+            .find(|l| l.contains("\"tags\":"))
+            .expect("tags line");
+        // One tag in, one tag out: the comma inside it must stay inert.
+        assert_eq!(
+            tags_line.matches("\", \"").count(),
+            0,
+            "tag forged a second array element: {tags_line}"
+        );
     }
 
     #[test]
@@ -3920,8 +5847,14 @@ mod tests {
     fn test_app_state_refresh_filter() {
         let mut state = AppState::new();
         state.vault.unlock("master123", state.now);
-        state.vault.add_entry(EntryData::Login(LoginData::new("GitHub", "user", "pass")), state.now);
-        state.vault.add_entry(EntryData::Login(LoginData::new("GitLab", "user", "pass")), state.now);
+        state.vault.add_entry(
+            EntryData::Login(LoginData::new("GitHub", "user", "pass")),
+            state.now,
+        );
+        state.vault.add_entry(
+            EntryData::Login(LoginData::new("GitLab", "user", "pass")),
+            state.now,
+        );
         state.refresh_filter();
         assert_eq!(state.filtered_ids.len(), 2);
 
@@ -3942,7 +5875,9 @@ mod tests {
     fn test_app_state_run_audit() {
         let mut state = AppState::new();
         state.vault.unlock("master123", state.now);
-        state.vault.add_entry(EntryData::Login(LoginData::new("s", "u", "123")), state.now);
+        state
+            .vault
+            .add_entry(EntryData::Login(LoginData::new("s", "u", "123")), state.now);
         state.run_audit();
         assert!(!state.audit_issues.is_empty());
     }
@@ -3955,7 +5890,10 @@ mod tests {
         let rt = build_render_tree(&state, 1024.0, 768.0);
         assert!(!rt.commands.is_empty());
         // Lock screen should have FillRect for background
-        let has_fill = rt.commands.iter().any(|c| matches!(c, RenderCommand::FillRect { .. }));
+        let has_fill = rt
+            .commands
+            .iter()
+            .any(|c| matches!(c, RenderCommand::FillRect { .. }));
         assert!(has_fill);
     }
 
@@ -3963,7 +5901,10 @@ mod tests {
     fn test_render_unlocked_main_ui() {
         let mut state = AppState::new();
         state.vault.unlock("master123", state.now);
-        state.vault.add_entry(EntryData::Login(LoginData::new("GitHub", "alice", "pass123")), state.now);
+        state.vault.add_entry(
+            EntryData::Login(LoginData::new("GitHub", "alice", "pass123")),
+            state.now,
+        );
         state.refresh_filter();
         state.selected_entry_id = state.filtered_ids.first().copied();
         let rt = build_render_tree(&state, 1280.0, 800.0);
@@ -4002,7 +5943,9 @@ mod tests {
     fn test_render_audit_panel_with_issues() {
         let mut state = AppState::new();
         state.vault.unlock("master123", state.now);
-        state.vault.add_entry(EntryData::Login(LoginData::new("s", "u", "123")), state.now);
+        state
+            .vault
+            .add_entry(EntryData::Login(LoginData::new("s", "u", "123")), state.now);
         state.run_audit();
         state.detail_view = DetailView::AuditReport;
         let rt = build_render_tree(&state, 1280.0, 800.0);
@@ -4054,8 +5997,12 @@ mod tests {
     fn test_navigate_entry_list_down() {
         let mut state = AppState::new();
         state.vault.unlock("master123", state.now);
-        state.vault.add_entry(EntryData::Login(LoginData::new("A", "u", "p")), state.now);
-        state.vault.add_entry(EntryData::Login(LoginData::new("B", "u", "p")), state.now);
+        state
+            .vault
+            .add_entry(EntryData::Login(LoginData::new("A", "u", "p")), state.now);
+        state
+            .vault
+            .add_entry(EntryData::Login(LoginData::new("B", "u", "p")), state.now);
         state.refresh_filter();
         navigate_entry_list(&mut state, 1);
         assert!(state.selected_entry_id.is_some());
@@ -4072,7 +6019,9 @@ mod tests {
     fn test_navigate_entry_list_clamp() {
         let mut state = AppState::new();
         state.vault.unlock("master123", state.now);
-        let id = state.vault.add_entry(EntryData::Login(LoginData::new("A", "u", "p")), state.now);
+        let id = state
+            .vault
+            .add_entry(EntryData::Login(LoginData::new("A", "u", "p")), state.now);
         state.refresh_filter();
         state.selected_entry_id = Some(id);
         // Navigate up past beginning
@@ -4096,7 +6045,12 @@ mod tests {
     #[test]
     fn test_wordlist_all_lowercase() {
         for word in WORDLIST {
-            assert_eq!(*word, word.to_ascii_lowercase(), "Word not lowercase: {}", word);
+            assert_eq!(
+                *word,
+                word.to_ascii_lowercase(),
+                "Word not lowercase: {}",
+                word
+            );
         }
     }
 
@@ -4106,7 +6060,9 @@ mod tests {
     /// side, in the bold weight the label is actually drawn in.
     #[test]
     fn badge_labels_fit_their_badges() {
-        for label in ["Login", "Note", "Card", "Identity", "SSH Key", "Weak", "Reused"] {
+        for label in [
+            "Login", "Note", "Card", "Identity", "SSH Key", "Weak", "Reused",
+        ] {
             let w = badge_width(label);
             let drawn = text::measure(label, SMALL_FONT_SIZE, FontWeightHint::Bold);
             assert!(drawn + 12.0 <= w + 0.01, "{label:?} overflows its badge");
@@ -4153,10 +6109,20 @@ mod tests {
     fn button_labels_are_centred_on_their_buttons() {
         for label in ["Random", "Pronounceable", "Passphrase", "Unlock"] {
             let (x, w) = (100.0, button_width(label, 10.0));
-            let tx = text::center_x(label, x + w / 2.0, DEFAULT_FONT_SIZE, FontWeightHint::Regular);
+            let tx = text::center_x(
+                label,
+                x + w / 2.0,
+                DEFAULT_FONT_SIZE,
+                FontWeightHint::Regular,
+            );
             let left = tx - x;
-            let right = (x + w) - (tx + text::measure(label, DEFAULT_FONT_SIZE, FontWeightHint::Regular));
-            assert!((left - right).abs() < 0.01, "{label:?} sits off-centre by {}", left - right);
+            let right =
+                (x + w) - (tx + text::measure(label, DEFAULT_FONT_SIZE, FontWeightHint::Regular));
+            assert!(
+                (left - right).abs() < 0.01,
+                "{label:?} sits off-centre by {}",
+                left - right
+            );
             assert!(left >= 0.0, "{label:?} overflows its button");
         }
     }

@@ -2465,12 +2465,21 @@ fn execute_drop_table(db: &mut Database, name: &str, if_exists: bool) -> QueryRe
 /// Export table data as CSV.
 pub fn export_csv(table: &Table) -> String {
     let mut out = String::new();
-    // Header
-    let headers: Vec<&str> = table.columns.iter().map(|c| c.name.as_str()).collect();
+    // Header. Column names are as free-form as the cell values -- a table can
+    // be created by `import_csv` from a file we did not write -- yet every
+    // exporter in this module escaped its values and none escaped its names.
+    let headers: Vec<String> = table
+        .columns
+        .iter()
+        .map(|c| guitk::escape::csv_field(&c.name))
+        .collect();
     out.push_str(&headers.join(","));
     out.push('\n');
 
-    // Data
+    // Data. Text is quoted unconditionally (rather than only when it needs
+    // to be) so the export keeps the text/number distinction visible; that is
+    // still conforming, and doubling the inner quotes makes commas, quotes
+    // and newlines alike inert.
     for row in &table.rows {
         let vals: Vec<String> = row
             .iter()
@@ -2494,12 +2503,20 @@ pub fn export_json(table: &Table) -> String {
             if ci > 0 {
                 out.push_str(", ");
             }
-            let col_name = table.columns.get(ci).map_or("?", |c| c.name.as_str());
+            let col_name =
+                guitk::escape::json_string(table.columns.get(ci).map_or("?", |c| c.name.as_str()));
             match val {
                 CellValue::Integer(n) => out.push_str(&format!("\"{col_name}\": {n}")),
                 CellValue::Real(n) => out.push_str(&format!("\"{col_name}\": {n}")),
                 CellValue::Text(s) => {
-                    out.push_str(&format!("\"{col_name}\": \"{}\"", s.replace('"', "\\\"")));
+                    // The old `s.replace('"', "\\\"")` was worse than doing
+                    // nothing for one input: a value ending in a backslash
+                    // became `"...\"`, escaping the closing quote and
+                    // truncating the whole document at that point.
+                    out.push_str(&format!(
+                        "\"{col_name}\": \"{}\"",
+                        guitk::escape::json_string(s)
+                    ));
                 }
                 CellValue::Blob(b) => {
                     out.push_str(&format!("\"{col_name}\": \"<blob:{}>\"", b.len()));
@@ -2518,9 +2535,19 @@ pub fn export_json(table: &Table) -> String {
 }
 
 /// Export table data as SQL INSERT statements.
+/// Quote a SQL identifier per the standard: wrap in double quotes and double
+/// any embedded double quote.
+///
+/// Identifiers were previously interpolated bare, so a table or column name
+/// containing a space, a keyword, or a `)` produced a script that either
+/// failed to parse or -- worse -- parsed as something else entirely.
+fn sql_ident(name: &str) -> String {
+    format!("\"{}\"", name.replace('"', "\"\""))
+}
+
 pub fn export_sql_inserts(table: &Table) -> String {
     let mut out = String::new();
-    let col_names: Vec<&str> = table.columns.iter().map(|c| c.name.as_str()).collect();
+    let col_names: Vec<String> = table.columns.iter().map(|c| sql_ident(&c.name)).collect();
     let cols_str = col_names.join(", ");
 
     for row in &table.rows {
@@ -2536,7 +2563,7 @@ pub fn export_sql_inserts(table: &Table) -> String {
             .collect();
         out.push_str(&format!(
             "INSERT INTO {} ({}) VALUES ({});\n",
-            table.name,
+            sql_ident(&table.name),
             cols_str,
             vals.join(", ")
         ));
@@ -2550,11 +2577,12 @@ pub fn export_sql_inserts(table: &Table) -> String {
 
 /// Import CSV data into a table. Returns the parsed table.
 pub fn import_csv(name: &str, csv_data: &str) -> Result<Table, String> {
-    let mut lines = csv_data.lines();
+    let mut records = split_csv_records(csv_data).into_iter();
 
-    // Detect header
-    let header_line = lines.next().ok_or_else(|| "Empty CSV data".to_owned())?;
-    let headers: Vec<&str> = header_line.split(',').map(str::trim).collect();
+    // Detect header. Column names go through the same RFC 4180 decoding as
+    // the values: a quoted header field may legitimately contain a comma, and
+    // `export_csv` now emits exactly that when a column name needs it.
+    let headers = records.next().ok_or_else(|| "Empty CSV data".to_owned())?;
 
     if headers.is_empty() {
         return Err("No columns found in CSV header".to_owned());
@@ -2567,13 +2595,21 @@ pub fn import_csv(name: &str, csv_data: &str) -> Result<Table, String> {
 
     let mut table = Table::new(name, columns);
 
-    for line in lines {
-        if line.trim().is_empty() {
+    for mut values in records {
+        if values.iter().all(|v| v.trim().is_empty()) {
             continue;
         }
-        let values: Vec<CellValue> = parse_csv_line(line, headers.len());
-        if values.len() == table.col_count() {
-            let _ = table.insert_row(values);
+        // Pad short records so a ragged file still imports.
+        let mut cells: Vec<CellValue> = values
+            .drain(..)
+            .map(CellValue::Text)
+            .take(headers.len())
+            .collect();
+        while cells.len() < headers.len() {
+            cells.push(CellValue::Null);
+        }
+        if cells.len() == table.col_count() {
+            let _ = table.insert_row(cells);
         }
     }
 
@@ -2583,49 +2619,72 @@ pub fn import_csv(name: &str, csv_data: &str) -> Result<Table, String> {
     Ok(table)
 }
 
-fn parse_csv_line(line: &str, expected_cols: usize) -> Vec<CellValue> {
-    let mut values = Vec::new();
-    let mut current = String::new();
+/// Split CSV text into records of decoded fields, per RFC 4180.
+///
+/// This is record-oriented rather than line-oriented on purpose: a quoted
+/// field may contain a newline, so splitting on `\n` before parsing fields
+/// tears such a field in half and drops the rest of the record. The previous
+/// importer did exactly that, which meant it could not read back its own
+/// exporter's output.
+///
+/// Leading/trailing whitespace is trimmed from *unquoted* fields only. A
+/// quoted field is taken verbatim -- the quotes are how the writer says the
+/// spaces are data.
+fn split_csv_records(data: &str) -> Vec<Vec<String>> {
+    let mut records = Vec::new();
+    let mut record: Vec<String> = Vec::new();
+    let mut field = String::new();
+    let mut was_quoted = false;
     let mut in_quotes = false;
-    let chars: Vec<char> = line.chars().collect();
-    let mut i = 0;
+    let mut chars = data.chars().peekable();
 
-    while i < chars.len() {
-        let ch = chars.get(i).copied().unwrap_or(' ');
+    let finish_field = |field: &mut String, was_quoted: &mut bool| -> String {
+        let done = if *was_quoted {
+            std::mem::take(field)
+        } else {
+            let trimmed = field.trim().to_owned();
+            field.clear();
+            trimmed
+        };
+        *was_quoted = false;
+        done
+    };
+
+    while let Some(c) = chars.next() {
         if in_quotes {
-            if ch == '"' {
-                if i.saturating_add(1) < chars.len() && chars.get(i.saturating_add(1)) == Some(&'"')
-                {
-                    current.push('"');
-                    i = i.saturating_add(2);
+            if c == '"' {
+                if chars.peek() == Some(&'"') {
+                    chars.next();
+                    field.push('"');
                 } else {
                     in_quotes = false;
-                    i = i.saturating_add(1);
                 }
             } else {
-                current.push(ch);
-                i = i.saturating_add(1);
+                field.push(c);
             }
-        } else if ch == '"' {
-            in_quotes = true;
-            i = i.saturating_add(1);
-        } else if ch == ',' {
-            values.push(CellValue::Text(current.trim().to_owned()));
-            current.clear();
-            i = i.saturating_add(1);
-        } else {
-            current.push(ch);
-            i = i.saturating_add(1);
+            continue;
+        }
+        match c {
+            '"' => {
+                in_quotes = true;
+                was_quoted = true;
+            }
+            ',' => record.push(finish_field(&mut field, &mut was_quoted)),
+            '\n' => {
+                record.push(finish_field(&mut field, &mut was_quoted));
+                records.push(std::mem::take(&mut record));
+            }
+            // A CR outside quotes is the first half of a CRLF terminator; the
+            // LF below ends the record.
+            '\r' => {}
+            _ => field.push(c),
         }
     }
-    values.push(CellValue::Text(current.trim().to_owned()));
-
-    // Pad to expected length
-    while values.len() < expected_cols {
-        values.push(CellValue::Null);
+    if in_quotes || !field.is_empty() || !record.is_empty() {
+        record.push(finish_field(&mut field, &mut was_quoted));
+        records.push(record);
     }
-
-    values
+    records
 }
 
 /// Infer and convert column types based on data patterns.
@@ -4001,10 +4060,8 @@ impl DbViewerApp {
                     // Column headers. The table follows the message rather than
                     // sitting at a fixed offset from the top of the pane, so a
                     // message that grew cannot be drawn over its own headers.
-                    let header_y = y
-                        + 4.0
-                        + message.len() as f32 * RESULT_MSG_LINE_HEIGHT
-                        + RESULT_MSG_GAP;
+                    let header_y =
+                        y + 4.0 + message.len() as f32 * RESULT_MSG_LINE_HEIGHT + RESULT_MSG_GAP;
                     cmds.push(RenderCommand::FillRect {
                         x,
                         y: header_y,
@@ -4536,7 +4593,7 @@ mod tests {
             ("hello", "h%", true),
             ("hello", "%o", true),
             ("hello", "h_llo", true),
-            ("hello", "h__lo", true), // _ = e, _ = l
+            ("hello", "h__lo", true),   // _ = e, _ = l
             ("hello", "h___lo", false), // one more character than there is
             ("hello", "%ell%", true),
             ("hello", "%xyz%", false),
@@ -4545,11 +4602,7 @@ mod tests {
             ("", "%", true),
             ("a", "", false),
         ] {
-            assert_eq!(
-                simple_like_match(text, pat),
-                want,
-                "{text:?} LIKE {pat:?}"
-            );
+            assert_eq!(simple_like_match(text, pat), want, "{text:?} LIKE {pat:?}");
             checked += 1;
         }
         assert!(checked >= 12, "only {checked} checked");
@@ -5424,8 +5477,181 @@ mod tests {
             CellValue::Text("Alice".to_owned()),
         ]);
         let sql = export_sql_inserts(&table);
-        assert!(sql.contains("INSERT INTO test"));
+        // Identifiers are quoted, so a name that collides with a keyword or
+        // contains a space still names the right object.
+        assert!(sql.contains("INSERT INTO \"test\" (\"id\", \"name\")"));
         assert!(sql.contains("1, 'Alice'"));
+    }
+
+    /// A one-row table whose *column name* is chosen by the caller. Column
+    /// names are not privileged data: `import_csv` takes them straight from
+    /// the header line of a file the user opened.
+    fn table_with_column_named(col: &str) -> Table {
+        let mut table = Table::new(
+            "test",
+            vec![
+                ColumnDef::new("id", DataType::Integer),
+                ColumnDef::new(col, DataType::Text),
+            ],
+        );
+        let _ = table.insert_row(vec![
+            CellValue::Integer(1),
+            CellValue::Text("Alice".to_owned()),
+        ]);
+        table
+    }
+
+    #[test]
+    fn a_hostile_column_name_cannot_forge_a_csv_column() {
+        let csv = export_csv(&table_with_column_named("name,forged"));
+        let header = csv.lines().next().expect("header");
+        // Walk the header the way a reader does, so an escaped comma inside
+        // a quoted name is not mistaken for a real separator.
+        let mut fields = 1;
+        let mut in_quotes = false;
+        for c in header.chars() {
+            match c {
+                '"' => in_quotes = !in_quotes,
+                ',' if !in_quotes => fields += 1,
+                _ => {}
+            }
+        }
+        assert_eq!(fields, 2, "column name forged a third column: {header}");
+    }
+
+    /// Count JSON string tokens, honouring backslash escapes.
+    ///
+    /// A bare `json.contains("\"admin\":")` cannot be used here: correctly
+    /// escaped output *does* contain that substring, preceded by a backslash
+    /// that makes it inert. The question is how many strings a parser sees.
+    fn json_string_token_count(text: &str) -> usize {
+        let mut count: usize = 0;
+        let mut in_string = false;
+        let mut escaped = false;
+        for c in text.chars() {
+            if in_string {
+                if escaped {
+                    escaped = false;
+                } else if c == '\\' {
+                    escaped = true;
+                } else if c == '"' {
+                    in_string = false;
+                }
+            } else if c == '"' {
+                in_string = true;
+                count = count.saturating_add(1);
+            }
+        }
+        count
+    }
+
+    #[test]
+    fn a_hostile_column_name_cannot_forge_a_json_key() {
+        let json = export_json(&table_with_column_named("name\", \"admin"));
+        // Three strings: the two column names and the one Text value. Left
+        // unescaped the payload would split into four.
+        assert_eq!(
+            json_string_token_count(&json),
+            3,
+            "column name forged a key: {json}"
+        );
+    }
+
+    #[test]
+    fn a_value_ending_in_a_backslash_does_not_truncate_the_json() {
+        let mut table = Table::new("test", vec![ColumnDef::new("path", DataType::Text)]);
+        let _ = table.insert_row(vec![CellValue::Text("C:\\".to_owned())]);
+        let json = export_json(&table);
+        // The backslash must be escaped, so the string is still terminated by
+        // a real closing quote and the object still closes.
+        assert!(
+            json.contains("\"path\": \"C:\\\\\""),
+            "backslash not escaped: {json}"
+        );
+        assert!(json.trim_end().ends_with(']'), "document truncated: {json}");
+    }
+
+    /// Count statement terminators the way a SQL lexer does: semicolons that
+    /// are outside both a `'...'` literal and a `"..."` identifier.
+    ///
+    /// Counting every `;` would flag correctly-quoted output, because the
+    /// hostile payload legitimately *contains* one -- inertly, inside an
+    /// identifier.
+    fn sql_statement_count(text: &str) -> usize {
+        let mut count: usize = 0;
+        let mut in_ident = false;
+        let mut in_literal = false;
+        for c in text.chars() {
+            match c {
+                '"' if !in_literal => in_ident = !in_ident,
+                '\'' if !in_ident => in_literal = !in_literal,
+                ';' if !in_ident && !in_literal => count = count.saturating_add(1),
+                _ => {}
+            }
+        }
+        count
+    }
+
+    #[test]
+    fn a_hostile_identifier_cannot_forge_a_sql_statement() {
+        let sql = export_sql_inserts(&table_with_column_named(
+            "name) VALUES (1, 'x'); DROP TABLE t--",
+        ));
+        assert_eq!(
+            sql_statement_count(&sql),
+            1,
+            "identifier forged a statement: {sql}"
+        );
+        // The payload survives verbatim as an identifier, with its `"` (none
+        // here) doubled -- it is data, not syntax.
+        assert!(
+            sql.contains("\"name) VALUES (1, 'x'); DROP TABLE t--\""),
+            "identifier not quoted: {sql}"
+        );
+    }
+
+    #[test]
+    fn a_csv_export_can_be_imported_back() {
+        // Every field here is one the old line-oriented importer mangled: a
+        // comma and a newline in a column name, and the same inside a value.
+        let mut table = Table::new(
+            "t",
+            vec![
+                ColumnDef::new("first,second", DataType::Text),
+                ColumnDef::new("with \"quotes\"", DataType::Text),
+                ColumnDef::new("two\nlines", DataType::Text),
+            ],
+        );
+        let _ = table.insert_row(vec![
+            CellValue::Text("a,b".to_owned()),
+            CellValue::Text("say \"hi\"".to_owned()),
+            CellValue::Text("line1\nline2".to_owned()),
+        ]);
+
+        let csv = export_csv(&table);
+        let back = import_csv("t", &csv).expect("re-import");
+
+        let names: Vec<&str> = back.columns.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["first,second", "with \"quotes\"", "two\nlines"]);
+        assert_eq!(back.row_count(), 1, "record count changed: {csv}");
+        let row: Vec<String> = back.rows[0].iter().map(CellValue::display).collect();
+        assert_eq!(row, ["a,b", "say \"hi\"", "line1\nline2"]);
+    }
+
+    #[test]
+    fn a_quoted_csv_field_keeps_its_spaces() {
+        // Quoting is how a writer says the whitespace is data; only unquoted
+        // fields get the lenient trim.
+        let table = import_csv("t", "a,b\n\"  padded  \",  bare  ").expect("import");
+        let row: Vec<String> = table.rows[0].iter().map(CellValue::display).collect();
+        assert_eq!(row, ["  padded  ", "bare"]);
+    }
+
+    #[test]
+    fn a_quote_in_an_identifier_is_doubled() {
+        let sql = export_sql_inserts(&table_with_column_named("na\"me"));
+        assert!(sql.contains("\"na\"\"me\""), "quote not doubled: {sql}");
+        assert_eq!(sql_statement_count(&sql), 1, "unbalanced quoting: {sql}");
     }
 
     // --- Import tests ---
@@ -5543,10 +5769,7 @@ mod tests {
     /// Wrapping depends on how wide the host's font draws the message, so a
     /// test about wrapping has to pick its width from that rather than from a
     /// constant — see `a_long_query_error_is_wrapped_not_cut_mid_word`.
-    fn results_pane_layout_at(
-        app: &DbViewerApp,
-        width: f32,
-    ) -> (Vec<(f32, String)>, Option<f32>) {
+    fn results_pane_layout_at(app: &DbViewerApp, width: f32) -> (Vec<(f32, String)>, Option<f32>) {
         let mut cmds = Vec::new();
         app.render_results(&mut cmds, 0.0, 0.0, width, TEST_PANE_HEIGHT);
         let lines = cmds
@@ -5795,7 +6018,7 @@ mod tests {
         let app = DbViewerApp::new();
         let sql = app.export_current_table(ExportFormat::SqlInserts);
         assert!(sql.is_some());
-        assert!(sql.unwrap().contains("INSERT INTO users"));
+        assert!(sql.unwrap().contains("INSERT INTO \"users\""));
     }
 
     #[test]

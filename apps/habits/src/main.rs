@@ -27,6 +27,7 @@
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand};
 use guitk::style::CornerRadii;
+use guitk::table::{Column, Fit, Table};
 
 // ── Catppuccin Mocha palette ────────────────────────────────────────
 const BASE: Color = Color::from_hex(0x1E1E2E);
@@ -47,6 +48,60 @@ const TEAL: Color = Color::from_hex(0x94E2D5);
 const MAUVE: Color = Color::from_hex(0xCBA6F7);
 const LAVENDER: Color = Color::from_hex(0xB4BEFE);
 const OVERLAY0: Color = Color::from_hex(0x6C7086);
+
+// ── Per-habit statistics table ──────────────────────────────────────
+//
+// The widths live here once. They used to live in a `col_widths` array, in
+// each cell's `max_width` as `col_widths[i] - 4.0`, and in a `cx +=` that
+// advanced by the *undiscounted* width -- three expressions for one number,
+// which is the arrangement that makes "does this cell fit its column?" a
+// question with no home. The 4px discount is the gap between columns, so it
+// belongs to the table, not to every cell.
+const STATS_GAP: f32 = 4.0;
+const STATS_COLUMNS: &[Column] = &[
+    Column {
+        label: "Habit",
+        width: 136.0,
+    },
+    Column {
+        label: "Category",
+        width: 86.0,
+    },
+    Column {
+        label: "Streak",
+        width: 46.0,
+    },
+    Column {
+        label: "Best",
+        width: 46.0,
+    },
+    Column {
+        label: "7d",
+        width: 46.0,
+    },
+    Column {
+        label: "30d",
+        width: 46.0,
+    },
+    Column {
+        label: "All",
+        width: 46.0,
+    },
+    Column {
+        label: "Total",
+        width: 46.0,
+    },
+];
+const STATS_HABIT: usize = 0;
+const STATS_CATEGORY: usize = 1;
+const STATS_STREAK: usize = 2;
+const STATS_BEST: usize = 3;
+const STATS_7D: usize = 4;
+const STATS_30D: usize = 5;
+const STATS_ALL: usize = 6;
+const STATS_TOTAL: usize = 7;
+const STATS_HEADER_FONT: f32 = 10.0;
+const STATS_ROW_FONT: f32 = 11.0;
 
 // ── Date ────────────────────────────────────────────────────────────
 
@@ -123,7 +178,11 @@ impl Date {
             d += days_in_month(y, m) as i32;
         }
 
-        Self { year: y, month: m, day: d as u32 }
+        Self {
+            year: y,
+            month: m,
+            day: d as u32,
+        }
     }
 
     /// Number of days between self and other (self - other). Positive if self is later.
@@ -166,7 +225,13 @@ fn is_leap_year(year: i32) -> bool {
 fn days_in_month(year: i32, month: u32) -> u32 {
     match month {
         1 => 31,
-        2 => if is_leap_year(year) { 29 } else { 28 },
+        2 => {
+            if is_leap_year(year) {
+                29
+            } else {
+                28
+            }
+        }
         3 => 31,
         4 => 30,
         5 => 31,
@@ -306,7 +371,14 @@ struct Habit {
 }
 
 impl Habit {
-    fn new(id: u32, name: &str, description: &str, category: Category, frequency: Frequency, created: Date) -> Self {
+    fn new(
+        id: u32,
+        name: &str,
+        description: &str,
+        category: Category,
+        frequency: Frequency,
+        created: Date,
+    ) -> Self {
         Self {
             id,
             name: String::from(name),
@@ -564,7 +636,11 @@ impl HabitTrackerApp {
     const HEATMAP_GAP: f32 = 3.0;
 
     fn new() -> Self {
-        let today = Date { year: 2026, month: 5, day: 18 };
+        let today = Date {
+            year: 2026,
+            month: 5,
+            day: 18,
+        };
         let mut app = Self {
             width: 1000.0,
             height: 700.0,
@@ -594,8 +670,12 @@ impl HabitTrackerApp {
 
         // 1) Exercise -- daily, fitness
         let mut h1 = Habit::new(
-            self.next_id, "Exercise", "30 minutes of physical activity",
-            Category::Fitness, Frequency::Daily, base,
+            self.next_id,
+            "Exercise",
+            "30 minutes of physical activity",
+            Category::Fitness,
+            Frequency::Daily,
+            base,
         );
         self.next_id += 1;
         // Simulate some check-ins over the last 45 days (about 70% completion)
@@ -609,8 +689,12 @@ impl HabitTrackerApp {
 
         // 2) Read -- daily, learning
         let mut h2 = Habit::new(
-            self.next_id, "Read 30 min", "Read for at least 30 minutes",
-            Category::Learning, Frequency::Daily, base,
+            self.next_id,
+            "Read 30 min",
+            "Read for at least 30 minutes",
+            Category::Learning,
+            Frequency::Daily,
+            base,
         );
         self.next_id += 1;
         for i in 0..45 {
@@ -623,8 +707,12 @@ impl HabitTrackerApp {
 
         // 3) Meditate -- daily, mindfulness
         let mut h3 = Habit::new(
-            self.next_id, "Meditate", "10 minutes of mindfulness meditation",
-            Category::Mindfulness, Frequency::Daily, base,
+            self.next_id,
+            "Meditate",
+            "10 minutes of mindfulness meditation",
+            Category::Mindfulness,
+            Frequency::Daily,
+            base,
         );
         self.next_id += 1;
         for i in 0..45 {
@@ -637,8 +725,12 @@ impl HabitTrackerApp {
 
         // 4) Meal prep -- weekly 3x, health
         let mut h4 = Habit::new(
-            self.next_id, "Meal Prep", "Prepare healthy meals for the week",
-            Category::Health, Frequency::Weekly(3), base,
+            self.next_id,
+            "Meal Prep",
+            "Prepare healthy meals for the week",
+            Category::Health,
+            Frequency::Weekly(3),
+            base,
         );
         self.next_id += 1;
         for i in 0..45 {
@@ -652,8 +744,12 @@ impl HabitTrackerApp {
 
         // 5) Journal -- daily, productivity
         let mut h5 = Habit::new(
-            self.next_id, "Journal", "Write in daily journal",
-            Category::Productivity, Frequency::Daily, base,
+            self.next_id,
+            "Journal",
+            "Write in daily journal",
+            Category::Productivity,
+            Frequency::Daily,
+            base,
         );
         self.next_id += 1;
         for i in 0..45 {
@@ -674,16 +770,19 @@ impl HabitTrackerApp {
                 continue;
             }
             if let Some(cat) = self.category_filter
-                && h.category != cat {
-                    continue;
-                }
+                && h.category != cat
+            {
+                continue;
+            }
             indices.push(i);
         }
         indices
     }
 
     fn archived_habits(&self) -> Vec<usize> {
-        self.habits.iter().enumerate()
+        self.habits
+            .iter()
+            .enumerate()
             .filter(|(_, h)| h.archived)
             .map(|(i, _)| i)
             .collect()
@@ -694,7 +793,8 @@ impl HabitTrackerApp {
             self.status_msg = String::from("Name cannot be empty");
             return;
         }
-        let category = Category::ALL.get(self.create_category_idx)
+        let category = Category::ALL
+            .get(self.create_category_idx)
             .copied()
             .unwrap_or(Category::Custom);
         let frequency = if self.create_frequency_daily {
@@ -789,10 +889,9 @@ impl HabitTrackerApp {
                 self.show_create_form = true;
                 self.status_msg = String::from("New habit -- fill in details");
             }
-            "Up"
-                if self.selected_habit > 0 => {
-                    self.selected_habit -= 1;
-                }
+            "Up" if self.selected_habit > 0 => {
+                self.selected_habit -= 1;
+            }
             "Down" => {
                 let max = match self.screen {
                     Screen::Dashboard => self.active_habits().len(),
@@ -822,31 +921,28 @@ impl HabitTrackerApp {
                     }
                 }
             }
-            "Space" | "Return" => {
-                match self.screen {
-                    Screen::Dashboard => self.toggle_check_in_selected(),
-                    Screen::Archive => {
-                        let archived = self.archived_habits();
-                        if let Some(&idx) = archived.get(self.selected_habit) {
-                            self.unarchive_habit(idx);
-                        }
+            "Space" | "Return" => match self.screen {
+                Screen::Dashboard => self.toggle_check_in_selected(),
+                Screen::Archive => {
+                    let archived = self.archived_habits();
+                    if let Some(&idx) = archived.get(self.selected_habit) {
+                        self.unarchive_habit(idx);
                     }
-                    _ => {}
                 }
-            }
+                _ => {}
+            },
             "d" | "D" if ctrl => {
                 let active = self.active_habits();
                 if let Some(&idx) = active.get(self.selected_habit) {
                     self.delete_habit(idx);
                 }
             }
-            "a" | "A" if !ctrl
-                && self.screen == Screen::Dashboard => {
-                    let active = self.active_habits();
-                    if let Some(&idx) = active.get(self.selected_habit) {
-                        self.archive_habit(idx);
-                    }
+            "a" | "A" if !ctrl && self.screen == Screen::Dashboard => {
+                let active = self.active_habits();
+                if let Some(&idx) = active.get(self.selected_habit) {
+                    self.archive_habit(idx);
                 }
+            }
             "+" | "=" => self.advance_day(),
             "-" => self.go_back_day(),
             "c" | "C" => {
@@ -916,9 +1012,10 @@ impl HabitTrackerApp {
         let mut done = 0u32;
         for &idx in &active {
             if let Some(h) = self.habits.get(idx)
-                && h.is_checked_on(self.today) {
-                    done += 1;
-                }
+                && h.is_checked_on(self.today)
+            {
+                done += 1;
+            }
         }
         (done, total)
     }
@@ -944,7 +1041,8 @@ impl HabitTrackerApp {
         if active.is_empty() {
             return 0.0;
         }
-        let sum: f32 = active.iter()
+        let sum: f32 = active
+            .iter()
             .filter_map(|&i| self.habits.get(i))
             .map(|h| h.completion_rate(self.today, 7))
             .sum();
@@ -956,7 +1054,8 @@ impl HabitTrackerApp {
         if active.is_empty() {
             return 0.0;
         }
-        let sum: f32 = active.iter()
+        let sum: f32 = active
+            .iter()
             .filter_map(|&i| self.habits.get(i))
             .map(|h| h.completion_rate(self.today, 30))
             .sum();
@@ -994,8 +1093,12 @@ impl HabitTrackerApp {
 
         // Background
         cmds.push(RenderCommand::FillRect {
-            x: 0.0, y: 0.0, width: self.width, height: self.height,
-            color: BASE, corner_radii: CornerRadii::ZERO,
+            x: 0.0,
+            y: 0.0,
+            width: self.width,
+            height: self.height,
+            color: BASE,
+            corner_radii: CornerRadii::ZERO,
         });
 
         self.render_header(&mut cmds);
@@ -1021,23 +1124,36 @@ impl HabitTrackerApp {
 
     fn render_header(&self, cmds: &mut Vec<RenderCommand>) {
         cmds.push(RenderCommand::FillRect {
-            x: 0.0, y: 0.0, width: self.width, height: Self::HEADER_H,
-            color: MANTLE, corner_radii: CornerRadii::ZERO,
+            x: 0.0,
+            y: 0.0,
+            width: self.width,
+            height: Self::HEADER_H,
+            color: MANTLE,
+            corner_radii: CornerRadii::ZERO,
         });
 
         cmds.push(RenderCommand::Text {
-            x: 16.0, y: 14.0,
+            x: 16.0,
+            y: 14.0,
             text: String::from("\u{1F4CB} Habit Tracker"),
-            font_size: 20.0, color: TEXT_COLOR,
+            font_size: 20.0,
+            color: TEXT_COLOR,
             font_weight: FontWeightHint::Bold,
             max_width: Some(200.0),
         });
 
         // Date display
         cmds.push(RenderCommand::Text {
-            x: 240.0, y: 18.0,
-            text: format!("{} {} -- {}", self.today.day_of_week_short(), self.today.format_full(), self.today.day_of_week_short()),
-            font_size: 14.0, color: SUBTEXT0,
+            x: 240.0,
+            y: 18.0,
+            text: format!(
+                "{} {} -- {}",
+                self.today.day_of_week_short(),
+                self.today.format_full(),
+                self.today.day_of_week_short()
+            ),
+            font_size: 14.0,
+            color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(280.0),
         });
@@ -1046,9 +1162,11 @@ impl HabitTrackerApp {
         let (done, total) = self.overall_completion_today();
         let progress_text = format!("Today: {done}/{total}");
         cmds.push(RenderCommand::Text {
-            x: self.width - 200.0, y: 10.0,
+            x: self.width - 200.0,
+            y: 10.0,
             text: progress_text,
-            font_size: 16.0, color: GREEN,
+            font_size: 16.0,
+            color: GREEN,
             font_weight: FontWeightHint::Bold,
             max_width: Some(180.0),
         });
@@ -1059,15 +1177,23 @@ impl HabitTrackerApp {
         let bar_w = 160.0;
         let bar_h = 8.0;
         cmds.push(RenderCommand::FillRect {
-            x: bar_x, y: bar_y, width: bar_w, height: bar_h,
-            color: SURFACE0, corner_radii: CornerRadii::all(4.0),
+            x: bar_x,
+            y: bar_y,
+            width: bar_w,
+            height: bar_h,
+            color: SURFACE0,
+            corner_radii: CornerRadii::all(4.0),
         });
         if total > 0 {
             let fill = bar_w * (done as f32 / total as f32);
             if fill > 0.5 {
                 cmds.push(RenderCommand::FillRect {
-                    x: bar_x, y: bar_y, width: fill, height: bar_h,
-                    color: GREEN, corner_radii: CornerRadii::all(4.0),
+                    x: bar_x,
+                    y: bar_y,
+                    width: fill,
+                    height: bar_h,
+                    color: GREEN,
+                    corner_radii: CornerRadii::all(4.0),
                 });
             }
         }
@@ -1075,13 +1201,19 @@ impl HabitTrackerApp {
         // New habit button
         let btn_x = 560.0;
         cmds.push(RenderCommand::FillRect {
-            x: btn_x, y: 10.0, width: 90.0, height: 30.0,
-            color: BLUE, corner_radii: CornerRadii::all(6.0),
+            x: btn_x,
+            y: 10.0,
+            width: 90.0,
+            height: 30.0,
+            color: BLUE,
+            corner_radii: CornerRadii::all(6.0),
         });
         cmds.push(RenderCommand::Text {
-            x: btn_x + 10.0, y: 17.0,
+            x: btn_x + 10.0,
+            y: 17.0,
             text: String::from("+ New Habit"),
-            font_size: 12.0, color: CRUST,
+            font_size: 12.0,
+            color: CRUST,
             font_weight: FontWeightHint::Bold,
             max_width: Some(80.0),
         });
@@ -1090,11 +1222,20 @@ impl HabitTrackerApp {
     fn render_nav(&self, cmds: &mut Vec<RenderCommand>) {
         let y = Self::HEADER_H;
         cmds.push(RenderCommand::FillRect {
-            x: 0.0, y, width: self.width, height: Self::NAV_H,
-            color: SURFACE0, corner_radii: CornerRadii::ZERO,
+            x: 0.0,
+            y,
+            width: self.width,
+            height: Self::NAV_H,
+            color: SURFACE0,
+            corner_radii: CornerRadii::ZERO,
         });
 
-        let tabs = [Screen::Dashboard, Screen::Statistics, Screen::Archive, Screen::HeatMap];
+        let tabs = [
+            Screen::Dashboard,
+            Screen::Statistics,
+            Screen::Archive,
+            Screen::HeatMap,
+        ];
         let mut tx = 16.0;
         for (i, tab) in tabs.iter().enumerate() {
             let selected = *tab == self.screen;
@@ -1102,14 +1243,24 @@ impl HabitTrackerApp {
             let fg = if selected { CRUST } else { TEXT_COLOR };
             let w = 90.0;
             cmds.push(RenderCommand::FillRect {
-                x: tx, y: y + 4.0, width: w, height: 28.0,
-                color: bg, corner_radii: CornerRadii::all(4.0),
+                x: tx,
+                y: y + 4.0,
+                width: w,
+                height: 28.0,
+                color: bg,
+                corner_radii: CornerRadii::all(4.0),
             });
             cmds.push(RenderCommand::Text {
-                x: tx + 8.0, y: y + 10.0,
+                x: tx + 8.0,
+                y: y + 10.0,
                 text: format!("{} {}", i + 1, tab.label()),
-                font_size: 11.0, color: fg,
-                font_weight: if selected { FontWeightHint::Bold } else { FontWeightHint::Regular },
+                font_size: 11.0,
+                color: fg,
+                font_weight: if selected {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
                 max_width: Some(w - 16.0),
             });
             tx += w + 6.0;
@@ -1118,13 +1269,19 @@ impl HabitTrackerApp {
         // Category filter indicator
         if let Some(cat) = self.category_filter {
             cmds.push(RenderCommand::FillRect {
-                x: tx + 20.0, y: y + 6.0, width: 120.0, height: 24.0,
-                color: cat.color(), corner_radii: CornerRadii::all(12.0),
+                x: tx + 20.0,
+                y: y + 6.0,
+                width: 120.0,
+                height: 24.0,
+                color: cat.color(),
+                corner_radii: CornerRadii::all(12.0),
             });
             cmds.push(RenderCommand::Text {
-                x: tx + 30.0, y: y + 10.0,
+                x: tx + 30.0,
+                y: y + 10.0,
                 text: format!("{} {}", cat.icon(), cat.label()),
-                font_size: 11.0, color: CRUST,
+                font_size: 11.0,
+                color: CRUST,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(100.0),
             });
@@ -1135,9 +1292,11 @@ impl HabitTrackerApp {
         let active = self.active_habits();
         if active.is_empty() {
             cmds.push(RenderCommand::Text {
-                x: self.width / 2.0 - 100.0, y: start_y + 80.0,
+                x: self.width / 2.0 - 100.0,
+                y: start_y + 80.0,
                 text: String::from("No habits yet. Press N to create one."),
-                font_size: 16.0, color: SUBTEXT0,
+                font_size: 16.0,
+                color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(300.0),
             });
@@ -1155,18 +1314,26 @@ impl HabitTrackerApp {
             } else {
                 d.day_of_week_short().to_string()
             };
-            let label_color = if col == self.selected_day_col { BLUE } else { SUBTEXT0 };
+            let label_color = if col == self.selected_day_col {
+                BLUE
+            } else {
+                SUBTEXT0
+            };
             cmds.push(RenderCommand::Text {
-                x: cx + 2.0, y: start_y + 6.0,
+                x: cx + 2.0,
+                y: start_y + 6.0,
                 text: label,
-                font_size: 10.0, color: label_color,
+                font_size: 10.0,
+                color: label_color,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(Self::DAY_COL_W),
             });
             cmds.push(RenderCommand::Text {
-                x: cx + 6.0, y: start_y + 18.0,
+                x: cx + 6.0,
+                y: start_y + 18.0,
                 text: format!("{:02}", d.day),
-                font_size: 9.0, color: OVERLAY0,
+                font_size: 9.0,
+                color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(Self::DAY_COL_W),
             });
@@ -1175,23 +1342,29 @@ impl HabitTrackerApp {
         // Streak/rate headers
         let stats_x = days_start_x + 7.0 * Self::DAY_COL_W + 12.0;
         cmds.push(RenderCommand::Text {
-            x: stats_x, y: start_y + 8.0,
+            x: stats_x,
+            y: start_y + 8.0,
             text: String::from("Streak"),
-            font_size: 10.0, color: SUBTEXT0,
+            font_size: 10.0,
+            color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(50.0),
         });
         cmds.push(RenderCommand::Text {
-            x: stats_x + 56.0, y: start_y + 8.0,
+            x: stats_x + 56.0,
+            y: start_y + 8.0,
             text: String::from("7d"),
-            font_size: 10.0, color: SUBTEXT0,
+            font_size: 10.0,
+            color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(30.0),
         });
         cmds.push(RenderCommand::Text {
-            x: stats_x + 90.0, y: start_y + 8.0,
+            x: stats_x + 90.0,
+            y: start_y + 8.0,
             text: String::from("30d"),
-            font_size: 10.0, color: SUBTEXT0,
+            font_size: 10.0,
+            color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(30.0),
         });
@@ -1199,7 +1372,9 @@ impl HabitTrackerApp {
         let row_start_y = start_y + 32.0 - self.scroll_offset;
 
         for (vi, &habit_idx) in active.iter().enumerate() {
-            let Some(habit) = self.habits.get(habit_idx) else { continue };
+            let Some(habit) = self.habits.get(habit_idx) else {
+                continue;
+            };
             let ry = row_start_y + vi as f32 * Self::ROW_H;
 
             if ry + Self::ROW_H < start_y || ry > self.height - Self::STATUS_H {
@@ -1207,33 +1382,51 @@ impl HabitTrackerApp {
             }
 
             let is_selected = vi == self.selected_habit;
-            let row_bg = if is_selected { SURFACE1 } else if vi % 2 == 0 { SURFACE0 } else { BASE };
+            let row_bg = if is_selected {
+                SURFACE1
+            } else if vi % 2 == 0 {
+                SURFACE0
+            } else {
+                BASE
+            };
 
             cmds.push(RenderCommand::FillRect {
-                x: 8.0, y: ry, width: self.width - 16.0, height: Self::ROW_H - 2.0,
-                color: row_bg, corner_radii: CornerRadii::all(6.0),
+                x: 8.0,
+                y: ry,
+                width: self.width - 16.0,
+                height: Self::ROW_H - 2.0,
+                color: row_bg,
+                corner_radii: CornerRadii::all(6.0),
             });
 
             // Category color dot
             cmds.push(RenderCommand::FillRect {
-                x: 16.0, y: ry + 16.0, width: 10.0, height: 10.0,
-                color: habit.category.color(), corner_radii: CornerRadii::all(5.0),
+                x: 16.0,
+                y: ry + 16.0,
+                width: 10.0,
+                height: 10.0,
+                color: habit.category.color(),
+                corner_radii: CornerRadii::all(5.0),
             });
 
             // Habit name
             cmds.push(RenderCommand::Text {
-                x: 32.0, y: ry + 8.0,
+                x: 32.0,
+                y: ry + 8.0,
                 text: habit.name.clone(),
-                font_size: 14.0, color: TEXT_COLOR,
+                font_size: 14.0,
+                color: TEXT_COLOR,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(160.0),
             });
 
             // Frequency label
             cmds.push(RenderCommand::Text {
-                x: 32.0, y: ry + 28.0,
+                x: 32.0,
+                y: ry + 28.0,
                 text: habit.frequency.label(),
-                font_size: 10.0, color: OVERLAY0,
+                font_size: 10.0,
+                color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(100.0),
             });
@@ -1251,15 +1444,21 @@ impl HabitTrackerApp {
                 let dot_y = ry + (Self::ROW_H - 2.0 - dot_size) / 2.0;
 
                 cmds.push(RenderCommand::FillRect {
-                    x: dot_x, y: dot_y, width: dot_size, height: dot_size,
-                    color: dot_color, corner_radii: CornerRadii::all(dot_size / 2.0),
+                    x: dot_x,
+                    y: dot_y,
+                    width: dot_size,
+                    height: dot_size,
+                    color: dot_color,
+                    corner_radii: CornerRadii::all(dot_size / 2.0),
                 });
 
                 if checked {
                     cmds.push(RenderCommand::Text {
-                        x: dot_x + 3.0, y: dot_y + 2.0,
+                        x: dot_x + 3.0,
+                        y: dot_y + 2.0,
                         text: String::from("\u{2713}"),
-                        font_size: 12.0, color: CRUST,
+                        font_size: 12.0,
+                        color: CRUST,
                         font_weight: FontWeightHint::Bold,
                         max_width: Some(dot_size),
                     });
@@ -1267,9 +1466,12 @@ impl HabitTrackerApp {
 
                 if cell_selected {
                     cmds.push(RenderCommand::StrokeRect {
-                        x: dot_x - 2.0, y: dot_y - 2.0,
-                        width: dot_size + 4.0, height: dot_size + 4.0,
-                        color: BLUE, line_width: 2.0,
+                        x: dot_x - 2.0,
+                        y: dot_y - 2.0,
+                        width: dot_size + 4.0,
+                        height: dot_size + 4.0,
+                        color: BLUE,
+                        line_width: 2.0,
                         corner_radii: CornerRadii::all((dot_size + 4.0) / 2.0),
                     });
                 }
@@ -1279,9 +1481,11 @@ impl HabitTrackerApp {
             let streak = habit.current_streak(self.today);
             let streak_color = if streak > 0 { PEACH } else { OVERLAY0 };
             cmds.push(RenderCommand::Text {
-                x: stats_x, y: ry + 16.0,
+                x: stats_x,
+                y: ry + 16.0,
                 text: format!("{streak}"),
-                font_size: 14.0, color: streak_color,
+                font_size: 14.0,
+                color: streak_color,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(40.0),
             });
@@ -1290,9 +1494,11 @@ impl HabitTrackerApp {
             let rate_7 = habit.completion_rate(self.today, 7);
             let rate_7_color = rate_color(rate_7);
             cmds.push(RenderCommand::Text {
-                x: stats_x + 50.0, y: ry + 16.0,
+                x: stats_x + 50.0,
+                y: ry + 16.0,
                 text: format!("{}%", (rate_7 * 100.0) as u32),
-                font_size: 12.0, color: rate_7_color,
+                font_size: 12.0,
+                color: rate_7_color,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(40.0),
             });
@@ -1301,9 +1507,11 @@ impl HabitTrackerApp {
             let rate_30 = habit.completion_rate(self.today, 30);
             let rate_30_color = rate_color(rate_30);
             cmds.push(RenderCommand::Text {
-                x: stats_x + 86.0, y: ry + 16.0,
+                x: stats_x + 86.0,
+                y: ry + 16.0,
                 text: format!("{}%", (rate_30 * 100.0) as u32),
-                font_size: 12.0, color: rate_30_color,
+                font_size: 12.0,
+                color: rate_30_color,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(40.0),
             });
@@ -1318,16 +1526,28 @@ impl HabitTrackerApp {
         // Card 1: Overall today
         let (done, total) = self.overall_completion_today();
         self.render_stat_card(
-            cmds, pad, start_y + pad, card_w, card_h,
+            cmds,
+            pad,
+            start_y + pad,
+            card_w,
+            card_h,
             "Today's Progress",
             &format!("{done} / {total}"),
-            if total > 0 && done == total { GREEN } else { BLUE },
+            if total > 0 && done == total {
+                GREEN
+            } else {
+                BLUE
+            },
         );
 
         // Card 2: Best streak
         let (best_name, best_val) = self.best_habit_streak();
         self.render_stat_card(
-            cmds, pad * 2.0 + card_w, start_y + pad, card_w, card_h,
+            cmds,
+            pad * 2.0 + card_w,
+            start_y + pad,
+            card_w,
+            card_h,
             "Best Streak",
             &format!("{best_val} ({best_name})"),
             PEACH,
@@ -1336,7 +1556,11 @@ impl HabitTrackerApp {
         // Card 3: 7-day avg
         let avg_7 = self.average_completion_7d();
         self.render_stat_card(
-            cmds, pad, start_y + pad * 2.0 + card_h, card_w, card_h,
+            cmds,
+            pad,
+            start_y + pad * 2.0 + card_h,
+            card_w,
+            card_h,
             "7-Day Average",
             &format!("{}%", (avg_7 * 100.0) as u32),
             rate_color(avg_7),
@@ -1345,7 +1569,11 @@ impl HabitTrackerApp {
         // Card 4: 30-day avg
         let avg_30 = self.average_completion_30d();
         self.render_stat_card(
-            cmds, pad * 2.0 + card_w, start_y + pad * 2.0 + card_h, card_w, card_h,
+            cmds,
+            pad * 2.0 + card_w,
+            start_y + pad * 2.0 + card_h,
+            card_w,
+            card_h,
             "30-Day Average",
             &format!("{}%", (avg_30 * 100.0) as u32),
             rate_color(avg_30),
@@ -1354,123 +1582,84 @@ impl HabitTrackerApp {
         // Per-habit stats table
         let table_y = start_y + pad * 3.0 + card_h * 2.0 + 10.0;
         cmds.push(RenderCommand::Text {
-            x: pad, y: table_y,
+            x: pad,
+            y: table_y,
             text: String::from("Per-Habit Statistics"),
-            font_size: 16.0, color: TEXT_COLOR,
+            font_size: 16.0,
+            color: TEXT_COLOR,
             font_weight: FontWeightHint::Bold,
             max_width: Some(300.0),
         });
 
-        let headers = ["Habit", "Category", "Streak", "Best", "7d", "30d", "All", "Total"];
-        let col_widths: [f32; 8] = [140.0, 90.0, 50.0, 50.0, 50.0, 50.0, 50.0, 50.0];
-        let mut hx = pad;
-        for (i, header) in headers.iter().enumerate() {
-            cmds.push(RenderCommand::Text {
-                x: hx, y: table_y + 24.0,
-                text: header.to_string(),
-                font_size: 10.0, color: SUBTEXT0,
-                font_weight: FontWeightHint::Bold,
-                max_width: Some(col_widths[i]),
-            });
-            hx += col_widths[i];
-        }
+        let table = Table::with_gap(STATS_COLUMNS, pad, STATS_GAP);
+        table.header(cmds, table_y + 24.0, SUBTEXT0, STATS_HEADER_FONT);
 
         cmds.push(RenderCommand::Line {
-            x1: pad, y1: table_y + 38.0,
-            x2: self.width - pad, y2: table_y + 38.0,
-            color: SURFACE1, width: 1.0,
+            x1: pad,
+            y1: table_y + 38.0,
+            x2: self.width - pad,
+            y2: table_y + 38.0,
+            color: SURFACE1,
+            width: 1.0,
         });
 
         let active = self.active_habits();
         for (vi, &idx) in active.iter().enumerate() {
-            let Some(h) = self.habits.get(idx) else { continue };
+            let Some(h) = self.habits.get(idx) else {
+                continue;
+            };
             let ry = table_y + 44.0 + vi as f32 * 24.0;
             if ry > self.height - Self::STATUS_H {
                 break;
             }
 
-            let mut cx = pad;
-            // Name
-            cmds.push(RenderCommand::Text {
-                x: cx, y: ry,
-                text: h.name.clone(),
-                font_size: 11.0, color: TEXT_COLOR,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(col_widths[0] - 4.0),
-            });
-            cx += col_widths[0];
-
-            // Category
-            cmds.push(RenderCommand::Text {
-                x: cx, y: ry,
-                text: h.category.label().to_string(),
-                font_size: 11.0, color: h.category.color(),
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(col_widths[1] - 4.0),
-            });
-            cx += col_widths[1];
-
-            // Current streak
-            cmds.push(RenderCommand::Text {
-                x: cx, y: ry,
-                text: format!("{}", h.current_streak(self.today)),
-                font_size: 11.0, color: PEACH,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(col_widths[2] - 4.0),
-            });
-            cx += col_widths[2];
-
-            // Best streak
-            cmds.push(RenderCommand::Text {
-                x: cx, y: ry,
-                text: format!("{}", h.best_streak(self.today)),
-                font_size: 11.0, color: YELLOW,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(col_widths[3] - 4.0),
-            });
-            cx += col_widths[3];
-
-            // 7d rate
+            // A habit name is user-entered, so it is the one cell here with no
+            // bound on its length. It was clipped with no marker, which reads
+            // as a complete name that happens to be terse -- the reader had no
+            // way to tell "Read" from "Read thirty minutes before bed". Cells
+            // are cut at the end (`Fit::Start`): a habit name is a label the
+            // user wrote, and a label identifies itself by how it begins.
             let r7 = h.completion_rate(self.today, 7);
-            cmds.push(RenderCommand::Text {
-                x: cx, y: ry,
-                text: format!("{}%", (r7 * 100.0) as u32),
-                font_size: 11.0, color: rate_color(r7),
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(col_widths[4] - 4.0),
-            });
-            cx += col_widths[4];
-
-            // 30d rate
             let r30 = h.completion_rate(self.today, 30);
-            cmds.push(RenderCommand::Text {
-                x: cx, y: ry,
-                text: format!("{}%", (r30 * 100.0) as u32),
-                font_size: 11.0, color: rate_color(r30),
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(col_widths[5] - 4.0),
-            });
-            cx += col_widths[5];
-
-            // All-time rate
             let ra = h.completion_rate_alltime(self.today);
-            cmds.push(RenderCommand::Text {
-                x: cx, y: ry,
-                text: format!("{}%", (ra * 100.0) as u32),
-                font_size: 11.0, color: rate_color(ra),
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(col_widths[6] - 4.0),
-            });
-            cx += col_widths[6];
-
-            // Total check-ins
-            cmds.push(RenderCommand::Text {
-                x: cx, y: ry,
-                text: format!("{}", h.total_check_ins()),
-                font_size: 11.0, color: TEXT_COLOR,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(col_widths[7] - 4.0),
-            });
+            let cells: [(usize, String, Color); 8] = [
+                (STATS_HABIT, h.name.clone(), TEXT_COLOR),
+                (
+                    STATS_CATEGORY,
+                    h.category.label().to_string(),
+                    h.category.color(),
+                ),
+                (
+                    STATS_STREAK,
+                    format!("{}", h.current_streak(self.today)),
+                    PEACH,
+                ),
+                (STATS_BEST, format!("{}", h.best_streak(self.today)), YELLOW),
+                (
+                    STATS_7D,
+                    format!("{}%", (r7 * 100.0) as u32),
+                    rate_color(r7),
+                ),
+                (
+                    STATS_30D,
+                    format!("{}%", (r30 * 100.0) as u32),
+                    rate_color(r30),
+                ),
+                (
+                    STATS_ALL,
+                    format!("{}%", (ra * 100.0) as u32),
+                    rate_color(ra),
+                ),
+                (STATS_TOTAL, format!("{}", h.total_check_ins()), TEXT_COLOR),
+            ];
+            debug_assert_eq!(
+                cells.len(),
+                table.len(),
+                "a cell with no column is positioned past the table and drawn empty",
+            );
+            for (index, text, color) in &cells {
+                table.cell(cmds, *index, ry, text, *color, STATS_ROW_FONT, Fit::Start);
+            }
         }
     }
 
@@ -1478,29 +1667,47 @@ impl HabitTrackerApp {
     // color. Grouping would not improve clarity.
     #[allow(clippy::too_many_arguments)]
     fn render_stat_card(
-        &self, cmds: &mut Vec<RenderCommand>,
-        x: f32, y: f32, w: f32, h: f32,
-        title: &str, value: &str, accent: Color,
+        &self,
+        cmds: &mut Vec<RenderCommand>,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        title: &str,
+        value: &str,
+        accent: Color,
     ) {
         cmds.push(RenderCommand::FillRect {
-            x, y, width: w, height: h,
-            color: SURFACE0, corner_radii: CornerRadii::all(8.0),
+            x,
+            y,
+            width: w,
+            height: h,
+            color: SURFACE0,
+            corner_radii: CornerRadii::all(8.0),
         });
         cmds.push(RenderCommand::FillRect {
-            x, y, width: 4.0, height: h,
-            color: accent, corner_radii: CornerRadii::all(2.0),
+            x,
+            y,
+            width: 4.0,
+            height: h,
+            color: accent,
+            corner_radii: CornerRadii::all(2.0),
         });
         cmds.push(RenderCommand::Text {
-            x: x + 16.0, y: y + 14.0,
+            x: x + 16.0,
+            y: y + 14.0,
             text: title.to_string(),
-            font_size: 12.0, color: SUBTEXT0,
+            font_size: 12.0,
+            color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(w - 32.0),
         });
         cmds.push(RenderCommand::Text {
-            x: x + 16.0, y: y + 40.0,
+            x: x + 16.0,
+            y: y + 40.0,
             text: value.to_string(),
-            font_size: 24.0, color: TEXT_COLOR,
+            font_size: 24.0,
+            color: TEXT_COLOR,
             font_weight: FontWeightHint::Bold,
             max_width: Some(w - 32.0),
         });
@@ -1511,9 +1718,11 @@ impl HabitTrackerApp {
 
         if archived.is_empty() {
             cmds.push(RenderCommand::Text {
-                x: self.width / 2.0 - 120.0, y: start_y + 80.0,
+                x: self.width / 2.0 - 120.0,
+                y: start_y + 80.0,
                 text: String::from("No archived habits. Press A to archive one."),
-                font_size: 16.0, color: SUBTEXT0,
+                font_size: 16.0,
+                color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(300.0),
             });
@@ -1521,15 +1730,19 @@ impl HabitTrackerApp {
         }
 
         cmds.push(RenderCommand::Text {
-            x: 20.0, y: start_y + 12.0,
+            x: 20.0,
+            y: start_y + 12.0,
             text: format!("Archived Habits ({})", archived.len()),
-            font_size: 16.0, color: TEXT_COLOR,
+            font_size: 16.0,
+            color: TEXT_COLOR,
             font_weight: FontWeightHint::Bold,
             max_width: Some(300.0),
         });
 
         for (vi, &idx) in archived.iter().enumerate() {
-            let Some(h) = self.habits.get(idx) else { continue };
+            let Some(h) = self.habits.get(idx) else {
+                continue;
+            };
             let ry = start_y + 42.0 + vi as f32 * Self::ROW_H;
             if ry > self.height - Self::STATUS_H {
                 break;
@@ -1539,28 +1752,44 @@ impl HabitTrackerApp {
             let bg = if is_selected { SURFACE1 } else { SURFACE0 };
 
             cmds.push(RenderCommand::FillRect {
-                x: 16.0, y: ry, width: self.width - 32.0, height: Self::ROW_H - 4.0,
-                color: bg, corner_radii: CornerRadii::all(6.0),
+                x: 16.0,
+                y: ry,
+                width: self.width - 32.0,
+                height: Self::ROW_H - 4.0,
+                color: bg,
+                corner_radii: CornerRadii::all(6.0),
             });
 
             // Category dot
             cmds.push(RenderCommand::FillRect {
-                x: 28.0, y: ry + 16.0, width: 10.0, height: 10.0,
-                color: h.category.color(), corner_radii: CornerRadii::all(5.0),
+                x: 28.0,
+                y: ry + 16.0,
+                width: 10.0,
+                height: 10.0,
+                color: h.category.color(),
+                corner_radii: CornerRadii::all(5.0),
             });
 
             cmds.push(RenderCommand::Text {
-                x: 46.0, y: ry + 8.0,
+                x: 46.0,
+                y: ry + 8.0,
                 text: h.name.clone(),
-                font_size: 14.0, color: SUBTEXT0,
+                font_size: 14.0,
+                color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(200.0),
             });
 
             cmds.push(RenderCommand::Text {
-                x: 46.0, y: ry + 28.0,
-                text: format!("{} -- {} check-ins", h.category.label(), h.total_check_ins()),
-                font_size: 10.0, color: OVERLAY0,
+                x: 46.0,
+                y: ry + 28.0,
+                text: format!(
+                    "{} -- {} check-ins",
+                    h.category.label(),
+                    h.total_check_ins()
+                ),
+                font_size: 10.0,
+                color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(300.0),
             });
@@ -1568,9 +1797,11 @@ impl HabitTrackerApp {
             // Restore hint
             if is_selected {
                 cmds.push(RenderCommand::Text {
-                    x: self.width - 180.0, y: ry + 14.0,
+                    x: self.width - 180.0,
+                    y: ry + 14.0,
                     text: String::from("Enter to restore"),
-                    font_size: 11.0, color: BLUE,
+                    font_size: 11.0,
+                    color: BLUE,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(140.0),
                 });
@@ -1582,34 +1813,43 @@ impl HabitTrackerApp {
         let active = self.active_habits();
         if active.is_empty() {
             cmds.push(RenderCommand::Text {
-                x: self.width / 2.0 - 80.0, y: start_y + 80.0,
+                x: self.width / 2.0 - 80.0,
+                y: start_y + 80.0,
                 text: String::from("No habits to display."),
-                font_size: 16.0, color: SUBTEXT0,
+                font_size: 16.0,
+                color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(300.0),
             });
             return;
         }
 
-        let habit_idx = active.get(self.heatmap_habit_idx.min(active.len().saturating_sub(1)))
+        let habit_idx = active
+            .get(self.heatmap_habit_idx.min(active.len().saturating_sub(1)))
             .copied()
             .unwrap_or(0);
-        let Some(habit) = self.habits.get(habit_idx) else { return };
+        let Some(habit) = self.habits.get(habit_idx) else {
+            return;
+        };
 
         // Title
         cmds.push(RenderCommand::Text {
-            x: 20.0, y: start_y + 12.0,
+            x: 20.0,
+            y: start_y + 12.0,
             text: format!("Contribution Graph: {}", habit.name),
-            font_size: 16.0, color: TEXT_COLOR,
+            font_size: 16.0,
+            color: TEXT_COLOR,
             font_weight: FontWeightHint::Bold,
             max_width: Some(400.0),
         });
 
         // Navigation hint
         cmds.push(RenderCommand::Text {
-            x: 20.0, y: start_y + 34.0,
+            x: 20.0,
+            y: start_y + 34.0,
             text: String::from("Left/Right to switch habits"),
-            font_size: 11.0, color: SUBTEXT0,
+            font_size: 11.0,
+            color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(300.0),
         });
@@ -1626,9 +1866,11 @@ impl HabitTrackerApp {
         for (di, label) in day_labels.iter().enumerate() {
             if !label.is_empty() {
                 cmds.push(RenderCommand::Text {
-                    x: 16.0, y: hy_start + di as f32 * (cell + gap) + 1.0,
+                    x: 16.0,
+                    y: hy_start + di as f32 * (cell + gap) + 1.0,
                     text: label.to_string(),
-                    font_size: 9.0, color: SUBTEXT0,
+                    font_size: 9.0,
+                    color: SUBTEXT0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(40.0),
                 });
@@ -1648,8 +1890,12 @@ impl HabitTrackerApp {
 
             let color = if *checked { GREEN } else { SURFACE0 };
             cmds.push(RenderCommand::FillRect {
-                x: cx, y: cy, width: cell, height: cell,
-                color, corner_radii: CornerRadii::all(2.0),
+                x: cx,
+                y: cy,
+                width: cell,
+                height: cell,
+                color,
+                corner_radii: CornerRadii::all(2.0),
             });
         }
 
@@ -1663,9 +1909,11 @@ impl HabitTrackerApp {
                 let mx = hx_start + week as f32 * (cell + gap);
                 if mx + 30.0 < self.width - 20.0 {
                     cmds.push(RenderCommand::Text {
-                        x: mx, y: hy_start - 14.0,
+                        x: mx,
+                        y: hy_start - 14.0,
                         text: date.month_short().to_string(),
-                        font_size: 9.0, color: SUBTEXT0,
+                        font_size: 9.0,
+                        color: SUBTEXT0,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(30.0),
                     });
@@ -1676,24 +1924,36 @@ impl HabitTrackerApp {
         // Legend
         let ly = hy_start + 7.0 * (cell + gap) + 16.0;
         cmds.push(RenderCommand::Text {
-            x: hx_start, y: ly,
+            x: hx_start,
+            y: ly,
             text: String::from("Less"),
-            font_size: 10.0, color: SUBTEXT0,
+            font_size: 10.0,
+            color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(40.0),
         });
-        let legend_colors = [SURFACE0, Color::rgba(166, 227, 161, 80), Color::rgba(166, 227, 161, 160), GREEN];
+        let legend_colors = [
+            SURFACE0,
+            Color::rgba(166, 227, 161, 80),
+            Color::rgba(166, 227, 161, 160),
+            GREEN,
+        ];
         for (li, lc) in legend_colors.iter().enumerate() {
             cmds.push(RenderCommand::FillRect {
-                x: hx_start + 36.0 + li as f32 * (cell + 2.0), y: ly,
-                width: cell, height: cell,
-                color: *lc, corner_radii: CornerRadii::all(2.0),
+                x: hx_start + 36.0 + li as f32 * (cell + 2.0),
+                y: ly,
+                width: cell,
+                height: cell,
+                color: *lc,
+                corner_radii: CornerRadii::all(2.0),
             });
         }
         cmds.push(RenderCommand::Text {
-            x: hx_start + 36.0 + 4.0 * (cell + 2.0) + 4.0, y: ly,
+            x: hx_start + 36.0 + 4.0 * (cell + 2.0) + 4.0,
+            y: ly,
             text: String::from("More"),
-            font_size: 10.0, color: SUBTEXT0,
+            font_size: 10.0,
+            color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(40.0),
         });
@@ -1710,18 +1970,29 @@ impl HabitTrackerApp {
             (format!("Current Streak: {streak}"), PEACH),
             (format!("Best Streak: {best}"), YELLOW),
             (format!("7-day: {}%", (r7 * 100.0) as u32), rate_color(r7)),
-            (format!("30-day: {}%", (r30 * 100.0) as u32), rate_color(r30)),
-            (format!("All-time: {}%", (ra * 100.0) as u32), rate_color(ra)),
-            (format!("Total check-ins: {}", habit.total_check_ins()), TEXT_COLOR),
+            (
+                format!("30-day: {}%", (r30 * 100.0) as u32),
+                rate_color(r30),
+            ),
+            (
+                format!("All-time: {}%", (ra * 100.0) as u32),
+                rate_color(ra),
+            ),
+            (
+                format!("Total check-ins: {}", habit.total_check_ins()),
+                TEXT_COLOR,
+            ),
         ];
 
         for (si, (text, color)) in stats_items.iter().enumerate() {
             let col = si % 3;
             let row = si / 3;
             cmds.push(RenderCommand::Text {
-                x: 20.0 + col as f32 * 200.0, y: sy + row as f32 * 22.0,
+                x: 20.0 + col as f32 * 200.0,
+                y: sy + row as f32 * 22.0,
                 text: text.clone(),
-                font_size: 12.0, color: *color,
+                font_size: 12.0,
+                color: *color,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(190.0),
             });
@@ -1731,8 +2002,12 @@ impl HabitTrackerApp {
     fn render_create_form(&self, cmds: &mut Vec<RenderCommand>) {
         // Modal overlay
         cmds.push(RenderCommand::FillRect {
-            x: 0.0, y: 0.0, width: self.width, height: self.height,
-            color: Color::rgba(0, 0, 0, 160), corner_radii: CornerRadii::ZERO,
+            x: 0.0,
+            y: 0.0,
+            width: self.width,
+            height: self.height,
+            color: Color::rgba(0, 0, 0, 160),
+            corner_radii: CornerRadii::ZERO,
         });
 
         let fw = 400.0;
@@ -1741,75 +2016,110 @@ impl HabitTrackerApp {
         let fy = (self.height - fh) / 2.0;
 
         cmds.push(RenderCommand::FillRect {
-            x: fx, y: fy, width: fw, height: fh,
-            color: MANTLE, corner_radii: CornerRadii::all(12.0),
+            x: fx,
+            y: fy,
+            width: fw,
+            height: fh,
+            color: MANTLE,
+            corner_radii: CornerRadii::all(12.0),
         });
         cmds.push(RenderCommand::StrokeRect {
-            x: fx, y: fy, width: fw, height: fh,
-            color: SURFACE1, line_width: 1.0,
+            x: fx,
+            y: fy,
+            width: fw,
+            height: fh,
+            color: SURFACE1,
+            line_width: 1.0,
             corner_radii: CornerRadii::all(12.0),
         });
 
         cmds.push(RenderCommand::Text {
-            x: fx + 20.0, y: fy + 16.0,
+            x: fx + 20.0,
+            y: fy + 16.0,
             text: String::from("New Habit"),
-            font_size: 18.0, color: TEXT_COLOR,
+            font_size: 18.0,
+            color: TEXT_COLOR,
             font_weight: FontWeightHint::Bold,
             max_width: Some(200.0),
         });
 
         // Name field
         cmds.push(RenderCommand::Text {
-            x: fx + 20.0, y: fy + 54.0,
+            x: fx + 20.0,
+            y: fy + 54.0,
             text: String::from("Name:"),
-            font_size: 12.0, color: SUBTEXT0,
+            font_size: 12.0,
+            color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(60.0),
         });
         cmds.push(RenderCommand::FillRect {
-            x: fx + 80.0, y: fy + 48.0, width: 290.0, height: 28.0,
-            color: SURFACE0, corner_radii: CornerRadii::all(4.0),
+            x: fx + 80.0,
+            y: fy + 48.0,
+            width: 290.0,
+            height: 28.0,
+            color: SURFACE0,
+            corner_radii: CornerRadii::all(4.0),
         });
         let display_name = if self.create_name.is_empty() {
             String::from("Type a name...")
         } else {
             self.create_name.clone()
         };
-        let name_color = if self.create_name.is_empty() { OVERLAY0 } else { TEXT_COLOR };
+        let name_color = if self.create_name.is_empty() {
+            OVERLAY0
+        } else {
+            TEXT_COLOR
+        };
         cmds.push(RenderCommand::Text {
-            x: fx + 88.0, y: fy + 54.0,
+            x: fx + 88.0,
+            y: fy + 54.0,
             text: display_name,
-            font_size: 12.0, color: name_color,
+            font_size: 12.0,
+            color: name_color,
             font_weight: FontWeightHint::Regular,
             max_width: Some(270.0),
         });
 
         // Category
-        let cat = Category::ALL.get(self.create_category_idx).copied().unwrap_or(Category::Custom);
+        let cat = Category::ALL
+            .get(self.create_category_idx)
+            .copied()
+            .unwrap_or(Category::Custom);
         cmds.push(RenderCommand::Text {
-            x: fx + 20.0, y: fy + 94.0,
+            x: fx + 20.0,
+            y: fy + 94.0,
             text: String::from("Category:"),
-            font_size: 12.0, color: SUBTEXT0,
+            font_size: 12.0,
+            color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(80.0),
         });
         cmds.push(RenderCommand::FillRect {
-            x: fx + 110.0, y: fy + 88.0, width: 140.0, height: 24.0,
-            color: cat.color(), corner_radii: CornerRadii::all(12.0),
+            x: fx + 110.0,
+            y: fy + 88.0,
+            width: 140.0,
+            height: 24.0,
+            color: cat.color(),
+            corner_radii: CornerRadii::all(12.0),
         });
         cmds.push(RenderCommand::Text {
-            x: fx + 120.0, y: fy + 92.0,
+            x: fx + 120.0,
+            y: fy + 92.0,
             text: format!("{} {} (Tab)", cat.icon(), cat.label()),
-            font_size: 11.0, color: CRUST,
+            font_size: 11.0,
+            color: CRUST,
             font_weight: FontWeightHint::Bold,
             max_width: Some(120.0),
         });
 
         // Frequency
         cmds.push(RenderCommand::Text {
-            x: fx + 20.0, y: fy + 134.0,
+            x: fx + 20.0,
+            y: fy + 134.0,
             text: String::from("Frequency:"),
-            font_size: 12.0, color: SUBTEXT0,
+            font_size: 12.0,
+            color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(80.0),
         });
@@ -1819,34 +2129,48 @@ impl HabitTrackerApp {
             format!("{}x/week (F1 toggle, F2 count)", self.create_weekly_count)
         };
         cmds.push(RenderCommand::Text {
-            x: fx + 110.0, y: fy + 134.0,
+            x: fx + 110.0,
+            y: fy + 134.0,
             text: freq_text,
-            font_size: 12.0, color: TEXT_COLOR,
+            font_size: 12.0,
+            color: TEXT_COLOR,
             font_weight: FontWeightHint::Regular,
             max_width: Some(250.0),
         });
 
         // Buttons
         cmds.push(RenderCommand::FillRect {
-            x: fx + 100.0, y: fy + fh - 60.0, width: 90.0, height: 32.0,
-            color: GREEN, corner_radii: CornerRadii::all(6.0),
+            x: fx + 100.0,
+            y: fy + fh - 60.0,
+            width: 90.0,
+            height: 32.0,
+            color: GREEN,
+            corner_radii: CornerRadii::all(6.0),
         });
         cmds.push(RenderCommand::Text {
-            x: fx + 118.0, y: fy + fh - 52.0,
+            x: fx + 118.0,
+            y: fy + fh - 52.0,
             text: String::from("Create"),
-            font_size: 13.0, color: CRUST,
+            font_size: 13.0,
+            color: CRUST,
             font_weight: FontWeightHint::Bold,
             max_width: Some(70.0),
         });
 
         cmds.push(RenderCommand::FillRect {
-            x: fx + 210.0, y: fy + fh - 60.0, width: 90.0, height: 32.0,
-            color: SURFACE1, corner_radii: CornerRadii::all(6.0),
+            x: fx + 210.0,
+            y: fy + fh - 60.0,
+            width: 90.0,
+            height: 32.0,
+            color: SURFACE1,
+            corner_radii: CornerRadii::all(6.0),
         });
         cmds.push(RenderCommand::Text {
-            x: fx + 228.0, y: fy + fh - 52.0,
+            x: fx + 228.0,
+            y: fy + fh - 52.0,
             text: String::from("Cancel"),
-            font_size: 13.0, color: TEXT_COLOR,
+            font_size: 13.0,
+            color: TEXT_COLOR,
             font_weight: FontWeightHint::Regular,
             max_width: Some(70.0),
         });
@@ -1855,20 +2179,28 @@ impl HabitTrackerApp {
     fn render_status(&self, cmds: &mut Vec<RenderCommand>) {
         let y = self.height - Self::STATUS_H;
         cmds.push(RenderCommand::FillRect {
-            x: 0.0, y, width: self.width, height: Self::STATUS_H,
-            color: MANTLE, corner_radii: CornerRadii::ZERO,
+            x: 0.0,
+            y,
+            width: self.width,
+            height: Self::STATUS_H,
+            color: MANTLE,
+            corner_radii: CornerRadii::ZERO,
         });
         cmds.push(RenderCommand::Text {
-            x: 12.0, y: y + 7.0,
+            x: 12.0,
+            y: y + 7.0,
             text: self.status_msg.clone(),
-            font_size: 11.0, color: SUBTEXT0,
+            font_size: 11.0,
+            color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(self.width * 0.5),
         });
         cmds.push(RenderCommand::Text {
-            x: self.width - 320.0, y: y + 7.0,
+            x: self.width - 320.0,
+            y: y + 7.0,
             text: String::from("N:New  A:Archive  C:Filter  Space:Check  +/-:Date"),
-            font_size: 10.0, color: OVERLAY0,
+            font_size: 10.0,
+            color: OVERLAY0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(310.0),
         });
@@ -1937,7 +2269,11 @@ mod tests {
 
     #[test]
     fn test_date_add_days_forward() {
-        let d = Date { year: 2026, month: 5, day: 30 };
+        let d = Date {
+            year: 2026,
+            month: 5,
+            day: 30,
+        };
         let next = d.add_days(2);
         assert_eq!(next.month, 6);
         assert_eq!(next.day, 1);
@@ -1945,7 +2281,11 @@ mod tests {
 
     #[test]
     fn test_date_add_days_backward() {
-        let d = Date { year: 2026, month: 6, day: 1 };
+        let d = Date {
+            year: 2026,
+            month: 6,
+            day: 1,
+        };
         let prev = d.add_days(-2);
         assert_eq!(prev.month, 5);
         assert_eq!(prev.day, 30);
@@ -1953,7 +2293,11 @@ mod tests {
 
     #[test]
     fn test_date_add_days_year_boundary() {
-        let d = Date { year: 2026, month: 12, day: 31 };
+        let d = Date {
+            year: 2026,
+            month: 12,
+            day: 31,
+        };
         let next = d.add_days(1);
         assert_eq!(next.year, 2027);
         assert_eq!(next.month, 1);
@@ -1962,7 +2306,11 @@ mod tests {
 
     #[test]
     fn test_date_add_days_backward_year() {
-        let d = Date { year: 2026, month: 1, day: 1 };
+        let d = Date {
+            year: 2026,
+            month: 1,
+            day: 1,
+        };
         let prev = d.add_days(-1);
         assert_eq!(prev.year, 2025);
         assert_eq!(prev.month, 12);
@@ -1971,8 +2319,16 @@ mod tests {
 
     #[test]
     fn test_days_since() {
-        let d1 = Date { year: 2026, month: 5, day: 18 };
-        let d2 = Date { year: 2026, month: 5, day: 15 };
+        let d1 = Date {
+            year: 2026,
+            month: 5,
+            day: 18,
+        };
+        let d2 = Date {
+            year: 2026,
+            month: 5,
+            day: 15,
+        };
         assert_eq!(d1.days_since(d2), 3);
         assert_eq!(d2.days_since(d1), -3);
     }
@@ -1980,20 +2336,32 @@ mod tests {
     #[test]
     fn test_day_of_week() {
         // 2026-05-18 is a Monday
-        let d = Date { year: 2026, month: 5, day: 18 };
+        let d = Date {
+            year: 2026,
+            month: 5,
+            day: 18,
+        };
         assert_eq!(d.day_of_week(), 1); // 1=Monday
     }
 
     #[test]
     fn test_day_of_week_sunday() {
         // 2026-05-17 is a Sunday
-        let d = Date { year: 2026, month: 5, day: 17 };
+        let d = Date {
+            year: 2026,
+            month: 5,
+            day: 17,
+        };
         assert_eq!(d.day_of_week(), 0); // 0=Sunday
     }
 
     #[test]
     fn test_week_start_monday() {
-        let d = Date { year: 2026, month: 5, day: 20 }; // Wednesday
+        let d = Date {
+            year: 2026,
+            month: 5,
+            day: 20,
+        }; // Wednesday
         let ws = d.week_start_monday();
         assert_eq!(ws.day_of_week(), 1); // Monday
         assert!(ws.to_day_number() <= d.to_day_number());
@@ -2002,27 +2370,51 @@ mod tests {
 
     #[test]
     fn test_format_short() {
-        let d = Date { year: 2026, month: 5, day: 18 };
+        let d = Date {
+            year: 2026,
+            month: 5,
+            day: 18,
+        };
         assert_eq!(d.format_short(), "May 18");
     }
 
     #[test]
     fn test_format_full() {
-        let d = Date { year: 2026, month: 5, day: 18 };
+        let d = Date {
+            year: 2026,
+            month: 5,
+            day: 18,
+        };
         assert_eq!(d.format_full(), "May 18, 2026");
     }
 
     #[test]
     fn test_to_day_number_monotonic() {
-        let d1 = Date { year: 2026, month: 1, day: 1 };
-        let d2 = Date { year: 2026, month: 12, day: 31 };
+        let d1 = Date {
+            year: 2026,
+            month: 1,
+            day: 1,
+        };
+        let d2 = Date {
+            year: 2026,
+            month: 12,
+            day: 31,
+        };
         assert!(d2.to_day_number() > d1.to_day_number());
     }
 
     #[test]
     fn test_date_ordering() {
-        let d1 = Date { year: 2026, month: 5, day: 1 };
-        let d2 = Date { year: 2026, month: 5, day: 18 };
+        let d1 = Date {
+            year: 2026,
+            month: 5,
+            day: 1,
+        };
+        let d2 = Date {
+            year: 2026,
+            month: 5,
+            day: 18,
+        };
         assert!(d1 < d2);
     }
 
@@ -2063,7 +2455,11 @@ mod tests {
 
     #[test]
     fn test_habit_creation() {
-        let d = Date { year: 2026, month: 5, day: 1 };
+        let d = Date {
+            year: 2026,
+            month: 5,
+            day: 1,
+        };
         let h = Habit::new(1, "Test", "Desc", Category::Health, Frequency::Daily, d);
         assert_eq!(h.id, 1);
         assert_eq!(h.name, "Test");
@@ -2073,7 +2469,11 @@ mod tests {
 
     #[test]
     fn test_habit_toggle_check_in() {
-        let d = Date { year: 2026, month: 5, day: 18 };
+        let d = Date {
+            year: 2026,
+            month: 5,
+            day: 18,
+        };
         let mut h = Habit::new(1, "Test", "", Category::Health, Frequency::Daily, d);
         assert!(!h.is_checked_on(d));
         h.toggle_check_in(d);
@@ -2084,7 +2484,11 @@ mod tests {
 
     #[test]
     fn test_habit_multiple_check_ins() {
-        let base = Date { year: 2026, month: 5, day: 1 };
+        let base = Date {
+            year: 2026,
+            month: 5,
+            day: 1,
+        };
         let mut h = Habit::new(1, "Test", "", Category::Health, Frequency::Daily, base);
         for i in 0..5 {
             h.toggle_check_in(base.add_days(i));
@@ -2097,7 +2501,11 @@ mod tests {
 
     #[test]
     fn test_habit_check_ins_sorted() {
-        let base = Date { year: 2026, month: 5, day: 1 };
+        let base = Date {
+            year: 2026,
+            month: 5,
+            day: 1,
+        };
         let mut h = Habit::new(1, "Test", "", Category::Health, Frequency::Daily, base);
         h.toggle_check_in(base.add_days(5));
         h.toggle_check_in(base.add_days(2));
@@ -2109,8 +2517,19 @@ mod tests {
 
     #[test]
     fn test_streak_daily_consecutive() {
-        let today = Date { year: 2026, month: 5, day: 18 };
-        let mut h = Habit::new(1, "Test", "", Category::Health, Frequency::Daily, today.add_days(-10));
+        let today = Date {
+            year: 2026,
+            month: 5,
+            day: 18,
+        };
+        let mut h = Habit::new(
+            1,
+            "Test",
+            "",
+            Category::Health,
+            Frequency::Daily,
+            today.add_days(-10),
+        );
         for i in 0..5 {
             h.check_ins.push(today.add_days(-i));
         }
@@ -2119,8 +2538,19 @@ mod tests {
 
     #[test]
     fn test_streak_daily_with_gap() {
-        let today = Date { year: 2026, month: 5, day: 18 };
-        let mut h = Habit::new(1, "Test", "", Category::Health, Frequency::Daily, today.add_days(-10));
+        let today = Date {
+            year: 2026,
+            month: 5,
+            day: 18,
+        };
+        let mut h = Habit::new(
+            1,
+            "Test",
+            "",
+            Category::Health,
+            Frequency::Daily,
+            today.add_days(-10),
+        );
         h.check_ins.push(today);
         h.check_ins.push(today.add_days(-1));
         // Gap on -2
@@ -2130,8 +2560,19 @@ mod tests {
 
     #[test]
     fn test_streak_daily_today_not_checked() {
-        let today = Date { year: 2026, month: 5, day: 18 };
-        let mut h = Habit::new(1, "Test", "", Category::Health, Frequency::Daily, today.add_days(-10));
+        let today = Date {
+            year: 2026,
+            month: 5,
+            day: 18,
+        };
+        let mut h = Habit::new(
+            1,
+            "Test",
+            "",
+            Category::Health,
+            Frequency::Daily,
+            today.add_days(-10),
+        );
         // Checked yesterday and day before
         h.check_ins.push(today.add_days(-1));
         h.check_ins.push(today.add_days(-2));
@@ -2141,15 +2582,30 @@ mod tests {
 
     #[test]
     fn test_streak_daily_empty() {
-        let today = Date { year: 2026, month: 5, day: 18 };
+        let today = Date {
+            year: 2026,
+            month: 5,
+            day: 18,
+        };
         let h = Habit::new(1, "Test", "", Category::Health, Frequency::Daily, today);
         assert_eq!(h.current_streak(today), 0);
     }
 
     #[test]
     fn test_best_streak_daily() {
-        let today = Date { year: 2026, month: 5, day: 18 };
-        let mut h = Habit::new(1, "Test", "", Category::Health, Frequency::Daily, today.add_days(-20));
+        let today = Date {
+            year: 2026,
+            month: 5,
+            day: 18,
+        };
+        let mut h = Habit::new(
+            1,
+            "Test",
+            "",
+            Category::Health,
+            Frequency::Daily,
+            today.add_days(-20),
+        );
         // Build a 5-day streak, then gap, then 3-day streak
         for i in 10..15 {
             h.check_ins.push(today.add_days(-i));
@@ -2163,7 +2619,11 @@ mod tests {
 
     #[test]
     fn test_streak_weekly() {
-        let today = Date { year: 2026, month: 5, day: 18 };
+        let today = Date {
+            year: 2026,
+            month: 5,
+            day: 18,
+        };
         let start = today.add_days(-28);
         let mut h = Habit::new(1, "Test", "", Category::Health, Frequency::Weekly(3), start);
         // Fill 3+ days for last 3 weeks
@@ -2181,7 +2641,11 @@ mod tests {
 
     #[test]
     fn test_best_streak_weekly() {
-        let today = Date { year: 2026, month: 5, day: 18 };
+        let today = Date {
+            year: 2026,
+            month: 5,
+            day: 18,
+        };
         let start = today.add_days(-60);
         let mut h = Habit::new(1, "Test", "", Category::Health, Frequency::Weekly(2), start);
         // 4 consecutive weeks meeting target
@@ -2199,8 +2663,19 @@ mod tests {
 
     #[test]
     fn test_completion_rate_daily_perfect() {
-        let today = Date { year: 2026, month: 5, day: 18 };
-        let mut h = Habit::new(1, "Test", "", Category::Health, Frequency::Daily, today.add_days(-10));
+        let today = Date {
+            year: 2026,
+            month: 5,
+            day: 18,
+        };
+        let mut h = Habit::new(
+            1,
+            "Test",
+            "",
+            Category::Health,
+            Frequency::Daily,
+            today.add_days(-10),
+        );
         for i in 0..7 {
             h.check_ins.push(today.add_days(-i));
         }
@@ -2210,8 +2685,19 @@ mod tests {
 
     #[test]
     fn test_completion_rate_daily_half() {
-        let today = Date { year: 2026, month: 5, day: 18 };
-        let mut h = Habit::new(1, "Test", "", Category::Health, Frequency::Daily, today.add_days(-10));
+        let today = Date {
+            year: 2026,
+            month: 5,
+            day: 18,
+        };
+        let mut h = Habit::new(
+            1,
+            "Test",
+            "",
+            Category::Health,
+            Frequency::Daily,
+            today.add_days(-10),
+        );
         // Check in on even days only (0, 2, 4, 6)
         for i in (0..7).filter(|x| x % 2 == 0) {
             h.check_ins.push(today.add_days(-i));
@@ -2223,14 +2709,22 @@ mod tests {
 
     #[test]
     fn test_completion_rate_zero_days() {
-        let today = Date { year: 2026, month: 5, day: 18 };
+        let today = Date {
+            year: 2026,
+            month: 5,
+            day: 18,
+        };
         let h = Habit::new(1, "Test", "", Category::Health, Frequency::Daily, today);
         assert_eq!(h.completion_rate(today, 0), 0.0);
     }
 
     #[test]
     fn test_completion_rate_weekly() {
-        let today = Date { year: 2026, month: 5, day: 18 };
+        let today = Date {
+            year: 2026,
+            month: 5,
+            day: 18,
+        };
         let start = today.add_days(-28);
         let mut h = Habit::new(1, "Test", "", Category::Health, Frequency::Weekly(3), start);
         // Meet target 2 out of 4 weeks
@@ -2247,7 +2741,11 @@ mod tests {
 
     #[test]
     fn test_completion_rate_alltime() {
-        let today = Date { year: 2026, month: 5, day: 18 };
+        let today = Date {
+            year: 2026,
+            month: 5,
+            day: 18,
+        };
         let created = today.add_days(-10);
         let mut h = Habit::new(1, "Test", "", Category::Health, Frequency::Daily, created);
         // 5 out of 11 days (inclusive)
@@ -2260,8 +2758,19 @@ mod tests {
 
     #[test]
     fn test_total_check_ins() {
-        let today = Date { year: 2026, month: 5, day: 18 };
-        let mut h = Habit::new(1, "Test", "", Category::Health, Frequency::Daily, today.add_days(-10));
+        let today = Date {
+            year: 2026,
+            month: 5,
+            day: 18,
+        };
+        let mut h = Habit::new(
+            1,
+            "Test",
+            "",
+            Category::Health,
+            Frequency::Daily,
+            today.add_days(-10),
+        );
         for i in 0..5 {
             h.check_ins.push(today.add_days(-i));
         }
@@ -2280,7 +2789,11 @@ mod tests {
     fn test_app_sample_habits_have_check_ins() {
         let app = HabitTrackerApp::new();
         for h in &app.habits {
-            assert!(!h.check_ins.is_empty(), "Habit '{}' should have check-ins", h.name);
+            assert!(
+                !h.check_ins.is_empty(),
+                "Habit '{}' should have check-ins",
+                h.name
+            );
         }
     }
 
@@ -2904,7 +3417,11 @@ mod tests {
 
     #[test]
     fn test_completions_in_week() {
-        let base = Date { year: 2026, month: 5, day: 18 }; // Monday
+        let base = Date {
+            year: 2026,
+            month: 5,
+            day: 18,
+        }; // Monday
         let mut h = Habit::new(1, "Test", "", Category::Health, Frequency::Weekly(3), base);
         h.check_ins.push(base);
         h.check_ins.push(base.add_days(2));
@@ -2914,7 +3431,11 @@ mod tests {
 
     #[test]
     fn test_completions_in_week_empty() {
-        let base = Date { year: 2026, month: 5, day: 18 };
+        let base = Date {
+            year: 2026,
+            month: 5,
+            day: 18,
+        };
         let h = Habit::new(1, "Test", "", Category::Health, Frequency::Weekly(3), base);
         assert_eq!(h.completions_in_week(base), 0);
     }
@@ -2969,5 +3490,99 @@ mod tests {
         app.selected_habit = 4; // last
         app.delete_habit(4);
         assert!(app.selected_habit < app.active_habits().len());
+    }
+
+    // ── Per-habit statistics table ──────────────────────────────────
+
+    /// Two habits whose names share a long prefix and are far too wide for the
+    /// 136px name column — the case a silent clip renders identically.
+    fn app_with_long_habit_names() -> HabitTrackerApp {
+        let mut app = HabitTrackerApp::new();
+        for suffix in ["before bed", "after lunch"] {
+            app.create_name = format!("Read thirty minutes of a paper book {suffix}");
+            app.create_habit();
+        }
+        app
+    }
+
+    /// The text commands of the statistics table, rendered on their own: a full
+    /// render puts header and nav text at x values that can coincide with a
+    /// column's left edge, and the assertion would then fail on chrome that was
+    /// never part of this table.
+    fn statistics_commands(app: &HabitTrackerApp) -> Vec<RenderCommand> {
+        let mut cmds = Vec::new();
+        app.render_statistics(&mut cmds, 0.0);
+        cmds
+    }
+
+    #[test]
+    fn no_statistics_cell_escapes_its_column() {
+        let app = app_with_long_habit_names();
+        let cmds = statistics_commands(&app);
+        let edges = Table::with_gap(STATS_COLUMNS, 20.0, STATS_GAP).spans();
+        let mut checked = 0usize;
+        for cmd in &cmds {
+            let RenderCommand::Text {
+                x: tx,
+                text,
+                font_size,
+                font_weight,
+                max_width: Some(_),
+                ..
+            } = cmd
+            else {
+                continue;
+            };
+            let Some(&(_, right)) = edges.iter().find(|(left, _)| (left - tx).abs() < 0.01) else {
+                continue;
+            };
+            let drawn = tx + guitk::text::measure(text, *font_size, *font_weight);
+            assert!(
+                drawn <= right + 0.5,
+                "cell {text:?} starting at {tx} runs to {drawn}, \
+                 past its column's right edge {right}",
+            );
+            checked = checked.saturating_add(1);
+        }
+        // 8 header labels plus 8 cells for each of the two long-named habits.
+        assert!(
+            checked >= 24,
+            "only {checked} statistics cells checked, expected at least 24",
+        );
+    }
+
+    #[test]
+    fn a_clipped_habit_name_says_it_was_clipped() {
+        let app = app_with_long_habit_names();
+        let cmds = statistics_commands(&app);
+        let left = Table::with_gap(STATS_COLUMNS, 20.0, STATS_GAP).left(STATS_HABIT);
+        let names: Vec<String> = cmds
+            .iter()
+            .filter_map(|cmd| match cmd {
+                RenderCommand::Text {
+                    x,
+                    text,
+                    font_weight: FontWeightHint::Regular,
+                    max_width: Some(_),
+                    ..
+                } if (x - left).abs() < 0.01 => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        let cut: Vec<&String> = names
+            .iter()
+            .filter(|n| n.starts_with("Read thirty"))
+            .collect();
+        assert_eq!(
+            cut.len(),
+            2,
+            "both long habit names should be drawn, got {names:?}"
+        );
+        for name in &cut {
+            assert!(
+                name.ends_with('…'),
+                "a name that did not fit must be marked as cut, got {name:?}"
+            );
+        }
     }
 }

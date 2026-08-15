@@ -63,7 +63,13 @@ pub struct Thumbnail {
     /// Raw pixel data in ARGB format (4 bytes per pixel, row-major).
     pub pixels: Vec<u8>,
     /// Absolute path of the source file or directory.
-    pub source_path: String,
+    ///
+    /// A `PathBuf`, not a `String`: this is the disk cache's key, hashed by
+    /// [`simple_hash`]. Held as a lossy string, two files whose names differ
+    /// only in bytes that are not UTF-8 collapsed to the same key and hashed
+    /// to the same cache filename — so one file was shown the other's
+    /// thumbnail.
+    pub source_path: PathBuf,
     /// Modification time of the source (seconds since epoch) for invalidation.
     pub source_mtime: u64,
 }
@@ -658,7 +664,7 @@ fn generate_image_thumbnail(path: &Path, config: &ThumbConfig, mtime: u64) -> Th
         width: size,
         height: size,
         pixels,
-        source_path: path.to_string_lossy().to_string(),
+        source_path: path.to_path_buf(),
         source_mtime: mtime,
     }
 }
@@ -729,7 +735,7 @@ fn try_bmp_thumbnail(
         width: sw,
         height: sh,
         pixels: scaled,
-        source_path: path.to_string_lossy().to_string(),
+        source_path: path.to_path_buf(),
         source_mtime: mtime,
     })
 }
@@ -792,7 +798,7 @@ fn generate_text_thumbnail(path: &Path, config: &ThumbConfig, mtime: u64) -> Thu
         width: size,
         height: size,
         pixels,
-        source_path: path.to_string_lossy().to_string(),
+        source_path: path.to_path_buf(),
         source_mtime: mtime,
     }
 }
@@ -887,7 +893,7 @@ fn generate_folder_thumbnail(path: &Path, config: &ThumbConfig, mtime: u64) -> T
         width: size,
         height: size,
         pixels,
-        source_path: path.to_string_lossy().to_string(),
+        source_path: path.to_path_buf(),
         source_mtime: mtime,
     }
 }
@@ -946,7 +952,7 @@ fn generate_pdf_placeholder(path: &Path, config: &ThumbConfig, mtime: u64) -> Th
         width: size,
         height: size,
         pixels,
-        source_path: path.to_string_lossy().to_string(),
+        source_path: path.to_path_buf(),
         source_mtime: mtime,
     }
 }
@@ -997,7 +1003,7 @@ fn generate_default_thumbnail(
         width: size,
         height: size,
         pixels,
-        source_path: path.to_string_lossy().to_string(),
+        source_path: path.to_path_buf(),
         source_mtime: mtime,
     }
 }
@@ -1222,13 +1228,13 @@ impl DiskCache {
     }
 
     /// Compute the cache filename for a given path and mtime.
-    fn cache_filename(&self, path: &str, mtime: u64) -> PathBuf {
+    fn cache_filename(&self, path: &Path, mtime: u64) -> PathBuf {
         let hash = simple_hash(path, mtime);
         self.cache_dir.join(format!("{hash:016x}.thumb"))
     }
 
     /// Try to load a cached thumbnail from disk.
-    pub fn load(&self, path: &str, mtime: u64) -> Option<Thumbnail> {
+    pub fn load(&self, path: &Path, mtime: u64) -> Option<Thumbnail> {
         let file_path = self.cache_filename(path, mtime);
         let data = fs::read(&file_path).ok()?;
 
@@ -1248,7 +1254,7 @@ impl DiskCache {
             width,
             height,
             pixels: pixel_data.to_vec(),
-            source_path: path.to_owned(),
+            source_path: path.to_path_buf(),
             source_mtime: mtime,
         })
     }
@@ -1266,7 +1272,7 @@ impl DiskCache {
     }
 
     /// Remove the cached thumbnail for a specific path/mtime.
-    pub fn remove(&self, path: &str, mtime: u64) {
+    pub fn remove(&self, path: &Path, mtime: u64) {
         let file_path = self.cache_filename(path, mtime);
         let _ = fs::remove_file(file_path); // Intentionally ignoring error: file may not exist.
     }
@@ -1291,7 +1297,7 @@ impl DiskCache {
     /// requires scanning the in-memory cache for paths.  Pass the set of
     /// known-valid source paths; anything in the cache directory that doesn't
     /// correspond to a valid entry is removed.
-    pub fn purge_stale(&self, valid_entries: &HashMap<String, u64>) -> std::io::Result<()> {
+    pub fn purge_stale(&self, valid_entries: &HashMap<PathBuf, u64>) -> std::io::Result<()> {
         if !self.cache_dir.is_dir() {
             return Ok(());
         }
@@ -1303,8 +1309,14 @@ impl DiskCache {
 
         for entry in fs::read_dir(&self.cache_dir)? {
             let entry = entry?;
-            let name = entry.file_name().to_string_lossy().to_string();
-            if name.ends_with(".thumb") && !valid_filenames.contains(&name) {
+            // Compared as bytes. Every name we write is `{hash:016x}.thumb`, so
+            // a name that is not UTF-8 is not one of ours; rendering it lossily
+            // first could make it *look* like one of ours and get it deleted.
+            let raw = entry.file_name();
+            let name = raw.as_encoded_bytes();
+            if name.ends_with(b".thumb")
+                && !valid_filenames.iter().any(|valid| valid.as_bytes() == name)
+            {
                 let _ = fs::remove_file(entry.path()); // Best-effort removal.
             }
         }
@@ -1487,9 +1499,12 @@ fn file_mtime(path: &Path) -> Option<u64> {
 /// Uses FNV-1a-style hashing on the path string concatenated with the mtime.
 /// This is not meant to be collision-resistant — just a fast, deterministic
 /// mapping to a 64-bit filename.
-fn simple_hash(path: &str, mtime: u64) -> u64 {
+fn simple_hash(path: &Path, mtime: u64) -> u64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325; // FNV offset basis
-    for byte in path.as_bytes() {
+    // The path's own bytes, not a lossy rendering: two names that differ only
+    // in undecodable bytes are different files and must not share a cache
+    // entry.
+    for byte in path.as_os_str().as_encoded_bytes() {
         hash ^= *byte as u64;
         hash = hash.wrapping_mul(0x0100_0000_01b3); // FNV prime
     }
@@ -1521,7 +1536,7 @@ mod tests {
         assert_eq!(cache.len(), 1);
         let got = cache.get("test.png", 12345, 1000);
         assert!(got.is_some());
-        assert_eq!(got.unwrap().source_path, "test.png");
+        assert_eq!(got.unwrap().source_path, Path::new("test.png"));
     }
 
     #[test]
@@ -1881,7 +1896,7 @@ mod tests {
             width: 0,
             height: 0,
             pixels: Vec::new(),
-            source_path: String::new(),
+            source_path: PathBuf::new(),
             source_mtime: 0,
         };
         let cmds = render_thumbnail(&thumb, 0.0, 0.0, 64.0);
@@ -1898,23 +1913,67 @@ mod tests {
 
     #[test]
     fn simple_hash_deterministic() {
-        let h1 = simple_hash("/foo/bar.png", 12345);
-        let h2 = simple_hash("/foo/bar.png", 12345);
+        let h1 = simple_hash(Path::new("/foo/bar.png"), 12345);
+        let h2 = simple_hash(Path::new("/foo/bar.png"), 12345);
         assert_eq!(h1, h2);
     }
 
     #[test]
     fn simple_hash_varies_with_mtime() {
-        let h1 = simple_hash("/foo/bar.png", 100);
-        let h2 = simple_hash("/foo/bar.png", 200);
+        let h1 = simple_hash(Path::new("/foo/bar.png"), 100);
+        let h2 = simple_hash(Path::new("/foo/bar.png"), 200);
         assert_ne!(h1, h2);
     }
 
     #[test]
     fn simple_hash_varies_with_path() {
-        let h1 = simple_hash("/foo/bar.png", 100);
-        let h2 = simple_hash("/foo/baz.png", 100);
+        let h1 = simple_hash(Path::new("/foo/bar.png"), 100);
+        let h2 = simple_hash(Path::new("/foo/baz.png"), 100);
         assert_ne!(h1, h2);
+    }
+
+    /// The cache key must separate files the *filesystem* separates. Held as a
+    /// lossy string, every undecodable byte became the same U+FFFD, so these
+    /// two distinct files hashed to one cache filename and the explorer showed
+    /// one of them the other's thumbnail.
+    ///
+    /// Unix-only: a Windows `OsString` cannot hold either of these paths, and
+    /// our target is `target-family = ["unix"]`.
+    #[cfg(unix)]
+    #[test]
+    fn two_names_differing_only_in_undecodable_bytes_do_not_share_a_cache_entry() {
+        use std::os::unix::ffi::OsStrExt;
+        let a = Path::new(std::ffi::OsStr::from_bytes(b"/foo/x\xE9.png"));
+        let b = Path::new(std::ffi::OsStr::from_bytes(b"/foo/x\xFF.png"));
+        assert_ne!(a, b, "the two paths are genuinely different files");
+        assert_ne!(
+            simple_hash(a, 100),
+            simple_hash(b, 100),
+            "and must not share a cache filename"
+        );
+    }
+
+    /// The same property, expressed in the one form the Windows test host can
+    /// represent: an unpaired surrogate is a legal `OsString` that
+    /// `to_string_lossy` maps to U+FFFD. Without this the regression above is
+    /// asserted only on a target we cannot execute here.
+    #[cfg(windows)]
+    #[test]
+    fn two_names_differing_only_in_undecodable_units_do_not_share_a_cache_entry() {
+        use std::os::windows::ffi::OsStringExt;
+        let a = PathBuf::from(std::ffi::OsString::from_wide(&[0x2F, 0xD800]));
+        let b = PathBuf::from(std::ffi::OsString::from_wide(&[0x2F, 0xD801]));
+        assert_ne!(a, b, "the two paths are genuinely different files");
+        assert_eq!(
+            a.to_string_lossy(),
+            b.to_string_lossy(),
+            "precondition: a lossy rendering cannot tell them apart"
+        );
+        assert_ne!(
+            simple_hash(&a, 100),
+            simple_hash(&b, 100),
+            "and must not share a cache filename"
+        );
     }
 
     // -- Thumbnail generator queue ------------------------------------------
@@ -1995,7 +2054,7 @@ mod tests {
             width: 4,
             height: 4,
             pixels: vec![0u8; 10], // wrong length
-            source_path: String::new(),
+            source_path: PathBuf::new(),
             source_mtime: 0,
         };
         assert!(!bad.is_valid());
@@ -2012,7 +2071,9 @@ mod tests {
         let thumb = make_test_thumb("test_disk.png", 4);
         cache.save(&thumb).unwrap();
 
-        let loaded = cache.load("test_disk.png", thumb.source_mtime).unwrap();
+        let loaded = cache
+            .load(Path::new("test_disk.png"), thumb.source_mtime)
+            .unwrap();
         assert_eq!(loaded.width, thumb.width);
         assert_eq!(loaded.height, thumb.height);
         assert_eq!(loaded.pixels.len(), thumb.pixels.len());
@@ -2032,7 +2093,11 @@ mod tests {
         cache.save(&thumb).unwrap();
 
         // Different mtime => cache miss.
-        assert!(cache.load("miss.png", thumb.source_mtime + 1).is_none());
+        assert!(
+            cache
+                .load(Path::new("miss.png"), thumb.source_mtime + 1)
+                .is_none()
+        );
 
         let _ = cache.clear();
         let _ = fs::remove_dir_all(&dir);
@@ -2046,7 +2111,7 @@ mod tests {
             width: size,
             height: size,
             pixels: vec![128u8; (size * size * 4) as usize],
-            source_path: name.to_owned(),
+            source_path: PathBuf::from(name),
             source_mtime: 42,
         }
     }

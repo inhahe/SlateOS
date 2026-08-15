@@ -23,6 +23,8 @@
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand};
 use guitk::style::CornerRadii;
+use guitk::table::{Column, Fit, Table};
+use guitk::text;
 
 // ── Catppuccin Mocha palette ────────────────────────────────────────
 const BASE: Color = Color::from_hex(0x1E1E2E);
@@ -40,6 +42,19 @@ const PEACH: Color = Color::from_hex(0xFAB387);
 const TEAL: Color = Color::from_hex(0x94E2D5);
 const MAUVE: Color = Color::from_hex(0xCBA6F7);
 const OVERLAY0: Color = Color::from_hex(0x6C7086);
+
+// ── Card-list type sizes ────────────────────────────────────────────
+// Named because eliding text and drawing it must agree on the size: a cell
+// measured at one size and drawn at another either overflows or is cut short.
+const CARD_HEADING_SIZE: f32 = 11.0;
+const CARD_FRONT_SIZE: f32 = 13.0;
+const CARD_BACK_SIZE: f32 = 11.0;
+const CARD_TAG_SIZE: f32 = 11.0;
+const CARD_STATUS_SIZE: f32 = 12.0;
+/// Gap between the search box and the tag-filter pill beside it.
+const TAG_PILL_GAP: f32 = 8.0;
+/// Inset of the tag-filter pill's label from the pill's own edges.
+const TAG_PILL_PAD: f32 = 8.0;
 
 // ── SM-2 defaults ───────────────────────────────────────────────────
 const SM2_INITIAL_EASE: f32 = 2.5;
@@ -206,7 +221,10 @@ impl Card {
         let q = query.to_ascii_lowercase();
         self.front.to_ascii_lowercase().contains(&q)
             || self.back.to_ascii_lowercase().contains(&q)
-            || self.tags.iter().any(|t| t.to_ascii_lowercase().contains(&q))
+            || self
+                .tags
+                .iter()
+                .any(|t| t.to_ascii_lowercase().contains(&q))
     }
 
     fn has_tag(&self, tag: &str) -> bool {
@@ -279,7 +297,11 @@ impl Deck {
     }
 
     fn average_accuracy(&self) -> u32 {
-        let reviewed: Vec<_> = self.cards.iter().filter(|c| c.review.total_reviews > 0).collect();
+        let reviewed: Vec<_> = self
+            .cards
+            .iter()
+            .filter(|c| c.review.total_reviews > 0)
+            .collect();
         if reviewed.is_empty() {
             return 0;
         }
@@ -531,47 +553,161 @@ impl FlashcardsApp {
 
     // ── Sample decks ────────────────────────────────────────────────
     fn sample_world_capitals() -> Deck {
-        let mut deck = Deck::new("World Capitals", "Capital cities of countries around the world");
-        deck.add_card_with_tags("What is the capital of France?", "Paris", &["europe", "western"]);
-        deck.add_card_with_tags("What is the capital of Japan?", "Tokyo", &["asia", "east-asia"]);
-        deck.add_card_with_tags("What is the capital of Brazil?", "Brasilia", &["south-america"]);
-        deck.add_card_with_tags("What is the capital of Australia?", "Canberra", &["oceania"]);
+        let mut deck = Deck::new(
+            "World Capitals",
+            "Capital cities of countries around the world",
+        );
+        deck.add_card_with_tags(
+            "What is the capital of France?",
+            "Paris",
+            &["europe", "western"],
+        );
+        deck.add_card_with_tags(
+            "What is the capital of Japan?",
+            "Tokyo",
+            &["asia", "east-asia"],
+        );
+        deck.add_card_with_tags(
+            "What is the capital of Brazil?",
+            "Brasilia",
+            &["south-america"],
+        );
+        deck.add_card_with_tags(
+            "What is the capital of Australia?",
+            "Canberra",
+            &["oceania"],
+        );
         deck.add_card_with_tags("What is the capital of Egypt?", "Cairo", &["africa"]);
-        deck.add_card_with_tags("What is the capital of Canada?", "Ottawa", &["north-america"]);
-        deck.add_card_with_tags("What is the capital of Germany?", "Berlin", &["europe", "western"]);
-        deck.add_card_with_tags("What is the capital of South Korea?", "Seoul", &["asia", "east-asia"]);
-        deck.add_card_with_tags("What is the capital of Argentina?", "Buenos Aires", &["south-america"]);
-        deck.add_card_with_tags("What is the capital of India?", "New Delhi", &["asia", "south-asia"]);
+        deck.add_card_with_tags(
+            "What is the capital of Canada?",
+            "Ottawa",
+            &["north-america"],
+        );
+        deck.add_card_with_tags(
+            "What is the capital of Germany?",
+            "Berlin",
+            &["europe", "western"],
+        );
+        deck.add_card_with_tags(
+            "What is the capital of South Korea?",
+            "Seoul",
+            &["asia", "east-asia"],
+        );
+        deck.add_card_with_tags(
+            "What is the capital of Argentina?",
+            "Buenos Aires",
+            &["south-america"],
+        );
+        deck.add_card_with_tags(
+            "What is the capital of India?",
+            "New Delhi",
+            &["asia", "south-asia"],
+        );
         deck
     }
 
     fn sample_programming() -> Deck {
-        let mut deck = Deck::new("Programming Concepts", "Fundamental CS and programming terms");
-        deck.add_card_with_tags("What does RAII stand for?", "Resource Acquisition Is Initialization", &["rust", "cpp", "memory"]);
-        deck.add_card_with_tags("What is a closure?", "A function that captures variables from its enclosing scope", &["functional", "rust"]);
-        deck.add_card_with_tags("What is Big-O notation?", "A mathematical notation describing the upper bound of an algorithm's growth rate", &["algorithms", "complexity"]);
-        deck.add_card_with_tags("What is a mutex?", "A synchronization primitive that provides mutual exclusion for shared data", &["concurrency", "rust"]);
-        deck.add_card_with_tags("What is polymorphism?", "The ability to process objects differently based on their type or class", &["oop", "design"]);
-        deck.add_card_with_tags("What is a hash map?", "A data structure mapping keys to values via a hash function, with O(1) average lookup", &["data-structures"]);
-        deck.add_card_with_tags("What is recursion?", "A technique where a function calls itself to solve smaller sub-problems", &["algorithms"]);
-        deck.add_card_with_tags("What is the stack vs the heap?", "Stack: LIFO, automatic, fast. Heap: dynamic, manual/GC, flexible size.", &["memory", "systems"]);
-        deck.add_card_with_tags("What is a trait in Rust?", "A collection of methods defined for an unknown type, enabling polymorphism", &["rust", "oop"]);
-        deck.add_card_with_tags("What is TCP vs UDP?", "TCP: reliable, ordered, connection-based. UDP: unreliable, fast, connectionless.", &["networking"]);
+        let mut deck = Deck::new(
+            "Programming Concepts",
+            "Fundamental CS and programming terms",
+        );
+        deck.add_card_with_tags(
+            "What does RAII stand for?",
+            "Resource Acquisition Is Initialization",
+            &["rust", "cpp", "memory"],
+        );
+        deck.add_card_with_tags(
+            "What is a closure?",
+            "A function that captures variables from its enclosing scope",
+            &["functional", "rust"],
+        );
+        deck.add_card_with_tags(
+            "What is Big-O notation?",
+            "A mathematical notation describing the upper bound of an algorithm's growth rate",
+            &["algorithms", "complexity"],
+        );
+        deck.add_card_with_tags(
+            "What is a mutex?",
+            "A synchronization primitive that provides mutual exclusion for shared data",
+            &["concurrency", "rust"],
+        );
+        deck.add_card_with_tags(
+            "What is polymorphism?",
+            "The ability to process objects differently based on their type or class",
+            &["oop", "design"],
+        );
+        deck.add_card_with_tags(
+            "What is a hash map?",
+            "A data structure mapping keys to values via a hash function, with O(1) average lookup",
+            &["data-structures"],
+        );
+        deck.add_card_with_tags(
+            "What is recursion?",
+            "A technique where a function calls itself to solve smaller sub-problems",
+            &["algorithms"],
+        );
+        deck.add_card_with_tags(
+            "What is the stack vs the heap?",
+            "Stack: LIFO, automatic, fast. Heap: dynamic, manual/GC, flexible size.",
+            &["memory", "systems"],
+        );
+        deck.add_card_with_tags(
+            "What is a trait in Rust?",
+            "A collection of methods defined for an unknown type, enabling polymorphism",
+            &["rust", "oop"],
+        );
+        deck.add_card_with_tags(
+            "What is TCP vs UDP?",
+            "TCP: reliable, ordered, connection-based. UDP: unreliable, fast, connectionless.",
+            &["networking"],
+        );
         deck
     }
 
     fn sample_science() -> Deck {
         let mut deck = Deck::new("Science Basics", "Elementary science facts and concepts");
-        deck.add_card_with_tags("What is the chemical symbol for water?", "H2O", &["chemistry"]);
-        deck.add_card_with_tags("What is the speed of light?", "Approximately 299,792,458 m/s", &["physics"]);
-        deck.add_card_with_tags("What is DNA?", "Deoxyribonucleic acid, the molecule carrying genetic instructions", &["biology"]);
+        deck.add_card_with_tags(
+            "What is the chemical symbol for water?",
+            "H2O",
+            &["chemistry"],
+        );
+        deck.add_card_with_tags(
+            "What is the speed of light?",
+            "Approximately 299,792,458 m/s",
+            &["physics"],
+        );
+        deck.add_card_with_tags(
+            "What is DNA?",
+            "Deoxyribonucleic acid, the molecule carrying genetic instructions",
+            &["biology"],
+        );
         deck.add_card_with_tags("What is Newton's first law?", "An object at rest stays at rest; an object in motion stays in motion unless acted upon by a force", &["physics"]);
-        deck.add_card_with_tags("What is photosynthesis?", "The process by which plants convert sunlight, CO2, and water into glucose and oxygen", &["biology", "chemistry"]);
-        deck.add_card_with_tags("What is the periodic table?", "A tabular arrangement of chemical elements ordered by atomic number", &["chemistry"]);
-        deck.add_card_with_tags("What is mitosis?", "Cell division producing two genetically identical daughter cells", &["biology"]);
+        deck.add_card_with_tags(
+            "What is photosynthesis?",
+            "The process by which plants convert sunlight, CO2, and water into glucose and oxygen",
+            &["biology", "chemistry"],
+        );
+        deck.add_card_with_tags(
+            "What is the periodic table?",
+            "A tabular arrangement of chemical elements ordered by atomic number",
+            &["chemistry"],
+        );
+        deck.add_card_with_tags(
+            "What is mitosis?",
+            "Cell division producing two genetically identical daughter cells",
+            &["biology"],
+        );
         deck.add_card_with_tags("What is E = mc^2?", "Einstein's mass-energy equivalence: energy equals mass times the speed of light squared", &["physics"]);
-        deck.add_card_with_tags("What is an atom?", "The smallest unit of matter that retains the properties of an element", &["chemistry", "physics"]);
-        deck.add_card_with_tags("What is evolution?", "Change in heritable characteristics of populations over successive generations", &["biology"]);
+        deck.add_card_with_tags(
+            "What is an atom?",
+            "The smallest unit of matter that retains the properties of an element",
+            &["chemistry", "physics"],
+        );
+        deck.add_card_with_tags(
+            "What is evolution?",
+            "Change in heritable characteristics of populations over successive generations",
+            &["biology"],
+        );
         deck
     }
 
@@ -667,9 +803,10 @@ impl FlashcardsApp {
 
         // Apply SM-2 to the card in the deck
         if let Some(deck) = self.decks.get_mut(deck_idx)
-            && let Some(card) = deck.cards.get_mut(card_idx) {
-                card.review.apply_rating(rating, day);
-            }
+            && let Some(card) = deck.cards.get_mut(card_idx)
+        {
+            card.review.apply_rating(rating, day);
+        }
 
         // Advance to next card
         if let Some(session) = &mut self.study_session {
@@ -729,14 +866,15 @@ impl FlashcardsApp {
         if let Some(card_id) = self.editing_card_id {
             // Update existing card
             if let Some(deck) = self.current_deck_mut()
-                && let Some(card) = deck.find_card_mut(card_id) {
-                    card.front = front;
-                    card.back = back;
-                    card.tags = tags;
-                    self.status_msg = String::from("Card updated");
-                    self.view = AppView::DeckDetail;
-                    return true;
-                }
+                && let Some(card) = deck.find_card_mut(card_id)
+            {
+                card.front = front;
+                card.back = back;
+                card.tags = tags;
+                self.status_msg = String::from("Card updated");
+                self.view = AppView::DeckDetail;
+                return true;
+            }
         } else {
             // Create new card
             if let Some(deck) = self.current_deck_mut() {
@@ -757,13 +895,14 @@ impl FlashcardsApp {
         let matching = self.matching_card_indices();
         if let Some(&card_list_idx) = matching.get(self.selected_card)
             && let Some(deck) = self.current_deck_mut()
-                && card_list_idx < deck.cards.len() {
-                    deck.cards.remove(card_list_idx);
-                    self.status_msg = String::from("Card deleted");
-                    if self.selected_card > 0 && self.selected_card >= matching.len().saturating_sub(1) {
-                        self.selected_card = self.selected_card.saturating_sub(1);
-                    }
-                }
+            && card_list_idx < deck.cards.len()
+        {
+            deck.cards.remove(card_list_idx);
+            self.status_msg = String::from("Card deleted");
+            if self.selected_card > 0 && self.selected_card >= matching.len().saturating_sub(1) {
+                self.selected_card = self.selected_card.saturating_sub(1);
+            }
+        }
     }
 
     fn matching_card_indices(&self) -> Vec<usize> {
@@ -787,14 +926,12 @@ impl FlashcardsApp {
 
     fn handle_key_deck_list(&mut self, key: &str, _ctrl: bool) {
         match key {
-            "Up" | "k"
-                if self.selected_deck > 0 => {
-                    self.selected_deck -= 1;
-                }
-            "Down" | "j"
-                if self.selected_deck + 1 < self.decks.len() => {
-                    self.selected_deck += 1;
-                }
+            "Up" | "k" if self.selected_deck > 0 => {
+                self.selected_deck -= 1;
+            }
+            "Down" | "j" if self.selected_deck + 1 < self.decks.len() => {
+                self.selected_deck += 1;
+            }
             "Enter" => self.select_deck(self.selected_deck),
             "n" => self.add_deck("New Deck", ""),
             "Delete" | "x" => {
@@ -812,11 +949,10 @@ impl FlashcardsApp {
                 self.search_query.clear();
                 self.tag_filter = None;
             }
-            "Up" | "k"
-                if self.selected_card > 0 => {
-                    self.selected_card -= 1;
-                    self.ensure_card_visible();
-                }
+            "Up" | "k" if self.selected_card > 0 => {
+                self.selected_card -= 1;
+                self.ensure_card_visible();
+            }
             "Down" | "j" => {
                 let count = self.matching_card_indices().len();
                 if self.selected_card + 1 < count {
@@ -831,10 +967,11 @@ impl FlashcardsApp {
                 let matching = self.matching_card_indices();
                 if let Some(&idx) = matching.get(self.selected_card)
                     && let Some(deck) = self.current_deck()
-                        && let Some(card) = deck.cards.get(idx) {
-                            let cid = card.id;
-                            self.open_edit_card(cid);
-                        }
+                    && let Some(card) = deck.cards.get(idx)
+                {
+                    let cid = card.id;
+                    self.open_edit_card(cid);
+                }
             }
             "Delete" | "x" => self.delete_selected_card(),
             "d" => self.advance_day(),
@@ -880,7 +1017,9 @@ impl FlashcardsApp {
     fn handle_key_card_editor(&mut self, key: &str) {
         match key {
             "Escape" => self.view = AppView::DeckDetail,
-            "Enter" => { self.save_card(); }
+            "Enter" => {
+                self.save_card();
+            }
             _ => {}
         }
     }
@@ -934,6 +1073,63 @@ impl FlashcardsApp {
     const SIDEBAR_W: f32 = 240.0;
     const CARD_ROW_H: f32 = 48.0;
     const PADDING: f32 = 16.0;
+
+    // ── Card-list geometry ──────────────────────────────────────────
+    //
+    // The three columns used to be laid out by hand and mixed coordinate
+    // systems: Front was proportional (`width * 0.45` from `PADDING + 8`),
+    // Tags was proportional in its anchor but *absolute* in its width
+    // (`width * 0.5`, 200 wide), and Status was absolute in both
+    // (`width - 120`, 100 wide). A fraction of the window is only a valid
+    // width when it is measured from a position that is also a fraction of
+    // the window, so the three agreed at exactly one size and collided
+    // everywhere else — Front ran into Tags below 480px and Tags ran into
+    // Status below 640px. Fractions that sum to 1.0 make the row fill its
+    // container at *every* width instead of at one.
+
+    const CARD_GAP: f32 = 8.0;
+    const CARD_FRONT: usize = 0;
+    const CARD_TAGS: usize = 1;
+    const CARD_STATUS: usize = 2;
+    const CARD_FRACTIONS: [f32; 3] = [0.55, 0.28, 0.17];
+    const CARD_HEADINGS: [&'static str; 3] = ["Front", "Tags", "Status"];
+
+    /// Left edge of the card rows' text, and the width they span to the
+    /// right margin.
+    fn card_row_span(&self) -> (f32, f32) {
+        let x = Self::PADDING + Self::CARD_GAP;
+        ((x), (self.width - Self::PADDING - x).max(0.0))
+    }
+
+    fn card_columns(&self) -> [Column; 3] {
+        let (_, row_w) = self.card_row_span();
+        // Three columns have two interior gaps.
+        let usable = (row_w - Self::CARD_GAP * 2.0).max(0.0);
+        let mut columns = [Column {
+            label: "",
+            width: 0.0,
+        }; 3];
+        for ((column, label), fraction) in columns
+            .iter_mut()
+            .zip(Self::CARD_HEADINGS)
+            .zip(Self::CARD_FRACTIONS)
+        {
+            *column = Column {
+                label,
+                width: usable * fraction,
+            };
+        }
+        columns
+    }
+
+    /// [`Table`]'s origin sits *before* its leading gap — `left(0)` is
+    /// `x + gap` — so the desired inset has to be handed over less one gap or
+    /// every column shifts right by one. That error is invisible to any test
+    /// comparing cells against their own columns, since they all move
+    /// together; it shows up only as a wrong margin at the far end.
+    fn card_table(columns: &[Column]) -> Table<'_> {
+        Table::with_gap(columns, Self::PADDING, Self::CARD_GAP)
+    }
 
     // ── Rendering ───────────────────────────────────────────────────
     fn render(&self) -> Vec<RenderCommand> {
@@ -1220,26 +1416,38 @@ impl FlashcardsApp {
             max_width: Some(content_w * 0.6 - 16.0),
         });
 
-        // Tag filter display
+        // Tag filter pill. The pill used to be a flat 100px at a proportional
+        // anchor, so it ran off the right edge of the panel whenever the
+        // content was narrower than 270px — a per-element `max_width` on the
+        // label inside it is not a bound on the pill itself. It is now sized
+        // to its own text and clamped to whatever room is left beside the
+        // search box, so it can shrink instead of overflowing.
         if let Some(tag) = &self.tag_filter {
-            let tag_x = Self::PADDING + content_w * 0.6 + 8.0;
-            cmds.push(RenderCommand::FillRect {
-                x: tag_x,
-                y: search_y + 2.0,
-                width: 100.0,
-                height: 24.0,
-                color: MAUVE,
-                corner_radii: CornerRadii::all(12.0),
-            });
-            cmds.push(RenderCommand::Text {
-                x: tag_x + 8.0,
-                y: search_y + 6.0,
-                text: tag.clone(),
-                font_size: 11.0,
-                color: CRUST,
-                font_weight: FontWeightHint::Bold,
-                max_width: Some(84.0),
-            });
+            let tag_x = Self::PADDING + content_w * 0.6 + TAG_PILL_GAP;
+            let room = (self.width - Self::PADDING - tag_x).max(0.0);
+            let pill_w = text::padded_width(tag, TAG_PILL_PAD, CARD_TAG_SIZE, FontWeightHint::Bold)
+                .min(room);
+            if pill_w > 0.0 {
+                cmds.push(RenderCommand::FillRect {
+                    x: tag_x,
+                    y: search_y + 2.0,
+                    width: pill_w,
+                    height: 24.0,
+                    color: MAUVE,
+                    corner_radii: CornerRadii::all(12.0),
+                });
+                Table::fitted(
+                    cmds,
+                    tag_x + TAG_PILL_PAD,
+                    (pill_w - TAG_PILL_PAD * 2.0).max(0.0),
+                    search_y + 6.0,
+                    tag,
+                    CRUST,
+                    CARD_TAG_SIZE,
+                    Fit::Start,
+                    FontWeightHint::Bold,
+                );
+            }
         }
 
         // Card list
@@ -1260,33 +1468,15 @@ impl FlashcardsApp {
         }
 
         // Column headers
-        cmds.push(RenderCommand::Text {
-            x: Self::PADDING + 8.0,
-            y: list_top,
-            text: String::from("Front"),
-            font_size: 11.0,
-            color: OVERLAY0,
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(300.0),
-        });
-        cmds.push(RenderCommand::Text {
-            x: self.width * 0.5,
-            y: list_top,
-            text: String::from("Tags"),
-            font_size: 11.0,
-            color: OVERLAY0,
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(200.0),
-        });
-        cmds.push(RenderCommand::Text {
-            x: self.width - 120.0,
-            y: list_top,
-            text: String::from("Status"),
-            font_size: 11.0,
-            color: OVERLAY0,
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(100.0),
-        });
+        let card_cols = self.card_columns();
+        let table = Self::card_table(&card_cols);
+        table.header_weighted(
+            cmds,
+            list_top,
+            OVERLAY0,
+            CARD_HEADING_SIZE,
+            FontWeightHint::Bold,
+        );
 
         let rows_top = list_top + 20.0;
         let visible_count = 8usize;
@@ -1294,93 +1484,94 @@ impl FlashcardsApp {
         let end = (self.scroll_offset + visible_count).min(matching.len());
         for (vis_i, list_i) in (self.scroll_offset..end).enumerate() {
             if let Some(&card_idx) = matching.get(list_i)
-                && let Some(card) = deck.cards.get(card_idx) {
-                    let y = rows_top + (vis_i as f32) * Self::CARD_ROW_H;
-                    let is_selected = list_i == self.selected_card;
-                    let bg = if is_selected { SURFACE1 } else { SURFACE0 };
+                && let Some(card) = deck.cards.get(card_idx)
+            {
+                let y = rows_top + (vis_i as f32) * Self::CARD_ROW_H;
+                let is_selected = list_i == self.selected_card;
+                let bg = if is_selected { SURFACE1 } else { SURFACE0 };
 
-                    cmds.push(RenderCommand::FillRect {
-                        x: Self::PADDING,
-                        y,
-                        width: content_w,
-                        height: Self::CARD_ROW_H - 4.0,
-                        color: bg,
-                        corner_radii: CornerRadii::all(4.0),
-                    });
+                cmds.push(RenderCommand::FillRect {
+                    x: Self::PADDING,
+                    y,
+                    width: content_w,
+                    height: Self::CARD_ROW_H - 4.0,
+                    color: bg,
+                    corner_radii: CornerRadii::all(4.0),
+                });
 
-                    // Truncate front text for display
-                    let front_display = if card.front.len() > 50 {
-                        format!("{}...", &card.front[..47])
-                    } else {
-                        card.front.clone()
-                    };
-                    cmds.push(RenderCommand::Text {
-                        x: Self::PADDING + 8.0,
-                        y: y + 8.0,
-                        text: front_display,
-                        font_size: 13.0,
-                        color: TEXT_COLOR,
-                        font_weight: FontWeightHint::Regular,
-                        max_width: Some(self.width * 0.45),
-                    });
+                // Front. Elided by measured width rather than by byte
+                // index: `&card.front[..47]` aborts whenever byte 47 lands
+                // inside a multi-byte character, and the `len() > 50` guard
+                // made that *more* likely rather than less — a 16-character
+                // Japanese prompt is 48 bytes and so always took the
+                // truncating branch. Language flashcards are the one thing
+                // guaranteed to carry non-ASCII text.
+                table.cell(
+                    cmds,
+                    Self::CARD_FRONT,
+                    y + 8.0,
+                    &card.front,
+                    TEXT_COLOR,
+                    CARD_FRONT_SIZE,
+                    Fit::Start,
+                );
 
-                    // Tags
-                    let tags_str = card.tags.join(", ");
-                    cmds.push(RenderCommand::Text {
-                        x: self.width * 0.5,
-                        y: y + 8.0,
-                        text: if tags_str.is_empty() {
-                            String::from("-")
-                        } else {
-                            tags_str
-                        },
-                        font_size: 11.0,
-                        color: MAUVE,
-                        font_weight: FontWeightHint::Regular,
-                        max_width: Some(200.0),
-                    });
+                // Tags
+                let tags_str = card.tags.join(", ");
+                table.cell(
+                    cmds,
+                    Self::CARD_TAGS,
+                    y + 8.0,
+                    if tags_str.is_empty() { "-" } else { &tags_str },
+                    MAUVE,
+                    CARD_TAG_SIZE,
+                    Fit::Start,
+                );
 
-                    // Review status
-                    let status_text = if card.review.total_reviews == 0 {
-                        String::from("New")
-                    } else if card.review.repetitions >= 3 {
-                        String::from("Mastered")
-                    } else {
-                        format!("{}d", card.review.interval_days)
-                    };
-                    let status_color = if card.review.total_reviews == 0 {
-                        YELLOW
-                    } else if card.review.repetitions >= 3 {
-                        GREEN
-                    } else {
-                        SUBTEXT0
-                    };
-                    cmds.push(RenderCommand::Text {
-                        x: self.width - 120.0,
-                        y: y + 8.0,
-                        text: status_text,
-                        font_size: 12.0,
-                        color: status_color,
-                        font_weight: FontWeightHint::Bold,
-                        max_width: Some(100.0),
-                    });
+                // Review status
+                let status_text = if card.review.total_reviews == 0 {
+                    String::from("New")
+                } else if card.review.repetitions >= 3 {
+                    String::from("Mastered")
+                } else {
+                    format!("{}d", card.review.interval_days)
+                };
+                let status_color = if card.review.total_reviews == 0 {
+                    YELLOW
+                } else if card.review.repetitions >= 3 {
+                    GREEN
+                } else {
+                    SUBTEXT0
+                };
+                table.cell_weighted(
+                    cmds,
+                    Self::CARD_STATUS,
+                    y + 8.0,
+                    &status_text,
+                    status_color,
+                    CARD_STATUS_SIZE,
+                    Fit::Start,
+                    FontWeightHint::Bold,
+                );
 
-                    // Back text preview on second line
-                    let back_display = if card.back.len() > 60 {
-                        format!("{}...", &card.back[..57])
-                    } else {
-                        card.back.clone()
-                    };
-                    cmds.push(RenderCommand::Text {
-                        x: Self::PADDING + 8.0,
-                        y: y + 26.0,
-                        text: back_display,
-                        font_size: 11.0,
-                        color: OVERLAY0,
-                        font_weight: FontWeightHint::Regular,
-                        max_width: Some(self.width * 0.45),
-                    });
-                }
+                // Back preview, on the row's second line. Nothing else is
+                // drawn at this height, so it gets the whole row rather
+                // than just the Front column — and is elided against that
+                // width, not against a byte count that knew nothing about
+                // the room available.
+                let (back_x, back_w) = self.card_row_span();
+                Table::fitted(
+                    cmds,
+                    back_x,
+                    back_w,
+                    y + 26.0,
+                    &card.back,
+                    OVERLAY0,
+                    CARD_BACK_SIZE,
+                    Fit::Start,
+                    FontWeightHint::Regular,
+                );
+            }
         }
 
         // Scroll indicator
@@ -1639,7 +1830,11 @@ impl FlashcardsApp {
         });
 
         // Side label
-        let side_label = if session.flipped { "ANSWER" } else { "QUESTION" };
+        let side_label = if session.flipped {
+            "ANSWER"
+        } else {
+            "QUESTION"
+        };
         let side_color = if session.flipped { GREEN } else { BLUE };
         cmds.push(RenderCommand::Text {
             x: Self::PADDING + 60.0,
@@ -1844,7 +2039,11 @@ impl FlashcardsApp {
         let stats = [
             ("Total Cards", format!("{}", deck.cards.len()), BLUE),
             ("Total Reviews", format!("{}", deck.total_reviews()), TEAL),
-            ("Avg Accuracy", format!("{}%", deck.average_accuracy()), GREEN),
+            (
+                "Avg Accuracy",
+                format!("{}%", deck.average_accuracy()),
+                GREEN,
+            ),
         ];
 
         for (i, (label, value, color)) in stats.iter().enumerate() {
@@ -1880,9 +2079,23 @@ impl FlashcardsApp {
         // Second row
         let row2_y = stats_y + 90.0;
         let stats2 = [
-            ("Due Today", format!("{}", deck.due_cards(self.current_day).len()), YELLOW),
+            (
+                "Due Today",
+                format!("{}", deck.due_cards(self.current_day).len()),
+                YELLOW,
+            ),
             ("Mastered", format!("{}", deck.mastered_count()), GREEN),
-            ("New", format!("{}", deck.cards.iter().filter(|c| c.review.total_reviews == 0).count()), PEACH),
+            (
+                "New",
+                format!(
+                    "{}",
+                    deck.cards
+                        .iter()
+                        .filter(|c| c.review.total_reviews == 0)
+                        .count()
+                ),
+                PEACH,
+            ),
         ];
 
         for (i, (label, value, color)) in stats2.iter().enumerate() {
@@ -1949,10 +2162,22 @@ impl FlashcardsApp {
         ];
 
         let counts: [usize; 4] = [
-            deck.cards.iter().filter(|c| c.review.ease_factor < 1.8).count(),
-            deck.cards.iter().filter(|c| c.review.ease_factor >= 1.8 && c.review.ease_factor < 2.2).count(),
-            deck.cards.iter().filter(|c| c.review.ease_factor >= 2.2 && c.review.ease_factor < 2.5).count(),
-            deck.cards.iter().filter(|c| c.review.ease_factor >= 2.5).count(),
+            deck.cards
+                .iter()
+                .filter(|c| c.review.ease_factor < 1.8)
+                .count(),
+            deck.cards
+                .iter()
+                .filter(|c| c.review.ease_factor >= 1.8 && c.review.ease_factor < 2.2)
+                .count(),
+            deck.cards
+                .iter()
+                .filter(|c| c.review.ease_factor >= 2.2 && c.review.ease_factor < 2.5)
+                .count(),
+            deck.cards
+                .iter()
+                .filter(|c| c.review.ease_factor >= 2.5)
+                .count(),
         ];
         let max_count = counts.iter().copied().max().unwrap_or(1).max(1);
 
@@ -2097,7 +2322,7 @@ mod tests {
         rd.apply_rating(Rating::Good, 1);
         // interval_days = 1, so due on day 2
         assert!(!rd.is_due(1)); // same day
-        assert!(rd.is_due(2));  // next day
+        assert!(rd.is_due(2)); // next day
     }
 
     #[test]
@@ -2194,7 +2419,7 @@ mod tests {
     #[test]
     fn test_card_has_tag() {
         let card = Card::new(1, "Q", "A").with_tags(&["Math", "Science"]);
-        assert!(card.has_tag("math"));   // case insensitive
+        assert!(card.has_tag("math")); // case insensitive
         assert!(card.has_tag("SCIENCE"));
         assert!(!card.has_tag("history"));
     }
@@ -3056,5 +3281,239 @@ mod tests {
         app.start_study();
         // Should not enter study mode since no cards are due on day 1
         assert!(app.study_session.is_none());
+    }
+
+    // ── Card list layout ────────────────────────────────────────────────
+
+    type TextCell = (f32, String, f32, FontWeightHint);
+
+    /// A deck whose fronts and backs are deliberately long and non-ASCII —
+    /// language decks are the one thing guaranteed to carry non-Latin text,
+    /// and the old code cut the front at byte 47 and the back at byte 57,
+    /// both of which land inside a character for most of these.
+    fn crowded_deck() -> Deck {
+        let mut deck = Deck::new("Vocabulary", "long non-ASCII entries");
+        let pinned_front = format!("{}é{}", "a".repeat(46), "z".repeat(40));
+        let pinned_back = format!("{}é{}", "b".repeat(56), "y".repeat(40));
+        let entries = [
+            (
+                "この漢字の読み方と意味を答えてください。よく使われる表現です。",
+                "「かんじ」— 中国から伝わった文字。日本語の表記に用いられる。",
+            ),
+            (
+                "Πώς μεταφράζεται αυτή η φράση στα αγγλικά με ακρίβεια;",
+                "It is translated as \"how is this phrase rendered in English\".",
+            ),
+            (
+                "Как правильно перевести это длинное предложение на английский?",
+                "Переводится как «how do you correctly translate this sentence».",
+            ),
+            // Byte 47 of the front and byte 57 of the back are each a
+            // continuation byte, pinning both old cut points exactly.
+            (pinned_front.as_str(), pinned_back.as_str()),
+            ("short", "brief"),
+        ];
+        for (front, back) in entries {
+            let id = deck.next_card_id;
+            deck.next_card_id += 1;
+            let mut card = Card::new(id, front, back);
+            card.tags = vec![
+                String::from("语言"),
+                String::from("уровень-продвинутый"),
+                String::from("phrases"),
+            ];
+            deck.cards.push(card);
+        }
+        deck
+    }
+
+    fn deck_detail(width: f32, tag_filter: Option<&str>) -> Vec<RenderCommand> {
+        let mut app = FlashcardsApp::new();
+        app.width = width;
+        app.height = 900.0;
+        app.decks = vec![crowded_deck()];
+        app.selected_deck = 0;
+        app.selected_card = 0;
+        app.scroll_offset = 0;
+        app.view = AppView::DeckDetail;
+        app.tag_filter = tag_filter.map(String::from);
+        let mut cmds = Vec::new();
+        app.render_deck_detail(&mut cmds);
+        cmds
+    }
+
+    fn texts_of(cmds: &[RenderCommand]) -> Vec<TextCell> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text {
+                    x,
+                    text,
+                    font_size,
+                    font_weight,
+                    ..
+                } => Some((*x, text.clone(), *font_size, *font_weight)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn app_at(width: f32) -> FlashcardsApp {
+        let mut app = FlashcardsApp::new();
+        app.width = width;
+        app
+    }
+
+    #[test]
+    fn a_non_ascii_card_does_not_abort_the_deck_detail_view() {
+        // Regression: the front was `&card.front[..47]` behind a `len() > 50`
+        // guard and the back `&card.back[..57]` behind `len() > 60`. Both
+        // abort when the byte index lands inside a multi-byte character, and
+        // both guards made that *more* likely rather than less — a
+        // 16-character Japanese prompt is 48 bytes, so it always took the
+        // truncating branch. A Japanese vocabulary deck crashed on open.
+        for width in [200.0_f32, 320.0, 480.0, 640.0, 900.0, 1400.0] {
+            let cmds = deck_detail(width, Some("уровень-продвинутый"));
+            assert!(!cmds.is_empty(), "at width {width} nothing was drawn");
+        }
+    }
+
+    #[test]
+    fn the_card_columns_fill_the_row() {
+        // The point of fractions summing to 1.0: the row fills its container
+        // at every width, rather than being right at exactly one size.
+        let sum: f32 = FlashcardsApp::CARD_FRACTIONS.iter().sum();
+        assert!(
+            (sum - 1.0).abs() < 1e-6,
+            "the card column fractions sum to {sum}, not 1"
+        );
+        for width in [200.0_f32, 320.0, 480.0, 640.0, 900.0, 1400.0] {
+            let app = app_at(width);
+            let columns = app.card_columns();
+            let table = FlashcardsApp::card_table(&columns);
+            let margin = width - FlashcardsApp::PADDING;
+            let end = table.right(FlashcardsApp::CARD_STATUS);
+            assert!(
+                (end - margin).abs() < 0.01,
+                "at width {width} the card row ends at {end}, not at the \
+                 margin {margin}"
+            );
+        }
+    }
+
+    #[test]
+    fn no_card_cell_escapes_its_column() {
+        // The three columns used to mix proportional and absolute coordinates,
+        // so Front ran into Tags below 480px and Tags into Status below 640px.
+        let mut checked = 0usize;
+        for width in [200.0_f32, 320.0, 480.0, 640.0, 900.0, 1400.0] {
+            let app = app_at(width);
+            let columns = app.card_columns();
+            let table = FlashcardsApp::card_table(&columns);
+            let spans: Vec<(f32, f32)> = table.spans();
+
+            for (x, text, size, weight) in texts_of(&deck_detail(width, None)) {
+                // Only cells that sit on a column's left edge belong to it;
+                // everything else in this view (title, shortcuts, search) is
+                // laid out separately.
+                let Some(&(left, right)) = spans.iter().find(|(l, _)| (l - x).abs() < 0.01) else {
+                    continue;
+                };
+                if size == CARD_BACK_SIZE && left == spans[FlashcardsApp::CARD_FRONT].0 {
+                    // The back preview shares the Front column's left edge but
+                    // spans the whole row; it has its own test.
+                    continue;
+                }
+                let end = x + text::measure(&text, size, weight);
+                assert!(
+                    end <= right + 0.5,
+                    "at width {width} the cell {text:?} at {left} draws to \
+                     {end}, past its column edge {right}"
+                );
+                checked += 1;
+            }
+        }
+        assert!(
+            checked >= 6 * 4,
+            "only {checked} cells examined — at least a heading and three rows \
+             per width were expected, so this test would pass without checking \
+             what it claims to"
+        );
+    }
+
+    #[test]
+    fn the_back_preview_stays_inside_the_row() {
+        // The back sits on the row's second line, so it gets the whole row
+        // rather than the Front column — but it still has to stop at the
+        // right margin.
+        let mut checked = 0usize;
+        for width in [200.0_f32, 320.0, 640.0, 1400.0] {
+            let app = app_at(width);
+            let (row_x, row_w) = app.card_row_span();
+            for (x, text, size, weight) in texts_of(&deck_detail(width, None)) {
+                if (x - row_x).abs() > 0.01 || size != CARD_BACK_SIZE {
+                    continue;
+                }
+                let end = x + text::measure(&text, size, weight);
+                assert!(
+                    end <= row_x + row_w + 0.5,
+                    "at width {width} the back preview {text:?} draws to {end}, \
+                     past the row's right edge {}",
+                    row_x + row_w
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked >= 4, "only {checked} back previews examined");
+    }
+
+    #[test]
+    fn the_tag_filter_pill_stays_inside_the_panel() {
+        // The pill was a flat 100px at a proportional anchor, so it ran off
+        // the right edge whenever the content was narrower than 270px. A
+        // `max_width` on the label inside it is not a bound on the pill.
+        let mut checked = 0usize;
+        for width in [180.0_f32, 220.0, 300.0, 400.0, 900.0] {
+            for cmd in deck_detail(width, Some("уровень-продвинутый")) {
+                let RenderCommand::FillRect {
+                    x, width: w, color, ..
+                } = cmd
+                else {
+                    continue;
+                };
+                if color != MAUVE {
+                    continue;
+                }
+                assert!(w >= 0.0, "at width {width} the pill is {w} wide");
+                assert!(
+                    x + w <= width - FlashcardsApp::PADDING + 0.5,
+                    "at width {width} the tag pill runs to {}, past the margin {}",
+                    x + w,
+                    width - FlashcardsApp::PADDING
+                );
+                checked += 1;
+            }
+        }
+        assert!(
+            checked >= 3,
+            "only {checked} pills examined — the filter matched almost nothing"
+        );
+    }
+
+    #[test]
+    fn a_short_card_is_drawn_verbatim() {
+        // Otherwise every "it fits" assertion above is satisfiable by drawing
+        // nothing at all.
+        let texts: Vec<String> = texts_of(&deck_detail(1400.0, None))
+            .into_iter()
+            .map(|(_, t, _, _)| t)
+            .collect();
+        assert!(
+            texts.iter().any(|t| t == "short"),
+            "the short front was cut; got {texts:?}"
+        );
+        assert!(
+            texts.iter().any(|t| t == "brief"),
+            "the short back was cut; got {texts:?}"
+        );
     }
 }

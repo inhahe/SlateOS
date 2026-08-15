@@ -1595,7 +1595,7 @@ _2D library: Vello (Rust-native, GPU compute shaders) + HarfBuzz FFI for complex
 - [ ] Can drag and drop icons into and out of system tray
 - [ ] Apps can start in system tray or minimize to system tray
 - [ ] User can override any app: always start in system tray, always in taskbar, or neither
-- [ ] **A single "Activity" tray icon** (never one per app or per process) listing the apps currently narrating and what each is doing, with warning/error badges. Absent until something wants attention; an app running a long foreground job can request its own entry for that job's duration only. See §4.14, where the facility and the reasoning for keeping the tray's role this small live.
+- [ ] **One permanent "Activity" tray icon** (never one per app or per process), alongside clock/wifi/volume/battery and as fixed as they are. Click opens a flyout listing the apps currently narrating and what each is doing; picking one opens its console window. It does not badge or shout — a log is a door you go through, not an alert. See §4.14.
 - [ ] **Volume icon popup (click on system-tray volume icon).** Lightweight Aero-styled flyout — opens instantly without launching the full Settings app. Contents:
   - [ ] **Main volume slider** at top with current level, and a mute toggle next to it. Adjusting the slider takes effect immediately (no Apply button).
   - [ ] **Output device selector** — dropdown or radio list of available audio output devices (speakers, headphones, HDMI sinks, Bluetooth devices, USB DACs, virtual outputs). Selecting one switches the system default output. Currently active device shown highlighted; unavailable devices (unplugged, asleep) shown disabled with reason. Refreshes live as devices appear/disappear.
@@ -2919,18 +2919,28 @@ the problem — twelve apps still means twelve icons, and it means the icons
 appear and vanish as apps come and go, which is the specific tray behaviour
 users hate most._
 
-_So the tray's job here is **attention, not browsing**. Browsing lives in
-Process Explorer, which has the screen space for it. The tray answers only "is
-anything asking for my eyes right now?", and the console window it can summon is
-a convenience for the one case Process Explorer serves badly: a long-running
-foreground job whose narration is the point._
+_The fix is to move the per-app enumeration **out of the icon row and into a
+list inside one icon**. Lists scale to forty entries; rows of icons do not.
+That, not a better grouping key, is what actually solves the clutter._
 
-- [ ] **A single "Activity" tray icon**, not one per app or per process. Its menu lists the apps currently narrating, each with its current-activity one-liner and a warning/error badge; picking one opens that app's console window or jumps to it in Process Explorer.
-- [ ] **The icon earns its place**: absent by default, appearing only when something wants attention (a warning or error since last looked at, or an app that explicitly requested it), and disappearing when nothing does. A permanent icon most users never click is itself the clutter this is trying to avoid. Users who want it always visible can pin it, per the existing tray drag-and-drop item.
-- [ ] **Transient per-app presence, opt-in and self-limiting**: an app running a job where narration *is* the point — a build, a backup, a package install, a long import — can request its own tray entry **for the duration of that job only**, and it goes away when the job finishes. This covers the "glance at the progress without hunting for it" case without any app being able to homestead a tray slot. Gated the same way as everything else in §3.4: the user can override any app to always-tray, never-tray, or neither.
+_**The icon is permanent and static.** An earlier draft had it appear only when
+something wanted attention, which was wrong twice over. It contradicted the very
+objection above — an icon that comes and goes is the churn users dislike,
+whether there is one of them or twelve — and it made Process Explorer the only
+reliable route to a log, which defeats the point of the feature. The tray is
+good at exactly one thing: **a stable, known location.** Its existing permanent
+residents (clock, wifi, volume, battery) are unobjectionable precisely because
+they are few and they never move. A single fixed Activity icon is the same deal,
+and the user can remove it like any other tray icon if they do not want it._
+
+- [ ] **One permanent "Activity" tray icon**, never one per app or per process. Always present, fixed position, does not appear or disappear with what is running. Removable and re-addable by the user per the existing tray drag-and-drop item, and hideable outright in settings.
+- [ ] **Click opens a flyout**, modelled on the volume-icon popup (§3.4): a lightweight instant panel, not the full Process Explorer. It lists the apps currently narrating with each one's current-activity one-liner, scrollable when there are many, most-recently-active first. Picking one opens that app's console window; a "More…" entry jumps to Process Explorer for the full tree.
+- [ ] **Hover tooltip** summarises without opening anything — how many apps are narrating and what the foreground one is doing.
+- [ ] **The log is not an attention channel, and the icon does not shout.** An `error`-level line in a trace stream is chatter, not an alert: a program logging "DNS lookup failed, retrying" is doing its job, and badging the tray for it would build a system that cries wolf constantly — the failure mode of every notification system ever shipped. Things that genuinely want the user go through the mechanisms that already exist for wanting the user: push notifications (§4.12), the hung-app dialog (§4.3), crash reports. The tray icon is a **door you go through**, not a thing that taps you on the shoulder.
+  - [ ] Opt-in, default off: a subtle state on the icon itself (not a layout change, not a popup) when an app the user has specifically marked as worth watching reports an error. Off by default because the default has to be quiet, available because "tell me if the backup fails" is a reasonable thing to want.
+  - [ ] A long-running job may show progress *on the existing icon* (a ring or overlay), never by adding a second icon. Progress is glanceable without being an interruption, and nothing in the tray moves.
 - [ ] **Console windows are views, not owners.** Opening, closing, or never opening a console does not change the program's behaviour or its output — the ring is being written either way. This is the difference from a real terminal, where closing the window kills the child and a program with no reader can block on a full pipe. An activity ring never blocks its writer; it overwrites. A console window can be opened for an app, a process, or a thread, since all three are just nodes.
-- [ ] A console window can be opened from Process Explorer's context menu ("open console"), which is the discoverable path and does not involve the tray at all.
-- [ ] **AMBIGUITY (operator to confirm):** the above keeps a *reduced* tray role — one earned icon plus transient per-job entries — rather than dropping the tray entirely. Dropping it completely is a defensible simplification: Process Explorer plus `pstail` cover every inspection need, and the tray adds a surface to build and maintain for a case that is arguably rare. The argument for keeping it is that a background job with no window of its own has nowhere else to surface, and that "open the task manager to watch your backup" is a worse answer than a glanceable icon.
+- [ ] Console windows are also reachable from Process Explorer's context menu ("open console") and from `pstail` on the command line, so the tray is the *convenient* route rather than the only one.
 
 #### CLI counterpart
 
@@ -2953,8 +2963,8 @@ kernel views as the GUI so the two can never disagree._
 
 #### Settings
 
-- [ ] Per-app: activity stream on/off, group ring budget and how it is weighted across members, default verbosity, whether the app may request a transient tray entry.
-- [ ] Global: default per-group budget, global cap on memory spent across all rings, whether stdout capture is on by default, whether the Activity tray icon is pinned / earned / disabled outright, retention of promoted and spilled traces.
+- [ ] Per-app: activity stream on/off, group ring budget and how it is weighted across members, default verbosity, whether this app is one the user wants flagged on the tray icon when it reports an error (default no).
+- [ ] Global: default per-group budget, global cap on memory spent across all rings, whether stdout capture is on by default, whether the Activity tray icon is shown at all, retention of promoted and spilled traces.
 - [ ] A "programs that are narrating" list, so a user can see which programs support structured activity records and which are only being captured from stdout.
 
 #### Making it something programs actually do

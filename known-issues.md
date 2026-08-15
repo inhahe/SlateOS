@@ -4,9 +4,10 @@
 
 **Status: FIXED 2026-08-15** (lane C, commits `f508f76cf`, `f53562a09`,
 `feb695bbd`, `8208fad9d`, `83dfaff21`, `5750232c5`, `a8d659199`, `ffbdec410`,
-and the videoplayer commit following it). Found while surveying app tables for
-unbounded columns. Ten sites across `apps/` and `gui/` confused a byte count
-with a character count, usually while truncating a *display* string:
+`54fd94f2b`, and the renamer commit following it). Found while surveying app
+tables for unbounded columns. Eleven sites across `apps/` and `gui/` confused a
+byte count with a character count, usually while truncating a *display*
+string:
 
 ```rust
 let display = if title.len() > 20 {
@@ -35,8 +36,9 @@ particular apps — it is their ordinary input.
 | `gui/desktop/src/clipboard_viewer.rs:112` | `content[..197]` on a clipping | Copying any non-Latin text aborted the shell. |
 | `gui/desktop/src/clipboard_viewer.rs:678` | `&preview_text[..40]` on the same | Same, one layer up. |
 | `apps/videoplayer/src/main.rs:538` | `padded[..3]` in the SRT timestamp parser | **A subtitle file the user merely opened.** |
+| `apps/renamer/src/main.rs:450,460,489,509` | the filename stem, cut at a position the user types | **Any non-ASCII filename**, and it aborts a batch rename *partway through*. |
 
-The last three were found while fixing the first seven and were not in the
+The last four were found while fixing the first seven and were not in the
 original count. `gui/clipboard/src/main.rs:183` looked like another but is not:
 it already goes through `find_char_boundary`.
 
@@ -49,6 +51,23 @@ shape above — there is no `if x.len() > N` guard in sight. It is
 "a byte budget with a byte guard": it is *any* place where a character count
 and a byte count are used interchangeably. Rust's own `format!` width is a
 character count, which makes it a natural source of the confusion.
+
+**`apps/renamer` is the one site where the byte/character confusion was also a
+*semantic* bug, and the most damaging of the eleven.** Four rename rules —
+insert-at, remove-from, number-at, datestamp-at — slice the filename stem at a
+position the *user types into the rule*, clamped only with `.min(stem.len())`,
+a byte length. `InsertPosition::At`'s own doc comment has always read "insert at
+a specific character index", so the code contradicted its documented intent: for
+`日本語.txt`, "insert at 3" is past the end of a 3-character stem and should
+append, but the byte clamp put it after the *first* kanji. And unlike a
+truncated label, a wrong position here writes the wrong name to disk. The panic
+is worse still, because a rename batch applies each rule to each file in turn:
+one non-ASCII name aborted the renamer *after* earlier files had already been
+renamed, leaving the batch half-applied with no undo record. Fixed with a
+`char_offset(s, chars)` helper that all four sites route through, which makes
+the position mean what it says and makes the slices sound as a side effect. For
+ASCII names the two numbers coincide, so no existing rule changed behaviour —
+the pre-existing tests confirm it.
 
 **The fix was not to hunt for char boundaries at each site.** All but one of
 these is a *display* truncation, and each already had a box to draw into, so
@@ -82,7 +101,10 @@ wide; and the clipboard row's meta line could run under the sensitive
 indicator.
 
 Grep shape, if this recurs: `&<ident>[..<literal>]` where the receiver is a
-`String`/`&str`, and its `if x.len() > N` guard. Note this is the same root
+`String`/`&str`, and its `if x.len() > N` guard. That shape found seven of the
+eleven; the other four needed a wider sweep for *any* mixing of the two counts —
+`format!` width against a byte slice (videoplayer), and `.min(s.len())` used to
+clamp a position the user thinks of in characters (renamer). Note this is the same root
 cause as the unbounded-column survey below — **counting characters instead of
 measuring the box** — and it was worth treating as one problem.
 

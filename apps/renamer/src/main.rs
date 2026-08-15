@@ -393,6 +393,26 @@ impl FileEntry {
     }
 }
 
+/// The byte offset of character `chars`, or the end of `s` if it is shorter.
+///
+/// Every position a rename rule takes — "insert at 3", "remove 2 from 5" — is a
+/// position in **characters**, because characters are what the user can see in
+/// the name they are typing a rule against. `InsertPosition::At`'s own doc
+/// comment has always said "character index".
+///
+/// The code did not: it clamped with `.min(stem.len())`, a *byte* length, and
+/// then sliced. For any name that is not pure ASCII that is a different
+/// position from the one the user asked for, and not necessarily a character
+/// boundary at all — "insert at 1" into `"\u{65e5}\u{672c}\u{8a9e}"` sliced
+/// inside the first kanji and aborted the renamer partway through a batch.
+///
+/// Going through here makes the position mean what it says, and makes the
+/// slices sound as a side effect. For ASCII names the two are the same number,
+/// so no existing rule changes behaviour.
+fn char_offset(s: &str, chars: usize) -> usize {
+    s.char_indices().nth(chars).map_or(s.len(), |(i, _)| i)
+}
+
 // ============================================================================
 // Rename engine
 // ============================================================================
@@ -427,7 +447,7 @@ impl RenameEngine {
                 let insert_pos = match position {
                     InsertPosition::Start => 0,
                     InsertPosition::End => stem.len(),
-                    InsertPosition::At(pos) => (*pos).min(stem.len()),
+                    InsertPosition::At(pos) => char_offset(stem, *pos),
                 };
                 let mut new_stem = String::with_capacity(stem.len().saturating_add(text.len()));
                 new_stem.push_str(&stem[..insert_pos]);
@@ -436,8 +456,9 @@ impl RenameEngine {
                 format!("{new_stem}{ext}")
             }
             RenameOp::Remove { from, count } => {
-                let from_clamped = (*from).min(stem.len());
-                let end = (from_clamped.saturating_add(*count)).min(stem.len());
+                // `from` and `count` are both counts of characters.
+                let from_clamped = char_offset(stem, *from);
+                let end = char_offset(stem, from.saturating_add(*count));
                 let mut new_stem = String::with_capacity(stem.len());
                 new_stem.push_str(&stem[..from_clamped]);
                 new_stem.push_str(&stem[end..]);
@@ -465,7 +486,7 @@ impl RenameEngine {
                     InsertPosition::Start => format!("{insert_str}{stem}{ext}"),
                     InsertPosition::End => format!("{stem}{insert_str}{ext}"),
                     InsertPosition::At(pos) => {
-                        let pos = (*pos).min(stem.len());
+                        let pos = char_offset(stem, *pos);
                         let mut s = String::new();
                         s.push_str(&stem[..pos]);
                         s.push_str(&insert_str);
@@ -485,7 +506,7 @@ impl RenameEngine {
                     InsertPosition::Start => format!("{date_str}{separator}{stem}{ext}"),
                     InsertPosition::End => format!("{stem}{separator}{date_str}{ext}"),
                     InsertPosition::At(pos) => {
-                        let pos = (*pos).min(stem.len());
+                        let pos = char_offset(stem, *pos);
                         let mut s = String::new();
                         s.push_str(&stem[..pos]);
                         s.push_str(separator);
@@ -2493,5 +2514,179 @@ mod tests {
             sizes.len() >= 3,
             "the header plus both rows' sizes should share that edge, got {sizes:?}"
         );
+    }
+    // --- Positional rules count characters, not bytes ---
+
+    /// Names whose stems are not pure ASCII, so that a character position and a
+    /// byte position are different numbers, and most byte positions are not
+    /// character boundaries at all.
+    fn adversarial_names() -> Vec<&'static str> {
+        vec![
+            "\u{65e5}\u{672c}\u{8a9e}.txt",        // 3 chars, 9 bytes
+            "\u{03b1}\u{03b2}\u{03b3}\u{03b4}.md", // Greek, 2 bytes/char
+            "\u{0440}\u{0435}\u{0437}\u{0443}\u{043c}\u{0435}.pdf", // Cyrillic
+            "\u{1f600}\u{1f601}\u{1f602}.png",     // emoji, 4 bytes/char
+            "caf\u{e9}_r\u{e9}sum\u{e9}.doc",      // mostly ASCII, some not
+            "a\u{65e5}b\u{672c}c.jpg",             // alternating widths
+            "\u{65e5}",                            // no extension at all
+            "\u{4e2d}\u{6587}\u{6587}\u{4ef6}\u{540d}\u{79f0}.tar.gz",
+        ]
+    }
+
+    /// Every rule that takes a position, at every position from before the name
+    /// to past its end.
+    fn positional_ops(pos: usize) -> Vec<RenameOp> {
+        vec![
+            RenameOp::Insert {
+                text: "-mid-".into(),
+                position: InsertPosition::At(pos),
+            },
+            RenameOp::Remove {
+                from: pos,
+                count: 2,
+            },
+            RenameOp::Number {
+                start: 1,
+                step: 1,
+                padding: 3,
+                position: InsertPosition::At(pos),
+                separator: "_".into(),
+            },
+            RenameOp::DateStamp {
+                format: DateFormat::YmdHyphen,
+                position: InsertPosition::At(pos),
+                separator: "_".into(),
+            },
+        ]
+    }
+
+    #[test]
+    fn a_non_ascii_name_does_not_abort_a_positional_rule() {
+        // A rename batch runs every rule over every file. One name whose byte
+        // length exceeds the position the user typed used to slice inside a
+        // character and abort the renamer partway through the batch — after
+        // some files on disk had already been renamed.
+        let mut checked = 0usize;
+        for name in adversarial_names() {
+            let (_, ext) = FileEntry::split_name(name);
+            // Well past the longest stem here, in both characters and bytes.
+            for pos in 0..24 {
+                for op in positional_ops(pos) {
+                    let out = RenameEngine::apply(&op, name, 0);
+                    // Every positional rule rewrites the stem and re-appends
+                    // the extension untouched.
+                    assert!(
+                        out.ends_with(ext),
+                        "{op:?} at {pos} on {name:?} lost the extension: {out:?}"
+                    );
+                    checked += 1;
+                }
+            }
+        }
+        assert!(
+            checked >= 700,
+            "expected the sweep to exercise every name/position/op, got {checked}"
+        );
+    }
+
+    #[test]
+    fn insert_at_a_position_counts_characters() {
+        let op = RenameOp::Insert {
+            text: "-mid-".into(),
+            position: InsertPosition::At(1),
+        };
+        // Position 1 is after the first *character*. As a byte offset it lands
+        // inside the first kanji, which is where this used to abort.
+        assert_eq!(
+            RenameEngine::apply(&op, "\u{65e5}\u{672c}\u{8a9e}.txt", 0),
+            "\u{65e5}-mid-\u{672c}\u{8a9e}.txt"
+        );
+        let op = RenameOp::Insert {
+            text: "!".into(),
+            position: InsertPosition::At(2),
+        };
+        assert_eq!(
+            RenameEngine::apply(&op, "\u{1f600}\u{1f601}\u{1f602}.png", 0),
+            "\u{1f600}\u{1f601}!\u{1f602}.png"
+        );
+    }
+
+    #[test]
+    fn remove_counts_characters_at_both_ends() {
+        // "remove 1 character starting at character 1" — not "1 byte at byte 1".
+        let op = RenameOp::Remove { from: 1, count: 1 };
+        assert_eq!(
+            RenameEngine::apply(&op, "\u{65e5}\u{672c}\u{8a9e}.txt", 0),
+            "\u{65e5}\u{8a9e}.txt"
+        );
+        // A count that runs past the end takes the rest of the stem and stops.
+        let op = RenameOp::Remove { from: 1, count: 99 };
+        assert_eq!(
+            RenameEngine::apply(&op, "\u{65e5}\u{672c}\u{8a9e}.txt", 0),
+            "\u{65e5}.txt"
+        );
+    }
+
+    #[test]
+    fn number_and_datestamp_insert_at_a_character_position() {
+        let op = RenameOp::Number {
+            start: 1,
+            step: 1,
+            padding: 3,
+            position: InsertPosition::At(1),
+            separator: "_".into(),
+        };
+        assert_eq!(
+            RenameEngine::apply(&op, "\u{65e5}\u{672c}\u{8a9e}.txt", 0),
+            "\u{65e5}_001_\u{672c}\u{8a9e}.txt"
+        );
+        let op = RenameOp::DateStamp {
+            format: DateFormat::YmdHyphen,
+            position: InsertPosition::At(2),
+            separator: "_".into(),
+        };
+        assert_eq!(
+            RenameEngine::apply(&op, "\u{65e5}\u{672c}\u{8a9e}.txt", 0),
+            "\u{65e5}\u{672c}_2026-05-18_\u{8a9e}.txt"
+        );
+    }
+
+    #[test]
+    fn a_position_past_the_end_clamps_to_the_end() {
+        // Clamping is what `.min(stem.len())` was trying to do; it just measured
+        // the wrong quantity. Past-the-end must still mean "append".
+        let op = RenameOp::Insert {
+            text: "_z".into(),
+            position: InsertPosition::At(99),
+        };
+        assert_eq!(
+            RenameEngine::apply(&op, "\u{65e5}\u{672c}\u{8a9e}.txt", 0),
+            "\u{65e5}\u{672c}\u{8a9e}_z.txt"
+        );
+        // Exactly at the end of a 3-character stem is the same thing.
+        let op = RenameOp::Insert {
+            text: "_z".into(),
+            position: InsertPosition::At(3),
+        };
+        assert_eq!(
+            RenameEngine::apply(&op, "\u{65e5}\u{672c}\u{8a9e}.txt", 0),
+            "\u{65e5}\u{672c}\u{8a9e}_z.txt"
+        );
+    }
+
+    #[test]
+    fn an_ascii_name_is_positioned_exactly_as_before() {
+        // For ASCII the character count and the byte count are the same number,
+        // so this change must be invisible to every existing rule.
+        let op = RenameOp::Insert {
+            text: "-mid-".into(),
+            position: InsertPosition::At(4),
+        };
+        assert_eq!(
+            RenameEngine::apply(&op, "filename.txt", 0),
+            "file-mid-name.txt"
+        );
+        let op = RenameOp::Remove { from: 2, count: 3 };
+        assert_eq!(RenameEngine::apply(&op, "abcdefg.txt", 0), "abfg.txt");
     }
 }

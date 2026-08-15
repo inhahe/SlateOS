@@ -3172,8 +3172,17 @@ mod tests {
     fn an_alert_card_grows_to_hold_its_description() {
         // Alerts are a stacked list, so a card that did not grow would be
         // overlapped by the next one drawn beneath it.
+        //
+        // The growing description is built by repetition rather than written
+        // out, because how many lines a given sentence wraps to is a fact
+        // about the host's fonts, not about this app. `LONG_ALERT` used to
+        // wrap to four lines; once `text::wrap` started measuring glyphs
+        // instead of estimating from byte counts it wrapped to two, which is
+        // under the card's 90px floor — so this test quietly became a check
+        // that 90.0 > 90.0 and failed. A repeated phrase overflows the floor
+        // whatever the face measures.
         let short = app_with_alert("Winds gusting to 60 km/h.");
-        let long = app_with_alert(LONG_ALERT);
+        let long = app_with_alert(&"Secure loose objects outdoors. ".repeat(40));
 
         let card_height = |app: &WeatherApp| -> f32 {
             // The card background is the widest fill in the alerts view.
@@ -3191,10 +3200,19 @@ mod tests {
                 .expect("the alerts view drew no card")
         };
 
+        // The floor covers two lines, so growth is only observable past it.
+        // Checked separately from the assertion below so that a description
+        // which stopped being long enough reports that, rather than looking
+        // like the card refusing to grow.
+        let drawn = alert_body_lines(&long).len();
+        assert!(
+            drawn > 2,
+            "the growth check needs a description past the 90px floor, got {drawn} line(s)"
+        );
         let long_h = card_height(&long);
         assert!(
             long_h > card_height(&short),
-            "a four-line description got the same {long_h}px card as a one-liner"
+            "a {drawn}-line description got the same {long_h}px card as a one-liner"
         );
         let body_bottom = alert_body_lines(&long)
             .iter()

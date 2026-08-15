@@ -1238,6 +1238,126 @@ def report_run_verdict(verdict, notes, extra_notes=()):
               "as clean.")
 
 
+#: Where a run-over-run movement sits against the benchmark's own history.
+BAND_OUTSIDE = "outside"
+BAND_WITHIN = "within"
+BAND_UNJUDGED = "unjudged"
+
+
+#: Tukey's fence multiplier: a sample is an outlier of its own distribution
+#: past `Q1 - k*IQR` / `Q3 + k*IQR`. 1.5 is the textbook boxplot constant and
+#: is deliberately not fitted to this project's data.
+TUKEY_K = 1.5
+
+
+def per_benchmark_bands(records, k=TUKEY_K):
+    """Robust spread of every benchmark across `records`.
+
+    Returns `{name: (lo, hi, median, n)}`, omitting any benchmark with fewer
+    than `MIN_WINDOW_FOR_BAND` samples in the window -- the absence is the
+    "cannot judge" answer, and callers must not read it as "fine".
+
+    Why this exists
+    ---------------
+    `diff()` decides REGRESSED/IMPROVED from the **immediately preceding run**.
+    For a tight benchmark that is correct and maximally sensitive; for a
+    volatile one it compares two samples of the same noise and reports the
+    difference as a change in the code. Measured, not assumed: `ipc_channel`
+    was reported at `+31% vs suite` on 542 -> 688 ns while its own release
+    history spans 420-1475 ns, with 688 sitting near its median.
+
+    Why Tukey's fence and not the median/MAD band used elsewhere in this file
+    ------------------------------------------------------------------------
+    Consistency argued for MAD, and the data overruled it. MAD measures the
+    width of the distribution's **core**, and these per-benchmark
+    distributions are visibly clustered rather than unimodal: `ipc_channel`
+    alternates between a ~545 ns and a ~650 ns cluster across builds. Over the
+    eight runs preceding the motivating one its median is 648.5 with a MAD of
+    7.5, so a 3-MAD band is **626-671 ns** -- narrower than the gap between
+    that benchmark's own two clusters, on a benchmark whose observed span is
+    420-1475. It flags 688, i.e. it would have reproduced the exact false
+    positive this function exists to remove.
+
+    Quartiles do not have that failure: a bimodal core *widens* the box instead
+    of shrinking it. The same window gives a fence of **505-746 ns**, which
+    declines 688 and still catches the following run's 953 (+40%).
+
+    Neither constant was tuned. Replaying the ten most recent release
+    comparisons in `bench/history.jsonl`: 47 movements cross the 25% threshold,
+    of which MAD confirms 35 and this rule confirms 29 -- and the six they
+    disagree on include the written-up `ipc_channel` non-event.
+
+    Two-sided, unlike `robust_band()`: a benchmark's own value can genuinely
+    move either way (a real optimisation is the whole point of the IMPROVED
+    list), whereas the quantities `robust_band` grades are contaminated in one
+    direction only.
+
+    A degenerate zero IQR -- a benchmark that reads the same value every run --
+    collapses the fence onto the quartiles, so *any* movement counts as outside
+    it. That is safe here and deliberately unfloored, because this band is only
+    ever applied as a **veto** on a movement that already crossed
+    `threshold_pct`: it can demote a report, never create one.
+    """
+    acc = {}
+    for record in records:
+        for name, value in record.get("entries", {}).items():
+            if value and value > 0:
+                acc.setdefault(name, []).append(float(value))
+    bands = {}
+    for name, values in acc.items():
+        if len(values) < MIN_WINDOW_FOR_BAND:
+            continue
+        q1, median, q3 = statistics.quantiles(values, n=4, method="inclusive")
+        iqr = q3 - q1
+        bands[name] = (q1 - k * iqr, q3 + k * iqr, median, len(values))
+    return bands
+
+
+def band_position(value, band, worse):
+    """Is `value` outside `band` in the direction that matters?
+
+    `worse` is True for a claimed regression (only the upper edge can confirm
+    it) and False for a claimed improvement (only the lower edge can). A
+    movement that crossed the run-over-run threshold but landed inside the
+    benchmark's own historical spread is `BAND_WITHIN` -- not evidence of
+    anything, and specifically not evidence that the code is fine either.
+
+    No band at all returns `BAND_UNJUDGED`, and callers must keep reporting
+    those: too little history is a reason to withhold the *word* "regressed",
+    never a reason to hide the movement. A new benchmark's first real
+    regression would otherwise be silenced by the very fact that it is new.
+    """
+    if band is None:
+        return BAND_UNJUDGED
+    lo, hi, _median, _n = band
+    if worse:
+        return BAND_OUTSIDE if value > hi else BAND_WITHIN
+    return BAND_OUTSIDE if value < lo else BAND_WITHIN
+
+
+def describe_band(band):
+    """Human-readable form of one `per_benchmark_bands` entry."""
+    lo, hi, median, n = band
+    return (f"its own range is {max(lo, 0.0):.0f}-{hi:.0f}ns "
+            f"(median {median:.0f}ns over {n} runs)")
+
+
+def split_by_band(flagged, bands, worse):
+    """Partition threshold-crossing movements by `band_position`.
+
+    Returns `(outside, within, unjudged)`, each a list of the input tuples with
+    the benchmark's band appended.
+    """
+    outside, within, unjudged = [], [], []
+    buckets = {BAND_OUTSIDE: outside, BAND_WITHIN: within,
+               BAND_UNJUDGED: unjudged}
+    for entry in flagged:
+        name, _before, after = entry[0], entry[1], entry[2]
+        band = bands.get(name)
+        buckets[band_position(after, band, worse)].append(entry + (band,))
+    return outside, within, unjudged
+
+
 def diff(previous, current, threshold_pct):
     """Split benchmarks into regressed / improved / added / removed.
 
@@ -1340,10 +1460,17 @@ def report(previous, current_entries, threshold_pct,
 
     `records`/`host`/`profile` are optional only so that callers interested
     purely in the run-over-run diff (the tests, chiefly) need not construct a
-    history.  When they are supplied, the diff is additionally placed against
-    the recent history for this host -- see `report_run_position`, and note
-    that the run-over-run diff alone is what produced two written-up
-    regressions that never existed.
+    history.  When they are supplied, two things change: the run is placed
+    against the recent history for this host (`report_run_position`), and each
+    threshold-crossing movement is checked against that benchmark's own recent
+    range (`per_benchmark_bands`) before being called a regression.  The
+    run-over-run diff alone is what produced two written-up regressions that
+    never existed, and `ipc_channel`'s "+31%" on a move well inside its own
+    420-1475ns span was a third.
+
+    Without a history every movement comes back UNCONFIRMED rather than
+    silently confirmed: a caller that supplies no records has not shown the
+    benchmark to be stable, and must not be told that it has.
     """
     current = {name: vals[0] for name, vals in current_entries.items()}
 
@@ -1370,7 +1497,8 @@ def report(previous, current_entries, threshold_pct,
     report_baseline_canary(previous)
     print(
         "  Comparison is run-over-run on this host, which cancels the TCG "
-        "emulation constant."
+        "emulation constant; a movement is only called a regression if it "
+        "also leaves that benchmark's own recent range."
     )
     print(
         "  (The 'target' column in the scorecard above is a *mix*: mostly a "
@@ -1410,22 +1538,57 @@ def report(previous, current_entries, threshold_pct,
     if records is not None and host is not None:
         report_run_position(records, host, profile, current, previous)
 
-    if regressed:
-        print(f"  REGRESSED (>{threshold_pct:g}% slower than the suite):")
-        for name, before, after, raw, adj in sorted(
-            regressed, key=lambda r: -r[4]
-        ):
+    # Each threshold-crossing movement is now checked against the benchmark's
+    # *own* recent spread before it is called a regression. The window is the
+    # same `comparable_records` one every other historical judgement here uses,
+    # and it holds only records that precede this run, so a verdict printed at
+    # boot still reads the same a week later.
+    if records is not None and host is not None:
+        bands = per_benchmark_bands(
+            comparable_records(records, host, profile)[-SPEED_WINDOW:]
+        )
+    else:
+        bands = {}
+
+    reg_out, reg_within, reg_unjudged = split_by_band(regressed, bands, True)
+    imp_out, imp_within, imp_unjudged = split_by_band(improved, bands, False)
+
+    def _print_movements(header, rows, key):
+        print(header)
+        for name, before, after, raw, adj, band in sorted(rows, key=key):
+            detail = f"; {describe_band(band)}" if band else ""
             print(
                 f"    {name}: {before}ns -> {after}ns "
-                f"({adj:+.0f}% vs suite, {raw:+.0f}% raw)"
+                f"({adj:+.0f}% vs suite, {raw:+.0f}% raw){detail}"
             )
-    if improved:
-        print(f"  IMPROVED (>{threshold_pct:g}% faster than the suite):")
-        for name, before, after, raw, adj in sorted(improved, key=lambda r: r[4]):
-            print(
-                f"    {name}: {before}ns -> {after}ns "
-                f"({adj:+.0f}% vs suite, {raw:+.0f}% raw)"
-            )
+
+    worst_first = lambda r: -r[4]  # noqa: E731 - reads better inline
+    best_first = lambda r: r[4]    # noqa: E731
+
+    if reg_out:
+        _print_movements(
+            f"  REGRESSED (>{threshold_pct:g}% slower than the suite AND "
+            f"outside its own recent range):", reg_out, worst_first)
+    if reg_unjudged:
+        _print_movements(
+            f"  REGRESSED, UNCONFIRMED (>{threshold_pct:g}% slower than the "
+            f"suite; too few prior runs to know this benchmark's spread):",
+            reg_unjudged, worst_first)
+    if imp_out:
+        _print_movements(
+            f"  IMPROVED (>{threshold_pct:g}% faster than the suite AND "
+            f"outside its own recent range):", imp_out, best_first)
+    if imp_unjudged:
+        _print_movements(
+            f"  IMPROVED, UNCONFIRMED (>{threshold_pct:g}% faster than the "
+            f"suite; too few prior runs to know this benchmark's spread):",
+            imp_unjudged, best_first)
+    if reg_within or imp_within:
+        _print_movements(
+            f"  WITHIN ITS OWN RANGE (crossed {threshold_pct:g}% run-over-run, "
+            f"but landed inside this benchmark's own recent spread -- this is "
+            f"NOT a finding in either direction):",
+            reg_within + imp_within, worst_first)
     if added:
         print("  NEW:")
         for name, measured in added:
@@ -1442,8 +1605,23 @@ def report(previous, current_entries, threshold_pct,
             )
         else:
             print(f"  No benchmark moved by more than {threshold_pct:g}%.")
+    elif not (reg_out or reg_unjudged or imp_out or imp_unjudged
+              or added or removed):
+        # Everything that crossed the threshold was demoted. Say so, rather
+        # than printing only the demoted list and leaving the reader to work
+        # out that nothing was found -- the whole point of the band is that
+        # this outcome is common and unremarkable.
+        print(
+            f"  No benchmark moved outside its own recent range "
+            f"({len(reg_within) + len(imp_within)} crossed "
+            f"{threshold_pct:g}% run-over-run and are listed above)."
+        )
 
-    return bool(regressed)
+    # The return value drives --fail-on-regression, so it must count only what
+    # is still being *claimed* as a regression: confirmed ones and the ones
+    # with too little history to judge. A movement inside the benchmark's own
+    # spread failing the build is exactly the false positive this fixes.
+    return bool(reg_out or reg_unjudged)
 
 
 def cmd_list(history_path):

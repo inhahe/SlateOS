@@ -1130,6 +1130,147 @@ def test_dispersion_band_fires_on_the_real_history(bh):
           True)
 
 
+def _band_history(bh, name, values, host="H", profile="release"):
+    """One record per value, so `per_benchmark_bands` sees `values` for `name`."""
+    return [{"host": host, "profile": profile, "entries": {name: v}}
+            for v in values]
+
+
+def test_per_benchmark_band_demotes_a_move_inside_its_own_spread(bh):
+    """A movement that stays inside the benchmark's own range is not a finding.
+
+    This is B-BENCH-COMPARES-TO-ONE-PRIOR-RUN-NOT-THE-DISTRIBUTION. The verdict
+    used to come from `runs[-1]` alone, so for a volatile benchmark it reported
+    the difference between two samples of the same noise as a change in the
+    code.
+
+    Note the asymmetry that makes this safe: the band is only ever consulted
+    *after* the run-over-run threshold has already been crossed, so it can
+    demote a report and can never invent one. A bug here loses sensitivity; it
+    cannot manufacture a false regression.
+    """
+    volatile = _band_history(bh, "b", [420, 1475, 549, 654, 657, 653, 644, 542])
+    bands = bh.per_benchmark_bands(volatile)
+    check("a benchmark with enough history gets a band", "b" in bands, True)
+    lo, hi, _median, n = bands["b"]
+    check("the band is built from every sample in the window", n, 8)
+
+    check("a value inside the range is not confirmed",
+          bh.band_position(688, bands["b"], True), bh.BAND_WITHIN)
+    check("a value well above it is",
+          bh.band_position(2500, bands["b"], True), bh.BAND_OUTSIDE)
+    check("a value well below it confirms an improvement",
+          bh.band_position(50, bands["b"], False), bh.BAND_OUTSIDE)
+    # Direction matters: a low value must not confirm a *regression* claim.
+    check("the upper edge cannot confirm a downward move",
+          bh.band_position(50, bands["b"], True), bh.BAND_WITHIN)
+    check("the band brackets the observed samples", lo < 500 and hi > 700, True)
+
+    # Too little history is `unjudged`, not `within`: a new benchmark's first
+    # real regression must not be silenced by the fact that it is new.
+    thin = _band_history(bh, "b", [500, 510, 505])
+    check("three samples yield no band",
+          bh.per_benchmark_bands(thin).get("b"), None)
+    check("no band means unjudged, which still gets reported",
+          bh.band_position(9999, None, True), bh.BAND_UNJUDGED)
+
+
+def test_band_is_wired_into_report_and_into_the_exit_status(bh):
+    """The demotion must happen on the real path and must reach `--fail-on-regression`.
+
+    A demoted movement that still fails the build has not been demoted; the
+    return value is the only thing `main()` acts on, so it is asserted here
+    rather than inferred from the printed text.
+    """
+    import io
+    import contextlib
+
+    # Twenty benchmarks so `global_drift` has its samples; one of them, `b0`,
+    # is volatile and moves 30% while staying inside its own range.
+    stable = {f"b{i}": 1000 for i in range(1, 20)}
+    history = []
+    for value in (420, 1475, 549, 654, 657, 653, 644, 542):
+        entries = dict(stable)
+        entries["b0"] = value
+        history.append({"host": "H", "profile": "release", "entries": entries})
+    previous = history[-1]                      # b0 == 542
+    current = {name: (v, 10000, "OK", None, None)
+               for name, v in previous["entries"].items()}
+    current["b0"] = (688, 10000, "OK", None, None)   # +27%, inside 505-746
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        regressed = bh.report(previous, current, 25.0, records=history,
+                              host="H", profile="release")
+    out = buf.getvalue()
+    check("an in-range movement does not fail the build", regressed, False)
+    check("...and is still shown, under its own heading",
+          "WITHIN ITS OWN RANGE" in out, True)
+    check("...with the range spelled out", "median" in out, True)
+    check("...and is not called a regression", "  REGRESSED" in out, False)
+
+    # The same machinery must still pass a real outlier through.
+    current["b0"] = (3000, 10000, "OK", None, None)
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        regressed = bh.report(previous, current, 25.0, records=history,
+                              host="H", profile="release")
+    check("a movement outside the range still fails the build", regressed, True)
+    check("...and is called a regression",
+          "REGRESSED" in buf.getvalue(), True)
+
+    # With no history at all the movement is UNCONFIRMED rather than silently
+    # confirmed -- and still fails the build, because withholding the word is
+    # not the same as clearing the change.
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        regressed = bh.report(previous, current, 25.0)
+    check("without a history the claim is unconfirmed, not dropped",
+          regressed, True)
+    check("...and says so", "UNCONFIRMED" in buf.getvalue(), True)
+
+
+def test_band_declines_the_written_up_false_positive_on_the_real_history(bh):
+    """Positive control: the documented false positive, replayed from real data.
+
+    `ipc_channel` 542 -> 688 ns was written up at "+31% vs suite" while sitting
+    near the middle of its own 420-1475 ns release history. The fix is only
+    worth anything if it declines *that* movement using the records genuinely
+    in `bench/history.jsonl` -- and only trustworthy if it still catches the
+    next run's 953 ns from the same window, which it does.
+
+    This also pins the choice of Tukey's fence over the median/MAD band used
+    elsewhere in this file: on this window MAD gives 626-671 ns and would
+    reproduce the false positive exactly. The band is quartile-based because
+    the data demanded it, and this test is what would notice a silent revert.
+    """
+    import json
+    if not os.path.exists(HISTORY):
+        check("history.jsonl exists for the positive control", False, True)
+        return
+    records = [json.loads(line) for line in
+               open(HISTORY, encoding="utf-8").read().splitlines()
+               if line.strip()]
+    release = [r for r in records if bh.record_profile(r) == "release"]
+    values = [r["entries"].get("ipc_channel") for r in release]
+    if 688 not in values or 953 not in values:
+        print("SKIP  ipc_channel control (history no longer holds those runs)")
+        return
+
+    at = values.index(688)
+    window = release[max(0, at - bh.SPEED_WINDOW):at]
+    band = bh.per_benchmark_bands(window).get("ipc_channel")
+    check("the real window supports a band", band is not None, True)
+    check("688ns is inside ipc_channel's own range",
+          bh.band_position(688, band, True), bh.BAND_WITHIN)
+
+    at953 = values.index(953)
+    window = release[max(0, at953 - bh.SPEED_WINDOW):at953]
+    band = bh.per_benchmark_bands(window).get("ipc_channel")
+    check("953ns from the same benchmark is outside it",
+          bh.band_position(953, band, True), bh.BAND_OUTSIDE)
+
+
 def test_main_records_wall_time_and_host_load(bh, tmpdir):
     """The new fields must survive the full `main()` path onto disk.
 

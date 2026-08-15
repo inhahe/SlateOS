@@ -7,6 +7,11 @@
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand};
 use guitk::style::CornerRadii;
+use guitk::text;
+
+/// Horizontal room a history row's text gives up to its icon and right margin,
+/// so the body preview is elided to the width it is actually drawn in.
+const BODY_INSET: f32 = 48.0;
 
 // ============================================================================
 // Catppuccin Mocha palette
@@ -1134,11 +1139,20 @@ impl NotificationSettingsUI {
             cmds.push(RenderCommand::Text {
                 x: x + 28.0,
                 y: cy + 38.0,
-                text: truncate_text(&entry.body, 60),
+                // A preview in a scannable list, so cutting it is right -- but
+                // cut it to the box it is actually drawn in, measured, rather
+                // than to a character budget chosen independently of that box.
+                text: text::elide(
+                    &entry.body,
+                    width - BODY_INSET,
+                    "...",
+                    11.0,
+                    FontWeightHint::Regular,
+                ),
                 font_size: 11.0,
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
-                max_width: Some(width - 48.0),
+                max_width: Some(width - BODY_INSET),
             });
 
             cy += 58.0;
@@ -1235,18 +1249,11 @@ impl NotificationSettingsUI {
     }
 }
 
-/// Truncate text to a maximum number of characters with ellipsis.
-fn truncate_text(text: &str, max_len: usize) -> String {
-    if text.len() <= max_len {
-        text.to_string()
-    } else {
-        let end = text.char_indices()
-            .nth(max_len.saturating_sub(3))
-            .map(|(i, _)| i)
-            .unwrap_or(text.len());
-        format!("{}...", &text[..end])
-    }
-}
+// `truncate_text` lived here: a local ellipsis helper that compared
+// `text.len()` (bytes) against a character budget, and whose budget was
+// chosen independently of the box the text was drawn in. Replaced by
+// `text::elide`, which measures both the text and the ellipsis against the
+// actual width. See known-issues.md TD-APPS-ESTIMATE-TEXT-WIDTH.
 
 // ============================================================================
 // Tests
@@ -1744,18 +1751,72 @@ mod tests {
         assert!(!cmds.is_empty());
     }
 
-    // ---- truncate_text ----
+    // ---- Body preview elision ----
 
     #[test]
-    fn test_truncate_short() {
-        assert_eq!(truncate_text("hello", 10), "hello");
+    fn a_body_preview_fits_the_row_it_is_drawn_in() {
+        // The preview used to be cut to a 60-*character* budget unrelated to
+        // the box, so a wide-glyph body overflowed and a narrow one was cut
+        // short of the room it had. Assert the postcondition instead: whatever
+        // is drawn fits.
+        let mut ui = NotificationSettingsUI::new();
+        ui.set_tab(NotificationSettingsTab::History);
+        for (i, body) in [
+            "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW",
+            "iiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiii",
+            "a body with accents: ééééééééééééééééééééééééééééééééééé",
+            "short",
+        ]
+        .iter()
+        .enumerate()
+        {
+            ui.settings.record_notification(
+                "app",
+                "title",
+                *body,
+                NotificationPriority::Normal,
+                i as u64,
+            );
+        }
+        let width = 600.0_f32;
+        let cmds = ui.render(width, 800.0);
+        let mut checked = 0;
+        for cmd in &cmds {
+            if let RenderCommand::Text {
+                text,
+                font_size,
+                font_weight,
+                max_width: Some(mw),
+                ..
+            } = cmd
+                && (*font_size - 11.0).abs() < 0.01
+            {
+                let w = guitk::text::measure(text, *font_size, *font_weight);
+                assert!(
+                    w <= *mw + 0.01,
+                    "preview {text:?} measures {w} in a {mw} box"
+                );
+                checked += 1;
+            }
+        }
+        // Without this the test passes on a render that drew no previews.
+        assert!(checked >= 4, "expected four body previews, checked {checked}");
     }
 
     #[test]
-    fn test_truncate_long() {
-        let result = truncate_text("this is a very long notification body text", 20);
-        assert!(result.ends_with("..."));
-        assert!(result.len() <= 23); // 20-3+3
+    fn a_short_body_is_not_elided() {
+        let mut ui = NotificationSettingsUI::new();
+        ui.set_tab(NotificationSettingsTab::History);
+        ui.settings
+            .record_notification("app", "title", "short body", NotificationPriority::Normal, 1);
+        let cmds = ui.render(600.0, 800.0);
+        assert!(
+            cmds.iter().any(|c| matches!(
+                c,
+                RenderCommand::Text { text, .. } if text == "short body"
+            )),
+            "a body that fits should be drawn whole, with no ellipsis"
+        );
     }
 
     // ---- Tab labels ----

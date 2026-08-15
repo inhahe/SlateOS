@@ -19,6 +19,21 @@
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand};
 use guitk::style::CornerRadii;
+use guitk::text;
+
+// Rule-list column widths. Defined once because the header row and the rule
+// rows both lay out against them, and two copies of a column width drift.
+const COL_PRIORITY: f32 = 70.0;
+const COL_NAME: f32 = 180.0;
+const COL_MATCH: f32 = 200.0;
+const COL_ACTIONS: f32 = 60.0;
+const COL_HITS: f32 = 50.0;
+const COL_STATUS: f32 = 60.0;
+/// Room left between a column's text and the next column's edge.
+const COL_GUTTER: f32 = 8.0;
+/// Horizontal room the action-summary line gives up to the icon on its left
+/// and the row's right margin.
+const SUMMARY_INSET: f32 = 86.0;
 
 // ============================================================================
 // Catppuccin Mocha theme constants
@@ -869,8 +884,17 @@ impl RulesSettingsUI {
         let rules = manager.rules();
         let row_h = 48.0;
 
-        // Column headers.
-        let headers = [("Priority", 70.0), ("Name", 180.0), ("Match", 200.0), ("Actions", 60.0), ("Hits", 50.0), ("Status", 60.0)];
+        // Column headers. The widths come from the shared constants rather
+        // than being written out again here: the row loop below advances by
+        // the same figures, and two copies of a column width drift.
+        let headers = [
+            ("Priority", COL_PRIORITY),
+            ("Name", COL_NAME),
+            ("Match", COL_MATCH),
+            ("Actions", COL_ACTIONS),
+            ("Hits", COL_HITS),
+            ("Status", COL_STATUS),
+        ];
         let mut hx = x + 8.0;
         for (label, col_w) in &headers {
             cmds.push(RenderCommand::Text {
@@ -931,29 +955,43 @@ impl RulesSettingsUI {
                 color: priority_color,
                 font_weight: FontWeightHint::Bold, max_width: None,
             });
-            cx += 70.0;
+            cx += COL_PRIORITY;
 
-            // Name.
+            // Name. These cells carry no `max_width`, so the elision is the
+            // only thing keeping a long rule name -- which the user types --
+            // out of the next column. Cut it to the column it occupies.
             cmds.push(RenderCommand::Text {
                 x: cx,
                 y: ry + 8.0,
-                text: truncate_string(&rule.name, 24),
+                text: text::elide(
+                    &rule.name,
+                    COL_NAME - COL_GUTTER,
+                    "...",
+                    12.0,
+                    FontWeightHint::Regular,
+                ),
                 font_size: 12.0,
                 color: if rule.enabled { MOCHA_TEXT } else { MOCHA_OVERLAY0 },
                 font_weight: FontWeightHint::Regular, max_width: None,
             });
-            cx += 180.0;
+            cx += COL_NAME;
 
             // Match criteria.
             cmds.push(RenderCommand::Text {
                 x: cx,
                 y: ry + 8.0,
-                text: truncate_string(&rule.criteria.description(), 28),
+                text: text::elide(
+                    &rule.criteria.description(),
+                    COL_MATCH - COL_GUTTER,
+                    "...",
+                    11.0,
+                    FontWeightHint::Regular,
+                ),
                 font_size: 11.0,
                 color: MOCHA_BLUE,
                 font_weight: FontWeightHint::Regular, max_width: None,
             });
-            cx += 200.0;
+            cx += COL_MATCH;
 
             // Action count.
             let ac = rule.actions.active_count();
@@ -1019,7 +1057,15 @@ impl RulesSettingsUI {
                 cmds.push(RenderCommand::Text {
                     x: x + 78.0,
                     y: ry + 26.0,
-                    text: truncate_string(&summary, 60),
+                    // Spans the rest of the row rather than a fixed column, so
+                    // it is elided to the room actually left beside the icon.
+                    text: text::elide(
+                        &summary,
+                        (w - SUMMARY_INSET).max(0.0),
+                        "...",
+                        10.0,
+                        FontWeightHint::Regular,
+                    ),
                     font_size: 10.0,
                     color: MOCHA_OVERLAY0,
                     font_weight: FontWeightHint::Regular, max_width: None,
@@ -1245,21 +1291,11 @@ impl Default for RulesSettingsUI {
 // Helpers
 // ============================================================================
 
-/// Truncate a string to max chars, adding "..." if truncated.
-fn truncate_string(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        let mut result: String = s.chars().take(max.saturating_sub(3)).collect();
-        // Strip trailing whitespace before appending the ellipsis so we
-        // don't produce ugly "word ..." with a space between word and dots.
-        while result.ends_with(char::is_whitespace) {
-            result.pop();
-        }
-        result.push_str("...");
-        result
-    }
-}
+// `truncate_string` lived here: it compared `s.len()` (bytes) against a
+// character budget, and each of its three call sites passed a budget picked
+// independently of the column the text was drawn in. Replaced by
+// `text::elide`, which measures against the actual column width. See
+// known-issues.md TD-APPS-ESTIMATE-TEXT-WIDTH.
 
 /// Build a human-readable summary of a rule's actions.
 fn action_summary(actions: &RuleActions) -> String {
@@ -1702,10 +1738,61 @@ mod tests {
     }
 
     #[test]
-    fn test_truncate_string() {
-        assert_eq!(truncate_string("short", 10), "short");
-        assert_eq!(truncate_string("a very long string indeed", 10), "a very...");
-        assert_eq!(truncate_string("", 5), "");
+    fn a_rule_name_stays_inside_its_column() {
+        // These cells carry no `max_width`, so nothing downstream will save a
+        // name that overruns -- it draws straight over the Match column. The
+        // old character budget could not prevent that, because 24 characters
+        // is a different width for every 24 characters.
+        let mut mgr = WindowRulesManager::new();
+        for (i, name) in [
+            "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW",
+            "a rule name with accents ééééééééééééééé",
+            "short",
+        ]
+        .iter()
+        .enumerate()
+        {
+            mgr.add_rule(WindowRule::new(i as u32, name, MatchCriteria::Any));
+        }
+        let ui = RulesSettingsUI::new();
+        let mut cmds = Vec::new();
+        ui.render_rule_list(&mut cmds, &mgr, 0.0, 0.0, 900.0, 600.0);
+
+        let mut checked = 0;
+        for cmd in &cmds {
+            if let RenderCommand::Text {
+                text, font_size, font_weight, ..
+            } = cmd
+                && (*font_size - 12.0).abs() < 0.01
+                && text != "Priority"
+            {
+                let w = guitk::text::measure(text, *font_size, *font_weight);
+                assert!(
+                    w <= COL_NAME - COL_GUTTER + 0.01,
+                    "rule name {text:?} measures {w}, wider than its {} px column",
+                    COL_NAME - COL_GUTTER
+                );
+                checked += 1;
+            }
+        }
+        // Without this the test passes on a render that drew no names at all.
+        assert!(checked >= 3, "expected three rule names, checked {checked}");
+    }
+
+    #[test]
+    fn a_short_rule_name_is_not_elided() {
+        let mut mgr = WindowRulesManager::new();
+        mgr.add_rule(WindowRule::new(1, "short", MatchCriteria::Any));
+        let ui = RulesSettingsUI::new();
+        let mut cmds = Vec::new();
+        ui.render_rule_list(&mut cmds, &mgr, 0.0, 0.0, 900.0, 600.0);
+        assert!(
+            cmds.iter().any(|c| matches!(
+                c,
+                RenderCommand::Text { text, .. } if text == "short"
+            )),
+            "a name that fits its column should be drawn whole"
+        );
     }
 
     #[test]

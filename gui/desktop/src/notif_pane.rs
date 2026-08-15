@@ -34,6 +34,7 @@ use guitk::color::Color;
 use guitk::event::{EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::render::{FontWeightHint, RenderCommand};
 use guitk::style::CornerRadii;
+use guitk::text;
 
 // ============================================================================
 // Theme — Catppuccin Mocha palette
@@ -110,6 +111,16 @@ const SLIDER_HEIGHT: f32 = 6.0;
 
 /// Quick-setting row height.
 const QS_ROW_HEIGHT: f32 = 36.0;
+
+/// Horizontal space a notification card's body preview loses to the card's
+/// left and right insets. The body is a one-line preview, so it is elided to
+/// `card_width - BODY_INSET` — the same width handed to the render command's
+/// `max_width`, so the elision and the clip agree by construction.
+const BODY_INSET: f32 = 24.0;
+
+/// Font size of the body preview. Named because the elision has to measure the
+/// text at exactly the size it will be drawn at.
+const BODY_FONT_SIZE: f32 = 12.0;
 
 // ============================================================================
 // Time grouping helpers
@@ -1066,15 +1077,22 @@ impl NotificationPane {
             max_width: Some(card_width - 40.0),
         });
 
-        // Body (truncated).
+        // Body — a one-line preview, elided against the width it is drawn in
+        // rather than a character budget picked independently of the box.
         cmds.push(RenderCommand::Text {
             x: x + 12.0,
             y: y + 46.0,
-            text: Self::truncate_body(&notif.body, 60),
+            text: text::elide(
+                &notif.body,
+                card_width - BODY_INSET,
+                "...",
+                BODY_FONT_SIZE,
+                FontWeightHint::Regular,
+            ),
             color: theme::SUBTEXT1,
-            font_size: 12.0,
+            font_size: BODY_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
-            max_width: Some(card_width - 24.0),
+            max_width: Some(card_width - BODY_INSET),
         });
 
         // Dismiss button (X) — shown on hover.
@@ -1448,15 +1466,14 @@ impl NotificationPane {
         }
     }
 
-    fn truncate_body(body: &str, max_chars: usize) -> String {
-        if body.len() <= max_chars {
-            body.to_string()
-        } else {
-            let mut s: String = body.chars().take(max_chars - 3).collect();
-            s.push_str("...");
-            s
-        }
-    }
+    // Note: there is deliberately no `truncate_body` helper here any more. It
+    // compared `body.len()` (bytes) against a *character* budget of 60 that was
+    // unrelated to the `card_width - BODY_INSET` box the text is drawn in, so a
+    // body of accented text or CJK was cut far shorter than it needed to be
+    // while a run of narrow characters still overflowed. It also underflowed on
+    // `max_chars - 3`. The call site now uses `text::elide`, which measures both
+    // the body and the ellipsis at the real font size against the real width.
+    // See known-issues.md TD-APPS-ESTIMATE-TEXT-WIDTH.
 }
 
 impl Default for NotificationPane {
@@ -1854,20 +1871,89 @@ mod tests {
     }
 
     // ========================================================================
-    // Body truncation
+    // Body preview elision
     // ========================================================================
 
-    #[test]
-    fn truncate_short_body_unchanged() {
-        let body = "Short text";
-        assert_eq!(NotificationPane::truncate_body(body, 60), "Short text");
+    /// Build a visible pane holding one notification with the given body, and
+    /// return its render commands.
+    fn pane_showing_body(body: &str) -> Vec<RenderCommand> {
+        let mut pane = NotificationPane::new();
+        let mut notif = make_notif("Mail", "A title", 1_000);
+        notif.body = body.to_string();
+        pane.push_notification(notif);
+        pane.state = PaneState::Visible;
+        pane.render(1920.0, 1080.0)
     }
 
+    /// The body previews drawn by `pane_showing_body`: `(text, max_width)`.
+    fn body_previews(cmds: &[RenderCommand]) -> Vec<(String, f32)> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text {
+                    text,
+                    font_size,
+                    max_width: Some(w),
+                    color,
+                    ..
+                } if (*font_size - BODY_FONT_SIZE).abs() < f32::EPSILON
+                    && *color == theme::SUBTEXT1 =>
+                {
+                    Some((text.clone(), *w))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The elision must be measured, not counted: whatever characters the body
+    /// is made of, what is drawn has to fit the box it is drawn in.
+    ///
+    /// The old `truncate_body` compared `body.len()` (bytes) against a
+    /// character budget of 60 that had nothing to do with `card_width`, so wide
+    /// glyphs overflowed the card and multibyte text was cut far too short.
     #[test]
-    fn truncate_long_body_adds_ellipsis() {
-        let body = "A".repeat(100);
-        let result = NotificationPane::truncate_body(&body, 60);
-        assert_eq!(result.len(), 60);
-        assert!(result.ends_with("..."));
+    fn a_body_preview_fits_the_card_it_is_drawn_in() {
+        let bodies = [
+            "W".repeat(200),
+            "i".repeat(200),
+            "Ünïcödé wíth áccents repeated many times over and over again".repeat(4),
+            "Short.".to_string(),
+        ];
+        let mut checked = 0;
+        for body in &bodies {
+            for (drawn, max_width) in body_previews(&pane_showing_body(body)) {
+                let measured = text::measure(&drawn, BODY_FONT_SIZE, FontWeightHint::Regular);
+                assert!(
+                    measured <= max_width + 0.5,
+                    "body preview {drawn:?} measures {measured} but its box is {max_width}",
+                );
+                checked += 1;
+            }
+        }
+        // Guard against the test passing vacuously on an empty command list.
+        assert!(checked >= 4, "expected a preview per body, checked {checked}");
+    }
+
+    /// A body that already fits is drawn verbatim — no ellipsis, no truncation.
+    #[test]
+    fn a_short_body_is_not_elided() {
+        let previews = body_previews(&pane_showing_body("Short text"));
+        assert_eq!(previews.len(), 1, "expected exactly one body preview");
+        assert_eq!(previews[0].0, "Short text");
+    }
+
+    /// A body too wide for the card is shortened and marked as shortened, so the
+    /// user can tell the preview is partial.
+    #[test]
+    fn an_overlong_body_is_marked_as_elided() {
+        let body = "W".repeat(200);
+        let previews = body_previews(&pane_showing_body(&body));
+        assert_eq!(previews.len(), 1, "expected exactly one body preview");
+        assert!(
+            previews[0].0.ends_with("..."),
+            "expected an ellipsis, got {:?}",
+            previews[0].0,
+        );
+        assert!(previews[0].0.len() < body.len(), "expected the body to be shortened");
     }
 }

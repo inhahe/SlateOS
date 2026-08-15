@@ -1554,7 +1554,7 @@ impl Vfs {
     /// lookup or a full walk.
     pub(crate) fn resolve_prologue(path: &Path) -> KernelResult<PathBuf> {
         let ns_path = crate::ipc::namespace::resolve_path(path)?;
-        let path = ns_path.as_path();
+        let path: &Path = &ns_path;
         validate_path(path)?;
         Ok(normalize_path(path))
     }
@@ -1662,7 +1662,7 @@ impl Vfs {
     pub fn resolve_no_symlinks<P: AsRef<Path>>(path: P) -> KernelResult<PathBuf> {
         // Apply per-process namespace translation before anything else.
         let ns_path = crate::ipc::namespace::resolve_path(path.as_ref())?;
-        let path = ns_path.as_path();
+        let path: &Path = &ns_path;
 
         validate_path(path)?;
         let norm = normalize_path(path);

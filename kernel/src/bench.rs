@@ -3988,10 +3988,18 @@ fn bench_vfs_stat_breakdown() {
 
     // Phase A1: per-process namespace translation alone.  For the root
     // namespace this is semantically a no-op — it returns the input path
-    // unchanged — but it still takes `PROCESS_NS.lock()` and `PROCESS_ROOT
-    // .lock()` and allocates a `PathBuf` to say so.  Measuring it separately
-    // is the point: a no-op that costs anything is pure overhead on every
-    // path operation the OS performs.
+    // unchanged — and measuring it separately is the point: a no-op that costs
+    // anything is pure overhead on every path operation the OS performs.
+    //
+    // This comment used to end "...and allocates a `PathBuf` to say so", which
+    // is the cost the benchmark existed to price.  It no longer does:
+    // `resolve_path` returns `Cow<'_, Path>` and the no-op case is
+    // `Cow::Borrowed`, so the allocation and the byte copy are gone (the two
+    // lock acquisitions were already skipped by `NS_FEATURES_ACTIVE`).  Keep
+    // the benchmark rather than deleting it with the cost it measured: it is
+    // now the check that this path *stays* allocation-free, and this file's
+    // standing lesson is that a check nobody runs is indistinguishable from a
+    // check that passes.  See known-issues.md P21.
     let root_path = crate::fs::path::Path::new("/");
     let ns_only = run("vfs_stat_breakdown_ns", 500, || {
         let _ = core::hint::black_box(crate::ipc::namespace::resolve_path(root_path));

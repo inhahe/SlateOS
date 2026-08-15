@@ -70808,3 +70808,146 @@ the thing the harness reports, so the notification actively misleads.
 Either make the command under test the **last** command in the chain, or chain
 with `&&` so a failure propagates. Do not put a diagnostic after it and then
 believe the notification.
+
+### P21 GRADED — (a) CONFIRMED at −79%; (b) ungradeable as registered, its replacement clause CONFIRMED to ~1%
+
+**Date:** 2026-08-15. **Measured on:** an idle release `--bench` boot, 160 s,
+canary clean (12 % spread over 11 samples). **Baseline:** the two idle release
+runs at `8135d1491` (261 ns) and `24a3407cc` (262 ns).
+
+#### P21(a) — CONFIRMED
+
+> *"`vfs_stat_breakdown_ns` (500 iterations of `resolve_path("/")` and nothing
+> else) drops by **≥20%** against an idle release baseline measured on the
+> immediately preceding commit. Falsified if the drop is under 20%."*
+
+**262 ns → 55 ns**: −79 % raw, −78 % after drift correction (whole-suite drift
+this run was −3.0 %). The threshold was 20 %; the result clears it by a factor
+of four. `vfs_stat_breakdown_prologue` moved 568 → 363 ns in the same run.
+
+So the allocation *was* the cost. The falsification branch — "the kernel heap's
+fast path is cheap enough that the allocation was not the cost here and the
+`Cow` bought nothing measurable" — is rejected on a margin no plausible noise
+band reaches.
+
+#### The attribution was verified, not assumed — and it nearly wasn't
+
+This measurement was taken **after merging 315 commits of `origin/main`** into
+`lane-a`, which breaks P21's own stated method: the baseline is supposed to come
+from *the immediately preceding commit*, and 315 commits is not that. A −79 %
+result is exciting enough to publish without noticing that the ground moved
+underneath it, which is exactly how a wrong attribution gets written down as a
+fact.
+
+So it was checked rather than argued:
+
+```
+git diff --stat 24a3407cc HEAD -- kernel/   →   (empty)
+git diff --name-only 24a3407cc HEAD -- kernel/ | wc -l   →   0
+```
+
+**Zero kernel files changed across the entire merge.** That is not luck, it is
+the lane split working as designed: `kernel/**` is Lane A's exclusive tree, so
+315 commits of Lane B and Lane C work cannot reach it. The only kernel delta in
+the measured boot is the `Cow<'_, Path>` refactor itself, and the attribution
+therefore holds despite the method deviation. Recorded because the *next* time
+this happens the answer may be different, and the check costs one command.
+
+#### P21(b) — UNGRADEABLE, as recorded in advance; the replacement clause CONFIRMED
+
+P21(b) was graded **UNGRADEABLE** in this file *before its number existed*,
+because its falsification condition ("falsified if the prologue drops by as much
+or more") is precisely what correct nesting predicts — `resolve_prologue` is
+`namespace::resolve_path` **plus** `validate_path` + `normalize_path`, so it
+strictly contains the `ns` phase, and removing an allocation from the contained
+part must remove the same absolute cost from the container. That grade stands
+and is not revisited now that the number is favourable.
+
+The replacement clause offered at the time was: *the prologue's absolute drop
+should land within measurement noise of the `ns` phase's.* It did:
+
+| phase | before | after | absolute drop |
+|---|---|---|---|
+| `vfs_stat_breakdown_ns` | 262 ns | 55 ns | **207 ns** |
+| `vfs_stat_breakdown_prologue` | 568 ns | 363 ns | **205 ns** |
+
+207 vs 205 ns — agreement to ~1 %, well inside the ~2 % run-to-run noise the
+prologue baseline itself showed (580, 568). This is the outcome that would have
+been mislabelled a *falsification* under the clause as originally written.
+
+#### Three benchmarks moved that this change cannot explain — NOT yet attributed
+
+The same run reported four "regressions". They are not all the same thing, and
+none of them is yet explained:
+
+| benchmark | this run | historical release range (16 runs) | verdict |
+|---|---|---|---|
+| `page_alloc_free` | 752 ns | 276–526, typically ~355 | **above historical max** |
+| `http_percent_decode` | 785 ns | 398–761, typically ~510 | **above historical max** |
+| `net_ipv6_parse` | 113 ns | 62–96, typically ~80 | **above historical max** |
+| `ipc_channel` | 688 ns | 420–1475, highly volatile | **not a regression** — well inside range |
+
+**`ipc_channel` is a tooling artefact, and worth fixing.** `bench-history.py`
+diffs against *the single previous run*, not against the distribution, so an
+ordinary excursion of a volatile benchmark is reported as a regression. 688 ns
+is unremarkable for a benchmark that has legitimately read 420 and 1475. A
+comparison that cannot tell "moved" from "is noisy" will keep manufacturing
+regressions and training the reader to ignore the section. Logged as
+**B-BENCH-COMPARES-TO-ONE-PRIOR-RUN-NOT-THE-DISTRIBUTION** below.
+
+**The other three are genuinely unexplained.** Physical page allocation,
+percent-decoding and IPv6 address parsing have no mechanical relationship to
+path resolution, and the kernel is byte-identical apart from the `Cow`
+refactor — so "the refactor did it" is not available as an explanation without a
+mechanism. Three unrelated benchmarks simultaneously exceeding their historical
+maxima, while the whole-suite drift is only −3 %, is the signature of *something
+about this run* rather than of three independent regressions.
+
+Two candidate explanations, neither yet tested:
+
+1. **Host load during part of the QEMU window.** The canary reported clean, but
+   it samples ~1 per 8 benchmarks and therefore cannot exclude a disturbance
+   that covered only part of the run — the dispersion line in the same output
+   already flags 3 *other* benchmarks as having stalled during their own run.
+   This is the same blind spot `B-CANARY-TOLERANCE-CANNOT-BE-FITTED` is about.
+2. **Code layout.** The refactor changes codegen in `namespace.rs`, shifting
+   addresses kernel-wide. Under TCG this is a weaker effect than on hardware
+   (no real cache hierarchy) but translation-block boundaries are not immune.
+
+**The deciding experiment is cheap and is the next action:** a boot is 160 s, so
+re-run the identical binary on an idle host and see whether the three reproduce.
+Reproducing → real, and (2) becomes the hypothesis to chase. Vanishing → (1),
+and the run was contaminated in a way the canary could not see, which is itself
+evidence for the `--host-load` work. **Until that is done, these three are
+recorded as unexplained, not as regressions** — and specifically not as
+regressions *caused by the Cow refactor*, which is the conclusion the adjacency
+of the two facts invites.
+
+### B-BENCH-COMPARES-TO-ONE-PRIOR-RUN-NOT-THE-DISTRIBUTION
+
+**Status:** OPEN, found 2026-08-15 while grading P21.
+
+`scripts/bench-history.py` computes its REGRESSED/IMPROVED verdicts against the
+**immediately preceding run** on the host. For a benchmark with a tight
+distribution that is correct and sensitive. For a volatile one it is neither: it
+reports the *difference between two samples of the same noise* as a change in
+the code.
+
+Demonstrated, not assumed: in the P21 run, `ipc_channel` was reported as
+`+31 % vs suite` on a move from 542 → 688 ns, while its own 16-run release
+history spans **420–1475 ns**. 688 is close to its median. Nothing regressed.
+
+**Proper fix.** Compare against a robust summary of the recent distribution
+(e.g. median and MAD, or an inter-quartile band, over the last N runs on the
+same host and profile) rather than against `runs[-1]`, and report a benchmark
+only when it moves outside that band. The machinery is already present — the
+tool computes a `x0.976 whole-suite vs the median of the last 8 run(s)` line, so
+it has the window and the median; the per-benchmark verdicts simply do not use
+them. Keep the raw one-run delta in the output as context, but stop making the
+verdict from it.
+
+**Why it matters beyond tidiness.** The regression list is the only automated
+guard on 70 benchmarks. Every false positive spends reader attention and makes
+the next real regression likelier to be waved through as "probably noise again"
+— and this file's standing lesson is that a check nobody trusts is worth about
+as much as a check nobody runs.

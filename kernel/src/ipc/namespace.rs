@@ -66,6 +66,7 @@
 // Subsystem API surface; not every helper has an in-tree caller yet.
 #![allow(dead_code)]
 
+use alloc::borrow::Cow;
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -872,14 +873,28 @@ fn longest_volume_match(
 ///
 /// For the root namespace, this is a no-op (returns the input path
 /// unchanged).
-pub fn resolve_path(path: impl AsRef<Path>) -> KernelResult<PathBuf> {
+///
+/// # Why `Cow`
+///
+/// The overwhelmingly common case is "no namespace feature has ever been
+/// used", which returns the input untouched — and the old `PathBuf` return
+/// type forced a heap allocation and a byte copy to express *nothing
+/// happened*. This runs before every path operation in the VFS, so that was a
+/// per-syscall `alloc` + `memcpy` bought purely to satisfy a signature.
+/// `Cow::Borrowed` says "unchanged" without allocating; only the branches that
+/// genuinely rewrite the path allocate, which is exactly when a new path
+/// really does exist.
+pub fn resolve_path<P>(path: &P) -> KernelResult<Cow<'_, Path>>
+where
+    P: AsRef<Path> + ?Sized,
+{
     let path = path.as_ref();
     // Fast path: while no namespace feature has ever been used, the result is
     // the input and nothing below can change that -- so skip `owner_process`'s
     // `THREAD_OWNERS.lock()` as well as the two locks in `resolve_path_for`.
     // See `NS_FEATURES_ACTIVE`.
     if ns_fast_path_available() {
-        return Ok(path.to_path_buf());
+        return Ok(Cow::Borrowed(path));
     }
     let task_id = crate::sched::current_task_id();
     let process_id = crate::proc::thread::owner_process(task_id)
@@ -893,18 +908,18 @@ pub fn resolve_path(path: impl AsRef<Path>) -> KernelResult<PathBuf> {
 /// Separated from `resolve_path()` to allow resolving on behalf of
 /// other processes (e.g., for `execve` path lookup in the child's
 /// namespace context).
-pub fn resolve_path_for(
-    process_id: u64,
-    path: impl AsRef<Path>,
-) -> KernelResult<PathBuf> {
+pub fn resolve_path_for<P>(process_id: u64, path: &P) -> KernelResult<Cow<'_, Path>>
+where
+    P: AsRef<Path> + ?Sized,
+{
     let path = path.as_ref();
     // Same fast path as `resolve_path`, repeated here because this is the
-    // shared entry point (41 call sites) and most of them do not come through
-    // `resolve_path`. The flag is global, so it is valid for *any*
-    // `process_id`: if no process has ever had a namespace, a root or a
-    // volume, then neither has this one.
+    // shared entry point (~45 call sites: 10 outside this file, the rest in
+    // the tests below) and most of them do not come through `resolve_path`.
+    // The flag is global, so it is valid for *any* `process_id`: if no process
+    // has ever had a namespace, a root or a volume, then neither has this one.
     if ns_fast_path_available() {
-        return Ok(path.to_path_buf());
+        return Ok(Cow::Borrowed(path));
     }
     // Step 1: apply Bind/Hide rules in the guest's path space.
     let ns_id = {
@@ -912,17 +927,20 @@ pub fn resolve_path_for(
         pns.get(&process_id).copied().unwrap_or(ROOT_NAMESPACE)
     };
 
-    let translated = if ns_id == ROOT_NAMESPACE {
+    // Both pass-through branches borrow: "no rule applied" is the answer here,
+    // and materialising a copy of the input to say so is the allocation this
+    // signature exists to avoid.
+    let translated: Cow<'_, Path> = if ns_id == ROOT_NAMESPACE {
         // No namespace rules, pass through.
-        path.to_path_buf()
+        Cow::Borrowed(path)
     } else {
         let table = NS_TABLE.lock();
         match table.get(&ns_id) {
-            Some(ns) => apply_rules(&ns.rules, path)?,
+            Some(ns) => Cow::Owned(apply_rules(&ns.rules, path)?),
             None => {
                 // Namespace was destroyed but process still references it.
                 // Fall back to root namespace behavior.
-                path.to_path_buf()
+                Cow::Borrowed(path)
             }
         }
     };
@@ -942,9 +960,9 @@ pub fn resolve_path_for(
                 PROCESS_MOUNTS.lock().get(&process_id).cloned().unwrap_or_default()
             };
             if volumes.is_empty() {
-                Ok(apply_root(&r, &translated))
+                Ok(Cow::Owned(apply_root(&r, &translated)))
             } else {
-                Ok(apply_root_with_volumes(&r, &volumes, &translated))
+                Ok(Cow::Owned(apply_root_with_volumes(&r, &volumes, &translated)))
             }
         }
         None => Ok(translated),
@@ -1396,15 +1414,38 @@ fn test_ns_fast_path_flag() -> KernelResult<()> {
     // Fast path really is being taken: the identity result below is what it
     // returns, and the slow path would return the same, so this alone is not
     // evidence -- it is the precondition for the three checks that follow.
-    assert_eq!(resolve_path_for(PID_ROOT, "/bin/sh")?.as_path(), Path::new("/bin/sh"));
+    assert_eq!(&*resolve_path_for(PID_ROOT, "/bin/sh")?, Path::new("/bin/sh"));
+
+    // ...and it borrows rather than allocating.
+    //
+    // The `Cow` return type only pays for itself if the pass-through branches
+    // actually stay `Borrowed`, and nothing about the *value* can show that --
+    // an allocating implementation returns an equal path. So the discriminant
+    // is asserted directly, or a future edit that innocently writes
+    // `Cow::Owned(path.to_path_buf())` would restore the per-syscall
+    // allocation with every existing test still green. Same reason the bench
+    // canary needed a positive control: an unobservable property is an
+    // unenforced one.
+    assert!(
+        matches!(resolve_path_for(PID_ROOT, "/bin/sh")?, Cow::Borrowed(_)),
+        "namespace fast path allocated a PathBuf to return its own input",
+    );
 
     // --- Site 1: set_root (worst failure mode: chroot escape) ---
     set_root(PID_ROOT, "/containers/fp/rootfs")?;
     assert!(ns_features_active(), "set_root did not disable the fast path");
     assert_eq!(
-        resolve_path_for(PID_ROOT, "/bin/sh")?.as_path(),
+        &*resolve_path_for(PID_ROOT, "/bin/sh")?,
         Path::new("/containers/fp/rootfs/bin/sh"),
         "jailed path resolved outside the jail",
+    );
+    // The negative half. Without it, the `Borrowed` assertion above would still
+    // pass under an implementation that had somehow lost the ability to return
+    // `Owned` at all -- and a check that can only ever report one answer is
+    // indistinguishable from no check.
+    assert!(
+        matches!(resolve_path_for(PID_ROOT, "/bin/sh")?, Cow::Owned(_)),
+        "a rewritten path was reported as borrowed from the input",
     );
     clear_root(PID_ROOT);
 
@@ -1704,7 +1745,7 @@ fn test_process_root() -> KernelResult<()> {
     assert!(get_root(pid).is_none());
 
     // No root: paths pass through unchanged.
-    assert_eq!(resolve_path_for(pid, "/bin/sh")?.as_path(), Path::new("/bin/sh"));
+    assert_eq!(&*resolve_path_for(pid, "/bin/sh")?, Path::new("/bin/sh"));
     // unjail is a no-op for an unjailed process (host path == guest path).
     assert_eq!(unjail_path_for(pid, "/bin/sh").as_path(), Path::new("/bin/sh"));
 
@@ -1717,33 +1758,33 @@ fn test_process_root() -> KernelResult<()> {
 
     // Absolute paths are re-anchored under the root.
     assert_eq!(
-        resolve_path_for(pid, "/bin/sh")?.as_path(),
+        &*resolve_path_for(pid, "/bin/sh")?,
         Path::new("/containers/c1/rootfs/bin/sh"),
     );
     // Guest root maps to the jail root itself.
-    assert_eq!(resolve_path_for(pid, "/")?.as_path(), Path::new("/containers/c1/rootfs"));
+    assert_eq!(&*resolve_path_for(pid, "/")?, Path::new("/containers/c1/rootfs"));
     // `.` and duplicate slashes collapse.
     assert_eq!(
-        resolve_path_for(pid, "/./bin//sh")?.as_path(),
+        &*resolve_path_for(pid, "/./bin//sh")?,
         Path::new("/containers/c1/rootfs/bin/sh"),
     );
 
     // `..` is clamped at the jail root — no escape.
     assert_eq!(
-        resolve_path_for(pid, "/../etc/passwd")?.as_path(),
+        &*resolve_path_for(pid, "/../etc/passwd")?,
         Path::new("/containers/c1/rootfs/etc/passwd"),
     );
     assert_eq!(
-        resolve_path_for(pid, "/a/../../b")?.as_path(),
+        &*resolve_path_for(pid, "/a/../../b")?,
         Path::new("/containers/c1/rootfs/b"),
     );
     assert_eq!(
-        resolve_path_for(pid, "/../../../..")?.as_path(),
+        &*resolve_path_for(pid, "/../../../..")?,
         Path::new("/containers/c1/rootfs"),
     );
 
     // Relative paths are left for the cwd layer (not jailed here).
-    assert_eq!(resolve_path_for(pid, "rel/path")?.as_path(), Path::new("rel/path"));
+    assert_eq!(&*resolve_path_for(pid, "rel/path")?, Path::new("rel/path"));
 
     // --- Non-idempotency guard (double-jail regression) ---
     //
@@ -1756,10 +1797,10 @@ fn test_process_root() -> KernelResult<()> {
     // behaviour so a future refactor that accidentally makes handle ops
     // re-resolve will be caught here.
     let once = resolve_path_for(pid, "/bin/sh")?;
-    assert_eq!(once.as_path(), Path::new("/containers/c1/rootfs/bin/sh"));
+    assert_eq!(&*once, Path::new("/containers/c1/rootfs/bin/sh"));
     let twice = resolve_path_for(pid, &once)?;
     assert_eq!(
-        twice.as_path(),
+        &*twice,
         Path::new("/containers/c1/rootfs/containers/c1/rootfs/bin/sh"),
         "re-resolving an already-jailed path must double-jail (handle ops \
          must therefore use the _resolved workers, not re-resolve)",
@@ -1776,7 +1817,7 @@ fn test_process_root() -> KernelResult<()> {
     assert_eq!(unjail_path_for(pid, "/containers/c1/rootfs").as_path(), Path::new("/"));
     // Round-trip: unjail(resolve(guest)) recovers the normalized guest path.
     let g = resolve_path_for(pid, "/a/b/../c")?;
-    assert_eq!(g.as_path(), Path::new("/containers/c1/rootfs/a/c"));
+    assert_eq!(&*g, Path::new("/containers/c1/rootfs/a/c"));
     assert_eq!(unjail_path_for(pid, &g).as_path(), Path::new("/a/c"));
     // A host path not within the jail is returned unchanged (defensive).
     assert_eq!(unjail_path_for(pid, "/elsewhere/x").as_path(), Path::new("/elsewhere/x"));
@@ -1784,7 +1825,7 @@ fn test_process_root() -> KernelResult<()> {
     // A root that normalizes to "/" clears the jail.
     set_root(pid, "/")?;
     assert!(get_root(pid).is_none());
-    assert_eq!(resolve_path_for(pid, "/bin/sh")?.as_path(), Path::new("/bin/sh"));
+    assert_eq!(&*resolve_path_for(pid, "/bin/sh")?, Path::new("/bin/sh"));
 
     // Trailing slashes and `.`/`..` in the root are normalized away.
     set_root(pid, "/containers/c2/./rootfs/")?;
@@ -1793,14 +1834,14 @@ fn test_process_root() -> KernelResult<()> {
         Some(Path::new("/containers/c2/rootfs")),
     );
     assert_eq!(
-        resolve_path_for(pid, "/bin/sh")?.as_path(),
+        &*resolve_path_for(pid, "/bin/sh")?,
         Path::new("/containers/c2/rootfs/bin/sh"),
     );
 
     // detach() must drop the jail (PID reuse safety).
     detach(pid);
     assert!(get_root(pid).is_none());
-    assert_eq!(resolve_path_for(pid, "/bin/sh")?.as_path(), Path::new("/bin/sh"));
+    assert_eq!(&*resolve_path_for(pid, "/bin/sh")?, Path::new("/bin/sh"));
 
     // A non-absolute root is rejected.
     assert!(set_root(pid, "relative/root").is_err());
@@ -1823,19 +1864,19 @@ fn test_volume_mounts() -> KernelResult<()> {
     assert_eq!(volume_count(pid), 1);
 
     // The mount point itself resolves to the volume target.
-    assert_eq!(resolve_path_for(pid, "/data")?.as_path(), Path::new("/host/shared"));
+    assert_eq!(&*resolve_path_for(pid, "/data")?, Path::new("/host/shared"));
     // Paths under the volume resolve under the target (escaping the rootfs).
     assert_eq!(
-        resolve_path_for(pid, "/data/file.txt")?.as_path(),
+        &*resolve_path_for(pid, "/data/file.txt")?,
         Path::new("/host/shared/file.txt"),
     );
     assert_eq!(
-        resolve_path_for(pid, "/data/sub/x")?.as_path(),
+        &*resolve_path_for(pid, "/data/sub/x")?,
         Path::new("/host/shared/sub/x"),
     );
     // Non-volume paths still resolve under the rootfs.
     assert_eq!(
-        resolve_path_for(pid, "/bin/sh")?.as_path(),
+        &*resolve_path_for(pid, "/bin/sh")?,
         Path::new("/containers/v1/rootfs/bin/sh"),
     );
 
@@ -1844,32 +1885,32 @@ fn test_volume_mounts() -> KernelResult<()> {
     // `/data/../secret` normalizes to `/secret`, which no longer matches the
     // `/data` volume and resolves under the rootfs — not the host target.
     assert_eq!(
-        resolve_path_for(pid, "/data/../secret")?.as_path(),
+        &*resolve_path_for(pid, "/data/../secret")?,
         Path::new("/containers/v1/rootfs/secret"),
     );
     // Repeated `..` cannot escape the volume's host subtree upward either.
     assert_eq!(
-        resolve_path_for(pid, "/data/../../etc")?.as_path(),
+        &*resolve_path_for(pid, "/data/../../etc")?,
         Path::new("/containers/v1/rootfs/etc"),
     );
     // `..` *within* the volume stays in the volume.
     assert_eq!(
-        resolve_path_for(pid, "/data/sub/../x")?.as_path(),
+        &*resolve_path_for(pid, "/data/sub/../x")?,
         Path::new("/host/shared/x"),
     );
 
     // Longest-prefix wins: a nested volume shadows the parent.
     add_volume(pid, "/data/cache", "/fastcache", false)?;
     assert_eq!(volume_count(pid), 2);
-    assert_eq!(resolve_path_for(pid, "/data/cache/a")?.as_path(), Path::new("/fastcache/a"));
-    assert_eq!(resolve_path_for(pid, "/data/cache")?.as_path(), Path::new("/fastcache"));
+    assert_eq!(&*resolve_path_for(pid, "/data/cache/a")?, Path::new("/fastcache/a"));
+    assert_eq!(&*resolve_path_for(pid, "/data/cache")?, Path::new("/fastcache"));
     // A sibling under the parent volume is unaffected.
-    assert_eq!(resolve_path_for(pid, "/data/other")?.as_path(), Path::new("/host/shared/other"));
+    assert_eq!(&*resolve_path_for(pid, "/data/other")?, Path::new("/host/shared/other"));
 
     // Re-adding at an existing guest prefix replaces (does not stack).
     add_volume(pid, "/data", "/host/shared2", false)?;
     assert_eq!(volume_count(pid), 2);
-    assert_eq!(resolve_path_for(pid, "/data/file")?.as_path(), Path::new("/host/shared2/file"));
+    assert_eq!(&*resolve_path_for(pid, "/data/file")?, Path::new("/host/shared2/file"));
 
     // Reverse mapping (fchdir into a volume): host path → guest path.
     assert_eq!(unjail_path_for(pid, "/host/shared2/file").as_path(), Path::new("/data/file"));
@@ -1883,13 +1924,13 @@ fn test_volume_mounts() -> KernelResult<()> {
 
     // Trailing slashes / `.` in volume args are normalized away.
     add_volume(pid, "/logs/", "/var/log/./c1/", false)?;
-    assert_eq!(resolve_path_for(pid, "/logs/app.log")?.as_path(), Path::new("/var/log/c1/app.log"));
+    assert_eq!(&*resolve_path_for(pid, "/logs/app.log")?, Path::new("/var/log/c1/app.log"));
 
     // Read-only volumes: writes under a read-only volume are rejected with
     // EROFS, while reads/path resolution still work.  Add a read-only volume
     // and verify check_writable_for enforces it.
     add_volume(pid, "/ro", "/host/ro-target", true)?;
-    assert_eq!(resolve_path_for(pid, "/ro/file")?.as_path(), Path::new("/host/ro-target/file"));
+    assert_eq!(&*resolve_path_for(pid, "/ro/file")?, Path::new("/host/ro-target/file"));
     assert!(check_writable_for(pid, "/ro/file").is_err());
     assert!(check_writable_for(pid, "/ro").is_err());
     // A read-write volume permits writes.
@@ -1934,7 +1975,7 @@ fn test_volume_mounts() -> KernelResult<()> {
     assert_eq!(volume_count(pid), 0);
     assert!(get_root(pid).is_none());
     // After detach, the former volume path is a plain host path again.
-    assert_eq!(resolve_path_for(pid, "/data/file")?.as_path(), Path::new("/data/file"));
+    assert_eq!(&*resolve_path_for(pid, "/data/file")?, Path::new("/data/file"));
 
     serial_println!("[namespace]   Volume (bind) mounts: OK");
     Ok(())

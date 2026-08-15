@@ -54001,6 +54001,32 @@ FAILs).  Reversible (pure translator change; no PCB/state).
 ##   NOT; YSH is genuine Oils C++, so this one is still correctly blocked -- but
 ##   re-check it whenever C++ cross-compilation lands).
 
+## DONE (2026-08-14, design-decisions.md S306): the shared docs stay per-branch;
+##   the fix is a fetch/merge CADENCE, now in roadmap.md S5.5 and CLAUDE.md.
+##   START of every task:  git fetch origin && git merge origin/main
+##   END of every green one: push the lane, then merge the lane up into main.
+##   WHY: requests/a-b-init-conflates-syscall-error-with-exit-code.md sat on
+##   origin/main UNREAD FOR A DAY because lane-b had never fetched (55 ahead,
+##   72 behind). The dropbox was not broken; nobody emptied it. Separately, I
+##   read the shared docs in D:\visual studio projects\os -- which is a
+##   CHECKOUT of main, 67 commits stale -- and concluded from them that no lane
+##   had ever merged. Wrong; lane-a had (6d69d308e). origin/main is the trunk;
+##   the os directory is a view of it that must be pulled before it is trusted.
+##   ALSO CORRECTED: roadmap.md rule 5 said "rebase on main, never merge". The
+##   lane branches are PUBLISHED, so rebasing one needs a force-push, which the
+##   very next bullet of the same rule forbids. It now says merge.
+
+## OPEN (2026-08-14): Lane A filed
+##   requests/a-b-init-conflates-syscall-error-with-exit-code.md against MY
+##   lane and it is now visible to me. services/init/src/main.rs (~line 1252)
+##   prints and acts on process_try_wait(pid)'s return as if it were a child
+##   exit code, but it may be a NEGATIVE KERNEL ERROR. Only ERR_WOULD_BLOCK
+##   (-4) is distinguished, so PermissionDenied (-400) was read as "exited 400"
+##   and init restarted `ticker` nine times. FIX: separate the error domain
+##   from the status domain at the call site -- any negative return other than
+##   ERR_WOULD_BLOCK is a syscall failure, not an exit status, and must be
+##   logged as such and must not drive the restart policy.
+
 ## ############################################################################
 ## Lane C — graphics, apps & net
 ## ############################################################################

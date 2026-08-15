@@ -533,9 +533,20 @@ fn parse_srt_time(s: &str) -> Option<Duration> {
     let seconds: u64 = sec_parts.first()?.parse().ok()?;
     let millis: u64 = if sec_parts.len() > 1 {
         let ms_str = sec_parts.get(1)?;
-        // Pad or truncate to 3 digits
+        // Pad or truncate to 3 digits.
+        //
+        // `format!`'s width is counted in *characters* but the slice below
+        // indexes *bytes*, and the two disagree on anything non-ASCII. For a
+        // fractional part of "ab\u{65e5}" the padding adds nothing — that is
+        // already 3 characters — and byte 3 lands inside the kanji, so the
+        // slice aborted the player on a subtitle file it had merely been asked
+        // to open. Milliseconds are digits; requiring that up front makes the
+        // character count and the byte count the same number.
+        if !ms_str.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
         let padded = format!("{ms_str:0<3}");
-        padded[..3].parse().ok()?
+        padded.get(..3)?.parse().ok()?
     } else {
         0
     };
@@ -5018,5 +5029,105 @@ mod tests {
             title: None,
         };
         assert_eq!(entry2.display_name(), "other.mp4");
+    }
+
+    // -- A subtitle file may not abort the player -----------------------------
+
+    /// Fractional-second fields whose character count and byte count disagree.
+    ///
+    /// `format!("{ms_str:0<3}")` pads to a width counted in *characters*, and
+    /// the slice that followed indexed *bytes*. Any non-ASCII fractional part
+    /// makes the two disagree, and a subtitle file is opened, not authored, by
+    /// the user — so this was reachable by playing a video with a bad `.srt`
+    /// beside it.
+    fn adversarial_fractions() -> Vec<&'static str> {
+        vec![
+            // 3 characters, 5 bytes: no padding is added and byte 3 lands
+            // inside the kanji.
+            "ab\u{65e5}",
+            "a\u{65e5}b",
+            "\u{65e5}\u{672c}\u{8a9e}",
+            // 2 characters, 3 bytes: padded to 3 characters / 4 bytes, and
+            // byte 3 lands inside nothing here — but it must still not parse.
+            "a\u{e9}",
+            "\u{e9}",
+            // 4 characters, 7 bytes.
+            "12\u{65e5}3",
+            // A 4-byte character on its own.
+            "\u{1f4cc}",
+            // Not digits, but ASCII, so the byte and character counts agree —
+            // these were always safe and must stay rejected.
+            "abc",
+            "1a2",
+        ]
+    }
+
+    #[test]
+    fn a_non_ascii_subtitle_timestamp_does_not_abort_the_player() {
+        for frac in adversarial_fractions() {
+            assert_eq!(
+                parse_srt_time(&format!("00:00:01.{frac}")),
+                None,
+                "accepted fractional part {frac:?}"
+            );
+            // The comma form goes through the same path after a replace.
+            assert_eq!(
+                parse_srt_time(&format!("00:00:01,{frac}")),
+                None,
+                "accepted fractional part {frac:?} in comma form"
+            );
+        }
+    }
+
+    /// A whole file's worth of them, since that is how the parser is reached.
+    #[test]
+    fn a_non_ascii_subtitle_file_does_not_abort_the_player() {
+        let mut srt = String::new();
+        for (i, frac) in adversarial_fractions().iter().enumerate() {
+            srt.push_str(&format!(
+                "{}\n00:00:0{}.{} --> 00:00:0{}.{}\n\u{5b57}\u{5e55}\n\n",
+                i + 1,
+                i % 10,
+                frac,
+                (i + 1) % 10,
+                frac
+            ));
+        }
+        // The bad cues are dropped, not fatal, and a good one still parses.
+        srt.push_str("99\n00:00:05,250 --> 00:00:06,500\nok\n\n");
+        let cues = parse_srt(&srt);
+        assert_eq!(cues.len(), 1, "expected only the well-formed cue: {cues:?}");
+    }
+
+    /// The rejections must not have cost any well-formed timestamp.
+    #[test]
+    fn every_valid_subtitle_timestamp_still_parses() {
+        assert_eq!(
+            parse_srt_time("01:30:45,678"),
+            Some(Duration::from_millis(5_445_678))
+        );
+        assert_eq!(
+            parse_srt_time("01:30:45.678"),
+            Some(Duration::from_millis(5_445_678))
+        );
+        // Fewer than three digits are right-padded, per the original intent.
+        assert_eq!(
+            parse_srt_time("00:00:00.5"),
+            Some(Duration::from_millis(500))
+        );
+        assert_eq!(
+            parse_srt_time("00:00:00.25"),
+            Some(Duration::from_millis(250))
+        );
+        // More than three are truncated, likewise.
+        assert_eq!(
+            parse_srt_time("00:00:00.1234"),
+            Some(Duration::from_millis(123))
+        );
+        // No fractional part at all.
+        assert_eq!(
+            parse_srt_time("00:00:07"),
+            Some(Duration::from_millis(7_000))
+        );
     }
 }

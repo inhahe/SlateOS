@@ -2,9 +2,11 @@
 
 ## Byte-indexed display truncation panics on non-ASCII text (lane C)
 
-**Status: open.** Found 2026-08-15 while surveying app tables for unbounded
-columns. Seven sites across `apps/` and `gui/` truncate a *display* string by
-counting bytes:
+**Status: FIXED 2026-08-15** (lane C, commits `f508f76cf`, `f53562a09`,
+`feb695bbd`, `8208fad9d`, `83dfaff21`, `5750232c5`, `a8d659199`, `ffbdec410`,
+and the videoplayer commit following it). Found while surveying app tables for
+unbounded columns. Ten sites across `apps/` and `gui/` confused a byte count
+with a character count, usually while truncating a *display* string:
 
 ```rust
 let display = if title.len() > 20 {
@@ -30,20 +32,68 @@ particular apps — it is their ordinary input.
 | `apps/stickynotes/src/main.rs:973` | the note's first line | The user's own text. |
 | `apps/procexplorer/src/main.rs:2359` | `KEY=value` from the environment | Environment strings are arbitrary bytes. |
 | `gui/toolkit/src/colorpicker.rs:175` | `&s[..6]` on a typed hex string | Any multi-byte character in the field. |
+| `gui/desktop/src/clipboard_viewer.rs:112` | `content[..197]` on a clipping | Copying any non-Latin text aborted the shell. |
+| `gui/desktop/src/clipboard_viewer.rs:678` | `&preview_text[..40]` on the same | Same, one layer up. |
+| `apps/videoplayer/src/main.rs:538` | `padded[..3]` in the SRT timestamp parser | **A subtitle file the user merely opened.** |
 
-**The proper fix is not to hunt for char boundaries at each site.** Every one of
-these is a *display* truncation, and each already has a box to draw into, so
-each should be `guitk::text::elide` (or a `guitk::table` cell): it measures
-display width, cuts on a character boundary, and marks the cut with `…`. That
-also removes the second, quieter bug present at every site — a truncation
-counted in bytes has no relationship to the width of the box the text is drawn
-in, so `20` characters of a wide font overflow anyway while `20` of a narrow one
-waste half the space.
+The last three were found while fixing the first seven and were not in the
+original count. `gui/clipboard/src/main.rs:183` looked like another but is not:
+it already goes through `find_char_boundary`.
 
-Grep shape: `&<ident>[..<literal>]` where the receiver is a `String`/`&str`,
-and its `if x.len() > N` guard. Note this is the same root cause as the
-unbounded-column survey below — **counting characters instead of measuring the
-box** — and it is worth treating as one problem.
+The videoplayer one is worth calling out because it does not match the grep
+shape above — there is no `if x.len() > N` guard in sight. It is
+`format!("{ms_str:0<3}")` followed by `padded[..3]`, and the bug is that
+`format!`'s width is counted in **characters** while the slice indexes
+**bytes**. For a fractional part of `"ab日"` the padding adds nothing (already
+3 characters) and byte 3 lands inside the kanji. So the class is wider than
+"a byte budget with a byte guard": it is *any* place where a character count
+and a byte count are used interchangeably. Rust's own `format!` width is a
+character count, which makes it a natural source of the confusion.
+
+**The fix was not to hunt for char boundaries at each site.** All but one of
+these is a *display* truncation, and each already had a box to draw into, so
+each became `guitk::text::elide` / `RenderTree::text_in` (or a `guitk::table`
+cell): it measures display width, cuts on a character boundary, and marks the
+cut with `…`. That also removed the second, quieter bug present at every site —
+a truncation counted in bytes has no relationship to the width of the box the
+text is drawn in, so `20` characters of a wide font overflow anyway while `20`
+of a narrow one waste half the space.
+
+Two sites needed something other than eliding:
+
+- **`colorpicker::parse_hex_color` is a parser, not a view.** It branched on
+  `s.len()` as if it were a digit count. Requiring ASCII hex digits up front
+  makes the length a digit count and every offset a character boundary, so the
+  rest of the function is sound by construction. (It also closed a smaller
+  hole: `u32::from_str_radix` accepts a sign, so `"+FFFFF"` parsed as a colour.)
+- **`ClipEntry::text`'s cap is a *retention* bound, not a display one** — a
+  clipping can be megabytes and the history holds many. That bound stayed in
+  the model but became a character count; the display bound moved to the view.
+
+Three sites had truncation in the *model*, where nothing knows how wide the
+drawing surface is: `DragDataType::description`, `NoteStore::sidebar_items`, and
+the clipboard row. All three now return full text and the caller elides.
+
+Writing the regression tests turned up four latent layout bugs the byte budgets
+had been hiding, all fixed in the same commits: pdfviewer's tab title drew 2px
+under its close glyph; flashcards' three columns overlapped below 640px;
+procexplorer's memory row sat at a flat 200px pitch and left the panel at 480px
+wide; and the clipboard row's meta line could run under the sensitive
+indicator.
+
+Grep shape, if this recurs: `&<ident>[..<literal>]` where the receiver is a
+`String`/`&str`, and its `if x.len() > N` guard. Note this is the same root
+cause as the unbounded-column survey below — **counting characters instead of
+measuring the box** — and it was worth treating as one problem.
+
+Every fix is covered by a test using Japanese/Greek/Russian/emoji input plus a
+string pinning the exact cut index to a continuation byte, and every one was
+verified non-vacuous by re-breaking the production code and confirming the test
+fails. That discipline earned its keep twice here: it showed that
+`colorpicker`'s `chars[2]` index was in fact *unreachable* (`hex_char_to_u8`
+rejects a multi-byte char one step earlier), and that an earlier `file_drop`
+test passed with its bound removed because no reachable payload draws both a
+count badge and a long description.
 
 Violates `CLAUDE.md` self-review item 7 (never force UTF-8 assumptions on
 OS-boundary data) and trips the workspace's `clippy::indexing_slicing` warn.

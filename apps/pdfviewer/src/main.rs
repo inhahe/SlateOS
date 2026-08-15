@@ -24,6 +24,7 @@ use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
+use guitk::text;
 
 use std::path::{Path, PathBuf};
 
@@ -33,27 +34,48 @@ use std::path::{Path, PathBuf};
 
 // Full palette is defined for use across the application. Not all colors are
 // referenced yet but they are part of the theme and available for future use.
-#[allow(dead_code)] const BASE: Color = Color::rgb(30, 30, 46);
-#[allow(dead_code)] const MANTLE: Color = Color::rgb(24, 24, 37);
-#[allow(dead_code)] const CRUST: Color = Color::rgb(17, 17, 27);
-#[allow(dead_code)] const SURFACE0: Color = Color::rgb(49, 50, 68);
-#[allow(dead_code)] const SURFACE1: Color = Color::rgb(69, 71, 90);
-#[allow(dead_code)] const SURFACE2: Color = Color::rgb(88, 91, 112);
-#[allow(dead_code)] const OVERLAY0: Color = Color::rgb(108, 112, 134);
-#[allow(dead_code)] const TEXT_COLOR: Color = Color::rgb(205, 214, 244);
-#[allow(dead_code)] const SUBTEXT1: Color = Color::rgb(186, 194, 222);
-#[allow(dead_code)] const SUBTEXT0: Color = Color::rgb(166, 173, 200);
-#[allow(dead_code)] const BLUE: Color = Color::rgb(137, 180, 250);
-#[allow(dead_code)] const LAVENDER: Color = Color::rgb(180, 190, 254);
-#[allow(dead_code)] const SAPPHIRE: Color = Color::rgb(116, 199, 236);
-#[allow(dead_code)] const GREEN: Color = Color::rgb(166, 227, 161);
-#[allow(dead_code)] const YELLOW: Color = Color::rgb(249, 226, 175);
-#[allow(dead_code)] const PEACH: Color = Color::rgb(250, 179, 135);
-#[allow(dead_code)] const RED: Color = Color::rgb(243, 139, 168);
-#[allow(dead_code)] const MAUVE: Color = Color::rgb(203, 166, 247);
-#[allow(dead_code)] const ROSEWATER: Color = Color::rgb(245, 224, 220);
-#[allow(dead_code)] const FLAMINGO: Color = Color::rgb(242, 205, 205);
-#[allow(dead_code)] const TEAL: Color = Color::rgb(148, 226, 213);
+#[allow(dead_code)]
+const BASE: Color = Color::rgb(30, 30, 46);
+#[allow(dead_code)]
+const MANTLE: Color = Color::rgb(24, 24, 37);
+#[allow(dead_code)]
+const CRUST: Color = Color::rgb(17, 17, 27);
+#[allow(dead_code)]
+const SURFACE0: Color = Color::rgb(49, 50, 68);
+#[allow(dead_code)]
+const SURFACE1: Color = Color::rgb(69, 71, 90);
+#[allow(dead_code)]
+const SURFACE2: Color = Color::rgb(88, 91, 112);
+#[allow(dead_code)]
+const OVERLAY0: Color = Color::rgb(108, 112, 134);
+#[allow(dead_code)]
+const TEXT_COLOR: Color = Color::rgb(205, 214, 244);
+#[allow(dead_code)]
+const SUBTEXT1: Color = Color::rgb(186, 194, 222);
+#[allow(dead_code)]
+const SUBTEXT0: Color = Color::rgb(166, 173, 200);
+#[allow(dead_code)]
+const BLUE: Color = Color::rgb(137, 180, 250);
+#[allow(dead_code)]
+const LAVENDER: Color = Color::rgb(180, 190, 254);
+#[allow(dead_code)]
+const SAPPHIRE: Color = Color::rgb(116, 199, 236);
+#[allow(dead_code)]
+const GREEN: Color = Color::rgb(166, 227, 161);
+#[allow(dead_code)]
+const YELLOW: Color = Color::rgb(249, 226, 175);
+#[allow(dead_code)]
+const PEACH: Color = Color::rgb(250, 179, 135);
+#[allow(dead_code)]
+const RED: Color = Color::rgb(243, 139, 168);
+#[allow(dead_code)]
+const MAUVE: Color = Color::rgb(203, 166, 247);
+#[allow(dead_code)]
+const ROSEWATER: Color = Color::rgb(245, 224, 220);
+#[allow(dead_code)]
+const FLAMINGO: Color = Color::rgb(242, 205, 205);
+#[allow(dead_code)]
+const TEAL: Color = Color::rgb(148, 226, 213);
 
 // ============================================================================
 // Layout constants
@@ -61,6 +83,13 @@ use std::path::{Path, PathBuf};
 
 const TOOLBAR_HEIGHT: f32 = 44.0;
 const TAB_BAR_HEIGHT: f32 = 36.0;
+/// Left inset of a tab's title text within its tab.
+const TAB_TEXT_INSET: f32 = 10.0;
+/// Distance from a tab's right edge to the close glyph. Doubles as the right
+/// bound on the title, which must stop before the glyph rather than at the tab
+/// edge — the two used to disagree by 2px and the title drew under the `x`.
+const TAB_CLOSE_INSET: f32 = 22.0;
+const TAB_TITLE_SIZE: f32 = 12.0;
 const STATUS_BAR_HEIGHT: f32 = 28.0;
 const SIDEBAR_WIDTH: f32 = 240.0;
 const THUMBNAIL_HEIGHT: f32 = 120.0;
@@ -82,8 +111,7 @@ const DEFAULT_PAGE_HEIGHT: f32 = 792.0;
 // ============================================================================
 
 /// PDF page rotation in degrees.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum Rotation {
     #[default]
     Deg0,
@@ -129,7 +157,6 @@ impl Rotation {
     }
 }
 
-
 /// A rectangular region on a page (in page-coordinate points).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PageRect {
@@ -141,7 +168,12 @@ pub struct PageRect {
 
 impl PageRect {
     pub fn new(x: f32, y: f32, width: f32, height: f32) -> Self {
-        Self { x, y, width, height }
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
     }
 
     pub fn contains(&self, px: f32, py: f32) -> bool {
@@ -165,7 +197,11 @@ pub enum AnnotationType {
     /// Sticky note.
     Note { content: String },
     /// Freehand drawing path.
-    Freehand { points: Vec<(f32, f32)>, color: Color, width: f32 },
+    Freehand {
+        points: Vec<(f32, f32)>,
+        color: Color,
+        width: f32,
+    },
     /// Underline.
     Underline { color: Color },
     /// Strikethrough.
@@ -439,8 +475,7 @@ pub struct SearchResult {
 // ============================================================================
 
 /// How pages are displayed.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum ViewMode {
     /// Show one page at a time.
     #[default]
@@ -448,7 +483,6 @@ pub enum ViewMode {
     /// Continuous vertical scroll through all pages.
     ContinuousScroll,
 }
-
 
 /// Zoom mode.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -521,8 +555,7 @@ impl Default for ZoomMode {
 // ============================================================================
 
 /// Which sidebar panel is active.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum SidebarPanel {
     #[default]
     Thumbnails,
@@ -530,14 +563,12 @@ pub enum SidebarPanel {
     Annotations,
 }
 
-
 // ============================================================================
 // Print settings
 // ============================================================================
 
 /// Page range for printing.
-#[derive(Clone, Debug, PartialEq)]
-#[derive(Default)]
+#[derive(Clone, Debug, PartialEq, Default)]
 pub enum PrintPageRange {
     #[default]
     All,
@@ -545,7 +576,6 @@ pub enum PrintPageRange {
     /// Specific ranges, e.g., [(0,2), (4,4)] for pages 1-3 and 5.
     Custom(Vec<(usize, usize)>),
 }
-
 
 /// Print settings.
 #[derive(Clone, Debug)]
@@ -622,10 +652,11 @@ impl PrintSettings {
                     ranges.push((s, e));
                 }
             } else if let Ok(n) = part.parse::<usize>()
-                && n >= 1 {
-                    let idx = (n - 1).min(page_count.saturating_sub(1));
-                    ranges.push((idx, idx));
-                }
+                && n >= 1
+            {
+                let idx = (n - 1).min(page_count.saturating_sub(1));
+                ranges.push((idx, idx));
+            }
         }
         if ranges.is_empty() {
             PrintPageRange::All
@@ -1067,17 +1098,18 @@ impl PdfViewerApp {
         if let Some(tab) = self.active_tab_mut() {
             let page_idx = tab.current_page;
             if let Some(doc) = &mut tab.document
-                && let Some(page) = doc.pages.get_mut(page_idx) {
-                    page.annotations.push(Annotation {
-                        id: ann_id,
-                        page_index: page_idx,
-                        rect,
-                        annotation_type: AnnotationType::Highlight { color },
-                        author: String::new(),
-                        created_timestamp: 0,
-                    });
-                    return Some(ann_id);
-                }
+                && let Some(page) = doc.pages.get_mut(page_idx)
+            {
+                page.annotations.push(Annotation {
+                    id: ann_id,
+                    page_index: page_idx,
+                    rect,
+                    annotation_type: AnnotationType::Highlight { color },
+                    author: String::new(),
+                    created_timestamp: 0,
+                });
+                return Some(ann_id);
+            }
         }
         None
     }
@@ -1089,17 +1121,18 @@ impl PdfViewerApp {
         if let Some(tab) = self.active_tab_mut() {
             let page_idx = tab.current_page;
             if let Some(doc) = &mut tab.document
-                && let Some(page) = doc.pages.get_mut(page_idx) {
-                    page.annotations.push(Annotation {
-                        id: ann_id,
-                        page_index: page_idx,
-                        rect,
-                        annotation_type: AnnotationType::Note { content },
-                        author: String::new(),
-                        created_timestamp: 0,
-                    });
-                    return Some(ann_id);
-                }
+                && let Some(page) = doc.pages.get_mut(page_idx)
+            {
+                page.annotations.push(Annotation {
+                    id: ann_id,
+                    page_index: page_idx,
+                    rect,
+                    annotation_type: AnnotationType::Note { content },
+                    author: String::new(),
+                    created_timestamp: 0,
+                });
+                return Some(ann_id);
+            }
         }
         None
     }
@@ -1117,17 +1150,22 @@ impl PdfViewerApp {
         if let Some(tab) = self.active_tab_mut() {
             let page_idx = tab.current_page;
             if let Some(doc) = &mut tab.document
-                && let Some(page) = doc.pages.get_mut(page_idx) {
-                    page.annotations.push(Annotation {
-                        id: ann_id,
-                        page_index: page_idx,
-                        rect,
-                        annotation_type: AnnotationType::Freehand { points, color, width },
-                        author: String::new(),
-                        created_timestamp: 0,
-                    });
-                    return Some(ann_id);
-                }
+                && let Some(page) = doc.pages.get_mut(page_idx)
+            {
+                page.annotations.push(Annotation {
+                    id: ann_id,
+                    page_index: page_idx,
+                    rect,
+                    annotation_type: AnnotationType::Freehand {
+                        points,
+                        color,
+                        width,
+                    },
+                    author: String::new(),
+                    created_timestamp: 0,
+                });
+                return Some(ann_id);
+            }
         }
         None
     }
@@ -1137,11 +1175,12 @@ impl PdfViewerApp {
         if let Some(tab) = self.active_tab_mut() {
             let page_idx = tab.current_page;
             if let Some(doc) = &mut tab.document
-                && let Some(page) = doc.pages.get_mut(page_idx) {
-                    let before = page.annotations.len();
-                    page.annotations.retain(|a| a.id != annotation_id);
-                    return page.annotations.len() < before;
-                }
+                && let Some(page) = doc.pages.get_mut(page_idx)
+            {
+                let before = page.annotations.len();
+                page.annotations.retain(|a| a.id != annotation_id);
+                return page.annotations.len() < before;
+            }
         }
         false
     }
@@ -1235,11 +1274,7 @@ impl PdfViewerApp {
 
         // Page indicator
         if let Some(tab) = self.active_tab() {
-            let page_text = format!(
-                "Page {} / {}",
-                tab.current_page + 1,
-                tab.page_count()
-            );
+            let page_text = format!("Page {} / {}", tab.current_page + 1, tab.page_count());
             tree.push(RenderCommand::Text {
                 x: btn_x,
                 y: btn_y + 9.0,
@@ -1446,25 +1481,38 @@ impl PdfViewerApp {
                 });
             }
 
-            // Tab title
-            let title = tab.title();
-            let display_title = if title.len() > 20 {
-                format!("{}...", &title[..17])
-            } else {
-                title
-            };
+            // Tab title. Elided by measured width, not by byte index: the
+            // title comes from the PDF's own `/Title` metadata or from the
+            // file name, so it is document-controlled and routinely non-ASCII.
+            // `&title[..17]` aborts whenever byte 17 lands inside a multi-byte
+            // character, and the `len() > 20` guard made that *more* likely —
+            // a seven-character Japanese title is 21 bytes and so always took
+            // the truncating branch.
+            //
+            // The room is measured to the close button rather than to the tab
+            // edge: the title starts `TAB_TEXT_INSET` in and the `x` glyph
+            // starts `TAB_CLOSE_INSET` from the far edge, so anything wider
+            // than the difference runs underneath it.
+            let title_room = (tab_w - TAB_TEXT_INSET - TAB_CLOSE_INSET).max(0.0);
+            let display_title = text::elide(
+                &tab.title(),
+                title_room,
+                "...",
+                TAB_TITLE_SIZE,
+                FontWeightHint::Regular,
+            );
             tree.push(RenderCommand::Text {
-                x: tab_x + 10.0,
+                x: tab_x + TAB_TEXT_INSET,
                 y: y + 10.0,
                 text: display_title,
                 color: fg,
-                font_size: 12.0,
+                font_size: TAB_TITLE_SIZE,
                 font_weight: FontWeightHint::Regular,
-                max_width: Some(tab_w - 30.0),
+                max_width: Some(title_room),
             });
 
             // Close button (x) on each tab
-            let close_x = tab_x + tab_w - 22.0;
+            let close_x = tab_x + tab_w - TAB_CLOSE_INSET;
             let close_y = y + 10.0;
             tree.push(RenderCommand::Text {
                 x: close_x,
@@ -1715,11 +1763,7 @@ impl PdfViewerApp {
                 x: indent,
                 y: y + 4.0,
                 text: bm.title.clone(),
-                color: if is_on_current_page {
-                    BLUE
-                } else {
-                    TEXT_COLOR
-                },
+                color: if is_on_current_page { BLUE } else { TEXT_COLOR },
                 font_size: 12.0,
                 font_weight: if is_on_current_page {
                     FontWeightHint::Bold
@@ -1857,14 +1901,7 @@ impl PdfViewerApp {
     }
 
     /// Render welcome message when no document is loaded.
-    fn render_welcome(
-        &self,
-        tree: &mut RenderTree,
-        x: f32,
-        y: f32,
-        w: f32,
-        h: f32,
-    ) {
+    fn render_welcome(&self, tree: &mut RenderTree, x: f32, y: f32, w: f32, h: f32) {
         let cx = x + w / 2.0 - 100.0;
         let cy = y + h / 2.0 - 60.0;
 
@@ -1949,7 +1986,16 @@ impl PdfViewerApp {
         let page_x = area_x + (area_w - rendered_w) / 2.0;
         let page_y = area_y + (area_h - rendered_h) / 2.0;
 
-        self.render_page_box(tree, page, tab.current_page, page_x, page_y, rendered_w, rendered_h, zoom);
+        self.render_page_box(
+            tree,
+            page,
+            tab.current_page,
+            page_x,
+            page_y,
+            rendered_w,
+            rendered_h,
+            zoom,
+        );
 
         // Render search highlights on this page
         self.render_search_highlights(tree, tab.current_page, page_x, page_y, zoom);
@@ -1977,7 +2023,9 @@ impl PdfViewerApp {
             .pages
             .first()
             .map_or(DEFAULT_PAGE_HEIGHT, |p| p.display_height());
-        let zoom = tab.zoom.effective_zoom(area_w, area_h, ref_page_w, ref_page_h);
+        let zoom = tab
+            .zoom
+            .effective_zoom(area_w, area_h, ref_page_w, ref_page_h);
 
         let mut y_offset = area_y + PAGE_MARGIN - tab.scroll_offset_y;
 
@@ -2125,7 +2173,11 @@ impl PdfViewerApp {
                     max_width: None,
                 });
             }
-            AnnotationType::Freehand { points, color, width } => {
+            AnnotationType::Freehand {
+                points,
+                color,
+                width,
+            } => {
                 // Draw line segments between points
                 for pair in points.windows(2) {
                     if let [p1, p2] = pair {
@@ -3503,11 +3555,11 @@ mod tests {
         let mut app = PdfViewerApp::new(1280.0, 720.0);
         let doc = PdfDocument::create_sample(PathBuf::from("/test.pdf"), 1);
         app.load_document(doc);
-        app.add_highlight(
-            PageRect::new(50.0, 100.0, 200.0, 14.0),
-            YELLOW,
+        app.add_highlight(PageRect::new(50.0, 100.0, 200.0, 14.0), YELLOW);
+        app.add_note(
+            PageRect::new(300.0, 200.0, 20.0, 20.0),
+            "Test note".to_string(),
         );
-        app.add_note(PageRect::new(300.0, 200.0, 20.0, 20.0), "Test note".to_string());
         app.add_freehand(
             PageRect::new(0.0, 0.0, 100.0, 100.0),
             vec![(10.0, 10.0), (50.0, 50.0)],
@@ -3538,5 +3590,107 @@ mod tests {
             ZoomMode::Fixed(z) => assert!(z < 1.0),
             _ => panic!("expected Fixed after zoom out from FitPage"),
         }
+    }
+
+    // -- Tab titles: non-ASCII safety and width discipline --------------------
+
+    /// Titles chosen so byte 17 — the offset the old code cut at — falls inside
+    /// a multi-byte character. The last one pins it exactly: 16 ASCII bytes
+    /// then a two-byte `é`, so byte 17 is that character's continuation byte.
+    fn adversarial_titles() -> Vec<String> {
+        vec![
+            "日本語の報告書の草案".to_string(),
+            "Ελληνικό έγγραφο αναφοράς".to_string(),
+            "Отчёт о состоянии дел за квартал".to_string(),
+            "quarterly 📊 results 🚀 summary".to_string(),
+            format!("{}é{}", "a".repeat(16), "b".repeat(30)),
+        ]
+    }
+
+    /// The tab bar with one tab per title, each title supplied as the
+    /// document's own `/Title` metadata — the document-controlled path.
+    fn tab_bar_with_titles(titles: &[String]) -> RenderTree {
+        let mut app = PdfViewerApp::new(1280.0, 720.0);
+        app.tabs.clear();
+        for (i, title) in titles.iter().enumerate() {
+            let mut tab = DocumentTab::new(i as u64 + 1);
+            let mut doc = PdfDocument::new(PathBuf::from("doc.pdf"));
+            doc.metadata.title = Some(title.clone());
+            tab.document = Some(doc);
+            app.tabs.push(tab);
+        }
+        app.active_tab = 0;
+        let mut tree = RenderTree::new();
+        app.render_tab_bar(&mut tree);
+        tree
+    }
+
+    #[test]
+    fn a_non_ascii_tab_title_does_not_abort_the_tab_bar() {
+        // Regression: the title was `&title[..17]` behind a `len() > 20` guard.
+        // Byte 17 lands inside a multi-byte character for most non-Latin text,
+        // and slicing there aborts — the guard made that *more* likely, not
+        // less, since a seven-character Japanese title is 21 bytes and so
+        // always took the truncating branch. The title comes from the PDF's own
+        // `/Title` metadata, so this is document-controlled input.
+        let tree = tab_bar_with_titles(&adversarial_titles());
+        assert!(!tree.commands.is_empty(), "the tab bar drew nothing");
+    }
+
+    #[test]
+    fn a_tab_title_stops_before_the_close_button() {
+        // A byte budget says nothing about the room available. The title starts
+        // TAB_TEXT_INSET into the tab and the close glyph starts
+        // TAB_CLOSE_INSET from its far edge, so anything wider than the
+        // difference draws underneath the `x`.
+        let titles = adversarial_titles();
+        let room = 180.0 - TAB_TEXT_INSET - TAB_CLOSE_INSET;
+        let mut checked = 0usize;
+        for cmd in tab_bar_with_titles(&titles).commands {
+            let RenderCommand::Text {
+                x,
+                text,
+                font_size,
+                font_weight,
+                ..
+            } = cmd
+            else {
+                continue;
+            };
+            if font_size != TAB_TITLE_SIZE {
+                continue;
+            }
+            let drawn = text::measure(&text, font_size, font_weight);
+            assert!(
+                drawn <= room + 0.5,
+                "the tab title {text:?} draws {drawn} wide from {x}, past the \
+                 {room} available before the close button"
+            );
+            checked += 1;
+        }
+        assert_eq!(
+            checked,
+            titles.len(),
+            "expected one title per tab; the filter matched {checked}, so this \
+             test would pass without measuring what it claims to"
+        );
+    }
+
+    #[test]
+    fn a_short_tab_title_is_drawn_verbatim() {
+        // Otherwise "it fits" would be satisfiable by drawing nothing.
+        let tree = tab_bar_with_titles(&["Отчёт".to_string()]);
+        let drawn: Vec<String> = tree
+            .commands
+            .into_iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            drawn.iter().any(|t| t == "Отчёт"),
+            "the short title was cut; got {drawn:?}"
+        );
     }
 }

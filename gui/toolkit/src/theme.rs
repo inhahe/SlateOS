@@ -188,9 +188,9 @@ impl Theme {
             mode: ThemeMode::Dark,
 
             // Mocha base colors
-            background: Color::from_hex(0x1E1E2E),    // Base
-            surface: Color::from_hex(0x313244),       // Surface0
-            surface_variant: Color::from_hex(0x45475A), // Surface1
+            background: Color::from_hex(0x1E1E2E),       // Base
+            surface: Color::from_hex(0x313244),          // Surface0
+            surface_variant: Color::from_hex(0x45475A),  // Surface1
             overlay: Color::rgba(0x11, 0x11, 0x1B, 200), // Crust with alpha
 
             text_primary: Color::from_hex(0xCDD6F4),   // Text
@@ -204,21 +204,21 @@ impl Theme {
             secondary: Color::from_hex(0xCBA6F7),      // Mauve
             secondary_hover: Color::from_hex(0xDFC2FA),
 
-            success: Color::from_hex(0xA6E3A1),        // Green
-            warning: Color::from_hex(0xF9E2AF),        // Yellow
-            error: Color::from_hex(0xF38BA8),          // Red
-            info: Color::from_hex(0x89DCEB),           // Sky
+            success: Color::from_hex(0xA6E3A1), // Green
+            warning: Color::from_hex(0xF9E2AF), // Yellow
+            error: Color::from_hex(0xF38BA8),   // Red
+            info: Color::from_hex(0x89DCEB),    // Sky
 
-            border: Color::from_hex(0x45475A),         // Surface1
-            border_focus: Color::from_hex(0x89B4FA),   // Blue
-            separator: Color::from_hex(0x313244),      // Surface0
+            border: Color::from_hex(0x45475A),       // Surface1
+            border_focus: Color::from_hex(0x89B4FA), // Blue
+            separator: Color::from_hex(0x313244),    // Surface0
 
-            titlebar_bg: Color::from_hex(0x181825),    // Mantle
-            titlebar_text: Color::from_hex(0xCDD6F4),  // Text
+            titlebar_bg: Color::from_hex(0x181825),   // Mantle
+            titlebar_text: Color::from_hex(0xCDD6F4), // Text
             titlebar_button_hover: Color::from_hex(0x45475A), // Surface1
-            sidebar_bg: Color::from_hex(0x181825),     // Mantle
-            tooltip_bg: Color::from_hex(0x313244),     // Surface0
-            tooltip_text: Color::from_hex(0xCDD6F4),   // Text
+            sidebar_bg: Color::from_hex(0x181825),    // Mantle
+            tooltip_bg: Color::from_hex(0x313244),    // Surface0
+            tooltip_text: Color::from_hex(0xCDD6F4),  // Text
             selection_bg: Color::rgba(0x89, 0xB4, 0xFA, 100), // Blue with alpha
             selection_text: Color::from_hex(0xCDD6F4), // Text
             scrollbar_thumb: Color::from_hex(0x585B70), // Surface2
@@ -234,9 +234,9 @@ impl Theme {
             name: String::from("Catppuccin Latte"),
             mode: ThemeMode::Light,
 
-            background: Color::from_hex(0xEFF1F5),     // Base
-            surface: Color::from_hex(0xE6E9EF),       // Surface0
-            surface_variant: Color::from_hex(0xDCE0E8), // Surface1 (Crust)
+            background: Color::from_hex(0xEFF1F5),       // Base
+            surface: Color::from_hex(0xE6E9EF),          // Surface0
+            surface_variant: Color::from_hex(0xDCE0E8),  // Surface1 (Crust)
             overlay: Color::rgba(0xDC, 0xE0, 0xE8, 200), // Crust with alpha
 
             text_primary: Color::from_hex(0x4C4F69),   // Text
@@ -250,21 +250,21 @@ impl Theme {
             secondary: Color::from_hex(0x8839EF),      // Mauve
             secondary_hover: Color::from_hex(0xA05CF2),
 
-            success: Color::from_hex(0x40A02B),        // Green
-            warning: Color::from_hex(0xDF8E1D),        // Yellow
-            error: Color::from_hex(0xD20F39),          // Red
-            info: Color::from_hex(0x04A5E5),           // Sky
+            success: Color::from_hex(0x40A02B), // Green
+            warning: Color::from_hex(0xDF8E1D), // Yellow
+            error: Color::from_hex(0xD20F39),   // Red
+            info: Color::from_hex(0x04A5E5),    // Sky
 
-            border: Color::from_hex(0xBCC0CC),         // Surface2
-            border_focus: Color::from_hex(0x1E66F5),   // Blue
-            separator: Color::from_hex(0xCCD0DA),      // Surface1
+            border: Color::from_hex(0xBCC0CC),       // Surface2
+            border_focus: Color::from_hex(0x1E66F5), // Blue
+            separator: Color::from_hex(0xCCD0DA),    // Surface1
 
-            titlebar_bg: Color::from_hex(0xE6E9EF),    // Surface0 (Mantle)
-            titlebar_text: Color::from_hex(0x4C4F69),  // Text
+            titlebar_bg: Color::from_hex(0xE6E9EF), // Surface0 (Mantle)
+            titlebar_text: Color::from_hex(0x4C4F69), // Text
             titlebar_button_hover: Color::from_hex(0xDCE0E8), // Surface1
-            sidebar_bg: Color::from_hex(0xE6E9EF),    // Surface0
-            tooltip_bg: Color::from_hex(0x5C5F77),     // Overlay2 (dark tooltip)
-            tooltip_text: Color::from_hex(0xEFF1F5),   // Base
+            sidebar_bg: Color::from_hex(0xE6E9EF),  // Surface0
+            tooltip_bg: Color::from_hex(0x5C5F77),  // Overlay2 (dark tooltip)
+            tooltip_text: Color::from_hex(0xEFF1F5), // Base
             selection_bg: Color::rgba(0x1E, 0x66, 0xF5, 80), // Blue with alpha
             selection_text: Color::from_hex(0x4C4F69), // Text
             scrollbar_thumb: Color::from_hex(0x9CA0B0), // Overlay0
@@ -290,10 +290,10 @@ impl Theme {
             text_disabled: Color::from_hex(0x808080),
             text_on_primary: Color::from_hex(0x000000),
 
-            primary: Color::from_hex(0x00BFFF),        // Bright cyan-blue
+            primary: Color::from_hex(0x00BFFF), // Bright cyan-blue
             primary_hover: Color::from_hex(0x66D9FF),
             primary_active: Color::from_hex(0x0099CC),
-            secondary: Color::from_hex(0xFFD700),      // Gold
+            secondary: Color::from_hex(0xFFD700), // Gold
             secondary_hover: Color::from_hex(0xFFE44D),
 
             success: Color::from_hex(0x00FF00),
@@ -302,7 +302,7 @@ impl Theme {
             info: Color::from_hex(0x00FFFF),
 
             border: Color::from_hex(0xFFFFFF),
-            border_focus: Color::from_hex(0xFFFF00),   // Yellow focus indicator
+            border_focus: Color::from_hex(0xFFFF00), // Yellow focus indicator
             separator: Color::from_hex(0x808080),
 
             titlebar_bg: Color::from_hex(0x000000),
@@ -336,10 +336,10 @@ impl Theme {
             text_disabled: Color::from_hex(0x666666),
             text_on_primary: Color::from_hex(0xFFFFFF),
 
-            primary: Color::from_hex(0x0000CC),        // Deep blue
+            primary: Color::from_hex(0x0000CC), // Deep blue
             primary_hover: Color::from_hex(0x0000FF),
             primary_active: Color::from_hex(0x000099),
-            secondary: Color::from_hex(0x6600CC),      // Deep purple
+            secondary: Color::from_hex(0x6600CC), // Deep purple
             secondary_hover: Color::from_hex(0x7700EE),
 
             success: Color::from_hex(0x006600),
@@ -348,7 +348,7 @@ impl Theme {
             info: Color::from_hex(0x006699),
 
             border: Color::from_hex(0x000000),
-            border_focus: Color::from_hex(0x0000FF),   // Blue focus indicator
+            border_focus: Color::from_hex(0x0000FF), // Blue focus indicator
             separator: Color::from_hex(0x666666),
 
             titlebar_bg: Color::from_hex(0xE0E0E0),
@@ -878,10 +878,7 @@ mod tests {
     fn test_theme_mode_display_name() {
         assert_eq!(ThemeMode::Light.display_name(), "Light");
         assert_eq!(ThemeMode::Dark.display_name(), "Dark");
-        assert_eq!(
-            ThemeMode::Custom("Nord".to_string()).display_name(),
-            "Nord"
-        );
+        assert_eq!(ThemeMode::Custom("Nord".to_string()).display_name(), "Nord");
     }
 
     #[test]

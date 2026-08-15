@@ -120,7 +120,10 @@ impl ScaledSize {
     /// Construct from a physical size at the given scale factor.
     pub fn from_physical(phys: PhysicalSize, scale: f32) -> Self {
         if scale == 0.0 {
-            return Self { width: 0.0, height: 0.0 };
+            return Self {
+                width: 0.0,
+                height: 0.0,
+            };
         }
         Self {
             width: phys.width as f32 / scale,
@@ -172,7 +175,12 @@ impl ScaledRect {
     /// Construct from a physical rectangle at the given scale factor.
     pub fn from_physical(phys: PhysicalRect, scale: f32) -> Self {
         if scale == 0.0 {
-            return Self { x: 0.0, y: 0.0, w: 0.0, h: 0.0 };
+            return Self {
+                x: 0.0,
+                y: 0.0,
+                w: 0.0,
+                h: 0.0,
+            };
         }
         Self {
             x: phys.x as f32 / scale,
@@ -486,8 +494,7 @@ static SCALE_TABLE: [AtomicU32; MAX_MONITORS + 1] = {
     // the AtomicU32 (which has interior mutability) — `[CONST; N]` would
     // copy the same value into every slot, which clippy correctly warns
     // against for interior-mutable types.
-    let mut table: [AtomicU32; MAX_MONITORS + 1] =
-        [const { AtomicU32::new(0) }; MAX_MONITORS + 1];
+    let mut table: [AtomicU32; MAX_MONITORS + 1] = [const { AtomicU32::new(0) }; MAX_MONITORS + 1];
     // Slot 0 = global default 1.0
     table[0] = AtomicU32::new(f32_to_bits(1.0));
     table
@@ -593,25 +600,40 @@ mod tests {
 
     #[test]
     fn logical_to_physical_1x() {
-        assert_eq!(logical_to_physical(LogicalPixel(100.0), 1.0), PhysicalPixel(100));
+        assert_eq!(
+            logical_to_physical(LogicalPixel(100.0), 1.0),
+            PhysicalPixel(100)
+        );
     }
 
     #[test]
     fn logical_to_physical_1_5x() {
         // 100 * 1.5 = 150
-        assert_eq!(logical_to_physical(LogicalPixel(100.0), 1.5), PhysicalPixel(150));
+        assert_eq!(
+            logical_to_physical(LogicalPixel(100.0), 1.5),
+            PhysicalPixel(150)
+        );
         // 7 * 1.5 = 10.5 -> rounds to 11 (nearest integer)
-        assert_eq!(logical_to_physical(LogicalPixel(7.0), 1.5), PhysicalPixel(11));
+        assert_eq!(
+            logical_to_physical(LogicalPixel(7.0), 1.5),
+            PhysicalPixel(11)
+        );
     }
 
     #[test]
     fn logical_to_physical_2x() {
-        assert_eq!(logical_to_physical(LogicalPixel(50.0), 2.0), PhysicalPixel(100));
+        assert_eq!(
+            logical_to_physical(LogicalPixel(50.0), 2.0),
+            PhysicalPixel(100)
+        );
     }
 
     #[test]
     fn logical_to_physical_3x() {
-        assert_eq!(logical_to_physical(LogicalPixel(33.0), 3.0), PhysicalPixel(99));
+        assert_eq!(
+            logical_to_physical(LogicalPixel(33.0), 3.0),
+            PhysicalPixel(99)
+        );
     }
 
     #[test]
@@ -649,12 +671,7 @@ mod tests {
     #[test]
     fn scalable_value_stepped() {
         // Example: border width steps
-        let v = ScalableValue::Stepped(vec![
-            (1.0, 1.0),
-            (1.5, 2.0),
-            (2.0, 2.0),
-            (2.5, 3.0),
-        ]);
+        let v = ScalableValue::Stepped(vec![(1.0, 1.0), (1.5, 2.0), (2.0, 2.0), (2.5, 3.0)]);
         assert_eq!(v.resolve(1.0), 1.0);
         assert_eq!(v.resolve(1.25), 1.0); // between 1.0 and 1.5 -> use 1.0's value
         assert_eq!(v.resolve(1.5), 2.0);
@@ -817,7 +834,7 @@ mod tests {
     fn spacing_scales_correctly() {
         let ctx = ScaleContext::new(1.5);
         assert_eq!(ctx.spacing(8.0), 12.0); // 8 * 1.5
-        assert_eq!(ctx.spacing(4.0), 6.0);  // 4 * 1.5
+        assert_eq!(ctx.spacing(4.0), 6.0); // 4 * 1.5
     }
 
     #[test]
@@ -898,7 +915,13 @@ mod tests {
     fn scaled_size_roundtrip() {
         let s = ScaledSize::new(120.0, 80.0);
         let phys = s.to_physical(2.0);
-        assert_eq!(phys, PhysicalSize { width: 240, height: 160 });
+        assert_eq!(
+            phys,
+            PhysicalSize {
+                width: 240,
+                height: 160
+            }
+        );
         let back = ScaledSize::from_physical(phys, 2.0);
         assert_eq!(back, s);
     }
@@ -930,13 +953,27 @@ mod tests {
 
     #[test]
     fn from_physical_zero_scale_safe() {
-        let s = ScaledSize::from_physical(PhysicalSize { width: 100, height: 100 }, 0.0);
+        let s = ScaledSize::from_physical(
+            PhysicalSize {
+                width: 100,
+                height: 100,
+            },
+            0.0,
+        );
         assert_eq!(s, ScaledSize::new(0.0, 0.0));
 
         let p = ScaledPoint::from_physical(PhysicalPoint { x: 50, y: 50 }, 0.0);
         assert_eq!(p, ScaledPoint::new(0.0, 0.0));
 
-        let r = ScaledRect::from_physical(PhysicalRect { x: 10, y: 10, w: 50, h: 50 }, 0.0);
+        let r = ScaledRect::from_physical(
+            PhysicalRect {
+                x: 10,
+                y: 10,
+                w: 50,
+                h: 50,
+            },
+            0.0,
+        );
         assert_eq!(r, ScaledRect::new(0.0, 0.0, 0.0, 0.0));
     }
 }

@@ -13,7 +13,9 @@
 
 use crate::color::Color;
 #[allow(unused_imports)]
-use crate::event::{Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
+use crate::event::{
+    Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 use crate::render::{FontWeightHint, RenderCommand, RenderTree};
 use crate::style::CornerRadii;
 
@@ -140,22 +142,30 @@ pub struct ButtonSet {
 impl ButtonSet {
     /// Single OK button.
     pub fn ok() -> Self {
-        Self { buttons: vec![DialogButton::Ok] }
+        Self {
+            buttons: vec![DialogButton::Ok],
+        }
     }
 
     /// OK and Cancel buttons.
     pub fn ok_cancel() -> Self {
-        Self { buttons: vec![DialogButton::Ok, DialogButton::Cancel] }
+        Self {
+            buttons: vec![DialogButton::Ok, DialogButton::Cancel],
+        }
     }
 
     /// Yes and No buttons.
     pub fn yes_no() -> Self {
-        Self { buttons: vec![DialogButton::Yes, DialogButton::No] }
+        Self {
+            buttons: vec![DialogButton::Yes, DialogButton::No],
+        }
     }
 
     /// Yes, No, and Cancel buttons.
     pub fn yes_no_cancel() -> Self {
-        Self { buttons: vec![DialogButton::Yes, DialogButton::No, DialogButton::Cancel] }
+        Self {
+            buttons: vec![DialogButton::Yes, DialogButton::No, DialogButton::Cancel],
+        }
     }
 
     /// Custom button set.
@@ -309,9 +319,11 @@ impl ModalOverlay {
         }
 
         if let MouseEventKind::Press(MouseButton::Left) = event.kind
-            && self.dismiss_on_click_outside && !self.point_in_content(event.x, event.y) {
-                return Some(DialogResult::Dismissed);
-            }
+            && self.dismiss_on_click_outside
+            && !self.point_in_content(event.x, event.y)
+        {
+            return Some(DialogResult::Dismissed);
+        }
         None
     }
 
@@ -549,12 +561,14 @@ impl AlertDialog {
         if let MouseEventKind::Press(MouseButton::Left) = event.kind {
             let layout = self.compute_layout(800.0, 600.0);
             for (i, btn_rect) in layout.button_rects.iter().enumerate() {
-                if point_in_rect(event.x, event.y, btn_rect.0, btn_rect.1, btn_rect.2, btn_rect.3)
-                    && let Some(btn) = self.buttons.buttons.get(i) {
-                        self.result = Some(btn.to_result());
-                        self.overlay.hide();
-                        return EventResult::Consumed;
-                    }
+                if point_in_rect(
+                    event.x, event.y, btn_rect.0, btn_rect.1, btn_rect.2, btn_rect.3,
+                ) && let Some(btn) = self.buttons.buttons.get(i)
+                {
+                    self.result = Some(btn.to_result());
+                    self.overlay.hide();
+                    return EventResult::Consumed;
+                }
             }
         }
 
@@ -691,7 +705,12 @@ impl AlertDialog {
 
     /// Render the button row.
     fn render_buttons(&self, tree: &mut RenderTree, layout: &DialogLayout, y: f32) {
-        let total_width: f32 = self.buttons.buttons.iter().map(|_| BUTTON_MIN_WIDTH).sum::<f32>()
+        let total_width: f32 = self
+            .buttons
+            .buttons
+            .iter()
+            .map(|_| BUTTON_MIN_WIDTH)
+            .sum::<f32>()
             + (self.buttons.len().saturating_sub(1) as f32) * BUTTON_SPACING;
         let start_x = layout.x + layout.width - CONTENT_PADDING - total_width;
 
@@ -729,7 +748,11 @@ impl AlertDialog {
 
             // Button label.
             let label = btn.label();
-            let text_color = if btn.is_primary() { COLOR_CRUST } else { COLOR_TEXT };
+            let text_color = if btn.is_primary() {
+                COLOR_CRUST
+            } else {
+                COLOR_TEXT
+            };
             tree.push(RenderCommand::Text {
                 // Centred on the label's measured width. The flat 7px-per-byte
                 // guess this replaces drifted further off-centre the longer the
@@ -750,7 +773,9 @@ impl AlertDialog {
 
     /// The dialog's outer width.
     fn dialog_width(&self) -> f32 {
-        self.width.unwrap_or(DIALOG_MIN_WIDTH).clamp(DIALOG_MIN_WIDTH, DIALOG_MAX_WIDTH)
+        self.width
+            .unwrap_or(DIALOG_MIN_WIDTH)
+            .clamp(DIALOG_MIN_WIDTH, DIALOG_MAX_WIDTH)
     }
 
     /// Horizontal room the message has, after the padding and any icon.
@@ -787,7 +812,12 @@ impl AlertDialog {
 
         // Compute button rects for hit testing.
         let buttons_y = y + height - BUTTON_HEIGHT - CONTENT_PADDING;
-        let total_btn_width: f32 = self.buttons.buttons.iter().map(|_| BUTTON_MIN_WIDTH).sum::<f32>()
+        let total_btn_width: f32 = self
+            .buttons
+            .buttons
+            .iter()
+            .map(|_| BUTTON_MIN_WIDTH)
+            .sum::<f32>()
             + (self.buttons.len().saturating_sub(1) as f32) * BUTTON_SPACING;
         let start_x = x + width - CONTENT_PADDING - total_btn_width;
 
@@ -798,7 +828,13 @@ impl AlertDialog {
             })
             .collect();
 
-        DialogLayout { x, y, width, height, button_rects }
+        DialogLayout {
+            x,
+            y,
+            width,
+            height,
+            button_rects,
+        }
     }
 
     /// Compute the height needed for the dialog content.
@@ -810,7 +846,12 @@ impl AlertDialog {
         // under a one-line message and clipped anything longer than three.
         let message_height = self.message_lines().len() as f32 * MESSAGE_LINE_HEIGHT;
         let content_height = ICON_SIZE.max(message_height);
-        (TITLE_BAR_HEIGHT + CONTENT_PADDING + content_height + CONTENT_PADDING + BUTTON_HEIGHT + CONTENT_PADDING)
+        (TITLE_BAR_HEIGHT
+            + CONTENT_PADDING
+            + content_height
+            + CONTENT_PADDING
+            + BUTTON_HEIGHT
+            + CONTENT_PADDING)
             .clamp(DIALOG_MIN_HEIGHT, DIALOG_MAX_HEIGHT)
     }
 
@@ -987,23 +1028,23 @@ impl InputDialog {
         }
 
         match self.focused_element {
-            InputFocus::TextField => { self.handle_text_input(event); },
-            InputFocus::OkButton | InputFocus::CancelButton => {
-                match event.key {
-                    Key::Enter | Key::Space => {
-                        if self.focused_element == InputFocus::OkButton {
-                            self.try_accept();
-                        } else {
-                            self.result = Some(DialogResult::Cancel);
-                            self.overlay.hide();
-                        }
-                    }
-                    Key::Tab => {
-                        self.cycle_focus(event.modifiers.shift);
-                    }
-                    _ => {}
-                }
+            InputFocus::TextField => {
+                self.handle_text_input(event);
             }
+            InputFocus::OkButton | InputFocus::CancelButton => match event.key {
+                Key::Enter | Key::Space => {
+                    if self.focused_element == InputFocus::OkButton {
+                        self.try_accept();
+                    } else {
+                        self.result = Some(DialogResult::Cancel);
+                        self.overlay.hide();
+                    }
+                }
+                Key::Tab => {
+                    self.cycle_focus(event.modifiers.shift);
+                }
+                _ => {}
+            },
         }
 
         EventResult::Consumed
@@ -1049,11 +1090,12 @@ impl InputDialog {
             }
             _ => {
                 if let Some(ch) = event.text
-                    && !ch.is_control() {
-                        self.input_text.insert(self.cursor_pos, ch);
-                        self.cursor_pos += 1;
-                        self.validation_error = None;
-                    }
+                    && !ch.is_control()
+                {
+                    self.input_text.insert(self.cursor_pos, ch);
+                    self.cursor_pos += 1;
+                    self.validation_error = None;
+                }
             }
         }
         EventResult::Consumed
@@ -1124,9 +1166,19 @@ impl InputDialog {
         // push the input field up over the second line of any longer prompt.
         let message_lines = self.message_lines();
         let message_height = message_lines.len() as f32 * MESSAGE_LINE_HEIGHT;
-        let height = TITLE_BAR_HEIGHT + CONTENT_PADDING + message_height + 12.0
-            + INPUT_HEIGHT + (if has_error { FONT_SIZE_SMALL + 8.0 } else { 0.0 })
-            + CONTENT_PADDING + BUTTON_HEIGHT + CONTENT_PADDING;
+        let height = TITLE_BAR_HEIGHT
+            + CONTENT_PADDING
+            + message_height
+            + 12.0
+            + INPUT_HEIGHT
+            + (if has_error {
+                FONT_SIZE_SMALL + 8.0
+            } else {
+                0.0
+            })
+            + CONTENT_PADDING
+            + BUTTON_HEIGHT
+            + CONTENT_PADDING;
         let x = (parent_width - width) / 2.0;
         let y = (parent_height - height) / 2.0;
 
@@ -1507,7 +1559,11 @@ impl ProgressDialog {
         } else {
             0.0
         };
-        let cancel_height = if self.cancelable { BUTTON_HEIGHT + CONTENT_PADDING } else { 0.0 };
+        let cancel_height = if self.cancelable {
+            BUTTON_HEIGHT + CONTENT_PADDING
+        } else {
+            0.0
+        };
         let height = TITLE_BAR_HEIGHT + CONTENT_PADDING
             + FONT_SIZE + 12.0 // status text
             + PROGRESS_BAR_HEIGHT + 12.0 // progress bar
@@ -1643,17 +1699,18 @@ impl ProgressDialog {
 
         // Detail text.
         if self.show_detail
-            && let Some(ref detail) = self.detail_text {
-                tree.push(RenderCommand::Text {
-                    x: x + CONTENT_PADDING,
-                    y: content_y,
-                    text: detail.clone(),
-                    color: COLOR_OVERLAY0,
-                    font_size: FONT_SIZE_SMALL,
-                    font_weight: FontWeightHint::Regular,
-                    max_width: Some(bar_width),
-                });
-            }
+            && let Some(ref detail) = self.detail_text
+        {
+            tree.push(RenderCommand::Text {
+                x: x + CONTENT_PADDING,
+                y: content_y,
+                text: detail.clone(),
+                color: COLOR_OVERLAY0,
+                font_size: FONT_SIZE_SMALL,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(bar_width),
+            });
+        }
 
         // Cancel button.
         if self.cancelable {
@@ -1843,13 +1900,27 @@ impl NonModalDialog {
                 // Check close button hit.
                 let close_x = self.x + self.width - CONTENT_PADDING - CLOSE_BUTTON_SIZE;
                 let close_y = self.y + (TITLE_BAR_HEIGHT - CLOSE_BUTTON_SIZE) / 2.0;
-                if point_in_rect(event.x, event.y, close_x, close_y, CLOSE_BUTTON_SIZE, CLOSE_BUTTON_SIZE) {
+                if point_in_rect(
+                    event.x,
+                    event.y,
+                    close_x,
+                    close_y,
+                    CLOSE_BUTTON_SIZE,
+                    CLOSE_BUTTON_SIZE,
+                ) {
                     self.hide();
                     return EventResult::Consumed;
                 }
 
                 // Check title bar drag.
-                if point_in_rect(event.x, event.y, self.x, self.y, self.width, TITLE_BAR_HEIGHT) {
+                if point_in_rect(
+                    event.x,
+                    event.y,
+                    self.x,
+                    self.y,
+                    self.width,
+                    TITLE_BAR_HEIGHT,
+                ) {
                     self.dragging = true;
                     self.drag_offset = (event.x - self.x, event.y - self.y);
                     return EventResult::Consumed;
@@ -1899,7 +1970,12 @@ impl NonModalDialog {
                 let close_x = self.x + self.width - CONTENT_PADDING - CLOSE_BUTTON_SIZE;
                 let close_y = self.y + (TITLE_BAR_HEIGHT - CLOSE_BUTTON_SIZE) / 2.0;
                 self.close_hovered = point_in_rect(
-                    event.x, event.y, close_x, close_y, CLOSE_BUTTON_SIZE, CLOSE_BUTTON_SIZE,
+                    event.x,
+                    event.y,
+                    close_x,
+                    close_y,
+                    CLOSE_BUTTON_SIZE,
+                    CLOSE_BUTTON_SIZE,
                 );
 
                 if point_in_rect(event.x, event.y, self.x, self.y, self.width, self.height) {
@@ -1979,7 +2055,11 @@ impl NonModalDialog {
         // Close button (X).
         let close_x = self.x + self.width - CONTENT_PADDING - CLOSE_BUTTON_SIZE;
         let close_y = self.y + (TITLE_BAR_HEIGHT - CLOSE_BUTTON_SIZE) / 2.0;
-        let close_bg = if self.close_hovered { COLOR_SURFACE2 } else { COLOR_SURFACE0 };
+        let close_bg = if self.close_hovered {
+            COLOR_SURFACE2
+        } else {
+            COLOR_SURFACE0
+        };
         tree.push(RenderCommand::FillRect {
             x: close_x,
             y: close_y,
@@ -1992,7 +2072,11 @@ impl NonModalDialog {
             x: close_x + (CLOSE_BUTTON_SIZE - 8.0) / 2.0,
             y: close_y + (CLOSE_BUTTON_SIZE - FONT_SIZE) / 2.0,
             text: String::from("X"),
-            color: if self.close_hovered { COLOR_RED } else { COLOR_OVERLAY1 },
+            color: if self.close_hovered {
+                COLOR_RED
+            } else {
+                COLOR_OVERLAY1
+            },
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -2074,8 +2158,14 @@ mod tests {
     fn test_dialog_result_variants() {
         assert_eq!(DialogResult::Ok, DialogResult::Ok);
         assert_ne!(DialogResult::Ok, DialogResult::Cancel);
-        assert_eq!(DialogResult::Text(String::from("hello")), DialogResult::Text(String::from("hello")));
-        assert_ne!(DialogResult::Text(String::from("a")), DialogResult::Text(String::from("b")));
+        assert_eq!(
+            DialogResult::Text(String::from("hello")),
+            DialogResult::Text(String::from("hello"))
+        );
+        assert_ne!(
+            DialogResult::Text(String::from("a")),
+            DialogResult::Text(String::from("b"))
+        );
     }
 
     // --- ButtonSet tests ---
@@ -2263,7 +2353,10 @@ mod tests {
 
         assert!(!tree.is_empty());
         // Should contain a FillRect for the scrim.
-        let has_fill = tree.commands.iter().any(|cmd| matches!(cmd, RenderCommand::FillRect { .. }));
+        let has_fill = tree
+            .commands
+            .iter()
+            .any(|cmd| matches!(cmd, RenderCommand::FillRect { .. }));
         assert!(has_fill);
     }
 
@@ -2594,8 +2687,7 @@ mod tests {
 
     #[test]
     fn test_alert_builder_custom_icon() {
-        let dialog = AlertDialog::info("Test", "Test")
-            .with_icon(DialogIcon::Error);
+        let dialog = AlertDialog::info("Test", "Test").with_icon(DialogIcon::Error);
         assert_eq!(dialog.icon, DialogIcon::Error);
     }
 
@@ -2613,15 +2705,13 @@ mod tests {
 
     #[test]
     fn test_input_dialog_password_mode() {
-        let dialog = InputDialog::prompt("Password", "Enter:", "")
-            .with_password_mode(true);
+        let dialog = InputDialog::prompt("Password", "Enter:", "").with_password_mode(true);
         assert!(dialog.password_mode);
     }
 
     #[test]
     fn test_input_dialog_initial_text() {
-        let dialog = InputDialog::prompt("Edit", "Edit value:", "")
-            .with_initial_text("hello");
+        let dialog = InputDialog::prompt("Edit", "Edit value:", "").with_initial_text("hello");
         assert_eq!(dialog.input_text(), "hello");
         assert_eq!(dialog.cursor_pos, 5);
     }
@@ -2654,8 +2744,7 @@ mod tests {
 
     #[test]
     fn test_input_dialog_backspace() {
-        let mut dialog = InputDialog::prompt("Test", "Type:", "")
-            .with_initial_text("hello");
+        let mut dialog = InputDialog::prompt("Test", "Type:", "").with_initial_text("hello");
         dialog.show();
 
         let bs = Event::Key(KeyEvent {
@@ -2670,8 +2759,7 @@ mod tests {
 
     #[test]
     fn test_input_dialog_delete() {
-        let mut dialog = InputDialog::prompt("Test", "Type:", "")
-            .with_initial_text("hello");
+        let mut dialog = InputDialog::prompt("Test", "Type:", "").with_initial_text("hello");
         dialog.show();
         dialog.cursor_pos = 0;
 
@@ -2687,8 +2775,7 @@ mod tests {
 
     #[test]
     fn test_input_dialog_cursor_movement() {
-        let mut dialog = InputDialog::prompt("Test", "Type:", "")
-            .with_initial_text("hello");
+        let mut dialog = InputDialog::prompt("Test", "Type:", "").with_initial_text("hello");
         dialog.show();
         assert_eq!(dialog.cursor_pos, 5);
 
@@ -2725,8 +2812,7 @@ mod tests {
 
     #[test]
     fn test_input_dialog_enter_accepts() {
-        let mut dialog = InputDialog::prompt("Test", "Type:", "")
-            .with_initial_text("result");
+        let mut dialog = InputDialog::prompt("Test", "Type:", "").with_initial_text("result");
         dialog.show();
 
         let enter = Event::Key(KeyEvent {
@@ -2736,7 +2822,10 @@ mod tests {
             text: None,
         });
         dialog.handle_event(&enter);
-        assert_eq!(dialog.result(), Some(&DialogResult::Text(String::from("result"))));
+        assert_eq!(
+            dialog.result(),
+            Some(&DialogResult::Text(String::from("result")))
+        );
     }
 
     #[test]
@@ -2863,8 +2952,7 @@ mod tests {
 
     #[test]
     fn test_progress_set_detail() {
-        let mut dialog = ProgressDialog::indeterminate("Test", "Status")
-            .with_detail("Detail line");
+        let mut dialog = ProgressDialog::indeterminate("Test", "Status").with_detail("Detail line");
         assert_eq!(dialog.detail_text, Some(String::from("Detail line")));
         assert!(dialog.show_detail);
 
@@ -2877,8 +2965,7 @@ mod tests {
 
     #[test]
     fn test_progress_cancelable() {
-        let mut dialog = ProgressDialog::indeterminate("Test", "Status")
-            .with_cancel();
+        let mut dialog = ProgressDialog::indeterminate("Test", "Status").with_cancel();
         assert!(dialog.cancelable);
         dialog.show();
 
@@ -2918,8 +3005,7 @@ mod tests {
 
     #[test]
     fn test_progress_toggle_detail() {
-        let mut dialog = ProgressDialog::indeterminate("Test", "Status")
-            .with_detail("Detail");
+        let mut dialog = ProgressDialog::indeterminate("Test", "Status").with_detail("Detail");
         assert!(dialog.show_detail);
         dialog.toggle_detail();
         assert!(!dialog.show_detail);
@@ -2977,8 +3063,7 @@ mod tests {
 
     #[test]
     fn test_nonmodal_center_in() {
-        let mut dialog = NonModalDialog::new("Test")
-            .with_size(200.0, 150.0);
+        let mut dialog = NonModalDialog::new("Test").with_size(200.0, 150.0);
         dialog.center_in(800.0, 600.0);
         assert_eq!(dialog.position(), (300.0, 225.0));
     }
@@ -3097,16 +3182,14 @@ mod tests {
     #[test]
     fn test_nonmodal_set_content() {
         let mut dialog = NonModalDialog::new("Test");
-        let content = vec![
-            RenderCommand::FillRect {
-                x: 0.0,
-                y: 0.0,
-                width: 100.0,
-                height: 50.0,
-                color: COLOR_BLUE,
-                corner_radii: CornerRadii::ZERO,
-            },
-        ];
+        let content = vec![RenderCommand::FillRect {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 50.0,
+            color: COLOR_BLUE,
+            corner_radii: CornerRadii::ZERO,
+        }];
         dialog.set_content(content);
         assert_eq!(dialog.content_commands.len(), 1);
     }

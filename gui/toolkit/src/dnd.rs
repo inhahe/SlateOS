@@ -368,7 +368,9 @@ impl DragDropManager {
     pub fn update_position(&mut self, x: f32, y: f32) -> Option<DragEvent> {
         match &self.state {
             DragState::Idle => None,
-            DragState::Dragging { start_x, start_y, .. } => {
+            DragState::Dragging {
+                start_x, start_y, ..
+            } => {
                 let dx = x - start_x;
                 let dy = y - start_y;
                 let distance_sq = dx * dx + dy * dy;
@@ -398,18 +400,17 @@ impl DragDropManager {
                 if let Some(target) = target_hit {
                     let target_id = target.id;
                     // Extract data from current state to build new state.
-                    let (data, source_id, allowed_effects) =
-                        if let DragState::Dragging {
-                            data,
-                            source_id,
-                            allowed_effects,
-                            ..
-                        } = &self.state
-                        {
-                            (data.clone(), *source_id, allowed_effects.clone())
-                        } else {
-                            return None;
-                        };
+                    let (data, source_id, allowed_effects) = if let DragState::Dragging {
+                        data,
+                        source_id,
+                        allowed_effects,
+                        ..
+                    } = &self.state
+                    {
+                        (data.clone(), *source_id, allowed_effects.clone())
+                    } else {
+                        return None;
+                    };
 
                     if self.target_accepts_data(target_id, &data) {
                         let effect = self.negotiate_effect(&allowed_effects, target_id);
@@ -424,10 +425,7 @@ impl DragDropManager {
                             current_y: y,
                         };
 
-                        return Some(DragEvent::DragEnter {
-                            target_id,
-                            formats,
-                        });
+                        return Some(DragEvent::DragEnter { target_id, formats });
                     }
                 }
 
@@ -484,9 +482,14 @@ impl DragDropManager {
                     if let Some(new_tgt) = new_target {
                         let new_id = new_tgt.id;
                         if self.target_accepts_data(new_id, &data_clone) {
-                            let allowed = self.collect_allowed_from_dragging(&data_clone, source_id_val);
+                            let allowed =
+                                self.collect_allowed_from_dragging(&data_clone, source_id_val);
                             let effect = self.negotiate_effect(&allowed, new_id);
-                            let formats = data_clone.available_formats().into_iter().cloned().collect();
+                            let formats = data_clone
+                                .available_formats()
+                                .into_iter()
+                                .cloned()
+                                .collect();
 
                             self.state = DragState::OverTarget {
                                 data: data_clone,
@@ -683,7 +686,10 @@ mod tests {
         assert_eq!(obj.available_formats().len(), 3);
         assert_eq!(obj.get_text(), Some("plain"));
         assert_eq!(obj.get_url(), Some("https://example.com"));
-        assert_eq!(obj.get_data(&DataFormat::Html), Some(b"<b>bold</b>".as_slice()));
+        assert_eq!(
+            obj.get_data(&DataFormat::Html),
+            Some(b"<b>bold</b>".as_slice())
+        );
     }
 
     #[test]
@@ -757,7 +763,13 @@ mod tests {
 
         // Start drag.
         let data = DataObject::with_text("hello");
-        mgr.begin_drag(1, 50.0, 50.0, data, vec![DropEffect::Copy, DropEffect::Move]);
+        mgr.begin_drag(
+            1,
+            50.0,
+            50.0,
+            data,
+            vec![DropEffect::Copy, DropEffect::Move],
+        );
 
         // Move past threshold but not over target.
         let event = mgr.update_position(60.0, 60.0);
@@ -835,7 +847,10 @@ mod tests {
 
         // Move out of target.
         let event = mgr.update_position(200.0, 200.0);
-        assert!(matches!(event, Some(DragEvent::DragLeave { target_id: 10 })));
+        assert!(matches!(
+            event,
+            Some(DragEvent::DragLeave { target_id: 10 })
+        ));
     }
 
     #[test]

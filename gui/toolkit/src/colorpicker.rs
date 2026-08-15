@@ -139,7 +139,11 @@ pub fn rgb_to_hsv(r: u8, g: u8, b: u8) -> Hsv {
         60.0 * (((rf - gf) / delta) + 4.0)
     };
 
-    let s = if c_max < f32::EPSILON { 0.0 } else { delta / c_max };
+    let s = if c_max < f32::EPSILON {
+        0.0
+    } else {
+        delta / c_max
+    };
     let v = c_max;
 
     Hsv { h, s, v }
@@ -152,7 +156,10 @@ pub fn color_to_hex_string(color: Color) -> String {
 
 /// Convert a `Color` to its 8-digit hex string with alpha (without `#` prefix).
 pub fn color_to_hex_string_alpha(color: Color) -> String {
-    format!("{:02X}{:02X}{:02X}{:02X}", color.r, color.g, color.b, color.a)
+    format!(
+        "{:02X}{:02X}{:02X}{:02X}",
+        color.r, color.g, color.b, color.a
+    )
 }
 
 /// Parse a hex color string (with or without `#`, 6 or 8 hex digits).
@@ -477,17 +484,15 @@ impl ColorPicker {
                     return Some(ColorPickerEvent::Changed(self.current_color()));
                 }
             }
-            MouseEventKind::Move
-                if self.drag.is_some() => {
-                    self.apply_drag(local_x, local_y);
-                    return Some(ColorPickerEvent::Changed(self.current_color()));
-                }
-            MouseEventKind::Release(MouseButton::Left)
-                if self.drag.is_some() => {
-                    self.drag = None;
-                    self.sync_hex_from_hsv();
-                    return Some(ColorPickerEvent::Changed(self.current_color()));
-                }
+            MouseEventKind::Move if self.drag.is_some() => {
+                self.apply_drag(local_x, local_y);
+                return Some(ColorPickerEvent::Changed(self.current_color()));
+            }
+            MouseEventKind::Release(MouseButton::Left) if self.drag.is_some() => {
+                self.drag = None;
+                self.sync_hex_from_hsv();
+                return Some(ColorPickerEvent::Changed(self.current_color()));
+            }
             _ => {}
         }
         None
@@ -525,11 +530,13 @@ impl ColorPicker {
                 }
                 _ => {
                     if let Some(ch) = event.text
-                        && ch.is_ascii_hexdigit() && self.hex_input.len() < 8 {
-                            self.hex_input.push(ch.to_ascii_uppercase());
-                            self.try_apply_hex();
-                            return Some(ColorPickerEvent::Changed(self.current_color()));
-                        }
+                        && ch.is_ascii_hexdigit()
+                        && self.hex_input.len() < 8
+                    {
+                        self.hex_input.push(ch.to_ascii_uppercase());
+                        self.try_apply_hex();
+                        return Some(ColorPickerEvent::Changed(self.current_color()));
+                    }
                 }
             }
         } else {
@@ -1089,7 +1096,8 @@ impl ColorPickerDialog {
         self.picker.render_sv_square(&mut cmds, sv_x, sv_y, sv_size);
 
         let hue_x = sv_x + sv_size + PADDING;
-        self.picker.render_hue_bar(&mut cmds, hue_x, sv_y, HUE_BAR_WIDTH, sv_size);
+        self.picker
+            .render_hue_bar(&mut cmds, hue_x, sv_y, HUE_BAR_WIDTH, sv_size);
 
         // Alpha bar below SV square
         let alpha_y = self.alpha_bar_y();
@@ -1259,7 +1267,11 @@ impl ColorPickerDialog {
 
     fn render_eyedropper_button(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32) {
         let is_active = self.picker.mode == PickerMode::Eyedropper;
-        let bg = if is_active { COLOR_TEAL } else { COLOR_SURFACE1 };
+        let bg = if is_active {
+            COLOR_TEAL
+        } else {
+            COLOR_SURFACE1
+        };
         let text_color = if is_active { COLOR_BASE } else { COLOR_TEXT };
 
         cmds.push(RenderCommand::FillRect {
@@ -1345,16 +1357,7 @@ impl ColorPickerDialog {
         match self.slider_tab {
             SliderTab::Rgb => {
                 let (r, g, b) = hsv_to_rgb(self.picker.hsv);
-                self.render_channel_slider(
-                    cmds,
-                    x,
-                    y,
-                    width,
-                    "R",
-                    r as f32 / 255.0,
-                    Color::RED,
-                    r,
-                );
+                self.render_channel_slider(cmds, x, y, width, "R", r as f32 / 255.0, Color::RED, r);
                 self.render_channel_slider(
                     cmds,
                     x,
@@ -1778,7 +1781,10 @@ impl ColorPickerDialog {
         let tab_width = 40.0;
         let tab_height = 22.0;
 
-        x >= tab_x && x <= tab_x + tab_width && local_y >= slider_y && local_y <= slider_y + tab_height
+        x >= tab_x
+            && x <= tab_x + tab_width
+            && local_y >= slider_y
+            && local_y <= slider_y + tab_height
     }
 
     fn hit_test_sliders(&self, x: f32, local_y: f32) -> Option<DragTarget> {
@@ -1792,7 +1798,11 @@ impl ColorPickerDialog {
 
         for i in 0..3u8 {
             let sy = slider_y + (SLIDER_HEIGHT + PADDING) * i as f32;
-            if local_y >= sy && local_y <= sy + SLIDER_HEIGHT && x >= track_x && x <= track_x + track_width {
+            if local_y >= sy
+                && local_y <= sy + SLIDER_HEIGHT
+                && x >= track_x
+                && x <= track_x + track_width
+            {
                 return match self.slider_tab {
                     SliderTab::Rgb => Some(DragTarget::RgbSlider(i)),
                     SliderTab::Hsv => Some(DragTarget::HsvSlider(i)),
@@ -1843,9 +1853,8 @@ impl ColorPickerDialog {
     }
 
     fn preset_palette_height(&self) -> f32 {
-        let cols = self.preset_columns(
-            self.picker.sv_size + HUE_BAR_WIDTH + PADDING * 4.0 + PREVIEW_SIZE,
-        );
+        let cols =
+            self.preset_columns(self.picker.sv_size + HUE_BAR_WIDTH + PADDING * 4.0 + PREVIEW_SIZE);
         let rows = PRESET_COLORS.len().div_ceil(cols);
         14.0 + rows as f32 * (SWATCH_SIZE + SWATCH_GAP)
     }
@@ -2032,7 +2041,9 @@ mod tests {
                     && (g as i16 - g2 as i16).unsigned_abs() <= 1
                     && (b as i16 - b2 as i16).unsigned_abs() <= 1,
                 "Roundtrip failed for ({r}, {g}, {b}) -> HSV({:.1}, {:.3}, {:.3}) -> ({r2}, {g2}, {b2})",
-                hsv.h, hsv.s, hsv.v,
+                hsv.h,
+                hsv.s,
+                hsv.v,
             );
         }
     }

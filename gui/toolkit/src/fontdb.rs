@@ -135,7 +135,9 @@ impl FontDb {
             // `file_type` rather than `path.is_dir()`: the latter follows
             // symlinks, and a link pointing at an ancestor would recurse
             // until the depth bound caught it.
-            let Ok(kind) = entry.file_type() else { continue };
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
             if kind.is_dir() {
                 self.walk(&path, depth.saturating_add(1));
             } else if is_font_file(&path) {
@@ -520,8 +522,9 @@ mod tests {
             println!("{family} regular -> {}", info.path.display());
             let face = db.load(family, Query::regular()).expect("load the file");
             assert!(
-                face.family().is_some_and(|f| f.eq_ignore_ascii_case(family)
-                    || info.families.contains(&f.to_lowercase())),
+                face.family()
+                    .is_some_and(|f| f.eq_ignore_ascii_case(family)
+                        || info.families.contains(&f.to_lowercase())),
                 "{family} resolved to {:?}, which calls itself {:?}",
                 info.path,
                 face.family()
@@ -566,7 +569,9 @@ mod tests {
             db.load("nothing", Query::regular()),
             Err(LoadError::NotInstalled)
         ));
-        let err = db.load("ghost", Query::regular()).expect_err("file is absent");
+        let err = db
+            .load("ghost", Query::regular())
+            .expect_err("file is absent");
         assert!(matches!(err, LoadError::Unreadable { .. }), "{err}");
         // The message names the file, so a user can act on it.
         assert!(err.to_string().contains("file.ttf"), "{err}");

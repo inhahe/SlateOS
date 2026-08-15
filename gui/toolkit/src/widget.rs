@@ -14,8 +14,8 @@
 use crate::color::Color;
 use crate::event::{Event, EventResult, KeyEvent, MouseEvent, MouseEventKind};
 use crate::layout::{
-    FlexAlign, FlexDirection, FlexItem, FlexJustify, FlexLayout,
-    LayoutBox, Size, SizeConstraint, flex_layout,
+    FlexAlign, FlexDirection, FlexItem, FlexJustify, FlexLayout, LayoutBox, Size, SizeConstraint,
+    flex_layout,
 };
 use crate::render::{FontWeightHint, RenderCommand, RenderTree};
 use crate::style::{Borders, CornerRadii, Edges, FontWeight, Style};
@@ -99,7 +99,11 @@ pub enum WidgetKind {
     /// Slider.
     Slider { value: f32, min: f32, max: f32 },
     /// Image display.
-    Image { image_id: u64, width: f32, height: f32 },
+    Image {
+        image_id: u64,
+        width: f32,
+        height: f32,
+    },
 }
 
 /// Checkbox state (supports tristate).
@@ -410,12 +414,10 @@ impl Widget {
                     height + self.style.padding.vertical(),
                 )
             }
-            WidgetKind::TextInput { .. } => {
-                Size::new(
-                    self.style.min_width.unwrap_or(120.0),
-                    self.style.min_height.unwrap_or(28.0),
-                )
-            }
+            WidgetKind::TextInput { .. } => Size::new(
+                self.style.min_width.unwrap_or(120.0),
+                self.style.min_height.unwrap_or(28.0),
+            ),
             WidgetKind::Checkbox { label, .. } => {
                 let checkbox_size = self.style.font_size;
                 let width = checkbox_size + 8.0 + self.measure(label);
@@ -425,12 +427,10 @@ impl Widget {
                     height + self.style.padding.vertical(),
                 )
             }
-            WidgetKind::ProgressBar { .. } => {
-                Size::new(
-                    self.style.min_width.unwrap_or(200.0),
-                    self.style.min_height.unwrap_or(20.0),
-                )
-            }
+            WidgetKind::ProgressBar { .. } => Size::new(
+                self.style.min_width.unwrap_or(200.0),
+                self.style.min_height.unwrap_or(20.0),
+            ),
             WidgetKind::Separator { vertical } => {
                 if *vertical {
                     Size::new(1.0, 0.0)
@@ -465,65 +465,63 @@ impl Widget {
         };
 
         if let Some(ref flex) = self.flex_layout
-            && !self.children.is_empty() {
-                // Compute child intrinsic sizes
-                let child_info: Vec<(Size, FlexItem)> = self
-                    .children
-                    .iter()
-                    .filter(|c| c.visible)
-                    .map(|c| (c.intrinsic_size(), c.flex_item.clone()))
-                    .collect();
+            && !self.children.is_empty()
+        {
+            // Compute child intrinsic sizes
+            let child_info: Vec<(Size, FlexItem)> = self
+                .children
+                .iter()
+                .filter(|c| c.visible)
+                .map(|c| (c.intrinsic_size(), c.flex_item.clone()))
+                .collect();
 
-                let container_size = Size::new(
-                    constraint.max_width - self.style.margin.horizontal(),
-                    constraint.max_height - self.style.margin.vertical(),
-                );
+            let container_size = Size::new(
+                constraint.max_width - self.style.margin.horizontal(),
+                constraint.max_height - self.style.margin.vertical(),
+            );
 
-                let layouts = flex_layout(container_size, flex, &child_info, &self.style.padding);
+            let layouts = flex_layout(container_size, flex, &child_info, &self.style.padding);
 
-                // Apply layout results to children
-                let mut visible_idx = 0;
-                for child in &mut self.children {
-                    if !child.visible {
-                        continue;
-                    }
-                    if visible_idx < layouts.len() {
-                        let lb = &layouts[visible_idx];
-                        child.layout.x = lb.x;
-                        child.layout.y = lb.y;
-
-                        // Recursively layout children with their computed size
-                        let child_constraint = SizeConstraint {
-                            min_width: 0.0,
-                            max_width: lb.width,
-                            min_height: 0.0,
-                            max_height: lb.height,
-                        };
-                        child.do_layout(child_constraint);
-                        child.layout.x = lb.x;
-                        child.layout.y = lb.y;
-                        child.layout.width = lb.width;
-                        child.layout.height = lb.height;
-                    }
-                    visible_idx += 1;
+            // Apply layout results to children
+            let mut visible_idx = 0;
+            for child in &mut self.children {
+                if !child.visible {
+                    continue;
                 }
+                if visible_idx < layouts.len() {
+                    let lb = &layouts[visible_idx];
+                    child.layout.x = lb.x;
+                    child.layout.y = lb.y;
 
-                // Update own size to fit content if unconstrained
-                if constraint.max_width == f32::INFINITY {
-                    let max_x = layouts
-                        .iter()
-                        .map(|l| l.x + l.width)
-                        .fold(0.0f32, f32::max);
-                    self.layout.width = max_x + self.style.padding.right;
+                    // Recursively layout children with their computed size
+                    let child_constraint = SizeConstraint {
+                        min_width: 0.0,
+                        max_width: lb.width,
+                        min_height: 0.0,
+                        max_height: lb.height,
+                    };
+                    child.do_layout(child_constraint);
+                    child.layout.x = lb.x;
+                    child.layout.y = lb.y;
+                    child.layout.width = lb.width;
+                    child.layout.height = lb.height;
                 }
-                if constraint.max_height == f32::INFINITY {
-                    let max_y = layouts
-                        .iter()
-                        .map(|l| l.y + l.height)
-                        .fold(0.0f32, f32::max);
-                    self.layout.height = max_y + self.style.padding.bottom;
-                }
+                visible_idx += 1;
             }
+
+            // Update own size to fit content if unconstrained
+            if constraint.max_width == f32::INFINITY {
+                let max_x = layouts.iter().map(|l| l.x + l.width).fold(0.0f32, f32::max);
+                self.layout.width = max_x + self.style.padding.right;
+            }
+            if constraint.max_height == f32::INFINITY {
+                let max_y = layouts
+                    .iter()
+                    .map(|l| l.y + l.height)
+                    .fold(0.0f32, f32::max);
+                self.layout.height = max_y + self.style.padding.bottom;
+            }
+        }
     }
 
     // ======================================================================

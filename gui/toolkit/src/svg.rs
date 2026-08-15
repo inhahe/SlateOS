@@ -132,7 +132,10 @@ fn u8_from_hex_char(c: u8) -> Result<u8, SvgError> {
         b'0'..=b'9' => Ok(c - b'0'),
         b'a'..=b'f' => Ok(c - b'a' + 10),
         b'A'..=b'F' => Ok(c - b'A' + 10),
-        _ => Err(SvgError::InvalidColor(format!("bad hex char: {}", c as char))),
+        _ => Err(SvgError::InvalidColor(format!(
+            "bad hex char: {}",
+            c as char
+        ))),
     }
 }
 
@@ -143,7 +146,9 @@ fn u8_from_hex_pair(hi: u8, lo: u8) -> Result<u8, SvgError> {
 fn parse_rgb_func(inner: &str) -> Result<Color, SvgError> {
     let parts: Vec<&str> = inner.split(',').collect();
     if parts.len() != 3 {
-        return Err(SvgError::InvalidColor(format!("rgb() expects 3 values: {inner}")));
+        return Err(SvgError::InvalidColor(format!(
+            "rgb() expects 3 values: {inner}"
+        )));
     }
     let r = parse_u8_component(parts[0])?;
     let g = parse_u8_component(parts[1])?;
@@ -154,7 +159,9 @@ fn parse_rgb_func(inner: &str) -> Result<Color, SvgError> {
 fn parse_rgba_func(inner: &str) -> Result<Color, SvgError> {
     let parts: Vec<&str> = inner.split(',').collect();
     if parts.len() != 4 {
-        return Err(SvgError::InvalidColor(format!("rgba() expects 4 values: {inner}")));
+        return Err(SvgError::InvalidColor(format!(
+            "rgba() expects 4 values: {inner}"
+        )));
     }
     let r = parse_u8_component(parts[0])?;
     let g = parse_u8_component(parts[1])?;
@@ -162,9 +169,9 @@ fn parse_rgba_func(inner: &str) -> Result<Color, SvgError> {
     let a_str = parts[3].trim();
     // Alpha can be 0.0-1.0 or 0-255
     let a = if a_str.contains('.') {
-        let f: f32 = a_str.parse().map_err(|_| {
-            SvgError::InvalidColor(format!("bad alpha: {a_str}"))
-        })?;
+        let f: f32 = a_str
+            .parse()
+            .map_err(|_| SvgError::InvalidColor(format!("bad alpha: {a_str}")))?;
         (f.clamp(0.0, 1.0) * 255.0) as u8
     } else {
         parse_u8_component(a_str)?
@@ -175,14 +182,15 @@ fn parse_rgba_func(inner: &str) -> Result<Color, SvgError> {
 fn parse_u8_component(s: &str) -> Result<u8, SvgError> {
     let s = s.trim();
     if let Some(pct) = s.strip_suffix('%') {
-        let f: f32 = pct.trim().parse().map_err(|_| {
-            SvgError::InvalidColor(format!("bad percentage: {s}"))
-        })?;
+        let f: f32 = pct
+            .trim()
+            .parse()
+            .map_err(|_| SvgError::InvalidColor(format!("bad percentage: {s}")))?;
         Ok((f.clamp(0.0, 100.0) * 2.55) as u8)
     } else {
-        let v: u32 = s.parse().map_err(|_| {
-            SvgError::InvalidColor(format!("bad component: {s}"))
-        })?;
+        let v: u32 = s
+            .parse()
+            .map_err(|_| SvgError::InvalidColor(format!("bad component: {s}")))?;
         Ok(v.min(255) as u8)
     }
 }
@@ -258,17 +266,38 @@ impl Transform {
     };
 
     pub fn translate(tx: f32, ty: f32) -> Self {
-        Self { a: 1.0, b: 0.0, c: 0.0, d: 1.0, tx, ty }
+        Self {
+            a: 1.0,
+            b: 0.0,
+            c: 0.0,
+            d: 1.0,
+            tx,
+            ty,
+        }
     }
 
     pub fn scale(sx: f32, sy: f32) -> Self {
-        Self { a: sx, b: 0.0, c: 0.0, d: sy, tx: 0.0, ty: 0.0 }
+        Self {
+            a: sx,
+            b: 0.0,
+            c: 0.0,
+            d: sy,
+            tx: 0.0,
+            ty: 0.0,
+        }
     }
 
     pub fn rotate(angle_rad: f32) -> Self {
         let cos = angle_rad.cos();
         let sin = angle_rad.sin();
-        Self { a: cos, b: sin, c: -sin, d: cos, tx: 0.0, ty: 0.0 }
+        Self {
+            a: cos,
+            b: sin,
+            c: -sin,
+            d: cos,
+            tx: 0.0,
+            ty: 0.0,
+        }
     }
 
     pub fn matrix(a: f32, b: f32, c: f32, d: f32, tx: f32, ty: f32) -> Self {
@@ -314,13 +343,13 @@ pub fn parse_transform(s: &str) -> Result<Transform, SvgError> {
         }
 
         // Find function name
-        let paren_pos = remaining.find('(').ok_or_else(|| {
-            SvgError::InvalidTransform(format!("expected '(' in: {remaining}"))
-        })?;
+        let paren_pos = remaining
+            .find('(')
+            .ok_or_else(|| SvgError::InvalidTransform(format!("expected '(' in: {remaining}")))?;
         let func_name = remaining[..paren_pos].trim();
-        let close_pos = remaining.find(')').ok_or_else(|| {
-            SvgError::InvalidTransform(format!("expected ')' in: {remaining}"))
-        })?;
+        let close_pos = remaining
+            .find(')')
+            .ok_or_else(|| SvgError::InvalidTransform(format!("expected ')' in: {remaining}")))?;
         let args_str = &remaining[paren_pos + 1..close_pos];
         remaining = &remaining[close_pos + 1..];
 
@@ -363,11 +392,25 @@ pub fn parse_transform(s: &str) -> Result<Transform, SvgError> {
             }
             "skewX" => {
                 let angle = args.first().copied().unwrap_or(0.0) * PI / 180.0;
-                Transform { a: 1.0, b: angle.tan(), c: 0.0, d: 1.0, tx: 0.0, ty: 0.0 }
+                Transform {
+                    a: 1.0,
+                    b: angle.tan(),
+                    c: 0.0,
+                    d: 1.0,
+                    tx: 0.0,
+                    ty: 0.0,
+                }
             }
             "skewY" => {
                 let angle = args.first().copied().unwrap_or(0.0) * PI / 180.0;
-                Transform { a: 1.0, b: 0.0, c: angle.tan(), d: 1.0, tx: 0.0, ty: 0.0 }
+                Transform {
+                    a: 1.0,
+                    b: 0.0,
+                    c: angle.tan(),
+                    d: 1.0,
+                    tx: 0.0,
+                    ty: 0.0,
+                }
             }
             _ => {
                 return Err(SvgError::InvalidTransform(format!(
@@ -386,9 +429,9 @@ fn parse_transform_args(s: &str) -> Result<Vec<f32>, SvgError> {
     s.split(|c: char| c == ',' || c.is_whitespace())
         .filter(|seg| !seg.is_empty())
         .map(|seg| {
-            seg.trim().parse::<f32>().map_err(|_| {
-                SvgError::InvalidTransform(format!("bad number: {seg}"))
-            })
+            seg.trim()
+                .parse::<f32>()
+                .map_err(|_| SvgError::InvalidTransform(format!("bad number: {seg}")))
         })
         .collect()
 }
@@ -398,15 +441,53 @@ fn parse_transform_args(s: &str) -> Result<Vec<f32>, SvgError> {
 /// A single command in a parsed SVG path, with absolute coordinates.
 #[derive(Clone, Debug, PartialEq)]
 pub enum PathCommand {
-    MoveTo { x: f32, y: f32 },
-    LineTo { x: f32, y: f32 },
-    HorizontalLineTo { x: f32 },
-    VerticalLineTo { y: f32 },
-    CubicBezier { x1: f32, y1: f32, x2: f32, y2: f32, x: f32, y: f32 },
-    SmoothCubic { x2: f32, y2: f32, x: f32, y: f32 },
-    QuadraticBezier { x1: f32, y1: f32, x: f32, y: f32 },
-    SmoothQuadratic { x: f32, y: f32 },
-    Arc { rx: f32, ry: f32, x_rotation: f32, large_arc: bool, sweep: bool, x: f32, y: f32 },
+    MoveTo {
+        x: f32,
+        y: f32,
+    },
+    LineTo {
+        x: f32,
+        y: f32,
+    },
+    HorizontalLineTo {
+        x: f32,
+    },
+    VerticalLineTo {
+        y: f32,
+    },
+    CubicBezier {
+        x1: f32,
+        y1: f32,
+        x2: f32,
+        y2: f32,
+        x: f32,
+        y: f32,
+    },
+    SmoothCubic {
+        x2: f32,
+        y2: f32,
+        x: f32,
+        y: f32,
+    },
+    QuadraticBezier {
+        x1: f32,
+        y1: f32,
+        x: f32,
+        y: f32,
+    },
+    SmoothQuadratic {
+        x: f32,
+        y: f32,
+    },
+    Arc {
+        rx: f32,
+        ry: f32,
+        x_rotation: f32,
+        large_arc: bool,
+        sweep: bool,
+        x: f32,
+        y: f32,
+    },
     Close,
 }
 
@@ -501,14 +582,24 @@ pub fn parse_path_data(d: &str) -> Result<Vec<PathCommand>, SvgError> {
                         let vals = consume_n_numbers(&tokens, &mut i, 6)?;
                         let (x1, y1, x2, y2, x, y) = if is_relative {
                             (
-                                cursor_x + vals[0], cursor_y + vals[1],
-                                cursor_x + vals[2], cursor_y + vals[3],
-                                cursor_x + vals[4], cursor_y + vals[5],
+                                cursor_x + vals[0],
+                                cursor_y + vals[1],
+                                cursor_x + vals[2],
+                                cursor_y + vals[3],
+                                cursor_x + vals[4],
+                                cursor_y + vals[5],
                             )
                         } else {
                             (vals[0], vals[1], vals[2], vals[3], vals[4], vals[5])
                         };
-                        commands.push(PathCommand::CubicBezier { x1, y1, x2, y2, x, y });
+                        commands.push(PathCommand::CubicBezier {
+                            x1,
+                            y1,
+                            x2,
+                            y2,
+                            x,
+                            y,
+                        });
                         cursor_x = x;
                         cursor_y = y;
                     }
@@ -518,8 +609,10 @@ pub fn parse_path_data(d: &str) -> Result<Vec<PathCommand>, SvgError> {
                         let vals = consume_n_numbers(&tokens, &mut i, 4)?;
                         let (x2, y2, x, y) = if is_relative {
                             (
-                                cursor_x + vals[0], cursor_y + vals[1],
-                                cursor_x + vals[2], cursor_y + vals[3],
+                                cursor_x + vals[0],
+                                cursor_y + vals[1],
+                                cursor_x + vals[2],
+                                cursor_y + vals[3],
                             )
                         } else {
                             (vals[0], vals[1], vals[2], vals[3])
@@ -534,8 +627,10 @@ pub fn parse_path_data(d: &str) -> Result<Vec<PathCommand>, SvgError> {
                         let vals = consume_n_numbers(&tokens, &mut i, 4)?;
                         let (x1, y1, x, y) = if is_relative {
                             (
-                                cursor_x + vals[0], cursor_y + vals[1],
-                                cursor_x + vals[2], cursor_y + vals[3],
+                                cursor_x + vals[0],
+                                cursor_y + vals[1],
+                                cursor_x + vals[2],
+                                cursor_y + vals[3],
                             )
                         } else {
                             (vals[0], vals[1], vals[2], vals[3])
@@ -562,10 +657,11 @@ pub fn parse_path_data(d: &str) -> Result<Vec<PathCommand>, SvgError> {
                     while i < tokens.len() && is_number_token(&tokens[i]) {
                         let rx = parse_path_number(&tokens[i])?.abs();
                         i += 1;
-                        let ry = parse_path_number(tokens.get(i).ok_or_else(|| {
-                            SvgError::InvalidPathData("A: missing ry".into())
-                        })?)?
-                        .abs();
+                        let ry =
+                            parse_path_number(tokens.get(i).ok_or_else(|| {
+                                SvgError::InvalidPathData("A: missing ry".into())
+                            })?)?
+                            .abs();
                         i += 1;
                         let x_rotation = parse_path_number(tokens.get(i).ok_or_else(|| {
                             SvgError::InvalidPathData("A: missing x-rotation".into())
@@ -573,19 +669,23 @@ pub fn parse_path_data(d: &str) -> Result<Vec<PathCommand>, SvgError> {
                         i += 1;
                         let large_arc = parse_path_number(tokens.get(i).ok_or_else(|| {
                             SvgError::InvalidPathData("A: missing large-arc flag".into())
-                        })?)? != 0.0;
+                        })?)?
+                            != 0.0;
                         i += 1;
                         let sweep = parse_path_number(tokens.get(i).ok_or_else(|| {
                             SvgError::InvalidPathData("A: missing sweep flag".into())
-                        })?)? != 0.0;
+                        })?)?
+                            != 0.0;
                         i += 1;
-                        let x_raw = parse_path_number(tokens.get(i).ok_or_else(|| {
-                            SvgError::InvalidPathData("A: missing x".into())
-                        })?)?;
+                        let x_raw =
+                            parse_path_number(tokens.get(i).ok_or_else(|| {
+                                SvgError::InvalidPathData("A: missing x".into())
+                            })?)?;
                         i += 1;
-                        let y_raw = parse_path_number(tokens.get(i).ok_or_else(|| {
-                            SvgError::InvalidPathData("A: missing y".into())
-                        })?)?;
+                        let y_raw =
+                            parse_path_number(tokens.get(i).ok_or_else(|| {
+                                SvgError::InvalidPathData("A: missing y".into())
+                            })?)?;
                         i += 1;
 
                         let (x, y) = if is_relative {
@@ -594,7 +694,13 @@ pub fn parse_path_data(d: &str) -> Result<Vec<PathCommand>, SvgError> {
                             (x_raw, y_raw)
                         };
                         commands.push(PathCommand::Arc {
-                            rx, ry, x_rotation, large_arc, sweep, x, y,
+                            rx,
+                            ry,
+                            x_rotation,
+                            large_arc,
+                            sweep,
+                            x,
+                            y,
                         });
                         cursor_x = x;
                         cursor_y = y;
@@ -617,9 +723,10 @@ pub fn parse_path_data(d: &str) -> Result<Vec<PathCommand>, SvgError> {
             if is_number_token(token) {
                 let x_raw = parse_path_number(token)?;
                 i += 1;
-                let y_raw = parse_path_number(tokens.get(i).ok_or_else(|| {
-                    SvgError::InvalidPathData("implicit lineto needs y".into())
-                })?)?;
+                let y_raw =
+                    parse_path_number(tokens.get(i).ok_or_else(|| {
+                        SvgError::InvalidPathData("implicit lineto needs y".into())
+                    })?)?;
                 i += 1;
                 commands.push(PathCommand::LineTo { x: x_raw, y: y_raw });
                 cursor_x = x_raw;
@@ -647,8 +754,8 @@ fn tokenize_path(d: &str) -> Vec<String> {
         let c = bytes[i];
         match c {
             // Command characters always start a new token
-            b'M' | b'm' | b'L' | b'l' | b'H' | b'h' | b'V' | b'v' | b'C' | b'c' | b'S'
-            | b's' | b'Q' | b'q' | b'T' | b't' | b'A' | b'a' | b'Z' | b'z' => {
+            b'M' | b'm' | b'L' | b'l' | b'H' | b'h' | b'V' | b'v' | b'C' | b'c' | b'S' | b's'
+            | b'Q' | b'q' | b'T' | b't' | b'A' | b'a' | b'Z' | b'z' => {
                 if !current.is_empty() {
                     tokens.push(core::mem::take(&mut current));
                 }
@@ -724,9 +831,8 @@ fn is_number_token(s: &str) -> bool {
 }
 
 fn parse_path_number(s: &str) -> Result<f32, SvgError> {
-    s.parse::<f32>().map_err(|_| {
-        SvgError::InvalidPathData(format!("bad number: {s}"))
-    })
+    s.parse::<f32>()
+        .map_err(|_| SvgError::InvalidPathData(format!("bad number: {s}")))
 }
 
 fn consume_n_numbers(tokens: &[String], i: &mut usize, n: usize) -> Result<Vec<f32>, SvgError> {
@@ -856,7 +962,13 @@ impl SvgDocument {
     /// Get the viewBox (min_x, min_y, width, height).
     /// Returns (0, 0, width, height) if no explicit viewBox is set.
     pub fn viewbox(&self) -> (f32, f32, f32, f32) {
-        if let SvgNode::Svg { view_box, width, height, .. } = &self.root {
+        if let SvgNode::Svg {
+            view_box,
+            width,
+            height,
+            ..
+        } = &self.root
+        {
             if let Some(vb) = view_box {
                 return *vb;
             }
@@ -872,8 +984,8 @@ impl SvgDocument {
         let (vb_x, vb_y, vb_w, vb_h) = self.viewbox();
         let scale_x = width as f32 / vb_w;
         let scale_y = height as f32 / vb_h;
-        let base_transform = Transform::scale(scale_x, scale_y)
-            .then(Transform::translate(-vb_x, -vb_y));
+        let base_transform =
+            Transform::scale(scale_x, scale_y).then(Transform::translate(-vb_x, -vb_y));
         renderer.render_node(&self.root, base_transform, &ResolvedStyle::default());
         renderer.buffer
     }
@@ -978,7 +1090,10 @@ struct XmlElement {
 
 impl XmlElement {
     fn attr(&self, name: &str) -> Option<&str> {
-        self.attrs.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str())
+        self.attrs
+            .iter()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.as_str())
     }
 
     fn attr_f32(&self, name: &str) -> Option<f32> {
@@ -1039,7 +1154,11 @@ fn skip_prolog(bytes: &[u8], pos: &mut usize) {
 
 fn skip_special(bytes: &[u8], pos: &mut usize) {
     // Skip <!-- comments --> and <?...?> and <!DOCTYPE...>
-    if *pos + 3 < bytes.len() && bytes[*pos + 1] == b'!' && bytes[*pos + 2] == b'-' && bytes[*pos + 3] == b'-' {
+    if *pos + 3 < bytes.len()
+        && bytes[*pos + 1] == b'!'
+        && bytes[*pos + 2] == b'-'
+        && bytes[*pos + 3] == b'-'
+    {
         // Comment
         *pos += 4;
         while *pos + 2 < bytes.len() {
@@ -1080,7 +1199,11 @@ fn parse_element(bytes: &[u8], pos: &mut usize) -> Result<XmlElement, SvgError> 
 
     // Tag name
     let tag_start = *pos;
-    while *pos < bytes.len() && !bytes[*pos].is_ascii_whitespace() && bytes[*pos] != b'>' && bytes[*pos] != b'/' {
+    while *pos < bytes.len()
+        && !bytes[*pos].is_ascii_whitespace()
+        && bytes[*pos] != b'>'
+        && bytes[*pos] != b'/'
+    {
         *pos += 1;
     }
     let tag = String::from_utf8_lossy(&bytes[tag_start..*pos]).to_string();
@@ -1097,7 +1220,12 @@ fn parse_element(bytes: &[u8], pos: &mut usize) -> Result<XmlElement, SvgError> 
         }
         // Attribute name
         let attr_start = *pos;
-        while *pos < bytes.len() && bytes[*pos] != b'=' && !bytes[*pos].is_ascii_whitespace() && bytes[*pos] != b'>' && bytes[*pos] != b'/' {
+        while *pos < bytes.len()
+            && bytes[*pos] != b'='
+            && !bytes[*pos].is_ascii_whitespace()
+            && bytes[*pos] != b'>'
+            && bytes[*pos] != b'/'
+        {
             *pos += 1;
         }
         let attr_name = String::from_utf8_lossy(&bytes[attr_start..*pos]).to_string();
@@ -1156,7 +1284,11 @@ fn parse_element(bytes: &[u8], pos: &mut usize) -> Result<XmlElement, SvgError> 
         }
     }
 
-    Ok(XmlElement { tag, attrs, children })
+    Ok(XmlElement {
+        tag,
+        attrs,
+        children,
+    })
 }
 
 fn parse_attr_value(bytes: &[u8], pos: &mut usize) -> Result<String, SvgError> {
@@ -1167,7 +1299,11 @@ fn parse_attr_value(bytes: &[u8], pos: &mut usize) -> Result<String, SvgError> {
     if quote != b'"' && quote != b'\'' {
         // Unquoted value (non-standard but handle gracefully)
         let start = *pos;
-        while *pos < bytes.len() && !bytes[*pos].is_ascii_whitespace() && bytes[*pos] != b'>' && bytes[*pos] != b'/' {
+        while *pos < bytes.len()
+            && !bytes[*pos].is_ascii_whitespace()
+            && bytes[*pos] != b'>'
+            && bytes[*pos] != b'/'
+        {
             *pos += 1;
         }
         return Ok(String::from_utf8_lossy(&bytes[start..*pos]).to_string());
@@ -1373,7 +1509,9 @@ fn parse_viewbox(s: &str) -> Result<(f32, f32, f32, f32), SvgError> {
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| SvgError::MalformedXml(format!("bad viewBox: {s}")))?;
     if parts.len() != 4 {
-        return Err(SvgError::MalformedXml(format!("viewBox needs 4 values: {s}")));
+        return Err(SvgError::MalformedXml(format!(
+            "viewBox needs 4 values: {s}"
+        )));
     }
     Ok((parts[0], parts[1], parts[2], parts[3]))
 }
@@ -1386,7 +1524,9 @@ fn parse_points(s: &str) -> Result<Vec<(f32, f32)>, SvgError> {
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| SvgError::InvalidPathData(format!("bad points: {s}")))?;
     if !numbers.len().is_multiple_of(2) {
-        return Err(SvgError::InvalidPathData("points needs even number of values".into()));
+        return Err(SvgError::InvalidPathData(
+            "points needs even number of values".into(),
+        ));
     }
     Ok(numbers.chunks(2).map(|c| (c[0], c[1])).collect())
 }
@@ -1398,21 +1538,41 @@ const DEFAULT_FLATNESS: f32 = 0.25;
 
 /// Flatten a cubic Bézier curve to line segments using adaptive subdivision.
 fn flatten_cubic(
-    x0: f32, y0: f32,
-    x1: f32, y1: f32,
-    x2: f32, y2: f32,
-    x3: f32, y3: f32,
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
+    x2: f32,
+    y2: f32,
+    x3: f32,
+    y3: f32,
     flatness: f32,
     output: &mut Vec<(f32, f32)>,
 ) {
-    flatten_cubic_recursive(x0, y0, x1, y1, x2, y2, x3, y3, flatness * flatness, 0, output);
+    flatten_cubic_recursive(
+        x0,
+        y0,
+        x1,
+        y1,
+        x2,
+        y2,
+        x3,
+        y3,
+        flatness * flatness,
+        0,
+        output,
+    );
 }
 
 fn flatten_cubic_recursive(
-    x0: f32, y0: f32,
-    x1: f32, y1: f32,
-    x2: f32, y2: f32,
-    x3: f32, y3: f32,
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
+    x2: f32,
+    y2: f32,
+    x3: f32,
+    y3: f32,
     flatness_sq: f32,
     depth: u32,
     output: &mut Vec<(f32, f32)>,
@@ -1456,15 +1616,42 @@ fn flatten_cubic_recursive(
     let mx0123 = (mx012 + mx123) * 0.5;
     let my0123 = (my012 + my123) * 0.5;
 
-    flatten_cubic_recursive(x0, y0, mx01, my01, mx012, my012, mx0123, my0123, flatness_sq, depth + 1, output);
-    flatten_cubic_recursive(mx0123, my0123, mx123, my123, mx23, my23, x3, y3, flatness_sq, depth + 1, output);
+    flatten_cubic_recursive(
+        x0,
+        y0,
+        mx01,
+        my01,
+        mx012,
+        my012,
+        mx0123,
+        my0123,
+        flatness_sq,
+        depth + 1,
+        output,
+    );
+    flatten_cubic_recursive(
+        mx0123,
+        my0123,
+        mx123,
+        my123,
+        mx23,
+        my23,
+        x3,
+        y3,
+        flatness_sq,
+        depth + 1,
+        output,
+    );
 }
 
 /// Flatten a quadratic Bézier curve to line segments.
 fn flatten_quadratic(
-    x0: f32, y0: f32,
-    x1: f32, y1: f32,
-    x2: f32, y2: f32,
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
+    x2: f32,
+    y2: f32,
     flatness: f32,
     output: &mut Vec<(f32, f32)>,
 ) {
@@ -1478,12 +1665,15 @@ fn flatten_quadratic(
 
 /// Approximate an elliptical arc with line segments.
 fn flatten_arc(
-    cursor_x: f32, cursor_y: f32,
-    rx: f32, ry: f32,
+    cursor_x: f32,
+    cursor_y: f32,
+    rx: f32,
+    ry: f32,
     x_rotation: f32,
     large_arc: bool,
     sweep: bool,
-    target_x: f32, target_y: f32,
+    target_x: f32,
+    target_y: f32,
     output: &mut Vec<(f32, f32)>,
 ) {
     // Implementation of the SVG arc endpoint-to-center parameterization
@@ -1523,7 +1713,11 @@ fn flatten_arc(
 
     let num = (rx_sq * ry_sq - rx_sq * y1p_sq - ry_sq * x1p_sq).max(0.0);
     let denom = rx_sq * y1p_sq + ry_sq * x1p_sq;
-    let sq = if denom < 1e-10 { 0.0 } else { (num / denom).sqrt() };
+    let sq = if denom < 1e-10 {
+        0.0
+    } else {
+        (num / denom).sqrt()
+    };
     let sign = if large_arc == sweep { -1.0 } else { 1.0 };
     let cxp = sign * sq * (rx * y1p / ry);
     let cyp = sign * sq * -(ry * x1p / rx);
@@ -1569,7 +1763,11 @@ fn angle_between(ux: f32, uy: f32, vx: f32, vy: f32) -> f32 {
     }
     let cos_angle = (dot / len).clamp(-1.0, 1.0);
     let angle = cos_angle.acos();
-    if ux * vy - uy * vx < 0.0 { -angle } else { angle }
+    if ux * vy - uy * vx < 0.0 {
+        -angle
+    } else {
+        angle
+    }
 }
 
 /// Convert path commands into a series of polygon outlines (lists of points).
@@ -1621,12 +1819,30 @@ fn path_to_polygons(commands: &[PathCommand], transform: Transform) -> Vec<Vec<(
                 last_cubic_cp = None;
                 last_quad_cp = None;
             }
-            PathCommand::CubicBezier { x1, y1, x2, y2, x, y } => {
+            PathCommand::CubicBezier {
+                x1,
+                y1,
+                x2,
+                y2,
+                x,
+                y,
+            } => {
                 let (tx0, ty0) = transform.apply(cursor_x, cursor_y);
                 let (tx1, ty1) = transform.apply(*x1, *y1);
                 let (tx2, ty2) = transform.apply(*x2, *y2);
                 let (tx3, ty3) = transform.apply(*x, *y);
-                flatten_cubic(tx0, ty0, tx1, ty1, tx2, ty2, tx3, ty3, DEFAULT_FLATNESS, &mut current);
+                flatten_cubic(
+                    tx0,
+                    ty0,
+                    tx1,
+                    ty1,
+                    tx2,
+                    ty2,
+                    tx3,
+                    ty3,
+                    DEFAULT_FLATNESS,
+                    &mut current,
+                );
                 last_cubic_cp = Some((*x2, *y2));
                 last_quad_cp = None;
                 cursor_x = *x;
@@ -1642,7 +1858,18 @@ fn path_to_polygons(commands: &[PathCommand], transform: Transform) -> Vec<Vec<(
                 let (tx1, ty1) = transform.apply(rx1, ry1);
                 let (tx2, ty2) = transform.apply(*x2, *y2);
                 let (tx3, ty3) = transform.apply(*x, *y);
-                flatten_cubic(tx0, ty0, tx1, ty1, tx2, ty2, tx3, ty3, DEFAULT_FLATNESS, &mut current);
+                flatten_cubic(
+                    tx0,
+                    ty0,
+                    tx1,
+                    ty1,
+                    tx2,
+                    ty2,
+                    tx3,
+                    ty3,
+                    DEFAULT_FLATNESS,
+                    &mut current,
+                );
                 last_cubic_cp = Some((*x2, *y2));
                 last_quad_cp = None;
                 cursor_x = *x;
@@ -1672,10 +1899,29 @@ fn path_to_polygons(commands: &[PathCommand], transform: Transform) -> Vec<Vec<(
                 cursor_x = *x;
                 cursor_y = *y;
             }
-            PathCommand::Arc { rx, ry, x_rotation, large_arc, sweep, x, y } => {
+            PathCommand::Arc {
+                rx,
+                ry,
+                x_rotation,
+                large_arc,
+                sweep,
+                x,
+                y,
+            } => {
                 // We flatten in untransformed space then transform points
                 let mut arc_pts = Vec::new();
-                flatten_arc(cursor_x, cursor_y, *rx, *ry, *x_rotation, *large_arc, *sweep, *x, *y, &mut arc_pts);
+                flatten_arc(
+                    cursor_x,
+                    cursor_y,
+                    *rx,
+                    *ry,
+                    *x_rotation,
+                    *large_arc,
+                    *sweep,
+                    *x,
+                    *y,
+                    &mut arc_pts,
+                );
                 for (px, py) in &arc_pts {
                     let (tx, ty) = transform.apply(*px, *py);
                     current.push((tx, ty));
@@ -1736,29 +1982,62 @@ impl SvgRenderer {
                     self.render_node(child, transform, parent_style);
                 }
             }
-            SvgNode::Group { transform: local_xf, style, children } => {
+            SvgNode::Group {
+                transform: local_xf,
+                style,
+                children,
+            } => {
                 let combined = transform.then(*local_xf);
                 let resolved = parent_style.with_overrides(style);
                 for child in children {
                     self.render_node(child, combined, &resolved);
                 }
             }
-            SvgNode::Rect { x, y, width, height, rx, ry, transform: local_xf, style } => {
+            SvgNode::Rect {
+                x,
+                y,
+                width,
+                height,
+                rx,
+                ry,
+                transform: local_xf,
+                style,
+            } => {
                 let combined = transform.then(*local_xf);
                 let resolved = parent_style.with_overrides(style);
                 self.render_rect(*x, *y, *width, *height, *rx, *ry, combined, &resolved);
             }
-            SvgNode::Circle { cx, cy, r, transform: local_xf, style } => {
+            SvgNode::Circle {
+                cx,
+                cy,
+                r,
+                transform: local_xf,
+                style,
+            } => {
                 let combined = transform.then(*local_xf);
                 let resolved = parent_style.with_overrides(style);
                 self.render_ellipse(*cx, *cy, *r, *r, combined, &resolved);
             }
-            SvgNode::Ellipse { cx, cy, rx, ry, transform: local_xf, style } => {
+            SvgNode::Ellipse {
+                cx,
+                cy,
+                rx,
+                ry,
+                transform: local_xf,
+                style,
+            } => {
                 let combined = transform.then(*local_xf);
                 let resolved = parent_style.with_overrides(style);
                 self.render_ellipse(*cx, *cy, *rx, *ry, combined, &resolved);
             }
-            SvgNode::Line { x1, y1, x2, y2, transform: local_xf, style } => {
+            SvgNode::Line {
+                x1,
+                y1,
+                x2,
+                y2,
+                transform: local_xf,
+                style,
+            } => {
                 let combined = transform.then(*local_xf);
                 let resolved = parent_style.with_overrides(style);
                 if let Some(color) = resolved.effective_stroke_color() {
@@ -1767,38 +2046,73 @@ impl SvgRenderer {
                     self.draw_line(tx1, ty1, tx2, ty2, resolved.stroke_width, color);
                 }
             }
-            SvgNode::Polyline { points, transform: local_xf, style } => {
+            SvgNode::Polyline {
+                points,
+                transform: local_xf,
+                style,
+            } => {
                 let combined = transform.then(*local_xf);
                 let resolved = parent_style.with_overrides(style);
-                let transformed: Vec<(f32, f32)> = points.iter().map(|(px, py)| combined.apply(*px, *py)).collect();
+                let transformed: Vec<(f32, f32)> = points
+                    .iter()
+                    .map(|(px, py)| combined.apply(*px, *py))
+                    .collect();
                 if let Some(color) = resolved.effective_stroke_color() {
                     for w in transformed.windows(2) {
-                        self.draw_line(w[0].0, w[0].1, w[1].0, w[1].1, resolved.stroke_width, color);
+                        self.draw_line(
+                            w[0].0,
+                            w[0].1,
+                            w[1].0,
+                            w[1].1,
+                            resolved.stroke_width,
+                            color,
+                        );
                     }
                 }
             }
-            SvgNode::Polygon { points, transform: local_xf, style } => {
+            SvgNode::Polygon {
+                points,
+                transform: local_xf,
+                style,
+            } => {
                 let combined = transform.then(*local_xf);
                 let resolved = parent_style.with_overrides(style);
-                let transformed: Vec<(f32, f32)> = points.iter().map(|(px, py)| combined.apply(*px, *py)).collect();
+                let transformed: Vec<(f32, f32)> = points
+                    .iter()
+                    .map(|(px, py)| combined.apply(*px, *py))
+                    .collect();
                 if let Some(fill_color) = resolved.effective_fill_color() {
                     self.fill_polygon(&transformed, fill_color);
                 }
                 if let Some(stroke_color) = resolved.effective_stroke_color() {
                     for w in transformed.windows(2) {
-                        self.draw_line(w[0].0, w[0].1, w[1].0, w[1].1, resolved.stroke_width, stroke_color);
+                        self.draw_line(
+                            w[0].0,
+                            w[0].1,
+                            w[1].0,
+                            w[1].1,
+                            resolved.stroke_width,
+                            stroke_color,
+                        );
                     }
                     if transformed.len() >= 2 {
                         let last = transformed.len() - 1;
                         self.draw_line(
-                            transformed[last].0, transformed[last].1,
-                            transformed[0].0, transformed[0].1,
-                            resolved.stroke_width, stroke_color,
+                            transformed[last].0,
+                            transformed[last].1,
+                            transformed[0].0,
+                            transformed[0].1,
+                            resolved.stroke_width,
+                            stroke_color,
                         );
                     }
                 }
             }
-            SvgNode::Path { commands, transform: local_xf, style } => {
+            SvgNode::Path {
+                commands,
+                transform: local_xf,
+                style,
+            } => {
                 let combined = transform.then(*local_xf);
                 let resolved = parent_style.with_overrides(style);
                 let polygons = path_to_polygons(commands, combined);
@@ -1810,7 +2124,14 @@ impl SvgRenderer {
                 if let Some(stroke_color) = resolved.effective_stroke_color() {
                     for poly in &polygons {
                         for w in poly.windows(2) {
-                            self.draw_line(w[0].0, w[0].1, w[1].0, w[1].1, resolved.stroke_width, stroke_color);
+                            self.draw_line(
+                                w[0].0,
+                                w[0].1,
+                                w[1].0,
+                                w[1].1,
+                                resolved.stroke_width,
+                                stroke_color,
+                            );
                         }
                     }
                 }
@@ -1820,8 +2141,12 @@ impl SvgRenderer {
 
     fn render_rect(
         &mut self,
-        x: f32, y: f32, w: f32, h: f32,
-        rx: f32, ry: f32,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        rx: f32,
+        ry: f32,
         transform: Transform,
         style: &ResolvedStyle,
     ) {
@@ -1840,7 +2165,14 @@ impl SvgRenderer {
             if let Some(stroke_color) = style.effective_stroke_color() {
                 for i in 0..4 {
                     let j = (i + 1) % 4;
-                    self.draw_line(poly[i].0, poly[i].1, poly[j].0, poly[j].1, style.stroke_width, stroke_color);
+                    self.draw_line(
+                        poly[i].0,
+                        poly[i].1,
+                        poly[j].0,
+                        poly[j].1,
+                        style.stroke_width,
+                        stroke_color,
+                    );
                 }
             }
         } else {
@@ -1888,11 +2220,25 @@ impl SvgRenderer {
             }
             if let Some(stroke_color) = style.effective_stroke_color() {
                 for w in points.windows(2) {
-                    self.draw_line(w[0].0, w[0].1, w[1].0, w[1].1, style.stroke_width, stroke_color);
+                    self.draw_line(
+                        w[0].0,
+                        w[0].1,
+                        w[1].0,
+                        w[1].1,
+                        style.stroke_width,
+                        stroke_color,
+                    );
                 }
                 if points.len() >= 2 {
                     let last = points.len() - 1;
-                    self.draw_line(points[last].0, points[last].1, points[0].0, points[0].1, style.stroke_width, stroke_color);
+                    self.draw_line(
+                        points[last].0,
+                        points[last].1,
+                        points[0].0,
+                        points[0].1,
+                        style.stroke_width,
+                        stroke_color,
+                    );
                 }
             }
         }
@@ -1900,7 +2246,10 @@ impl SvgRenderer {
 
     fn render_ellipse(
         &mut self,
-        cx: f32, cy: f32, rx: f32, ry: f32,
+        cx: f32,
+        cy: f32,
+        rx: f32,
+        ry: f32,
         transform: Transform,
         style: &ResolvedStyle,
     ) {
@@ -1921,7 +2270,14 @@ impl SvgRenderer {
         if let Some(stroke_color) = style.effective_stroke_color() {
             for i in 0..points.len() {
                 let j = (i + 1) % points.len();
-                self.draw_line(points[i].0, points[i].1, points[j].0, points[j].1, style.stroke_width, stroke_color);
+                self.draw_line(
+                    points[i].0,
+                    points[i].1,
+                    points[j].0,
+                    points[j].1,
+                    style.stroke_width,
+                    stroke_color,
+                );
             }
         }
     }
@@ -1976,7 +2332,9 @@ impl SvgRenderer {
                     }
                 }
 
-                intersections.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(core::cmp::Ordering::Equal));
+                intersections.sort_unstable_by(|a, b| {
+                    a.partial_cmp(b).unwrap_or(core::cmp::Ordering::Equal)
+                });
 
                 // Even-odd rule: fill between pairs of intersections
                 for pair in intersections.chunks(2) {
@@ -2084,14 +2442,27 @@ fn collect_render_commands(
                 collect_render_commands(child, transform, parent_style, cmds);
             }
         }
-        SvgNode::Group { transform: local_xf, style, children } => {
+        SvgNode::Group {
+            transform: local_xf,
+            style,
+            children,
+        } => {
             let combined = transform.then(*local_xf);
             let resolved = parent_style.with_overrides(style);
             for child in children {
                 collect_render_commands(child, combined, &resolved, cmds);
             }
         }
-        SvgNode::Rect { x, y, width, height, rx, ry, transform: local_xf, style } => {
+        SvgNode::Rect {
+            x,
+            y,
+            width,
+            height,
+            rx,
+            ry,
+            transform: local_xf,
+            style,
+        } => {
             let combined = transform.then(*local_xf);
             let resolved = parent_style.with_overrides(style);
             // For axis-aligned rects without rotation, emit native FillRect
@@ -2139,7 +2510,14 @@ fn collect_render_commands(
                 });
             }
         }
-        SvgNode::Line { x1, y1, x2, y2, transform: local_xf, style } => {
+        SvgNode::Line {
+            x1,
+            y1,
+            x2,
+            y2,
+            transform: local_xf,
+            style,
+        } => {
             let combined = transform.then(*local_xf);
             let resolved = parent_style.with_overrides(style);
             if let Some(stroke_color) = resolved.effective_stroke_color() {
@@ -2155,7 +2533,11 @@ fn collect_render_commands(
                 });
             }
         }
-        SvgNode::Polyline { points, transform: local_xf, style } => {
+        SvgNode::Polyline {
+            points,
+            transform: local_xf,
+            style,
+        } => {
             let combined = transform.then(*local_xf);
             let resolved = parent_style.with_overrides(style);
             if let Some(stroke_color) = resolved.effective_stroke_color() {
@@ -2176,8 +2558,21 @@ fn collect_render_commands(
         // For complex shapes (circles, ellipses, polygons, paths), we would
         // ideally rasterize to a temporary buffer and emit as an Image command.
         // For now, emit FillRects for polygons and approximate circles/ellipses.
-        SvgNode::Circle { cx, cy, r, transform: local_xf, style }
-        | SvgNode::Ellipse { cx, cy, rx: r, ry: _, transform: local_xf, style } => {
+        SvgNode::Circle {
+            cx,
+            cy,
+            r,
+            transform: local_xf,
+            style,
+        }
+        | SvgNode::Ellipse {
+            cx,
+            cy,
+            rx: r,
+            ry: _,
+            transform: local_xf,
+            style,
+        } => {
             let combined = transform.then(*local_xf);
             let resolved = parent_style.with_overrides(style);
             let ry_val = match node {
@@ -2217,7 +2612,11 @@ fn collect_render_commands(
                 });
             }
         }
-        SvgNode::Polygon { points, transform: local_xf, style } => {
+        SvgNode::Polygon {
+            points,
+            transform: local_xf,
+            style,
+        } => {
             let combined = transform.then(*local_xf);
             let resolved = parent_style.with_overrides(style);
             // Emit as line segments for stroke
@@ -2226,37 +2625,69 @@ fn collect_render_commands(
                     let (tx1, ty1) = combined.apply(w[0].0, w[0].1);
                     let (tx2, ty2) = combined.apply(w[1].0, w[1].1);
                     cmds.push(RenderCommand::Line {
-                        x1: tx1, y1: ty1, x2: tx2, y2: ty2,
-                        color: stroke_color, width: resolved.stroke_width,
+                        x1: tx1,
+                        y1: ty1,
+                        x2: tx2,
+                        y2: ty2,
+                        color: stroke_color,
+                        width: resolved.stroke_width,
                     });
                 }
                 if points.len() >= 2 {
-                    let (tx1, ty1) = combined.apply(points.last().map(|p| p.0).unwrap_or(0.0), points.last().map(|p| p.1).unwrap_or(0.0));
+                    let (tx1, ty1) = combined.apply(
+                        points.last().map(|p| p.0).unwrap_or(0.0),
+                        points.last().map(|p| p.1).unwrap_or(0.0),
+                    );
                     let (tx2, ty2) = combined.apply(points[0].0, points[0].1);
                     cmds.push(RenderCommand::Line {
-                        x1: tx1, y1: ty1, x2: tx2, y2: ty2,
-                        color: stroke_color, width: resolved.stroke_width,
+                        x1: tx1,
+                        y1: ty1,
+                        x2: tx2,
+                        y2: ty2,
+                        color: stroke_color,
+                        width: resolved.stroke_width,
                     });
                 }
             }
             // Fill approximation: bounding rect
             if let Some(fill_color) = resolved.effective_fill_color() {
-                let transformed: Vec<(f32, f32)> = points.iter().map(|(px, py)| combined.apply(*px, *py)).collect();
+                let transformed: Vec<(f32, f32)> = points
+                    .iter()
+                    .map(|(px, py)| combined.apply(*px, *py))
+                    .collect();
                 if !transformed.is_empty() {
-                    let min_x = transformed.iter().map(|p| p.0).fold(f32::INFINITY, f32::min);
-                    let max_x = transformed.iter().map(|p| p.0).fold(f32::NEG_INFINITY, f32::max);
-                    let min_y = transformed.iter().map(|p| p.1).fold(f32::INFINITY, f32::min);
-                    let max_y = transformed.iter().map(|p| p.1).fold(f32::NEG_INFINITY, f32::max);
+                    let min_x = transformed
+                        .iter()
+                        .map(|p| p.0)
+                        .fold(f32::INFINITY, f32::min);
+                    let max_x = transformed
+                        .iter()
+                        .map(|p| p.0)
+                        .fold(f32::NEG_INFINITY, f32::max);
+                    let min_y = transformed
+                        .iter()
+                        .map(|p| p.1)
+                        .fold(f32::INFINITY, f32::min);
+                    let max_y = transformed
+                        .iter()
+                        .map(|p| p.1)
+                        .fold(f32::NEG_INFINITY, f32::max);
                     cmds.push(RenderCommand::FillRect {
-                        x: min_x, y: min_y,
-                        width: max_x - min_x, height: max_y - min_y,
+                        x: min_x,
+                        y: min_y,
+                        width: max_x - min_x,
+                        height: max_y - min_y,
                         color: fill_color,
                         corner_radii: CornerRadii::ZERO,
                     });
                 }
             }
         }
-        SvgNode::Path { commands, transform: local_xf, style } => {
+        SvgNode::Path {
+            commands,
+            transform: local_xf,
+            style,
+        } => {
             let combined = transform.then(*local_xf);
             let resolved = parent_style.with_overrides(style);
             let polygons = path_to_polygons(commands, combined);
@@ -2265,8 +2696,10 @@ fn collect_render_commands(
                 for poly in &polygons {
                     for w in poly.windows(2) {
                         cmds.push(RenderCommand::Line {
-                            x1: w[0].0, y1: w[0].1,
-                            x2: w[1].0, y2: w[1].1,
+                            x1: w[0].0,
+                            y1: w[0].1,
+                            x2: w[1].0,
+                            y2: w[1].1,
                             color: stroke_color,
                             width: resolved.stroke_width,
                         });
@@ -2284,8 +2717,10 @@ fn collect_render_commands(
                     let min_y = poly.iter().map(|p| p.1).fold(f32::INFINITY, f32::min);
                     let max_y = poly.iter().map(|p| p.1).fold(f32::NEG_INFINITY, f32::max);
                     cmds.push(RenderCommand::FillRect {
-                        x: min_x, y: min_y,
-                        width: max_x - min_x, height: max_y - min_y,
+                        x: min_x,
+                        y: min_y,
+                        width: max_x - min_x,
+                        height: max_y - min_y,
                         color: fill_color,
                         corner_radii: CornerRadii::ZERO,
                     });
@@ -2305,7 +2740,8 @@ mod tests {
 
     #[test]
     fn test_parse_xml_basic() {
-        let svg = r#"<svg width="100" height="100"><rect x="10" y="20" width="30" height="40"/></svg>"#;
+        let svg =
+            r#"<svg width="100" height="100"><rect x="10" y="20" width="30" height="40"/></svg>"#;
         let elems = parse_xml(svg).unwrap();
         assert_eq!(elems.len(), 1);
         assert_eq!(elems[0].tag, "svg");
@@ -2370,7 +2806,14 @@ mod tests {
         let cmds = parse_path_data("M 0 0 C 10 20 30 40 50 60").unwrap();
         assert_eq!(
             cmds[1],
-            PathCommand::CubicBezier { x1: 10.0, y1: 20.0, x2: 30.0, y2: 40.0, x: 50.0, y: 60.0 }
+            PathCommand::CubicBezier {
+                x1: 10.0,
+                y1: 20.0,
+                x2: 30.0,
+                y2: 40.0,
+                x: 50.0,
+                y: 60.0
+            }
         );
     }
 
@@ -2379,7 +2822,12 @@ mod tests {
         let cmds = parse_path_data("M 0 0 Q 10 20 30 40").unwrap();
         assert_eq!(
             cmds[1],
-            PathCommand::QuadraticBezier { x1: 10.0, y1: 20.0, x: 30.0, y: 40.0 }
+            PathCommand::QuadraticBezier {
+                x1: 10.0,
+                y1: 20.0,
+                x: 30.0,
+                y: 40.0
+            }
         );
     }
 
@@ -2389,8 +2837,13 @@ mod tests {
         assert_eq!(
             cmds[1],
             PathCommand::Arc {
-                rx: 25.0, ry: 25.0, x_rotation: 0.0,
-                large_arc: false, sweep: true, x: 50.0, y: 50.0,
+                rx: 25.0,
+                ry: 25.0,
+                x_rotation: 0.0,
+                large_arc: false,
+                sweep: true,
+                x: 50.0,
+                y: 50.0,
             }
         );
     }
@@ -2414,7 +2867,15 @@ mod tests {
     fn test_path_smooth_cubic() {
         let cmds = parse_path_data("M 0 0 C 10 20 30 40 50 60 S 70 80 90 100").unwrap();
         assert_eq!(cmds.len(), 3);
-        assert_eq!(cmds[2], PathCommand::SmoothCubic { x2: 70.0, y2: 80.0, x: 90.0, y: 100.0 });
+        assert_eq!(
+            cmds[2],
+            PathCommand::SmoothCubic {
+                x2: 70.0,
+                y2: 80.0,
+                x: 90.0,
+                y: 100.0
+            }
+        );
     }
 
     #[test]
@@ -2440,9 +2901,18 @@ mod tests {
 
     #[test]
     fn test_color_named() {
-        assert_eq!(parse_color("red").unwrap(), SvgPaint::Color(Color::rgb(255, 0, 0)));
-        assert_eq!(parse_color("blue").unwrap(), SvgPaint::Color(Color::rgb(0, 0, 255)));
-        assert_eq!(parse_color("green").unwrap(), SvgPaint::Color(Color::rgb(0, 128, 0)));
+        assert_eq!(
+            parse_color("red").unwrap(),
+            SvgPaint::Color(Color::rgb(255, 0, 0))
+        );
+        assert_eq!(
+            parse_color("blue").unwrap(),
+            SvgPaint::Color(Color::rgb(0, 0, 255))
+        );
+        assert_eq!(
+            parse_color("green").unwrap(),
+            SvgPaint::Color(Color::rgb(0, 128, 0))
+        );
     }
 
     #[test]
@@ -2464,7 +2934,10 @@ mod tests {
 
     #[test]
     fn test_color_transparent() {
-        assert_eq!(parse_color("transparent").unwrap(), SvgPaint::Color(Color::TRANSPARENT));
+        assert_eq!(
+            parse_color("transparent").unwrap(),
+            SvgPaint::Color(Color::TRANSPARENT)
+        );
     }
 
     #[test]
@@ -2527,7 +3000,18 @@ mod tests {
     fn test_flatten_straight_line() {
         // A "cubic" that's actually a straight line: all control points collinear
         let mut output = Vec::new();
-        flatten_cubic(0.0, 0.0, 10.0, 10.0, 20.0, 20.0, 30.0, 30.0, 0.25, &mut output);
+        flatten_cubic(
+            0.0,
+            0.0,
+            10.0,
+            10.0,
+            20.0,
+            20.0,
+            30.0,
+            30.0,
+            0.25,
+            &mut output,
+        );
         // Should be very few points since it's flat
         assert!(!output.is_empty());
         assert!(output.len() <= 4); // Should be just 1 point (the end)
@@ -2537,7 +3021,18 @@ mod tests {
     fn test_flatten_curve_produces_points() {
         // A real curve should produce more points
         let mut output = Vec::new();
-        flatten_cubic(0.0, 0.0, 0.0, 100.0, 100.0, 100.0, 100.0, 0.0, 0.25, &mut output);
+        flatten_cubic(
+            0.0,
+            0.0,
+            0.0,
+            100.0,
+            100.0,
+            100.0,
+            100.0,
+            0.0,
+            0.25,
+            &mut output,
+        );
         // This is a pronounced S-curve that needs many segments
         assert!(output.len() > 4);
     }
@@ -2553,25 +3048,21 @@ mod tests {
 
     #[test]
     fn test_viewbox_parsing() {
-        let doc = SvgDocument::parse(
-            r#"<svg viewBox="0 0 100 100" width="200" height="200"></svg>"#,
-        ).unwrap();
+        let doc =
+            SvgDocument::parse(r#"<svg viewBox="0 0 100 100" width="200" height="200"></svg>"#)
+                .unwrap();
         assert_eq!(doc.viewbox(), (0.0, 0.0, 100.0, 100.0));
     }
 
     #[test]
     fn test_viewbox_default() {
-        let doc = SvgDocument::parse(
-            r#"<svg width="300" height="150"></svg>"#,
-        ).unwrap();
+        let doc = SvgDocument::parse(r#"<svg width="300" height="150"></svg>"#).unwrap();
         assert_eq!(doc.viewbox(), (0.0, 0.0, 300.0, 150.0));
     }
 
     #[test]
     fn test_viewbox_offset() {
-        let doc = SvgDocument::parse(
-            r#"<svg viewBox="10 20 80 60"></svg>"#,
-        ).unwrap();
+        let doc = SvgDocument::parse(r#"<svg viewBox="10 20 80 60"></svg>"#).unwrap();
         assert_eq!(doc.viewbox(), (10.0, 20.0, 80.0, 60.0));
     }
 
@@ -2586,7 +3077,14 @@ mod tests {
             SvgNode::Svg { children, .. } => {
                 assert_eq!(children.len(), 1);
                 match &children[0] {
-                    SvgNode::Rect { x, y, width, height, style, .. } => {
+                    SvgNode::Rect {
+                        x,
+                        y,
+                        width,
+                        height,
+                        style,
+                        ..
+                    } => {
                         assert!((x - 10.0).abs() < 1e-5);
                         assert!((y - 10.0).abs() < 1e-5);
                         assert!((width - 80.0).abs() < 1e-5);
@@ -2608,19 +3106,22 @@ mod tests {
                     <circle cx="50" cy="50" r="25"/>
                 </g>
             </svg>"#,
-        ).unwrap();
+        )
+        .unwrap();
         match &doc.root {
-            SvgNode::Svg { children, .. } => {
-                match &children[0] {
-                    SvgNode::Group { transform, style, children } => {
-                        assert!((transform.tx - 5.0).abs() < 1e-5);
-                        assert!((transform.ty - 5.0).abs() < 1e-5);
-                        assert_eq!(style.fill, Some(SvgPaint::Color(Color::rgb(0, 0, 255))));
-                        assert_eq!(children.len(), 1);
-                    }
-                    _ => panic!("expected Group node"),
+            SvgNode::Svg { children, .. } => match &children[0] {
+                SvgNode::Group {
+                    transform,
+                    style,
+                    children,
+                } => {
+                    assert!((transform.tx - 5.0).abs() < 1e-5);
+                    assert!((transform.ty - 5.0).abs() < 1e-5);
+                    assert_eq!(style.fill, Some(SvgPaint::Color(Color::rgb(0, 0, 255))));
+                    assert_eq!(children.len(), 1);
                 }
-            }
+                _ => panic!("expected Group node"),
+            },
             _ => panic!("expected Svg root"),
         }
     }
@@ -2637,9 +3138,9 @@ mod tests {
         assert_eq!(buf.len(), 400);
         // Center pixel should be red
         let center = (5 * 10 + 5) * 4;
-        assert_eq!(buf[center], 255);     // R
-        assert_eq!(buf[center + 1], 0);   // G
-        assert_eq!(buf[center + 2], 0);   // B
+        assert_eq!(buf[center], 255); // R
+        assert_eq!(buf[center + 1], 0); // G
+        assert_eq!(buf[center + 2], 0); // B
         assert_eq!(buf[center + 3], 255); // A
     }
 
@@ -2647,14 +3148,15 @@ mod tests {
     fn test_render_circle_center_filled() {
         let doc = SvgDocument::parse(
             r#"<svg viewBox="0 0 100 100"><circle cx="50" cy="50" r="40" fill="blue"/></svg>"#,
-        ).unwrap();
+        )
+        .unwrap();
         let buf = doc.render(100, 100);
         // Center should be filled with blue
         let center = (50 * 100 + 50) * 4;
-        assert_eq!(buf[center], 0);       // R
-        assert_eq!(buf[center + 1], 0);   // G
+        assert_eq!(buf[center], 0); // R
+        assert_eq!(buf[center + 1], 0); // G
         assert_eq!(buf[center + 2], 255); // B
-        assert!(buf[center + 3] > 200);   // A (should be full or near-full)
+        assert!(buf[center + 3] > 200); // A (should be full or near-full)
     }
 
     #[test]

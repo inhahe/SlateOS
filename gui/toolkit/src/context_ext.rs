@@ -287,7 +287,11 @@ impl ExtensionRegistry {
         self.extensions
             .iter()
             .filter(|ext| self.has_capability(ext))
-            .filter(|ext| ext.file_patterns.iter().any(|pat| match_file_pattern(pat, path)))
+            .filter(|ext| {
+                ext.file_patterns
+                    .iter()
+                    .any(|pat| match_file_pattern(pat, path))
+            })
             .collect()
     }
 
@@ -297,9 +301,9 @@ impl ExtensionRegistry {
             .iter()
             .filter(|ext| self.has_capability(ext))
             .filter(|ext| {
-                ext.file_patterns.iter().any(|pat| {
-                    match_directory_pattern(pat, path)
-                })
+                ext.file_patterns
+                    .iter()
+                    .any(|pat| match_directory_pattern(pat, path))
             })
             .collect()
     }
@@ -316,7 +320,9 @@ impl ExtensionRegistry {
             .filter(|ext| self.has_capability(ext))
             .filter(|ext| {
                 paths.iter().all(|path| {
-                    ext.file_patterns.iter().any(|pat| match_file_pattern(pat, path))
+                    ext.file_patterns
+                        .iter()
+                        .any(|pat| match_file_pattern(pat, path))
                 })
             })
             .collect()
@@ -516,7 +522,9 @@ pub fn build_context_menu(
     // Sort by priority (lower = higher in menu), then by app name for stability.
     let mut sorted: Vec<&ContextMenuExtension> = matching;
     sorted.sort_by(|a, b| {
-        a.priority.cmp(&b.priority).then_with(|| a.app_name.cmp(&b.app_name))
+        a.priority
+            .cmp(&b.priority)
+            .then_with(|| a.app_name.cmp(&b.app_name))
     });
 
     let mut result = base_items;
@@ -610,7 +618,9 @@ pub fn build_context_menu_for_selection(
 
     let mut sorted: Vec<&ContextMenuExtension> = matching;
     sorted.sort_by(|a, b| {
-        a.priority.cmp(&b.priority).then_with(|| a.app_name.cmp(&b.app_name))
+        a.priority
+            .cmp(&b.priority)
+            .then_with(|| a.app_name.cmp(&b.app_name))
     });
 
     let mut result = base_items;
@@ -648,10 +658,7 @@ pub fn loading_placeholder(id: u64) -> MenuItem {
 /// Check if extension loading has exceeded the timeout.
 ///
 /// Returns timeout events for extensions that took too long.
-pub fn check_timeouts(
-    entries: &[LoadingEntry],
-    policy: &TimeoutPolicy,
-) -> Vec<ExtensionEvent> {
+pub fn check_timeouts(entries: &[LoadingEntry], policy: &TimeoutPolicy) -> Vec<ExtensionEvent> {
     entries
         .iter()
         .filter(|e| !e.completed && e.elapsed_ms > policy.timeout_ms)
@@ -669,11 +676,7 @@ mod tests {
 
     // ─── Helpers ────────────────────────────────────────────────────────────
 
-    fn make_extension(
-        label: &str,
-        patterns: &[&str],
-        priority: i32,
-    ) -> ExtensionManifest {
+    fn make_extension(label: &str, patterns: &[&str], priority: i32) -> ExtensionManifest {
         ExtensionManifest {
             app_name: label.to_string(),
             label: label.to_string(),
@@ -771,7 +774,9 @@ mod tests {
 
     impl DenyCapability {
         fn new(denied: &str) -> Self {
-            Self { denied: denied.to_string() }
+            Self {
+                denied: denied.to_string(),
+            }
         }
     }
 
@@ -1024,7 +1029,9 @@ mod tests {
 
         let mut results = registry.get_for_file("test.txt");
         results.sort_by(|a, b| {
-            a.priority.cmp(&b.priority).then_with(|| a.app_name.cmp(&b.app_name))
+            a.priority
+                .cmp(&b.priority)
+                .then_with(|| a.app_name.cmp(&b.app_name))
         });
 
         assert_eq!(results[0].label, "Alpha");
@@ -1111,13 +1118,11 @@ mod tests {
     #[test]
     fn timeout_not_exceeded() {
         let policy = TimeoutPolicy::new(200);
-        let entries = vec![
-            LoadingEntry {
-                extension_id: ExtensionId(1),
-                completed: false,
-                elapsed_ms: 100,
-            },
-        ];
+        let entries = vec![LoadingEntry {
+            extension_id: ExtensionId(1),
+            completed: false,
+            elapsed_ms: 100,
+        }];
 
         let events = check_timeouts(&entries, &policy);
         assert!(events.is_empty());
@@ -1126,32 +1131,30 @@ mod tests {
     #[test]
     fn timeout_exceeded_generates_event() {
         let policy = TimeoutPolicy::new(200);
-        let entries = vec![
-            LoadingEntry {
-                extension_id: ExtensionId(1),
-                completed: false,
-                elapsed_ms: 250,
-            },
-        ];
+        let entries = vec![LoadingEntry {
+            extension_id: ExtensionId(1),
+            completed: false,
+            elapsed_ms: 250,
+        }];
 
         let events = check_timeouts(&entries, &policy);
         assert_eq!(events.len(), 1);
         assert_eq!(
             events[0],
-            ExtensionEvent::LoadTimeout { extension_id: ExtensionId(1) }
+            ExtensionEvent::LoadTimeout {
+                extension_id: ExtensionId(1)
+            }
         );
     }
 
     #[test]
     fn timeout_completed_not_reported() {
         let policy = TimeoutPolicy::new(200);
-        let entries = vec![
-            LoadingEntry {
-                extension_id: ExtensionId(1),
-                completed: true,
-                elapsed_ms: 500, // Over limit but already completed.
-            },
-        ];
+        let entries = vec![LoadingEntry {
+            extension_id: ExtensionId(1),
+            completed: true,
+            elapsed_ms: 500, // Over limit but already completed.
+        }];
 
         let events = check_timeouts(&entries, &policy);
         assert!(events.is_empty());
@@ -1161,10 +1164,26 @@ mod tests {
     fn timeout_multiple_entries() {
         let policy = TimeoutPolicy::new(200);
         let entries = vec![
-            LoadingEntry { extension_id: ExtensionId(1), completed: false, elapsed_ms: 50 },
-            LoadingEntry { extension_id: ExtensionId(2), completed: false, elapsed_ms: 300 },
-            LoadingEntry { extension_id: ExtensionId(3), completed: true, elapsed_ms: 400 },
-            LoadingEntry { extension_id: ExtensionId(4), completed: false, elapsed_ms: 201 },
+            LoadingEntry {
+                extension_id: ExtensionId(1),
+                completed: false,
+                elapsed_ms: 50,
+            },
+            LoadingEntry {
+                extension_id: ExtensionId(2),
+                completed: false,
+                elapsed_ms: 300,
+            },
+            LoadingEntry {
+                extension_id: ExtensionId(3),
+                completed: true,
+                elapsed_ms: 400,
+            },
+            LoadingEntry {
+                extension_id: ExtensionId(4),
+                completed: false,
+                elapsed_ms: 201,
+            },
         ];
 
         let events = check_timeouts(&entries, &policy);
@@ -1236,7 +1255,9 @@ mod tests {
         // Should have an "Open with..." submenu at the end.
         let last = result.last().expect("menu should not be empty");
         match last {
-            MenuItem::Submenu { label, children, .. } => {
+            MenuItem::Submenu {
+                label, children, ..
+            } => {
                 assert_eq!(label, "Open with...");
                 assert_eq!(children.len(), 2);
             }
@@ -1374,7 +1395,9 @@ mod tests {
     fn loading_placeholder_is_disabled() {
         let item = loading_placeholder(999);
         match item {
-            MenuItem::Action { id, label, enabled, .. } => {
+            MenuItem::Action {
+                id, label, enabled, ..
+            } => {
                 assert_eq!(id, 999);
                 assert_eq!(label, "Loading...");
                 assert!(!enabled);
@@ -1391,11 +1414,8 @@ mod tests {
         registry.register(make_extension("AllFiles", &["*"], 0));
         registry.register(make_extension("RustOnly", &["*.rs"], 5));
 
-        let result = build_context_menu_for_selection(
-            base_items(),
-            &["main.rs", "lib.rs"],
-            &registry,
-        );
+        let result =
+            build_context_menu_for_selection(base_items(), &["main.rs", "lib.rs"], &registry);
 
         // base_items + separator + AllFiles + RustOnly (both match all .rs files)
         let base_len = base_items().len();
@@ -1408,11 +1428,8 @@ mod tests {
         registry.register(make_extension("AllFiles", &["*"], 0));
         registry.register(make_extension("RustOnly", &["*.rs"], 5));
 
-        let result = build_context_menu_for_selection(
-            Vec::new(),
-            &["main.rs", "readme.txt"],
-            &registry,
-        );
+        let result =
+            build_context_menu_for_selection(Vec::new(), &["main.rs", "readme.txt"], &registry);
 
         // Only AllFiles matches both.
         assert_eq!(result.len(), 1);
@@ -1433,7 +1450,11 @@ mod tests {
         };
 
         match event {
-            ExtensionEvent::Activated { extension_id, file_paths, action } => {
+            ExtensionEvent::Activated {
+                extension_id,
+                file_paths,
+                action,
+            } => {
                 assert_eq!(extension_id, ExtensionId(42));
                 assert_eq!(file_paths.len(), 1);
                 assert_eq!(action, Some("compile".to_string()));
@@ -1450,7 +1471,9 @@ mod tests {
 
         assert_eq!(
             event,
-            ExtensionEvent::LoadTimeout { extension_id: ExtensionId(7) }
+            ExtensionEvent::LoadTimeout {
+                extension_id: ExtensionId(7)
+            }
         );
     }
 }

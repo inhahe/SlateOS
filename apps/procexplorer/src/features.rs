@@ -183,8 +183,7 @@ impl WindowPicker {
             cmds.push(RenderCommand::Text {
                 x: x + FEATURE_TEXT_PAD,
                 y: y + 26.0,
-                text: "Click a window to identify its process. Press Esc to cancel."
-                    .to_string(),
+                text: "Click a window to identify its process. Press Esc to cancel.".to_string(),
                 color: MOCHA_SUBTEXT0,
                 font_size: FEATURE_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
@@ -601,11 +600,7 @@ impl BlockingAnalyzer {
         } else {
             for (i, link) in info.chain.iter().enumerate() {
                 let indent = (i as f32) * 20.0;
-                let bg = if i % 2 == 0 {
-                    MOCHA_BASE
-                } else {
-                    MOCHA_MANTLE
-                };
+                let bg = if i % 2 == 0 { MOCHA_BASE } else { MOCHA_MANTLE };
                 cmds.push(RenderCommand::FillRect {
                     x,
                     y: cy,
@@ -1317,18 +1312,16 @@ impl EnvViewer {
         let asc = self.sort_ascending;
         match self.sort_column {
             EnvSortColumn::Name => {
-                self.entries
-                    .sort_by(|a, b| {
-                        let cmp = a.name.to_lowercase().cmp(&b.name.to_lowercase());
-                        if asc { cmp } else { cmp.reverse() }
-                    });
+                self.entries.sort_by(|a, b| {
+                    let cmp = a.name.to_lowercase().cmp(&b.name.to_lowercase());
+                    if asc { cmp } else { cmp.reverse() }
+                });
             }
             EnvSortColumn::Value => {
-                self.entries
-                    .sort_by(|a, b| {
-                        let cmp = a.value.to_lowercase().cmp(&b.value.to_lowercase());
-                        if asc { cmp } else { cmp.reverse() }
-                    });
+                self.entries.sort_by(|a, b| {
+                    let cmp = a.value.to_lowercase().cmp(&b.value.to_lowercase());
+                    if asc { cmp } else { cmp.reverse() }
+                });
             }
         }
     }
@@ -1365,7 +1358,10 @@ impl EnvViewer {
         Self::new(
             pid,
             vec![
-                ("PATH".to_string(), "/usr/bin:/usr/local/bin:/bin".to_string()),
+                (
+                    "PATH".to_string(),
+                    "/usr/bin:/usr/local/bin:/bin".to_string(),
+                ),
                 ("HOME".to_string(), "/home/user".to_string()),
                 ("USER".to_string(), "user".to_string()),
                 ("SHELL".to_string(), "/usr/bin/oursh".to_string()),
@@ -1373,16 +1369,34 @@ impl EnvViewer {
                 ("TERM".to_string(), "slateos-256color".to_string()),
                 ("DISPLAY".to_string(), ":0".to_string()),
                 ("XDG_RUNTIME_DIR".to_string(), "/run/user/1000".to_string()),
-                ("XDG_DATA_HOME".to_string(), "/home/user/.local/share".to_string()),
-                ("XDG_CONFIG_HOME".to_string(), "/home/user/.config".to_string()),
-                ("XDG_CACHE_HOME".to_string(), "/home/user/.cache".to_string()),
+                (
+                    "XDG_DATA_HOME".to_string(),
+                    "/home/user/.local/share".to_string(),
+                ),
+                (
+                    "XDG_CONFIG_HOME".to_string(),
+                    "/home/user/.config".to_string(),
+                ),
+                (
+                    "XDG_CACHE_HOME".to_string(),
+                    "/home/user/.cache".to_string(),
+                ),
                 ("EDITOR".to_string(), "oured".to_string()),
                 ("PAGER".to_string(), "less".to_string()),
                 ("RUST_LOG".to_string(), "info".to_string()),
                 ("GPU_DRIVER".to_string(), "virtio-gpu".to_string()),
-                ("DBUS_SESSION_BUS_ADDRESS".to_string(), "unix:path=/run/user/1000/bus".to_string()),
-                ("SSH_AUTH_SOCK".to_string(), "/run/user/1000/ssh-agent.sock".to_string()),
-                ("LD_LIBRARY_PATH".to_string(), "/usr/lib:/usr/local/lib".to_string()),
+                (
+                    "DBUS_SESSION_BUS_ADDRESS".to_string(),
+                    "unix:path=/run/user/1000/bus".to_string(),
+                ),
+                (
+                    "SSH_AUTH_SOCK".to_string(),
+                    "/run/user/1000/ssh-agent.sock".to_string(),
+                ),
+                (
+                    "LD_LIBRARY_PATH".to_string(),
+                    "/usr/lib:/usr/local/lib".to_string(),
+                ),
                 ("PKG_STORE".to_string(), "/nix/store".to_string()),
                 ("COLORTERM".to_string(), "truecolor".to_string()),
             ],
@@ -1684,7 +1698,11 @@ impl MemoryMap {
                 start_addr: 0x0040_0000,
                 end_addr: 0x0048_0000,
                 region_type: RegionType::Code,
-                protection: Protection { read: true, write: false, execute: true },
+                protection: Protection {
+                    read: true,
+                    write: false,
+                    execute: true,
+                },
                 backing: "/usr/bin/editor".to_string(),
                 committed: 512 * 1024,
                 reserved: 512 * 1024,
@@ -1693,7 +1711,11 @@ impl MemoryMap {
                 start_addr: 0x0060_0000,
                 end_addr: 0x0062_0000,
                 region_type: RegionType::Data,
-                protection: Protection { read: true, write: true, execute: false },
+                protection: Protection {
+                    read: true,
+                    write: true,
+                    execute: false,
+                },
                 backing: "/usr/bin/editor".to_string(),
                 committed: 128 * 1024,
                 reserved: 128 * 1024,
@@ -1702,7 +1724,11 @@ impl MemoryMap {
                 start_addr: 0x00A0_0000,
                 end_addr: 0x01A0_0000,
                 region_type: RegionType::Heap,
-                protection: Protection { read: true, write: true, execute: false },
+                protection: Protection {
+                    read: true,
+                    write: true,
+                    execute: false,
+                },
                 backing: "[heap]".to_string(),
                 committed: 8 * 1024 * 1024,
                 reserved: 16 * 1024 * 1024,
@@ -1711,7 +1737,11 @@ impl MemoryMap {
                 start_addr: 0x7F00_0000_0000,
                 end_addr: 0x7F00_0010_0000,
                 region_type: RegionType::MappedFile,
-                protection: Protection { read: true, write: false, execute: false },
+                protection: Protection {
+                    read: true,
+                    write: false,
+                    execute: false,
+                },
                 backing: "/usr/lib/libguitk.so".to_string(),
                 committed: 1024 * 1024,
                 reserved: 1024 * 1024,
@@ -1720,7 +1750,11 @@ impl MemoryMap {
                 start_addr: 0x7F00_0100_0000,
                 end_addr: 0x7F00_0108_0000,
                 region_type: RegionType::Code,
-                protection: Protection { read: true, write: false, execute: true },
+                protection: Protection {
+                    read: true,
+                    write: false,
+                    execute: true,
+                },
                 backing: "/usr/lib/libguitk.so".to_string(),
                 committed: 512 * 1024,
                 reserved: 512 * 1024,
@@ -1729,7 +1763,11 @@ impl MemoryMap {
                 start_addr: 0x7F00_1000_0000,
                 end_addr: 0x7F00_1004_0000,
                 region_type: RegionType::Shared,
-                protection: Protection { read: true, write: true, execute: false },
+                protection: Protection {
+                    read: true,
+                    write: true,
+                    execute: false,
+                },
                 backing: "shm:compositor-buffer".to_string(),
                 committed: 256 * 1024,
                 reserved: 256 * 1024,
@@ -1738,7 +1776,11 @@ impl MemoryMap {
                 start_addr: 0x7FFE_0000_0000,
                 end_addr: 0x7FFE_0020_0000,
                 region_type: RegionType::Stack,
-                protection: Protection { read: true, write: true, execute: false },
+                protection: Protection {
+                    read: true,
+                    write: true,
+                    execute: false,
+                },
                 backing: "[stack]".to_string(),
                 committed: 64 * 1024,
                 reserved: 2 * 1024 * 1024,
@@ -2364,7 +2406,11 @@ mod tests {
             start_addr: 0x1000,
             end_addr: 0x2000,
             region_type: RegionType::Code,
-            protection: Protection { read: true, write: false, execute: true },
+            protection: Protection {
+                read: true,
+                write: false,
+                execute: true,
+            },
             backing: "test".to_string(),
             committed: 4096,
             reserved: 4096,
@@ -2374,13 +2420,25 @@ mod tests {
 
     #[test]
     fn protection_to_rwx() {
-        let p = Protection { read: true, write: false, execute: true };
+        let p = Protection {
+            read: true,
+            write: false,
+            execute: true,
+        };
         assert_eq!(p.to_rwx(), "r-x");
 
-        let p = Protection { read: true, write: true, execute: false };
+        let p = Protection {
+            read: true,
+            write: true,
+            execute: false,
+        };
         assert_eq!(p.to_rwx(), "rw-");
 
-        let p = Protection { read: false, write: false, execute: false };
+        let p = Protection {
+            read: false,
+            write: false,
+            execute: false,
+        };
         assert_eq!(p.to_rwx(), "---");
     }
 

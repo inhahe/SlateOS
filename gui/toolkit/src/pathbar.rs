@@ -318,14 +318,15 @@ impl PathBar {
     fn handle_key_breadcrumb(&mut self, event: &KeyEvent) -> EventResult {
         // Any printable character enters edit mode.
         if let Some(ch) = event.text
-            && !ch.is_control() {
-                self.enter_edit_mode();
-                // Insert the typed character.
-                self.edit_text.clear();
-                self.edit_text.push(ch);
-                self.cursor = self.edit_text.len();
-                return EventResult::Consumed;
-            }
+            && !ch.is_control()
+        {
+            self.enter_edit_mode();
+            // Insert the typed character.
+            self.edit_text.clear();
+            self.edit_text.push(ch);
+            self.cursor = self.edit_text.len();
+            return EventResult::Consumed;
+        }
         EventResult::Ignored
     }
 
@@ -396,14 +397,15 @@ impl PathBar {
             _ => {
                 // Insert character.
                 if let Some(ch) = event.text
-                    && !ch.is_control() {
-                        self.delete_selection();
-                        self.edit_text.insert(self.cursor, ch);
-                        self.cursor += ch.len_utf8();
-                        self.selection_anchor = None;
-                        self.on_text_changed();
-                        return EventResult::Consumed;
-                    }
+                    && !ch.is_control()
+                {
+                    self.delete_selection();
+                    self.edit_text.insert(self.cursor, ch);
+                    self.cursor += ch.len_utf8();
+                    self.selection_anchor = None;
+                    self.on_text_changed();
+                    return EventResult::Consumed;
+                }
                 EventResult::Ignored
             }
         }
@@ -826,19 +828,14 @@ impl PathBar {
             // selected glyphs; a proportional face makes a char count useless
             // here, since the same count spans a different width every time.
             let sel_x = text_x + width_before(&self.edit_text, sel_start);
-            let sel_w = width_before(&self.edit_text, sel_end)
-                - width_before(&self.edit_text, sel_start);
+            let sel_w =
+                width_before(&self.edit_text, sel_end) - width_before(&self.edit_text, sel_start);
             cmds.push(RenderCommand::FillRect {
                 x: sel_x,
                 y: text_y - 2.0,
                 width: sel_w,
                 height: FONT_SIZE + 4.0,
-                color: Color::rgba(
-                    COLOR_LAVENDER.r,
-                    COLOR_LAVENDER.g,
-                    COLOR_LAVENDER.b,
-                    60,
-                ),
+                color: Color::rgba(COLOR_LAVENDER.r, COLOR_LAVENDER.g, COLOR_LAVENDER.b, 60),
                 corner_radii: CornerRadii::all(2.0),
             });
         }
@@ -873,8 +870,7 @@ impl PathBar {
 
     fn render_dropdown(&self, cmds: &mut Vec<RenderCommand>, width: f32, bar_height: f32) {
         let visible_count = self.completions.len().min(DROPDOWN_MAX_VISIBLE);
-        let dropdown_h =
-            visible_count as f32 * DROPDOWN_ITEM_HEIGHT + DROPDOWN_PADDING * 2.0;
+        let dropdown_h = visible_count as f32 * DROPDOWN_ITEM_HEIGHT + DROPDOWN_PADDING * 2.0;
         let dropdown_y = bar_height + 2.0;
         let dropdown_w = width;
 
@@ -1517,8 +1513,7 @@ mod tests {
 
     #[test]
     fn test_overflow_rendering() {
-        let mut bar =
-            PathBar::new("/very/long/path/with/many/segments/that/will/overflow");
+        let mut bar = PathBar::new("/very/long/path/with/many/segments/that/will/overflow");
         // Render at a narrow width to trigger overflow.
         let cmds = bar.render(150, 32);
 

@@ -1758,24 +1758,53 @@ mod tests {
 
     #[test]
     fn detect_os_specific_extensions() {
-        assert_eq!(detect_from_extension(".nx").category, FileCategory::Executable);
-        assert_eq!(detect_from_extension(".dso").category, FileCategory::Library);
-        assert_eq!(detect_from_extension(".slib").category, FileCategory::Library);
-        assert_eq!(detect_from_extension(".pkg").category, FileCategory::Package);
+        assert_eq!(
+            detect_from_extension(".nx").category,
+            FileCategory::Executable
+        );
+        assert_eq!(
+            detect_from_extension(".dso").category,
+            FileCategory::Library
+        );
+        assert_eq!(
+            detect_from_extension(".slib").category,
+            FileCategory::Library
+        );
+        assert_eq!(
+            detect_from_extension(".pkg").category,
+            FileCategory::Package
+        );
     }
 
     #[test]
     fn detect_document_extensions() {
-        assert_eq!(detect_from_extension(".txt").category, FileCategory::Document);
-        assert_eq!(detect_from_extension(".md").category, FileCategory::Document);
-        assert_eq!(detect_from_extension(".pdf").category, FileCategory::Document);
-        assert_eq!(detect_from_extension(".html").category, FileCategory::Document);
-        assert_eq!(detect_from_extension(".docx").category, FileCategory::Document);
+        assert_eq!(
+            detect_from_extension(".txt").category,
+            FileCategory::Document
+        );
+        assert_eq!(
+            detect_from_extension(".md").category,
+            FileCategory::Document
+        );
+        assert_eq!(
+            detect_from_extension(".pdf").category,
+            FileCategory::Document
+        );
+        assert_eq!(
+            detect_from_extension(".html").category,
+            FileCategory::Document
+        );
+        assert_eq!(
+            detect_from_extension(".docx").category,
+            FileCategory::Document
+        );
     }
 
     #[test]
     fn detect_image_extensions() {
-        for ext in &[".png", ".jpg", ".jpeg", ".gif", ".bmp", ".svg", ".ico", ".webp", ".tiff"] {
+        for ext in &[
+            ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".svg", ".ico", ".webp", ".tiff",
+        ] {
             assert_eq!(
                 detect_from_extension(ext).category,
                 FileCategory::Image,
@@ -1844,8 +1873,14 @@ mod tests {
 
     #[test]
     fn detect_disk_image_extensions() {
-        assert_eq!(detect_from_extension(".iso").category, FileCategory::DiskImage);
-        assert_eq!(detect_from_extension(".img").category, FileCategory::DiskImage);
+        assert_eq!(
+            detect_from_extension(".iso").category,
+            FileCategory::DiskImage
+        );
+        assert_eq!(
+            detect_from_extension(".img").category,
+            FileCategory::DiskImage
+        );
     }
 
     // -- Magic byte detection -----------------------------------------------
@@ -1997,7 +2032,10 @@ mod tests {
         assert_eq!(mime_for_extension(".html"), "text/html");
         assert_eq!(mime_for_extension(".json"), "application/json");
         assert_eq!(mime_for_extension(".mp3"), "audio/mpeg");
-        assert_eq!(mime_for_extension(".nx"), "application/x-slateos-executable");
+        assert_eq!(
+            mime_for_extension(".nx"),
+            "application/x-slateos-executable"
+        );
     }
 
     #[test]
@@ -2045,8 +2083,14 @@ mod tests {
     fn case_insensitive() {
         assert_eq!(detect_from_extension(".RS").category, FileCategory::Code);
         assert_eq!(detect_from_extension(".Png").category, FileCategory::Image);
-        assert_eq!(detect_from_extension(".NX").category, FileCategory::Executable);
-        assert_eq!(detect_from_extension(".TAR.GZ").category, FileCategory::Archive);
+        assert_eq!(
+            detect_from_extension(".NX").category,
+            FileCategory::Executable
+        );
+        assert_eq!(
+            detect_from_extension(".TAR.GZ").category,
+            FileCategory::Archive
+        );
         assert_eq!(detect_from_extension("JSON").category, FileCategory::Data);
     }
 
@@ -2119,10 +2163,22 @@ mod tests {
 
     #[test]
     fn compound_extensions() {
-        assert_eq!(detect_from_extension(".tar.gz").category, FileCategory::Archive);
-        assert_eq!(detect_from_extension(".tar.bz2").category, FileCategory::Archive);
-        assert_eq!(detect_from_extension(".tar.xz").category, FileCategory::Archive);
-        assert_eq!(detect_from_extension(".tgz").category, FileCategory::Archive);
+        assert_eq!(
+            detect_from_extension(".tar.gz").category,
+            FileCategory::Archive
+        );
+        assert_eq!(
+            detect_from_extension(".tar.bz2").category,
+            FileCategory::Archive
+        );
+        assert_eq!(
+            detect_from_extension(".tar.xz").category,
+            FileCategory::Archive
+        );
+        assert_eq!(
+            detect_from_extension(".tgz").category,
+            FileCategory::Archive
+        );
     }
 
     // -- DIR_ICON_GLYPH constant -------------------------------------------

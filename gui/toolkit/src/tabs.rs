@@ -289,11 +289,7 @@ impl TabView {
         let bar_height = TAB_BAR_HEIGHT;
         let (bar_y, content_y, content_height) = match self.position {
             TabPosition::Top => (y, y + bar_height, total_height - bar_height),
-            TabPosition::Bottom => (
-                y + total_height - bar_height,
-                y,
-                total_height - bar_height,
-            ),
+            TabPosition::Bottom => (y + total_height - bar_height, y, total_height - bar_height),
         };
 
         let mut commands = Vec::new();
@@ -387,9 +383,18 @@ impl TabView {
             }
 
             // Tab label
-            let text_color = if is_active { ACTIVE_TEXT } else { INACTIVE_TEXT };
-            let max_label_width = tw - TAB_PADDING_H * 2.0
-                - if tab.closeable { CLOSE_BUTTON_SIZE + 4.0 } else { 0.0 }
+            let text_color = if is_active {
+                ACTIVE_TEXT
+            } else {
+                INACTIVE_TEXT
+            };
+            let max_label_width = tw
+                - TAB_PADDING_H * 2.0
+                - if tab.closeable {
+                    CLOSE_BUTTON_SIZE + 4.0
+                } else {
+                    0.0
+                }
                 - if tab.dirty { 10.0 } else { 0.0 };
 
             commands.push(RenderCommand::Text {
@@ -482,9 +487,10 @@ impl TabView {
             return None;
         }
 
-        let current_idx = self.active_id.and_then(|aid| {
-            self.tabs.iter().position(|t| t.id == aid)
-        }).unwrap_or(0);
+        let current_idx = self
+            .active_id
+            .and_then(|aid| self.tabs.iter().position(|t| t.id == aid))
+            .unwrap_or(0);
 
         let count = self.tabs.len() as i32;
         let new_idx = ((current_idx as i32 + direction).rem_euclid(count)) as usize;
@@ -506,7 +512,11 @@ impl TabView {
                 // never too narrow for its own text.
                 let estimated = TAB_PADDING_H * 2.0
                     + crate::text::width(&tab.label, LABEL_FONT_SIZE)
-                    + if tab.closeable { CLOSE_BUTTON_SIZE + 4.0 } else { 0.0 }
+                    + if tab.closeable {
+                        CLOSE_BUTTON_SIZE + 4.0
+                    } else {
+                        0.0
+                    }
                     + if tab.dirty { 10.0 } else { 0.0 };
                 estimated.clamp(min, max)
             }
@@ -606,7 +616,12 @@ mod tests {
         let key = KeyEvent {
             key: Key::Tab,
             pressed: true,
-            modifiers: Modifiers { ctrl: true, shift: false, alt: false, super_key: false },
+            modifiers: Modifiers {
+                ctrl: true,
+                shift: false,
+                alt: false,
+                super_key: false,
+            },
             text: None,
         };
         let event = tv.handle_key(&key);
@@ -625,7 +640,12 @@ mod tests {
         let key = KeyEvent {
             key: Key::Tab,
             pressed: true,
-            modifiers: Modifiers { ctrl: true, shift: true, alt: false, super_key: false },
+            modifiers: Modifiers {
+                ctrl: true,
+                shift: true,
+                alt: false,
+                super_key: false,
+            },
             text: None,
         };
         let event = tv.handle_key(&key);

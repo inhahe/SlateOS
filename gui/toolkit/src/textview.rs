@@ -156,8 +156,7 @@ impl Selection {
 // ---------------------------------------------------------------------------
 
 /// Style attributes from ANSI SGR sequences.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct AnsiStyle {
     pub fg: Option<Color>,
     pub bg: Option<Color>,
@@ -167,7 +166,6 @@ pub struct AnsiStyle {
     pub underline: bool,
     pub reverse: bool,
 }
-
 
 /// A span of text with uniform styling (used in SimpleTextView).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -369,9 +367,8 @@ fn apply_sgr_params(params: &[u16], style: &mut AnsiStyle) {
             // Bright background 100-107
             100..=107 => style.bg = Some(ANSI_COLORS[(params[i] - 100 + 8) as usize]),
             // Extended color: 38;5;N or 38;2;R;G;B
-            38
-                if i + 1 < params.len() => {
-                    match params[i + 1] {
+            38 if i + 1 < params.len() => {
+                match params[i + 1] {
                         5
                             // 256-color
                             if i + 2 < params.len() => {
@@ -390,30 +387,27 @@ fn apply_sgr_params(params: &[u16], style: &mut AnsiStyle) {
                             }
                         _ => {}
                     }
-                    i += 1;
-                }
+                i += 1;
+            }
             // Extended background: 48;5;N or 48;2;R;G;B
-            48
-                if i + 1 < params.len() => {
-                    match params[i + 1] {
-                        5
-                            if i + 2 < params.len() => {
-                                style.bg = Some(color_from_256(params[i + 2] as u8));
-                                i += 2;
-                            }
-                        2
-                            if i + 4 < params.len() => {
-                                style.bg = Some(Color::rgb(
-                                    params[i + 2] as u8,
-                                    params[i + 3] as u8,
-                                    params[i + 4] as u8,
-                                ));
-                                i += 4;
-                            }
-                        _ => {}
+            48 if i + 1 < params.len() => {
+                match params[i + 1] {
+                    5 if i + 2 < params.len() => {
+                        style.bg = Some(color_from_256(params[i + 2] as u8));
+                        i += 2;
                     }
-                    i += 1;
+                    2 if i + 4 < params.len() => {
+                        style.bg = Some(Color::rgb(
+                            params[i + 2] as u8,
+                            params[i + 3] as u8,
+                            params[i + 4] as u8,
+                        ));
+                        i += 4;
+                    }
+                    _ => {}
                 }
+                i += 1;
+            }
             _ => {} // Unknown SGR parameter — ignore
         }
         i += 1;
@@ -1057,30 +1051,27 @@ impl SimpleTextView {
 
             // Selection highlight for this line
             if let Some(ref sel) = self.selection
-                && !sel.is_empty() && line_idx >= sel.start.line && line_idx <= sel.end.line {
-                    let line_len = self.line_char_count(line_idx);
-                    let sel_start = if line_idx == sel.start.line {
-                        sel.start.col
-                    } else {
-                        0
-                    };
-                    let sel_end = if line_idx == sel.end.line {
-                        sel.end.col
-                    } else {
-                        line_len
-                    };
-                    if sel_start < sel_end {
-                        let x1 = gutter_w + sel_start as f32 * self.config.char_width;
-                        let x2 = gutter_w + sel_end as f32 * self.config.char_width;
-                        tree.fill_rect(
-                            x1,
-                            y,
-                            x2 - x1,
-                            self.config.line_height,
-                            SELECTION_COLOR,
-                        );
-                    }
+                && !sel.is_empty()
+                && line_idx >= sel.start.line
+                && line_idx <= sel.end.line
+            {
+                let line_len = self.line_char_count(line_idx);
+                let sel_start = if line_idx == sel.start.line {
+                    sel.start.col
+                } else {
+                    0
+                };
+                let sel_end = if line_idx == sel.end.line {
+                    sel.end.col
+                } else {
+                    line_len
+                };
+                if sel_start < sel_end {
+                    let x1 = gutter_w + sel_start as f32 * self.config.char_width;
+                    let x2 = gutter_w + sel_end as f32 * self.config.char_width;
+                    tree.fill_rect(x1, y, x2 - x1, self.config.line_height, SELECTION_COLOR);
                 }
+            }
 
             // Search match highlights for this line
             for (match_idx, &(ml, ms, me)) in self.search.matches.iter().enumerate() {
@@ -1184,28 +1175,23 @@ fn is_word_char(b: u8) -> bool {
 // ===========================================================================
 
 /// Font weight for rich text.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum RichFontWeight {
     #[default]
     Normal,
     Bold,
 }
 
-
 /// Font style for rich text.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum RichFontStyle {
     #[default]
     Normal,
     Italic,
 }
 
-
 /// Font size specification.
-#[derive(Clone, Copy, Debug, PartialEq)]
-#[derive(Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
 pub enum FontSize {
     /// Relative sizes.
     Small,
@@ -1216,7 +1202,6 @@ pub enum FontSize {
     /// Absolute size in points.
     Points(f32),
 }
-
 
 impl FontSize {
     /// Resolve to concrete points given a base size.
@@ -1644,8 +1629,7 @@ impl RichTextView {
                 }
                 RichBlock::Heading { level, spans } => {
                     y += level.spacing_above() * self.config.line_height;
-                    let h_line_height =
-                        self.config.line_height * level.size_multiplier();
+                    let h_line_height = self.config.line_height * level.size_multiplier();
                     let lines = self.wrap_spans(spans, available_width, Some(*level));
                     for (i, line_spans) in lines.into_iter().enumerate() {
                         self.wrapped_lines.push(WrappedLine {
@@ -1819,8 +1803,12 @@ impl RichTextView {
             let w = self.span_width(span, heading);
             if x <= left + w {
                 let (size, weight) = self.span_font(span, heading);
-                return seen
-                    .saturating_add(crate::text::char_index_at(&span.text, x - left, size, weight));
+                return seen.saturating_add(crate::text::char_index_at(
+                    &span.text,
+                    x - left,
+                    size,
+                    weight,
+                ));
             }
             left += w;
             seen = seen.saturating_add(span.text.chars().count());
@@ -2119,16 +2107,17 @@ impl RichTextView {
     fn scroll_to_match(&mut self, match_idx: usize) {
         self.ensure_layout();
         if let Some(&(line_idx, _, _)) = self.search.matches.get(match_idx)
-            && let Some(wl) = self.wrapped_lines.get(line_idx) {
-                let line_y = wl.y;
-                if line_y < self.scroll_offset_px
-                    || line_y + wl.line_height > self.scroll_offset_px + self.height
-                {
-                    // Center the match
-                    self.scroll_offset_px = (line_y - self.height / 2.0).max(0.0);
-                    self.clamp_scroll();
-                }
+            && let Some(wl) = self.wrapped_lines.get(line_idx)
+        {
+            let line_y = wl.y;
+            if line_y < self.scroll_offset_px
+                || line_y + wl.line_height > self.scroll_offset_px + self.height
+            {
+                // Center the match
+                self.scroll_offset_px = (line_y - self.height / 2.0).max(0.0);
+                self.clamp_scroll();
             }
+        }
     }
 
     // ----- Event handling -----
@@ -2250,10 +2239,12 @@ impl RichTextView {
                     // measuring the span's extent in bytes made every link
                     // after a non-ASCII one unclickable.
                     let span_end = col.saturating_add(span.text.chars().count());
-                    if char_idx >= col && char_idx < span_end
-                        && let Some(ref url) = span.style.link {
-                            return Some(url.clone());
-                        }
+                    if char_idx >= col
+                        && char_idx < span_end
+                        && let Some(ref url) = span.style.link
+                    {
+                        return Some(url.clone());
+                    }
                     col = span_end;
                 }
                 break;
@@ -2340,8 +2331,11 @@ impl RichTextView {
             }
 
             // Image placeholder
-            if let Some(RichBlock::ImagePlaceholder { width: iw, height: ih, .. }) =
-                self.blocks.get(wl.block_idx)
+            if let Some(RichBlock::ImagePlaceholder {
+                width: iw,
+                height: ih,
+                ..
+            }) = self.blocks.get(wl.block_idx)
             {
                 tree.push(RenderCommand::StrokeRect {
                     x: gutter_w + 4.0,
@@ -2377,45 +2371,48 @@ impl RichTextView {
                     indent_level,
                     ..
                 }) = self.blocks.get(wl.block_idx)
-                {
-                    let indent_px = (*indent_level as f32)
-                        * (self.config.list_indent_chars as f32)
-                        * self.config.char_width;
-                    let marker = match kind {
-                        ListKind::Bullet => "\u{2022}".to_string(), // bullet
-                        ListKind::Numbered => format!("{}.", index),
-                    };
-                    tree.push(RenderCommand::Text {
-                        x: gutter_w + indent_px,
-                        y: render_y,
-                        text: marker,
-                        color: LIST_MARKER_COLOR,
-                        font_size: self.config.font_size,
-                        font_weight: FontWeightHint::Regular,
-                        max_width: None,
-                    });
-                }
+            {
+                let indent_px = (*indent_level as f32)
+                    * (self.config.list_indent_chars as f32)
+                    * self.config.char_width;
+                let marker = match kind {
+                    ListKind::Bullet => "\u{2022}".to_string(), // bullet
+                    ListKind::Numbered => format!("{}.", index),
+                };
+                tree.push(RenderCommand::Text {
+                    x: gutter_w + indent_px,
+                    y: render_y,
+                    text: marker,
+                    color: LIST_MARKER_COLOR,
+                    font_size: self.config.font_size,
+                    font_weight: FontWeightHint::Regular,
+                    max_width: None,
+                });
+            }
 
             // Selection highlight
             if let Some(ref sel) = self.selection
-                && !sel.is_empty() && vis_idx >= sel.start.line && vis_idx <= sel.end.line {
-                    let line_len: usize = wl.spans.iter().map(|s| s.text.len()).sum();
-                    let sel_start = if vis_idx == sel.start.line {
-                        sel.start.col
-                    } else {
-                        0
-                    };
-                    let sel_end = if vis_idx == sel.end.line {
-                        sel.end.col
-                    } else {
-                        line_len
-                    };
-                    if sel_start < sel_end {
-                        let x1 = gutter_w + wl.indent + self.x_of_col(wl, sel_start);
-                        let x2 = gutter_w + wl.indent + self.x_of_col(wl, sel_end);
-                        tree.fill_rect(x1, render_y, x2 - x1, wl.line_height, SELECTION_COLOR);
-                    }
+                && !sel.is_empty()
+                && vis_idx >= sel.start.line
+                && vis_idx <= sel.end.line
+            {
+                let line_len: usize = wl.spans.iter().map(|s| s.text.len()).sum();
+                let sel_start = if vis_idx == sel.start.line {
+                    sel.start.col
+                } else {
+                    0
+                };
+                let sel_end = if vis_idx == sel.end.line {
+                    sel.end.col
+                } else {
+                    line_len
+                };
+                if sel_start < sel_end {
+                    let x1 = gutter_w + wl.indent + self.x_of_col(wl, sel_start);
+                    let x2 = gutter_w + wl.indent + self.x_of_col(wl, sel_end);
+                    tree.fill_rect(x1, render_y, x2 - x1, wl.line_height, SELECTION_COLOR);
                 }
+            }
 
             // Search match highlights
             for (match_idx, &(ml, ms, me)) in self.search.matches.iter().enumerate() {
@@ -2433,14 +2430,16 @@ impl RichTextView {
 
             // Render text spans
             let mut x = gutter_w + wl.indent;
-            let is_heading = matches!(self.blocks.get(wl.block_idx), Some(RichBlock::Heading { .. }));
-            let heading_level = if let Some(RichBlock::Heading { level, .. }) =
-                self.blocks.get(wl.block_idx)
-            {
-                Some(*level)
-            } else {
-                None
-            };
+            let is_heading = matches!(
+                self.blocks.get(wl.block_idx),
+                Some(RichBlock::Heading { .. })
+            );
+            let heading_level =
+                if let Some(RichBlock::Heading { level, .. }) = self.blocks.get(wl.block_idx) {
+                    Some(*level)
+                } else {
+                    None
+                };
 
             for span in &wl.spans {
                 // The same call the wrapper used, so a span is drawn in exactly
@@ -2666,7 +2665,10 @@ mod tests {
     #[test]
     fn test_simple_scroll_basics() {
         let mut view = simple_view(400.0, 160.0); // 10 visible lines
-        let text = (0..50).map(|i| format!("Line {}", i)).collect::<Vec<_>>().join("\n");
+        let text = (0..50)
+            .map(|i| format!("Line {}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
         view.set_text(&text);
 
         assert_eq!(view.line_count(), 50);
@@ -2684,7 +2686,10 @@ mod tests {
     #[test]
     fn test_simple_scroll_by() {
         let mut view = simple_view(400.0, 160.0);
-        let text = (0..50).map(|i| format!("Line {}", i)).collect::<Vec<_>>().join("\n");
+        let text = (0..50)
+            .map(|i| format!("Line {}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
         view.set_text(&text);
 
         view.scroll_by(5);
@@ -2737,20 +2742,14 @@ mod tests {
 
     #[test]
     fn test_selection_ordering() {
-        let sel = Selection::new(
-            TextPosition::new(5, 10),
-            TextPosition::new(2, 3),
-        );
+        let sel = Selection::new(TextPosition::new(5, 10), TextPosition::new(2, 3));
         assert_eq!(sel.start, TextPosition::new(2, 3));
         assert_eq!(sel.end, TextPosition::new(5, 10));
     }
 
     #[test]
     fn test_selection_contains() {
-        let sel = Selection::new(
-            TextPosition::new(1, 5),
-            TextPosition::new(3, 10),
-        );
+        let sel = Selection::new(TextPosition::new(1, 5), TextPosition::new(3, 10));
         assert!(sel.contains(TextPosition::new(2, 0)));
         assert!(sel.contains(TextPosition::new(1, 5)));
         assert!(!sel.contains(TextPosition::new(3, 10))); // end is exclusive
@@ -2871,13 +2870,19 @@ mod tests {
             spacing_below: 0.0,
         }]);
         view.ensure_layout();
-        assert!(view.wrapped_lines.len() >= 2, "an over-long word must break");
+        assert!(
+            view.wrapped_lines.len() >= 2,
+            "an over-long word must break"
+        );
         let rejoined: String = view
             .wrapped_lines
             .iter()
             .flat_map(|wl| wl.spans.iter().map(|s| s.text.as_str()))
             .collect();
-        assert_eq!(rejoined, word, "breaking the word dropped or duplicated text");
+        assert_eq!(
+            rejoined, word,
+            "breaking the word dropped or duplicated text"
+        );
     }
 
     #[test]
@@ -3071,7 +3076,10 @@ mod tests {
         assert_eq!(depth, 0, "the font scopes do not balance");
         assert_eq!(deepest, 1, "the grid's scope was never opened");
         // Three lines of content plus three gutter numbers, all on the grid.
-        assert!(inside >= 6, "only {inside} glyph runs landed in the mono scope");
+        assert!(
+            inside >= 6,
+            "only {inside} glyph runs landed in the mono scope"
+        );
     }
 
     /// Every glyph a log line can contain has to fit the cell the grid steps
@@ -3088,10 +3096,7 @@ mod tests {
                 FontWeightHint::Regular,
                 FontFamily::Mono,
             );
-            assert!(
-                w <= cell + 0.01,
-                "{ch:?} measures {w} in a {cell} cell",
-            );
+            assert!(w <= cell + 0.01, "{ch:?} measures {w} in a {cell} cell",);
         }
     }
 
@@ -3162,7 +3167,10 @@ mod tests {
     #[test]
     fn test_hit_test_with_scroll() {
         let mut view = simple_view(400.0, 160.0);
-        let text = (0..50).map(|i| format!("Line {}", i)).collect::<Vec<_>>().join("\n");
+        let text = (0..50)
+            .map(|i| format!("Line {}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
         view.set_text(&text);
         view.scroll_offset = 10;
 

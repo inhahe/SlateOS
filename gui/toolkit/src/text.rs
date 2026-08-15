@@ -524,7 +524,9 @@ pub fn wrap(text: &str, max_width: f32, size: f32, weight: FontWeightHint) -> Ve
         // Reporting the paragraphs unwrapped keeps the line count meaningful.
         return text.split('\n').map(str::to_string).collect();
     }
-    with_font(size, weight, FontFamily::Ui, |font| font.wrap(text, max_width))
+    with_font(size, weight, FontFamily::Ui, |font| {
+        font.wrap(text, max_width)
+    })
 }
 
 /// A block of prose, drawn as one [`RenderCommand::Text`] per wrapped line.
@@ -659,13 +661,7 @@ impl<'a> Paragraph<'a> {
         {
             lines.truncate(max);
             if let Some(last) = lines.last_mut() {
-                *last = elide(
-                    &format!("{last}…"),
-                    self.width,
-                    "…",
-                    self.size,
-                    self.weight,
-                );
+                *last = elide(&format!("{last}…"), self.width, "…", self.size, self.weight);
             }
         }
         lines
@@ -727,10 +723,8 @@ pub fn char_index_at(text: &str, offset: f32, size: f32, weight: FontWeightHint)
     let at = with_font(size, weight, FontFamily::Ui, |font| {
         font.shape(text).offset_at(offset, text.len())
     });
-    text.get(..at).map_or_else(
-        || text.chars().count(),
-        |prefix| prefix.chars().count(),
-    )
+    text.get(..at)
+        .map_or_else(|| text.chars().count(), |prefix| prefix.chars().count())
 }
 
 #[cfg(test)]
@@ -791,7 +785,10 @@ mod tests {
             let mut max = 0.0_f32;
             while max <= full + 8.0 {
                 let cut = fit(text, max, 16.0, FontWeightHint::Regular);
-                assert!(text.is_char_boundary(cut), "{text:?}: cut {cut} splits a character");
+                assert!(
+                    text.is_char_boundary(cut),
+                    "{text:?}: cut {cut} splits a character"
+                );
                 let kept = measure(&text[..cut], 16.0, FontWeightHint::Regular);
                 assert!(
                     kept <= max + 0.001,
@@ -883,7 +880,10 @@ mod tests {
         let path = "/home/user/projets/déjà-vu/résumé-final.txt";
         for max in [4.0, 9.0, 17.0, 33.0, 65.0, 129.0] {
             let out = elide_start(path, max, "…", 16.0, FontWeightHint::Regular);
-            assert!(measure(&out, 16.0, FontWeightHint::Regular) <= max, "{out:?} > {max}");
+            assert!(
+                measure(&out, 16.0, FontWeightHint::Regular) <= max,
+                "{out:?} > {max}"
+            );
         }
     }
 
@@ -893,7 +893,11 @@ mod tests {
         let w = measure("abc", 16.0, FontWeightHint::Regular);
         // Room for exactly three characters, taken from the right.
         assert_eq!(&s[fit_end(s, w, 16.0, FontWeightHint::Regular)..], "def");
-        assert_eq!(fit_end(s, 1e9, 16.0, FontWeightHint::Regular), 0, "all of it fits");
+        assert_eq!(
+            fit_end(s, 1e9, 16.0, FontWeightHint::Regular),
+            0,
+            "all of it fits"
+        );
         assert_eq!(
             fit_end(s, -5.0, 16.0, FontWeightHint::Regular),
             s.len(),
@@ -1051,8 +1055,18 @@ mod tests {
     fn wrapping_is_not_decided_by_byte_length() {
         // Same glyph count, twice the bytes. Wrapped on a byte count the
         // accented text would break into twice as many lines.
-        let ascii = wrap("aaa aaa aaa aaa aaa aaa", 80.0, 11.0, FontWeightHint::Regular);
-        let accented = wrap("ééé ééé ééé ééé ééé ééé", 80.0, 11.0, FontWeightHint::Regular);
+        let ascii = wrap(
+            "aaa aaa aaa aaa aaa aaa",
+            80.0,
+            11.0,
+            FontWeightHint::Regular,
+        );
+        let accented = wrap(
+            "ééé ééé ééé ééé ééé ééé",
+            80.0,
+            11.0,
+            FontWeightHint::Regular,
+        );
         assert_eq!(ascii.len(), accented.len());
     }
 
@@ -1112,7 +1126,10 @@ mod tests {
         let lines = drawn(&cmds);
         assert!(lines.len() > 1, "the prose was not wrapped");
         assert!((used - lines.len() as f32 * 18.0).abs() < 0.01);
-        assert!((used - p.height()).abs() < 0.01, "height() disagrees with draw()");
+        assert!(
+            (used - p.height()).abs() < 0.01,
+            "height() disagrees with draw()"
+        );
 
         // Each line sits one spacing below the last, starting at the top.
         for (n, (y, _)) in lines.iter().enumerate() {
@@ -1163,7 +1180,10 @@ mod tests {
 
         let lines = drawn(&cmds);
         assert_eq!(lines.len(), 2);
-        assert!((used - 32.0).abs() < 0.01, "a capped paragraph reserved {used}");
+        assert!(
+            (used - 32.0).abs() < 0.01,
+            "a capped paragraph reserved {used}"
+        );
         let last = &lines[1].1;
         assert!(last.ends_with('…'), "the cut was not marked: {last:?}");
         assert!(
@@ -1182,7 +1202,9 @@ mod tests {
     #[test]
     fn an_empty_paragraph_draws_nothing_and_takes_no_room() {
         let mut cmds = Vec::new();
-        let used = Paragraph::new("", ink()).at(0.0, 0.0, 200.0).draw(&mut cmds);
+        let used = Paragraph::new("", ink())
+            .at(0.0, 0.0, 200.0)
+            .draw(&mut cmds);
         assert!(drawn(&cmds).is_empty());
         assert!(used.abs() < 0.01, "an empty paragraph reserved {used}");
     }

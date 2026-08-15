@@ -53,6 +53,21 @@ const HEADER_HEIGHT: f32 = 24.0;
 /// two from drifting.
 const CELL_PAD: f32 = 6.0;
 
+/// How far the Details tab indents a list entry (a handle, an env var) from the
+/// panel's own padding. The entry's usable width is what is left of the panel
+/// after this indent and the padding on both sides.
+const DETAIL_INDENT: f32 = 8.0;
+
+/// Rows per column in the Details tab's basic-info grid. The grid fills down
+/// then across, so this is what turns an item's index into its row and column —
+/// and, with the item count, into how many columns there are, which is what
+/// tells the last column that its room runs to the right margin.
+const INFO_ROWS: usize = 4;
+
+/// Gap left between an info-grid value and whatever is drawn to its right, so
+/// two adjacent cells never touch even when both are fitted to their room.
+const INFO_GUTTER: f32 = 8.0;
+
 /// The Network tab's connection table.
 ///
 /// These widths are what a cell may *use*. The old `&[(&str, f32)]` array held
@@ -2176,18 +2191,37 @@ impl ProcessExplorerState {
 
         let label_w = 90.0;
         let col_gap = 260.0;
+        let info_cols = info_items.len().div_ceil(INFO_ROWS);
 
         for (i, (label, value)) in info_items.iter().enumerate() {
-            let col = i / 4;
-            let row = i % 4;
+            let col = i / INFO_ROWS;
+            let row = i % INFO_ROWS;
             let lx = pad + col as f32 * col_gap;
             let ly = cur_y + row as f32 * 18.0;
 
-            tree.text(lx, ly, &format!("{label}:"), COLOR_TEXT_DIM, 11.0);
-            tree.text(lx + label_w, ly, value, COLOR_TEXT, 11.0);
+            // The value's room runs to the next column's label, or to the right
+            // margin for the last column. `User` is the one that matters: it is
+            // whatever name the process runs as, so an over-long one used to be
+            // drawn straight across "CPU time" and "Threads" beside it.
+            let next_x = if col + 1 < info_cols {
+                pad + (col + 1) as f32 * col_gap
+            } else {
+                w - pad
+            };
+            let value_room = (next_x - INFO_GUTTER - (lx + label_w)).max(0.0);
+
+            tree.text_in(
+                lx,
+                ly,
+                (label_w - INFO_GUTTER).max(0.0),
+                &format!("{label}:"),
+                COLOR_TEXT_DIM,
+                11.0,
+            );
+            tree.text_in(lx + label_w, ly, value_room, value, COLOR_TEXT, 11.0);
         }
 
-        cur_y += 4.0 * 18.0 + 12.0;
+        cur_y += INFO_ROWS as f32 * 18.0 + 12.0;
 
         // -- Memory breakdown --
         tree.fill_rect(pad, cur_y, w - 2.0 * pad, 1.0, Color::rgb(55, 60, 70));
@@ -2201,9 +2235,21 @@ impl ProcessExplorerState {
             ("Virtual", format_bytes(proc.virtual_bytes)),
             ("Shared", format_bytes(proc.shared_bytes)),
         ];
+        // The three fields used to sit at a flat 200px pitch, which is a bound
+        // on nothing: at 480px wide the third field started at 416 and ran to
+        // 488, past the panel's own right margin at 464. A pitch that divides
+        // the panel fills it at every width instead of at one.
+        let mem_col_w = (w - 2.0 * pad) / mem_fields.len() as f32;
         for (i, (label, value)) in mem_fields.iter().enumerate() {
-            let lx = pad + i as f32 * 200.0;
-            tree.text(lx, cur_y, &format!("{label}: {value}"), COLOR_TEXT, 11.0);
+            let lx = pad + i as f32 * mem_col_w;
+            tree.text_in(
+                lx,
+                cur_y,
+                (mem_col_w - INFO_GUTTER).max(0.0),
+                &format!("{label}: {value}"),
+                COLOR_TEXT,
+                11.0,
+            );
         }
         cur_y += 22.0;
 
@@ -2320,7 +2366,17 @@ impl ProcessExplorerState {
                     "#{}: [{}] {}",
                     handle.handle_id, handle.resource_type, handle.description
                 );
-                tree.text(pad + 8.0, cur_y, &entry, COLOR_TEXT_DIM, 10.0);
+                // A handle description is a path or object name supplied by the
+                // process, so it is fitted to the panel rather than left to run
+                // off the right edge of the window.
+                tree.text_in(
+                    pad + DETAIL_INDENT,
+                    cur_y,
+                    (w - pad - DETAIL_INDENT - pad).max(0.0),
+                    &entry,
+                    COLOR_TEXT_DIM,
+                    10.0,
+                );
                 cur_y += 16.0;
             }
             if proc.handles.len() > max_handles {
@@ -2354,13 +2410,24 @@ impl ProcessExplorerState {
             let max_env = 8;
             for (key, val) in proc.environment.iter().take(max_env) {
                 let entry = format!("{key}={val}");
-                // Truncate long values for display.
-                let display = if entry.len() > 80 {
-                    format!("{}...", &entry[..77])
-                } else {
-                    entry
-                };
-                tree.text(pad + 8.0, cur_y, &display, COLOR_TEXT_DIM, 10.0);
+                // This used to be cut with `&entry[..77]` behind an
+                // `if entry.len() > 80` guard. That guard was anti-protective:
+                // it fired only for strings long enough in *bytes*, and a
+                // non-Latin environment value reaches 80 bytes at ~27
+                // characters, so it selected for exactly the entries whose byte
+                // 77 is a continuation byte — and aborted the whole panel.
+                //
+                // A byte budget was never the right constraint either: 80 bytes
+                // is unrelated to the pixels this panel has, which depend on the
+                // window width. Fitting to the panel makes the two agree.
+                tree.text_in(
+                    pad + DETAIL_INDENT,
+                    cur_y,
+                    (w - pad - DETAIL_INDENT - pad).max(0.0),
+                    &entry,
+                    COLOR_TEXT_DIM,
+                    10.0,
+                );
                 cur_y += 16.0;
             }
             if proc.environment.len() > max_env {
@@ -3344,6 +3411,194 @@ mod tests {
         assert!(
             (caret - expected).abs() < 0.01,
             "caret at {caret}, glyphs end at {expected}"
+        );
+    }
+
+    // -- Details tab: entries are fitted to the panel, not cut at a byte count -
+
+    /// Environment entries whose byte 77 is deliberately mid-character.
+    ///
+    /// The `if entry.len() > 80 { &entry[..77] }` cut this replaced was
+    /// anti-protective: it fired *only* on strings long enough in bytes, and a
+    /// non-Latin value reaches 80 bytes at ~27 characters, so the guard
+    /// selected for exactly the entries that would abort on the slice.
+    fn adversarial_environment() -> Vec<(String, String)> {
+        vec![
+            (
+                "LANG".to_string(),
+                "\u{3053}\u{308c}\u{306f}\u{74b0}\u{5883}\u{5909}\u{6570}\u{306e}\u{5024}\u{3067}\u{3059}\u{3001}\u{30d0}\u{30a4}\u{30c8}\u{6570}\u{306f}\u{6587}\u{5b57}\u{6570}\u{306e}\u{4e09}\u{500d}\u{3042}\u{308a}\u{307e}\u{3059}\u{304b}\u{3089}\u{6ce8}\u{610f}".to_string(),
+            ),
+            (
+                "\u{41f}\u{423}\u{422}\u{42c}".to_string(),
+                "\u{42d}\u{442}\u{43e} \u{43e}\u{447}\u{435}\u{43d}\u{44c} \u{434}\u{43b}\u{438}\u{43d}\u{43d}\u{43e}\u{435} \u{437}\u{43d}\u{430}\u{447}\u{435}\u{43d}\u{438}\u{435} \u{43f}\u{435}\u{440}\u{435}\u{43c}\u{435}\u{43d}\u{43d}\u{43e}\u{439} \u{43e}\u{43a}\u{440}\u{443}\u{436}\u{435}\u{43d}\u{438}\u{44f}".to_string(),
+            ),
+            (
+                "EMOJI".to_string(),
+                "\u{1f4cc}\u{1f4dd}\u{1f5d2}\u{fe0f}\u{1f4a1}\u{1f9e0}\u{1f4da}\u{1f4c8}\u{1f4c9}\u{1f4ca}\u{1f5c3}\u{fe0f}\u{1f4c1}\u{1f4c2}\u{1f5df}\u{fe0f}\u{1f4cc}\u{1f4dd}\u{1f5d2}\u{fe0f}\u{1f4a1}\u{1f9e0}".to_string(),
+            ),
+            // `KEY=` is 4 bytes, so byte 77 of the entry lands on byte 73 of the
+            // value — the middle of this U+00E9.
+            (
+                "KEY".to_string(),
+                format!("{}\u{e9}{}", "v".repeat(72), "w".repeat(40)),
+            ),
+            ("SHORT".to_string(), "ok".to_string()),
+        ]
+    }
+
+    /// A process whose every self-supplied string is far too long for the
+    /// Details tab — the case a process can arrange for itself.
+    fn app_with_a_shouting_details_tab(window_width: u32) -> ProcessExplorerState {
+        let mut app = ProcessExplorerState::new();
+        let mut proc = make_demo_process(
+            1,
+            0,
+            "loud",
+            ProcessStatus::Running,
+            12.5,
+            4096,
+            3,
+            0,
+            // A user name is not the process's to choose, but it is not the
+            // explorer's to trust either.
+            &"\u{3068}\u{3066}\u{3082}\u{9577}\u{3044}\u{30e6}\u{30fc}\u{30b6}\u{30fc}\u{540d}"
+                .repeat(4),
+        );
+        proc.environment = adversarial_environment();
+        proc.handles = vec![
+            HandleInfo {
+                handle_id: 3,
+                resource_type: "file".to_string(),
+                description: format!("/very/deep/{}/leaf.txt", "directory".repeat(20)),
+            },
+            HandleInfo {
+                handle_id: 4,
+                resource_type: "\u{30c1}\u{30e3}\u{30cd}\u{30eb}".to_string(),
+                description: "\u{3053}\u{308c}\u{306f}\u{975e}\u{5e38}\u{306b}\u{9577}\u{3044}\u{30cf}\u{30f3}\u{30c9}\u{30eb}\u{306e}\u{8aac}\u{660e}\u{6587}\u{3067}\u{3059}".repeat(3),
+            },
+            HandleInfo {
+                handle_id: 5,
+                resource_type: "sock".to_string(),
+                description: "short".to_string(),
+            },
+        ];
+        app.processes = vec![proc];
+        app.window_width = window_width;
+        app.rebuild_visible_list();
+        app.selected_index = Some(0);
+        app
+    }
+
+    fn details_tab_commands(app: &ProcessExplorerState) -> Vec<RenderCommand> {
+        let mut tree = RenderTree::new();
+        app.render_details_tab(&mut tree);
+        tree.commands
+    }
+
+    #[test]
+    fn a_non_ascii_environment_does_not_abort_the_details_tab() {
+        let app = app_with_a_shouting_details_tab(960);
+        assert!(!details_tab_commands(&app).is_empty());
+    }
+
+    /// Nothing the process supplies may be drawn past the panel's right margin,
+    /// at any window width the user might drag to.
+    #[test]
+    fn no_details_text_escapes_the_panel() {
+        let mut checked = 0usize;
+        for width in [480_u32, 640, 960, 1440] {
+            let app = app_with_a_shouting_details_tab(width);
+            let right_margin = width as f32 - 16.0;
+            for cmd in &details_tab_commands(&app) {
+                let RenderCommand::Text {
+                    x,
+                    text,
+                    font_size,
+                    font_weight,
+                    ..
+                } = cmd
+                else {
+                    continue;
+                };
+                let right = x + text::measure(text, *font_size, *font_weight);
+                assert!(
+                    right <= right_margin + 0.5,
+                    "at width {width} the entry {text:?} at {x} runs to {right}, \
+                     past the panel margin {right_margin}"
+                );
+                checked += 1;
+            }
+        }
+        assert!(
+            checked >= 40,
+            "expected a full details tab, checked {checked}"
+        );
+    }
+
+    /// The info grid's two columns must not overlap: a long `User` may not be
+    /// drawn across `CPU time` and `Threads` in the column beside it.
+    #[test]
+    fn the_info_grid_columns_do_not_overlap() {
+        let app = app_with_a_shouting_details_tab(960);
+        let second_col_x = 16.0 + 260.0;
+        // The grid's own four rows, so the memory row below it — which has its
+        // own, different column pitch — is not mistaken for a third column.
+        let grid_top = TOOLBAR_HEIGHT + TAB_BAR_HEIGHT + 8.0 + 24.0;
+        let grid_bottom = grid_top + (INFO_ROWS - 1) as f32 * 18.0;
+        let mut checked = 0usize;
+        for cmd in &details_tab_commands(&app) {
+            let RenderCommand::Text {
+                x,
+                y,
+                text,
+                font_size,
+                font_weight,
+                ..
+            } = cmd
+            else {
+                continue;
+            };
+            if *y < grid_top - 0.5 || *y > grid_bottom + 0.5 {
+                continue;
+            }
+            // Only the first info column starts left of the second column's x.
+            if *x >= second_col_x {
+                continue;
+            }
+            let right = x + text::measure(text, *font_size, *font_weight);
+            assert!(
+                right <= second_col_x + 0.5,
+                "info cell {text:?} at {x} runs to {right}, into the second \
+                 column at {second_col_x}"
+            );
+            checked += 1;
+        }
+        assert!(
+            checked >= 8,
+            "expected a full info column, checked {checked}"
+        );
+    }
+
+    /// A short entry must survive untouched — an elide that fires when it did
+    /// not need to would be just as wrong as one that never fires.
+    #[test]
+    fn a_short_details_entry_is_drawn_verbatim() {
+        let app = app_with_a_shouting_details_tab(960);
+        let cmds = details_tab_commands(&app);
+        let drawn: Vec<&str> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            drawn.contains(&"SHORT=ok"),
+            "a short env entry was altered: {drawn:?}"
+        );
+        assert!(
+            drawn.contains(&"#5: [sock] short"),
+            "a short handle entry was altered: {drawn:?}"
         );
     }
 }

@@ -562,6 +562,68 @@ was not installed, so **no `#[cfg(unix)]` code in this lane had ever been
 compiled**, let alone checked. `cargo check --target x86_64-unknown-linux-gnu`
 needs no linker and now covers those branches.
 
+## `cargo test -p indexer` tests lane B's crate, not lane C's (lane C)
+
+**Status: OPEN 2026-08-15** (lane C, needs a cross-lane decision). Four crates
+under `apps/` carry a package name that differs from their directory, because a
+crate with the directory's name already existed under `userspace/`:
+
+| directory | package | collides with |
+|---|---|---|
+| `apps/backup` | `backup-app` | `userspace/backup` |
+| `apps/indexer` | `indexer-app` | `userspace/indexer` |
+| `apps/sysinfo` | `sysinfo-app` | `userspace/sysinfo` |
+| `apps/tmux` | `tmux-app` | `userspace/tmux` |
+
+The hazard is that `-p <dir-name>` is not an error. `cargo build -p indexer`
+and `cargo test -p indexer` both succeed, silently building **lane B's**
+`userspace/indexer` — a different program. This was hit for real: an entire
+edit-build cycle on `apps/indexer/src/main.rs` reported a clean build and
+`test result: ok. 0 passed`, and the "0 passed" against a file containing 58
+`#[test]` functions was the only visible symptom. A change with no tests of its
+own would have produced an unqualified green.
+
+**Detection:** if `cargo test -p X` reports a test count that does not match
+`grep -c '#\[test\]'` in the crate you edited, you are testing a different
+crate. `cargo test -p X -v 2>&1 | grep 'Running unittests'` prints the path.
+
+**Proper fix** is a cross-lane rename so directory and package agree — but both
+halves of each pair are real programs with overlapping purposes
+(`userspace/tmux` vs `apps/tmux`), and deciding which survives, or what the
+surviving names are, is not lane C's call to make alone. Filed here rather than
+acted on; it wants a `requests/c-b-…` once there is a concrete proposal.
+
+## `apps/indexer` stored index paths lossily and panicked on a short header (lane C)
+
+**Status: FIXED 2026-08-15** (lane C), commit below. Third instance of the
+lossy-path class, found by continuing the sweep. The index is a binary,
+length-prefixed format, so unlike `meta.txt` and the backup manifest there was
+never a readability tradeoff to weigh — it simply stored the wrong bytes:
+
+- `serialize` wrote `entry.path.to_string_lossy().as_bytes()` and
+  `deserialize` read them back with `String::from_utf8_lossy`. A file whose
+  name is not UTF-8 was indexed under a name containing U+FFFD, so the search
+  hit that named it could not be opened. Both sides now carry
+  `OsStr::as_encoded_bytes` verbatim; `INDEX_VERSION` goes 1 → 2. No migration
+  is needed — the index is a derived cache and the existing version check
+  already tells the user to reindex.
+- **Panic on a truncated index.** The header check was `data.len() < 28`, but
+  `dirs_scanned` is read from bytes `24..32`, so a file of 28..=31 bytes
+  passed the check and then indexed out of bounds. The existing
+  `test_index_deserialize_too_short` used a 4-byte input and never reached it.
+  Now `< INDEX_HEADER_LEN` (32), with a test that sweeps every length below it.
+
+Two smaller things fixed in passing: the two scanners each carried a verbatim
+copy of the directory-exclusion check (now one `is_excluded_dir`), and each
+copy tested `dir_str.ends_with(excl) || dir_str.contains(excl)` — the same
+predicate written twice, since `contains` is true whenever `ends_with` is.
+
+The `filename` field stays a lossy `String`, now documented as a **search key
+only**: a query is UTF-8 text the user typed, so matching against a lossy
+rendering is a selection heuristic. It is never displayed and never used to
+name a file — `path` is, and `path` is exact. Both producers of the key now go
+through one `filename_key` function so they cannot drift.
+
 ## Almost no `apps/` crate opts into the workspace lints (lane C)
 
 **Status: OPEN 2026-08-15** (lane C). Noticed while checking whether

@@ -31,7 +31,15 @@ const CONFIG_PATH: &str = "/etc/indexer.conf";
 const INDEX_PATH: &str = "/var/indexer/index.db";
 const PID_FILE: &str = "/var/indexer/indexer.pid";
 const INDEX_MAGIC: &[u8; 4] = b"OIDX";
-const INDEX_VERSION: u32 = 1;
+/// Version 2 stores entry paths as their exact bytes. Version 1 wrote them
+/// through `to_string_lossy`, so any path that was not UTF-8 came back with
+/// U+FFFD where its bytes had been and no longer named a real file. The index
+/// is a derived cache, so a version bump needs no migration: `deserialize`
+/// rejects the old file and the caller reindexes.
+const INDEX_VERSION: u32 = 2;
+/// Bytes before the first entry: magic(4) + version(4) + count(8) +
+/// last_indexed(8) + dirs_scanned(8).
+const INDEX_HEADER_LEN: usize = 32;
 const DEFAULT_MAX_FILE_SIZE: u64 = 50 * 1024 * 1024; // 50 MB
 const DEFAULT_SCAN_INTERVAL: u64 = 3600; // 1 hour
 const DEFAULT_RESULT_LIMIT: usize = 50;
@@ -162,7 +170,10 @@ impl Config {
         out.push_str("# Slate OS File Indexer Configuration\n\n");
         out.push_str(&format!("enabled = {}\n", self.enabled));
         out.push_str(&format!("index_paths = {}\n", self.index_paths.join(", ")));
-        out.push_str(&format!("exclude_paths = {}\n", self.exclude_paths.join(", ")));
+        out.push_str(&format!(
+            "exclude_paths = {}\n",
+            self.exclude_paths.join(", ")
+        ));
         if let Some(ref exts) = self.include_extensions {
             out.push_str(&format!("include_extensions = {}\n", exts.join(", ")));
         } else {
@@ -173,7 +184,10 @@ impl Config {
             self.exclude_extensions.join(", ")
         ));
         out.push_str(&format!("max_file_size = {}\n", self.max_file_size));
-        out.push_str(&format!("scan_interval_secs = {}\n", self.scan_interval_secs));
+        out.push_str(&format!(
+            "scan_interval_secs = {}\n",
+            self.scan_interval_secs
+        ));
         out.push_str(&format!("index_contents = {}\n", self.index_contents));
         out
     }
@@ -218,9 +232,16 @@ impl fmt::Display for Config {
 /// A single indexed file entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct IndexEntry {
-    /// Full path to the file.
+    /// Full path to the file. Authoritative: this is what identifies the file
+    /// and what a caller opens, so it holds the path's exact bytes.
     path: PathBuf,
-    /// Filename component (cached for fast lookup).
+    /// Filename component, as a **search key only** — never as an identity and
+    /// never displayed.
+    ///
+    /// A query is UTF-8 text the user typed, so matching it against a lossy
+    /// rendering of the name is the only thing that can be meant; the bytes a
+    /// query could never have named become U+FFFD, which no query matches. Use
+    /// [`IndexEntry::path`] for anything that has to name the file.
     filename: String,
     /// File size in bytes.
     size: u64,
@@ -255,6 +276,41 @@ impl FileType {
             2 => Self::Symlink,
             _ => Self::Other,
         }
+    }
+}
+
+/// Derive the search key in [`IndexEntry::filename`] from a path.
+///
+/// One function so the scanner and the index loader cannot disagree about what
+/// a given path's key is — they did not, but nothing stopped them.
+fn filename_key(path: &Path) -> String {
+    path.file_name()
+        .map(|f| f.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+/// Build an `OsString` from the raw bytes of a path.
+///
+/// Split per platform rather than papered over with
+/// `OsStr::from_encoded_bytes_unchecked`, whose contract is that the bytes are
+/// valid for the platform's `OsStr` encoding — true for arbitrary bytes on
+/// Unix, but not on Windows, where `OsStr` is WTF-8. Our target is
+/// `target-family = ["unix"]`, so the safe total conversion is the one that
+/// runs; Windows appears only as a test host.
+#[cfg(unix)]
+fn os_string_from_bytes(bytes: Vec<u8>) -> std::ffi::OsString {
+    use std::os::unix::ffi::OsStringExt;
+    std::ffi::OsString::from_vec(bytes)
+}
+
+/// Test-host fallback: a Windows `OsString` cannot hold a byte string that is
+/// not WTF-8. Only reachable on a non-Unix host reading an index written on
+/// the target.
+#[cfg(not(unix))]
+fn os_string_from_bytes(bytes: Vec<u8>) -> std::ffi::OsString {
+    match String::from_utf8(bytes) {
+        Ok(s) => std::ffi::OsString::from(s),
+        Err(e) => std::ffi::OsString::from(String::from_utf8_lossy(e.as_bytes()).into_owned()),
     }
 }
 
@@ -358,9 +414,12 @@ impl FileIndex {
 
         // Entries
         for entry in &self.entries {
-            let path_bytes = entry.path.to_string_lossy().as_bytes().to_vec();
+            // The exact bytes, not `to_string_lossy`: a path is a byte string
+            // here, and an index entry whose path has been through U+FFFD
+            // substitution no longer names the file it was built from.
+            let path_bytes = entry.path.as_os_str().as_encoded_bytes();
             buf.extend_from_slice(&(path_bytes.len() as u32).to_le_bytes());
-            buf.extend_from_slice(&path_bytes);
+            buf.extend_from_slice(path_bytes);
             buf.extend_from_slice(&entry.size.to_le_bytes());
             buf.extend_from_slice(&entry.mtime.to_le_bytes());
             buf.push(entry.file_type.as_byte());
@@ -371,7 +430,9 @@ impl FileIndex {
 
     /// Deserialize the index from binary data.
     fn deserialize(data: &[u8]) -> Result<Self, IndexError> {
-        if data.len() < 28 {
+        // 32, not 28: `dirs_scanned` is read from bytes 24..32, so a file of
+        // 28..=31 bytes passed this check and then panicked on the read.
+        if data.len() < INDEX_HEADER_LEN {
             return Err(IndexError::CorruptIndex("header too short".into()));
         }
 
@@ -405,17 +466,24 @@ impl FileIndex {
 
         for _ in 0..entry_count {
             if offset + 4 > data.len() {
-                return Err(IndexError::CorruptIndex("truncated entry path length".into()));
+                return Err(IndexError::CorruptIndex(
+                    "truncated entry path length".into(),
+                ));
             }
-            let path_len =
-                u32::from_le_bytes([data[offset], data[offset + 1], data[offset + 2], data[offset + 3]])
-                    as usize;
+            let path_len = u32::from_le_bytes([
+                data[offset],
+                data[offset + 1],
+                data[offset + 2],
+                data[offset + 3],
+            ]) as usize;
             offset += 4;
 
             if offset + path_len > data.len() {
                 return Err(IndexError::CorruptIndex("truncated entry path".into()));
             }
-            let path_str = String::from_utf8_lossy(&data[offset..offset + path_len]).into_owned();
+            let path = PathBuf::from(os_string_from_bytes(
+                data[offset..offset + path_len].to_vec(),
+            ));
             offset += path_len;
 
             if offset + 17 > data.len() {
@@ -448,11 +516,7 @@ impl FileIndex {
             let file_type = FileType::from_byte(data[offset]);
             offset += 1;
 
-            let path = PathBuf::from(&path_str);
-            let filename = path
-                .file_name()
-                .map(|f| f.to_string_lossy().into_owned())
-                .unwrap_or_default();
+            let filename = filename_key(&path);
 
             entries.push(IndexEntry {
                 path,
@@ -522,7 +586,11 @@ fn extract_trigrams(text: &str) -> Vec<[u8; 3]> {
 fn index_file_content(index: &mut FileIndex, entry_idx: usize, content: &str) {
     let trigrams = extract_trigrams(content);
     for trigram in trigrams {
-        index.trigram_index.entry(trigram).or_default().push(entry_idx);
+        index
+            .trigram_index
+            .entry(trigram)
+            .or_default()
+            .push(entry_idx);
     }
 }
 
@@ -587,6 +655,9 @@ fn search(index: &FileIndex, query: &str, limit: usize) -> Vec<SearchResult> {
 
         if is_path_search {
             // Match against full path.
+            // Matching a query against a lossy rendering is a selection
+            // heuristic, not an identity check: the result carries `entry`,
+            // whose path is exact, so what gets opened is still the right file.
             let path_str = entry.path.to_string_lossy().to_ascii_lowercase();
             if is_glob {
                 if glob_match(&query_lower, &path_str) {
@@ -646,9 +717,7 @@ fn search(index: &FileIndex, query: &str, limit: usize) -> Vec<SearchResult> {
     }
 
     // Sort by rank (best first), then by score (lower = better).
-    results.sort_by(|a, b| {
-        a.rank.cmp(&b.rank).then_with(|| a.score.cmp(&b.score))
-    });
+    results.sort_by(|a, b| a.rank.cmp(&b.rank).then_with(|| a.score.cmp(&b.score)));
 
     results.truncate(limit);
     results
@@ -731,11 +800,12 @@ fn glob_match_chars(pattern: &[char], text: &[char]) -> bool {
                 '[' => {
                     // Character class.
                     if let Some((matched, end)) = match_char_class(&pattern[pi..], text[ti])
-                        && matched {
-                            pi += end;
-                            ti += 1;
-                            continue;
-                        }
+                        && matched
+                    {
+                        pi += end;
+                        ti += 1;
+                        continue;
+                    }
                     // Fall through to star backtrack.
                 }
                 ch => {
@@ -920,6 +990,26 @@ fn scan(config: &Config) -> (FileIndex, ScanStats) {
     (index, stats)
 }
 
+/// Whether `dir` is covered by one of the configured exclusions.
+///
+/// One function rather than the copy in each of the two scanners: they were
+/// identical, which is exactly how they stay identical only until one of them
+/// is edited.
+///
+/// The exclusions are UTF-8 text from the config file, so this matches against
+/// a lossy rendering of the directory — a selection heuristic, not an identity
+/// check. A directory whose name is not UTF-8 can still be excluded by naming
+/// one of its ASCII ancestors.
+///
+/// `contains` rather than a component-wise comparison is deliberately loose and
+/// is the documented behaviour: excluding `node_modules` excludes it at any
+/// depth. (The previous `ends_with(excl) || contains(excl)` was the same test
+/// written twice — `contains` is true whenever `ends_with` is.)
+fn is_excluded_dir(dir: &Path, config: &Config) -> bool {
+    let dir_str = dir.to_string_lossy();
+    config.exclude_paths.iter().any(|e| dir_str.contains(e))
+}
+
 /// Recursively scan a directory.
 fn scan_directory(
     dir: &Path,
@@ -927,12 +1017,8 @@ fn scan_directory(
     entries: &mut Vec<IndexEntry>,
     stats: &mut ScanStats,
 ) {
-    // Check if this directory is excluded.
-    let dir_str = dir.to_string_lossy();
-    for excl in &config.exclude_paths {
-        if dir_str.ends_with(excl) || dir_str.contains(excl) {
-            return;
-        }
+    if is_excluded_dir(dir, config) {
+        return;
     }
 
     let read_dir = match fs::read_dir(dir) {
@@ -971,11 +1057,12 @@ fn scan_directory(
             FileType::Regular
         };
 
-        // Get filename.
-        let filename = match path.file_name() {
-            Some(f) => f.to_string_lossy().into_owned(),
-            None => continue,
-        };
+        // Get the filename search key. A path with no final component is not a
+        // file we can index.
+        if path.file_name().is_none() {
+            continue;
+        }
+        let filename = filename_key(&path);
 
         // Check extension filters.
         if file_type == FileType::Regular {
@@ -995,13 +1082,11 @@ fn scan_directory(
 
                 // Check include extensions (if set).
                 if let Some(ref includes) = config.include_extensions
-                    && !includes
-                        .iter()
-                        .any(|e| e.to_ascii_lowercase() == ext_lower)
-                    {
-                        stats.files_skipped += 1;
-                        continue;
-                    }
+                    && !includes.iter().any(|e| e.to_ascii_lowercase() == ext_lower)
+                {
+                    stats.files_skipped += 1;
+                    continue;
+                }
             } else if config.include_extensions.is_some() {
                 // No extension and include filter is set — skip.
                 stats.files_skipped += 1;
@@ -1039,10 +1124,7 @@ fn scan_directory(
 }
 
 /// Incremental scan: only re-scan directories whose mtime has changed.
-fn scan_incremental(
-    config: &Config,
-    existing: &mut FileIndex,
-) -> ScanStats {
+fn scan_incremental(config: &Config, existing: &mut FileIndex) -> ScanStats {
     let mut stats = ScanStats::default();
 
     for root in &config.index_paths {
@@ -1065,11 +1147,8 @@ fn scan_directory_incremental(
     index: &mut FileIndex,
     stats: &mut ScanStats,
 ) {
-    let dir_str = dir.to_string_lossy();
-    for excl in &config.exclude_paths {
-        if dir_str.ends_with(excl) || dir_str.contains(excl) {
-            return;
-        }
+    if is_excluded_dir(dir, config) {
+        return;
     }
 
     let dir_meta = match fs::metadata(dir) {
@@ -1088,18 +1167,20 @@ fn scan_directory_incremental(
         .unwrap_or(0);
 
     // Check if we already have an entry for this directory with same mtime.
-    let needs_rescan = !index.entries.iter().any(|e| {
-        e.path == dir && e.file_type == FileType::Directory && e.mtime == dir_mtime
-    });
+    let needs_rescan = !index
+        .entries
+        .iter()
+        .any(|e| e.path == dir && e.file_type == FileType::Directory && e.mtime == dir_mtime);
 
     if !needs_rescan {
         // Still recurse to check subdirectories.
         if let Ok(rd) = fs::read_dir(dir) {
             for entry in rd.flatten() {
                 if let Ok(m) = entry.metadata()
-                    && m.is_dir() {
-                        scan_directory_incremental(&entry.path(), config, index, stats);
-                    }
+                    && m.is_dir()
+                {
+                    scan_directory_incremental(&entry.path(), config, index, stats);
+                }
             }
         }
         return;
@@ -1128,14 +1209,8 @@ fn cmd_start(config: &Config) {
     }
 
     println!("Starting file indexer service...");
-    println!(
-        "  Indexing paths: {:?}",
-        config.index_paths
-    );
-    println!(
-        "  Scan interval: {} seconds",
-        config.scan_interval_secs
-    );
+    println!("  Indexing paths: {:?}", config.index_paths);
+    println!("  Scan interval: {} seconds", config.scan_interval_secs);
 
     // Write PID file.
     if let Err(e) = write_pid_file() {
@@ -1145,10 +1220,7 @@ fn cmd_start(config: &Config) {
     // Initial full scan.
     println!("Performing initial scan...");
     let (mut index, stats) = scan(config);
-    println!(
-        "Initial scan complete. {}",
-        stats
-    );
+    println!("Initial scan complete. {}", stats);
 
     if let Err(e) = index.save() {
         eprintln!("error: failed to save index: {}", e);
@@ -1196,22 +1268,25 @@ fn cmd_stop() {
 /// Show service status.
 fn cmd_status() {
     let running = Path::new(PID_FILE).exists();
-    println!("Indexer service: {}", if running { "running" } else { "stopped" });
+    println!(
+        "Indexer service: {}",
+        if running { "running" } else { "stopped" }
+    );
 
     match FileIndex::load() {
         Ok(index) => {
             println!("  Files indexed:      {}", index.file_count());
             println!("  Directories scanned: {}", index.dirs_scanned);
-            println!("  Last indexed:       {}", format_timestamp(index.last_indexed));
+            println!(
+                "  Last indexed:       {}",
+                format_timestamp(index.last_indexed)
+            );
             println!(
                 "  Index size (approx): {}",
                 format_size(index.approx_size_bytes() as u64)
             );
             if !index.trigram_index.is_empty() {
-                println!(
-                    "  Content trigrams:   {}",
-                    index.trigram_index.len()
-                );
+                println!("  Content trigrams:   {}", index.trigram_index.len());
             }
         }
         Err(e) => {
@@ -1664,6 +1739,100 @@ exclude_extensions = .o, .tmp
         data[4..8].copy_from_slice(&99u32.to_le_bytes()); // Bad version
         let result = FileIndex::deserialize(&data);
         assert!(result.is_err());
+    }
+
+    /// A header of 28..=31 bytes passed the old length check (`< 28`) and then
+    /// panicked reading `dirs_scanned` out of bytes 24..32. A corrupt or
+    /// truncated index file must be an error, never a crash.
+    #[test]
+    fn a_header_that_stops_mid_field_is_an_error_not_a_panic() {
+        for len in 0..INDEX_HEADER_LEN {
+            let mut data = vec![0u8; len];
+            if len >= 4 {
+                data[0..4].copy_from_slice(INDEX_MAGIC);
+            }
+            if len >= 8 {
+                data[4..8].copy_from_slice(&INDEX_VERSION.to_le_bytes());
+            }
+            assert!(
+                FileIndex::deserialize(&data).is_err(),
+                "a {len}-byte index is not a valid index"
+            );
+        }
+    }
+
+    /// An entry count in the header that the file does not actually contain
+    /// must not be trusted into an out-of-bounds read.
+    #[test]
+    fn an_entry_count_larger_than_the_file_is_an_error_not_a_panic() {
+        let mut data = vec![0u8; INDEX_HEADER_LEN];
+        data[0..4].copy_from_slice(INDEX_MAGIC);
+        data[4..8].copy_from_slice(&INDEX_VERSION.to_le_bytes());
+        data[8..16].copy_from_slice(&1_000u64.to_le_bytes());
+        assert!(FileIndex::deserialize(&data).is_err());
+    }
+
+    /// The index stores the path it will later hand back to whoever opens the
+    /// file, so it must store bytes. Written through `to_string_lossy`, a name
+    /// that is not UTF-8 came back with U+FFFD in place of its bytes and no
+    /// longer named anything.
+    ///
+    /// Unix-only: a Windows `OsString` cannot hold such a path at all, and our
+    /// target is `target-family = ["unix"]`.
+    #[cfg(unix)]
+    #[test]
+    fn a_non_utf8_path_survives_the_index_file() {
+        use std::os::unix::ffi::{OsStrExt, OsStringExt};
+        let raw = b"/home/u/caf\xE9.txt".to_vec();
+        let path = PathBuf::from(std::ffi::OsString::from_vec(raw.clone()));
+        let entries = vec![IndexEntry {
+            filename: filename_key(&path),
+            path,
+            size: 3,
+            mtime: 7,
+            file_type: FileType::Regular,
+        }];
+        let data = FileIndex::build_from_entries(entries).serialize();
+        let loaded = FileIndex::deserialize(&data).expect("round trip");
+        assert_eq!(
+            loaded.entries[0].path.as_os_str().as_bytes(),
+            raw.as_slice(),
+            "the 0xE9 must come back as 0xE9, not as U+FFFD"
+        );
+    }
+
+    /// Paths that *are* UTF-8 must survive byte-for-byte too — including the
+    /// multi-byte ones, which is the case a lossy round trip happens to pass.
+    #[test]
+    fn a_multibyte_path_survives_the_index_file() {
+        let path = PathBuf::from("/home/u/写真/Ωμέγα.txt");
+        let entries = vec![IndexEntry {
+            filename: filename_key(&path),
+            path: path.clone(),
+            size: 3,
+            mtime: 7,
+            file_type: FileType::Regular,
+        }];
+        let data = FileIndex::build_from_entries(entries).serialize();
+        let loaded = FileIndex::deserialize(&data).expect("round trip");
+        assert_eq!(loaded.entries[0].path, path);
+        assert_eq!(loaded.entries[0].filename, "Ωμέγα.txt");
+    }
+
+    /// The two scanners each carried a copy of this test; they must agree, and
+    /// the `contains` match is deliberately depth-independent.
+    #[test]
+    fn an_exclusion_matches_at_any_depth() {
+        let config = Config {
+            exclude_paths: vec!["node_modules".to_string()],
+            ..Config::default()
+        };
+        assert!(is_excluded_dir(Path::new("/srv/app/node_modules"), &config));
+        assert!(is_excluded_dir(
+            Path::new("/srv/app/node_modules/pkg/dist"),
+            &config
+        ));
+        assert!(!is_excluded_dir(Path::new("/srv/app/src"), &config));
     }
 
     // ---- Search Tests ----

@@ -5450,6 +5450,9 @@ mod tests {
     /// Height of the pane the results are rendered into by the helpers below.
     const TEST_PANE_HEIGHT: f32 = 400.0;
 
+    /// Width of that pane, for the tests that do not care how wide it is.
+    const TEST_PANE_WIDTH: f32 = 1200.0;
+
     /// The `(y, text)` of every result-message line, and the `y` of the results
     /// table's header row.
     ///
@@ -5457,8 +5460,20 @@ mod tests {
     /// text elsewhere in the window — the status bar and the SQL editor also
     /// draw 11pt in red and green — cannot be mistaken for the message.
     fn results_pane_layout(app: &DbViewerApp) -> (Vec<(f32, String)>, Option<f32>) {
+        results_pane_layout_at(app, TEST_PANE_WIDTH)
+    }
+
+    /// The same, at a caller-chosen width.
+    ///
+    /// Wrapping depends on how wide the host's font draws the message, so a
+    /// test about wrapping has to pick its width from that rather than from a
+    /// constant — see `a_long_query_error_is_wrapped_not_cut_mid_word`.
+    fn results_pane_layout_at(
+        app: &DbViewerApp,
+        width: f32,
+    ) -> (Vec<(f32, String)>, Option<f32>) {
         let mut cmds = Vec::new();
-        app.render_results(&mut cmds, 0.0, 0.0, 1200.0, TEST_PANE_HEIGHT);
+        app.render_results(&mut cmds, 0.0, 0.0, width, TEST_PANE_HEIGHT);
         let lines = cmds
             .iter()
             .filter_map(|c| match c {
@@ -5484,20 +5499,28 @@ mod tests {
         (lines, header_y)
     }
 
-    /// The `(y, text)` of every result-message line drawn.
-    fn result_message_lines(app: &DbViewerApp) -> Vec<(f32, String)> {
-        results_pane_layout(app).0
-    }
-
     #[test]
     fn a_long_query_error_is_wrapped_not_cut_mid_word() {
         // `RenderCommand::Text` clips at `max_width`, so the error the engine
         // reported used to reach the user as its first line and no more.
+        //
+        // The pane is sized from what the message *measures*, not from a
+        // constant, because the constant went stale and took the test with
+        // it. This was written against a 1200px pane, which leaves the
+        // message 1176px, back when the toolkit measured with the built-in
+        // 8x16 bitmap font and these 184 characters came to ~1470px. Once
+        // `SystemFont` began resolving a real proportional host face the same
+        // string measured 988px, fit on one line, and the test failed —
+        // reporting a wrapping bug where there was none, purely because the
+        // font got narrower. Asking for half the message's own width forces
+        // an overflow on any face, however wide it draws.
+        let msg_width = text::measure(LONG_ERROR, RESULT_MSG_FONT_SIZE, FontWeightHint::Bold) / 2.0;
         let app = app_showing(QueryResult::error(LONG_ERROR));
-        let lines = result_message_lines(&app);
+        // `render_results` gives the message the pane's width less 24.
+        let lines = results_pane_layout_at(&app, msg_width + 24.0).0;
         assert!(
             lines.len() > 1,
-            "the error was drawn as {} command(s)",
+            "the error was drawn as {} command(s) in {msg_width}px",
             lines.len()
         );
         let drawn: String = lines

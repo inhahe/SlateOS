@@ -457,6 +457,15 @@ pub fn category_icon(cat: FileCategory) -> &'static str {
 
 // ─── Search Index ────────────────────────────────────────────────────
 
+/// Longest trailing segment still treated as a file extension.
+///
+/// Past this it is almost certainly part of the name — a timestamp or a version
+/// suffix — rather than a format. The previous limit was nine characters, which
+/// was really standing in for "reject the whole name when it has no dot"; now
+/// that the dotless case is rejected directly, the limit can be generous enough
+/// for the real long ones (`.properties`, `.compressed`, `.appxbundle`).
+const MAX_EXTENSION_LEN: usize = 24;
+
 /// An indexed file entry
 #[derive(Debug, Clone)]
 pub struct IndexEntry {
@@ -482,10 +491,18 @@ impl IndexEntry {
         created: u64,
         is_dir: bool,
     ) -> Self {
+        // An extension is what follows the *last* dot, and only if there is a
+        // dot with something before it. `rsplit('.').next()` does not say that:
+        // on a name with no dot it yields the whole name, so `readme` was
+        // indexed with extension `readme`, shown as type "README", and
+        // categorised as if `readme` were a format. A leading dot is likewise
+        // not an extension — `.bashrc` is a name — so an empty stem is
+        // rejected too.
         let ext = name
-            .rsplit('.')
-            .next()
-            .filter(|e| e.len() < 10 && !e.contains('/'))
+            .rsplit_once('.')
+            .filter(|(stem, _)| !stem.is_empty())
+            .map(|(_, ext)| ext)
+            .filter(|e| e.len() <= MAX_EXTENSION_LEN && !e.contains('/'))
             .unwrap_or("")
             .to_string();
         let category = if is_dir {
@@ -940,6 +957,7 @@ impl fmt::Display for SortColumn {
 
 use guitk::render::{FontWeightHint, RenderCommand};
 use guitk::style::CornerRadii;
+use guitk::table::{Column, Fit, Table};
 
 mod colors {
     use guitk::Color;
@@ -963,6 +981,44 @@ mod colors {
     pub const OVERLAY0: Color = Color::from_hex(0x6C7086);
     pub const MAUVE: Color = Color::from_hex(0xCBA6F7);
 }
+
+/// Columns of the results table.
+///
+/// One definition that the header row and the body rows both read, so they
+/// cannot drift apart — and so a test can ask whether a cell fits its column.
+const RESULT_COLUMNS: &[Column] = &[
+    Column {
+        label: "Name",
+        width: 260.0,
+    },
+    Column {
+        label: "Path",
+        width: 200.0,
+    },
+    Column {
+        label: "Size",
+        width: 80.0,
+    },
+    Column {
+        label: "Modified",
+        width: 120.0,
+    },
+    Column {
+        label: "Type",
+        width: 80.0,
+    },
+];
+
+const COL_NAME: usize = 0;
+const COL_PATH: usize = 1;
+const COL_SIZE: usize = 2;
+const COL_MODIFIED: usize = 3;
+const COL_TYPE: usize = 4;
+
+/// Font size of the results table's name cell.
+const ROW_FONT: f32 = 12.0;
+/// Font size of the results table's header and its remaining cells.
+const ROW_FONT_SMALL: f32 = 11.0;
 
 /// Main file search application
 pub struct FileSearchApp {
@@ -1418,28 +1474,19 @@ impl FileSearchApp {
         }
     }
 
+    /// Draw the results table.
+    ///
+    /// Every cell here holds something the filesystem chose, not something this
+    /// app authored — a filename, a directory, an extension — and the two that
+    /// overflow in practice are Name and Path, which were clipped mid-glyph
+    /// with no marker that anything had been dropped. Size and Type were drawn
+    /// with no width at all; they happen to fit today only because
+    /// [`IndexEntry::new`] refuses extensions of ten characters or more, which
+    /// is an incidental property of the parser and not something a table should
+    /// be relying on. All five now go through [`Table::cell`].
     fn render_results(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, w: f32, h: f32) {
-        // Column headers
-        let cols = [
-            ("Name", 260.0),
-            ("Path", 200.0),
-            ("Size", 80.0),
-            ("Modified", 120.0),
-            ("Type", 80.0),
-        ];
-        let mut cx = x + 8.0;
-        for (label, cw) in &cols {
-            cmds.push(RenderCommand::Text {
-                x: cx,
-                y: y + 4.0,
-                text: label.to_string(),
-                font_size: 11.0,
-                color: colors::OVERLAY0,
-                font_weight: FontWeightHint::Bold,
-                max_width: Some(*cw),
-            });
-            cx += cw + 8.0;
-        }
+        let table = Table::new(RESULT_COLUMNS, x);
+        table.header(cmds, y + 4.0, colors::OVERLAY0, ROW_FONT_SMALL);
 
         let row_h = 28.0;
         let mut ry = y + 24.0;
@@ -1484,85 +1531,80 @@ impl FileSearchApp {
                 });
             }
 
-            let mut cx = x + 8.0;
+            let cy = ry + 6.0;
 
-            // Name with icon
+            // Name with icon.
             let icon = if entry.is_directory {
                 "📁"
             } else {
                 category_icon(entry.category)
             };
-            cmds.push(RenderCommand::Text {
-                x: cx,
-                y: ry + 6.0,
-                text: format!("{icon} {}", entry.name),
-                font_size: 12.0,
-                color: if entry.is_directory {
+            table.cell(
+                cmds,
+                COL_NAME,
+                cy,
+                &format!("{icon} {}", entry.name),
+                if entry.is_directory {
                     colors::BLUE
                 } else {
                     colors::TEXT
                 },
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(260.0),
-            });
-            cx += 268.0;
+                ROW_FONT,
+                Fit::Start,
+            );
 
-            // Path
-            cmds.push(RenderCommand::Text {
-                x: cx,
-                y: ry + 6.0,
-                text: entry.parent_dir().to_string(),
-                font_size: 11.0,
-                color: colors::SUBTEXT0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(200.0),
-            });
-            cx += 208.0;
+            // The directory is cut at the *front*: what distinguishes two
+            // results is the deepest directory, not the mount point they share.
+            table.cell(
+                cmds,
+                COL_PATH,
+                cy,
+                entry.parent_dir(),
+                colors::SUBTEXT0,
+                ROW_FONT_SMALL,
+                Fit::End,
+            );
 
-            // Size
-            cmds.push(RenderCommand::Text {
-                x: cx,
-                y: ry + 6.0,
-                text: if entry.is_directory {
+            table.cell(
+                cmds,
+                COL_SIZE,
+                cy,
+                &if entry.is_directory {
                     "—".to_string()
                 } else {
                     format_size(entry.size)
                 },
-                font_size: 11.0,
-                color: colors::SUBTEXT1,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-            });
-            cx += 88.0;
+                colors::SUBTEXT1,
+                ROW_FONT_SMALL,
+                Fit::Start,
+            );
 
-            // Modified date (just show relative)
             let age = self.criteria.current_time.saturating_sub(entry.modified);
-            let date_str = format_relative_time(age);
-            cmds.push(RenderCommand::Text {
-                x: cx,
-                y: ry + 6.0,
-                text: date_str,
-                font_size: 11.0,
-                color: colors::SUBTEXT0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(120.0),
-            });
-            cx += 128.0;
+            table.cell(
+                cmds,
+                COL_MODIFIED,
+                cy,
+                &format_relative_time(age),
+                colors::SUBTEXT0,
+                ROW_FONT_SMALL,
+                Fit::Start,
+            );
 
-            // Type
-            cmds.push(RenderCommand::Text {
-                x: cx,
-                y: ry + 6.0,
-                text: if entry.extension.is_empty() {
+            // An extension is whatever follows the last dot in a name the app
+            // did not choose, so its length is not ours to assume.
+            table.cell(
+                cmds,
+                COL_TYPE,
+                cy,
+                &if entry.extension.is_empty() {
                     "—".to_string()
                 } else {
                     entry.extension.to_uppercase()
                 },
-                font_size: 11.0,
-                color: colors::PEACH,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-            });
+                colors::PEACH,
+                ROW_FONT_SMALL,
+                Fit::Start,
+            );
 
             ry += row_h;
         }
@@ -2243,5 +2285,178 @@ mod tests {
     fn test_entry_parent_dir() {
         let entry = IndexEntry::new("/home/user/test.txt", "test.txt", 100, 0, 0, false);
         assert_eq!(entry.parent_dir(), "/home/user");
+    }
+
+    // ─── Extension parsing ───────────────────────────────────────────
+
+    fn ext_of(name: &str) -> String {
+        IndexEntry::new(&format!("/tmp/{name}"), name, 0, 0, 0, false).extension
+    }
+
+    #[test]
+    fn a_name_with_no_dot_has_no_extension() {
+        // `rsplit('.').next()` yields the whole string when there is no dot, so
+        // `readme` used to be indexed with extension `readme` and displayed in
+        // the Type column as "README".
+        assert_eq!(ext_of("readme"), "");
+        assert_eq!(ext_of("Makefile"), "");
+        assert_eq!(ext_of("LICENSE"), "");
+    }
+
+    #[test]
+    fn a_leading_dot_is_a_name_not_an_extension() {
+        assert_eq!(ext_of(".bashrc"), "");
+        assert_eq!(ext_of(".gitignore"), "");
+    }
+
+    #[test]
+    fn a_dotfile_with_a_real_extension_keeps_it() {
+        assert_eq!(ext_of(".eslintrc.json"), "json");
+    }
+
+    #[test]
+    fn the_last_dot_wins() {
+        assert_eq!(ext_of("archive.tar.gz"), "gz");
+        assert_eq!(ext_of("v1.2.3.zip"), "zip");
+    }
+
+    #[test]
+    fn a_long_but_real_extension_is_kept() {
+        // The old nine-character limit dropped these on the floor, because it
+        // was really compensating for the dotless-name bug above.
+        assert_eq!(ext_of("app.properties"), "properties");
+        assert_eq!(ext_of("bundle.appxbundle"), "appxbundle");
+    }
+
+    #[test]
+    fn an_absurd_trailing_segment_is_not_an_extension() {
+        let name = format!("backup.{}", "z".repeat(MAX_EXTENSION_LEN + 1));
+        assert_eq!(ext_of(&name), "");
+    }
+
+    #[test]
+    fn an_extension_is_indexed_lowercase() {
+        assert_eq!(ext_of("PHOTO.JPEG"), "jpeg");
+    }
+
+    // ─── Results table column fitting ────────────────────────────────
+    //
+    // Every cell in this table holds a string the filesystem chose. These tests
+    // hold the table to the rule that no cell draws past its column's right
+    // edge, and that a value too long to show is visibly cut rather than
+    // silently clipped.
+
+    /// An index holding one entry whose every field is far too long for its
+    /// column, and one that comfortably fits.
+    fn app_with_a_shouting_result() -> FileSearchApp {
+        let mut app = FileSearchApp::new();
+        app.index.add(IndexEntry::new(
+            "/home/user/archive/2024/quarterly/very/deeply/nested/reports/\
+             An Extremely Long Report Filename That Will Not Fit In The Column.pdf",
+            "An Extremely Long Report Filename That Will Not Fit In The Column.pdf",
+            123_456_789,
+            1_000,
+            0,
+            false,
+        ));
+        app.index
+            .add(IndexEntry::new("/tmp/a.txt", "a.txt", 12, 1_000, 0, false));
+        app.criteria = SearchCriteria::new("");
+        app.criteria.current_time = 2_000;
+        app.results = vec![0, 1];
+        app
+    }
+
+    #[test]
+    fn no_result_cell_escapes_its_column() {
+        let app = app_with_a_shouting_result();
+        let mut cmds = Vec::new();
+        // Render the results panel directly: a whole-app render puts sidebar
+        // and search-bar text at x values that fall inside a column's range,
+        // and the assertion would then fail on chrome that is not in the table.
+        app.render_results(&mut cmds, 0.0, 0.0, 900.0, 400.0);
+
+        let table = Table::new(RESULT_COLUMNS, 0.0);
+        let spans = table.spans();
+        let mut checked = 0usize;
+        for cmd in &cmds {
+            let RenderCommand::Text {
+                x,
+                text,
+                font_size,
+                font_weight,
+                max_width: Some(_),
+                ..
+            } = cmd
+            else {
+                continue;
+            };
+            let Some(&(_, right)) = spans.iter().find(|(l, _)| (l - x).abs() < 0.01) else {
+                continue;
+            };
+            let drawn = x + guitk::text::measure(text, *font_size, *font_weight);
+            assert!(
+                drawn <= right + 0.5,
+                "cell {text:?} starting at {x} runs to {drawn}, \
+                 past its column's right edge {right}"
+            );
+            checked += 1;
+        }
+        // 5 header labels + 2 rows x 5 cells.
+        assert!(checked >= 15, "only {checked} cells checked");
+    }
+
+    /// The texts drawn in one column of the results table, header excluded.
+    fn result_column_cells(cmds: &[RenderCommand], index: usize) -> Vec<String> {
+        let left = Table::new(RESULT_COLUMNS, 0.0).left(index);
+        cmds.iter()
+            .filter_map(|cmd| match cmd {
+                RenderCommand::Text {
+                    x,
+                    text,
+                    font_weight: FontWeightHint::Regular,
+                    max_width: Some(_),
+                    ..
+                } if (x - left).abs() < 0.01 => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn an_overlong_filename_is_marked_as_cut() {
+        let app = app_with_a_shouting_result();
+        let mut cmds = Vec::new();
+        app.render_results(&mut cmds, 0.0, 0.0, 900.0, 400.0);
+        let names = result_column_cells(&cmds, COL_NAME);
+        assert!(
+            names.iter().any(|n| n.ends_with('…')),
+            "a filename too long for its column must be visibly cut: {names:?}"
+        );
+        assert!(
+            names.iter().any(|n| n.ends_with("a.txt")),
+            "a filename that fits must be drawn verbatim: {names:?}"
+        );
+    }
+
+    #[test]
+    fn an_overlong_directory_keeps_its_deepest_component() {
+        let app = app_with_a_shouting_result();
+        let mut cmds = Vec::new();
+        app.render_results(&mut cmds, 0.0, 0.0, 900.0, 400.0);
+        let paths = result_column_cells(&cmds, COL_PATH);
+        let deep = paths
+            .iter()
+            .find(|p| p.starts_with('…'))
+            .expect("the deep path should be cut at the front");
+        assert!(
+            deep.ends_with("reports"),
+            "what distinguishes two results is the deepest directory, \
+             which must survive the cut: {deep:?}"
+        );
+        assert!(
+            paths.iter().any(|p| p == "/tmp"),
+            "a path that fits must be drawn verbatim: {paths:?}"
+        );
     }
 }

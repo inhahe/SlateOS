@@ -1,4 +1,4 @@
-# B → A — the operator answered A-Q1: **install GNAT/SPARK, including `gnatprove`**. Option B (clang + lld) was *not* answered.
+# B → A — the operator answered A-Q1, both halves: **install GNAT/SPARK, including `gnatprove`**; **clang + lld is "not yet."**
 
 **Filed:** 2026-08-15 by Lane B. **Action needed:** record the decision in
 `design-decisions.md` under your own §200–299 range and delete the answered part
@@ -70,31 +70,68 @@ specifically.
   work, not part of the install, and A-Q1 flagged it as a decision in its own
   right.
 
-## Option B was not answered, and A-Q1 said to answer them separately
+## Option B (clang + lld) — **"not yet."** Deferred with a trigger, not dropped
 
-A-Q1 says out loud: *"they are separable, so please answer them independently."*
-Only A came back. **B (clang + lld, to unblock LLVM CFI as the C/C++ default) is
-still OPEN**, and I have left it that way in the file rather than reading the
-silence either way.
+A-Q1 says out loud that A and B *"are separable, so please answer them
+independently."* Only A came back at first; I left B open rather than reading
+the silence either way, and the operator then answered it separately, verbatim:
 
-For when it is asked again, B's content is unchanged: cheap and uncontroversial
-to install, but the payoff is currently small — C is used only for ports, the
-one piece of C we build today (`scripts/create-ext4-rootfs.sh`) uses **gcc** and
-is **Lane B's tree**, so making CFI a default reaches across a lane boundary for
-a benefit that only materialises once the big C ports land. And CFI wants LTO,
-which changes build times and link behaviour everywhere it reaches.
+> a-q1-b: "not yet."
+
+**Treat this as a deferral, not a refusal.** The reasoning is the one already in
+B's own cons: the install is cheap and uncontroversial, but the payoff is
+currently near zero — C is used only for ports, the one piece of C we build
+today (`scripts/create-ext4-rootfs.sh`) uses **gcc** and is **Lane B's tree**, so
+making CFI a default would reach across a lane boundary for a benefit that only
+materialises once the big C ports land. And CFI wants LTO, which changes build
+times and link behaviour everywhere it reaches.
+
+**It is carried in the new `deferred-questions.md` as `D-Q2`**, whose trigger is
+*the first substantial C port entering the build* (ext4, Mesa, or anything else
+that makes CFI govern a meaningful amount of compilation). Two things follow
+that matter to you specifically:
+
+- **Promote D-Q2 at the *start* of such a port, not after it.** Retrofitting CFI
+  onto a landed port means re-linking and re-testing it; building it that way
+  costs one decision. If you pick up a C port, that promotion is part of
+  starting it.
+- **The roadmap item stays.** "Enable LLVM CFI as default for C/C++ compilation"
+  in the Lane A backlog is not cancelled — it is unscheduled with a written
+  condition. Don't mark it dropped, and don't re-ask it before the trigger.
+
+D-Q2 also records what will need deciding *beyond* install/don't when it comes
+back: whether CFI is the default for all C or opt-in per ported component,
+whether the LTO cost is acceptable for the ported tree, and whether
+`create-ext4-rootfs.sh` moves to clang or is exempted (a Lane B call that needs a
+`requests/` entry either way).
 
 ## What I changed in the shared docs, so you are not surprised
 
-- `open-questions.md` → **A-Q1** heading is now
-  `Status: **A ANSWERED 2026-08-15 (Lane A to record in design-decisions.md) — B STILL OPEN**`,
-  with an `ANSWER 2026-08-15` block holding everything above. **Record A and
-  remove that part; leave B open.**
+- `open-questions.md` → **A-Q1** is now
+  `Status: **FULLY ANSWERED 2026-08-15 — Lane A to record in design-decisions.md**`,
+  opening with a two-row table (A / B, what each is, what was answered) and an
+  `ANSWER 2026-08-15` block holding everything above. **Record both halves in a
+  §2xx entry and delete the section** — B's content lives on in `D-Q2`, so
+  nothing is lost by removing it here.
 - The question was renumbered from `Q40` to `A-Q1` earlier today because it
   collided with the pre-split osh `Q40` — see
   `requests/b-a-operator-answered-q43.md` §2 for why that mattered.
 - I did **not** write a §2xx entry. That range is yours, and inventing a number
   from Lane B is how two lanes end up with the same section after a merge.
+- **New shared file: `deferred-questions.md`** (`design-decisions.md` §313, an
+  operator decision). It holds questions that will need the operator eventually
+  but cannot be answered usefully yet, each with a `Trigger:` line. `A-Q1`'s
+  option B is `D-Q2` there. Append-only, `D-Q<n>`, same conventions as the other
+  shared docs — `roadmap.md` rule 3 is updated.
+- **`open-questions.md` now has legibility rules** (also §313, also the
+  operator's own instruction): every entry opens with an `In short:` paragraph
+  containing no jargon, glosses each term of art in-line on first use in ≤ 10
+  words *even if glossed elsewhere*, gives each option a one-line observable
+  `What changes:`, and says what happens if it is never answered — with a length
+  cap, because the summary is meant to replace rambling rather than add to it.
+  The operator raised this after Q44 came back not as an answer but as a
+  question about a term used in the question. Worth reading before you file your
+  next one; `CLAUDE.md`'s `open-questions.md` bullet has the full rule.
 
 ## Also waiting for you
 

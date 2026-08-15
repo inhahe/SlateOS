@@ -390,30 +390,32 @@ blindly.
 `gui/toolkit/src/text.rs` (`elide` / `elide_start`), and every `max_width:
 Some(..)` in `gui/**` and `apps/**`.
 
-## A-Q1 — Install the GNAT/SPARK and LLVM toolchains? — Status: **A ANSWERED 2026-08-15 (Lane A to record in `design-decisions.md`) — B STILL OPEN**
+## A-Q1 — Install the GNAT/SPARK and LLVM toolchains? — Status: **FULLY ANSWERED 2026-08-15 — Lane A to record in `design-decisions.md`**
 
 **In short:** this entry asked about **two unrelated compiler installs** in one
-question, and only the first was answered.
+question. Both are now answered, separately.
 
-| | What it is | Status |
+| | What it is | Answer |
 |---|---|---|
-| **A** | **Ada/SPARK** — a second programming language whose toolchain can mathematically *prove* driver code has no buffer overflows and no bad state transitions. `design.txt` wants it for safety-critical drivers. | ✅ **Answered: install it, with the prover (`gnatprove`).** |
-| **B** | **clang + lld** — an alternative C compiler and linker. Installing them is what would let us switch on **CFI** (Control-Flow Integrity: a compiler feature that stops an attacker redirecting a function call to code of their choosing). | ❓ **Still open — nothing has been said about it.** |
+| **A** | **Ada/SPARK** — a second programming language whose toolchain can mathematically *prove* driver code has no buffer overflows and no bad state transitions. `design.txt` wants it for safety-critical drivers. | ✅ **Install it, with the prover (`gnatprove`).** |
+| **B** | **clang + lld** — an alternative C compiler and linker. Installing them is what would let us switch on **CFI** (Control-Flow Integrity: a compiler feature that stops an attacker redirecting a function call to code of their choosing). | ⏸ **"not yet."** Deferred, not refused → `deferred-questions.md` **D-Q2**. |
 
-**What B is actually asking you for:** one word, install or don't. It is a
-small, standard, uncontroversial install. The only reason it isn't obvious is
-that the payoff is currently near zero — we use C only for *ported* code, and
-the one piece of C we compile today (`scripts/create-ext4-rootfs.sh`) is built
-with gcc, so turning CFI on would change Lane B's build for a benefit that only
-arrives when the big C ports (ext4, Mesa) land. It also pulls in LTO
+**On B — "not yet" (operator, 2026-08-15).** The install itself is small and
+uncontroversial; what is missing is a reason. We use C only for *ported* code,
+and the one piece of C we compile today (`scripts/create-ext4-rootfs.sh`) is
+built with gcc — so turning CFI on now would change Lane B's build for a benefit
+that only materialises when the big C ports land, and would pull in LTO
 (whole-program optimization at link time), which slows every build it touches.
-Saying "not yet" costs nothing; nothing is blocked either way.
+Nothing is blocked by waiting. It moves to `deferred-questions.md` as **D-Q2**
+with an explicit trigger — the first substantial C port entering the build — so
+it comes back when the payoff is real rather than being quietly dropped.
 
-*(Two smaller follow-ups inside A are also unsettled — which GNAT distribution
+*(Two smaller follow-ups inside A are still unsettled — which GNAT distribution
 to install, and which cut-down Ada runtime to use — but those are Lane A's calls
-to make, not yours. They are spelled out at the end of the answer below.)*
+to make, not the operator's. They are spelled out at the end of the answer
+below.)*
 
-### ANSWER 2026-08-15 — option **A**, including `gnatprove`. Option **B** was not answered.
+### ANSWER 2026-08-15 — option **A**, including `gnatprove`. Option **B**: "not yet" (deferred as D-Q2).
 
 The operator answered in a Lane B session. Verbatim:
 
@@ -451,13 +453,23 @@ to escalate:
   full Ada runtime, which wants an OS underneath it. This is configuration work
   with real content, not part of the install.
 
-**Option B (clang + lld, for LLVM CFI) was not answered and is still open.**
-This question says out loud that A and B "are separable, so please answer them
-independently", and only A came back. B remains as written: cheap and
-uncontroversial to install, but its payoff is currently small (C is used only
-for ports, and the C in `scripts/create-ext4-rootfs.sh` is built with gcc and is
-Lane B's tree), and CFI wants LTO, which changes build times and link behaviour
+**Option B (clang + lld, for LLVM CFI) — the operator's answer was "not yet."**
+It arrived separately, after the A answer, because this question says out loud
+that A and B "are separable, so please answer them independently" and only A had
+come back. **"Not yet" is a deferral, not a refusal**, and the reasoning is the
+one already written into B's cons: cheap and uncontroversial to install, but the
+payoff is currently near zero — C is used only for ports, the one piece of C we
+compile today (`scripts/create-ext4-rootfs.sh`) is built with gcc and is Lane
+B's tree, and CFI wants LTO, which changes build times and link behaviour
 everywhere it reaches.
+
+**Do not silently drop it.** It is carried in `deferred-questions.md` as
+**D-Q2**, whose trigger is *the first substantial C port entering the build*
+(ext4, Mesa, or anything else that makes `clang`'s CFI govern a meaningful
+amount of compilation). Whoever starts such a port promotes D-Q2 back into this
+file. Note the ordering that follows: **install clang/lld and decide CFI at the
+start of that port, not after it**, because retrofitting CFI onto a landed port
+means re-linking and re-testing it rather than building it that way once.
 
 **Recording:** the decision belongs in `design-decisions.md` under Lane A's
 §200–299 range. Lane B has deliberately **not** written it there — inventing a

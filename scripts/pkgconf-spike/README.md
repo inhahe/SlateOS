@@ -49,13 +49,23 @@ handful of minutes and it certified 53 symbols against real software rather
 than against our own expectations.
 
 It also settles a live question. `userspace/pkgconf/` had an in-progress Rust
-reimplementation (~5 modules, 112 passing tests, never built for the
-`x86_64-slateos` target) which prompted the operator's question — *"if upstream
-pkgconf doesn't build against our libc, could that be taken as a suggestion to
-improve our libc for it and for future apps instead?"* — that became §307. The
-premise turned out not to apply: nothing needed improving. Per the policy the
-port wins, and the rewrite is preserved but not merged, on the branch
-`wip/pkgconf-rust-parked`.
+reimplementation (5 modules, 3,143 lines, 112 passing tests) which prompted the
+operator's question — *"if upstream pkgconf doesn't build against our libc,
+could that be taken as a suggestion to improve our libc for it and for future
+apps instead?"* — that became §307. The premise turned out not to apply: nothing
+needed improving. Per the policy the port wins, and the rewrite is preserved but
+not merged, on the branch `wip/pkgconf-rust-parked`.
+
+That rewrite is **unfinished**, and is now labelled as such in two places so
+nobody picks it up expecting a nearly-done job: `userspace/pkgconf/STATUS.md`
+and `known-issues.md` →
+`TD-PKGCONF-THE-RUST-REWRITE-IS-UNFINISHED-AND-SUPERSEDED-BY-THE-UPSTREAM-PORT`.
+Measured state: 112/112 tests pass and it *does* build for `x86_64-slateos`
+(an earlier note of mine claiming otherwise was wrong), but it implements 34 of
+upstream's 62 long options, clippy is red with 9 errors, and it has never run
+under the kernel. Note the shape of that comparison — the port reached a
+working binary in minutes; the rewrite is 3,143 lines in and still roughly half
+an implementation.
 
 ## What this spike does *not* establish
 

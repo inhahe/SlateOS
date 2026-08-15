@@ -2369,7 +2369,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] ffmpeg/ffprobe/ffplay: Multimedia framework (encode/decode/analyze, codecs/formats/filters, ~210 lines)
   - [x] convert/identify/mogrify/composite/montage/magick: ImageMagick image processing (resize/crop/rotate/blur/annotate, ~285 lines)
   - [x] valgrind/callgrind_annotate/ms_print: Memory debugging (memcheck/callgrind/cachegrind/massif/helgrind/drd, ~280 lines)
-  - [x] pkgconf/pkg-config: Package configuration (--cflags/--libs/--modversion/--exists/--list-all, ~200 lines)
+  - [x] pkgconf/pkg-config: Package configuration (--cflags/--libs/--modversion/--exists/--list-all, ~200 lines) — **superseded, do not extend.** An in-tree Rust rewrite of this grew to 3,143 lines and ~half of upstream's option surface before it was found that upstream pkgconf 2.3.0 links against our libc unmodified (`scripts/pkgconf-spike/`, `design-decisions.md` §307). The rewrite is unfinished and parked (`userspace/pkgconf/STATUS.md`, `known-issues.md` → `TD-PKGCONF-…`); the port is what should ship.
   - [x] sensors/sensors-detect/pwmconfig/fancontrol: Hardware monitoring (CPU/GPU/voltage/fan, JSON/Fahrenheit, ~295 lines)
   - [x] tmux: terminal multiplexer (new-session/attach/detach/list-sessions/kill-session/split-window/list-keys, ~195 lines)
   - [x] ruby/irb/gem/rake/bundler/erb/rdoc/ri: Ruby interpreter and toolchain (~235 lines)

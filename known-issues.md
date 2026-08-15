@@ -79,6 +79,81 @@ fresh measurement disagree, the measurement wins.
 
 ## Active Bugs
 
+### TD-PKGCONF-THE-RUST-REWRITE-IS-UNFINISHED-AND-SUPERSEDED-BY-THE-UPSTREAM-PORT. 34 of upstream's 62 options, clippy-red, never run on target — kept as reference only — 2026-08-14
+
+**Where:** `userspace/pkgconf/src/` — `main.rs` (1,075 lines), `flags.rs` (454),
+`pcfile.rs` (667), `store.rs` (646), `version.rs` (301); 3,143 lines total.
+Archived complete on branch `wip/pkgconf-rust-parked`.
+
+**⚠️ Do not "finish" this without asking the operator first.** It is not a
+half-done task waiting to be completed — it is work that was **superseded while
+in progress**, and completing it would spend hours re-solving a problem that is
+already solved. Read `design-decisions.md` §307 and `scripts/pkgconf-spike/`
+before touching it.
+
+**What happened.** This crate was a from-scratch Rust reimplementation of
+pkgconf, started without first checking whether upstream pkgconf builds for
+SlateOS. It does. Upstream pkgconf 2.3.0 cross-compiles and links against
+`toolchain/sysroot/lib/libc.a` with zero source changes, zero shims and **zero
+missing symbols** on the first attempt (`scripts/pkgconf-spike/`). Per §307 and
+`roadmap-detailed.md`'s "Porting vs. Reimplementing" policy, the port wins.
+
+**What actually works** (all measured 2026-08-14, not assumed):
+
+- **112/112 unit tests pass.** `cargo +nightly test -p pkgconf --target
+  x86_64-pc-windows-gnu` **from the repo root** — 112 passed, 0 failed, 0.09s.
+- **It builds and links for the real target.** `cargo +nightly build-slateos -p
+  pkgconf` produces a 21 MB static `ET_EXEC` for `x86_64-slateos`. An earlier
+  note in the wip commit message claiming it was "never built for the
+  x86_64-slateos target" was wrong; it builds.
+- The `rpmvercmp` implementation in `version.rs` is genuinely complete and
+  well-tested, including the `~` pre-release rule that pkg-config 0.29 itself
+  gets wrong. If any part of this is worth salvaging, it is that file.
+
+**What does not work:**
+
+- **34 of upstream's 62 long options are implemented.** Missing: `about`,
+  `define-prefix`, `digraph`, `dont-relocate-paths`, `dump-personality`, `env`,
+  `env-only`, `exists-cflags`, `fragment-filter`, `ignore-conflicts`,
+  `internal-cflags`, `license`, `list-package-names`, `log-file`,
+  `maximum-traverse-depth`, `msvc-syntax`, `no-cache`, `no-provides`,
+  `no-uninstalled`, `path`, `personality`, `prefix-variable`, `pure`,
+  `relocate`, `shared`, `simulate`, `solution`, `verbose` — 28 in all.
+  (`--frobnicate` and `--weird-name` appear in the source but are test
+  fixtures for the unknown-option and `--` paths, not features.)
+- **Clippy is red: 9 errors, 2 warnings**, so the crate violates CLAUDE.md's
+  "clippy clean" bar. The errors are all cosmetic-grade
+  (`format!` appended to a `String` ×3, missing doc backticks ×2, collapsible
+  `if`, identical match arms, >3 bools in a struct, case-sensitive extension
+  compare).
+- **The 2 warnings are the real tell that it is unfinished**, not style noise:
+  `PcFile::path` is never read even though its doc comment says "`--validate`
+  and error messages quote this", and `Store::dirs()` is never called. Both are
+  scaffolding for features that were never wired up.
+- **It has never been executed under the SlateOS kernel.** No on-target
+  self-test exists.
+
+**A hazard in the working tree.** `main.rs` is *tracked and modified*, while
+`flags.rs`, `pcfile.rs`, `store.rs` and `version.rs` are *untracked*. The
+committed `main.rs` is the older ~200-line standalone version with no `mod`
+declarations. So committing `main.rs` alone would break the crate — it would
+reference four modules that do not exist in the index. Commit all five or none.
+The `wip/pkgconf-rust-parked` branch holds a consistent snapshot of all five.
+
+**The proper fix, in the operator's preferred order:**
+
+1. Ship upstream pkgconf. Needs the on-target ring-3 self-test described in
+   `scripts/pkgconf-spike/README.md` ("What this spike does *not* establish") —
+   `realpath`/`lstat`/`opendir` behaviour on our VFS and the 0x1000/0x2000
+   segment alignment against our 16 KiB pages are the open questions.
+2. Delete this crate, keeping `wip/pkgconf-rust-parked` as the archive, and
+   drop `roadmap.md`'s `[x] pkgconf/pkg-config … ~200 lines` claim to point at
+   the port instead.
+3. Only if the operator wants a native Rust pkgconf for a reason the port
+   cannot serve: finish the 28 options, clear clippy, wire up `path`/`dirs`,
+   and add the on-target test. Record the reason under §307's "Where it flips".
+
+
 ### B-MOUNT-ACCEPTS-UNREACHABLE-MOUNT-POINTS. `Vfs::mount` succeeds when the mount point's parent does not exist, producing a filesystem nothing can reach — 2026-08-13 — ✅ FIXED 2026-08-13 (`kernel/src/fs/vfs.rs`, `kernel/src/fs/overlay.rs`)
 
 **Symptom.** The overlay filesystem self-test failed on every boot, so the boot

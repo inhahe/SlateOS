@@ -33,35 +33,54 @@ use std::fmt;
 
 /// Match a string against a glob pattern
 /// Supports: * (any chars), ? (single char), [a-z] (char class)
+///
+/// Both engines in this module work on `&[char]`, not `&[u8]`. They used to
+/// step a byte at a time, which made `?` match one *byte*: `?.txt` did not
+/// match `\u{65e5}.txt`, and `[\u{e9}]` matched either half of the two-byte
+/// `\u{e9}` and so also matched part of the unrelated `\u{e8}`. Since both
+/// inputs here are `&str` — filenames already validated as UTF-8 — character
+/// semantics is both what these doc comments promise and what the caller can
+/// supply. (Contrast `apps/backup`, whose matcher runs on raw path bytes that
+/// need not be UTF-8, so there only the `?` advance could be fixed.)
 #[must_use]
 pub fn glob_match(pattern: &str, text: &str) -> bool {
-    glob_match_impl(pattern.as_bytes(), text.as_bytes())
+    let pat: Vec<char> = pattern.chars().collect();
+    let txt: Vec<char> = text.chars().collect();
+    glob_match_chars(&pat, &txt)
 }
 
-fn glob_match_impl(pattern: &[u8], text: &[u8]) -> bool {
+/// `glob_match` for callers that already hold decoded characters. Searching an
+/// index calls this once per entry, so the pattern is decoded once by the
+/// caller instead of once per candidate.
+#[must_use]
+pub fn glob_match_chars(pattern: &[char], text: &[char]) -> bool {
+    glob_match_impl(pattern, text)
+}
+
+fn glob_match_impl(pattern: &[char], text: &[char]) -> bool {
     let mut pi = 0;
     let mut ti = 0;
     let mut star_pi = usize::MAX;
     let mut star_ti = 0;
 
     while ti < text.len() {
-        if pi < pattern.len() && (pattern.get(pi) == Some(&b'?') || pattern.get(pi) == text.get(ti))
+        if pi < pattern.len() && (pattern.get(pi) == Some(&'?') || pattern.get(pi) == text.get(ti))
         {
             pi = pi.saturating_add(1);
             ti = ti.saturating_add(1);
-        } else if pi < pattern.len() && pattern.get(pi) == Some(&b'*') {
+        } else if pi < pattern.len() && pattern.get(pi) == Some(&'*') {
             star_pi = pi;
             star_ti = ti;
             pi = pi.saturating_add(1);
-        } else if pi < pattern.len() && pattern.get(pi) == Some(&b'[') {
+        } else if pi < pattern.len() && pattern.get(pi) == Some(&'[') {
             // Character class
             let class_end = pattern
                 .get(pi..)
-                .and_then(|s| s.iter().position(|&b| b == b']'));
+                .and_then(|s| s.iter().position(|&b| b == ']'));
             if let Some(end_offset) = class_end {
                 let class_start = pi.saturating_add(1);
                 let class_end_pos = pi.saturating_add(end_offset);
-                let ch = text.get(ti).copied().unwrap_or(0);
+                let ch = text.get(ti).copied().unwrap_or('\0');
                 let class_bytes = pattern.get(class_start..class_end_pos).unwrap_or_default();
 
                 if char_class_matches(class_bytes, ch) {
@@ -93,7 +112,7 @@ fn glob_match_impl(pattern: &[u8], text: &[u8]) -> bool {
     }
 
     // Skip trailing stars
-    while pi < pattern.len() && pattern.get(pi) == Some(&b'*') {
+    while pi < pattern.len() && pattern.get(pi) == Some(&'*') {
         pi = pi.saturating_add(1);
     }
 
@@ -101,8 +120,8 @@ fn glob_match_impl(pattern: &[u8], text: &[u8]) -> bool {
 }
 
 /// Check if a character matches a character class like [a-z] or [abc]
-fn char_class_matches(class: &[u8], ch: u8) -> bool {
-    let negated = class.first() == Some(&b'!') || class.first() == Some(&b'^');
+fn char_class_matches(class: &[char], ch: char) -> bool {
+    let negated = class.first() == Some(&'!') || class.first() == Some(&'^');
     let class = if negated {
         class.get(1..).unwrap_or_default()
     } else {
@@ -112,9 +131,9 @@ fn char_class_matches(class: &[u8], ch: u8) -> bool {
     let mut matches = false;
     let mut i = 0;
     while i < class.len() {
-        if i.saturating_add(2) < class.len() && class.get(i.saturating_add(1)) == Some(&b'-') {
-            let lo = class.get(i).copied().unwrap_or(0);
-            let hi = class.get(i.saturating_add(2)).copied().unwrap_or(0);
+        if i.saturating_add(2) < class.len() && class.get(i.saturating_add(1)) == Some(&'-') {
+            let lo = class.get(i).copied().unwrap_or('\0');
+            let hi = class.get(i.saturating_add(2)).copied().unwrap_or('\0');
             if ch >= lo && ch <= hi {
                 matches = true;
             }
@@ -138,18 +157,27 @@ fn char_class_matches(class: &[u8], ch: u8) -> bool {
 /// character classes [abc], [a-z]
 #[must_use]
 pub fn regex_match(pattern: &str, text: &str) -> bool {
-    let pat_bytes = pattern.as_bytes();
-    let text_bytes = text.as_bytes();
+    let pat: Vec<char> = pattern.chars().collect();
+    let txt: Vec<char> = text.chars().collect();
+    regex_match_chars(&pat, &txt)
+}
+
+/// `regex_match` for callers that already hold decoded characters. See
+/// `glob_match_chars`.
+#[must_use]
+pub fn regex_match_chars(pattern: &[char], text: &[char]) -> bool {
+    let pat_bytes = pattern;
+    let text_bytes = text;
 
     // Check if anchored at start
-    let (pat, anchored_start) = if pat_bytes.first() == Some(&b'^') {
+    let (pat, anchored_start) = if pat_bytes.first() == Some(&'^') {
         (pat_bytes.get(1..).unwrap_or_default(), true)
     } else {
         (pat_bytes, false)
     };
 
     // Check if anchored at end
-    let (pat, anchored_end) = if pat.last() == Some(&b'$') {
+    let (pat, anchored_end) = if pat.last() == Some(&'$') {
         (
             pat.get(..pat.len().saturating_sub(1)).unwrap_or_default(),
             true,
@@ -171,7 +199,7 @@ pub fn regex_match(pattern: &str, text: &str) -> bool {
     }
 }
 
-fn regex_match_at(pattern: &[u8], text: &[u8], start: usize, anchored_end: bool) -> bool {
+fn regex_match_at(pattern: &[char], text: &[char], start: usize, anchored_end: bool) -> bool {
     let mut pi = 0;
     let mut ti = start;
 
@@ -182,11 +210,11 @@ fn regex_match_at(pattern: &[u8], text: &[u8], start: usize, anchored_end: bool)
         // Check for quantifier
         let next = pattern.get(pi.saturating_add(atom_len)).copied();
         match next {
-            Some(b'*') => {
+            Some('*') => {
                 // Greedy: match as many as possible, then backtrack
                 let mut count = 0;
                 while ti.saturating_add(count) < text.len()
-                    && matcher.matches(text.get(ti.saturating_add(count)).copied().unwrap_or(0))
+                    && matcher.matches(text.get(ti.saturating_add(count)).copied().unwrap_or('\0'))
                 {
                     count = count.saturating_add(1);
                 }
@@ -209,15 +237,15 @@ fn regex_match_at(pattern: &[u8], text: &[u8], start: usize, anchored_end: bool)
                 }
                 return false;
             }
-            Some(b'+') => {
+            Some('+') => {
                 // One or more
-                if ti >= text.len() || !matcher.matches(text.get(ti).copied().unwrap_or(0)) {
+                if ti >= text.len() || !matcher.matches(text.get(ti).copied().unwrap_or('\0')) {
                     return false;
                 }
                 ti = ti.saturating_add(1);
                 let mut count = 0;
                 while ti.saturating_add(count) < text.len()
-                    && matcher.matches(text.get(ti.saturating_add(count)).copied().unwrap_or(0))
+                    && matcher.matches(text.get(ti.saturating_add(count)).copied().unwrap_or('\0'))
                 {
                     count = count.saturating_add(1);
                 }
@@ -239,14 +267,14 @@ fn regex_match_at(pattern: &[u8], text: &[u8], start: usize, anchored_end: bool)
                 }
                 return false;
             }
-            Some(b'?') => {
+            Some('?') => {
                 // Zero or one
                 let rest = pattern
                     .get(pi.saturating_add(atom_len).saturating_add(1)..)
                     .unwrap_or_default();
                 // Try with match
                 if ti < text.len()
-                    && matcher.matches(text.get(ti).copied().unwrap_or(0))
+                    && matcher.matches(text.get(ti).copied().unwrap_or('\0'))
                     && regex_match_at(rest, text, ti.saturating_add(1), anchored_end)
                 {
                     return true;
@@ -256,7 +284,7 @@ fn regex_match_at(pattern: &[u8], text: &[u8], start: usize, anchored_end: bool)
             }
             _ => {
                 // Exactly one match required
-                if ti >= text.len() || !matcher.matches(text.get(ti).copied().unwrap_or(0)) {
+                if ti >= text.len() || !matcher.matches(text.get(ti).copied().unwrap_or('\0')) {
                     return false;
                 }
                 ti = ti.saturating_add(1);
@@ -268,24 +296,25 @@ fn regex_match_at(pattern: &[u8], text: &[u8], start: usize, anchored_end: bool)
     if anchored_end { ti == text.len() } else { true }
 }
 
-/// A single matchable regex atom. Unlike a bare `fn(u8) -> bool`, this enum can
-/// carry the specific literal byte to match and a borrowed character-class body,
-/// so literal characters match by value (e.g. `world` matches only "world", not
-/// "any five lowercase letters").
+/// A single matchable regex atom. Unlike a bare `fn(char) -> bool`, this enum
+/// can carry the specific literal character to match and a borrowed
+/// character-class body, so literal characters match by value (e.g. `world`
+/// matches only "world", not "any five lowercase letters").
 #[derive(Clone, Copy)]
 enum Matcher<'a> {
     Any,
-    Literal(u8),
+    Literal(char),
     Digit,
     NotDigit,
     Word,
     NotWord,
     Space,
     NotSpace,
-    /// Character class `[...]`. `body` is the bytes between the brackets; if the
-    /// class began with `^` the sense is negated and `^` is excluded from `body`.
+    /// Character class `[...]`. `body` is the characters between the brackets;
+    /// if the class began with `^` the sense is negated and `^` is excluded
+    /// from `body`.
     Class {
-        body: &'a [u8],
+        body: &'a [char],
         negated: bool,
     },
     /// Matches nothing (end of pattern / malformed).
@@ -293,14 +322,14 @@ enum Matcher<'a> {
 }
 
 impl Matcher<'_> {
-    fn matches(self, c: u8) -> bool {
+    fn matches(self, c: char) -> bool {
         match self {
             Matcher::Any => true,
             Matcher::Literal(b) => c == b,
             Matcher::Digit => c.is_ascii_digit(),
             Matcher::NotDigit => !c.is_ascii_digit(),
-            Matcher::Word => c.is_ascii_alphanumeric() || c == b'_',
-            Matcher::NotWord => !c.is_ascii_alphanumeric() && c != b'_',
+            Matcher::Word => c.is_ascii_alphanumeric() || c == '_',
+            Matcher::NotWord => !c.is_ascii_alphanumeric() && c != '_',
             Matcher::Space => c.is_ascii_whitespace(),
             Matcher::NotSpace => !c.is_ascii_whitespace(),
             Matcher::Class { body, negated } => class_matches(body, c) != negated,
@@ -309,14 +338,17 @@ impl Matcher<'_> {
     }
 }
 
-/// Test whether byte `c` is a member of a character-class body (the text between
-/// `[` and `]`, with any leading `^` already stripped). Supports literal bytes
-/// and `a-z` style ranges.
-fn class_matches(body: &[u8], c: u8) -> bool {
+/// Test whether character `c` is a member of a character-class body (the text
+/// between `[` and `]`, with any leading `^` already stripped). Supports
+/// literal characters and `a-z` style ranges. Because the body is `&[char]`,
+/// a range compares scalar values, so a non-ASCII range such as
+/// `[\u{430}-\u{44f}]` (Cyrillic) means what it looks like instead of
+/// comparing the first byte of each endpoint's encoding.
+fn class_matches(body: &[char], c: char) -> bool {
     let mut i = 0;
     while let Some(&lo) = body.get(i) {
-        // Range "x-y": a '-' with a byte on either side (and not the final char).
-        if body.get(i.saturating_add(1)) == Some(&b'-')
+        // Range "x-y": a '-' with a character on either side (not the final one).
+        if body.get(i.saturating_add(1)) == Some(&'-')
             && let Some(&hi) = body.get(i.saturating_add(2))
         {
             if lo <= c && c <= hi {
@@ -333,29 +365,29 @@ fn class_matches(body: &[u8], c: u8) -> bool {
     false
 }
 
-/// Returns (matcher, bytes consumed from pattern).
-fn parse_regex_atom(pattern: &[u8], pos: usize) -> (Matcher<'_>, usize) {
+/// Returns (matcher, characters consumed from pattern).
+fn parse_regex_atom(pattern: &[char], pos: usize) -> (Matcher<'_>, usize) {
     match pattern.get(pos) {
-        Some(b'.') => (Matcher::Any, 1),
-        Some(b'\\') => match pattern.get(pos.saturating_add(1)) {
-            Some(b'd') => (Matcher::Digit, 2),
-            Some(b'w') => (Matcher::Word, 2),
-            Some(b's') => (Matcher::Space, 2),
-            Some(b'D') => (Matcher::NotDigit, 2),
-            Some(b'W') => (Matcher::NotWord, 2),
-            Some(b'S') => (Matcher::NotSpace, 2),
-            // Escaped literal: \. \$ \\ etc. match the literal following byte.
+        Some('.') => (Matcher::Any, 1),
+        Some('\\') => match pattern.get(pos.saturating_add(1)) {
+            Some('d') => (Matcher::Digit, 2),
+            Some('w') => (Matcher::Word, 2),
+            Some('s') => (Matcher::Space, 2),
+            Some('D') => (Matcher::NotDigit, 2),
+            Some('W') => (Matcher::NotWord, 2),
+            Some('S') => (Matcher::NotSpace, 2),
+            // Escaped literal: \. \$ \\ etc. match the literal following char.
             Some(&ch) => (Matcher::Literal(ch), 2),
             // Trailing backslash: match a literal backslash.
-            None => (Matcher::Literal(b'\\'), 1),
+            None => (Matcher::Literal('\\'), 1),
         },
-        Some(b'[') => {
+        Some('[') => {
             // Find the closing ']' relative to the '['.
             let rest = pattern.get(pos.saturating_add(1)..).unwrap_or_default();
-            if let Some(close) = rest.iter().position(|&b| b == b']') {
+            if let Some(close) = rest.iter().position(|&b| b == ']') {
                 let inner = rest.get(..close).unwrap_or_default();
                 let (negated, body) = match inner.first() {
-                    Some(b'^') => (true, inner.get(1..).unwrap_or_default()),
+                    Some('^') => (true, inner.get(1..).unwrap_or_default()),
                     _ => (false, inner),
                 };
                 // Total consumed = '[' + body/negation + ']'.
@@ -363,7 +395,7 @@ fn parse_regex_atom(pattern: &[u8], pos: usize) -> (Matcher<'_>, usize) {
                 (Matcher::Class { body, negated }, len)
             } else {
                 // No closing bracket: treat '[' as a literal.
-                (Matcher::Literal(b'['), 1)
+                (Matcher::Literal('['), 1)
             }
         }
         Some(&ch) => (Matcher::Literal(ch), 1),
@@ -594,19 +626,28 @@ impl FileIndex {
     /// Search by glob pattern
     #[must_use]
     pub fn search_glob(&self, pattern: &str) -> Vec<&IndexEntry> {
-        let lower_pat = pattern.to_lowercase();
+        // Decode the pattern once, not once per entry: this runs over the
+        // whole index.
+        let pat: Vec<char> = pattern.to_lowercase().chars().collect();
         self.entries
             .iter()
-            .filter(|e| glob_match(&lower_pat, &e.name_lower))
+            .filter(|e| {
+                let name: Vec<char> = e.name_lower.chars().collect();
+                glob_match_chars(&pat, &name)
+            })
             .collect()
     }
 
     /// Search by regex pattern
     #[must_use]
     pub fn search_regex(&self, pattern: &str) -> Vec<&IndexEntry> {
+        let pat: Vec<char> = pattern.chars().collect();
         self.entries
             .iter()
-            .filter(|e| regex_match(pattern, &e.name))
+            .filter(|e| {
+                let name: Vec<char> = e.name.chars().collect();
+                regex_match_chars(&pat, &name)
+            })
             .collect()
     }
 
@@ -2033,6 +2074,151 @@ mod tests {
     fn test_regex_digit() {
         assert!(regex_match("\\d", "abc123"));
         assert!(!regex_match("^\\d$", "abc"));
+    }
+
+    // ─── Byte/character confusion in the two matchers ────────────────
+    //
+    // Both engines used to step one byte at a time, so every
+    // single-character construct (`?`, `.`, a class, `\D`/`\W`/`\S`)
+    // consumed a byte. Each test below is written so that it fails against
+    // that old behaviour, in both directions: a character that should match
+    // and did not, and a run of bytes that should not match and did.
+
+    /// Non-ASCII names of known character length, one per encoded width.
+    fn wide_names() -> [(&'static str, usize); 4] {
+        [("é", 2), ("日", 3), ("р", 2), ("😀", 4)]
+    }
+
+    #[test]
+    fn a_glob_question_mark_matches_one_character_not_one_byte() {
+        let mut checked = 0;
+        for (ch, width) in wide_names() {
+            let name = format!("{ch}.txt");
+            assert!(
+                glob_match("?.txt", &name),
+                "`?.txt` should match {name:?} — `?` is one character"
+            );
+            // The old engine needed one `?` per byte. Make sure we did not
+            // simply move the off-by-N: `width` question marks must NOT match.
+            let many = "?".repeat(width);
+            assert!(
+                !glob_match(&format!("{many}.txt"), &name),
+                "{width} `?`s should no longer match the {width} bytes of {name:?}"
+            );
+            checked += 1;
+        }
+        assert!(checked >= 4, "only {checked} names checked");
+
+        assert!(glob_match("??.txt", "日本.txt"));
+        assert!(!glob_match("?.txt", "ab.txt"));
+    }
+
+    #[test]
+    fn a_glob_class_compares_whole_characters() {
+        // Old: the class matched the shared *first byte* of é (C3 A9) and
+        // è (C3 A8), so this was a false positive.
+        assert!(!glob_match("[é]*", "èb"));
+        assert!(glob_match("[é]*", "éb"));
+        // Old: the class consumed one byte of a two-byte character, leaving
+        // the pattern exhausted with text remaining, so this was a false
+        // negative.
+        assert!(glob_match("[é]", "é"));
+        assert!(!glob_match("[é]", "è"));
+    }
+
+    #[test]
+    fn a_glob_range_over_non_ascii_compares_scalar_values() {
+        // Cyrillic а-я. Byte-wise this range was meaningless.
+        assert!(glob_match("[а-я]", "р"));
+        assert!(!glob_match("[а-я]", "z"));
+    }
+
+    #[test]
+    fn a_regex_dot_matches_one_character_not_one_byte() {
+        let mut checked = 0;
+        for (ch, width) in wide_names() {
+            assert!(regex_match("^.$", ch), "`.` should match {ch:?} whole");
+            // The decisive direction: `.` per *byte* used to match here.
+            let dots = ".".repeat(width);
+            assert!(
+                !regex_match(&format!("^{dots}$"), ch),
+                "{width} dots must not match the {width} bytes of {ch:?}"
+            );
+            checked += 1;
+        }
+        assert!(checked >= 4, "only {checked} characters checked");
+
+        assert!(regex_match("a.c", "a日c"));
+        assert!(regex_match("^..$", "日本"));
+    }
+
+    #[test]
+    fn a_regex_negated_class_does_not_match_part_of_a_character() {
+        // \W, \D and \S are defined by ASCII predicates, so every byte of a
+        // multi-byte character satisfied them. Three of them used to match
+        // one kanji exactly.
+        assert!(!regex_match("^\\W\\W\\W$", "日"));
+        assert!(regex_match("^\\W$", "日"));
+        assert!(!regex_match("^\\D\\D$", "é"));
+        assert!(regex_match("^\\D$", "é"));
+    }
+
+    #[test]
+    fn a_non_ascii_name_is_found_through_the_index() {
+        // Covers the bulk-search paths, which decode the pattern once and
+        // each candidate separately.
+        let mut index = FileIndex::new();
+        index.add(IndexEntry::new("/t/日本.rs", "日本.rs", 100, 0, 0, false));
+        index.add(IndexEntry::new("/t/ab.rs", "ab.rs", 100, 0, 0, false));
+
+        let by_glob = index.search_glob("??.rs");
+        assert_eq!(by_glob.len(), 2, "both two-character stems should match");
+
+        let by_regex = index.search_regex("^..\\.rs$");
+        assert_eq!(by_regex.len(), 2);
+
+        assert_eq!(index.search_glob("?.rs").len(), 0);
+    }
+
+    #[test]
+    fn an_ascii_pattern_matches_exactly_as_before() {
+        // For ASCII input a character index and a byte index are the same
+        // number, so none of the above may have changed anything here.
+        let globs = [
+            ("*.rs", "main.rs", true),
+            ("*.rs", "main.py", false),
+            ("?.txt", "a.txt", true),
+            ("?.txt", "ab.txt", false),
+            ("[abc].txt", "a.txt", true),
+            ("[abc].txt", "d.txt", false),
+            ("[a-z]*", "hello", true),
+            ("[^0-9]*", "hello", true),
+            ("src/*/mod.rs", "src/net/mod.rs", true),
+        ];
+        let mut checked = 0;
+        for (pat, text, want) in globs {
+            assert_eq!(glob_match(pat, text), want, "glob {pat:?} vs {text:?}");
+            checked += 1;
+        }
+
+        let regexes = [
+            ("hello", "hello world", true),
+            ("^hello", "hello world", true),
+            ("^world", "hello world", false),
+            ("world$", "hello world", true),
+            ("h.llo", "hello", true),
+            ("\\d", "abc123", true),
+            ("^\\d$", "abc", false),
+            ("^a+b$", "aaab", true),
+            ("^a*b$", "b", true),
+            ("^ab?c$", "ac", true),
+            ("\\.rs$", "main.rs", true),
+        ];
+        for (pat, text, want) in regexes {
+            assert_eq!(regex_match(pat, text), want, "regex {pat:?} vs {text:?}");
+            checked += 1;
+        }
+        assert!(checked >= 20, "only {checked} cases checked");
     }
 
     // File category tests

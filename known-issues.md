@@ -60880,6 +60880,24 @@ proved it out.
   distinct** rather than merely marked. That assertion is the one worth copying:
   "is it marked as cut?" passes on a column that renders every row identically,
   which is the failure that actually misleads a reader.
+- ~~`apps/procexplorer`~~ **done**. Three `cx +=` sites; two (the process table
+  and the thread table) had already been single-sourced in an earlier pass and
+  were genuinely fine. The third — the **Network tab's connection table** — was
+  the worst instance in the sweep so far, because its cells were not clipped
+  *at all*: `tree.text(cx + 6.0, ry + 4.0, field, color, 11.0)` with **no
+  `max_width` argument**, then `cx += col_w`. Nothing bounded the value, so the
+  regression test finds an IPv6 local address drawn 71px past its column, over
+  the Remote Address beside it.
+  This is the shape to watch for next: the survey looked for `max_width` values
+  that disagree with a cursor advance, but a cell with **no width argument at
+  all** does not appear in that grep. `tree.text(...)` is five arguments and
+  `tree.text_in(...)` is six; the unbounded one is the shorter, more natural
+  call, and it is invisible to a search for a mismatched bound.
+  Addresses use `Fit::End` — the port lives on the tail, and `:443` vs `:22` is
+  the whole difference between two rows to the same peer. Converting also
+  required `Table::header_weighted`, because this app marks headings by colour
+  alone and `Table::header` forces bold; "my headings are the wrong weight" was
+  otherwise a reason to leave a table hand-drawn and unfitted.
 
 The lesson that generalises past the cursor pattern: **a per-element bound is
 not a bound on the row.** Eliding each cell to its own width makes every cell
@@ -60903,6 +60921,15 @@ blast radius is everything drawn *after* it on that row — not just the cell
 that overflowed. Grep for `cx +=` near a `max_width:` that is not the same
 expression. The fix is always the same: elide first, then advance by what was
 actually drawn.
+
+But do not let that grep define the search, because **the unbounded cell is the
+one it cannot find.** A `max_width` that disagrees with a cursor advance is at
+least *present*; `tree.text(x, y, s, c, size)` and a bare `RenderCommand::Text`
+with `max_width: None` carry no bound to disagree with, and they are the
+shorter, more natural calls. procexplorer's Network tab was written that way
+and drew 71px over its neighbour. Search for the *absence*: `tree.text(` inside
+a loop over a column array, and `max_width: None` on anything whose text is not
+a literal.
 
 **What it is.** `RenderCommand::Text` carries a `max_width`, and the obvious
 reading is that the compositor wraps to it. It does not. `Compositor::draw_text`

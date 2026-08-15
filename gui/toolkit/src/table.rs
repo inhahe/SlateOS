@@ -177,27 +177,40 @@ impl<'a> Table<'a> {
         spans
     }
 
-    /// Draw the header row at `y`.
+    /// Draw the header row at `y`, in bold.
     ///
     /// Labels are bold, and bold glyphs are wider than regular ones at the same
     /// size, so they are measured at the weight they are drawn at — measuring a
     /// bold heading as regular under-measures it and lets a real overflow
     /// through.
     pub fn header(&self, cmds: &mut Vec<RenderCommand>, y: f32, color: Color, font_size: f32) {
+        self.header_weighted(cmds, y, color, font_size, FontWeightHint::Bold);
+    }
+
+    /// As [`Table::header`], at an explicit weight.
+    ///
+    /// Bold is the usual choice but not the only one: an app whose other tables
+    /// mark their headings by colour alone gains a stray bold row from
+    /// [`Table::header`], and "my headings are the wrong weight" is a bad reason
+    /// to keep a table hand-drawn and lose the fitting that comes with this one.
+    /// As with [`Table::cell_weighted`], the weight is not cosmetic — it decides
+    /// how wide the glyphs are, so it decides where a long heading is cut.
+    pub fn header_weighted(
+        &self,
+        cmds: &mut Vec<RenderCommand>,
+        y: f32,
+        color: Color,
+        font_size: f32,
+        font_weight: FontWeightHint,
+    ) {
         for (i, col) in self.columns.iter().enumerate() {
             cmds.push(RenderCommand::Text {
                 x: self.left(i),
                 y,
-                text: text::elide(
-                    col.label,
-                    col.width,
-                    ELLIPSIS,
-                    font_size,
-                    FontWeightHint::Bold,
-                ),
+                text: text::elide(col.label, col.width, ELLIPSIS, font_size, font_weight),
                 font_size,
                 color,
-                font_weight: FontWeightHint::Bold,
+                font_weight,
                 max_width: Some(col.width),
             });
         }
@@ -475,6 +488,43 @@ mod tests {
         let mut cmds = Vec::new();
         table.cell(&mut cmds, 9, 0.0, "lost", INK, 11.0, Fit::Start);
         assert_eq!(texts(&cmds)[0].1, "");
+    }
+
+    #[test]
+    fn a_regular_weight_header_is_fitted_at_regular_weight() {
+        // The point of the parameter is that the *fitting* follows the weight,
+        // not just the drawing: a heading measured at the wrong weight is cut
+        // in the wrong place.
+        const NARROW: &[Column] = &[Column {
+            label: "Remote Address",
+            width: 46.0,
+        }];
+        let table = Table::new(NARROW, 0.0);
+        let mut bold = Vec::new();
+        table.header(&mut bold, 0.0, INK, 11.0);
+        let mut regular = Vec::new();
+        table.header_weighted(&mut regular, 0.0, INK, 11.0, FontWeightHint::Regular);
+
+        let (bx, btext, bsize, bweight) = texts(&bold)[0].clone();
+        let (rx, rtext, rsize, rweight) = texts(&regular)[0].clone();
+        assert_eq!(bweight, FontWeightHint::Bold);
+        assert_eq!(rweight, FontWeightHint::Regular);
+        for (x, t, size, weight) in [
+            (bx, btext.clone(), bsize, bweight),
+            (rx, rtext.clone(), rsize, rweight),
+        ] {
+            let drawn = x + text::measure(&t, size, weight);
+            assert!(
+                drawn <= table.right(0) + 0.01,
+                "heading {t:?} at {weight:?} draws to {drawn}, past {}",
+                table.right(0)
+            );
+        }
+        // Regular glyphs are narrower, so more of the label survives.
+        assert!(
+            rtext.chars().count() >= btext.chars().count(),
+            "regular {rtext:?} kept less than bold {btext:?}"
+        );
     }
 
     #[test]

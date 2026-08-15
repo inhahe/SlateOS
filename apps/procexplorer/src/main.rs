@@ -16,6 +16,7 @@ mod features;
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEventKind};
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
+use guitk::table::{Column, Fit, Table};
 use guitk::text;
 
 use std::collections::HashMap;
@@ -51,6 +52,54 @@ const HEADER_HEIGHT: f32 = 24.0;
 /// Getting this from the same constant the `x` offset uses is what keeps the
 /// two from drifting.
 const CELL_PAD: f32 = 6.0;
+
+/// The Network tab's connection table.
+///
+/// These widths are what a cell may *use*. The old `&[(&str, f32)]` array held
+/// the column pitch instead, and nothing ever subtracted the padding from it:
+/// every cell was drawn with a bare `tree.text` at `cx + 6.0` with no width at
+/// all, then the cursor advanced by the full pitch. So a long value did not
+/// merely clip — it was never bounded in the first place and drew straight over
+/// every column to its right.
+///
+/// That mattered here more than in most tables, because a connection row is
+/// made almost entirely of values this machine did not choose: a remote address
+/// is whatever the peer at the other end happens to be, and an IPv6 address is
+/// three times the width of the IPv4 ones the 180px column was eyeballed for.
+const NET_COLUMNS: &[Column] = &[
+    Column {
+        label: "Protocol",
+        width: 70.0 - CELL_PAD * 2.0,
+    },
+    Column {
+        label: "Local Address",
+        width: 180.0 - CELL_PAD * 2.0,
+    },
+    Column {
+        label: "Remote Address",
+        width: 180.0 - CELL_PAD * 2.0,
+    },
+    Column {
+        label: "State",
+        width: 100.0 - CELL_PAD * 2.0,
+    },
+    Column {
+        label: "PID",
+        width: 60.0 - CELL_PAD * 2.0,
+    },
+    Column {
+        label: "Process",
+        width: 140.0 - CELL_PAD * 2.0,
+    },
+];
+const NET_PROTOCOL: usize = 0;
+const NET_LOCAL_ADDR: usize = 1;
+const NET_REMOTE_ADDR: usize = 2;
+const NET_STATE: usize = 3;
+const NET_PID: usize = 4;
+const NET_PROCESS: usize = 5;
+/// Font size of the connection table's headings and cells.
+const NET_FONT: f32 = 11.0;
 /// Number of historical samples kept for time-series graphs.
 const GRAPH_HISTORY_LEN: usize = 60;
 /// Default auto-refresh interval in milliseconds.
@@ -1976,27 +2025,32 @@ impl ProcessExplorerState {
         let hdr_y = table_y + 20.0;
         tree.fill_rect(0.0, hdr_y, w, HEADER_HEIGHT, COLOR_HEADER_BG);
 
-        // Columns: Protocol, Local Address, Remote Address, State, PID, Process
-        let net_cols: &[(&str, f32)] = &[
-            ("Protocol", 70.0),
-            ("Local Address", 180.0),
-            ("Remote Address", 180.0),
-            ("State", 100.0),
-            ("PID", 60.0),
-            ("Process", 140.0),
-        ];
-
-        let mut nx = 0.0f32;
-        for &(label, col_w) in net_cols {
-            tree.text(nx + 6.0, hdr_y + 5.0, label, COLOR_TEXT_DIM, 11.0);
+        // `Table` inserts a full gap before the first column, but this layout's
+        // leading inset is a single `CELL_PAD` — matching the Processes tab —
+        // rather than the doubled one that separates two adjacent columns. The
+        // anchor absorbs the difference, so the first cell still starts at
+        // `CELL_PAD` and the columns still fall on the old pitch.
+        let net = Table::with_gap(NET_COLUMNS, -CELL_PAD, CELL_PAD * 2.0);
+        // Regular, not bold: the Processes and Threads tables in this app mark
+        // their headings by colour alone, and a bold row here would be the odd
+        // one out.
+        net.header_weighted(
+            &mut tree.commands,
+            hdr_y + 5.0,
+            COLOR_TEXT_DIM,
+            NET_FONT,
+            FontWeightHint::Regular,
+        );
+        for i in 0..net.len() {
+            // The separator sits on the pitch boundary, one `CELL_PAD` past the
+            // right edge of the text the column may hold.
             tree.fill_rect(
-                nx + col_w - 1.0,
+                net.right(i) + CELL_PAD - 1.0,
                 hdr_y + 2.0,
                 1.0,
                 HEADER_HEIGHT - 4.0,
                 Color::rgb(55, 60, 70),
             );
-            nx += col_w;
         }
 
         // Connection rows
@@ -2019,18 +2073,33 @@ impl ProcessExplorerState {
             };
             tree.fill_rect(0.0, ry, w, ROW_HEIGHT, bg);
 
-            let mut cx = 0.0f32;
-            let fields: &[&str] = &[
-                &conn.protocol,
-                &conn.local_addr,
-                &conn.remote_addr,
-                &conn.state,
-                &conn.pid.to_string(),
-                &conn.process_name,
+            // An address is cut at the *front*. Its tail carries the port, and
+            // the port is most of what a connection row is read for — `:443`
+            // and `:22` are the difference between two rows that are otherwise
+            // the same peer. Cut the usual way, every connection to one host
+            // renders as one indistinguishable string with the port gone.
+            // Each cell names the column it goes in rather than relying on its
+            // position in this array. The old code took the width from
+            // `net_cols[j]` and the value from `fields[j]`, two arrays that
+            // happened to line up; naming the column means adding, removing or
+            // reordering a field cannot silently shift every cell after it into
+            // the wrong column.
+            let pid = conn.pid.to_string();
+            let fields: [(usize, &str, Fit); 6] = [
+                (NET_PROTOCOL, conn.protocol.as_str(), Fit::Start),
+                (NET_LOCAL_ADDR, conn.local_addr.as_str(), Fit::End),
+                (NET_REMOTE_ADDR, conn.remote_addr.as_str(), Fit::End),
+                (NET_STATE, conn.state.as_str(), Fit::Start),
+                (NET_PID, pid.as_str(), Fit::Start),
+                (NET_PROCESS, conn.process_name.as_str(), Fit::Start),
             ];
-            for (j, &field) in fields.iter().enumerate() {
-                let col_w = net_cols.get(j).map(|c| c.1).unwrap_or(100.0);
-                let color = if j == 3 {
+            debug_assert_eq!(
+                fields.len(),
+                net.len(),
+                "a cell with no column is positioned past the table and drawn empty",
+            );
+            for (column, field, fit) in fields {
+                let color = if column == NET_STATE {
                     // State column gets color coding.
                     match field {
                         "ESTABLISHED" => COLOR_STATUS_RUNNING,
@@ -2041,8 +2110,15 @@ impl ProcessExplorerState {
                 } else {
                     COLOR_TEXT
                 };
-                tree.text(cx + 6.0, ry + 4.0, field, color, 11.0);
-                cx += col_w;
+                net.cell(
+                    &mut tree.commands,
+                    column,
+                    ry + 4.0,
+                    field,
+                    color,
+                    NET_FONT,
+                    fit,
+                );
             }
         }
 
@@ -3024,6 +3100,188 @@ mod tests {
             )),
             "a short name must be drawn verbatim",
         );
+    }
+
+    // --- Network tab: connection rows stay in their columns ---
+
+    /// The connection table's geometry, built the way the renderer builds it.
+    fn net_table() -> Table<'static> {
+        Table::with_gap(NET_COLUMNS, -CELL_PAD, CELL_PAD * 2.0)
+    }
+
+    /// A connection list of the shape a real machine produces and the 180px
+    /// address columns were never sized for: IPv6 peers on one host, differing
+    /// only in their port, plus a process name longer than its column.
+    ///
+    /// Everything on these rows arrives from outside — the peer chooses its own
+    /// address, and the port is the only thing telling two of these rows apart.
+    fn app_with_long_connections() -> ProcessExplorerState {
+        let mut app = ProcessExplorerState::new();
+        app.active_tab = Tab::Network;
+        app.connections = vec![
+            ConnectionInfo {
+                protocol: String::from("TCP"),
+                local_addr: String::from("2001:0db8:85a3:0000:0000:8a2e:0370:7334:41244"),
+                remote_addr: String::from("2001:0db8:85a3:0000:0000:8a2e:0370:1111:443"),
+                state: String::from("ESTABLISHED"),
+                pid: 1234,
+                process_name: String::from("a-service-with-a-very-long-name"),
+            },
+            ConnectionInfo {
+                protocol: String::from("TCP"),
+                local_addr: String::from("2001:0db8:85a3:0000:0000:8a2e:0370:7334:41245"),
+                remote_addr: String::from("2001:0db8:85a3:0000:0000:8a2e:0370:1111:22"),
+                state: String::from("ESTABLISHED"),
+                pid: 1235,
+                process_name: String::from("sshd"),
+            },
+            ConnectionInfo {
+                protocol: String::from("UDP"),
+                local_addr: String::from("0.0.0.0:53"),
+                remote_addr: String::from("*:*"),
+                state: String::from("LISTEN"),
+                pid: 42,
+                process_name: String::from("resolved"),
+            },
+        ];
+        app
+    }
+
+    /// Render *only* the Network tab, for the reason given on
+    /// [`process_tab_commands`]: chrome elsewhere in the window shares x-ranges
+    /// with the table's columns.
+    fn network_tab_texts(app: &ProcessExplorerState) -> Vec<(f32, String, f32, FontWeightHint)> {
+        let mut tree = RenderTree::new();
+        app.render_network_tab(&mut tree);
+        tree.commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text {
+                    x,
+                    text,
+                    font_size,
+                    font_weight,
+                    ..
+                } => Some((*x, text.clone(), *font_size, *font_weight)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn no_connection_row_cell_escapes_its_column() {
+        let app = app_with_long_connections();
+        let table = net_table();
+        let spans = table.spans();
+        let mut checked = 0usize;
+        for (x, text, size, weight) in network_tab_texts(&app) {
+            let Some((_, right)) = spans.iter().copied().find(|(l, _)| (l - x).abs() < 0.01) else {
+                continue;
+            };
+            let drawn = x + text::measure(&text, size, weight);
+            assert!(
+                drawn <= right + 0.01,
+                "cell {text:?} at {x} draws to {drawn}, past its column edge {right}"
+            );
+            checked = checked.saturating_add(1);
+        }
+        assert!(
+            checked >= NET_COLUMNS.len() * 4,
+            "expected a header and three rows, checked {checked}"
+        );
+    }
+
+    #[test]
+    fn an_overlong_address_keeps_the_port_that_identifies_it() {
+        // The two IPv6 rows in the fixture share every character but the port.
+        // Cut at the end they would both render as the same prefix with the
+        // port gone — one string for two different connections.
+        let app = app_with_long_connections();
+        let table = net_table();
+        let remote_x = table.left(NET_REMOTE_ADDR);
+        let cut: Vec<String> = network_tab_texts(&app)
+            .into_iter()
+            .filter(|(x, t, ..)| (x - remote_x).abs() < 0.01 && t.starts_with('…'))
+            .map(|(_, t, ..)| t)
+            .collect();
+        assert_eq!(
+            cut.len(),
+            2,
+            "expected the two IPv6 peers to be cut: {cut:?}"
+        );
+        assert!(
+            cut.iter().any(|t| t.ends_with(":443")),
+            "the https port was lost: {cut:?}"
+        );
+        assert!(
+            cut.iter().any(|t| t.ends_with(":22")),
+            "the ssh port was lost: {cut:?}"
+        );
+        assert_ne!(cut[0], cut[1], "two peers rendered identically: {cut:?}");
+    }
+
+    #[test]
+    fn a_short_value_is_drawn_verbatim_in_its_own_column() {
+        // Two properties at once, because checking only the first is how a
+        // misfiled cell survives: a value that fits must be drawn untouched,
+        // *and* it must land in the column it belongs to. The old code indexed
+        // the widths array separately from the fields array, so those two could
+        // disagree with nothing to catch it.
+        let app = app_with_long_connections();
+        let table = net_table();
+        let drawn = network_tab_texts(&app);
+        for (column, expected) in [
+            (NET_PROTOCOL, "UDP"),
+            (NET_LOCAL_ADDR, "0.0.0.0:53"),
+            (NET_REMOTE_ADDR, "*:*"),
+            (NET_STATE, "LISTEN"),
+            (NET_PID, "42"),
+            (NET_PROCESS, "resolved"),
+        ] {
+            let x = table.left(column);
+            assert!(
+                drawn
+                    .iter()
+                    .any(|(cx, t, ..)| (cx - x).abs() < 0.01 && t == expected),
+                "{expected:?} should be drawn as-is at column {column} (x={x}): {drawn:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_connection_header_and_rows_agree_on_where_a_column_starts() {
+        let app = app_with_long_connections();
+        let table = net_table();
+        let lefts: Vec<f32> = (0..table.len()).map(|i| table.left(i)).collect();
+        let mut seen = vec![0usize; table.len()];
+        for (x, ..) in network_tab_texts(&app) {
+            if let Some(i) = lefts.iter().position(|l| (l - x).abs() < 0.01) {
+                seen[i] = seen[i].saturating_add(1);
+            }
+        }
+        // One heading plus three rows in every column, all at the same x.
+        for (i, count) in seen.iter().enumerate() {
+            assert_eq!(*count, 4, "column {i} drew {count} texts at its left edge");
+        }
+    }
+
+    #[test]
+    fn the_connection_columns_still_fall_on_the_old_pitch() {
+        // The conversion had to preserve the layout exactly: the table anchors
+        // at `-CELL_PAD` precisely so the first cell still starts at `CELL_PAD`
+        // and each separator still sits on a 70/180/180/100/60/140 boundary.
+        let table = net_table();
+        let pitches = [70.0f32, 180.0, 180.0, 100.0, 60.0, 140.0];
+        assert!((table.left(NET_PROTOCOL) - CELL_PAD).abs() < 0.01);
+        let mut boundary = 0.0f32;
+        for (i, pitch) in pitches.iter().enumerate() {
+            boundary += pitch;
+            assert!(
+                (table.right(i) + CELL_PAD - boundary).abs() < 0.01,
+                "column {i} ends at {} + pad, not on the pitch boundary {boundary}",
+                table.right(i)
+            );
+        }
     }
 
     #[test]

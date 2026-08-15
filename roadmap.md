@@ -254,7 +254,8 @@ git -C "D:/visual studio projects/os" pull \
   only want a look: `git fetch origin && git log origin/main -- requests/`
   and `git show origin/main:requests/<file>.md`. Do this if nothing else.
 
-**Two hazards this rule exists to prevent — both of which actually happened:**
+**Three hazards this rule exists to prevent — all of which actually happened,
+on the same day, to the same lane:**
 
 1. **A request sat unread for a day.**
    `requests/a-b-init-conflates-syscall-error-with-exit-code.md` was filed by
@@ -269,6 +270,15 @@ git -C "D:/visual studio projects/os" pull \
    confident shape. **`origin/main` is the trunk; the `os` directory is a view
    of it that may be months stale.** `git -C "D:/visual studio projects/os"
    pull` before you read it, or read `origin/main` directly with `git show`.
+3. **The worktree was never provisioned, and the script that provisions it was
+   one merge away.** `scripts/bootstrap-worktree.sh` fetches `limine/`, copies
+   `rootfs.ext4`, and builds the six service ELFs `kernel/src/main.rs`
+   `include_bytes!`es. It landed on `main` on 2026-08-13 (`0d013beb1`,
+   `60dab49d5`). Lane B did not have it, so its first boot test failed on a
+   missing `limine/BOOTX64.EFI` and on six missing service binaries — and
+   those got diagnosed as unrelated build problems rather than as one stale
+   branch. **If your worktree cannot boot-test, run
+   `bash scripts/bootstrap-worktree.sh` before debugging anything.**
 
 **Why per-branch copies are kept at all** (rather than moving the shared docs
 to `main` only): the per-lane conventions in rule 3 are what make them merge

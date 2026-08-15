@@ -279,7 +279,10 @@ fn the_power_button_toggles_its_menu_and_leaves_the_start_menu_open() {
 
     assert_eq!(click_at(&mut shell, button), ShellAction::Consumed);
     assert!(!shell.power_menu_open);
-    assert!(shell.start_menu_open, "closing the submenu is not closing both");
+    assert!(
+        shell.start_menu_open,
+        "closing the submenu is not closing both"
+    );
 }
 
 /// A submenu is allowed to cover the list it opened from — but then a click in
@@ -308,7 +311,9 @@ fn a_click_on_the_list_behind_the_power_menu_only_dismisses_it() {
 
     let row = shell.start_menu_row_rect(0);
     assert!(
-        !shell.power_menu_rect().contains(row.x + row.w / 2.0, row.y + row.h / 2.0),
+        !shell
+            .power_menu_rect()
+            .contains(row.x + row.w / 2.0, row.y + row.h / 2.0),
         "the fixture must pick a row the popup does not cover"
     );
     assert_eq!(click_at(&mut shell, row), ShellAction::Consumed);
@@ -389,9 +394,7 @@ fn every_power_action_is_clickable_where_it_is_drawn_at_every_scale() {
         let button = shell.power_button_rect();
         let start = shell.start_menu_rect();
         assert!(
-            button.x >= start.x
-                && button.y >= start.y
-                && button.y + button.h <= start.y + start.h,
+            button.x >= start.x && button.y >= start.y && button.y + button.h <= start.y + start.h,
             "the power button escaped the menu at {percent}%"
         );
 
@@ -727,7 +730,11 @@ fn adjacent_rows_do_not_share_a_pixel() {
     let first = shell.start_menu_row_rect(0);
     let boundary = first.y + first.h;
     assert!(!first.contains(first.x + 4.0, boundary));
-    assert!(shell.start_menu_row_rect(1).contains(first.x + 4.0, boundary));
+    assert!(
+        shell
+            .start_menu_row_rect(1)
+            .contains(first.x + 4.0, boundary)
+    );
 }
 
 /// A screen too small for the chrome must produce empty rectangles, not
@@ -960,7 +967,10 @@ fn the_corner_setting_reaches_the_start_menu_and_the_taskbar_buttons() {
 fn the_corner_radius_grows_with_the_display_scaling() {
     let mut shell = scaled(200);
     shell.add_window("A", 100, 100, 400, 300, 1);
-    assert_eq!(fill_radii(&shell.render_window_decorations())[0].top_left, 16.0);
+    assert_eq!(
+        fill_radii(&shell.render_window_decorations())[0].top_left,
+        16.0
+    );
 }
 
 #[test]

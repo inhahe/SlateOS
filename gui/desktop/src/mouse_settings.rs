@@ -238,13 +238,11 @@ impl MouseConfig {
 // ============================================================================
 
 /// Combined mouse + keyboard input settings.
-#[derive(Clone, Debug)]
-#[derive(Default)]
+#[derive(Clone, Debug, Default)]
 pub struct InputSettings {
     pub mouse: MouseConfig,
     pub keyboard: KeyboardRepeatConfig,
 }
-
 
 impl InputSettings {
     pub fn new() -> Self {
@@ -956,7 +954,9 @@ mod tests {
         ui.settings_mut().mouse.set_speed(3);
         let cmds = ui.render(0.0, 0.0, 400.0);
         // Should contain a yellow "unsaved changes" text.
-        let has_yellow = cmds.iter().any(|c| matches!(c, RenderCommand::Text { color, .. } if *color == YELLOW));
+        let has_yellow = cmds
+            .iter()
+            .any(|c| matches!(c, RenderCommand::Text { color, .. } if *color == YELLOW));
         assert!(has_yellow);
     }
 
@@ -976,7 +976,9 @@ mod tests {
         ui.settings_mut().mouse.accel_profile = AccelProfile::Custom;
         ui.expand_section(0);
         let cmds = ui.render(0.0, 0.0, 400.0);
-        let has_gain = cmds.iter().any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("Accel gain")));
+        let has_gain = cmds
+            .iter()
+            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("Accel gain")));
         assert!(has_gain);
     }
 
@@ -1028,7 +1030,9 @@ mod tests {
         ui.settings_mut().mouse.show_trail = true;
         ui.expand_section(3);
         let cmds = ui.render(0.0, 0.0, 400.0);
-        let has_trail = cmds.iter().any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("Trail length")));
+        let has_trail = cmds.iter().any(
+            |c| matches!(c, RenderCommand::Text { text, .. } if text.contains("Trail length")),
+        );
         assert!(has_trail);
     }
 
@@ -1038,7 +1042,9 @@ mod tests {
         ui.settings_mut().keyboard.enabled = false;
         ui.expand_section(4);
         let cmds = ui.render(0.0, 0.0, 400.0);
-        let has_delay = cmds.iter().any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("Repeat delay")));
+        let has_delay = cmds.iter().any(
+            |c| matches!(c, RenderCommand::Text { text, .. } if text.contains("Repeat delay")),
+        );
         assert!(!has_delay);
     }
 
@@ -1057,7 +1063,9 @@ mod tests {
         ui.settings_mut().mouse.scroll_mode = ScrollMode::Smooth;
         ui.expand_section(2);
         let cmds = ui.render(0.0, 0.0, 400.0);
-        let has_speed = cmds.iter().any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("Scroll speed")));
+        let has_speed = cmds.iter().any(
+            |c| matches!(c, RenderCommand::Text { text, .. } if text.contains("Scroll speed")),
+        );
         assert!(has_speed);
     }
 
@@ -1067,7 +1075,9 @@ mod tests {
         ui.settings_mut().mouse.scroll_mode = ScrollMode::Lines;
         ui.expand_section(2);
         let cmds = ui.render(0.0, 0.0, 400.0);
-        let has_lines = cmds.iter().any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("Lines per notch")));
+        let has_lines = cmds.iter().any(
+            |c| matches!(c, RenderCommand::Text { text, .. } if text.contains("Lines per notch")),
+        );
         assert!(has_lines);
     }
 }

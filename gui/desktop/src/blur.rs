@@ -120,7 +120,13 @@ impl BlurEffect {
 
     /// Fully opaque, no blur (accessibility/performance fallback).
     pub fn none() -> Self {
-        Self::new(0.0, 1.0, Color::rgba(MOCHA_BASE.r, MOCHA_BASE.g, MOCHA_BASE.b, 255), 1.0, 0.0)
+        Self::new(
+            0.0,
+            1.0,
+            Color::rgba(MOCHA_BASE.r, MOCHA_BASE.g, MOCHA_BASE.b, 255),
+            1.0,
+            0.0,
+        )
     }
 }
 
@@ -216,12 +222,7 @@ impl BlurRenderer {
     ///
     /// The buffer is `&mut [u32]` in ARGB format (0xAA_RR_GG_BB). Pixels
     /// outside the region are not modified.
-    pub fn blur_region(
-        buffer: &mut [u32],
-        fb_width: u32,
-        fb_height: u32,
-        region: &BlurRegion,
-    ) {
+    pub fn blur_region(buffer: &mut [u32], fb_width: u32, fb_height: u32, region: &BlurRegion) {
         if !region.enabled || region.effect.radius < 0.5 {
             return;
         }
@@ -298,14 +299,7 @@ impl BlurRenderer {
     // ------------------------------------------------------------------
 
     /// Copy a rectangular region from the framebuffer into a contiguous Vec.
-    fn extract_sub(
-        buffer: &[u32],
-        fb_width: u32,
-        rx: u32,
-        ry: u32,
-        rw: u32,
-        rh: u32,
-    ) -> Vec<u32> {
+    fn extract_sub(buffer: &[u32], fb_width: u32, rx: u32, ry: u32, rw: u32, rh: u32) -> Vec<u32> {
         let fb_w = fb_width as usize;
         let rw_us = rw as usize;
         let mut sub = Vec::with_capacity(rw_us * rh as usize);
@@ -383,16 +377,8 @@ impl BlurRenderer {
         }
 
         // Centre of the corner arc.
-        let cx = if in_left {
-            r
-        } else {
-            w as f32 - r
-        };
-        let cy = if in_top {
-            r
-        } else {
-            h as f32 - r
-        };
+        let cx = if in_left { r } else { w as f32 - r };
+        let cy = if in_top { r } else { h as f32 - r };
 
         let dx = col as f32 + 0.5 - cx;
         let dy = row as f32 + 0.5 - cy;
@@ -710,15 +696,15 @@ impl BlurManager {
             let is_dirty = self.dirty.get(&id).copied().unwrap_or(true);
 
             // Use cache if not dirty and cache exists.
-            if !is_dirty
-                && let Some(cached) = self.cache.get(&id) {
-                    if let Some(region) = self.regions.get(&id)
-                        && region.enabled {
-                            let (rx, ry, rw, rh) = region.pixel_bounds(fb_width, fb_height);
-                            Self::blit_cached(buffer, fb_width, cached, rx, ry, rw, rh);
-                        }
-                    continue;
+            if !is_dirty && let Some(cached) = self.cache.get(&id) {
+                if let Some(region) = self.regions.get(&id)
+                    && region.enabled
+                {
+                    let (rx, ry, rw, rh) = region.pixel_bounds(fb_width, fb_height);
+                    Self::blit_cached(buffer, fb_width, cached, rx, ry, rw, rh);
                 }
+                continue;
+            }
 
             // Need to recompute.
             if let Some(region) = self.regions.get(&id) {
@@ -815,7 +801,9 @@ fn reciprocal_table(n: u32) -> u32 {
 #[inline]
 fn pixel_hash(x: u32, y: u32) -> u32 {
     // Minimal hash — good enough for visual noise, not crypto.
-    let mut h = x.wrapping_mul(374_761_393).wrapping_add(y.wrapping_mul(668_265_263));
+    let mut h = x
+        .wrapping_mul(374_761_393)
+        .wrapping_add(y.wrapping_mul(668_265_263));
     h = (h ^ (h >> 13)).wrapping_mul(1_274_126_177);
     h ^ (h >> 16)
 }
@@ -961,9 +949,18 @@ mod tests {
             let r = (px >> 16) & 0xFF;
             let g = (px >> 8) & 0xFF;
             let b = px & 0xFF;
-            assert!((r as i32 - 0x80).unsigned_abs() <= 2, "R channel drifted: {r:#X}");
-            assert!((g as i32 - 0x60).unsigned_abs() <= 2, "G channel drifted: {g:#X}");
-            assert!((b as i32 - 0x40).unsigned_abs() <= 2, "B channel drifted: {b:#X}");
+            assert!(
+                (r as i32 - 0x80).unsigned_abs() <= 2,
+                "R channel drifted: {r:#X}"
+            );
+            assert!(
+                (g as i32 - 0x60).unsigned_abs() <= 2,
+                "G channel drifted: {g:#X}"
+            );
+            assert!(
+                (b as i32 - 0x40).unsigned_abs() <= 2,
+                "B channel drifted: {b:#X}"
+            );
         }
     }
 
@@ -974,7 +971,11 @@ mod tests {
         let mut buf = Vec::with_capacity(w as usize * h as usize);
         for row in 0..h {
             for col in 0..w {
-                let c = if (row + col) % 2 == 0 { 0xFF_FF_FF_FF } else { 0xFF_00_00_00 };
+                let c = if (row + col) % 2 == 0 {
+                    0xFF_FF_FF_FF
+                } else {
+                    0xFF_00_00_00
+                };
                 buf.push(c);
             }
         }
@@ -1021,13 +1022,7 @@ mod tests {
         let original = gradient_buffer(w, h);
         let mut buf = original.clone();
 
-        let mut region = BlurRegion::new(
-            0.0,
-            0.0,
-            w as f32,
-            h as f32,
-            BlurEffect::default(),
-        );
+        let mut region = BlurRegion::new(0.0, 0.0, w as f32, h as f32, BlurEffect::default());
         region.set_enabled(false);
         BlurRenderer::blur_region(&mut buf, w, h, &region);
 
@@ -1155,11 +1150,17 @@ mod tests {
         assert!(mgr.is_empty());
         assert_eq!(mgr.region_count(), 0);
 
-        mgr.register(1, BlurRegion::new(0.0, 0.0, 100.0, 48.0, BlurEffect::taskbar()));
+        mgr.register(
+            1,
+            BlurRegion::new(0.0, 0.0, 100.0, 48.0, BlurEffect::taskbar()),
+        );
         assert_eq!(mgr.region_count(), 1);
         assert!(!mgr.is_empty());
 
-        mgr.register(2, BlurRegion::new(0.0, 0.0, 800.0, 30.0, BlurEffect::title_bar()));
+        mgr.register(
+            2,
+            BlurRegion::new(0.0, 0.0, 800.0, 30.0, BlurEffect::title_bar()),
+        );
         assert_eq!(mgr.region_count(), 2);
 
         mgr.unregister(1);
@@ -1171,8 +1172,14 @@ mod tests {
     #[test]
     fn test_manager_replace_region() {
         let mut mgr = BlurManager::new();
-        mgr.register(1, BlurRegion::new(0.0, 0.0, 100.0, 48.0, BlurEffect::taskbar()));
-        mgr.register(1, BlurRegion::new(10.0, 10.0, 200.0, 60.0, BlurEffect::menu()));
+        mgr.register(
+            1,
+            BlurRegion::new(0.0, 0.0, 100.0, 48.0, BlurEffect::taskbar()),
+        );
+        mgr.register(
+            1,
+            BlurRegion::new(10.0, 10.0, 200.0, 60.0, BlurEffect::menu()),
+        );
 
         assert_eq!(mgr.region_count(), 1);
         let r = mgr.get(1).expect("region should exist");
@@ -1183,7 +1190,10 @@ mod tests {
     #[test]
     fn test_manager_get_mut_marks_dirty() {
         let mut mgr = BlurManager::new();
-        mgr.register(1, BlurRegion::new(0.0, 0.0, 100.0, 48.0, BlurEffect::taskbar()));
+        mgr.register(
+            1,
+            BlurRegion::new(0.0, 0.0, 100.0, 48.0, BlurEffect::taskbar()),
+        );
         // Clear dirty flag manually.
         mgr.dirty.insert(1, false);
 
@@ -1233,7 +1243,10 @@ mod tests {
         let (w, h) = (16, 16);
         let original = solid_buffer(w, h, 0xFF_AA_BB_CC);
         let mut buf = original.clone();
-        mgr.register(1, BlurRegion::new(0.0, 0.0, w as f32, h as f32, BlurEffect::taskbar()));
+        mgr.register(
+            1,
+            BlurRegion::new(0.0, 0.0, w as f32, h as f32, BlurEffect::taskbar()),
+        );
         mgr.update_all(&mut buf, w, h);
         assert_eq!(buf, original);
     }

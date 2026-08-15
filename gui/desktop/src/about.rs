@@ -1122,10 +1122,7 @@ mod tests {
         cmds.iter()
             .filter_map(|c| match c {
                 RenderCommand::Text {
-                    y,
-                    text,
-                    font_size,
-                    ..
+                    y, text, font_size, ..
                 } if (*font_size - LICENSE_FONT_SIZE).abs() < 0.01 => Some((*y, text.clone())),
                 _ => None,
             })
@@ -1282,8 +1279,16 @@ mod tests {
     fn test_theme_colors_opaque() {
         // All theme constants should be fully opaque.
         let colors = [
-            COL_BASE, COL_SURFACE0, COL_SURFACE1, COL_TEXT, COL_SUBTEXT0,
-            COL_BLUE, COL_LAVENDER, COL_OVERLAY0, COL_MANTLE, COL_GREEN,
+            COL_BASE,
+            COL_SURFACE0,
+            COL_SURFACE1,
+            COL_TEXT,
+            COL_SUBTEXT0,
+            COL_BLUE,
+            COL_LAVENDER,
+            COL_OVERLAY0,
+            COL_MANTLE,
+            COL_GREEN,
             COL_PEACH,
         ];
         for c in &colors {

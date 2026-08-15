@@ -277,7 +277,8 @@ impl StartupSettings {
     ) -> u64 {
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1);
-        self.entries.push(StartupEntry::new(id, name, publisher, command));
+        self.entries
+            .push(StartupEntry::new(id, name, publisher, command));
         id
     }
 
@@ -345,7 +346,10 @@ impl StartupSettings {
 
     /// Entries with high impact.
     pub fn high_impact_entries(&self) -> Vec<&StartupEntry> {
-        self.entries.iter().filter(|e| e.impact == StartupImpact::High && e.enabled).collect()
+        self.entries
+            .iter()
+            .filter(|e| e.impact == StartupImpact::High && e.enabled)
+            .collect()
     }
 
     /// Entries that are failing.
@@ -355,7 +359,8 @@ impl StartupSettings {
 
     /// Total estimated startup impact in milliseconds (enabled entries only).
     pub fn total_impact_ms(&self) -> u64 {
-        self.entries.iter()
+        self.entries
+            .iter()
             .filter(|e| e.enabled)
             .filter_map(|e| e.startup_time_ms)
             .sum()
@@ -367,7 +372,9 @@ impl StartupSettings {
         match sort {
             StartupSort::Name => entries.sort_by_key(|a| a.name.to_lowercase()),
             StartupSort::Impact => entries.sort_by_key(|e| std::cmp::Reverse(e.impact)),
-            StartupSort::StartupType => entries.sort_by(|a, b| a.startup_type.label().cmp(b.startup_type.label())),
+            StartupSort::StartupType => {
+                entries.sort_by(|a, b| a.startup_type.label().cmp(b.startup_type.label()))
+            }
             StartupSort::Status => entries.sort_by_key(|e| std::cmp::Reverse(e.enabled)),
         }
         entries
@@ -470,7 +477,10 @@ impl StartupSettingsUI {
     /// Get filtered and sorted entries.
     fn visible_entries(&self) -> Vec<&StartupEntry> {
         let filter_lower = self.filter.to_lowercase();
-        let mut entries: Vec<_> = self.settings.entries.iter()
+        let mut entries: Vec<_> = self
+            .settings
+            .entries
+            .iter()
             .filter(|e| {
                 if self.show_enabled_only && !e.enabled {
                     return false;
@@ -487,7 +497,9 @@ impl StartupSettingsUI {
         match self.sort {
             StartupSort::Name => entries.sort_by_key(|a| a.name.to_lowercase()),
             StartupSort::Impact => entries.sort_by_key(|e| std::cmp::Reverse(e.impact)),
-            StartupSort::StartupType => entries.sort_by(|a, b| a.startup_type.label().cmp(b.startup_type.label())),
+            StartupSort::StartupType => {
+                entries.sort_by(|a, b| a.startup_type.label().cmp(b.startup_type.label()))
+            }
             StartupSort::Status => entries.sort_by_key(|e| std::cmp::Reverse(e.enabled)),
         }
 
@@ -555,7 +567,11 @@ impl StartupSettingsUI {
                 text: tab.label().into(),
                 font_size: 13.0,
                 color: if active { CRUST } else { SUBTEXT0 },
-                font_weight: if active { FontWeightHint::Bold } else { FontWeightHint::Regular },
+                font_weight: if active {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
                 max_width: Some(tw - 20.0),
             });
             tx += tw + 8.0;
@@ -601,7 +617,11 @@ impl StartupSettingsUI {
             y: cy + 7.0,
             text: filter_text,
             font_size: 13.0,
-            color: if self.filter.is_empty() { OVERLAY0 } else { TEXT },
+            color: if self.filter.is_empty() {
+                OVERLAY0
+            } else {
+                TEXT
+            },
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - 20.0),
         });
@@ -633,7 +653,10 @@ impl StartupSettingsUI {
             cmds.push(RenderCommand::Text {
                 x: x + 10.0,
                 y: cy + 6.0,
-                text: format!("{} high-impact apps slowing your startup", high_impact.len()),
+                text: format!(
+                    "{} high-impact apps slowing your startup",
+                    high_impact.len()
+                ),
                 font_size: 12.0,
                 color: RED,
                 font_weight: FontWeightHint::Bold,
@@ -809,7 +832,13 @@ impl StartupSettingsUI {
                 y: cy + 24.0,
                 text: format!("{:.1}s", ms as f64 / 1000.0),
                 font_size: 18.0,
-                color: if ms < 10000 { GREEN } else if ms < 30000 { YELLOW } else { RED },
+                color: if ms < 10000 {
+                    GREEN
+                } else if ms < 30000 {
+                    YELLOW
+                } else {
+                    RED
+                },
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(width - 24.0),
             });
@@ -830,13 +859,27 @@ impl StartupSettingsUI {
         cy += 28.0;
 
         // Toggle rows
-        self.render_toggle_row(cmds, x, cy, width, "Measure Boot Time", cfg.measure_boot_time);
+        self.render_toggle_row(
+            cmds,
+            x,
+            cy,
+            width,
+            "Measure Boot Time",
+            cfg.measure_boot_time,
+        );
         cy += 36.0;
 
         self.render_toggle_row(cmds, x, cy, width, "Fast Startup", cfg.fast_startup);
         cy += 36.0;
 
-        self.render_toggle_row(cmds, x, cy, width, "Auto-disable Failing Apps", cfg.auto_disable_failing);
+        self.render_toggle_row(
+            cmds,
+            x,
+            cy,
+            width,
+            "Auto-disable Failing Apps",
+            cfg.auto_disable_failing,
+        );
         cy += 36.0;
 
         // Thresholds
@@ -852,14 +895,20 @@ impl StartupSettingsUI {
         cy += 26.0;
 
         self.render_label_value(
-            cmds, x, cy, width,
+            cmds,
+            x,
+            cy,
+            width,
             "Max Startup Delay",
             &format!("{:.0}s", cfg.max_startup_delay_ms as f64 / 1000.0),
         );
         cy += 28.0;
 
         self.render_label_value(
-            cmds, x, cy, width,
+            cmds,
+            x,
+            cy,
+            width,
             "Fail Threshold",
             &format!("{} consecutive failures", cfg.auto_disable_threshold),
         );

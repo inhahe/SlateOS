@@ -226,9 +226,7 @@ impl MonitorLayout {
 
     /// Find which enabled monitor contains the point `(x, y)`.
     pub fn monitor_at(&self, x: i32, y: i32) -> Option<&MonitorInfo> {
-        self.monitors
-            .iter()
-            .find(|m| m.enabled && m.contains(x, y))
+        self.monitors.iter().find(|m| m.enabled && m.contains(x, y))
     }
 
     /// Snap a monitor's position so its edges align with neighbouring monitors.
@@ -321,8 +319,7 @@ impl MonitorLayout {
     /// the horizontal and vertical edges of every monitor, then reports
     /// uncovered cells.
     pub fn detect_gaps(&self) -> Vec<(i32, i32, u32, u32)> {
-        let enabled: Vec<&MonitorInfo> =
-            self.monitors.iter().filter(|m| m.enabled).collect();
+        let enabled: Vec<&MonitorInfo> = self.monitors.iter().filter(|m| m.enabled).collect();
         if enabled.len() < 2 {
             return Vec::new();
         }
@@ -404,11 +401,7 @@ impl MonitorLayout {
             }
             ArrangeMode::Primary => {
                 // Disable everything except the primary.
-                let primary_id = self
-                    .monitors
-                    .iter()
-                    .find(|m| m.primary)
-                    .map(|m| m.id);
+                let primary_id = self.monitors.iter().find(|m| m.primary).map(|m| m.id);
                 for m in &mut self.monitors {
                     if Some(m.id) == primary_id {
                         m.enabled = true;
@@ -464,12 +457,7 @@ impl MonitorManager {
 
         if was_primary {
             // Promote the first enabled monitor.
-            if let Some(first) = self
-                .layout
-                .monitors
-                .iter_mut()
-                .find(|m| m.enabled)
-            {
+            if let Some(first) = self.layout.monitors.iter_mut().find(|m| m.enabled) {
                 first.primary = true;
             }
         }
@@ -606,10 +594,7 @@ impl MonitorConfig {
                 "resolution={}x{}\n",
                 cfg.resolution.0, cfg.resolution.1
             ));
-            out.push_str(&format!(
-                "position={},{}\n",
-                cfg.position.0, cfg.position.1
-            ));
+            out.push_str(&format!("position={},{}\n", cfg.position.0, cfg.position.1));
             out.push_str(&format!("rotation={}\n", cfg.rotation.as_str()));
             out.push_str(&format!("scale={}\n", cfg.scale));
             out.push_str(&format!("enabled={}\n", cfg.enabled));
@@ -628,36 +613,33 @@ impl MonitorConfig {
         let mut current_scale: Option<f32> = None;
         let mut current_enabled: Option<bool> = None;
 
-        let flush =
-            |connector: &Option<String>,
-             res: &Option<(u32, u32)>,
-             pos: &Option<(i32, i32)>,
-             rot: &Option<Rotation>,
-             scale: &Option<f32>,
-             enabled: &Option<bool>,
-             out: &mut HashMap<String, PerMonitorConfig>|
-             -> Result<(), ConfigError> {
-                if let Some(conn) = connector {
-                    let r =
-                        res.ok_or_else(|| ConfigError::MissingKey("resolution".into()))?;
-                    let p =
-                        pos.ok_or_else(|| ConfigError::MissingKey("position".into()))?;
-                    let ro = rot.unwrap_or(Rotation::Normal);
-                    let sc = scale.unwrap_or(1.0);
-                    let en = enabled.unwrap_or(true);
-                    out.insert(
-                        conn.clone(),
-                        PerMonitorConfig {
-                            resolution: r,
-                            position: p,
-                            rotation: ro,
-                            scale: sc,
-                            enabled: en,
-                        },
-                    );
-                }
-                Ok(())
-            };
+        let flush = |connector: &Option<String>,
+                     res: &Option<(u32, u32)>,
+                     pos: &Option<(i32, i32)>,
+                     rot: &Option<Rotation>,
+                     scale: &Option<f32>,
+                     enabled: &Option<bool>,
+                     out: &mut HashMap<String, PerMonitorConfig>|
+         -> Result<(), ConfigError> {
+            if let Some(conn) = connector {
+                let r = res.ok_or_else(|| ConfigError::MissingKey("resolution".into()))?;
+                let p = pos.ok_or_else(|| ConfigError::MissingKey("position".into()))?;
+                let ro = rot.unwrap_or(Rotation::Normal);
+                let sc = scale.unwrap_or(1.0);
+                let en = enabled.unwrap_or(true);
+                out.insert(
+                    conn.clone(),
+                    PerMonitorConfig {
+                        resolution: r,
+                        position: p,
+                        rotation: ro,
+                        scale: sc,
+                        enabled: en,
+                    },
+                );
+            }
+            Ok(())
+        };
 
         for line in s.lines() {
             let line = line.trim();
@@ -677,8 +659,7 @@ impl MonitorConfig {
                     &current_enabled,
                     &mut configs,
                 )?;
-                current_connector =
-                    Some(line[1..line.len() - 1].to_string());
+                current_connector = Some(line[1..line.len() - 1].to_string());
                 current_res = None;
                 current_pos = None;
                 current_rot = None;
@@ -697,9 +678,7 @@ impl MonitorConfig {
             match key {
                 "resolution" => {
                     let Some((ws, hs)) = val.split_once('x') else {
-                        return Err(ConfigError::InvalidValue(format!(
-                            "resolution: {val}"
-                        )));
+                        return Err(ConfigError::InvalidValue(format!("resolution: {val}")));
                     };
                     let w: u32 = ws.trim().parse().map_err(|_| {
                         ConfigError::InvalidValue(format!("resolution width: {ws}"))
@@ -711,34 +690,33 @@ impl MonitorConfig {
                 }
                 "position" => {
                     let Some((xs, yst)) = val.split_once(',') else {
-                        return Err(ConfigError::InvalidValue(format!(
-                            "position: {val}"
-                        )));
+                        return Err(ConfigError::InvalidValue(format!("position: {val}")));
                     };
-                    let x: i32 = xs.trim().parse().map_err(|_| {
-                        ConfigError::InvalidValue(format!("position x: {xs}"))
-                    })?;
-                    let y: i32 = yst.trim().parse().map_err(|_| {
-                        ConfigError::InvalidValue(format!("position y: {yst}"))
-                    })?;
+                    let x: i32 = xs
+                        .trim()
+                        .parse()
+                        .map_err(|_| ConfigError::InvalidValue(format!("position x: {xs}")))?;
+                    let y: i32 = yst
+                        .trim()
+                        .parse()
+                        .map_err(|_| ConfigError::InvalidValue(format!("position y: {yst}")))?;
                     current_pos = Some((x, y));
                 }
                 "rotation" => {
-                    let rot = Rotation::from_str_config(val).ok_or_else(|| {
-                        ConfigError::InvalidValue(format!("rotation: {val}"))
-                    })?;
+                    let rot = Rotation::from_str_config(val)
+                        .ok_or_else(|| ConfigError::InvalidValue(format!("rotation: {val}")))?;
                     current_rot = Some(rot);
                 }
                 "scale" => {
-                    let s: f32 = val.parse().map_err(|_| {
-                        ConfigError::InvalidValue(format!("scale: {val}"))
-                    })?;
+                    let s: f32 = val
+                        .parse()
+                        .map_err(|_| ConfigError::InvalidValue(format!("scale: {val}")))?;
                     current_scale = Some(s);
                 }
                 "enabled" => {
-                    let b: bool = val.parse().map_err(|_| {
-                        ConfigError::InvalidValue(format!("enabled: {val}"))
-                    })?;
+                    let b: bool = val
+                        .parse()
+                        .map_err(|_| ConfigError::InvalidValue(format!("enabled: {val}")))?;
                     current_enabled = Some(b);
                 }
                 _ => {
@@ -961,7 +939,10 @@ mod tests {
 
     #[test]
     fn rotation_normal_preserves_resolution() {
-        assert_eq!(Rotation::Normal.effective_resolution(1920, 1080), (1920, 1080));
+        assert_eq!(
+            Rotation::Normal.effective_resolution(1920, 1080),
+            (1920, 1080)
+        );
     }
 
     #[test]
@@ -974,12 +955,18 @@ mod tests {
 
     #[test]
     fn rotation_left_swaps_dimensions() {
-        assert_eq!(Rotation::Left.effective_resolution(1920, 1080), (1080, 1920));
+        assert_eq!(
+            Rotation::Left.effective_resolution(1920, 1080),
+            (1080, 1920)
+        );
     }
 
     #[test]
     fn rotation_right_swaps_dimensions() {
-        assert_eq!(Rotation::Right.effective_resolution(1920, 1080), (1080, 1920));
+        assert_eq!(
+            Rotation::Right.effective_resolution(1920, 1080),
+            (1080, 1920)
+        );
     }
 
     #[test]
@@ -1036,10 +1023,7 @@ mod tests {
         let mut m2 = make_monitor(2, "DP-2", 2560, 1440, 1920, 0, false);
         m2.enabled = false;
         let layout = MonitorLayout {
-            monitors: vec![
-                make_monitor(1, "DP-1", 1920, 1080, 0, 0, true),
-                m2,
-            ],
+            monitors: vec![make_monitor(1, "DP-1", 1920, 1080, 0, 0, true), m2],
         };
         assert_eq!(layout.virtual_bounds(), (0, 0, 1920, 1080));
     }
@@ -1048,9 +1032,7 @@ mod tests {
     fn virtual_bounds_all_disabled() {
         let mut m1 = make_monitor(1, "DP-1", 1920, 1080, 0, 0, true);
         m1.enabled = false;
-        let layout = MonitorLayout {
-            monitors: vec![m1],
-        };
+        let layout = MonitorLayout { monitors: vec![m1] };
         assert_eq!(layout.virtual_bounds(), (0, 0, 0, 0));
     }
 
@@ -1459,8 +1441,7 @@ mod tests {
         let to = make_monitor(2, "DP-2", 2560, 1440, 1920, 0, false);
 
         // Window at the center of monitor 1.
-        let (x, y, w, h) =
-            WindowPlacement::move_to_monitor((960, 540, 400, 300), &from, &to);
+        let (x, y, w, h) = WindowPlacement::move_to_monitor((960, 540, 400, 300), &from, &to);
         assert_eq!(w, 400);
         assert_eq!(h, 300);
 
@@ -1483,8 +1464,7 @@ mod tests {
         let layout = MonitorLayout {
             monitors: vec![make_monitor(1, "DP-1", 1920, 1080, 0, 0, true)],
         };
-        let (x, _y, w, h) =
-            WindowPlacement::clamp_to_visible((5000, 500, 800, 600), &layout);
+        let (x, _y, w, h) = WindowPlacement::clamp_to_visible((5000, 500, 800, 600), &layout);
         assert_eq!(w, 800);
         assert_eq!(h, 600);
         // Window should be pulled back so that at least 48px is visible.
@@ -1497,8 +1477,7 @@ mod tests {
         let layout = MonitorLayout {
             monitors: vec![make_monitor(1, "DP-1", 1920, 1080, 0, 0, true)],
         };
-        let (x, _y, w, _h) =
-            WindowPlacement::clamp_to_visible((-5000, 500, 800, 600), &layout);
+        let (x, _y, w, _h) = WindowPlacement::clamp_to_visible((-5000, 500, 800, 600), &layout);
         // At least 48px must overlap the monitor.
         assert!(x + w as i32 >= 48);
     }

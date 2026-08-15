@@ -142,10 +142,7 @@ impl PeekConfig {
         out.push_str(&format!("hover_delay_ms={}\n", self.hover_delay_ms));
         out.push_str(&format!("max_thumb_width={}\n", self.max_thumb_width));
         out.push_str(&format!("max_thumb_height={}\n", self.max_thumb_height));
-        out.push_str(&format!(
-            "show_close_buttons={}\n",
-            self.show_close_buttons
-        ));
+        out.push_str(&format!("show_close_buttons={}\n", self.show_close_buttons));
         out.push_str(&format!("enabled={}\n", self.enabled));
         out.push_str(&format!("fade_duration_ms={}\n", self.fade_duration_ms));
         out
@@ -179,13 +176,7 @@ pub struct WindowSnapshot {
 
 impl WindowSnapshot {
     /// Create a new window snapshot.
-    pub fn new(
-        window_id: u64,
-        app_id: &str,
-        title: &str,
-        width: f32,
-        height: f32,
-    ) -> Self {
+    pub fn new(window_id: u64, app_id: &str, title: &str, width: f32, height: f32) -> Self {
         Self {
             window_id,
             app_id: app_id.to_string(),
@@ -207,7 +198,9 @@ impl WindowSnapshot {
         let scale_x = max_w / self.window_width;
         let scale_y = max_h / self.window_height;
         let scale = scale_x.min(scale_y);
-        let w = (self.window_width * scale).max(MIN_THUMBNAIL_WIDTH).min(max_w);
+        let w = (self.window_width * scale)
+            .max(MIN_THUMBNAIL_WIDTH)
+            .min(max_w);
         let h = (self.window_height * scale).min(max_h);
         (w, h)
     }
@@ -255,16 +248,17 @@ pub struct ThumbnailSlot {
 impl ThumbnailSlot {
     /// Check if a point is inside this thumbnail.
     pub fn contains(&self, px: f32, py: f32) -> bool {
-        px >= self.x && px < self.x + self.width
-            && py >= self.y && py < self.y + self.height + TITLE_HEIGHT
+        px >= self.x
+            && px < self.x + self.width
+            && py >= self.y
+            && py < self.y + self.height + TITLE_HEIGHT
     }
 
     /// Check if a point is inside the close button area (top-right corner).
     pub fn close_button_hit(&self, px: f32, py: f32) -> bool {
         let bx = self.x + self.width - CLOSE_BUTTON_SIZE - 4.0;
         let by = self.y + 4.0;
-        px >= bx && px < bx + CLOSE_BUTTON_SIZE
-            && py >= by && py < by + CLOSE_BUTTON_SIZE
+        px >= bx && px < bx + CLOSE_BUTTON_SIZE && py >= by && py < by + CLOSE_BUTTON_SIZE
     }
 }
 
@@ -413,8 +407,7 @@ impl PeekPopup {
         self.snapshots = snapshots;
 
         // Compute layout
-        let (slots, width, height) =
-            compute_thumbnail_layout(&self.snapshots, &self.config);
+        let (slots, width, height) = compute_thumbnail_layout(&self.snapshots, &self.config);
         self.slots = slots;
         self.popup_width = width;
         self.popup_height = height;
@@ -542,8 +535,7 @@ impl PeekPopup {
 
         for slot in &self.slots {
             if slot.contains(local_x, local_y) {
-                if self.config.show_close_buttons && slot.close_button_hit(local_x, local_y)
-                {
+                if self.config.show_close_buttons && slot.close_button_hit(local_x, local_y) {
                     return PeekAction::CloseWindow(slot.window_id);
                 }
                 return PeekAction::FocusWindow(slot.window_id);
@@ -604,12 +596,7 @@ impl PeekPopup {
             y: self.popup_y,
             width: self.popup_width,
             height: self.popup_height,
-            color: Color::rgba(
-                MOCHA_BASE.r,
-                MOCHA_BASE.g,
-                MOCHA_BASE.b,
-                bg_alpha,
-            ),
+            color: Color::rgba(MOCHA_BASE.r, MOCHA_BASE.g, MOCHA_BASE.b, bg_alpha),
             corner_radii: CornerRadii::all(POPUP_RADIUS),
         });
 
@@ -686,12 +673,7 @@ impl PeekPopup {
             y: abs_y,
             width: slot.width,
             height: slot.height,
-            color: Color::rgba(
-                content_color.r,
-                content_color.g,
-                content_color.b,
-                a,
-            ),
+            color: Color::rgba(content_color.r, content_color.g, content_color.b, a),
             corner_radii: CornerRadii::all(4.0),
         });
 
@@ -709,12 +691,7 @@ impl PeekPopup {
             y: abs_y,
             width: slot.width,
             height: slot.height,
-            color: Color::rgba(
-                border_color.r,
-                border_color.g,
-                border_color.b,
-                a,
-            ),
+            color: Color::rgba(border_color.r, border_color.g, border_color.b, a),
             line_width: if snap.is_focused { 2.0 } else { 1.0 },
             corner_radii: CornerRadii::all(4.0),
         });
@@ -726,12 +703,7 @@ impl PeekPopup {
                 y: abs_y + slot.height / 2.0 - 6.0,
                 text: "Minimized".to_string(),
                 font_size: 11.0,
-                color: Color::rgba(
-                    MOCHA_SUBTEXT0.r,
-                    MOCHA_SUBTEXT0.g,
-                    MOCHA_SUBTEXT0.b,
-                    a,
-                ),
+                color: Color::rgba(MOCHA_SUBTEXT0.r, MOCHA_SUBTEXT0.g, MOCHA_SUBTEXT0.b, a),
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(slot.width - 8.0),
             });
@@ -747,12 +719,7 @@ impl PeekPopup {
             y: title_y,
             text: display_title.to_string(),
             font_size: 11.0,
-            color: Color::rgba(
-                MOCHA_TEXT.r,
-                MOCHA_TEXT.g,
-                MOCHA_TEXT.b,
-                a,
-            ),
+            color: Color::rgba(MOCHA_TEXT.r, MOCHA_TEXT.g, MOCHA_TEXT.b, a),
             font_weight: FontWeightHint::Regular,
             max_width: Some(slot.width - 4.0),
         });
@@ -774,23 +741,13 @@ impl PeekPopup {
                 y: by,
                 width: CLOSE_BUTTON_SIZE,
                 height: CLOSE_BUTTON_SIZE,
-                color: Color::rgba(
-                    close_bg.r,
-                    close_bg.g,
-                    close_bg.b,
-                    a,
-                ),
+                color: Color::rgba(close_bg.r, close_bg.g, close_bg.b, a),
                 corner_radii: CornerRadii::all(3.0),
             });
 
             // X symbol via two crossed lines
             let margin = 4.0;
-            let line_color = Color::rgba(
-                MOCHA_TEXT.r,
-                MOCHA_TEXT.g,
-                MOCHA_TEXT.b,
-                a,
-            );
+            let line_color = Color::rgba(MOCHA_TEXT.r, MOCHA_TEXT.g, MOCHA_TEXT.b, a);
             cmds.push(RenderCommand::Line {
                 x1: bx + margin,
                 y1: by + margin,
@@ -854,10 +811,7 @@ impl PeekManager {
             return;
         }
 
-        let same_app = self
-            .hovered_app
-            .as_ref()
-            .is_some_and(|a| a == app_id);
+        let same_app = self.hovered_app.as_ref().is_some_and(|a| a == app_id);
 
         if same_app && self.popup.is_active() {
             // Already showing or waiting for this app
@@ -866,13 +820,8 @@ impl PeekManager {
 
         self.hovered_app = Some(app_id.to_string());
         let snapshots = snapshots_fn();
-        self.popup.begin_hover(
-            app_id,
-            button_center_x,
-            button_top_y,
-            snapshots,
-            now_ms,
-        );
+        self.popup
+            .begin_hover(app_id, button_center_x, button_top_y, snapshots, now_ms);
     }
 
     /// Notify that the mouse left the taskbar button area.
@@ -893,12 +842,7 @@ impl PeekManager {
     }
 
     /// Handle mouse movement. Returns true if state changed.
-    pub fn on_mouse_move(
-        &mut self,
-        screen_x: f32,
-        screen_y: f32,
-        _now_ms: u64,
-    ) -> bool {
+    pub fn on_mouse_move(&mut self, screen_x: f32, screen_y: f32, _now_ms: u64) -> bool {
         self.popup.on_mouse_move(screen_x, screen_y)
     }
 
@@ -1057,7 +1001,12 @@ mod tests {
 
     #[test]
     fn test_snapshot_display_title_truncate() {
-        let s = make_snapshot(1, "This is a very long window title that should be truncated", 800.0, 600.0);
+        let s = make_snapshot(
+            1,
+            "This is a very long window title that should be truncated",
+            800.0,
+            600.0,
+        );
         let truncated = s.display_title(20);
         assert!(truncated.len() <= 20);
     }

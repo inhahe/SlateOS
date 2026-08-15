@@ -110,15 +110,15 @@ impl IconType {
     /// Unicode glyph representing this icon type.
     fn glyph(self) -> &'static str {
         match self {
-            Self::Folder => "\u{1F4C1}",    // folder
-            Self::File => "\u{1F4C4}",      // page facing up
-            Self::Shortcut => "\u{1F517}",  // link
-            Self::Drive => "\u{1F4BE}",     // floppy disk (drive)
+            Self::Folder => "\u{1F4C1}",     // folder
+            Self::File => "\u{1F4C4}",       // page facing up
+            Self::Shortcut => "\u{1F517}",   // link
+            Self::Drive => "\u{1F4BE}",      // floppy disk (drive)
             Self::RecycleBin => "\u{1F5D1}", // wastebasket
-            Self::Computer => "\u{1F4BB}",  // laptop
-            Self::Document => "\u{1F4DD}",  // memo
-            Self::Image => "\u{1F5BC}",     // framed picture
-            Self::Executable => "\u{2699}", // gear
+            Self::Computer => "\u{1F4BB}",   // laptop
+            Self::Document => "\u{1F4DD}",   // memo
+            Self::Image => "\u{1F5BC}",      // framed picture
+            Self::Executable => "\u{2699}",  // gear
         }
     }
 
@@ -211,7 +211,11 @@ pub enum IconEvent {
     /// An icon was activated (double-click or Enter).
     Activate(IconId, IconAction),
     /// A context menu was requested at a position.
-    ContextMenu { x: i32, y: i32, icon_id: Option<IconId> },
+    ContextMenu {
+        x: i32,
+        y: i32,
+        icon_id: Option<IconId>,
+    },
     /// Icons were deleted (moved to recycle bin).
     Delete(Vec<IconId>),
     /// Rename was initiated for an icon.
@@ -370,7 +374,12 @@ impl DesktopIconLayer {
     }
 
     /// Add an icon at the next available grid position.
-    pub fn add_icon_auto(&mut self, label: &str, icon_type: IconType, action: IconAction) -> IconId {
+    pub fn add_icon_auto(
+        &mut self,
+        label: &str,
+        icon_type: IconType,
+        action: IconAction,
+    ) -> IconId {
         let pos = self.next_free_cell();
         self.add_icon(label, icon_type, action, pos.0, pos.1)
     }
@@ -522,8 +531,12 @@ impl DesktopIconLayer {
 
     /// Find the next free grid cell (scanning top-to-bottom, left-to-right).
     pub fn next_free_cell(&self) -> (i32, i32) {
-        let cols = self.grid.columns_in(self.screen_width.saturating_sub(EDGE_PADDING * 2));
-        let rows = self.grid.rows_in(self.usable_height().saturating_sub(EDGE_PADDING * 2));
+        let cols = self
+            .grid
+            .columns_in(self.screen_width.saturating_sub(EDGE_PADDING * 2));
+        let rows = self
+            .grid
+            .rows_in(self.usable_height().saturating_sub(EDGE_PADDING * 2));
 
         // Map each icon's stored top-left back to its grid cell.  Icons
         // placed via `add_icon` are snapped (no padding added), and icons
@@ -553,11 +566,7 @@ impl DesktopIconLayer {
     /// Auto-arrange all icons into a grid, sorted alphabetically.
     pub fn auto_arrange(&mut self) {
         // Sort by label (case-insensitive).
-        self.icons.sort_by(|a, b| {
-            a.label
-                .to_lowercase()
-                .cmp(&b.label.to_lowercase())
-        });
+        self.icons.sort_by_key(|i| i.label.to_lowercase());
 
         let cols = self
             .grid
@@ -759,9 +768,10 @@ impl DesktopIconLayer {
     /// Handle double-click at a position.
     pub fn handle_double_click(&mut self, x: f32, y: f32) -> IconEvent {
         if let Some(id) = self.icon_at(x, y)
-            && let Some(icon) = self.icons.iter().find(|i| i.id == id) {
-                return IconEvent::Activate(id, icon.action.clone());
-            }
+            && let Some(icon) = self.icons.iter().find(|i| i.id == id)
+        {
+            return IconEvent::Activate(id, icon.action.clone());
+        }
         IconEvent::None
     }
 
@@ -790,9 +800,10 @@ impl DesktopIconLayer {
             DesktopKey::Enter => {
                 let selected = self.selected_ids();
                 if selected.len() == 1
-                    && let Some(icon) = self.icons.iter().find(|i| i.id == selected[0]) {
-                        return IconEvent::Activate(selected[0], icon.action.clone());
-                    }
+                    && let Some(icon) = self.icons.iter().find(|i| i.id == selected[0])
+                {
+                    return IconEvent::Activate(selected[0], icon.action.clone());
+                }
                 IconEvent::None
             }
             _ => IconEvent::None,
@@ -1174,7 +1185,13 @@ mod tests {
     fn select_single_deselects_others() {
         let mut layer = DesktopIconLayer::new(1920, 1080, 40);
         let id1 = layer.add_icon("A", IconType::File, IconAction::OpenPath("/a".into()), 0, 0);
-        let id2 = layer.add_icon("B", IconType::File, IconAction::OpenPath("/b".into()), 80, 0);
+        let id2 = layer.add_icon(
+            "B",
+            IconType::File,
+            IconAction::OpenPath("/b".into()),
+            80,
+            0,
+        );
 
         layer.select_all();
         assert_eq!(layer.selected_ids().len(), 2);
@@ -1204,8 +1221,20 @@ mod tests {
     fn select_all_and_deselect_all() {
         let mut layer = DesktopIconLayer::new(1920, 1080, 40);
         layer.add_icon("A", IconType::File, IconAction::OpenPath("/a".into()), 0, 0);
-        layer.add_icon("B", IconType::File, IconAction::OpenPath("/b".into()), 80, 0);
-        layer.add_icon("C", IconType::File, IconAction::OpenPath("/c".into()), 160, 0);
+        layer.add_icon(
+            "B",
+            IconType::File,
+            IconAction::OpenPath("/b".into()),
+            80,
+            0,
+        );
+        layer.add_icon(
+            "C",
+            IconType::File,
+            IconAction::OpenPath("/c".into()),
+            160,
+            0,
+        );
 
         layer.select_all();
         assert_eq!(layer.selected_ids().len(), 3);
@@ -1219,8 +1248,20 @@ mod tests {
         let mut layer = DesktopIconLayer::new(1920, 1080, 40);
         // Place icons in a known grid.
         layer.add_icon("A", IconType::File, IconAction::OpenPath("/a".into()), 0, 0);
-        layer.add_icon("B", IconType::File, IconAction::OpenPath("/b".into()), 80, 0);
-        layer.add_icon("C", IconType::File, IconAction::OpenPath("/c".into()), 0, 90);
+        layer.add_icon(
+            "B",
+            IconType::File,
+            IconAction::OpenPath("/b".into()),
+            80,
+            0,
+        );
+        layer.add_icon(
+            "C",
+            IconType::File,
+            IconAction::OpenPath("/c".into()),
+            0,
+            90,
+        );
 
         // Select a rectangle that covers A and C (first column).
         // Center of A = (40, 45), center of C = (40, 135), center of B = (120, 45).
@@ -1239,9 +1280,27 @@ mod tests {
     #[test]
     fn auto_arrange_sorts_alphabetically() {
         let mut layer = DesktopIconLayer::new(1920, 1080, 40);
-        layer.add_icon("Zebra", IconType::File, IconAction::OpenPath("/z".into()), 500, 500);
-        layer.add_icon("Apple", IconType::File, IconAction::OpenPath("/a".into()), 300, 300);
-        layer.add_icon("Mango", IconType::File, IconAction::OpenPath("/m".into()), 100, 100);
+        layer.add_icon(
+            "Zebra",
+            IconType::File,
+            IconAction::OpenPath("/z".into()),
+            500,
+            500,
+        );
+        layer.add_icon(
+            "Apple",
+            IconType::File,
+            IconAction::OpenPath("/a".into()),
+            300,
+            300,
+        );
+        layer.add_icon(
+            "Mango",
+            IconType::File,
+            IconAction::OpenPath("/m".into()),
+            100,
+            100,
+        );
 
         layer.auto_arrange();
 
@@ -1295,7 +1354,13 @@ mod tests {
         let next = layer.next_free_cell();
         // Should be second row, first column.
         let (expected_x, expected_y) = layer.grid.from_cell(0, 1);
-        assert_eq!(next, (expected_x + EDGE_PADDING as i32, expected_y + EDGE_PADDING as i32));
+        assert_eq!(
+            next,
+            (
+                expected_x + EDGE_PADDING as i32,
+                expected_y + EDGE_PADDING as i32
+            )
+        );
     }
 
     // ------------------------------------------------------------------
@@ -1305,7 +1370,13 @@ mod tests {
     #[test]
     fn icon_at_hit() {
         let mut layer = DesktopIconLayer::new(1920, 1080, 40);
-        let id = layer.add_icon("Test", IconType::File, IconAction::OpenPath("/t".into()), 0, 0);
+        let id = layer.add_icon(
+            "Test",
+            IconType::File,
+            IconAction::OpenPath("/t".into()),
+            0,
+            0,
+        );
 
         // Click inside the cell (grid snaps to 0,0).
         assert_eq!(layer.icon_at(40.0, 45.0), Some(id));
@@ -1317,8 +1388,20 @@ mod tests {
     fn icon_at_returns_topmost() {
         let mut layer = DesktopIconLayer::new(1920, 1080, 40);
         // Two icons at the same position (overlapping).
-        let _id1 = layer.add_icon("Under", IconType::File, IconAction::OpenPath("/u".into()), 0, 0);
-        let id2 = layer.add_icon("Over", IconType::File, IconAction::OpenPath("/o".into()), 0, 0);
+        let _id1 = layer.add_icon(
+            "Under",
+            IconType::File,
+            IconAction::OpenPath("/u".into()),
+            0,
+            0,
+        );
+        let id2 = layer.add_icon(
+            "Over",
+            IconType::File,
+            IconAction::OpenPath("/o".into()),
+            0,
+            0,
+        );
 
         // Should return the later-added (topmost) icon.
         assert_eq!(layer.icon_at(40.0, 45.0), Some(id2));
@@ -1394,7 +1477,13 @@ mod tests {
     #[test]
     fn double_click_on_empty_returns_none() {
         let mut layer = DesktopIconLayer::new(1920, 1080, 40);
-        layer.add_icon("Test", IconType::File, IconAction::OpenPath("/t".into()), 0, 0);
+        layer.add_icon(
+            "Test",
+            IconType::File,
+            IconAction::OpenPath("/t".into()),
+            0,
+            0,
+        );
 
         let event = layer.handle_double_click(500.0, 500.0);
         assert_eq!(event, IconEvent::None);
@@ -1408,7 +1497,13 @@ mod tests {
     fn delete_key_returns_selected_ids() {
         let mut layer = DesktopIconLayer::new(1920, 1080, 40);
         let id1 = layer.add_icon("A", IconType::File, IconAction::OpenPath("/a".into()), 0, 0);
-        let id2 = layer.add_icon("B", IconType::File, IconAction::OpenPath("/b".into()), 80, 0);
+        let id2 = layer.add_icon(
+            "B",
+            IconType::File,
+            IconAction::OpenPath("/b".into()),
+            80,
+            0,
+        );
 
         layer.select_all();
         let event = layer.handle_key(DesktopKey::Delete, false);
@@ -1429,7 +1524,13 @@ mod tests {
     fn f2_does_nothing_for_multi_selection() {
         let mut layer = DesktopIconLayer::new(1920, 1080, 40);
         layer.add_icon("A", IconType::File, IconAction::OpenPath("/a".into()), 0, 0);
-        layer.add_icon("B", IconType::File, IconAction::OpenPath("/b".into()), 80, 0);
+        layer.add_icon(
+            "B",
+            IconType::File,
+            IconAction::OpenPath("/b".into()),
+            80,
+            0,
+        );
 
         layer.select_all();
         let event = layer.handle_key(DesktopKey::F2, false);
@@ -1473,14 +1574,20 @@ mod tests {
     #[test]
     fn render_selected_icon_has_highlight() {
         let mut layer = DesktopIconLayer::new(1920, 1080, 40);
-        let id = layer.add_icon("Sel", IconType::File, IconAction::OpenPath("/s".into()), 0, 0);
+        let id = layer.add_icon(
+            "Sel",
+            IconType::File,
+            IconAction::OpenPath("/s".into()),
+            0,
+            0,
+        );
         layer.select_single(id);
 
         let cmds = layer.render();
         // First command for a selected icon should be the selection FillRect.
-        let has_fill = cmds.iter().any(|c| {
-            matches!(c, RenderCommand::FillRect { color, .. } if *color == theme::SELECTION_BG)
-        });
+        let has_fill = cmds.iter().any(
+            |c| matches!(c, RenderCommand::FillRect { color, .. } if *color == theme::SELECTION_BG),
+        );
         assert!(has_fill, "Selected icon should have a selection highlight");
     }
 }

@@ -162,7 +162,10 @@ impl OverviewState {
 
     /// Collect every `WindowThumbnail` from all lanes.
     pub fn all_thumbnails(&self) -> Vec<&WindowThumbnail> {
-        self.lanes.iter().flat_map(|l| l.thumbnails.iter()).collect()
+        self.lanes
+            .iter()
+            .flat_map(|l| l.thumbnails.iter())
+            .collect()
     }
 
     /// Update the search results based on the current query.
@@ -234,8 +237,14 @@ impl OverviewConfig {
         let mut out = String::new();
         out.push_str(&format!("thumbnail_padding={}\n", self.thumbnail_padding));
         out.push_str(&format!("max_columns={}\n", self.max_columns));
-        out.push_str(&format!("show_desktop_labels={}\n", self.show_desktop_labels));
-        out.push_str(&format!("animation_duration_ms={}\n", self.animation_duration_ms));
+        out.push_str(&format!(
+            "show_desktop_labels={}\n",
+            self.show_desktop_labels
+        ));
+        out.push_str(&format!(
+            "animation_duration_ms={}\n",
+            self.animation_duration_ms
+        ));
         out.push_str(&format!("background_opacity={}\n", self.background_opacity));
         out
     }
@@ -362,7 +371,11 @@ pub fn compute_lane_layout(
     }
 
     let pad = config.thumbnail_padding;
-    let label_h: f32 = if config.show_desktop_labels { 28.0 } else { 0.0 };
+    let label_h: f32 = if config.show_desktop_labels {
+        28.0
+    } else {
+        0.0
+    };
     let lane_count = lanes.len();
     let lane_h = (bh - pad * (lane_count as f32 + 1.0)) / lane_count as f32;
 
@@ -464,9 +477,14 @@ pub fn render_overview(
             let thumbs = collect_thumbs_for_mode(state);
             compute_grid_layout(&thumbs, 20.0, content_y, screen_w - 40.0, content_h, config)
         }
-        OverviewMode::AllDesktops => {
-            compute_lane_layout(&state.lanes, 20.0, content_y, screen_w - 40.0, content_h, config)
-        }
+        OverviewMode::AllDesktops => compute_lane_layout(
+            &state.lanes,
+            20.0,
+            content_y,
+            screen_w - 40.0,
+            content_h,
+            config,
+        ),
     };
 
     // Desktop labels (AllDesktops only).
@@ -477,8 +495,8 @@ pub fn render_overview(
     // Thumbnail cards.
     for layout in &layouts {
         let is_hovered = state.hovered_window == Some(layout.window_id);
-        let is_search_match = !state.search_query.is_empty()
-            && state.search_results.contains(&layout.window_id);
+        let is_search_match =
+            !state.search_query.is_empty() && state.search_results.contains(&layout.window_id);
         let is_dimmed = !state.search_query.is_empty() && !is_search_match;
 
         render_thumbnail_card(&mut cmds, layout, is_hovered, is_dimmed);
@@ -581,7 +599,11 @@ fn render_desktop_labels(
             x: 32.0,
             y: ly + 4.0,
             text: lane.name.clone(),
-            color: if lane.is_current { MOCHA_TEXT } else { MOCHA_SUBTEXT0 },
+            color: if lane.is_current {
+                MOCHA_TEXT
+            } else {
+                MOCHA_SUBTEXT0
+            },
             font_size: 13.0,
             font_weight: if lane.is_current {
                 FontWeightHint::Bold
@@ -632,7 +654,11 @@ fn render_thumbnail_card(
 
     // Title inside card.
     let title_display: String = layout.title.chars().take(30).collect();
-    let title_color = if is_dimmed { MOCHA_OVERLAY0 } else { MOCHA_TEXT };
+    let title_color = if is_dimmed {
+        MOCHA_OVERLAY0
+    } else {
+        MOCHA_TEXT
+    };
     cmds.push(RenderCommand::Text {
         x: x + dx + 8.0,
         y: y + dy + 8.0,
@@ -707,7 +733,11 @@ fn render_thumbnail_card(
     }
 
     // App name label below the card.
-    let app_color = if is_dimmed { MOCHA_OVERLAY0 } else { MOCHA_SUBTEXT0 };
+    let app_color = if is_dimmed {
+        MOCHA_OVERLAY0
+    } else {
+        MOCHA_SUBTEXT0
+    };
     cmds.push(RenderCommand::Text {
         x: x + dx,
         y: y + dy + h + dh + 4.0,
@@ -792,8 +822,10 @@ pub fn on_key(state: &mut OverviewState, key: OverviewKey) -> OverviewAction {
                 OverviewAction::None
             }
         }
-        OverviewKey::ArrowUp | OverviewKey::ArrowDown
-        | OverviewKey::ArrowLeft | OverviewKey::ArrowRight => {
+        OverviewKey::ArrowUp
+        | OverviewKey::ArrowDown
+        | OverviewKey::ArrowLeft
+        | OverviewKey::ArrowRight => {
             navigate_selection(state, key);
             OverviewAction::NavigateSelection
         }
@@ -905,10 +937,7 @@ pub fn on_mouse_click(
 }
 
 /// Process a mouse-scroll event in AllDesktops mode.
-pub fn on_mouse_scroll(
-    state: &mut OverviewState,
-    delta: f32,
-) -> OverviewAction {
+pub fn on_mouse_scroll(state: &mut OverviewState, delta: f32) -> OverviewAction {
     if !state.visible || state.mode != OverviewMode::AllDesktops {
         return OverviewAction::None;
     }
@@ -966,7 +995,11 @@ fn navigate_selection(state: &mut OverviewState, key: OverviewKey) {
     let new_idx = match (current_idx, key) {
         (None, _) => Some(0),
         (Some(i), OverviewKey::ArrowRight) | (Some(i), OverviewKey::ArrowDown) => {
-            if i + 1 < all.len() { Some(i + 1) } else { Some(i) }
+            if i + 1 < all.len() {
+                Some(i + 1)
+            } else {
+                Some(i)
+            }
         }
         (Some(i), OverviewKey::ArrowLeft) | (Some(i), OverviewKey::ArrowUp) => {
             Some(i.saturating_sub(1))
@@ -975,9 +1008,10 @@ fn navigate_selection(state: &mut OverviewState, key: OverviewKey) {
     };
 
     if let Some(idx) = new_idx
-        && let Some(t) = all.get(idx) {
-            state.hovered_window = Some(t.window_id);
-        }
+        && let Some(t) = all.get(idx)
+    {
+        state.hovered_window = Some(t.window_id);
+    }
 }
 
 /// Collect the thumbnails relevant to the current mode.
@@ -985,10 +1019,7 @@ fn collect_thumbs_for_mode(state: &OverviewState) -> Vec<WindowThumbnail> {
     match state.mode {
         OverviewMode::AllWindows => {
             // Current desktop only.
-            let current_desktop = state
-                .lanes
-                .iter()
-                .find(|l| l.is_current);
+            let current_desktop = state.lanes.iter().find(|l| l.is_current);
             match current_desktop {
                 Some(lane) => lane.thumbnails.clone(),
                 None => state
@@ -1296,7 +1327,10 @@ mod tests {
 
         // First row should have 3 items.
         let first_row_y = result[0].render_y;
-        let first_row_count = result.iter().filter(|r| (r.render_y - first_row_y).abs() < 1.0).count();
+        let first_row_count = result
+            .iter()
+            .filter(|r| (r.render_y - first_row_y).abs() < 1.0)
+            .count();
         assert_eq!(first_row_count, 3);
     }
 
@@ -1309,7 +1343,11 @@ mod tests {
         let result = compute_grid_layout(&[thumb], 0.0, 0.0, 800.0, 800.0, &config);
         assert_eq!(result.len(), 1);
         let ratio = result[0].render_width / result[0].render_height;
-        assert!((ratio - 4.0).abs() < 0.1, "aspect ratio should be ~4:1, got {}", ratio);
+        assert!(
+            (ratio - 4.0).abs() < 0.1,
+            "aspect ratio should be ~4:1, got {}",
+            ratio
+        );
     }
 
     #[test]

@@ -232,7 +232,11 @@ impl AppearanceSettingsUI {
                 text: tab.label().into(),
                 font_size: 13.0,
                 color: if active { CRUST } else { SUBTEXT0 },
-                font_weight: if active { FontWeightHint::Bold } else { FontWeightHint::Regular },
+                font_weight: if active {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
                 max_width: Some(tab_w - 20.0),
             });
 
@@ -356,7 +360,10 @@ impl AppearanceSettingsUI {
             y: cy,
             text: format!(
                 "Current: {} (#{:02X}{:02X}{:02X})",
-                self.file.settings.accent_color.label(), accent.r, accent.g, accent.b,
+                self.file.settings.accent_color.label(),
+                accent.r,
+                accent.g,
+                accent.b,
             ),
             font_size: 12.0,
             color: SUBTEXT0,
@@ -377,7 +384,14 @@ impl AppearanceSettingsUI {
         });
         cy += 26.0;
 
-        self.render_label_value(cmds, x, cy, width, "Level", self.file.settings.transparency.label());
+        self.render_label_value(
+            cmds,
+            x,
+            cy,
+            width,
+            "Level",
+            self.file.settings.transparency.label(),
+        );
         cy += 28.0;
 
         // Transparency preview bar
@@ -414,7 +428,10 @@ impl AppearanceSettingsUI {
         cy += 26.0;
 
         self.render_label_value(
-            cmds, x, cy, width,
+            cmds,
+            x,
+            cy,
+            width,
             "Scale",
             &format!("{}%", self.file.settings.scaling_percent),
         );
@@ -438,7 +455,14 @@ impl AppearanceSettingsUI {
 
         self.render_label_value(cmds, x, cy, width, "Family", &fonts.ui_font);
         cy += 28.0;
-        self.render_label_value(cmds, x, cy, width, "Size", &format!("{:.0}pt", fonts.ui_size));
+        self.render_label_value(
+            cmds,
+            x,
+            cy,
+            width,
+            "Size",
+            &format!("{:.0}pt", fonts.ui_size),
+        );
         cy += 36.0;
 
         // Font preview
@@ -483,7 +507,14 @@ impl AppearanceSettingsUI {
 
         self.render_label_value(cmds, x, cy, width, "Family", &fonts.mono_font);
         cy += 28.0;
-        self.render_label_value(cmds, x, cy, width, "Size", &format!("{:.0}pt", fonts.mono_size));
+        self.render_label_value(
+            cmds,
+            x,
+            cy,
+            width,
+            "Size",
+            &format!("{:.0}pt", fonts.mono_size),
+        );
         cy += 36.0;
 
         // Mono preview
@@ -541,10 +572,20 @@ impl AppearanceSettingsUI {
         });
         cy += 26.0;
 
-        self.render_label_value(cmds, x, cy, width, "Speed", self.file.settings.animation_speed.label());
+        self.render_label_value(
+            cmds,
+            x,
+            cy,
+            width,
+            "Speed",
+            self.file.settings.animation_speed.label(),
+        );
         cy += 28.0;
         self.render_label_value(
-            cmds, x, cy, width,
+            cmds,
+            x,
+            cy,
+            width,
             "Multiplier",
             &format!("{:.2}x", self.file.settings.animation_speed.multiplier()),
         );
@@ -616,15 +657,43 @@ impl AppearanceSettingsUI {
         });
         cy += 26.0;
 
-        self.render_label_value(cmds, x, cy, width, "Style", self.file.settings.taskbar_style.label());
+        self.render_label_value(
+            cmds,
+            x,
+            cy,
+            width,
+            "Style",
+            self.file.settings.taskbar_style.label(),
+        );
         cy += 36.0;
 
         // Toggle switches
-        self.render_toggle_row(cmds, x, cy, width, "Accent on Taskbar", self.file.settings.accent_taskbar);
+        self.render_toggle_row(
+            cmds,
+            x,
+            cy,
+            width,
+            "Accent on Taskbar",
+            self.file.settings.accent_taskbar,
+        );
         cy += 32.0;
-        self.render_toggle_row(cmds, x, cy, width, "Accent on Title Bars", self.file.settings.accent_titlebars);
+        self.render_toggle_row(
+            cmds,
+            x,
+            cy,
+            width,
+            "Accent on Title Bars",
+            self.file.settings.accent_titlebars,
+        );
         cy += 32.0;
-        self.render_toggle_row(cmds, x, cy, width, "Drop Shadows", self.file.settings.drop_shadows);
+        self.render_toggle_row(
+            cmds,
+            x,
+            cy,
+            width,
+            "Drop Shadows",
+            self.file.settings.drop_shadows,
+        );
         let _ = cy;
     }
 
@@ -643,9 +712,23 @@ impl AppearanceSettingsUI {
         });
         cy += 26.0;
 
-        self.render_label_value(cmds, x, cy, width, "Size", self.file.settings.cursor_size.label());
+        self.render_label_value(
+            cmds,
+            x,
+            cy,
+            width,
+            "Size",
+            self.file.settings.cursor_size.label(),
+        );
         cy += 28.0;
-        self.render_label_value(cmds, x, cy, width, "Scheme", self.file.settings.cursor_scheme.label());
+        self.render_label_value(
+            cmds,
+            x,
+            cy,
+            width,
+            "Scheme",
+            self.file.settings.cursor_scheme.label(),
+        );
         cy += 36.0;
 
         // Cursor preview
@@ -681,7 +764,14 @@ impl AppearanceSettingsUI {
         });
         cy += 26.0;
 
-        self.render_label_value(cmds, x, cy, width, "Size", self.file.settings.icon_size.label());
+        self.render_label_value(
+            cmds,
+            x,
+            cy,
+            width,
+            "Size",
+            self.file.settings.icon_size.label(),
+        );
         cy += 28.0;
 
         // Icon size preview
@@ -902,7 +992,6 @@ mod tests {
         assert_eq!(AppearanceTab::CursorsIcons.label(), "Cursors & Icons");
     }
 
-
     #[test]
     fn test_config_save_preserves_the_users_comments_and_keys() {
         // The whole point of yamldoc: a user annotates their file, changes one
@@ -930,7 +1019,10 @@ experimental:
             text.contains("wobbly_windows: true"),
             "a key this version does not model was deleted:\n{text}"
         );
-        assert!(text.contains("accent: mauve"), "the edit did not land:\n{text}");
+        assert!(
+            text.contains("accent: mauve"),
+            "the edit did not land:\n{text}"
+        );
         assert!(!text.contains("accent: teal"));
         assert_eq!(
             AppearanceSettings::read_from(&Document::parse(&text)).accent_color,
@@ -941,9 +1033,8 @@ experimental:
     #[test]
     fn test_config_saving_twice_produces_no_second_diff() {
         // Otherwise every visit to the settings panel dirties the user's file.
-        let mut ui = AppearanceSettingsUI::from_document(Document::parse(
-            "# notes\ntheme:\n  mode: dark\n",
-        ));
+        let mut ui =
+            AppearanceSettingsUI::from_document(Document::parse("# notes\ntheme:\n  mode: dark\n"));
         ui.file.settings.fonts.ui_size = 14.0;
         let once = ui.apply().to_text();
         let twice = ui.apply().to_text();

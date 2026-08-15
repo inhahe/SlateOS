@@ -317,15 +317,25 @@ impl NetworkState {
         match self.connection_type {
             ConnectionType::None => "Not connected".into(),
             ConnectionType::Ethernet => {
-                format!("Ethernet — {}", self.ip_address.as_deref().unwrap_or("No IP"))
+                format!(
+                    "Ethernet — {}",
+                    self.ip_address.as_deref().unwrap_or("No IP")
+                )
             }
             ConnectionType::Wifi => {
-                format!("{} — {} — {}", self.network_name, self.signal.label(),
-                    self.ip_address.as_deref().unwrap_or("No IP"))
+                format!(
+                    "{} — {} — {}",
+                    self.network_name,
+                    self.signal.label(),
+                    self.ip_address.as_deref().unwrap_or("No IP")
+                )
             }
             ConnectionType::VPN => {
-                format!("VPN: {} — {}", self.network_name,
-                    self.ip_address.as_deref().unwrap_or("No IP"))
+                format!(
+                    "VPN: {} — {}",
+                    self.network_name,
+                    self.ip_address.as_deref().unwrap_or("No IP")
+                )
             }
             ConnectionType::Cellular => {
                 format!("Cellular — {}", self.signal.label())
@@ -380,7 +390,8 @@ impl NetworkIndicator {
         self.wifi_networks = networks;
         // Sort by signal strength descending, connected first.
         self.wifi_networks.sort_by(|a, b| {
-            b.connected.cmp(&a.connected)
+            b.connected
+                .cmp(&a.connected)
                 .then(b.signal.cmp(&a.signal))
                 .then(a.ssid.cmp(&b.ssid))
         });
@@ -476,7 +487,10 @@ impl NetworkIndicator {
 
         // Icon background circle
         cmds.push(RenderCommand::FillRect {
-            x, y, width: 24.0, height: 24.0,
+            x,
+            y,
+            width: 24.0,
+            height: 24.0,
             color: SURFACE0,
             corner_radii: CornerRadii::all(12.0),
         });
@@ -488,9 +502,11 @@ impl NetworkIndicator {
             self.state.connection_type.icon_label()
         };
         cmds.push(RenderCommand::Text {
-            x: x + 4.0, y: y + 4.0,
+            x: x + 4.0,
+            y: y + 4.0,
             text: label.into(),
-            font_size: 13.0, color: icon_color,
+            font_size: 13.0,
+            color: icon_color,
             font_weight: FontWeightHint::Regular,
             max_width: Some(20.0),
         });
@@ -512,7 +528,10 @@ impl NetworkIndicator {
         // Flyout background
         let height = 60.0 + self.wifi_networks.len() as f32 * 44.0 + 80.0;
         cmds.push(RenderCommand::FillRect {
-            x, y, width, height,
+            x,
+            y,
+            width,
+            height,
             color: BASE,
             corner_radii: CornerRadii::all(8.0),
         });
@@ -520,9 +539,11 @@ impl NetworkIndicator {
         // Current connection summary
         cy += pad;
         cmds.push(RenderCommand::Text {
-            x: x + pad, y: cy,
+            x: x + pad,
+            y: cy,
             text: self.state.tooltip(),
-            font_size: 13.0, color: TEXT,
+            font_size: 13.0,
+            color: TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: Some(inner),
         });
@@ -530,9 +551,15 @@ impl NetworkIndicator {
 
         // Transfer rates
         cmds.push(RenderCommand::Text {
-            x: x + pad, y: cy,
-            text: format!("↓ {}  ↑ {}", self.state.rates.rx_formatted(), self.state.rates.tx_formatted()),
-            font_size: 11.0, color: SUBTEXT0,
+            x: x + pad,
+            y: cy,
+            text: format!(
+                "↓ {}  ↑ {}",
+                self.state.rates.rx_formatted(),
+                self.state.rates.tx_formatted()
+            ),
+            font_size: 11.0,
+            color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(inner),
         });
@@ -540,33 +567,55 @@ impl NetworkIndicator {
 
         // Toggles row
         // Airplane mode toggle
-        let airplane_label = if self.state.airplane_mode { "✈ Airplane ON" } else { "✈ Airplane OFF" };
-        let airplane_color = if self.state.airplane_mode { PEACH } else { OVERLAY0 };
+        let airplane_label = if self.state.airplane_mode {
+            "✈ Airplane ON"
+        } else {
+            "✈ Airplane OFF"
+        };
+        let airplane_color = if self.state.airplane_mode {
+            PEACH
+        } else {
+            OVERLAY0
+        };
         cmds.push(RenderCommand::FillRect {
-            x: x + pad, y: cy, width: inner * 0.48, height: 28.0,
+            x: x + pad,
+            y: cy,
+            width: inner * 0.48,
+            height: 28.0,
             color: SURFACE0,
             corner_radii: CornerRadii::all(6.0),
         });
         cmds.push(RenderCommand::Text {
-            x: x + pad + 8.0, y: cy + 6.0,
+            x: x + pad + 8.0,
+            y: cy + 6.0,
             text: airplane_label.into(),
-            font_size: 12.0, color: airplane_color,
+            font_size: 12.0,
+            color: airplane_color,
             font_weight: FontWeightHint::Regular,
             max_width: Some(inner * 0.45),
         });
 
         // WiFi toggle
-        let wifi_label = if self.wifi_enabled { "Wi-Fi ON" } else { "Wi-Fi OFF" };
+        let wifi_label = if self.wifi_enabled {
+            "Wi-Fi ON"
+        } else {
+            "Wi-Fi OFF"
+        };
         let wifi_color = if self.wifi_enabled { GREEN } else { OVERLAY0 };
         cmds.push(RenderCommand::FillRect {
-            x: x + pad + inner * 0.52, y: cy, width: inner * 0.48, height: 28.0,
+            x: x + pad + inner * 0.52,
+            y: cy,
+            width: inner * 0.48,
+            height: 28.0,
             color: SURFACE0,
             corner_radii: CornerRadii::all(6.0),
         });
         cmds.push(RenderCommand::Text {
-            x: x + pad + inner * 0.52 + 8.0, y: cy + 6.0,
+            x: x + pad + inner * 0.52 + 8.0,
+            y: cy + 6.0,
             text: wifi_label.into(),
-            font_size: 12.0, color: wifi_color,
+            font_size: 12.0,
+            color: wifi_color,
             font_weight: FontWeightHint::Regular,
             max_width: Some(inner * 0.45),
         });
@@ -585,20 +634,32 @@ impl NetworkIndicator {
                 };
 
                 cmds.push(RenderCommand::FillRect {
-                    x: x + pad, y: cy, width: inner, height: 40.0,
+                    x: x + pad,
+                    y: cy,
+                    width: inner,
+                    height: 40.0,
                     color: bg,
                     corner_radii: CornerRadii::all(6.0),
                 });
 
                 // SSID
                 let connected_marker = if net.connected { " ✓" } else { "" };
-                let saved_marker = if net.saved && !net.connected { " ★" } else { "" };
+                let saved_marker = if net.saved && !net.connected {
+                    " ★"
+                } else {
+                    ""
+                };
                 cmds.push(RenderCommand::Text {
-                    x: x + pad + 8.0, y: cy + 4.0,
+                    x: x + pad + 8.0,
+                    y: cy + 4.0,
                     text: format!("{}{}{}", net.ssid, connected_marker, saved_marker),
                     font_size: 13.0,
                     color: if net.connected { BLUE } else { TEXT },
-                    font_weight: if net.connected { FontWeightHint::Bold } else { FontWeightHint::Regular },
+                    font_weight: if net.connected {
+                        FontWeightHint::Bold
+                    } else {
+                        FontWeightHint::Regular
+                    },
                     max_width: Some(inner * 0.6),
                 });
 
@@ -607,17 +668,21 @@ impl NetworkIndicator {
                     .map(|b| if b < net.signal.bars() { '█' } else { '░' })
                     .collect();
                 cmds.push(RenderCommand::Text {
-                    x: x + pad + 8.0, y: cy + 22.0,
+                    x: x + pad + 8.0,
+                    y: cy + 22.0,
                     text: format!("{} {} ch{}", bars_str, net.security.label(), net.channel),
-                    font_size: 11.0, color: SUBTEXT0,
+                    font_size: 11.0,
+                    color: SUBTEXT0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(inner - 16.0),
                 });
 
                 // Signal bars color indicator
                 cmds.push(RenderCommand::FillRect {
-                    x: x + pad + inner - 28.0, y: cy + 8.0,
-                    width: 20.0, height: 20.0,
+                    x: x + pad + inner - 28.0,
+                    y: cy + 8.0,
+                    width: 20.0,
+                    height: 20.0,
                     color: net.signal.color(),
                     corner_radii: CornerRadii::all(10.0),
                 });
@@ -640,7 +705,13 @@ mod tests {
 
     #[test]
     fn connection_type_labels() {
-        for ct in [ConnectionType::Ethernet, ConnectionType::Wifi, ConnectionType::VPN, ConnectionType::Cellular, ConnectionType::None] {
+        for ct in [
+            ConnectionType::Ethernet,
+            ConnectionType::Wifi,
+            ConnectionType::VPN,
+            ConnectionType::Cellular,
+            ConnectionType::None,
+        ] {
             assert!(!ct.label().is_empty());
             assert!(!ct.icon_label().is_empty());
         }
@@ -666,7 +737,13 @@ mod tests {
 
     #[test]
     fn signal_labels_and_colors() {
-        for s in [SignalStrength::None, SignalStrength::Weak, SignalStrength::Fair, SignalStrength::Good, SignalStrength::Excellent] {
+        for s in [
+            SignalStrength::None,
+            SignalStrength::Weak,
+            SignalStrength::Fair,
+            SignalStrength::Good,
+            SignalStrength::Excellent,
+        ] {
             assert!(!s.label().is_empty());
             let _ = s.color();
         }
@@ -867,9 +944,11 @@ mod tests {
     #[test]
     fn indicator_render_flyout_open() {
         let mut ind = NetworkIndicator::new();
-        ind.set_wifi_networks(vec![
-            WifiNetwork::new("TestNet", SignalStrength::Good, WifiSecurity::WPA2),
-        ]);
+        ind.set_wifi_networks(vec![WifiNetwork::new(
+            "TestNet",
+            SignalStrength::Good,
+            WifiSecurity::WPA2,
+        )]);
         ind.toggle_flyout();
         let cmds = ind.render_flyout(0.0, 0.0, 300.0);
         assert!(!cmds.is_empty());
@@ -902,9 +981,11 @@ mod tests {
     #[test]
     fn flyout_resets_selection() {
         let mut ind = NetworkIndicator::new();
-        ind.set_wifi_networks(vec![
-            WifiNetwork::new("A", SignalStrength::Good, WifiSecurity::WPA2),
-        ]);
+        ind.set_wifi_networks(vec![WifiNetwork::new(
+            "A",
+            SignalStrength::Good,
+            WifiSecurity::WPA2,
+        )]);
         ind.select_next();
         assert!(ind.selected_index().is_some());
         ind.toggle_flyout(); // opens, resets selection

@@ -489,7 +489,11 @@ impl NotificationPane {
         notif.id = id;
 
         // Ensure per-app settings exist.
-        if !self.app_settings.iter().any(|s| s.app_name == notif.app_name) {
+        if !self
+            .app_settings
+            .iter()
+            .any(|s| s.app_name == notif.app_name)
+        {
             self.app_settings
                 .push(AppNotifSettings::new(notif.app_name.clone()));
         }
@@ -531,7 +535,12 @@ impl NotificationPane {
     }
 
     /// Handle a mouse event. Coordinates are in screen space.
-    pub fn handle_mouse_event(&mut self, event: &MouseEvent, screen_width: f32, screen_height: f32) -> EventResult {
+    pub fn handle_mouse_event(
+        &mut self,
+        event: &MouseEvent,
+        screen_width: f32,
+        screen_height: f32,
+    ) -> EventResult {
         if !self.state.is_visible() {
             return EventResult::Ignored;
         }
@@ -704,7 +713,10 @@ impl NotificationPane {
             width: PANE_WIDTH,
             height: screen_height,
         });
-        cmds.push(RenderCommand::PushTranslate { dx: pane_x, dy: 0.0 });
+        cmds.push(RenderCommand::PushTranslate {
+            dx: pane_x,
+            dy: 0.0,
+        });
 
         // Render sections.
         let mut y = PANE_PADDING;
@@ -852,13 +864,26 @@ impl NotificationPane {
         y += QS_ROW_HEIGHT;
 
         // Brightness slider.
-        self.render_slider_row(cmds, PANE_PADDING, y, "Brightness", self.quick_settings.brightness);
+        self.render_slider_row(
+            cmds,
+            PANE_PADDING,
+            y,
+            "Brightness",
+            self.quick_settings.brightness,
+        );
         y += QS_ROW_HEIGHT;
 
         y - start_y
     }
 
-    fn render_toggle_row(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, label: &str, enabled: bool) {
+    fn render_toggle_row(
+        &self,
+        cmds: &mut Vec<RenderCommand>,
+        x: f32,
+        y: f32,
+        label: &str,
+        enabled: bool,
+    ) {
         // Label.
         cmds.push(RenderCommand::Text {
             x,
@@ -872,7 +897,11 @@ impl NotificationPane {
 
         // Toggle pill.
         let pill_x = PANE_WIDTH - PANE_PADDING - TOGGLE_WIDTH - PANE_PADDING;
-        let pill_bg = if enabled { theme::BLUE } else { theme::SURFACE2 };
+        let pill_bg = if enabled {
+            theme::BLUE
+        } else {
+            theme::SURFACE2
+        };
         cmds.push(RenderCommand::FillRect {
             x: pill_x,
             y: y + 6.0,
@@ -899,7 +928,14 @@ impl NotificationPane {
         });
     }
 
-    fn render_slider_row(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, label: &str, value: u8) {
+    fn render_slider_row(
+        &self,
+        cmds: &mut Vec<RenderCommand>,
+        x: f32,
+        y: f32,
+        label: &str,
+        value: u8,
+    ) {
         // Label + value.
         cmds.push(RenderCommand::Text {
             x,
@@ -946,7 +982,12 @@ impl NotificationPane {
         });
     }
 
-    fn render_notifications(&self, cmds: &mut Vec<RenderCommand>, start_y: f32, available_height: f32) {
+    fn render_notifications(
+        &self,
+        cmds: &mut Vec<RenderCommand>,
+        start_y: f32,
+        available_height: f32,
+    ) {
         // Clip notifications to available area.
         cmds.push(RenderCommand::PushClip {
             x: 0.0,
@@ -1019,7 +1060,11 @@ impl NotificationPane {
     ) {
         let card_width = PANE_WIDTH - 2.0 * PANE_PADDING;
         let is_hovered = self.hovered_notif == Some(idx);
-        let bg = if is_hovered { theme::HOVER_BG } else { theme::CARD_BG };
+        let bg = if is_hovered {
+            theme::HOVER_BG
+        } else {
+            theme::CARD_BG
+        };
 
         // Card background.
         cmds.push(RenderCommand::FillRect {
@@ -1120,7 +1165,12 @@ impl NotificationPane {
         }
     }
 
-    fn render_app_settings(&self, cmds: &mut Vec<RenderCommand>, start_y: f32, available_height: f32) {
+    fn render_app_settings(
+        &self,
+        cmds: &mut Vec<RenderCommand>,
+        start_y: f32,
+        available_height: f32,
+    ) {
         cmds.push(RenderCommand::PushClip {
             x: 0.0,
             y: start_y,
@@ -1191,7 +1241,11 @@ impl NotificationPane {
 
             // Enabled toggle.
             let enabled_x = card_width - TOGGLE_WIDTH;
-            let pill_bg = if app.enabled { theme::GREEN } else { theme::SURFACE2 };
+            let pill_bg = if app.enabled {
+                theme::GREEN
+            } else {
+                theme::SURFACE2
+            };
             cmds.push(RenderCommand::FillRect {
                 x: enabled_x,
                 y: y + 10.0,
@@ -1332,7 +1386,13 @@ impl NotificationPane {
         }
     }
 
-    fn handle_notification_click(&mut self, rx: f32, ry: f32, content_start: f32, _screen_height: f32) {
+    fn handle_notification_click(
+        &mut self,
+        rx: f32,
+        ry: f32,
+        content_start: f32,
+        _screen_height: f32,
+    ) {
         let adjusted_y = ry - content_start + self.scroll_offset;
         let mut y: f32 = 0.0;
         let mut current_group: Option<TimeGroup> = None;
@@ -1348,7 +1408,10 @@ impl NotificationPane {
                 // Check if dismiss button was clicked.
                 let card_width = PANE_WIDTH - 2.0 * PANE_PADDING;
                 let btn_x = PANE_PADDING + card_width - DISMISS_BTN_SIZE - 8.0;
-                if rx >= btn_x && rx <= btn_x + DISMISS_BTN_SIZE && (adjusted_y - y) < DISMISS_BTN_SIZE + 6.0 {
+                if rx >= btn_x
+                    && rx <= btn_x + DISMISS_BTN_SIZE
+                    && (adjusted_y - y) < DISMISS_BTN_SIZE + 6.0
+                {
                     let id = notif.id;
                     self.dismiss_notification(idx);
                     self.events.push(NotifPaneEvent::NotificationDismissed(id));
@@ -1440,9 +1503,10 @@ impl NotificationPane {
             self.notifications.remove(idx);
             // Adjust hover if needed.
             if let Some(h) = self.hovered_notif
-                && h >= self.notifications.len() {
-                    self.hovered_notif = None;
-                }
+                && h >= self.notifications.len()
+            {
+                self.hovered_notif = None;
+            }
         }
     }
 
@@ -1572,7 +1636,10 @@ mod tests {
     fn time_group_this_week() {
         let now = 1_000_000;
         let three_days_ago = now - 3 * SECS_PER_DAY;
-        assert_eq!(TimeGroup::classify(three_days_ago, now), TimeGroup::ThisWeek);
+        assert_eq!(
+            TimeGroup::classify(three_days_ago, now),
+            TimeGroup::ThisWeek
+        );
     }
 
     #[test]
@@ -1867,7 +1934,10 @@ mod tests {
     fn format_relative_time_days() {
         let mut pane = NotificationPane::new();
         pane.current_time = 1_000_000;
-        assert_eq!(pane.format_relative_time(1_000_000 - 3 * SECS_PER_DAY), "3d ago");
+        assert_eq!(
+            pane.format_relative_time(1_000_000 - 3 * SECS_PER_DAY),
+            "3d ago"
+        );
     }
 
     // ========================================================================
@@ -1931,7 +2001,10 @@ mod tests {
             }
         }
         // Guard against the test passing vacuously on an empty command list.
-        assert!(checked >= 4, "expected a preview per body, checked {checked}");
+        assert!(
+            checked >= 4,
+            "expected a preview per body, checked {checked}"
+        );
     }
 
     /// A body that already fits is drawn verbatim — no ellipsis, no truncation.
@@ -1954,6 +2027,9 @@ mod tests {
             "expected an ellipsis, got {:?}",
             previews[0].0,
         );
-        assert!(previews[0].0.len() < body.len(), "expected the body to be shortened");
+        assert!(
+            previews[0].0.len() < body.len(),
+            "expected the body to be shortened"
+        );
     }
 }

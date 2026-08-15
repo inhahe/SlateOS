@@ -750,13 +750,7 @@ impl ResourceMonitor {
     }
 
     /// Render subtle horizontal grid lines across a graph area.
-    fn render_grid_lines(
-        cmds: &mut Vec<RenderCommand>,
-        x: f32,
-        y: f32,
-        w: f32,
-        h: f32,
-    ) {
+    fn render_grid_lines(cmds: &mut Vec<RenderCommand>, x: f32, y: f32, w: f32, h: f32) {
         let grid_color = theme::SURFACE1;
         for i in 1..=GRID_LINE_COUNT {
             let gy = y + (i as f32 / (GRID_LINE_COUNT as f32 + 1.0)) * h;
@@ -937,7 +931,10 @@ mod tests {
         assert_eq!(samples.len(), GRAPH_BUFFER_SIZE);
         // Oldest should be 5, newest should be GRAPH_BUFFER_SIZE + 4.
         assert_eq!(samples[0], 5.0);
-        assert_eq!(samples[GRAPH_BUFFER_SIZE - 1], (GRAPH_BUFFER_SIZE + 4) as f32);
+        assert_eq!(
+            samples[GRAPH_BUFFER_SIZE - 1],
+            (GRAPH_BUFFER_SIZE + 4) as f32
+        );
     }
 
     #[test]
@@ -1153,7 +1150,11 @@ mod tests {
         // Should have at least background + border.
         assert!(cmds.len() >= 2);
         match &cmds[0] {
-            RenderCommand::FillRect { color, corner_radii, .. } => {
+            RenderCommand::FillRect {
+                color,
+                corner_radii,
+                ..
+            } => {
                 assert_eq!(*color, theme::BASE);
                 assert_eq!(*corner_radii, CornerRadii::all(4.0));
             }
@@ -1169,7 +1170,10 @@ mod tests {
         }
         let cmds = monitor.render();
 
-        let line_count = cmds.iter().filter(|c| matches!(c, RenderCommand::Line { .. })).count();
+        let line_count = cmds
+            .iter()
+            .filter(|c| matches!(c, RenderCommand::Line { .. }))
+            .count();
         // 4 sparklines, each with 9 line segments (10 points) = 36 lines.
         assert!(
             line_count > 0,
@@ -1195,11 +1199,16 @@ mod tests {
         monitor.set_mode(DisplayMode::Expanded);
         let cmds = monitor.render();
 
-        let has_title = cmds.iter().any(|c| matches!(c,
-            RenderCommand::Text { text, font_weight: FontWeightHint::Bold, .. }
-            if text == "Resource Monitor"
-        ));
-        assert!(has_title, "Expected 'Resource Monitor' title in expanded view");
+        let has_title = cmds.iter().any(|c| {
+            matches!(c,
+                RenderCommand::Text { text, font_weight: FontWeightHint::Bold, .. }
+                if text == "Resource Monitor"
+            )
+        });
+        assert!(
+            has_title,
+            "Expected 'Resource Monitor' title in expanded view"
+        );
     }
 
     #[test]
@@ -1209,9 +1218,14 @@ mod tests {
         let cmds = monitor.render();
 
         // Should have 4 panel backgrounds (Surface0 fill rects) plus the outer bg.
-        let surface0_rects = cmds.iter().filter(|c| matches!(c,
-            RenderCommand::FillRect { color, .. } if *color == theme::SURFACE0
-        )).count();
+        let surface0_rects = cmds
+            .iter()
+            .filter(|c| {
+                matches!(c,
+                    RenderCommand::FillRect { color, .. } if *color == theme::SURFACE0
+                )
+            })
+            .count();
         assert_eq!(surface0_rects, 4, "Expected 4 panel backgrounds");
     }
 
@@ -1222,13 +1236,20 @@ mod tests {
         monitor.update(&make_snapshot(50.0, 8192, 25.0, 500_000));
         let cmds = monitor.render();
 
-        let labels: Vec<&str> = cmds.iter().filter_map(|c| match c {
-            RenderCommand::Text { text, color, .. } if *color == theme::CPU
-                || *color == theme::MEMORY
-                || *color == theme::DISK
-                || *color == theme::NETWORK => Some(text.as_str()),
-            _ => None,
-        }).collect();
+        let labels: Vec<&str> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, color, .. }
+                    if *color == theme::CPU
+                        || *color == theme::MEMORY
+                        || *color == theme::DISK
+                        || *color == theme::NETWORK =>
+                {
+                    Some(text.as_str())
+                }
+                _ => None,
+            })
+            .collect();
         assert!(labels.contains(&"CPU"), "Missing CPU label");
         assert!(labels.contains(&"RAM"), "Missing RAM label");
         assert!(labels.contains(&"Disk"), "Missing Disk label");
@@ -1241,10 +1262,15 @@ mod tests {
         monitor.set_mode(DisplayMode::Expanded);
         let cmds = monitor.render();
 
-        let grid_lines = cmds.iter().filter(|c| matches!(c,
-            RenderCommand::Line { color, width, .. }
-            if *color == theme::SURFACE1 && (*width - 0.5).abs() < f32::EPSILON
-        )).count();
+        let grid_lines = cmds
+            .iter()
+            .filter(|c| {
+                matches!(c,
+                    RenderCommand::Line { color, width, .. }
+                    if *color == theme::SURFACE1 && (*width - 0.5).abs() < f32::EPSILON
+                )
+            })
+            .count();
         // 4 panels * GRID_LINE_COUNT grid lines each.
         assert_eq!(
             grid_lines,
@@ -1266,11 +1292,12 @@ mod tests {
         data.push(75.0);
 
         let mut cmds = Vec::new();
-        ResourceMonitor::render_bar_graph(
-            &mut cmds, &data, 0.0, 0.0, 100.0, 50.0, theme::CPU,
-        );
+        ResourceMonitor::render_bar_graph(&mut cmds, &data, 0.0, 0.0, 100.0, 50.0, theme::CPU);
 
-        let fill_count = cmds.iter().filter(|c| matches!(c, RenderCommand::FillRect { .. })).count();
+        let fill_count = cmds
+            .iter()
+            .filter(|c| matches!(c, RenderCommand::FillRect { .. }))
+            .count();
         assert_eq!(fill_count, 3, "Expected 3 bars for 3 data points");
     }
 
@@ -1278,9 +1305,7 @@ mod tests {
     fn test_render_bar_graph_empty_data() {
         let data = GraphData::new();
         let mut cmds = Vec::new();
-        ResourceMonitor::render_bar_graph(
-            &mut cmds, &data, 0.0, 0.0, 100.0, 50.0, theme::CPU,
-        );
+        ResourceMonitor::render_bar_graph(&mut cmds, &data, 0.0, 0.0, 100.0, 50.0, theme::CPU);
         assert!(cmds.is_empty(), "Empty data should produce no bar commands");
     }
 
@@ -1294,9 +1319,7 @@ mod tests {
         data.push(50.0);
 
         let mut cmds = Vec::new();
-        ResourceMonitor::render_sparkline(
-            &mut cmds, &data, 0.0, 0.0, 100.0, 50.0, theme::CPU,
-        );
+        ResourceMonitor::render_sparkline(&mut cmds, &data, 0.0, 0.0, 100.0, 50.0, theme::CPU);
         // Need at least 2 points to draw a line.
         assert!(cmds.is_empty());
     }
@@ -1308,9 +1331,7 @@ mod tests {
         data.push(75.0);
 
         let mut cmds = Vec::new();
-        ResourceMonitor::render_sparkline(
-            &mut cmds, &data, 0.0, 0.0, 100.0, 50.0, theme::CPU,
-        );
+        ResourceMonitor::render_sparkline(&mut cmds, &data, 0.0, 0.0, 100.0, 50.0, theme::CPU);
         assert_eq!(cmds.len(), 1);
         assert!(matches!(&cmds[0], RenderCommand::Line { .. }));
     }
@@ -1322,9 +1343,7 @@ mod tests {
         data.push(150.0);
 
         let mut cmds = Vec::new();
-        ResourceMonitor::render_sparkline(
-            &mut cmds, &data, 0.0, 0.0, 100.0, 50.0, theme::CPU,
-        );
+        ResourceMonitor::render_sparkline(&mut cmds, &data, 0.0, 0.0, 100.0, 50.0, theme::CPU);
 
         // Should produce a line; the clamp should prevent y from escaping bounds.
         assert_eq!(cmds.len(), 1);

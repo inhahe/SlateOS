@@ -73,7 +73,12 @@ pub struct CaptureRegion {
 
 impl CaptureRegion {
     pub fn new(x: i32, y: i32, width: u32, height: u32) -> Self {
-        Self { x, y, width, height }
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
     }
 
     /// Calculate the total pixel count.
@@ -625,11 +630,7 @@ impl Default for ScreenRecorder {
 // ============================================================================
 
 /// Render the small recording indicator overlay (shown while recording).
-pub fn render_recording_indicator(
-    recorder: &ScreenRecorder,
-    x: f32,
-    y: f32,
-) -> Vec<RenderCommand> {
+pub fn render_recording_indicator(recorder: &ScreenRecorder, x: f32, y: f32) -> Vec<RenderCommand> {
     let mut cmds = Vec::new();
 
     if !recorder.state.is_active() && !matches!(recorder.state, RecordingState::Processing) {
@@ -641,7 +642,10 @@ pub fn render_recording_indicator(
 
     // Background pill.
     cmds.push(RenderCommand::FillRect {
-        x, y, width: w, height: h,
+        x,
+        y,
+        width: w,
+        height: h,
         color: Color::rgba(MOCHA_BASE.r, MOCHA_BASE.g, MOCHA_BASE.b, 220),
         corner_radii: CornerRadii::all(16.0),
     });
@@ -653,16 +657,21 @@ pub fn render_recording_indicator(
         _ => MOCHA_OVERLAY0,
     };
     cmds.push(RenderCommand::FillRect {
-        x: x + 10.0, y: y + 10.0, width: 12.0, height: 12.0,
+        x: x + 10.0,
+        y: y + 10.0,
+        width: 12.0,
+        height: 12.0,
         color: dot_color,
         corner_radii: CornerRadii::all(6.0),
     });
 
     // Time display.
     cmds.push(RenderCommand::Text {
-        x: x + 28.0, y: y + 8.0,
+        x: x + 28.0,
+        y: y + 8.0,
         text: recorder.stats.elapsed_display(),
-        font_size: 13.0, color: MOCHA_TEXT,
+        font_size: 13.0,
+        color: MOCHA_TEXT,
         font_weight: FontWeightHint::Bold,
         max_width: None,
     });
@@ -670,9 +679,11 @@ pub fn render_recording_indicator(
     // State label.
     let state_label = recorder.state.label();
     cmds.push(RenderCommand::Text {
-        x: x + 90.0, y: y + 10.0,
+        x: x + 90.0,
+        y: y + 10.0,
         text: state_label.to_string(),
-        font_size: 10.0, color: MOCHA_SUBTEXT0,
+        font_size: 10.0,
+        color: MOCHA_SUBTEXT0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
     });
@@ -692,16 +703,21 @@ pub fn render_recording_controls(
 
     // Background.
     cmds.push(RenderCommand::FillRect {
-        x, y, width: w, height: h,
+        x,
+        y,
+        width: w,
+        height: h,
         color: MOCHA_MANTLE,
         corner_radii: CornerRadii::all(8.0),
     });
 
     // Title.
     cmds.push(RenderCommand::Text {
-        x: x + 12.0, y: y + 6.0,
+        x: x + 12.0,
+        y: y + 6.0,
         text: "Screen Recorder".to_string(),
-        font_size: 13.0, color: MOCHA_TEXT,
+        font_size: 13.0,
+        color: MOCHA_TEXT,
         font_weight: FontWeightHint::Bold,
         max_width: None,
     });
@@ -713,14 +729,19 @@ pub fn render_recording_controls(
         RecordingState::Idle => {
             // Record button.
             cmds.push(RenderCommand::FillRect {
-                x: x + 12.0, y: btn_y, width: 80.0, height: btn_h,
+                x: x + 12.0,
+                y: btn_y,
+                width: 80.0,
+                height: btn_h,
                 color: MOCHA_RED,
                 corner_radii: CornerRadii::all(6.0),
             });
             cmds.push(RenderCommand::Text {
-                x: x + 26.0, y: btn_y + 5.0,
+                x: x + 26.0,
+                y: btn_y + 5.0,
                 text: "Record".to_string(),
-                font_size: 12.0, color: MOCHA_BASE,
+                font_size: 12.0,
+                color: MOCHA_BASE,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
             });
@@ -728,28 +749,38 @@ pub fn render_recording_controls(
         RecordingState::Recording => {
             // Pause button.
             cmds.push(RenderCommand::FillRect {
-                x: x + 12.0, y: btn_y, width: 70.0, height: btn_h,
+                x: x + 12.0,
+                y: btn_y,
+                width: 70.0,
+                height: btn_h,
                 color: MOCHA_YELLOW,
                 corner_radii: CornerRadii::all(6.0),
             });
             cmds.push(RenderCommand::Text {
-                x: x + 24.0, y: btn_y + 5.0,
+                x: x + 24.0,
+                y: btn_y + 5.0,
                 text: "Pause".to_string(),
-                font_size: 12.0, color: MOCHA_BASE,
+                font_size: 12.0,
+                color: MOCHA_BASE,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
             });
 
             // Stop button.
             cmds.push(RenderCommand::FillRect {
-                x: x + 92.0, y: btn_y, width: 60.0, height: btn_h,
+                x: x + 92.0,
+                y: btn_y,
+                width: 60.0,
+                height: btn_h,
                 color: MOCHA_SURFACE1,
                 corner_radii: CornerRadii::all(6.0),
             });
             cmds.push(RenderCommand::Text {
-                x: x + 106.0, y: btn_y + 5.0,
+                x: x + 106.0,
+                y: btn_y + 5.0,
                 text: "Stop".to_string(),
-                font_size: 12.0, color: MOCHA_TEXT,
+                font_size: 12.0,
+                color: MOCHA_TEXT,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
             });
@@ -757,37 +788,49 @@ pub fn render_recording_controls(
         RecordingState::Paused => {
             // Resume button.
             cmds.push(RenderCommand::FillRect {
-                x: x + 12.0, y: btn_y, width: 80.0, height: btn_h,
+                x: x + 12.0,
+                y: btn_y,
+                width: 80.0,
+                height: btn_h,
                 color: MOCHA_GREEN,
                 corner_radii: CornerRadii::all(6.0),
             });
             cmds.push(RenderCommand::Text {
-                x: x + 22.0, y: btn_y + 5.0,
+                x: x + 22.0,
+                y: btn_y + 5.0,
                 text: "Resume".to_string(),
-                font_size: 12.0, color: MOCHA_BASE,
+                font_size: 12.0,
+                color: MOCHA_BASE,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
             });
 
             // Stop button.
             cmds.push(RenderCommand::FillRect {
-                x: x + 102.0, y: btn_y, width: 60.0, height: btn_h,
+                x: x + 102.0,
+                y: btn_y,
+                width: 60.0,
+                height: btn_h,
                 color: MOCHA_SURFACE1,
                 corner_radii: CornerRadii::all(6.0),
             });
             cmds.push(RenderCommand::Text {
-                x: x + 116.0, y: btn_y + 5.0,
+                x: x + 116.0,
+                y: btn_y + 5.0,
                 text: "Stop".to_string(),
-                font_size: 12.0, color: MOCHA_TEXT,
+                font_size: 12.0,
+                color: MOCHA_TEXT,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
             });
         }
         _ => {
             cmds.push(RenderCommand::Text {
-                x: x + 12.0, y: btn_y + 4.0,
+                x: x + 12.0,
+                y: btn_y + 4.0,
                 text: recorder.state.label().to_string(),
-                font_size: 12.0, color: MOCHA_PEACH,
+                font_size: 12.0,
+                color: MOCHA_PEACH,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
             });
@@ -798,29 +841,37 @@ pub fn render_recording_controls(
     if recorder.state.is_active() || recorder.state == RecordingState::Processing {
         let stats_x = x + w - 200.0;
         cmds.push(RenderCommand::Text {
-            x: stats_x, y: y + 8.0,
-            text: format!("Frames: {} ({:.1} fps)",
+            x: stats_x,
+            y: y + 8.0,
+            text: format!(
+                "Frames: {} ({:.1} fps)",
                 recorder.stats.frames_captured,
                 recorder.stats.average_fps(),
             ),
-            font_size: 10.0, color: MOCHA_SUBTEXT0,
+            font_size: 10.0,
+            color: MOCHA_SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
         });
         cmds.push(RenderCommand::Text {
-            x: stats_x, y: y + 22.0,
-            text: format!("Size: {} | Drops: {:.1}%",
+            x: stats_x,
+            y: y + 22.0,
+            text: format!(
+                "Size: {} | Drops: {:.1}%",
                 recorder.stats.size_display(),
                 recorder.stats.drop_rate_pct(),
             ),
-            font_size: 10.0, color: MOCHA_SUBTEXT0,
+            font_size: 10.0,
+            color: MOCHA_SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
         });
         cmds.push(RenderCommand::Text {
-            x: stats_x, y: y + 36.0,
+            x: stats_x,
+            y: y + 36.0,
             text: format!("Time: {}", recorder.stats.elapsed_display()),
-            font_size: 10.0, color: MOCHA_SUBTEXT0,
+            font_size: 10.0,
+            color: MOCHA_SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
         });
@@ -975,10 +1026,14 @@ mod tests {
     #[test]
     fn test_entry_duration_display() {
         let entry = RecordingEntry {
-            id: 1, filename: "test.mp4".to_string(), timestamp: 0,
-            duration_ms: 125000, file_size: 1024,
+            id: 1,
+            filename: "test.mp4".to_string(),
+            timestamp: 0,
+            duration_ms: 125000,
+            file_size: 1024,
             region: CaptureRegion::new(0, 0, 800, 600),
-            frame_rate: FrameRate::Fps30, format: OutputFormat::Mp4,
+            frame_rate: FrameRate::Fps30,
+            format: OutputFormat::Mp4,
         };
         assert_eq!(entry.duration_display(), "2:05");
     }
@@ -994,7 +1049,10 @@ mod tests {
     fn test_start_with_countdown() {
         let mut r = ScreenRecorder::new();
         assert!(r.start());
-        assert!(matches!(r.state, RecordingState::Countdown { remaining_secs: 3 }));
+        assert!(matches!(
+            r.state,
+            RecordingState::Countdown { remaining_secs: 3 }
+        ));
     }
 
     #[test]
@@ -1166,8 +1224,12 @@ mod tests {
     fn test_clear_history() {
         let mut r = ScreenRecorder::new();
         r.config.countdown_secs = 0;
-        r.start(); r.stop(); r.finish_processing("a.mp4", 1, 0);
-        r.start(); r.stop(); r.finish_processing("b.mp4", 2, 1);
+        r.start();
+        r.stop();
+        r.finish_processing("a.mp4", 1, 0);
+        r.start();
+        r.stop();
+        r.finish_processing("b.mp4", 2, 1);
         assert_eq!(r.history.len(), 2);
         r.clear_history();
         assert!(r.history.is_empty());

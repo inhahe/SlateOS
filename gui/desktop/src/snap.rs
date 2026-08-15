@@ -371,10 +371,7 @@ impl SnapLayoutPreset {
                             y: row as f32 * (row_h + g),
                             width: col_w,
                             height: row_h,
-                            label: labels
-                                .get(idx as usize)
-                                .unwrap_or(&"Zone")
-                                .to_string(),
+                            label: labels.get(idx as usize).unwrap_or(&"Zone").to_string(),
                         });
                     }
                 }
@@ -476,12 +473,7 @@ pub enum SnapEdge {
 
 /// Detect which edge or corner the cursor is near, given the screen dimensions.
 /// Returns `None` if the cursor is not near any edge.
-pub fn detect_edge(
-    cursor_x: f32,
-    cursor_y: f32,
-    screen_w: f32,
-    screen_h: f32,
-) -> Option<SnapEdge> {
+pub fn detect_edge(cursor_x: f32, cursor_y: f32, screen_w: f32, screen_h: f32) -> Option<SnapEdge> {
     let near_left = cursor_x < EDGE_THRESHOLD;
     let near_right = cursor_x >= screen_w - EDGE_THRESHOLD;
     let near_top = cursor_y < EDGE_THRESHOLD;
@@ -643,11 +635,7 @@ impl SnapManager {
 
     /// Detect edge/corner proximity and return the matching zone from
     /// an appropriate layout (using the implicit edge-snap rules).
-    pub fn edge_snap_hit(
-        &self,
-        cursor_x: f32,
-        cursor_y: f32,
-    ) -> Option<(SnapEdge, SnapZone)> {
+    pub fn edge_snap_hit(&self, cursor_x: f32, cursor_y: f32) -> Option<(SnapEdge, SnapZone)> {
         let edge = detect_edge(cursor_x, cursor_y, self.screen_width, self.screen_height)?;
         let (preset, zone_id) = edge_to_default_zone(edge);
         let layout = preset.build(self.screen_width, self.screen_height);
@@ -748,8 +736,7 @@ impl SnapManager {
         cursor_x: f32,
         cursor_y: f32,
     ) -> Option<(f32, f32, f32, f32)> {
-        let (_edge, zone) =
-            self.edge_snap_hit(cursor_x, cursor_y)?;
+        let (_edge, zone) = self.edge_snap_hit(cursor_x, cursor_y)?;
         let geom = (zone.x, zone.y, zone.width, zone.height);
         if self.history.snapped_zone(window_id).is_none() {
             self.history.record(
@@ -901,10 +888,8 @@ impl SnapManager {
         let per_row = self.picker_items_per_row();
 
         let rows = presets.len().div_ceil(per_row);
-        let picker_h = PICKER_PADDING * 2.0
-            + 24.0
-            + rows as f32 * (THUMB_SIZE + THUMB_GAP)
-            - THUMB_GAP;
+        let picker_h =
+            PICKER_PADDING * 2.0 + 24.0 + rows as f32 * (THUMB_SIZE + THUMB_GAP) - THUMB_GAP;
 
         let mut cmds = Vec::with_capacity(presets.len() * 8 + 4);
 
@@ -1200,8 +1185,7 @@ mod tests {
     #[test]
     fn three_columns_cover_full_width() {
         let layout = SnapLayoutPreset::ThreeColumns.build(1920.0, 1080.0);
-        let total: f32 = layout.zones.iter().map(|z| z.width).sum::<f32>()
-            + 2.0 * ZONE_GAP;
+        let total: f32 = layout.zones.iter().map(|z| z.width).sum::<f32>() + 2.0 * ZONE_GAP;
         assert!((total - 1920.0).abs() < 0.5);
     }
 
@@ -1219,11 +1203,7 @@ mod tests {
     fn four_quadrants_cover_full_area() {
         let layout = SnapLayoutPreset::FourQuadrants.build(1920.0, 1080.0);
         // Sum of zone areas + gap areas should approximately equal screen area.
-        let zone_area: f32 = layout
-            .zones
-            .iter()
-            .map(|z| z.width * z.height)
-            .sum();
+        let zone_area: f32 = layout.zones.iter().map(|z| z.width * z.height).sum();
         let screen_area = 1920.0 * 1080.0;
         // Allow for gap space.
         assert!(zone_area > screen_area * 0.98);
@@ -1261,7 +1241,10 @@ mod tests {
 
     #[test]
     fn detect_edge_left() {
-        assert_eq!(detect_edge(2.0, 500.0, 1920.0, 1080.0), Some(SnapEdge::Left));
+        assert_eq!(
+            detect_edge(2.0, 500.0, 1920.0, 1080.0),
+            Some(SnapEdge::Left)
+        );
     }
 
     #[test]

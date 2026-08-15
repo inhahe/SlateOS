@@ -31,6 +31,20 @@ const MOCHA_PEACH: Color = Color::from_hex(0xFAB387);
 const MOCHA_OVERLAY0: Color = Color::from_hex(0x6C7086);
 
 // ============================================================================
+// Drag-cursor card geometry
+// ============================================================================
+
+/// Width of the little card drawn next to the cursor during a drag.
+const DRAG_CARD_W: f32 = 140.0;
+/// Inset of the card's contents from its left and right edges.
+const DRAG_CARD_PAD: f32 = 8.0;
+/// Distance from the card's right edge to the item-count badge. Doubles as the
+/// right bound on the description whenever the badge is drawn, so the two
+/// cannot drift into each other.
+const COUNT_BADGE_INSET: f32 = 28.0;
+const DRAG_DESC_SIZE: f32 = 11.0;
+
+// ============================================================================
 // Drag data types
 // ============================================================================
 
@@ -48,7 +62,15 @@ pub enum DragDataType {
 }
 
 impl DragDataType {
-    /// Human-readable description.
+    /// Human-readable description, in full.
+    ///
+    /// Deliberately *not* truncated. Truncation belongs to whoever draws this,
+    /// because only they know the room available; the model attempting it here
+    /// was wrong twice over. It cut at `&t[..27]`, which aborts whenever byte
+    /// 27 lands inside a multi-byte character — so dragging any non-Latin text
+    /// selection took the whole desktop shell down — and its 30-byte budget
+    /// bore no relation to the 124px the drag overlay actually has.
+    /// [`render_drag_overlay`] elides it to that width instead.
     pub fn description(&self) -> String {
         match self {
             Self::Files(paths) => {
@@ -60,15 +82,9 @@ impl DragDataType {
                     format!("{} files", paths.len())
                 }
             }
-            Self::Text(t) => {
-                if t.len() > 30 {
-                    format!("\"{}...\"", &t[..27])
-                } else {
-                    format!("\"{}\"", t)
-                }
-            }
+            Self::Text(t) => format!("\"{t}\""),
             Self::Uris(uris) => format!("{} links", uris.len()),
-            Self::Raw { mime, size } => format!("{} ({} bytes)", mime, size),
+            Self::Raw { mime, size } => format!("{mime} ({size} bytes)"),
         }
     }
 
@@ -150,8 +166,7 @@ pub struct DropTarget {
 impl DropTarget {
     /// Check if a point is inside this target.
     pub fn contains(&self, px: f32, py: f32) -> bool {
-        px >= self.x && px < self.x + self.width
-            && py >= self.y && py < self.y + self.height
+        px >= self.x && px < self.x + self.width && py >= self.y && py < self.y + self.height
     }
 
     /// Get the best effect for this target.
@@ -284,7 +299,11 @@ impl DragDropManager {
                 for target in &self.targets {
                     if target.contains(x, y) {
                         found_target = Some(target.id);
-                        best_effect = if ctrl { DropEffect::Copy } else { target.best_effect() };
+                        best_effect = if ctrl {
+                            DropEffect::Copy
+                        } else {
+                            target.best_effect()
+                        };
                         break;
                     }
                 }
@@ -302,14 +321,15 @@ impl DragDropManager {
                 return None;
             }
             if let Some(target_id) = session.hover_target
-                && session.current_effect != DropEffect::None {
-                    let data = session.data.clone();
-                    let effect = session.current_effect;
-                    session.phase = DragPhase::Completed;
-                    let result = Some((data, target_id, effect));
-                    self.session = None;
-                    return result;
-                }
+                && session.current_effect != DropEffect::None
+            {
+                let data = session.data.clone();
+                let effect = session.current_effect;
+                session.phase = DragPhase::Completed;
+                let result = Some((data, target_id, effect));
+                self.session = None;
+                return result;
+            }
             session.phase = DragPhase::Cancelled;
             self.session = None;
         }
@@ -336,7 +356,10 @@ impl DragDropManager {
 
     /// Whether a drag is actively in progress.
     pub fn is_dragging(&self) -> bool {
-        self.session.as_ref().map(|s| s.phase == DragPhase::Active).unwrap_or(false)
+        self.session
+            .as_ref()
+            .map(|s| s.phase == DragPhase::Active)
+            .unwrap_or(false)
     }
 }
 
@@ -362,54 +385,82 @@ pub fn render_drag_overlay(session: &DragSession) -> Vec<RenderCommand> {
     let cy = session.mouse_y;
 
     // Dragged item indicator (small rounded rect near cursor).
-    let w = 140.0;
+    let w = DRAG_CARD_W;
     let h = 32.0;
     let ox = cx + 12.0;
     let oy = cy + 12.0;
 
     cmds.push(RenderCommand::FillRect {
-        x: ox, y: oy, width: w, height: h,
+        x: ox,
+        y: oy,
+        width: w,
+        height: h,
         color: Color::rgba(MOCHA_BASE.r, MOCHA_BASE.g, MOCHA_BASE.b, 220),
         corner_radii: CornerRadii::all(6.0),
     });
 
-    // Item description.
+    // Item description, elided to the room the card actually has. When the
+    // count badge is drawn the description has to stop before it, not at the
+    // card edge — `max_width` alone would have let it run underneath.
+    let count = session.data.item_count();
+    let desc_room = if count > 1 {
+        (w - COUNT_BADGE_INSET - DRAG_CARD_PAD * 2.0).max(0.0)
+    } else {
+        (w - DRAG_CARD_PAD * 2.0).max(0.0)
+    };
     cmds.push(RenderCommand::Text {
-        x: ox + 8.0, y: oy + 4.0,
-        text: session.data.description(),
-        font_size: 11.0, color: MOCHA_TEXT,
+        x: ox + DRAG_CARD_PAD,
+        y: oy + 4.0,
+        text: text::elide(
+            &session.data.description(),
+            desc_room,
+            "...",
+            DRAG_DESC_SIZE,
+            FontWeightHint::Regular,
+        ),
+        font_size: DRAG_DESC_SIZE,
+        color: MOCHA_TEXT,
         font_weight: FontWeightHint::Regular,
-        max_width: Some(w - 16.0),
+        max_width: Some(desc_room),
     });
 
     // Effect badge.
     let badge_text = session.current_effect.label();
     let badge_color = session.current_effect.color();
     cmds.push(RenderCommand::FillRect {
-        x: ox + 8.0, y: oy + 18.0, width: 40.0, height: 12.0,
+        x: ox + 8.0,
+        y: oy + 18.0,
+        width: 40.0,
+        height: 12.0,
         color: badge_color,
         corner_radii: CornerRadii::all(3.0),
     });
     cmds.push(RenderCommand::Text {
-        x: ox + 12.0, y: oy + 19.0,
+        x: ox + 12.0,
+        y: oy + 19.0,
         text: badge_text.to_string(),
-        font_size: 9.0, color: MOCHA_BASE,
+        font_size: 9.0,
+        color: MOCHA_BASE,
         font_weight: FontWeightHint::Bold,
         max_width: None,
     });
 
     // Item count badge (if multiple).
-    let count = session.data.item_count();
     if count > 1 {
         cmds.push(RenderCommand::FillRect {
-            x: ox + w - 28.0, y: oy + 2.0, width: 24.0, height: 16.0,
+            x: ox + w - COUNT_BADGE_INSET,
+            y: oy + 2.0,
+            width: 24.0,
+            height: 16.0,
             color: MOCHA_PEACH,
             corner_radii: CornerRadii::all(8.0),
         });
         cmds.push(RenderCommand::Text {
-            x: ox + w - 24.0, y: oy + 3.0,
+            x: ox + w - 24.0,
+            y: oy + 3.0,
             text: format!("{}", count),
-            font_size: 10.0, color: MOCHA_BASE,
+            font_size: 10.0,
+            color: MOCHA_BASE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
         });
@@ -440,14 +491,19 @@ pub fn render_drop_target_highlight(target: &DropTarget, effect: DropEffect) -> 
         let label_y = target.y + target.height + 4.0;
 
         cmds.push(RenderCommand::FillRect {
-            x: label_x, y: label_y, width: label_w, height: 20.0,
+            x: label_x,
+            y: label_y,
+            width: label_w,
+            height: 20.0,
             color: Color::rgba(MOCHA_BASE.r, MOCHA_BASE.g, MOCHA_BASE.b, 200),
             corner_radii: CornerRadii::all(4.0),
         });
         cmds.push(RenderCommand::Text {
-            x: label_x + 8.0, y: label_y + 3.0,
+            x: label_x + 8.0,
+            y: label_y + 3.0,
             text: target.label.clone(),
-            font_size: 11.0, color: MOCHA_TEXT,
+            font_size: 11.0,
+            color: MOCHA_TEXT,
             font_weight: FontWeightHint::Regular,
             max_width: None,
         });
@@ -485,13 +541,137 @@ mod tests {
 
     #[test]
     fn test_text_description_long() {
+        // `description()` no longer truncates — the drag overlay does, against
+        // the width it actually has. See `a_long_drag_description_is_elided`.
         let d = DragDataType::Text("a".repeat(50));
-        assert!(d.description().contains("..."));
+        assert_eq!(d.description(), format!("\"{}\"", "a".repeat(50)));
+    }
+
+    // --- Drag overlay: non-ASCII safety and width discipline ---
+
+    fn overlay_for(data: DragDataType) -> Vec<RenderCommand> {
+        let mut session = DragSession::new(1, data, 400.0, 300.0);
+        session.phase = DragPhase::Active;
+        render_drag_overlay(&session)
+    }
+
+    fn description_of(cmds: &[RenderCommand]) -> String {
+        cmds.iter()
+            .find_map(|c| match c {
+                RenderCommand::Text {
+                    text, font_size, ..
+                } if *font_size == DRAG_DESC_SIZE => Some(text.clone()),
+                _ => None,
+            })
+            .expect("the overlay draws a description")
+    }
+
+    /// Drag payloads chosen so byte 27 — the offset the old code cut at — falls
+    /// inside a multi-byte character. The last pins it exactly: 26 ASCII bytes
+    /// then a two-byte `é`, so byte 27 is that character's continuation byte.
+    fn adversarial_payloads() -> Vec<String> {
+        vec![
+            "日本語のテキストを選択してドラッグしています".to_string(),
+            "Επιλεγμένο κείμενο προς μεταφορά".to_string(),
+            "Выделенный текст для перетаскивания".to_string(),
+            "dragging 🌍 some 🚀 emoji 🛰 text around".to_string(),
+            format!("{}é{}", "a".repeat(26), "b".repeat(30)),
+        ]
+    }
+
+    #[test]
+    fn a_non_ascii_drag_payload_does_not_abort_the_overlay() {
+        // Regression: `description()` cut `Text` at `&t[..27]` behind a
+        // `len() > 30` guard. Byte 27 lands inside a multi-byte character for
+        // most non-Latin text, and the guard made that *more* likely rather
+        // than less — a ten-character Japanese selection is 30 bytes and so
+        // always took the truncating branch. Dragging a non-Latin selection
+        // took the desktop shell down.
+        for payload in adversarial_payloads() {
+            let cmds = overlay_for(DragDataType::Text(payload.clone()));
+            assert!(!cmds.is_empty(), "the overlay drew nothing for {payload:?}");
+            // The filename path is document-controlled too.
+            let cmds = overlay_for(DragDataType::Files(vec![format!("/home/u/{payload}")]));
+            assert!(
+                !cmds.is_empty(),
+                "the overlay drew nothing for a {payload:?} file"
+            );
+        }
+    }
+
+    #[test]
+    fn a_long_drag_description_is_elided() {
+        let mut checked = 0usize;
+        for payload in adversarial_payloads() {
+            let cmds = overlay_for(DragDataType::Text(payload.clone()));
+            let drawn = description_of(&cmds);
+            let width = text::measure(&drawn, DRAG_DESC_SIZE, FontWeightHint::Regular);
+            let room = DRAG_CARD_W - DRAG_CARD_PAD * 2.0;
+            assert!(
+                width <= room + 0.5,
+                "the description {drawn:?} draws {width} wide, past the {room} \
+                 the drag card has"
+            );
+            checked += 1;
+        }
+        assert_eq!(checked, adversarial_payloads().len());
+    }
+
+    #[test]
+    fn a_multi_item_description_stops_before_the_count_badge() {
+        // With a badge on the card, the card edge is the wrong bound: the
+        // description has to stop before the badge or it draws underneath it.
+        //
+        // Honest note on this test's strength: every description that comes
+        // with a badge today is short by construction — a multi-item drag
+        // renders as "N files" or "N links", never as a path — so the
+        // assertion currently has slack, and removing the badge-aware bound
+        // from `render_drag_overlay` does *not* make it fail. It is written
+        // against the drawn geometry rather than against the constants so
+        // that it starts biting the moment that stops being true, which is
+        // exactly when the overlap would appear.
+        let files: Vec<String> = (0..12).map(|i| format!("/home/u/файл-{i}.txt")).collect();
+        let cmds = overlay_for(DragDataType::Files(files));
+
+        let (desc_x, desc) = cmds
+            .iter()
+            .find_map(|c| match c {
+                RenderCommand::Text {
+                    x, text, font_size, ..
+                } if *font_size == DRAG_DESC_SIZE => Some((*x, text.clone())),
+                _ => None,
+            })
+            .expect("the overlay draws a description");
+        let badge_x = cmds
+            .iter()
+            .find_map(|c| match c {
+                // The count badge is the only peach fill on the card.
+                RenderCommand::FillRect { x, color, .. } if *color == MOCHA_PEACH => Some(*x),
+                _ => None,
+            })
+            .expect("a 12-item drag draws a count badge");
+
+        let desc_right = desc_x + text::measure(&desc, DRAG_DESC_SIZE, FontWeightHint::Regular);
+        assert!(
+            desc_right <= badge_x + 0.5,
+            "the description {desc:?} runs to {desc_right}, under the count \
+             badge that starts at {badge_x}"
+        );
+    }
+
+    #[test]
+    fn a_short_drag_description_is_drawn_verbatim() {
+        // Otherwise "it fits" would be satisfiable by drawing nothing.
+        let cmds = overlay_for(DragDataType::Text("да".to_string()));
+        assert_eq!(description_of(&cmds), "\"да\"");
     }
 
     #[test]
     fn test_item_count() {
-        assert_eq!(DragDataType::Files(vec!["a".into(), "b".into()]).item_count(), 2);
+        assert_eq!(
+            DragDataType::Files(vec!["a".into(), "b".into()]).item_count(),
+            2
+        );
         assert_eq!(DragDataType::Text("x".into()).item_count(), 1);
         assert_eq!(DragDataType::Uris(vec!["u".into()]).item_count(), 1);
     }
@@ -508,8 +688,13 @@ mod tests {
     #[test]
     fn test_target_contains() {
         let t = DropTarget {
-            id: 1, x: 100.0, y: 100.0, width: 200.0, height: 150.0,
-            accepted_effects: vec![DropEffect::Copy], label: "Drop here".into(),
+            id: 1,
+            x: 100.0,
+            y: 100.0,
+            width: 200.0,
+            height: 150.0,
+            accepted_effects: vec![DropEffect::Copy],
+            label: "Drop here".into(),
         };
         assert!(t.contains(150.0, 150.0));
         assert!(!t.contains(50.0, 50.0));
@@ -519,21 +704,33 @@ mod tests {
     #[test]
     fn test_target_best_effect() {
         let t = DropTarget {
-            id: 1, x: 0.0, y: 0.0, width: 100.0, height: 100.0,
+            id: 1,
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 100.0,
             accepted_effects: vec![DropEffect::Copy, DropEffect::Link],
             label: String::new(),
         };
         assert_eq!(t.best_effect(), DropEffect::Copy);
 
         let t2 = DropTarget {
-            id: 2, x: 0.0, y: 0.0, width: 100.0, height: 100.0,
+            id: 2,
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 100.0,
             accepted_effects: vec![DropEffect::Move],
             label: String::new(),
         };
         assert_eq!(t2.best_effect(), DropEffect::Move);
 
         let t3 = DropTarget {
-            id: 3, x: 0.0, y: 0.0, width: 100.0, height: 100.0,
+            id: 3,
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 100.0,
             accepted_effects: vec![],
             label: String::new(),
         };
@@ -607,7 +804,11 @@ mod tests {
     fn test_drop_on_target() {
         let mut mgr = DragDropManager::new();
         mgr.register_target(DropTarget {
-            id: 42, x: 100.0, y: 100.0, width: 200.0, height: 200.0,
+            id: 42,
+            x: 100.0,
+            y: 100.0,
+            width: 200.0,
+            height: 200.0,
             accepted_effects: vec![DropEffect::Copy],
             label: "Target".into(),
         });
@@ -635,21 +836,33 @@ mod tests {
     fn test_ctrl_forces_copy() {
         let mut mgr = DragDropManager::new();
         mgr.register_target(DropTarget {
-            id: 1, x: 100.0, y: 100.0, width: 200.0, height: 200.0,
+            id: 1,
+            x: 100.0,
+            y: 100.0,
+            width: 200.0,
+            height: 200.0,
             accepted_effects: vec![DropEffect::Move, DropEffect::Copy],
             label: String::new(),
         });
         mgr.begin_drag(1, DragDataType::Files(vec!["f".into()]), 50.0, 50.0);
         mgr.update(150.0, 150.0, true); // Ctrl held
-        assert_eq!(mgr.session.as_ref().unwrap().current_effect, DropEffect::Copy);
+        assert_eq!(
+            mgr.session.as_ref().unwrap().current_effect,
+            DropEffect::Copy
+        );
     }
 
     #[test]
     fn test_register_unregister_targets() {
         let mut mgr = DragDropManager::new();
         mgr.register_target(DropTarget {
-            id: 1, x: 0.0, y: 0.0, width: 100.0, height: 100.0,
-            accepted_effects: vec![], label: String::new(),
+            id: 1,
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 100.0,
+            accepted_effects: vec![],
+            label: String::new(),
         });
         assert_eq!(mgr.targets.len(), 1);
         mgr.unregister_target(1);
@@ -666,7 +879,12 @@ mod tests {
 
     #[test]
     fn test_render_overlay_active() {
-        let mut s = DragSession::new(1, DragDataType::Files(vec!["a".into(), "b".into()]), 0.0, 0.0);
+        let mut s = DragSession::new(
+            1,
+            DragDataType::Files(vec!["a".into(), "b".into()]),
+            0.0,
+            0.0,
+        );
         s.phase = DragPhase::Active;
         s.mouse_x = 100.0;
         s.mouse_y = 100.0;
@@ -677,7 +895,11 @@ mod tests {
     #[test]
     fn test_render_target_highlight() {
         let t = DropTarget {
-            id: 1, x: 50.0, y: 50.0, width: 200.0, height: 150.0,
+            id: 1,
+            x: 50.0,
+            y: 50.0,
+            width: 200.0,
+            height: 150.0,
             accepted_effects: vec![DropEffect::Copy],
             label: "Drop files here".into(),
         };

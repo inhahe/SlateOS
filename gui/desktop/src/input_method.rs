@@ -349,9 +349,10 @@ impl InputMethodManager {
             .iter()
             .find(|(id, _)| id == app_id)
             .map(|(_, idx)| *idx)
-            && idx < self.layouts.len() {
-                self.active_index = idx;
-            }
+            && idx < self.layouts.len()
+        {
+            self.active_index = idx;
+        }
     }
 
     /// Remember the current layout for an application.
@@ -395,12 +396,7 @@ impl InputMethodManager {
     }
 
     /// Render the keyboard layout preview popup.
-    pub fn render_preview(
-        &self,
-        popup_x: f32,
-        popup_y: f32,
-        width: f32,
-    ) -> Vec<RenderCommand> {
+    pub fn render_preview(&self, popup_x: f32, popup_y: f32, width: f32) -> Vec<RenderCommand> {
         if !self.preview_visible {
             return Vec::new();
         }
@@ -519,9 +515,10 @@ impl InputMethodManager {
                     }
                     "active" => {
                         if let Ok(idx) = val.trim().parse::<usize>()
-                            && idx < self.layouts.len() {
-                                self.active_index = idx;
-                            }
+                            && idx < self.layouts.len()
+                        {
+                            self.active_index = idx;
+                        }
                     }
                     _ => {}
                 }
@@ -599,10 +596,7 @@ mod tests {
 
     #[test]
     fn test_shortcut_unknown_defaults() {
-        assert_eq!(
-            SwitchShortcut::from_id("unknown"),
-            SwitchShortcut::AltShift
-        );
+        assert_eq!(SwitchShortcut::from_id("unknown"), SwitchShortcut::AltShift);
     }
 
     // ---- InputMethodManager tests ----
@@ -617,10 +611,8 @@ mod tests {
 
     #[test]
     fn test_manager_next_layout() {
-        let mut mgr = InputMethodManager::new(vec![
-            KeyboardLayout::us_qwerty(),
-            KeyboardLayout::dvorak(),
-        ]);
+        let mut mgr =
+            InputMethodManager::new(vec![KeyboardLayout::us_qwerty(), KeyboardLayout::dvorak()]);
         assert_eq!(mgr.tray_label(), "EN");
         mgr.next_layout();
         assert_eq!(mgr.tray_label(), "DV");
@@ -641,10 +633,8 @@ mod tests {
 
     #[test]
     fn test_manager_switch_to() {
-        let mut mgr = InputMethodManager::new(vec![
-            KeyboardLayout::us_qwerty(),
-            KeyboardLayout::dvorak(),
-        ]);
+        let mut mgr =
+            InputMethodManager::new(vec![KeyboardLayout::us_qwerty(), KeyboardLayout::dvorak()]);
         assert!(mgr.switch_to(&LayoutId::new("dvorak")));
         assert_eq!(mgr.tray_label(), "DV");
     }
@@ -670,10 +660,8 @@ mod tests {
 
     #[test]
     fn test_manager_remove_layout() {
-        let mut mgr = InputMethodManager::new(vec![
-            KeyboardLayout::us_qwerty(),
-            KeyboardLayout::dvorak(),
-        ]);
+        let mut mgr =
+            InputMethodManager::new(vec![KeyboardLayout::us_qwerty(), KeyboardLayout::dvorak()]);
         assert!(mgr.remove_layout(&LayoutId::new("dvorak")));
         assert_eq!(mgr.layouts.len(), 1);
     }
@@ -686,10 +674,8 @@ mod tests {
 
     #[test]
     fn test_manager_remove_adjusts_active_index() {
-        let mut mgr = InputMethodManager::new(vec![
-            KeyboardLayout::us_qwerty(),
-            KeyboardLayout::dvorak(),
-        ]);
+        let mut mgr =
+            InputMethodManager::new(vec![KeyboardLayout::us_qwerty(), KeyboardLayout::dvorak()]);
         mgr.active_index = 1;
         mgr.remove_layout(&LayoutId::new("dvorak"));
         assert_eq!(mgr.active_index, 0);
@@ -697,10 +683,8 @@ mod tests {
 
     #[test]
     fn test_manager_per_app_layout() {
-        let mut mgr = InputMethodManager::new(vec![
-            KeyboardLayout::us_qwerty(),
-            KeyboardLayout::dvorak(),
-        ]);
+        let mut mgr =
+            InputMethodManager::new(vec![KeyboardLayout::us_qwerty(), KeyboardLayout::dvorak()]);
         mgr.per_app_layout = true;
 
         // Set dvorak for terminal
@@ -721,10 +705,8 @@ mod tests {
 
     #[test]
     fn test_manager_per_app_disabled() {
-        let mut mgr = InputMethodManager::new(vec![
-            KeyboardLayout::us_qwerty(),
-            KeyboardLayout::dvorak(),
-        ]);
+        let mut mgr =
+            InputMethodManager::new(vec![KeyboardLayout::us_qwerty(), KeyboardLayout::dvorak()]);
         mgr.per_app_layout = false;
         mgr.active_index = 0;
         mgr.on_app_focus("anything");
@@ -765,19 +747,15 @@ mod tests {
 
     #[test]
     fn test_manager_config_roundtrip() {
-        let mut mgr = InputMethodManager::new(vec![
-            KeyboardLayout::us_qwerty(),
-            KeyboardLayout::dvorak(),
-        ]);
+        let mut mgr =
+            InputMethodManager::new(vec![KeyboardLayout::us_qwerty(), KeyboardLayout::dvorak()]);
         mgr.switch_shortcut = SwitchShortcut::SuperSpace;
         mgr.per_app_layout = true;
         mgr.active_index = 1;
 
         let text = mgr.to_config_text();
-        let mut mgr2 = InputMethodManager::new(vec![
-            KeyboardLayout::us_qwerty(),
-            KeyboardLayout::dvorak(),
-        ]);
+        let mut mgr2 =
+            InputMethodManager::new(vec![KeyboardLayout::us_qwerty(), KeyboardLayout::dvorak()]);
         mgr2.apply_config_text(&text);
 
         assert_eq!(mgr2.switch_shortcut, SwitchShortcut::SuperSpace);

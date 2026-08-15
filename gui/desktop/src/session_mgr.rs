@@ -256,7 +256,11 @@ impl SessionManager {
     /// Rename a workspace.
     pub fn rename_workspace(&mut self, id: WorkspaceId, new_name: &str) -> bool {
         // Check for duplicate name.
-        if self.workspaces.iter().any(|w| w.name == new_name && w.id != id) {
+        if self
+            .workspaces
+            .iter()
+            .any(|w| w.name == new_name && w.id != id)
+        {
             return false;
         }
         if let Some(ws) = self.get_mut(id) {
@@ -293,7 +297,11 @@ impl SessionManager {
     }
 
     /// Apply a workspace (set it as active and return the window states to restore).
-    pub fn apply_workspace(&mut self, id: WorkspaceId, now_ms: u64) -> Option<Vec<SavedWindowState>> {
+    pub fn apply_workspace(
+        &mut self,
+        id: WorkspaceId,
+        now_ms: u64,
+    ) -> Option<Vec<SavedWindowState>> {
         let ws = self.workspaces.iter_mut().find(|w| w.id == id)?;
         ws.last_used = now_ms;
         self.active_workspace = Some(id);
@@ -327,7 +335,12 @@ impl SessionManager {
     }
 
     /// Save current session state (called periodically or at logout).
-    pub fn save_session(&mut self, windows: Vec<SavedWindowState>, active_desktop: u32, now_ms: u64) {
+    pub fn save_session(
+        &mut self,
+        windows: Vec<SavedWindowState>,
+        active_desktop: u32,
+        now_ms: u64,
+    ) {
         self.session.windows = windows;
         self.session.active_desktop = active_desktop;
         self.session.saved_at = now_ms;
@@ -335,7 +348,10 @@ impl SessionManager {
 
     /// Get session state for restore (at login).
     pub fn restore_session(&self) -> Option<&SessionState> {
-        if self.session_restore_enabled && self.session.restore_on_login && !self.session.windows.is_empty() {
+        if self.session_restore_enabled
+            && self.session.restore_on_login
+            && !self.session.windows.is_empty()
+        {
             Some(&self.session)
         } else {
             None
@@ -371,7 +387,14 @@ impl SessionManager {
             for win in &ws.windows {
                 output.push_str(&format!(
                     "  window:{}:{}:{}:{}:{}:{}:{:?}:{}\n",
-                    win.app_id, win.title_hint, win.x, win.y, win.width, win.height, win.state, win.desktop
+                    win.app_id,
+                    win.title_hint,
+                    win.x,
+                    win.y,
+                    win.width,
+                    win.height,
+                    win.state,
+                    win.desktop
                 ));
             }
         }
@@ -511,7 +534,11 @@ impl WorkspacePicker {
                 self.search_text.clone()
             },
             font_size: 16.0,
-            color: if self.search_text.is_empty() { TEXT } else { BLUE },
+            color: if self.search_text.is_empty() {
+                TEXT
+            } else {
+                BLUE
+            },
             font_weight: FontWeightHint::Bold,
             max_width: Some(picker_w - padding * 2.0),
         });
@@ -754,7 +781,9 @@ mod tests {
     fn apply_workspace() {
         let mut mgr = make_mgr();
         let id = mgr.create_workspace("Dev").unwrap();
-        mgr.get_mut(id).unwrap().add_window(sample_window("editor", 0, 0));
+        mgr.get_mut(id)
+            .unwrap()
+            .add_window(sample_window("editor", 0, 0));
         let windows = mgr.apply_workspace(id, 5000);
         assert!(windows.is_some());
         assert_eq!(windows.unwrap().len(), 1);
@@ -796,7 +825,9 @@ mod tests {
     fn duplicate_workspace() {
         let mut mgr = make_mgr();
         let id = mgr.create_workspace("Dev").unwrap();
-        mgr.get_mut(id).unwrap().add_window(sample_window("editor", 0, 0));
+        mgr.get_mut(id)
+            .unwrap()
+            .add_window(sample_window("editor", 0, 0));
         let new_id = mgr.duplicate_workspace(id).unwrap();
         assert_ne!(id, new_id);
         assert_eq!(mgr.get(new_id).unwrap().name, "Dev (copy)");
@@ -876,7 +907,9 @@ mod tests {
     fn export_workspaces() {
         let mut mgr = make_mgr();
         let id = mgr.create_workspace("Dev").unwrap();
-        mgr.get_mut(id).unwrap().add_window(sample_window("editor", 0, 0));
+        mgr.get_mut(id)
+            .unwrap()
+            .add_window(sample_window("editor", 0, 0));
         let exported = mgr.export_workspaces();
         assert!(exported.contains("Dev"));
         assert!(exported.contains("editor"));

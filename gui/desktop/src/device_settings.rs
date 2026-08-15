@@ -84,7 +84,7 @@ impl DeviceCategory {
     /// Icon character.
     pub fn icon(self) -> &'static str {
         match self {
-            Self::Usb => "\u{1F50C}",      // plug
+            Self::Usb => "\u{1F50C}",       // plug
             Self::Bluetooth => "\u{1F4F6}", // signal
             Self::Audio => "\u{1F3A7}",     // headphones
             Self::Display => "\u{1F5B5}",   // display
@@ -431,7 +431,12 @@ pub enum DeviceSettingsTab {
 impl DeviceSettingsTab {
     /// All tabs.
     pub fn all() -> &'static [Self] {
-        &[Self::Overview, Self::ByCategory, Self::Drivers, Self::SafeRemove]
+        &[
+            Self::Overview,
+            Self::ByCategory,
+            Self::Drivers,
+            Self::SafeRemove,
+        ]
     }
 
     /// Tab label.
@@ -647,10 +652,26 @@ impl DeviceSettingsUI {
 
         // Summary cards
         let stats = [
-            ("Connected", format!("{}", self.manager.connected_count()), GREEN),
+            (
+                "Connected",
+                format!("{}", self.manager.connected_count()),
+                GREEN,
+            ),
             ("Total", format!("{}", self.manager.devices.len()), BLUE),
-            ("Problems", format!("{}", self.manager.problem_count()), if self.manager.problem_count() > 0 { RED } else { OVERLAY0 }),
-            ("Removable", format!("{}", self.manager.safely_removable().len()), LAVENDER),
+            (
+                "Problems",
+                format!("{}", self.manager.problem_count()),
+                if self.manager.problem_count() > 0 {
+                    RED
+                } else {
+                    OVERLAY0
+                },
+            ),
+            (
+                "Removable",
+                format!("{}", self.manager.safely_removable().len()),
+                LAVENDER,
+            ),
         ];
 
         let card_w = (width - 24.0) / 4.0;
@@ -759,7 +780,10 @@ impl DeviceSettingsUI {
         let settings = [
             ("Show disconnected devices", self.manager.show_disconnected),
             ("Auto-install drivers", self.manager.auto_install_drivers),
-            ("Safe-remove notifications", self.manager.safely_remove_notifications),
+            (
+                "Safe-remove notifications",
+                self.manager.safely_remove_notifications,
+            ),
             ("USB power saving", self.manager.usb_power_saving),
         ];
 
@@ -822,7 +846,11 @@ impl DeviceSettingsUI {
             y: row_y + 8.0,
             text: search_text,
             font_size: 12.0,
-            color: if self.search_query.is_empty() { OVERLAY0 } else { TEXT },
+            color: if self.search_query.is_empty() {
+                OVERLAY0
+            } else {
+                TEXT
+            },
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - 24.0),
         });
@@ -832,7 +860,9 @@ impl DeviceSettingsUI {
             self.manager
                 .devices
                 .iter()
-                .filter(|d| self.manager.show_disconnected || d.status != DeviceStatus::Disconnected)
+                .filter(|d| {
+                    self.manager.show_disconnected || d.status != DeviceStatus::Disconnected
+                })
                 .collect()
         } else {
             self.manager.search(&self.search_query)
@@ -840,16 +870,15 @@ impl DeviceSettingsUI {
 
         // Group by category
         for category in DeviceCategory::all() {
-            let cat_devices: Vec<&&DeviceInfo> = devices
-                .iter()
-                .filter(|d| d.category == *category)
-                .collect();
+            let cat_devices: Vec<&&DeviceInfo> =
+                devices.iter().filter(|d| d.category == *category).collect();
 
             if cat_devices.is_empty() {
                 continue;
             }
 
-            let is_expanded = self.expanded_category == Some(*category) || !self.search_query.is_empty();
+            let is_expanded =
+                self.expanded_category == Some(*category) || !self.search_query.is_empty();
 
             // Category header
             cmds.push(RenderCommand::FillRect {
@@ -879,9 +908,7 @@ impl DeviceSettingsUI {
 
             if is_expanded {
                 for device in &cat_devices {
-                    let is_selected = self
-                        .selected_device
-                        .as_ref() == Some(&device.id);
+                    let is_selected = self.selected_device.as_ref() == Some(&device.id);
 
                     cmds.push(RenderCommand::FillRect {
                         x: x + 8.0,
@@ -1327,8 +1354,16 @@ mod tests {
         mgr.register_device(sample_device("a1", DeviceCategory::Audio));
 
         let counts = mgr.category_counts();
-        assert!(counts.iter().any(|(c, n)| *c == DeviceCategory::Usb && *n == 2));
-        assert!(counts.iter().any(|(c, n)| *c == DeviceCategory::Audio && *n == 1));
+        assert!(
+            counts
+                .iter()
+                .any(|(c, n)| *c == DeviceCategory::Usb && *n == 2)
+        );
+        assert!(
+            counts
+                .iter()
+                .any(|(c, n)| *c == DeviceCategory::Audio && *n == 1)
+        );
     }
 
     #[test]

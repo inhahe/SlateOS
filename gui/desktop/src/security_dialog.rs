@@ -62,9 +62,9 @@
 //! }
 //! ```
 
-use guitk::event::{Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 #[cfg(test)]
 use guitk::event::Modifiers;
+use guitk::event::{Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::render::{FontWeightHint, RenderCommand};
 use guitk::style::CornerRadii;
 use guitk::text;
@@ -208,10 +208,12 @@ impl ResourceType {
     fn risk_level(self) -> RiskLevel {
         match self {
             Self::Timer | Self::EventFd | Self::CompletionPort => RiskLevel::Low,
-            Self::Channel | Self::Pipe | Self::SharedMemory
-            | Self::File | Self::Service => RiskLevel::Medium,
-            Self::Socket | Self::Process | Self::Thread
-            | Self::IoScheduler | Self::Namespace => RiskLevel::High,
+            Self::Channel | Self::Pipe | Self::SharedMemory | Self::File | Self::Service => {
+                RiskLevel::Medium
+            }
+            Self::Socket | Self::Process | Self::Thread | Self::IoScheduler | Self::Namespace => {
+                RiskLevel::High
+            }
             Self::PortIo | Self::DeviceIrq => RiskLevel::Critical,
         }
     }
@@ -236,13 +238,27 @@ impl Rights {
     /// Build a human-readable list of rights.
     fn labels(self) -> Vec<&'static str> {
         let mut result = Vec::new();
-        if self.0 & Self::READ.0 != 0 { result.push("Read"); }
-        if self.0 & Self::WRITE.0 != 0 { result.push("Write"); }
-        if self.0 & Self::EXECUTE.0 != 0 { result.push("Execute"); }
-        if self.0 & Self::CREATE.0 != 0 { result.push("Create"); }
-        if self.0 & Self::DELETE.0 != 0 { result.push("Delete"); }
-        if self.0 & Self::ADMIN.0 != 0 { result.push("Admin"); }
-        if result.is_empty() { result.push("(none)"); }
+        if self.0 & Self::READ.0 != 0 {
+            result.push("Read");
+        }
+        if self.0 & Self::WRITE.0 != 0 {
+            result.push("Write");
+        }
+        if self.0 & Self::EXECUTE.0 != 0 {
+            result.push("Execute");
+        }
+        if self.0 & Self::CREATE.0 != 0 {
+            result.push("Create");
+        }
+        if self.0 & Self::DELETE.0 != 0 {
+            result.push("Delete");
+        }
+        if self.0 & Self::ADMIN.0 != 0 {
+            result.push("Admin");
+        }
+        if result.is_empty() {
+            result.push("(none)");
+        }
         result
     }
 }
@@ -283,7 +299,9 @@ impl RiskLevel {
             Self::Low => "This request has minimal security implications.",
             Self::Medium => "This request grants access to system resources.",
             Self::High => "This request grants significant system access.",
-            Self::Critical => "This request grants direct hardware access. Only allow if you trust this application completely.",
+            Self::Critical => {
+                "This request grants direct hardware access. Only allow if you trust this application completely."
+            }
         }
     }
 }
@@ -454,8 +472,7 @@ impl SecurityDialog {
     fn record_decision(&mut self, request: &CapRequestInfo, allowed: bool) {
         // Remove any existing decision for this combination
         self.remembered_decisions.retain(|d| {
-            !(d.process_name == request.process_name
-                && d.resource_type == request.resource_type)
+            !(d.process_name == request.process_name && d.resource_type == request.resource_type)
         });
 
         self.remembered_decisions.push(RememberedDecision {
@@ -498,7 +515,8 @@ impl SecurityDialog {
             self.events.push(SecurityDialogEvent::Approved(request.id));
             if self.remember {
                 self.record_decision(&request, true);
-                self.events.push(SecurityDialogEvent::RememberToggled(request.id, true));
+                self.events
+                    .push(SecurityDialogEvent::RememberToggled(request.id, true));
             }
             self.queue.remove(0);
             self.advance_or_hide();
@@ -511,7 +529,8 @@ impl SecurityDialog {
             self.events.push(SecurityDialogEvent::Denied(request.id));
             if self.remember {
                 self.record_decision(&request, false);
-                self.events.push(SecurityDialogEvent::RememberToggled(request.id, false));
+                self.events
+                    .push(SecurityDialogEvent::RememberToggled(request.id, false));
             }
             self.queue.remove(0);
             self.advance_or_hide();
@@ -546,7 +565,9 @@ impl SecurityDialog {
 
     /// Handle a keyboard event. Returns true if the event was consumed.
     pub fn handle_key_event(&mut self, event: &KeyEvent) -> bool {
-        if !self.visible { return false; }
+        if !self.visible {
+            return false;
+        }
 
         match event.key {
             // Enter = Allow (focused action)
@@ -583,7 +604,8 @@ impl SecurityDialog {
                 self.remember = !self.remember;
                 if let Some(request) = self.current_request() {
                     let id = request.id;
-                    self.events.push(SecurityDialogEvent::RememberToggled(id, self.remember));
+                    self.events
+                        .push(SecurityDialogEvent::RememberToggled(id, self.remember));
                 }
                 true
             }
@@ -603,7 +625,9 @@ impl SecurityDialog {
 
     /// Handle a mouse event. Returns true if the event was consumed.
     pub fn handle_mouse_event(&mut self, event: &MouseEvent) -> bool {
-        if !self.visible { return false; }
+        if !self.visible {
+            return false;
+        }
 
         let dialog_x = (self.screen_width - DIALOG_WIDTH) / 2.0;
         let dialog_y = (self.screen_height - self.dialog_height()) / 2.0;
@@ -635,7 +659,8 @@ impl SecurityDialog {
                     self.remember = !self.remember;
                     if let Some(request) = self.current_request() {
                         let id = request.id;
-                        self.events.push(SecurityDialogEvent::RememberToggled(id, self.remember));
+                        self.events
+                            .push(SecurityDialogEvent::RememberToggled(id, self.remember));
                     }
                     return true;
                 }
@@ -662,33 +687,26 @@ impl SecurityDialog {
         // Allow button: right side of button row, near bottom
         let btn_y = h - PADDING - BUTTON_HEIGHT;
         let allow_x = DIALOG_WIDTH - PADDING - BUTTON_WIDTH;
-        if x >= allow_x && x <= allow_x + BUTTON_WIDTH
-            && y >= btn_y && y <= btn_y + BUTTON_HEIGHT
-        {
+        if x >= allow_x && x <= allow_x + BUTTON_WIDTH && y >= btn_y && y <= btn_y + BUTTON_HEIGHT {
             return Some(ButtonId::Allow);
         }
 
         // Deny button: left of Allow
         let deny_x = allow_x - BUTTON_SPACING - BUTTON_WIDTH;
-        if x >= deny_x && x <= deny_x + BUTTON_WIDTH
-            && y >= btn_y && y <= btn_y + BUTTON_HEIGHT
-        {
+        if x >= deny_x && x <= deny_x + BUTTON_WIDTH && y >= btn_y && y <= btn_y + BUTTON_HEIGHT {
             return Some(ButtonId::Deny);
         }
 
         // Details toggle: small link below the reason text
         let details_y = self.details_link_y();
-        if (PADDING..=PADDING + 100.0).contains(&x)
-            && y >= details_y && y <= details_y + 18.0
-        {
+        if (PADDING..=PADDING + 100.0).contains(&x) && y >= details_y && y <= details_y + 18.0 {
             return Some(ButtonId::Details);
         }
 
         // Deny All: only shown when queue > 1, bottom-left
         if self.queue.len() > 1 {
             let deny_all_x = PADDING;
-            if x >= deny_all_x && x <= deny_all_x + 90.0
-                && y >= btn_y && y <= btn_y + BUTTON_HEIGHT
+            if x >= deny_all_x && x <= deny_all_x + 90.0 && y >= btn_y && y <= btn_y + BUTTON_HEIGHT
             {
                 return Some(ButtonId::DenyAll);
             }
@@ -701,8 +719,7 @@ impl SecurityDialog {
     fn hit_test_remember(&self, x: f32, y: f32) -> bool {
         let h = self.dialog_height();
         let checkbox_y = h - PADDING - BUTTON_HEIGHT - 28.0;
-        (PADDING..=PADDING + 200.0).contains(&x)
-            && y >= checkbox_y && y <= checkbox_y + 20.0
+        (PADDING..=PADDING + 200.0).contains(&x) && y >= checkbox_y && y <= checkbox_y + 20.0
     }
 
     /// Y position of the "Show details" / "Hide details" link.
@@ -821,7 +838,13 @@ impl SecurityDialog {
         // --- Shield icon ---
         let shield_x = dx + PADDING;
         let shield_y = dy + (HEADER_HEIGHT - SHIELD_SIZE) / 2.0 + 1.0;
-        self.render_shield_icon(&mut cmds, shield_x, shield_y, accent_color, request.resource_type.icon_char());
+        self.render_shield_icon(
+            &mut cmds,
+            shield_x,
+            shield_y,
+            accent_color,
+            request.resource_type.icon_char(),
+        );
 
         // --- Title text ---
         cmds.push(RenderCommand::Text {
@@ -855,7 +878,8 @@ impl SecurityDialog {
 
         // Risk level badge
         let risk_label = risk.label();
-        let badge_width = text::padded_width(risk_label, 8.0, SMALL_FONT_SIZE, FontWeightHint::Bold);
+        let badge_width =
+            text::padded_width(risk_label, 8.0, SMALL_FONT_SIZE, FontWeightHint::Bold);
         cmds.push(RenderCommand::FillRect {
             x: dx + PADDING,
             y: body_y,
@@ -889,20 +913,35 @@ impl SecurityDialog {
         let row_y = body_y + 32.0;
 
         // Process info row
-        self.render_detail_row(&mut cmds, dx + PADDING, row_y,
-            "Process:", &format!("{} (PID {})", request.process_name, request.pid),
-            dw - PADDING * 2.0);
+        self.render_detail_row(
+            &mut cmds,
+            dx + PADDING,
+            row_y,
+            "Process:",
+            &format!("{} (PID {})", request.process_name, request.pid),
+            dw - PADDING * 2.0,
+        );
 
         // Resource type row
-        self.render_detail_row(&mut cmds, dx + PADDING, row_y + DETAIL_ROW_HEIGHT,
-            "Resource:", request.resource_type.label(),
-            dw - PADDING * 2.0);
+        self.render_detail_row(
+            &mut cmds,
+            dx + PADDING,
+            row_y + DETAIL_ROW_HEIGHT,
+            "Resource:",
+            request.resource_type.label(),
+            dw - PADDING * 2.0,
+        );
 
         // Rights row
         let rights_str = request.rights.labels().join(", ");
-        self.render_detail_row(&mut cmds, dx + PADDING, row_y + DETAIL_ROW_HEIGHT * 2.0,
-            "Rights:", &rights_str,
-            dw - PADDING * 2.0);
+        self.render_detail_row(
+            &mut cmds,
+            dx + PADDING,
+            row_y + DETAIL_ROW_HEIGHT * 2.0,
+            "Rights:",
+            &rights_str,
+            dw - PADDING * 2.0,
+        );
 
         // Reason row
         let reason_display = if request.reason.is_empty() {
@@ -910,13 +949,22 @@ impl SecurityDialog {
         } else {
             truncate_str(&request.reason, MAX_REASON_DISPLAY).to_string()
         };
-        self.render_detail_row(&mut cmds, dx + PADDING, row_y + DETAIL_ROW_HEIGHT * 3.0,
-            "Reason:", &reason_display,
-            dw - PADDING * 2.0);
+        self.render_detail_row(
+            &mut cmds,
+            dx + PADDING,
+            row_y + DETAIL_ROW_HEIGHT * 3.0,
+            "Reason:",
+            &reason_display,
+            dw - PADDING * 2.0,
+        );
 
         // --- Details toggle link ---
         let details_y = dy + self.details_link_y();
-        let details_text = if self.details_expanded { "Hide details" } else { "Show details" };
+        let details_text = if self.details_expanded {
+            "Hide details"
+        } else {
+            "Show details"
+        };
         let details_color = if self.hovered_button == Some(ButtonId::Details) {
             theme::BLUE
         } else {
@@ -1016,7 +1064,13 @@ impl SecurityDialog {
 
         // --- Remember checkbox ---
         let checkbox_y = dy + dh - PADDING - BUTTON_HEIGHT - 28.0;
-        self.render_checkbox(&mut cmds, dx + PADDING, checkbox_y, self.remember, "Remember this decision");
+        self.render_checkbox(
+            &mut cmds,
+            dx + PADDING,
+            checkbox_y,
+            self.remember,
+            "Remember this decision",
+        );
 
         // --- Action buttons ---
         let btn_y = dy + dh - PADDING - BUTTON_HEIGHT;
@@ -1028,9 +1082,15 @@ impl SecurityDialog {
             } else {
                 theme::BUTTON_BG
             };
-            self.render_button(&mut cmds, dx + PADDING, btn_y, 90.0,
+            self.render_button(
+                &mut cmds,
+                dx + PADDING,
+                btn_y,
+                90.0,
                 &format!("Deny All ({})", self.queue.len()),
-                deny_all_color, theme::RED);
+                deny_all_color,
+                theme::RED,
+            );
         }
 
         // Deny button
@@ -1045,7 +1105,15 @@ impl SecurityDialog {
         } else {
             theme::RED
         };
-        self.render_button(&mut cmds, deny_x, btn_y, BUTTON_WIDTH, "Deny", deny_bg, deny_fg);
+        self.render_button(
+            &mut cmds,
+            deny_x,
+            btn_y,
+            BUTTON_WIDTH,
+            "Deny",
+            deny_bg,
+            deny_fg,
+        );
 
         // Allow button
         let allow_x = dx + dw - PADDING - BUTTON_WIDTH;
@@ -1059,7 +1127,15 @@ impl SecurityDialog {
         } else {
             theme::GREEN
         };
-        self.render_button(&mut cmds, allow_x, btn_y, BUTTON_WIDTH, "Allow", allow_bg, allow_fg);
+        self.render_button(
+            &mut cmds,
+            allow_x,
+            btn_y,
+            BUTTON_WIDTH,
+            "Allow",
+            allow_bg,
+            allow_fg,
+        );
 
         // --- Queue indicator ---
         if self.queue.len() > 1 {
@@ -1083,8 +1159,14 @@ impl SecurityDialog {
     // ========================================================================
 
     /// Render a shield icon with a letter inside it.
-    fn render_shield_icon(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32,
-                          color: guitk::Color, letter: char) {
+    fn render_shield_icon(
+        &self,
+        cmds: &mut Vec<RenderCommand>,
+        x: f32,
+        y: f32,
+        color: guitk::Color,
+        letter: char,
+    ) {
         // Shield background (rounded square)
         cmds.push(RenderCommand::FillRect {
             x,
@@ -1129,8 +1211,15 @@ impl SecurityDialog {
     }
 
     /// Render a detail row (label + value).
-    fn render_detail_row(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32,
-                          label: &str, value: &str, width: f32) {
+    fn render_detail_row(
+        &self,
+        cmds: &mut Vec<RenderCommand>,
+        x: f32,
+        y: f32,
+        label: &str,
+        value: &str,
+        width: f32,
+    ) {
         let label_width = 80.0;
         cmds.push(RenderCommand::Text {
             x,
@@ -1153,8 +1242,16 @@ impl SecurityDialog {
     }
 
     /// Render a button.
-    fn render_button(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32,
-                      width: f32, label: &str, bg: guitk::Color, fg: guitk::Color) {
+    fn render_button(
+        &self,
+        cmds: &mut Vec<RenderCommand>,
+        x: f32,
+        y: f32,
+        width: f32,
+        label: &str,
+        bg: guitk::Color,
+        fg: guitk::Color,
+    ) {
         cmds.push(RenderCommand::FillRect {
             x,
             y,
@@ -1178,8 +1275,14 @@ impl SecurityDialog {
     }
 
     /// Render a checkbox with label.
-    fn render_checkbox(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32,
-                        checked: bool, label: &str) {
+    fn render_checkbox(
+        &self,
+        cmds: &mut Vec<RenderCommand>,
+        x: f32,
+        y: f32,
+        checked: bool,
+        label: &str,
+    ) {
         let box_size = 16.0;
 
         // Checkbox background
@@ -1188,7 +1291,11 @@ impl SecurityDialog {
             y: y + 1.0,
             width: box_size,
             height: box_size,
-            color: if checked { theme::BLUE } else { theme::SURFACE0 },
+            color: if checked {
+                theme::BLUE
+            } else {
+                theme::SURFACE0
+            },
             corner_radii: CornerRadii::all(3.0),
         });
 
@@ -1198,7 +1305,11 @@ impl SecurityDialog {
             y: y + 1.0,
             width: box_size,
             height: box_size,
-            color: if checked { theme::BLUE } else { theme::SURFACE2 },
+            color: if checked {
+                theme::BLUE
+            } else {
+                theme::SURFACE2
+            },
             line_width: 1.0,
             corner_radii: CornerRadii::all(3.0),
         });
@@ -1263,13 +1374,21 @@ mod tests {
         for label in ["Allow", "Deny", "Always Allow", "Immer zulassen"] {
             let x = guitk::text::center_x(label, width / 2.0, BODY_FONT_SIZE, FontWeightHint::Bold);
             let w = guitk::text::measure(label, BODY_FONT_SIZE, FontWeightHint::Bold);
-            assert!((x + w / 2.0 - width / 2.0).abs() < 0.01, "{label:?} is not centred");
+            assert!(
+                (x + w / 2.0 - width / 2.0).abs() < 0.01,
+                "{label:?} is not centred"
+            );
         }
     }
 
     #[test]
     fn a_risk_badge_fits_its_label() {
-        for level in [RiskLevel::Low, RiskLevel::Medium, RiskLevel::High, RiskLevel::Critical] {
+        for level in [
+            RiskLevel::Low,
+            RiskLevel::Medium,
+            RiskLevel::High,
+            RiskLevel::Critical,
+        ] {
             let label = level.label();
             let w = guitk::text::padded_width(label, 8.0, SMALL_FONT_SIZE, FontWeightHint::Bold);
             let drawn = guitk::text::measure(label, SMALL_FONT_SIZE, FontWeightHint::Bold);
@@ -1461,7 +1580,10 @@ mod tests {
         assert_eq!(r.labels(), vec!["Read", "Write"]);
 
         let all = Rights(0x3F);
-        assert_eq!(all.labels(), vec!["Read", "Write", "Execute", "Create", "Delete", "Admin"]);
+        assert_eq!(
+            all.labels(),
+            vec!["Read", "Write", "Execute", "Create", "Delete", "Admin"]
+        );
 
         let none = Rights(0);
         assert_eq!(none.labels(), vec!["(none)"]);
@@ -1482,7 +1604,11 @@ mod tests {
         //   shield bg + shield border + shield inner + shield letter +
         //   title + subtitle + risk badge + risk text + 4 detail rows (8 texts) +
         //   details link + checkbox (3 parts) + deny button (2 parts) + allow button (2 parts)
-        assert!(cmds.len() >= 20, "Expected at least 20 render commands, got {}", cmds.len());
+        assert!(
+            cmds.len() >= 20,
+            "Expected at least 20 render commands, got {}",
+            cmds.len()
+        );
     }
 
     #[test]
@@ -1496,8 +1622,12 @@ mod tests {
         let cmds_expanded = dialog.render();
 
         // Expanded should have more commands (the details panel + its contents)
-        assert!(cmds_expanded.len() > cmds_collapsed.len(),
-            "Expanded {} should be > collapsed {}", cmds_expanded.len(), cmds_collapsed.len());
+        assert!(
+            cmds_expanded.len() > cmds_collapsed.len(),
+            "Expanded {} should be > collapsed {}",
+            cmds_expanded.len(),
+            cmds_collapsed.len()
+        );
     }
 
     #[test]
@@ -1508,7 +1638,12 @@ mod tests {
         let event = KeyEvent {
             key: Key::Enter,
             pressed: true,
-            modifiers: Modifiers { ctrl: false, alt: false, shift: false, super_key: false },
+            modifiers: Modifiers {
+                ctrl: false,
+                alt: false,
+                shift: false,
+                super_key: false,
+            },
             text: None,
         };
         assert!(dialog.handle_key_event(&event));
@@ -1524,7 +1659,12 @@ mod tests {
         let event = KeyEvent {
             key: Key::Escape,
             pressed: true,
-            modifiers: Modifiers { ctrl: false, alt: false, shift: false, super_key: false },
+            modifiers: Modifiers {
+                ctrl: false,
+                alt: false,
+                shift: false,
+                super_key: false,
+            },
             text: None,
         };
         assert!(dialog.handle_key_event(&event));
@@ -1541,7 +1681,12 @@ mod tests {
         let event = KeyEvent {
             key: Key::D,
             pressed: true,
-            modifiers: Modifiers { ctrl: true, alt: false, shift: false, super_key: false },
+            modifiers: Modifiers {
+                ctrl: true,
+                alt: false,
+                shift: false,
+                super_key: false,
+            },
             text: None,
         };
         assert!(dialog.handle_key_event(&event));
@@ -1558,7 +1703,12 @@ mod tests {
         let event = KeyEvent {
             key: Key::Space,
             pressed: true,
-            modifiers: Modifiers { ctrl: false, alt: false, shift: false, super_key: false },
+            modifiers: Modifiers {
+                ctrl: false,
+                alt: false,
+                shift: false,
+                super_key: false,
+            },
             text: None,
         };
         dialog.handle_key_event(&event);
@@ -1577,7 +1727,12 @@ mod tests {
         let event = KeyEvent {
             key: Key::R,
             pressed: true,
-            modifiers: Modifiers { ctrl: false, alt: false, shift: false, super_key: false },
+            modifiers: Modifiers {
+                ctrl: false,
+                alt: false,
+                shift: false,
+                super_key: false,
+            },
             text: None,
         };
         dialog.handle_key_event(&event);
@@ -1590,7 +1745,12 @@ mod tests {
         let event = KeyEvent {
             key: Key::Enter,
             pressed: true,
-            modifiers: Modifiers { ctrl: false, alt: false, shift: false, super_key: false },
+            modifiers: Modifiers {
+                ctrl: false,
+                alt: false,
+                shift: false,
+                super_key: false,
+            },
             text: None,
         };
         // Can't call on immutable ref; need mutable
@@ -1606,7 +1766,12 @@ mod tests {
         let tab = KeyEvent {
             key: Key::Tab,
             pressed: true,
-            modifiers: Modifiers { ctrl: false, alt: false, shift: false, super_key: false },
+            modifiers: Modifiers {
+                ctrl: false,
+                alt: false,
+                shift: false,
+                super_key: false,
+            },
             text: None,
         };
 
@@ -1638,7 +1803,12 @@ mod tests {
         let h1 = dialog.dialog_height();
         dialog.details_expanded = true;
         let h2 = dialog.dialog_height();
-        assert!(h2 > h1, "Expanded height {} should be > collapsed {}", h2, h1);
+        assert!(
+            h2 > h1,
+            "Expanded height {} should be > collapsed {}",
+            h2,
+            h1
+        );
     }
 
     #[test]
@@ -1718,15 +1888,27 @@ mod tests {
     fn test_resource_type_icon_chars() {
         // Every resource type has an icon char
         let types = [
-            ResourceType::Channel, ResourceType::Pipe, ResourceType::SharedMemory,
-            ResourceType::EventFd, ResourceType::CompletionPort,
-            ResourceType::Process, ResourceType::Thread,
-            ResourceType::PortIo, ResourceType::DeviceIrq,
-            ResourceType::File, ResourceType::Socket, ResourceType::Timer,
-            ResourceType::IoScheduler, ResourceType::Service, ResourceType::Namespace,
+            ResourceType::Channel,
+            ResourceType::Pipe,
+            ResourceType::SharedMemory,
+            ResourceType::EventFd,
+            ResourceType::CompletionPort,
+            ResourceType::Process,
+            ResourceType::Thread,
+            ResourceType::PortIo,
+            ResourceType::DeviceIrq,
+            ResourceType::File,
+            ResourceType::Socket,
+            ResourceType::Timer,
+            ResourceType::IoScheduler,
+            ResourceType::Service,
+            ResourceType::Namespace,
         ];
         for t in types {
-            assert!(t.icon_char().is_ascii_alphabetic(), "{t:?} should have an alpha icon char");
+            assert!(
+                t.icon_char().is_ascii_alphabetic(),
+                "{t:?} should have an alpha icon char"
+            );
         }
     }
 }

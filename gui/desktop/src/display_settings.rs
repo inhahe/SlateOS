@@ -92,11 +92,7 @@ impl ColorTemperature {
     /// Produce a preview color at this temperature.
     pub fn preview_color(self) -> Color {
         let (r, g, b) = self.to_rgb_multiplier();
-        Color::rgb(
-            (r * 255.0) as u8,
-            (g * 255.0) as u8,
-            (b * 255.0) as u8,
-        )
+        Color::rgb((r * 255.0) as u8, (g * 255.0) as u8, (b * 255.0) as u8)
     }
 }
 
@@ -740,7 +736,10 @@ impl DisplaySettingsManager {
                 start_minute,
                 end_hour,
                 end_minute,
-            } => format!("custom:{:02}:{:02}-{:02}:{:02}", start_hour, start_minute, end_hour, end_minute),
+            } => format!(
+                "custom:{:02}:{:02}-{:02}:{:02}",
+                start_hour, start_minute, end_hour, end_minute
+            ),
         };
         out.push_str(&format!("night_light_schedule={}\n", sched_str));
 
@@ -754,11 +753,7 @@ impl DisplaySettingsManager {
             out.push_str(&format!("{}_gamma_r={}\n", prefix, d.gamma.red));
             out.push_str(&format!("{}_gamma_g={}\n", prefix, d.gamma.green));
             out.push_str(&format!("{}_gamma_b={}\n", prefix, d.gamma.blue));
-            out.push_str(&format!(
-                "{}_profile={}\n",
-                prefix,
-                d.color_profile.id()
-            ));
+            out.push_str(&format!("{}_profile={}\n", prefix, d.color_profile.id()));
             out.push_str(&format!("{}_rotation={}\n", prefix, d.rotation));
         }
 
@@ -812,7 +807,11 @@ impl DisplaySettingsManager {
                 y: tab_y + 6.0,
                 text: tab.display_name().to_string(),
                 font_size: 12.0,
-                color: if is_active { MOCHA_BLUE } else { MOCHA_SUBTEXT0 },
+                color: if is_active {
+                    MOCHA_BLUE
+                } else {
+                    MOCHA_SUBTEXT0
+                },
                 font_weight: if is_active {
                     FontWeightHint::Bold
                 } else {
@@ -828,16 +827,40 @@ impl DisplaySettingsManager {
 
         match self.active_tab {
             DisplaySettingsTab::General => {
-                self.render_general_tab(&mut cmds, x + 16.0, content_y, width - 32.0, content_height);
+                self.render_general_tab(
+                    &mut cmds,
+                    x + 16.0,
+                    content_y,
+                    width - 32.0,
+                    content_height,
+                );
             }
             DisplaySettingsTab::NightLight => {
-                self.render_night_light_tab(&mut cmds, x + 16.0, content_y, width - 32.0, content_height);
+                self.render_night_light_tab(
+                    &mut cmds,
+                    x + 16.0,
+                    content_y,
+                    width - 32.0,
+                    content_height,
+                );
             }
             DisplaySettingsTab::ColorCalibration => {
-                self.render_calibration_tab(&mut cmds, x + 16.0, content_y, width - 32.0, content_height);
+                self.render_calibration_tab(
+                    &mut cmds,
+                    x + 16.0,
+                    content_y,
+                    width - 32.0,
+                    content_height,
+                );
             }
             DisplaySettingsTab::TestPatterns => {
-                self.render_test_patterns_tab(&mut cmds, x + 16.0, content_y, width - 32.0, content_height);
+                self.render_test_patterns_tab(
+                    &mut cmds,
+                    x + 16.0,
+                    content_y,
+                    width - 32.0,
+                    content_height,
+                );
             }
         }
 
@@ -857,7 +880,11 @@ impl DisplaySettingsManager {
             cmds.push(RenderCommand::Text {
                 x,
                 y,
-                text: format!("Display: {} ({})", d.name, if d.is_primary { "Primary" } else { "Secondary" }),
+                text: format!(
+                    "Display: {} ({})",
+                    d.name,
+                    if d.is_primary { "Primary" } else { "Secondary" }
+                ),
                 font_size: 14.0,
                 color: MOCHA_TEXT,
                 font_weight: FontWeightHint::Bold,
@@ -918,7 +945,10 @@ impl DisplaySettingsManager {
 
         // Schedule
         self.render_setting_row(
-            cmds, x, row_y, width,
+            cmds,
+            x,
+            row_y,
+            width,
             "Schedule",
             nl.schedule.display_name(),
         );
@@ -949,7 +979,10 @@ impl DisplaySettingsManager {
 
         // Transition
         self.render_setting_row(
-            cmds, x, row_y, width,
+            cmds,
+            x,
+            row_y,
+            width,
             "Transition",
             &format!("{} min", nl.transition_minutes),
         );
@@ -977,7 +1010,14 @@ impl DisplaySettingsManager {
             let mut row_y = y + 30.0;
 
             // Color profile
-            self.render_setting_row(cmds, x, row_y, width, "Color Profile", d.color_profile.display_name());
+            self.render_setting_row(
+                cmds,
+                x,
+                row_y,
+                width,
+                "Color Profile",
+                d.color_profile.display_name(),
+            );
             row_y += 28.0;
 
             // Gamma - Red
@@ -985,11 +1025,27 @@ impl DisplaySettingsManager {
             row_y += 28.0;
 
             // Gamma - Green
-            self.render_gamma_row(cmds, x, row_y, width, "Green Gamma", d.gamma.green, MOCHA_GREEN);
+            self.render_gamma_row(
+                cmds,
+                x,
+                row_y,
+                width,
+                "Green Gamma",
+                d.gamma.green,
+                MOCHA_GREEN,
+            );
             row_y += 28.0;
 
             // Gamma - Blue
-            self.render_gamma_row(cmds, x, row_y, width, "Blue Gamma", d.gamma.blue, MOCHA_BLUE);
+            self.render_gamma_row(
+                cmds,
+                x,
+                row_y,
+                width,
+                "Blue Gamma",
+                d.gamma.blue,
+                MOCHA_BLUE,
+            );
             row_y += 28.0;
 
             // Reset button
@@ -1037,7 +1093,11 @@ impl DisplaySettingsManager {
             let is_active = self.active_test_pattern == Some(*pattern);
 
             // Button background
-            let bg_color = if is_active { MOCHA_BLUE } else { MOCHA_SURFACE0 };
+            let bg_color = if is_active {
+                MOCHA_BLUE
+            } else {
+                MOCHA_SURFACE0
+            };
             cmds.push(RenderCommand::FillRect {
                 x,
                 y: row_y,
@@ -1279,8 +1339,8 @@ mod tests {
     #[test]
     fn test_schedule_sunset_sunrise() {
         let s = NightLightSchedule::SunsetToSunrise;
-        assert!(s.is_active(22, 0));  // 10 PM
-        assert!(s.is_active(3, 0));   // 3 AM
+        assert!(s.is_active(22, 0)); // 10 PM
+        assert!(s.is_active(3, 0)); // 3 AM
         assert!(!s.is_active(12, 0)); // Noon
     }
 
@@ -1474,8 +1534,16 @@ mod tests {
     #[test]
     fn test_manager_select_next() {
         let mut mgr = DisplaySettingsManager::new(vec![
-            DisplayConfig { display_id: 0, name: "A".to_string(), ..DisplayConfig::default() },
-            DisplayConfig { display_id: 1, name: "B".to_string(), ..DisplayConfig::default() },
+            DisplayConfig {
+                display_id: 0,
+                name: "A".to_string(),
+                ..DisplayConfig::default()
+            },
+            DisplayConfig {
+                display_id: 1,
+                name: "B".to_string(),
+                ..DisplayConfig::default()
+            },
         ]);
         assert_eq!(mgr.selected_display, 0);
         mgr.select_next_display();

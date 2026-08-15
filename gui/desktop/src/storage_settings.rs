@@ -77,9 +77,16 @@ impl StorageCategory {
     }
 
     pub const ALL: [Self; 10] = [
-        Self::System, Self::Apps, Self::Documents, Self::Media,
-        Self::Downloads, Self::Trash, Self::Temporary, Self::PackageCache,
-        Self::Logs, Self::Other,
+        Self::System,
+        Self::Apps,
+        Self::Documents,
+        Self::Media,
+        Self::Downloads,
+        Self::Trash,
+        Self::Temporary,
+        Self::PackageCache,
+        Self::Logs,
+        Self::Other,
     ];
 }
 
@@ -95,7 +102,11 @@ pub struct UsageEntry {
 
 impl UsageEntry {
     pub fn new(category: StorageCategory, bytes: u64, items: u64) -> Self {
-        Self { category, bytes, item_count: items }
+        Self {
+            category,
+            bytes,
+            item_count: items,
+        }
     }
 }
 
@@ -137,7 +148,9 @@ impl DriveInfo {
     }
 
     pub fn used_pct(&self) -> u32 {
-        if self.total_bytes == 0 { return 0; }
+        if self.total_bytes == 0 {
+            return 0;
+        }
         ((self.used_bytes as f64 / self.total_bytes as f64) * 100.0) as u32
     }
 
@@ -172,7 +185,13 @@ impl SenseFrequency {
         }
     }
 
-    pub const ALL: [Self; 5] = [Self::WhenLow, Self::Daily, Self::Weekly, Self::Monthly, Self::Never];
+    pub const ALL: [Self; 5] = [
+        Self::WhenLow,
+        Self::Daily,
+        Self::Weekly,
+        Self::Monthly,
+        Self::Never,
+    ];
 }
 
 /// How long to keep files before auto-cleanup.
@@ -209,7 +228,14 @@ impl RetentionPeriod {
         }
     }
 
-    pub const ALL: [Self; 6] = [Self::Never, Self::OneDay, Self::SevenDays, Self::ThirtyDays, Self::SixtyDays, Self::NinetyDays];
+    pub const ALL: [Self; 6] = [
+        Self::Never,
+        Self::OneDay,
+        Self::SevenDays,
+        Self::ThirtyDays,
+        Self::SixtyDays,
+        Self::NinetyDays,
+    ];
 }
 
 /// Storage Sense — automatic cleanup configuration.
@@ -376,14 +402,12 @@ impl StorageSettings {
                     StorageCategory::Trash | StorageCategory::Temporary => {
                         total = total.saturating_add(cat.bytes);
                     }
-                    StorageCategory::PackageCache
-                        if self.sense.clean_package_cache => {
-                            total = total.saturating_add(cat.bytes / 2);
-                        }
-                    StorageCategory::Logs
-                        if self.sense.clean_logs => {
-                            total = total.saturating_add(cat.bytes);
-                        }
+                    StorageCategory::PackageCache if self.sense.clean_package_cache => {
+                        total = total.saturating_add(cat.bytes / 2);
+                    }
+                    StorageCategory::Logs if self.sense.clean_logs => {
+                        total = total.saturating_add(cat.bytes);
+                    }
                     _ => {}
                 }
             }
@@ -475,7 +499,10 @@ impl StorageSettingsUI {
 
         // Background
         cmds.push(RenderCommand::FillRect {
-            x, y, width, height: 900.0,
+            x,
+            y,
+            width,
+            height: 900.0,
             color: BASE,
             corner_radii: CornerRadii::all(8.0),
         });
@@ -483,9 +510,11 @@ impl StorageSettingsUI {
         // Title
         cy += pad;
         cmds.push(RenderCommand::Text {
-            x: x + pad, y: cy,
+            x: x + pad,
+            y: cy,
             text: "Storage Settings".into(),
-            font_size: 20.0, color: TEXT,
+            font_size: 20.0,
+            color: TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: Some(inner),
         });
@@ -494,14 +523,19 @@ impl StorageSettingsUI {
         // Warning if low space
         if self.settings.any_low_space() {
             cmds.push(RenderCommand::FillRect {
-                x: x + pad, y: cy, width: inner, height: 28.0,
+                x: x + pad,
+                y: cy,
+                width: inner,
+                height: 28.0,
                 color: Color::rgba(RED.r, RED.g, RED.b, 40),
                 corner_radii: CornerRadii::all(6.0),
             });
             cmds.push(RenderCommand::Text {
-                x: x + pad + 10.0, y: cy + 6.0,
+                x: x + pad + 10.0,
+                y: cy + 6.0,
                 text: "⚠ Low disk space — consider running cleanup".into(),
-                font_size: 12.0, color: RED,
+                font_size: 12.0,
+                color: RED,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(inner - 20.0),
             });
@@ -514,16 +548,24 @@ impl StorageSettingsUI {
             let tx = x + pad + tab_w * i as f32;
             let active = self.active_tab == i;
             cmds.push(RenderCommand::FillRect {
-                x: tx, y: cy, width: tab_w - 2.0, height: 30.0,
+                x: tx,
+                y: cy,
+                width: tab_w - 2.0,
+                height: 30.0,
                 color: if active { SURFACE0 } else { MANTLE },
                 corner_radii: CornerRadii::all(6.0),
             });
             cmds.push(RenderCommand::Text {
-                x: tx + 8.0, y: cy + 8.0,
+                x: tx + 8.0,
+                y: cy + 8.0,
                 text: (*label).into(),
                 font_size: 12.0,
                 color: if active { BLUE } else { SUBTEXT0 },
-                font_weight: if active { FontWeightHint::Bold } else { FontWeightHint::Regular },
+                font_weight: if active {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
                 max_width: Some(tab_w - 16.0),
             });
         }
@@ -545,27 +587,35 @@ impl StorageSettingsUI {
             let bg = if selected { SURFACE0 } else { MANTLE };
 
             cmds.push(RenderCommand::FillRect {
-                x, y, width, height: 56.0,
+                x,
+                y,
+                width,
+                height: 56.0,
                 color: bg,
                 corner_radii: CornerRadii::all(6.0),
             });
 
             // Drive label + mount
             cmds.push(RenderCommand::Text {
-                x: x + 12.0, y: y + 6.0,
+                x: x + 12.0,
+                y: y + 6.0,
                 text: format!("{} ({})", drive.label, drive.mount_point),
-                font_size: 14.0, color: TEXT,
+                font_size: 14.0,
+                color: TEXT,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(width * 0.55),
             });
 
             // Used / total
             cmds.push(RenderCommand::Text {
-                x: x + width * 0.6, y: y + 6.0,
-                text: format!("{} / {} ({}%)",
+                x: x + width * 0.6,
+                y: y + 6.0,
+                text: format!(
+                    "{} / {} ({}%)",
                     format_bytes(drive.used_bytes),
                     format_bytes(drive.total_bytes),
-                    drive.used_pct()),
+                    drive.used_pct()
+                ),
                 font_size: 12.0,
                 color: if drive.is_low_space() { RED } else { SUBTEXT0 },
                 font_weight: FontWeightHint::Regular,
@@ -575,7 +625,10 @@ impl StorageSettingsUI {
             // Usage bar
             let bar_y = y + 30.0;
             cmds.push(RenderCommand::FillRect {
-                x: x + 12.0, y: bar_y, width: width - 24.0, height: 12.0,
+                x: x + 12.0,
+                y: bar_y,
+                width: width - 24.0,
+                height: 12.0,
                 color: SURFACE1,
                 corner_radii: CornerRadii::all(6.0),
             });
@@ -588,7 +641,10 @@ impl StorageSettingsUI {
                 let seg_w = (cat.bytes as f64 / total * bar_w as f64) as f32;
                 if seg_w > 0.5 {
                     cmds.push(RenderCommand::FillRect {
-                        x: bx, y: bar_y, width: seg_w, height: 12.0,
+                        x: bx,
+                        y: bar_y,
+                        width: seg_w,
+                        height: 12.0,
                         color: cat.category.color(),
                         corner_radii: CornerRadii::ZERO,
                     });
@@ -598,10 +654,15 @@ impl StorageSettingsUI {
 
             // FS type
             cmds.push(RenderCommand::Text {
-                x: x + 12.0, y: y + 44.0,
-                text: format!("{}{}", drive.filesystem,
-                    if drive.removable { " (removable)" } else { "" }),
-                font_size: 10.0, color: OVERLAY0,
+                x: x + 12.0,
+                y: y + 44.0,
+                text: format!(
+                    "{}{}",
+                    drive.filesystem,
+                    if drive.removable { " (removable)" } else { "" }
+                ),
+                font_size: 10.0,
+                color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 24.0),
             });
@@ -613,9 +674,11 @@ impl StorageSettingsUI {
         if let Some(drive) = self.settings.drives().get(self.selected_drive) {
             y += 8.0;
             cmds.push(RenderCommand::Text {
-                x, y,
+                x,
+                y,
                 text: "Breakdown".into(),
-                font_size: 14.0, color: LAVENDER,
+                font_size: 14.0,
+                color: LAVENDER,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(width),
             });
@@ -624,21 +687,28 @@ impl StorageSettingsUI {
             for cat in &drive.categories {
                 // Color swatch
                 cmds.push(RenderCommand::FillRect {
-                    x, y: y + 2.0, width: 12.0, height: 12.0,
+                    x,
+                    y: y + 2.0,
+                    width: 12.0,
+                    height: 12.0,
                     color: cat.category.color(),
                     corner_radii: CornerRadii::all(2.0),
                 });
                 cmds.push(RenderCommand::Text {
-                    x: x + 18.0, y,
+                    x: x + 18.0,
+                    y,
                     text: cat.category.label().into(),
-                    font_size: 12.0, color: TEXT,
+                    font_size: 12.0,
+                    color: TEXT,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(width * 0.4),
                 });
                 cmds.push(RenderCommand::Text {
-                    x: x + width * 0.45, y,
+                    x: x + width * 0.45,
+                    y,
                     text: format!("{}  ({} items)", format_bytes(cat.bytes), cat.item_count),
-                    font_size: 12.0, color: SUBTEXT0,
+                    font_size: 12.0,
+                    color: SUBTEXT0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(width * 0.5),
                 });
@@ -650,9 +720,11 @@ impl StorageSettingsUI {
             let reclaimable = self.settings.estimated_reclaimable();
             if reclaimable > 0 {
                 cmds.push(RenderCommand::Text {
-                    x, y,
+                    x,
+                    y,
                     text: format!("Estimated reclaimable: {}", format_bytes(reclaimable)),
-                    font_size: 13.0, color: GREEN,
+                    font_size: 13.0,
+                    color: GREEN,
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(width),
                 });
@@ -670,27 +742,64 @@ impl StorageSettingsUI {
         y += 24.0;
 
         if s.frequency == SenseFrequency::WhenLow {
-            Self::render_kv(cmds, x, y, width, "Trigger at", &format!("{}% used", s.low_space_threshold_pct));
+            Self::render_kv(
+                cmds,
+                x,
+                y,
+                width,
+                "Trigger at",
+                &format!("{}% used", s.low_space_threshold_pct),
+            );
             y += 24.0;
         }
 
         y += 8.0;
         cmds.push(RenderCommand::Text {
-            x, y,
+            x,
+            y,
             text: "Auto-cleanup rules".into(),
-            font_size: 14.0, color: LAVENDER,
+            font_size: 14.0,
+            color: LAVENDER,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
         });
         y += 24.0;
 
-        Self::render_kv(cmds, x, y, width, "Delete temp files older than", s.temp_retention.label());
+        Self::render_kv(
+            cmds,
+            x,
+            y,
+            width,
+            "Delete temp files older than",
+            s.temp_retention.label(),
+        );
         y += 24.0;
-        Self::render_kv(cmds, x, y, width, "Empty trash items older than", s.trash_retention.label());
+        Self::render_kv(
+            cmds,
+            x,
+            y,
+            width,
+            "Empty trash items older than",
+            s.trash_retention.label(),
+        );
         y += 24.0;
-        Self::render_kv(cmds, x, y, width, "Delete downloads older than", s.downloads_retention.label());
+        Self::render_kv(
+            cmds,
+            x,
+            y,
+            width,
+            "Delete downloads older than",
+            s.downloads_retention.label(),
+        );
         y += 24.0;
-        Self::render_toggle(cmds, x, y, width, "Clean package cache", s.clean_package_cache);
+        Self::render_toggle(
+            cmds,
+            x,
+            y,
+            width,
+            "Clean package cache",
+            s.clean_package_cache,
+        );
         y += 28.0;
         Self::render_toggle(cmds, x, y, width, "Clean old log files", s.clean_logs);
     }
@@ -709,34 +818,46 @@ impl StorageSettingsUI {
 
         for (label, path) in entries {
             cmds.push(RenderCommand::FillRect {
-                x, y, width, height: 36.0,
+                x,
+                y,
+                width,
+                height: 36.0,
                 color: MANTLE,
                 corner_radii: CornerRadii::all(4.0),
             });
             cmds.push(RenderCommand::Text {
-                x: x + 12.0, y: y + 4.0,
+                x: x + 12.0,
+                y: y + 4.0,
                 text: (*label).into(),
-                font_size: 13.0, color: SUBTEXT0,
+                font_size: 13.0,
+                color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width * 0.3),
             });
             cmds.push(RenderCommand::Text {
-                x: x + width * 0.35, y: y + 4.0,
+                x: x + width * 0.35,
+                y: y + 4.0,
                 text: (*path).into(),
-                font_size: 13.0, color: TEXT,
+                font_size: 13.0,
+                color: TEXT,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width * 0.6),
             });
             // Change button placeholder
             cmds.push(RenderCommand::FillRect {
-                x: x + width - 70.0, y: y + 6.0, width: 56.0, height: 22.0,
+                x: x + width - 70.0,
+                y: y + 6.0,
+                width: 56.0,
+                height: 22.0,
                 color: SURFACE0,
                 corner_radii: CornerRadii::all(4.0),
             });
             cmds.push(RenderCommand::Text {
-                x: x + width - 62.0, y: y + 10.0,
+                x: x + width - 62.0,
+                y: y + 10.0,
                 text: "Change".into(),
-                font_size: 11.0, color: BLUE,
+                font_size: 11.0,
+                color: BLUE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(48.0),
             });
@@ -746,39 +867,58 @@ impl StorageSettingsUI {
 
     fn render_kv(cmds: &mut Vec<RenderCommand>, x: f32, y: f32, width: f32, key: &str, val: &str) {
         cmds.push(RenderCommand::Text {
-            x: x + 8.0, y,
+            x: x + 8.0,
+            y,
             text: key.into(),
-            font_size: 13.0, color: SUBTEXT0,
+            font_size: 13.0,
+            color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width * 0.55),
         });
         cmds.push(RenderCommand::Text {
-            x: x + width * 0.58, y,
+            x: x + width * 0.58,
+            y,
             text: val.into(),
-            font_size: 13.0, color: TEXT,
+            font_size: 13.0,
+            color: TEXT,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width * 0.4),
         });
     }
 
-    fn render_toggle(cmds: &mut Vec<RenderCommand>, x: f32, y: f32, width: f32, label: &str, on: bool) {
+    fn render_toggle(
+        cmds: &mut Vec<RenderCommand>,
+        x: f32,
+        y: f32,
+        width: f32,
+        label: &str,
+        on: bool,
+    ) {
         cmds.push(RenderCommand::Text {
-            x: x + 8.0, y,
+            x: x + 8.0,
+            y,
             text: label.into(),
-            font_size: 13.0, color: SUBTEXT0,
+            font_size: 13.0,
+            color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width * 0.65),
         });
         let tx = x + width - 48.0;
         let bg = if on { GREEN } else { SURFACE1 };
         cmds.push(RenderCommand::FillRect {
-            x: tx, y, width: 40.0, height: 20.0,
+            x: tx,
+            y,
+            width: 40.0,
+            height: 20.0,
             color: bg,
             corner_radii: CornerRadii::all(10.0),
         });
         let knob_x = if on { tx + 22.0 } else { tx + 2.0 };
         cmds.push(RenderCommand::FillRect {
-            x: knob_x, y: y + 2.0, width: 16.0, height: 16.0,
+            x: knob_x,
+            y: y + 2.0,
+            width: 16.0,
+            height: 16.0,
             color: TEXT,
             corner_radii: CornerRadii::all(8.0),
         });
@@ -973,7 +1113,9 @@ mod tests {
         s.add_drive(DriveInfo::new("/", "Root", "ext4", 100_000, 95_000));
         let ui = StorageSettingsUI::with_settings(s);
         let cmds = ui.render(0.0, 0.0, 500.0);
-        let has_warning = cmds.iter().any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("Low disk")));
+        let has_warning = cmds
+            .iter()
+            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("Low disk")));
         assert!(has_warning);
     }
 

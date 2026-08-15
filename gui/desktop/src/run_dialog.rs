@@ -521,9 +521,10 @@ impl RunDialog {
                 if self.show_autocomplete && self.suggestion_index.is_some() {
                     // Navigate autocomplete up
                     if let Some(idx) = self.suggestion_index
-                        && idx > 0 {
-                            self.suggestion_index = Some(idx - 1);
-                        }
+                        && idx > 0
+                    {
+                        self.suggestion_index = Some(idx - 1);
+                    }
                 } else {
                     self.history_prev();
                 }
@@ -533,9 +534,10 @@ impl RunDialog {
                 if self.show_autocomplete && self.suggestion_index.is_some() {
                     // Navigate autocomplete down
                     if let Some(idx) = self.suggestion_index
-                        && idx + 1 < self.suggestions.len() {
-                            self.suggestion_index = Some(idx + 1);
-                        }
+                        && idx + 1 < self.suggestions.len()
+                    {
+                        self.suggestion_index = Some(idx + 1);
+                    }
                 } else {
                     self.history_next();
                 }
@@ -597,11 +599,7 @@ impl RunDialog {
         let local_y = event.y - self.dialog_y;
 
         // Check if click is outside dialog bounds — dismiss.
-        if local_x < 0.0
-            || local_y < 0.0
-            || local_x > DIALOG_WIDTH
-            || local_y > DIALOG_HEIGHT
-        {
+        if local_x < 0.0 || local_y < 0.0 || local_x > DIALOG_WIDTH || local_y > DIALOG_HEIGHT {
             if matches!(event.kind, MouseEventKind::Press(MouseButton::Left)) {
                 self.events.push(RunDialogEvent::Cancel);
                 self.hide();
@@ -871,7 +869,11 @@ impl RunDialog {
                     x: dropdown_x + 8.0,
                     y: row_y + 6.0,
                     text: suggestion.text.clone(),
-                    color: if is_selected { theme::BLUE } else { theme::TEXT },
+                    color: if is_selected {
+                        theme::BLUE
+                    } else {
+                        theme::TEXT
+                    },
                     font_size: INPUT_FONT_SIZE,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(input_w - 16.0),
@@ -900,10 +902,7 @@ impl RunDialog {
         self.render_button(
             &mut cmds,
             "Browse...",
-            x + DIALOG_WIDTH
-                - PADDING
-                - BUTTON_WIDTH * 3.0
-                - BUTTON_SPACING * 2.0,
+            x + DIALOG_WIDTH - PADDING - BUTTON_WIDTH * 3.0 - BUTTON_SPACING * 2.0,
             button_y,
             ButtonId::Browse,
             false,
@@ -949,7 +948,12 @@ impl RunDialog {
         });
 
         cmds.push(RenderCommand::Text {
-            x: text::center_x(label, bx + BUTTON_WIDTH / 2.0, BODY_FONT_SIZE, FontWeightHint::Regular),
+            x: text::center_x(
+                label,
+                bx + BUTTON_WIDTH / 2.0,
+                BODY_FONT_SIZE,
+                FontWeightHint::Regular,
+            ),
             y: by + 7.0,
             text: label.to_string(),
             color: fg,
@@ -1006,7 +1010,10 @@ impl RunDialog {
             for _dir in &self.path_dirs {
                 // In a real implementation, we would check if dir/program exists.
                 // For now, accept anything that looks like a valid command name.
-                if program.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.') {
+                if program
+                    .chars()
+                    .all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.')
+                {
                     return true;
                 }
             }
@@ -1173,9 +1180,10 @@ fn fuzzy_score(query: &str, target: &str) -> Option<u32> {
 
             // Bonus for consecutive matches.
             if let Some(prev) = prev_match_idx
-                && ti == prev + 1 {
-                    score = score.saturating_add(5);
-                }
+                && ti == prev + 1
+            {
+                score = score.saturating_add(5);
+            }
 
             prev_match_idx = Some(ti);
             qi += 1;

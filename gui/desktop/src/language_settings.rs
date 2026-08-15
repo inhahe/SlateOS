@@ -73,18 +73,43 @@ pub fn default_languages() -> Vec<Language> {
         Language::new("it-IT", "Italian (Italy)", "Italiano", true),
         Language::new("pt-BR", "Portuguese (Brazil)", "Portugu\u{00ea}s", true),
         Language::new("nl-NL", "Dutch (Netherlands)", "Nederlands", true),
-        Language::new("ja-JP", "Japanese (Japan)", "\u{65e5}\u{672c}\u{8a9e}", true),
+        Language::new(
+            "ja-JP",
+            "Japanese (Japan)",
+            "\u{65e5}\u{672c}\u{8a9e}",
+            true,
+        ),
         Language::new("ko-KR", "Korean (Korea)", "\u{d55c}\u{ad6d}\u{c5b4}", true),
-        Language::new("zh-CN", "Chinese (Simplified)", "\u{7b80}\u{4f53}\u{4e2d}\u{6587}", true),
-        Language::new("zh-TW", "Chinese (Traditional)", "\u{7e41}\u{9ad4}\u{4e2d}\u{6587}", true),
-        Language::new("ru-RU", "Russian (Russia)", "\u{0420}\u{0443}\u{0441}\u{0441}\u{043a}\u{0438}\u{0439}", true),
+        Language::new(
+            "zh-CN",
+            "Chinese (Simplified)",
+            "\u{7b80}\u{4f53}\u{4e2d}\u{6587}",
+            true,
+        ),
+        Language::new(
+            "zh-TW",
+            "Chinese (Traditional)",
+            "\u{7e41}\u{9ad4}\u{4e2d}\u{6587}",
+            true,
+        ),
+        Language::new(
+            "ru-RU",
+            "Russian (Russia)",
+            "\u{0420}\u{0443}\u{0441}\u{0441}\u{043a}\u{0438}\u{0439}",
+            true,
+        ),
         Language::new("pl-PL", "Polish (Poland)", "Polski", false),
         Language::new("sv-SE", "Swedish (Sweden)", "Svenska", false),
         Language::new("da-DK", "Danish (Denmark)", "Dansk", false),
         Language::new("fi-FI", "Finnish (Finland)", "Suomi", false),
         Language::new("nb-NO", "Norwegian (Norway)", "Norsk", false),
         Language::new("tr-TR", "Turkish (Turkey)", "T\u{00fc}rk\u{00e7}e", false),
-        Language::new("ar-SA", "Arabic (Saudi Arabia)", "\u{0627}\u{0644}\u{0639}\u{0631}\u{0628}\u{064a}\u{0629}", false),
+        Language::new(
+            "ar-SA",
+            "Arabic (Saudi Arabia)",
+            "\u{0627}\u{0644}\u{0639}\u{0631}\u{0628}\u{064a}\u{0629}",
+            false,
+        ),
     ]
 }
 
@@ -348,12 +373,16 @@ impl Default for LocaleSettings {
 impl LocaleSettings {
     /// Get the current primary language info.
     pub fn current_language(&self) -> Option<&Language> {
-        self.available_languages.iter().find(|l| l.tag == self.language)
+        self.available_languages
+            .iter()
+            .find(|l| l.tag == self.language)
     }
 
     /// Get the currency format for the current currency code.
     pub fn current_currency(&self) -> Option<&CurrencyFormat> {
-        self.available_currencies.iter().find(|c| c.code == self.currency_code)
+        self.available_currencies
+            .iter()
+            .find(|c| c.code == self.currency_code)
     }
 
     /// Set the primary language (validates against available list).
@@ -402,7 +431,8 @@ impl LocaleSettings {
     /// Search available languages by name or tag.
     pub fn search_languages(&self, query: &str) -> Vec<&Language> {
         let q = query.to_lowercase();
-        self.available_languages.iter()
+        self.available_languages
+            .iter()
             .filter(|l| {
                 l.tag.to_lowercase().contains(&q)
                     || l.display_name.to_lowercase().contains(&q)
@@ -499,7 +529,11 @@ impl LanguageSettingsUI {
         });
 
         // Tabs
-        let tabs = [LanguageTab::Language, LanguageTab::Formats, LanguageTab::Region];
+        let tabs = [
+            LanguageTab::Language,
+            LanguageTab::Formats,
+            LanguageTab::Region,
+        ];
         let tab_y = 60.0;
         let mut tx = 24.0;
         for &tab in &tabs {
@@ -519,7 +553,11 @@ impl LanguageSettingsUI {
                 text: tab.label().into(),
                 font_size: 13.0,
                 color: if active { CRUST } else { SUBTEXT0 },
-                font_weight: if active { FontWeightHint::Bold } else { FontWeightHint::Regular },
+                font_weight: if active {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
                 max_width: Some(tw - 20.0),
             });
             tx += tw + 8.0;
@@ -590,7 +628,11 @@ impl LanguageSettingsUI {
             y: cy + 7.0,
             text: search_text,
             font_size: 13.0,
-            color: if self.language_search.is_empty() { OVERLAY0 } else { TEXT },
+            color: if self.language_search.is_empty() {
+                OVERLAY0
+            } else {
+                TEXT
+            },
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - 20.0),
         });
@@ -628,7 +670,11 @@ impl LanguageSettingsUI {
                 text: lang.display_name.clone(),
                 font_size: 13.0,
                 color: if is_current { BLUE } else { TEXT },
-                font_weight: if is_current { FontWeightHint::Bold } else { FontWeightHint::Regular },
+                font_weight: if is_current {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
                 max_width: Some(width * 0.6),
             });
 
@@ -693,7 +739,14 @@ impl LanguageSettingsUI {
         });
         cy += 26.0;
 
-        self.render_label_value(cmds, x, cy, width, "Format", self.settings.date_format.label());
+        self.render_label_value(
+            cmds,
+            x,
+            cy,
+            width,
+            "Format",
+            self.settings.date_format.label(),
+        );
         cy += 24.0;
         self.render_label_value(cmds, x, cy, width, "Example", self.settings.date_example());
         cy += 36.0;
@@ -710,7 +763,14 @@ impl LanguageSettingsUI {
         });
         cy += 26.0;
 
-        self.render_label_value(cmds, x, cy, width, "Format", self.settings.time_format.label());
+        self.render_label_value(
+            cmds,
+            x,
+            cy,
+            width,
+            "Format",
+            self.settings.time_format.label(),
+        );
         cy += 24.0;
         self.render_label_value(cmds, x, cy, width, "Example", self.settings.time_example());
         cy += 36.0;
@@ -727,7 +787,14 @@ impl LanguageSettingsUI {
         });
         cy += 26.0;
 
-        self.render_label_value(cmds, x, cy, width, "First Day", self.settings.first_day.label());
+        self.render_label_value(
+            cmds,
+            x,
+            cy,
+            width,
+            "First Day",
+            self.settings.first_day.label(),
+        );
         cy += 36.0;
 
         // Number format
@@ -742,9 +809,23 @@ impl LanguageSettingsUI {
         });
         cy += 26.0;
 
-        self.render_label_value(cmds, x, cy, width, "Decimal", self.settings.decimal_separator.label());
+        self.render_label_value(
+            cmds,
+            x,
+            cy,
+            width,
+            "Decimal",
+            self.settings.decimal_separator.label(),
+        );
         cy += 24.0;
-        self.render_label_value(cmds, x, cy, width, "Example", self.settings.number_example());
+        self.render_label_value(
+            cmds,
+            x,
+            cy,
+            width,
+            "Example",
+            self.settings.number_example(),
+        );
         let _ = cy;
     }
 
@@ -763,7 +844,14 @@ impl LanguageSettingsUI {
         });
         cy += 26.0;
 
-        self.render_label_value(cmds, x, cy, width, "System", self.settings.measurement.label());
+        self.render_label_value(
+            cmds,
+            x,
+            cy,
+            width,
+            "System",
+            self.settings.measurement.label(),
+        );
         cy += 36.0;
 
         // Temperature
@@ -778,7 +866,14 @@ impl LanguageSettingsUI {
         });
         cy += 26.0;
 
-        self.render_label_value(cmds, x, cy, width, "Unit", self.settings.temperature.label());
+        self.render_label_value(
+            cmds,
+            x,
+            cy,
+            width,
+            "Unit",
+            self.settings.temperature.label(),
+        );
         cy += 36.0;
 
         // Currency
@@ -825,7 +920,12 @@ impl LanguageSettingsUI {
             cmds.push(RenderCommand::Text {
                 x: x + 10.0,
                 y: cy + 6.0,
-                text: format!("{} {} ({})", cur.symbol, cur.code, cur.format_value(1234.56)),
+                text: format!(
+                    "{} {} ({})",
+                    cur.symbol,
+                    cur.code,
+                    cur.format_value(1234.56)
+                ),
                 font_size: 12.0,
                 color: if is_current { BLUE } else { TEXT },
                 font_weight: FontWeightHint::Regular,

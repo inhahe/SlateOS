@@ -17,10 +17,7 @@
 // hit-test state, cursor, etc.), and several network/graphics protocol
 // names use capitalized acronyms (VPN, WEP, WPA, WPA2, SRGB) that
 // match RFC / spec terminology.
-#![allow(
-    clippy::too_many_arguments,
-    clippy::upper_case_acronyms,
-)]
+#![allow(clippy::too_many_arguments, clippy::upper_case_acronyms)]
 #![cfg_attr(
     test,
     allow(
@@ -32,113 +29,113 @@
 )]
 
 #[allow(dead_code)]
-mod blur;
-#[allow(dead_code)]
-mod multimon;
-#[allow(dead_code)]
-mod icons;
-#[allow(dead_code)]
-mod notif_pane;
-#[allow(dead_code)]
-mod run_dialog;
-#[allow(dead_code)]
-mod taskbar;
-#[allow(dead_code)]
-mod tray_dnd;
-#[allow(dead_code)]
-mod power;
-#[allow(dead_code)]
-mod wallpaper;
-#[allow(dead_code)]
-mod calendar;
-#[allow(dead_code)]
 mod a11y;
-#[allow(dead_code)]
-mod resmon;
-#[allow(dead_code)]
-mod hotkeys;
-#[allow(dead_code)]
-mod animations;
-#[allow(dead_code)]
-mod snap;
-#[allow(dead_code)]
-mod clipboard_viewer;
-#[allow(dead_code)]
-mod window_peek;
-#[allow(dead_code)]
-mod overview;
-#[allow(dead_code)]
-mod display_settings;
 #[allow(dead_code)]
 mod about;
 #[allow(dead_code)]
-mod user_accounts;
+mod accessibility_settings;
 #[allow(dead_code)]
-mod taskbar_autohide;
+mod animations;
 #[allow(dead_code)]
-mod input_method;
+mod appearance_settings;
 #[allow(dead_code)]
-mod window_rules;
-#[allow(dead_code)]
-mod touchpad;
-#[allow(dead_code)]
-mod screen_capture;
-#[allow(dead_code)]
-mod print_manager;
+mod backup_settings;
 #[allow(dead_code)]
 mod bluetooth;
 #[allow(dead_code)]
-mod file_drop;
+mod blur;
 #[allow(dead_code)]
-mod osd;
+mod calendar;
+#[allow(dead_code)]
+mod clipboard_viewer;
 #[allow(dead_code)]
 mod context_ext;
 #[allow(dead_code)]
-mod widgets;
+mod datetime_settings;
 #[allow(dead_code)]
-mod login_screen;
+mod default_apps;
 #[allow(dead_code)]
-mod session_mgr;
+mod device_settings;
+#[allow(dead_code)]
+mod display_settings;
+#[allow(dead_code)]
+mod file_drop;
 #[allow(dead_code)]
 mod focus_assist;
 #[allow(dead_code)]
-mod mouse_settings;
+mod hotkeys;
 #[allow(dead_code)]
-mod sound_settings;
+mod icons;
 #[allow(dead_code)]
-mod power_settings;
-#[allow(dead_code)]
-mod network_indicator;
-#[allow(dead_code)]
-mod storage_settings;
-#[allow(dead_code)]
-mod privacy_settings;
-#[allow(dead_code)]
-mod update_settings;
-#[allow(dead_code)]
-mod notification_settings;
-#[allow(dead_code)]
-mod appearance_settings;
+mod input_method;
 #[allow(dead_code)]
 mod language_settings;
 #[allow(dead_code)]
 mod launcher;
 #[allow(dead_code)]
-mod startup_settings;
+mod login_screen;
 #[allow(dead_code)]
-mod datetime_settings;
+mod mouse_settings;
 #[allow(dead_code)]
-mod accessibility_settings;
+mod multimon;
+#[allow(dead_code)]
+mod network_indicator;
 #[allow(dead_code)]
 mod network_settings;
 #[allow(dead_code)]
-mod default_apps;
+mod notif_pane;
 #[allow(dead_code)]
-mod backup_settings;
+mod notification_settings;
 #[allow(dead_code)]
-mod device_settings;
+mod osd;
+#[allow(dead_code)]
+mod overview;
+#[allow(dead_code)]
+mod power;
+#[allow(dead_code)]
+mod power_settings;
+#[allow(dead_code)]
+mod print_manager;
+#[allow(dead_code)]
+mod privacy_settings;
+#[allow(dead_code)]
+mod resmon;
+#[allow(dead_code)]
+mod run_dialog;
+#[allow(dead_code)]
+mod screen_capture;
 #[allow(dead_code)]
 mod security_dialog;
+#[allow(dead_code)]
+mod session_mgr;
+#[allow(dead_code)]
+mod snap;
+#[allow(dead_code)]
+mod sound_settings;
+#[allow(dead_code)]
+mod startup_settings;
+#[allow(dead_code)]
+mod storage_settings;
+#[allow(dead_code)]
+mod taskbar;
+#[allow(dead_code)]
+mod taskbar_autohide;
+#[allow(dead_code)]
+mod touchpad;
+#[allow(dead_code)]
+mod tray_dnd;
+#[allow(dead_code)]
+mod update_settings;
+#[allow(dead_code)]
+mod user_accounts;
+#[allow(dead_code)]
+mod wallpaper;
+#[allow(dead_code)]
+mod widgets;
+#[allow(dead_code)]
+mod window_peek;
+#[allow(dead_code)]
+mod window_rules;
 
 #[cfg(test)]
 mod pointer_tests;
@@ -944,7 +941,12 @@ impl DesktopShell {
     #[must_use]
     pub fn start_button_rect(&self) -> Rect {
         let bar = self.taskbar_rect();
-        Rect::new(bar.x, bar.y, self.scale(START_BUTTON_WIDTH).min(bar.w), bar.h)
+        Rect::new(
+            bar.x,
+            bar.y,
+            self.scale(START_BUTTON_WIDTH).min(bar.w),
+            bar.h,
+        )
     }
 
     /// Where the system tray begins.
@@ -1063,8 +1065,8 @@ impl DesktopShell {
         let button = self.power_button_rect();
         let rows = self.power_menu_entries().len() as f32;
         let pad = self.scale(POWER_MENU_PADDING);
-        let h = (rows * self.scale(POWER_MENU_ROW_HEIGHT) + pad * 2.0)
-            .min(self.screen_height as f32);
+        let h =
+            (rows * self.scale(POWER_MENU_ROW_HEIGHT) + pad * 2.0).min(self.screen_height as f32);
         let w = self
             .scale(POWER_MENU_WIDTH)
             .min(self.screen_width as f32)
@@ -1181,9 +1183,11 @@ impl DesktopShell {
     pub fn scroll_start_menu(&mut self, rows: i32) {
         let max = self.start_menu_max_scroll();
         let moved = if rows >= 0 {
-            self.start_menu_scroll.saturating_sub(rows.unsigned_abs() as usize)
+            self.start_menu_scroll
+                .saturating_sub(rows.unsigned_abs() as usize)
         } else {
-            self.start_menu_scroll.saturating_add(rows.unsigned_abs() as usize)
+            self.start_menu_scroll
+                .saturating_add(rows.unsigned_abs() as usize)
         };
         self.start_menu_scroll = moved.min(max);
     }
@@ -1347,9 +1351,7 @@ impl DesktopShell {
         // The submenu is dismissed first and on its own: a click that lands on
         // the application list while the power menu is open closes the power
         // menu without also launching the program underneath it.
-        if self.power_menu_open
-            && !matches!(hit, Hit::PowerMenuEntry(_) | Hit::PowerMenuPanel)
-        {
+        if self.power_menu_open && !matches!(hit, Hit::PowerMenuEntry(_) | Hit::PowerMenuPanel) {
             self.power_menu_open = false;
             if !Self::keeps_start_menu_open(hit) {
                 self.start_menu_open = false;
@@ -1411,9 +1413,7 @@ impl DesktopShell {
                     None => ShellAction::Consumed,
                 }
             }
-            Hit::StartMenuPanel | Hit::PowerMenuPanel | Hit::TaskbarPanel => {
-                ShellAction::Consumed
-            }
+            Hit::StartMenuPanel | Hit::PowerMenuPanel | Hit::TaskbarPanel => ShellAction::Consumed,
             Hit::TaskbarButton(index) => {
                 let id = self.visible_windows().get(index).map(|w| w.id);
                 if let Some(id) = id {
@@ -1531,14 +1531,12 @@ impl DesktopShell {
         self.windows.remove(&id);
         if self.focused_window == Some(id) {
             // Focus the topmost remaining window
-            self.focused_window = self
-                .visible_windows()
-                .last()
-                .map(|w| w.id);
+            self.focused_window = self.visible_windows().last().map(|w| w.id);
             if let Some(fid) = self.focused_window
-                && let Some(w) = self.windows.get_mut(&fid) {
-                    w.focused = true;
-                }
+                && let Some(w) = self.windows.get_mut(&fid)
+            {
+                w.focused = true;
+            }
         }
     }
 
@@ -1546,9 +1544,10 @@ impl DesktopShell {
     pub fn focus_window(&mut self, id: WindowId) {
         // Unfocus previous
         if let Some(prev) = self.focused_window
-            && let Some(w) = self.windows.get_mut(&prev) {
-                w.focused = false;
-            }
+            && let Some(w) = self.windows.get_mut(&prev)
+        {
+            w.focused = false;
+        }
 
         if let Some(w) = self.windows.get_mut(&id) {
             w.focused = true;
@@ -1691,9 +1690,10 @@ impl DesktopShell {
 
     pub fn move_window_to_desktop(&mut self, id: WindowId, desktop: u32) {
         if desktop < self.num_desktops
-            && let Some(w) = self.windows.get_mut(&id) {
-                w.desktop = desktop;
-            }
+            && let Some(w) = self.windows.get_mut(&id)
+        {
+            w.desktop = desktop;
+        }
     }
 
     // ======================================================================
@@ -1739,11 +1739,10 @@ impl DesktopShell {
     pub fn handle_hotkey(&mut self, key: &KeyEvent) -> bool {
         if !key.pressed {
             // Key release — check for Alt+Tab completion
-            if (key.key == Key::LeftAlt || key.key == Key::RightAlt)
-                && self.alt_tab_active {
-                    self.finish_alt_tab();
-                    return true;
-                }
+            if (key.key == Key::LeftAlt || key.key == Key::RightAlt) && self.alt_tab_active {
+                self.finish_alt_tab();
+                return true;
+            }
             return false;
         }
 
@@ -1810,13 +1809,14 @@ impl DesktopShell {
         // Super+Down: restore/minimize
         if key.modifiers.super_key && key.key == Key::Down {
             if let Some(id) = self.focused_window
-                && let Some(w) = self.windows.get(&id) {
-                    if w.state == WindowState::Maximized {
-                        self.restore_window(id);
-                    } else {
-                        self.minimize_window(id);
-                    }
+                && let Some(w) = self.windows.get(&id)
+            {
+                if w.state == WindowState::Maximized {
+                    self.restore_window(id);
+                } else {
+                    self.minimize_window(id);
                 }
+            }
             return true;
         }
 
@@ -1928,7 +1928,8 @@ impl DesktopShell {
         let top_radii = self.top_corner_radii();
         // The buttons are round when the windows are: a circular close button
         // beside a square corner is the mismatch, not the consistency.
-        let button_radii = CornerRadii::all(radii.top_left.min(self.scale(WINDOW_BUTTON_SIZE) / 2.0));
+        let button_radii =
+            CornerRadii::all(radii.top_left.min(self.scale(WINDOW_BUTTON_SIZE) / 2.0));
 
         for window in self.visible_windows() {
             let chrome = self.window_chrome(window);
@@ -2282,17 +2283,11 @@ fn main() {
 
     // Render taskbar
     let taskbar = desktop.render_taskbar();
-    println!(
-        "Taskbar rendered: {} commands",
-        taskbar.len()
-    );
+    println!("Taskbar rendered: {} commands", taskbar.len());
 
     // Render window decorations
     let decorations = desktop.render_window_decorations();
-    println!(
-        "Window decorations: {} commands",
-        decorations.len()
-    );
+    println!("Window decorations: {} commands", decorations.len());
 
     // Test keyboard shortcuts
     let alt_f4 = KeyEvent {
@@ -2302,10 +2297,7 @@ fn main() {
         text: None,
     };
     desktop.handle_hotkey(&alt_f4);
-    println!(
-        "After Alt+F4: {} windows remaining",
-        desktop.windows.len()
-    );
+    println!("After Alt+F4: {} windows remaining", desktop.windows.len());
 
     // Open the start menu and pick Settings out of it, the way a click would.
     let start = desktop.start_button_rect();
@@ -2344,7 +2336,10 @@ fn main() {
     desktop.snap_window(w1, true);
     desktop.snap_window(w2, false);
     if let Some(w) = desktop.windows.get(&w1) {
-        println!("Window 1 snapped left: {}x{} at ({},{})", w.width, w.height, w.x, w.y);
+        println!(
+            "Window 1 snapped left: {}x{} at ({},{})",
+            w.width, w.height, w.x, w.y
+        );
     }
 
     // Test virtual desktop switching
@@ -2403,13 +2398,22 @@ mod theme_tests {
     fn the_mode_picks_the_base_palette() {
         let mut s = settings();
         s.theme_mode = ThemeMode::Dark;
-        assert_eq!(DesktopTheme::from_settings(&s).desktop_bg, DesktopTheme::dark().desktop_bg);
+        assert_eq!(
+            DesktopTheme::from_settings(&s).desktop_bg,
+            DesktopTheme::dark().desktop_bg
+        );
         s.theme_mode = ThemeMode::Light;
-        assert_eq!(DesktopTheme::from_settings(&s).desktop_bg, DesktopTheme::light().desktop_bg);
+        assert_eq!(
+            DesktopTheme::from_settings(&s).desktop_bg,
+            DesktopTheme::light().desktop_bg
+        );
         // "System" has no schedule to follow yet, so it stays on dark rather
         // than flipping the desktop for a user who asked to be left alone.
         s.theme_mode = ThemeMode::System;
-        assert_eq!(DesktopTheme::from_settings(&s).desktop_bg, DesktopTheme::dark().desktop_bg);
+        assert_eq!(
+            DesktopTheme::from_settings(&s).desktop_bg,
+            DesktopTheme::dark().desktop_bg
+        );
     }
 
     #[test]
@@ -2445,7 +2449,10 @@ mod theme_tests {
                 s.theme_mode = mode;
                 let theme = DesktopTheme::from_settings(&s);
                 let ratio = contrast(theme.accent_color, theme.start_menu_bg);
-                assert!(ratio >= 4.5, "{mode:?} {accent:?}: contrast {ratio:.2} < 4.5");
+                assert!(
+                    ratio >= 4.5,
+                    "{mode:?} {accent:?}: contrast {ratio:.2} < 4.5"
+                );
             }
         }
     }
@@ -2455,10 +2462,16 @@ mod theme_tests {
         let mut s = settings();
         s.accent_color = AccentColor::Custom;
         s.custom_accent = Color::from_hex(0x123456);
-        assert_eq!(DesktopTheme::from_settings(&s).accent_color, Color::from_hex(0x123456));
+        assert_eq!(
+            DesktopTheme::from_settings(&s).accent_color,
+            Color::from_hex(0x123456)
+        );
         // Including in light mode: the user named a colour, not a role.
         s.theme_mode = ThemeMode::Light;
-        assert_eq!(DesktopTheme::from_settings(&s).accent_color, Color::from_hex(0x123456));
+        assert_eq!(
+            DesktopTheme::from_settings(&s).accent_color,
+            Color::from_hex(0x123456)
+        );
     }
 
     /// An accented taskbar must not swallow the start glyph, which is drawn in
@@ -2477,7 +2490,10 @@ mod theme_tests {
                 assert_eq!(theme.taskbar_bg, s.effective_accent());
                 assert_ne!(theme.taskbar_accent, theme.taskbar_bg);
                 let glyph = contrast(theme.taskbar_accent, theme.taskbar_bg);
-                assert!(glyph >= 4.5, "{mode:?} {accent:?}: glyph contrast {glyph:.2}");
+                assert!(
+                    glyph >= 4.5,
+                    "{mode:?} {accent:?}: glyph contrast {glyph:.2}"
+                );
                 let text = contrast(theme.taskbar_fg, theme.taskbar_bg);
                 assert!(text >= 4.5, "{mode:?} {accent:?}: text contrast {text:.2}");
                 assert_ne!(theme.taskbar_active_bg, theme.taskbar_bg);
@@ -2515,13 +2531,24 @@ mod theme_tests {
 
                 assert_eq!(theme.window_title_bg, s.effective_accent());
                 assert_ne!(theme.window_title_bg, theme.window_title_inactive_bg);
-                assert_eq!(theme.window_title_inactive_bg, base.window_title_inactive_bg);
+                assert_eq!(
+                    theme.window_title_inactive_bg,
+                    base.window_title_inactive_bg
+                );
 
                 let active = contrast(theme.window_title_fg, theme.window_title_bg);
-                assert!(active >= 4.5, "{mode:?} {accent:?}: active title {active:.2}");
-                let inactive =
-                    contrast(theme.window_title_inactive_fg, theme.window_title_inactive_bg);
-                assert!(inactive >= 3.0, "{mode:?} {accent:?}: inactive title {inactive:.2}");
+                assert!(
+                    active >= 4.5,
+                    "{mode:?} {accent:?}: active title {active:.2}"
+                );
+                let inactive = contrast(
+                    theme.window_title_inactive_fg,
+                    theme.window_title_inactive_bg,
+                );
+                assert!(
+                    inactive >= 3.0,
+                    "{mode:?} {accent:?}: inactive title {inactive:.2}"
+                );
             }
         }
     }
@@ -2539,7 +2566,11 @@ mod theme_tests {
             TransparencyLevel::Full,
         ] {
             s.transparency = level;
-            assert_eq!(DesktopTheme::from_settings(&s).taskbar_bg.a, 255, "{level:?}");
+            assert_eq!(
+                DesktopTheme::from_settings(&s).taskbar_bg.a,
+                255,
+                "{level:?}"
+            );
         }
 
         // Translucent follows the level — but `Subtle` is documented as

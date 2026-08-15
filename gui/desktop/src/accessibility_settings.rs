@@ -78,10 +78,10 @@ impl ColorFilter {
 /// Text size scaling.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TextScale {
-    Normal,    // 100%
-    Large,     // 125%
-    Larger,    // 150%
-    Largest,   // 200%
+    Normal,  // 100%
+    Large,   // 125%
+    Larger,  // 150%
+    Largest, // 200%
 }
 
 impl TextScale {
@@ -375,21 +375,51 @@ impl AccessibilitySettings {
     /// Count of active accessibility features.
     pub fn active_feature_count(&self) -> usize {
         let mut count = 0;
-        if self.visual.contrast_mode != ContrastMode::Off { count += 1; }
-        if self.visual.color_filter != ColorFilter::Off { count += 1; }
-        if self.visual.reduce_motion { count += 1; }
-        if self.visual.reduce_transparency { count += 1; }
-        if self.visual.cursor_indicator != CursorIndicator::Off { count += 1; }
-        if self.input.sticky_keys.enabled { count += 1; }
-        if self.input.filter_keys.enabled { count += 1; }
-        if self.input.mouse_keys.enabled { count += 1; }
-        if self.input.on_screen_keyboard { count += 1; }
-        if self.input.auto_click { count += 1; }
-        if self.audio.visual_alerts { count += 1; }
-        if self.audio.mono_audio { count += 1; }
-        if self.audio.show_captions { count += 1; }
-        if self.screen_reader.enabled { count += 1; }
-        if self.magnifier.enabled { count += 1; }
+        if self.visual.contrast_mode != ContrastMode::Off {
+            count += 1;
+        }
+        if self.visual.color_filter != ColorFilter::Off {
+            count += 1;
+        }
+        if self.visual.reduce_motion {
+            count += 1;
+        }
+        if self.visual.reduce_transparency {
+            count += 1;
+        }
+        if self.visual.cursor_indicator != CursorIndicator::Off {
+            count += 1;
+        }
+        if self.input.sticky_keys.enabled {
+            count += 1;
+        }
+        if self.input.filter_keys.enabled {
+            count += 1;
+        }
+        if self.input.mouse_keys.enabled {
+            count += 1;
+        }
+        if self.input.on_screen_keyboard {
+            count += 1;
+        }
+        if self.input.auto_click {
+            count += 1;
+        }
+        if self.audio.visual_alerts {
+            count += 1;
+        }
+        if self.audio.mono_audio {
+            count += 1;
+        }
+        if self.audio.show_captions {
+            count += 1;
+        }
+        if self.screen_reader.enabled {
+            count += 1;
+        }
+        if self.magnifier.enabled {
+            count += 1;
+        }
         count
     }
 }
@@ -440,13 +470,17 @@ impl AccessibilitySettingsUI {
         let mut cmds = Vec::new();
 
         cmds.push(RenderCommand::FillRect {
-            x: 0.0, y: 0.0, width, height,
+            x: 0.0,
+            y: 0.0,
+            width,
+            height,
             color: BASE,
             corner_radii: CornerRadii::all(8.0),
         });
 
         cmds.push(RenderCommand::Text {
-            x: 24.0, y: 24.0,
+            x: 24.0,
+            y: 24.0,
             text: "Accessibility".into(),
             font_size: 22.0,
             color: TEXT,
@@ -458,7 +492,8 @@ impl AccessibilitySettingsUI {
         let active = self.settings.active_feature_count();
         if active > 0 {
             cmds.push(RenderCommand::Text {
-                x: 24.0, y: 50.0,
+                x: 24.0,
+                y: 50.0,
                 text: format!("{} accessibility features active", active),
                 font_size: 12.0,
                 color: GREEN,
@@ -468,23 +503,37 @@ impl AccessibilitySettingsUI {
         }
 
         // Tabs
-        let tabs = [A11yTab::Visual, A11yTab::Input, A11yTab::Audio, A11yTab::Reader, A11yTab::Magnifier];
+        let tabs = [
+            A11yTab::Visual,
+            A11yTab::Input,
+            A11yTab::Audio,
+            A11yTab::Reader,
+            A11yTab::Magnifier,
+        ];
         let tab_y = 68.0;
         let mut tx = 24.0;
         for &tab in &tabs {
             let active_tab = tab == self.active_tab;
             let tw = text::padded_width_any_weight(tab.label(), 9.0, 12.0);
             cmds.push(RenderCommand::FillRect {
-                x: tx, y: tab_y, width: tw, height: 30.0,
+                x: tx,
+                y: tab_y,
+                width: tw,
+                height: 30.0,
                 color: if active_tab { BLUE } else { SURFACE0 },
                 corner_radii: CornerRadii::all(6.0),
             });
             cmds.push(RenderCommand::Text {
-                x: tx + 9.0, y: tab_y + 7.0,
+                x: tx + 9.0,
+                y: tab_y + 7.0,
                 text: tab.label().into(),
                 font_size: 12.0,
                 color: if active_tab { CRUST } else { SUBTEXT0 },
-                font_weight: if active_tab { FontWeightHint::Bold } else { FontWeightHint::Regular },
+                font_weight: if active_tab {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
                 max_width: Some(tw - 18.0),
             });
             tx += tw + 6.0;
@@ -514,21 +563,63 @@ impl AccessibilitySettingsUI {
         cy += 28.0;
         self.render_label_value(cmds, x, cy, width, "Text Size", v.text_scale.label());
         cy += 28.0;
-        self.render_label_value(cmds, x, cy, width, "Cursor Indicator", v.cursor_indicator.label());
+        self.render_label_value(
+            cmds,
+            x,
+            cy,
+            width,
+            "Cursor Indicator",
+            v.cursor_indicator.label(),
+        );
         cy += 28.0;
-        self.render_label_value(cmds, x, cy, width, "Cursor Size", &format!("{:.1}x", v.cursor_size_multiplier));
+        self.render_label_value(
+            cmds,
+            x,
+            cy,
+            width,
+            "Cursor Size",
+            &format!("{:.1}x", v.cursor_size_multiplier),
+        );
         cy += 36.0;
 
         self.render_toggle_row(cmds, x, cy, width, "Reduce Motion", v.reduce_motion);
         cy += 32.0;
-        self.render_toggle_row(cmds, x, cy, width, "Reduce Transparency", v.reduce_transparency);
+        self.render_toggle_row(
+            cmds,
+            x,
+            cy,
+            width,
+            "Reduce Transparency",
+            v.reduce_transparency,
+        );
         cy += 32.0;
-        self.render_toggle_row(cmds, x, cy, width, "Always Show Scrollbars", v.always_show_scrollbars);
+        self.render_toggle_row(
+            cmds,
+            x,
+            cy,
+            width,
+            "Always Show Scrollbars",
+            v.always_show_scrollbars,
+        );
         cy += 36.0;
 
-        self.render_label_value(cmds, x, cy, width, "Focus Indicator", &format!("{}px", v.focus_indicator_width));
+        self.render_label_value(
+            cmds,
+            x,
+            cy,
+            width,
+            "Focus Indicator",
+            &format!("{}px", v.focus_indicator_width),
+        );
         cy += 28.0;
-        self.render_label_value(cmds, x, cy, width, "Text Cursor", &format!("{}px", v.text_cursor_thickness));
+        self.render_label_value(
+            cmds,
+            x,
+            cy,
+            width,
+            "Text Cursor",
+            &format!("{}px", v.text_cursor_thickness),
+        );
         let _ = cy;
     }
 
@@ -537,45 +628,130 @@ impl AccessibilitySettingsUI {
 
         // Sticky keys
         cmds.push(RenderCommand::Text {
-            x, y: cy, text: "Sticky Keys".into(), font_size: 15.0,
-            color: LAVENDER, font_weight: FontWeightHint::Bold, max_width: Some(width),
+            x,
+            y: cy,
+            text: "Sticky Keys".into(),
+            font_size: 15.0,
+            color: LAVENDER,
+            font_weight: FontWeightHint::Bold,
+            max_width: Some(width),
         });
         cy += 24.0;
-        self.render_toggle_row(cmds, x, cy, width, "Enable", self.settings.input.sticky_keys.enabled);
+        self.render_toggle_row(
+            cmds,
+            x,
+            cy,
+            width,
+            "Enable",
+            self.settings.input.sticky_keys.enabled,
+        );
         cy += 28.0;
-        self.render_toggle_row(cmds, x, cy, width, "Lock on Double Press", self.settings.input.sticky_keys.lock_on_double_press);
+        self.render_toggle_row(
+            cmds,
+            x,
+            cy,
+            width,
+            "Lock on Double Press",
+            self.settings.input.sticky_keys.lock_on_double_press,
+        );
         cy += 28.0;
-        self.render_toggle_row(cmds, x, cy, width, "Sound", self.settings.input.sticky_keys.play_sound);
+        self.render_toggle_row(
+            cmds,
+            x,
+            cy,
+            width,
+            "Sound",
+            self.settings.input.sticky_keys.play_sound,
+        );
         cy += 36.0;
 
         // Filter keys
         cmds.push(RenderCommand::Text {
-            x, y: cy, text: "Filter Keys".into(), font_size: 15.0,
-            color: LAVENDER, font_weight: FontWeightHint::Bold, max_width: Some(width),
+            x,
+            y: cy,
+            text: "Filter Keys".into(),
+            font_size: 15.0,
+            color: LAVENDER,
+            font_weight: FontWeightHint::Bold,
+            max_width: Some(width),
         });
         cy += 24.0;
-        self.render_toggle_row(cmds, x, cy, width, "Enable", self.settings.input.filter_keys.enabled);
+        self.render_toggle_row(
+            cmds,
+            x,
+            cy,
+            width,
+            "Enable",
+            self.settings.input.filter_keys.enabled,
+        );
         cy += 28.0;
-        self.render_label_value(cmds, x, cy, width, "Acceptance", &format!("{}ms", self.settings.input.filter_keys.acceptance_delay_ms));
+        self.render_label_value(
+            cmds,
+            x,
+            cy,
+            width,
+            "Acceptance",
+            &format!("{}ms", self.settings.input.filter_keys.acceptance_delay_ms),
+        );
         cy += 28.0;
-        self.render_label_value(cmds, x, cy, width, "Bounce", &format!("{}ms", self.settings.input.filter_keys.bounce_delay_ms));
+        self.render_label_value(
+            cmds,
+            x,
+            cy,
+            width,
+            "Bounce",
+            &format!("{}ms", self.settings.input.filter_keys.bounce_delay_ms),
+        );
         cy += 36.0;
 
         // Mouse keys
         cmds.push(RenderCommand::Text {
-            x, y: cy, text: "Mouse Keys".into(), font_size: 15.0,
-            color: LAVENDER, font_weight: FontWeightHint::Bold, max_width: Some(width),
+            x,
+            y: cy,
+            text: "Mouse Keys".into(),
+            font_size: 15.0,
+            color: LAVENDER,
+            font_weight: FontWeightHint::Bold,
+            max_width: Some(width),
         });
         cy += 24.0;
-        self.render_toggle_row(cmds, x, cy, width, "Enable", self.settings.input.mouse_keys.enabled);
+        self.render_toggle_row(
+            cmds,
+            x,
+            cy,
+            width,
+            "Enable",
+            self.settings.input.mouse_keys.enabled,
+        );
         cy += 28.0;
-        self.render_label_value(cmds, x, cy, width, "Speed", &self.settings.input.mouse_keys.speed.to_string());
+        self.render_label_value(
+            cmds,
+            x,
+            cy,
+            width,
+            "Speed",
+            &self.settings.input.mouse_keys.speed.to_string(),
+        );
         cy += 36.0;
 
         // Other
-        self.render_toggle_row(cmds, x, cy, width, "On-Screen Keyboard", self.settings.input.on_screen_keyboard);
+        self.render_toggle_row(
+            cmds,
+            x,
+            cy,
+            width,
+            "On-Screen Keyboard",
+            self.settings.input.on_screen_keyboard,
+        );
         cy += 28.0;
-        self.render_toggle_row(cmds, x, cy, width, "Auto Click", self.settings.input.auto_click);
+        self.render_toggle_row(
+            cmds,
+            x,
+            cy,
+            width,
+            "Auto Click",
+            self.settings.input.auto_click,
+        );
         let _ = cy;
     }
 
@@ -591,13 +767,25 @@ impl AccessibilitySettingsUI {
         cy += 36.0;
 
         cmds.push(RenderCommand::Text {
-            x, y: cy, text: "Captions".into(), font_size: 15.0,
-            color: LAVENDER, font_weight: FontWeightHint::Bold, max_width: Some(width),
+            x,
+            y: cy,
+            text: "Captions".into(),
+            font_size: 15.0,
+            color: LAVENDER,
+            font_weight: FontWeightHint::Bold,
+            max_width: Some(width),
         });
         cy += 24.0;
         self.render_toggle_row(cmds, x, cy, width, "Show Captions", a.show_captions);
         cy += 28.0;
-        self.render_label_value(cmds, x, cy, width, "Font Size", &format!("{:.0}pt", a.caption_font_size));
+        self.render_label_value(
+            cmds,
+            x,
+            cy,
+            width,
+            "Font Size",
+            &format!("{:.0}pt", a.caption_font_size),
+        );
         cy += 28.0;
         self.render_toggle_row(cmds, x, cy, width, "Background", a.caption_background);
         let _ = cy;
@@ -610,7 +798,14 @@ impl AccessibilitySettingsUI {
         self.render_toggle_row(cmds, x, cy, width, "Screen Reader", r.enabled);
         cy += 36.0;
 
-        self.render_label_value(cmds, x, cy, width, "Speech Rate", &format!("{}%", r.speech_rate));
+        self.render_label_value(
+            cmds,
+            x,
+            cy,
+            width,
+            "Speech Rate",
+            &format!("{}%", r.speech_rate),
+        );
         cy += 28.0;
         self.render_label_value(cmds, x, cy, width, "Pitch", &format!("{}%", r.pitch));
         cy += 28.0;
@@ -619,11 +814,25 @@ impl AccessibilitySettingsUI {
         self.render_label_value(cmds, x, cy, width, "Verbosity", r.verbosity.label());
         cy += 36.0;
 
-        self.render_toggle_row(cmds, x, cy, width, "Read Typed Characters", r.read_typed_chars);
+        self.render_toggle_row(
+            cmds,
+            x,
+            cy,
+            width,
+            "Read Typed Characters",
+            r.read_typed_chars,
+        );
         cy += 28.0;
         self.render_toggle_row(cmds, x, cy, width, "Read Typed Words", r.read_typed_words);
         cy += 28.0;
-        self.render_toggle_row(cmds, x, cy, width, "Announce Notifications", r.announce_notifications);
+        self.render_toggle_row(
+            cmds,
+            x,
+            cy,
+            width,
+            "Announce Notifications",
+            r.announce_notifications,
+        );
         let _ = cy;
     }
 
@@ -634,9 +843,23 @@ impl AccessibilitySettingsUI {
         self.render_toggle_row(cmds, x, cy, width, "Magnifier", m.enabled);
         cy += 36.0;
 
-        self.render_label_value(cmds, x, cy, width, "Zoom Level", &format!("{:.1}x", m.zoom_level));
+        self.render_label_value(
+            cmds,
+            x,
+            cy,
+            width,
+            "Zoom Level",
+            &format!("{:.1}x", m.zoom_level),
+        );
         cy += 28.0;
-        self.render_label_value(cmds, x, cy, width, "Lens Size", &format!("{}px", m.lens_size));
+        self.render_label_value(
+            cmds,
+            x,
+            cy,
+            width,
+            "Lens Size",
+            &format!("{}px", m.lens_size),
+        );
         cy += 36.0;
 
         self.render_toggle_row(cmds, x, cy, width, "Follow Cursor", m.follow_cursor);
@@ -649,32 +872,70 @@ impl AccessibilitySettingsUI {
         let _ = cy;
     }
 
-    fn render_toggle_row(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, width: f32, label: &str, enabled: bool) {
+    fn render_toggle_row(
+        &self,
+        cmds: &mut Vec<RenderCommand>,
+        x: f32,
+        y: f32,
+        width: f32,
+        label: &str,
+        enabled: bool,
+    ) {
         cmds.push(RenderCommand::Text {
-            x, y: y + 4.0, text: label.into(), font_size: 14.0,
-            color: TEXT, font_weight: FontWeightHint::Regular, max_width: Some(width - 80.0),
+            x,
+            y: y + 4.0,
+            text: label.into(),
+            font_size: 14.0,
+            color: TEXT,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(width - 80.0),
         });
         let sw_x = x + width - 44.0;
         cmds.push(RenderCommand::FillRect {
-            x: sw_x, y: y + 2.0, width: 40.0, height: 22.0,
+            x: sw_x,
+            y: y + 2.0,
+            width: 40.0,
+            height: 22.0,
             color: if enabled { GREEN } else { SURFACE2 },
             corner_radii: CornerRadii::all(11.0),
         });
         let knob_x = if enabled { sw_x + 20.0 } else { sw_x + 2.0 };
         cmds.push(RenderCommand::FillRect {
-            x: knob_x, y: y + 4.0, width: 18.0, height: 18.0,
-            color: TEXT, corner_radii: CornerRadii::all(9.0),
+            x: knob_x,
+            y: y + 4.0,
+            width: 18.0,
+            height: 18.0,
+            color: TEXT,
+            corner_radii: CornerRadii::all(9.0),
         });
     }
 
-    fn render_label_value(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, width: f32, label: &str, value: &str) {
+    fn render_label_value(
+        &self,
+        cmds: &mut Vec<RenderCommand>,
+        x: f32,
+        y: f32,
+        width: f32,
+        label: &str,
+        value: &str,
+    ) {
         cmds.push(RenderCommand::Text {
-            x, y, text: label.into(), font_size: 13.0,
-            color: SUBTEXT0, font_weight: FontWeightHint::Regular, max_width: Some(width * 0.5),
+            x,
+            y,
+            text: label.into(),
+            font_size: 13.0,
+            color: SUBTEXT0,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(width * 0.5),
         });
         cmds.push(RenderCommand::Text {
-            x: x + width * 0.55, y, text: value.into(), font_size: 13.0,
-            color: TEXT, font_weight: FontWeightHint::Regular, max_width: Some(width * 0.45),
+            x: x + width * 0.55,
+            y,
+            text: value.into(),
+            font_size: 13.0,
+            color: TEXT,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(width * 0.45),
         });
     }
 }
@@ -696,7 +957,10 @@ mod tests {
     #[test]
     fn test_color_filter_labels() {
         assert_eq!(ColorFilter::Off.label(), "Off");
-        assert_eq!(ColorFilter::Deuteranopia.label(), "Red-Green (Deuteranopia)");
+        assert_eq!(
+            ColorFilter::Deuteranopia.label(),
+            "Red-Green (Deuteranopia)"
+        );
     }
 
     #[test]

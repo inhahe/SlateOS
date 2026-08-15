@@ -91,9 +91,16 @@ impl PermissionKind {
     }
 
     pub const ALL: [Self; 10] = [
-        Self::Camera, Self::Microphone, Self::Location, Self::Contacts,
-        Self::Calendar, Self::Notifications, Self::BackgroundApps,
-        Self::FileSystem, Self::Clipboard, Self::ScreenCapture,
+        Self::Camera,
+        Self::Microphone,
+        Self::Location,
+        Self::Contacts,
+        Self::Calendar,
+        Self::Notifications,
+        Self::BackgroundApps,
+        Self::FileSystem,
+        Self::Clipboard,
+        Self::ScreenCapture,
     ];
 }
 
@@ -296,12 +303,18 @@ impl PrivacySettings {
 
     /// List all apps that have any permission entry for a given kind.
     pub fn apps_for_permission(&self, kind: PermissionKind) -> Vec<&AppPermission> {
-        self.app_permissions.iter().filter(|p| p.kind == kind).collect()
+        self.app_permissions
+            .iter()
+            .filter(|p| p.kind == kind)
+            .collect()
     }
 
     /// List all permission entries for an app.
     pub fn permissions_for_app(&self, app_id: &str) -> Vec<&AppPermission> {
-        self.app_permissions.iter().filter(|p| p.app_id == app_id).collect()
+        self.app_permissions
+            .iter()
+            .filter(|p| p.app_id == app_id)
+            .collect()
     }
 
     pub fn record_access(&mut self, app_id: &str, kind: PermissionKind, allowed: bool) {
@@ -436,7 +449,10 @@ impl PrivacySettingsUI {
 
         // Background
         cmds.push(RenderCommand::FillRect {
-            x, y, width, height: 900.0,
+            x,
+            y,
+            width,
+            height: 900.0,
             color: BASE,
             corner_radii: CornerRadii::all(8.0),
         });
@@ -444,9 +460,11 @@ impl PrivacySettingsUI {
         // Title
         cy += pad;
         cmds.push(RenderCommand::Text {
-            x: x + pad, y: cy,
+            x: x + pad,
+            y: cy,
             text: "Privacy & Permissions".into(),
-            font_size: 20.0, color: TEXT,
+            font_size: 20.0,
+            color: TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: Some(inner),
         });
@@ -458,16 +476,24 @@ impl PrivacySettingsUI {
             let tx = x + pad + tab_w * i as f32;
             let active = self.active_tab == i;
             cmds.push(RenderCommand::FillRect {
-                x: tx, y: cy, width: tab_w - 2.0, height: 30.0,
+                x: tx,
+                y: cy,
+                width: tab_w - 2.0,
+                height: 30.0,
                 color: if active { SURFACE0 } else { MANTLE },
                 corner_radii: CornerRadii::all(6.0),
             });
             cmds.push(RenderCommand::Text {
-                x: tx + 8.0, y: cy + 8.0,
+                x: tx + 8.0,
+                y: cy + 8.0,
                 text: (*label).into(),
                 font_size: 12.0,
                 color: if active { BLUE } else { SUBTEXT0 },
-                font_weight: if active { FontWeightHint::Bold } else { FontWeightHint::Regular },
+                font_weight: if active {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
                 max_width: Some(tab_w - 16.0),
             });
         }
@@ -494,17 +520,21 @@ impl PrivacySettingsUI {
             let kind = PermissionKind::ALL[sel];
             // Detail view for selected permission.
             cmds.push(RenderCommand::Text {
-                x, y,
+                x,
+                y,
                 text: format!("{} {}", kind.icon(), kind.label()),
-                font_size: 16.0, color: LAVENDER,
+                font_size: 16.0,
+                color: LAVENDER,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(width),
             });
             y += 24.0;
             cmds.push(RenderCommand::Text {
-                x: x + 4.0, y,
+                x: x + 4.0,
+                y,
                 text: kind.description().into(),
-                font_size: 12.0, color: SUBTEXT0,
+                font_size: 12.0,
+                color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 8.0),
             });
@@ -519,37 +549,48 @@ impl PrivacySettingsUI {
             let apps = self.settings.apps_for_permission(kind);
             if apps.is_empty() {
                 cmds.push(RenderCommand::Text {
-                    x, y,
+                    x,
+                    y,
                     text: "No apps have requested this permission.".into(),
-                    font_size: 12.0, color: OVERLAY0,
+                    font_size: 12.0,
+                    color: OVERLAY0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(width),
                 });
             } else {
                 for app in &apps {
                     cmds.push(RenderCommand::FillRect {
-                        x, y, width, height: 32.0,
+                        x,
+                        y,
+                        width,
+                        height: 32.0,
                         color: MANTLE,
                         corner_radii: CornerRadii::all(4.0),
                     });
                     cmds.push(RenderCommand::Text {
-                        x: x + 8.0, y: y + 8.0,
+                        x: x + 8.0,
+                        y: y + 8.0,
                         text: app.app_name.clone(),
-                        font_size: 13.0, color: TEXT,
+                        font_size: 13.0,
+                        color: TEXT,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(width * 0.5),
                     });
                     cmds.push(RenderCommand::Text {
-                        x: x + width * 0.55, y: y + 8.0,
+                        x: x + width * 0.55,
+                        y: y + 8.0,
                         text: app.state.label().into(),
-                        font_size: 13.0, color: app.state.color(),
+                        font_size: 13.0,
+                        color: app.state.color(),
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(width * 0.2),
                     });
                     cmds.push(RenderCommand::Text {
-                        x: x + width * 0.78, y: y + 8.0,
+                        x: x + width * 0.78,
+                        y: y + 8.0,
                         text: format!("{}×", app.access_count),
-                        font_size: 11.0, color: OVERLAY0,
+                        font_size: 11.0,
+                        color: OVERLAY0,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(width * 0.2),
                     });
@@ -562,14 +603,19 @@ impl PrivacySettingsUI {
                 let enabled = self.settings.is_globally_enabled(*kind);
                 let count = self.settings.allowed_count(*kind);
                 cmds.push(RenderCommand::FillRect {
-                    x, y, width, height: 40.0,
+                    x,
+                    y,
+                    width,
+                    height: 40.0,
                     color: MANTLE,
                     corner_radii: CornerRadii::all(6.0),
                 });
                 cmds.push(RenderCommand::Text {
-                    x: x + 8.0, y: y + 4.0,
+                    x: x + 8.0,
+                    y: y + 4.0,
                     text: format!("{} {}", kind.icon(), kind.label()),
-                    font_size: 14.0, color: TEXT,
+                    font_size: 14.0,
+                    color: TEXT,
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(width * 0.5),
                 });
@@ -582,7 +628,8 @@ impl PrivacySettingsUI {
                     "No apps".to_string()
                 };
                 cmds.push(RenderCommand::Text {
-                    x: x + width * 0.55, y: y + 4.0,
+                    x: x + width * 0.55,
+                    y: y + 4.0,
                     text: status,
                     font_size: 12.0,
                     color: if enabled { GREEN } else { RED },
@@ -590,9 +637,11 @@ impl PrivacySettingsUI {
                     max_width: Some(width * 0.4),
                 });
                 cmds.push(RenderCommand::Text {
-                    x: x + 8.0, y: y + 22.0,
+                    x: x + 8.0,
+                    y: y + 22.0,
                     text: kind.description().into(),
-                    font_size: 10.0, color: OVERLAY0,
+                    font_size: 10.0,
+                    color: OVERLAY0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(width - 16.0),
                 });
@@ -603,19 +652,15 @@ impl PrivacySettingsUI {
         }
     }
 
-    fn render_activity_tab(
-        &self,
-        cmds: &mut Vec<RenderCommand>,
-        x: f32,
-        mut y: f32,
-        width: f32,
-    ) {
+    fn render_activity_tab(&self, cmds: &mut Vec<RenderCommand>, x: f32, mut y: f32, width: f32) {
         let log = self.settings.activity_log();
         if log.is_empty() {
             cmds.push(RenderCommand::Text {
-                x, y,
+                x,
+                y,
                 text: "No activity recorded yet.".into(),
-                font_size: 13.0, color: OVERLAY0,
+                font_size: 13.0,
+                color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width),
             });
@@ -623,9 +668,11 @@ impl PrivacySettingsUI {
         }
 
         cmds.push(RenderCommand::Text {
-            x, y,
+            x,
+            y,
             text: format!("{} recent access events", log.len()),
-            font_size: 13.0, color: TEXT,
+            font_size: 13.0,
+            color: TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
         });
@@ -635,7 +682,10 @@ impl PrivacySettingsUI {
         let show = log.iter().rev().take(20);
         for entry in show {
             cmds.push(RenderCommand::FillRect {
-                x, y, width, height: 28.0,
+                x,
+                y,
+                width,
+                height: 28.0,
                 color: MANTLE,
                 corner_radii: CornerRadii::all(4.0),
             });
@@ -643,9 +693,17 @@ impl PrivacySettingsUI {
             let status = if entry.allowed { "✓" } else { "✕" };
             let color = if entry.allowed { GREEN } else { RED };
             cmds.push(RenderCommand::Text {
-                x: x + 8.0, y: y + 6.0,
-                text: format!("{} {} {} {}", icon, entry.app_name, entry.permission.label(), status),
-                font_size: 12.0, color,
+                x: x + 8.0,
+                y: y + 6.0,
+                text: format!(
+                    "{} {} {} {}",
+                    icon,
+                    entry.app_name,
+                    entry.permission.label(),
+                    status
+                ),
+                font_size: 12.0,
+                color,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 16.0),
             });
@@ -653,17 +711,13 @@ impl PrivacySettingsUI {
         }
     }
 
-    fn render_general_tab(
-        &self,
-        cmds: &mut Vec<RenderCommand>,
-        x: f32,
-        mut y: f32,
-        width: f32,
-    ) {
+    fn render_general_tab(&self, cmds: &mut Vec<RenderCommand>, x: f32, mut y: f32, width: f32) {
         cmds.push(RenderCommand::Text {
-            x, y,
+            x,
+            y,
             text: "Telemetry".into(),
-            font_size: 14.0, color: LAVENDER,
+            font_size: 14.0,
+            color: LAVENDER,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
         });
@@ -672,17 +726,25 @@ impl PrivacySettingsUI {
         for level in TelemetryLevel::ALL {
             let active = self.settings.telemetry == level;
             cmds.push(RenderCommand::FillRect {
-                x, y, width, height: 28.0,
+                x,
+                y,
+                width,
+                height: 28.0,
                 color: if active { SURFACE0 } else { MANTLE },
                 corner_radii: CornerRadii::all(4.0),
             });
             let indicator = if active { "● " } else { "○ " };
             cmds.push(RenderCommand::Text {
-                x: x + 8.0, y: y + 6.0,
+                x: x + 8.0,
+                y: y + 6.0,
                 text: format!("{}{}", indicator, level.label()),
                 font_size: 13.0,
                 color: if active { BLUE } else { TEXT },
-                font_weight: if active { FontWeightHint::Bold } else { FontWeightHint::Regular },
+                font_weight: if active {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
                 max_width: Some(width - 16.0),
             });
             y += 32.0;
@@ -690,39 +752,77 @@ impl PrivacySettingsUI {
 
         y += 8.0;
         cmds.push(RenderCommand::Text {
-            x, y,
+            x,
+            y,
             text: "Other".into(),
-            font_size: 14.0, color: LAVENDER,
+            font_size: 14.0,
+            color: LAVENDER,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
         });
         y += 24.0;
 
-        Self::render_toggle(cmds, x, y, width, "Prompt on first access", self.settings.prompt_on_first_access);
+        Self::render_toggle(
+            cmds,
+            x,
+            y,
+            width,
+            "Prompt on first access",
+            self.settings.prompt_on_first_access,
+        );
         y += 28.0;
-        Self::render_toggle(cmds, x, y, width, "Clear activity on logout", self.settings.clear_history_on_logout);
+        Self::render_toggle(
+            cmds,
+            x,
+            y,
+            width,
+            "Clear activity on logout",
+            self.settings.clear_history_on_logout,
+        );
         y += 28.0;
-        Self::render_toggle(cmds, x, y, width, "Location: while in use only", self.settings.location_while_in_use_only);
+        Self::render_toggle(
+            cmds,
+            x,
+            y,
+            width,
+            "Location: while in use only",
+            self.settings.location_while_in_use_only,
+        );
     }
 
-    fn render_toggle(cmds: &mut Vec<RenderCommand>, x: f32, y: f32, width: f32, label: &str, on: bool) {
+    fn render_toggle(
+        cmds: &mut Vec<RenderCommand>,
+        x: f32,
+        y: f32,
+        width: f32,
+        label: &str,
+        on: bool,
+    ) {
         cmds.push(RenderCommand::Text {
-            x: x + 8.0, y,
+            x: x + 8.0,
+            y,
             text: label.into(),
-            font_size: 13.0, color: SUBTEXT0,
+            font_size: 13.0,
+            color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width * 0.65),
         });
         let tx = x + width - 48.0;
         let bg = if on { GREEN } else { SURFACE1 };
         cmds.push(RenderCommand::FillRect {
-            x: tx, y, width: 40.0, height: 20.0,
+            x: tx,
+            y,
+            width: 40.0,
+            height: 20.0,
             color: bg,
             corner_radii: CornerRadii::all(10.0),
         });
         let knob_x = if on { tx + 22.0 } else { tx + 2.0 };
         cmds.push(RenderCommand::FillRect {
-            x: knob_x, y: y + 2.0, width: 16.0, height: 16.0,
+            x: knob_x,
+            y: y + 2.0,
+            width: 16.0,
+            height: 16.0,
             color: TEXT,
             corner_radii: CornerRadii::all(8.0),
         });
@@ -748,7 +848,11 @@ mod tests {
 
     #[test]
     fn permission_state_labels() {
-        for s in [PermissionState::Allowed, PermissionState::Denied, PermissionState::NotDecided] {
+        for s in [
+            PermissionState::Allowed,
+            PermissionState::Denied,
+            PermissionState::NotDecided,
+        ] {
             assert!(!s.label().is_empty());
             let _ = s.color();
         }
@@ -780,28 +884,57 @@ mod tests {
     #[test]
     fn set_app_permission() {
         let mut s = PrivacySettings::new();
-        s.set_app_permission("cam_app", "Camera App", PermissionKind::Camera, PermissionState::Allowed);
-        assert_eq!(s.get_app_permission("cam_app", PermissionKind::Camera), PermissionState::Allowed);
+        s.set_app_permission(
+            "cam_app",
+            "Camera App",
+            PermissionKind::Camera,
+            PermissionState::Allowed,
+        );
+        assert_eq!(
+            s.get_app_permission("cam_app", PermissionKind::Camera),
+            PermissionState::Allowed
+        );
     }
 
     #[test]
     fn update_app_permission() {
         let mut s = PrivacySettings::new();
-        s.set_app_permission("app", "App", PermissionKind::Location, PermissionState::Allowed);
-        s.set_app_permission("app", "App", PermissionKind::Location, PermissionState::Denied);
-        assert_eq!(s.get_app_permission("app", PermissionKind::Location), PermissionState::Denied);
+        s.set_app_permission(
+            "app",
+            "App",
+            PermissionKind::Location,
+            PermissionState::Allowed,
+        );
+        s.set_app_permission(
+            "app",
+            "App",
+            PermissionKind::Location,
+            PermissionState::Denied,
+        );
+        assert_eq!(
+            s.get_app_permission("app", PermissionKind::Location),
+            PermissionState::Denied
+        );
     }
 
     #[test]
     fn get_undecided_by_default() {
         let s = PrivacySettings::new();
-        assert_eq!(s.get_app_permission("any", PermissionKind::Camera), PermissionState::NotDecided);
+        assert_eq!(
+            s.get_app_permission("any", PermissionKind::Camera),
+            PermissionState::NotDecided
+        );
     }
 
     #[test]
     fn is_allowed_respects_global() {
         let mut s = PrivacySettings::new();
-        s.set_app_permission("app", "App", PermissionKind::Camera, PermissionState::Allowed);
+        s.set_app_permission(
+            "app",
+            "App",
+            PermissionKind::Camera,
+            PermissionState::Allowed,
+        );
         assert!(s.is_allowed("app", PermissionKind::Camera));
         s.set_globally_enabled(PermissionKind::Camera, false);
         assert!(!s.is_allowed("app", PermissionKind::Camera));
@@ -810,7 +943,12 @@ mod tests {
     #[test]
     fn is_allowed_denied_app() {
         let mut s = PrivacySettings::new();
-        s.set_app_permission("app", "App", PermissionKind::Microphone, PermissionState::Denied);
+        s.set_app_permission(
+            "app",
+            "App",
+            PermissionKind::Microphone,
+            PermissionState::Denied,
+        );
         assert!(!s.is_allowed("app", PermissionKind::Microphone));
     }
 
@@ -827,8 +965,18 @@ mod tests {
     #[test]
     fn permissions_for_app() {
         let mut s = PrivacySettings::new();
-        s.set_app_permission("app", "App", PermissionKind::Camera, PermissionState::Allowed);
-        s.set_app_permission("app", "App", PermissionKind::Microphone, PermissionState::Denied);
+        s.set_app_permission(
+            "app",
+            "App",
+            PermissionKind::Camera,
+            PermissionState::Allowed,
+        );
+        s.set_app_permission(
+            "app",
+            "App",
+            PermissionKind::Microphone,
+            PermissionState::Denied,
+        );
         let perms = s.permissions_for_app("app");
         assert_eq!(perms.len(), 2);
     }
@@ -836,7 +984,12 @@ mod tests {
     #[test]
     fn record_access() {
         let mut s = PrivacySettings::new();
-        s.set_app_permission("app", "App", PermissionKind::Camera, PermissionState::Allowed);
+        s.set_app_permission(
+            "app",
+            "App",
+            PermissionKind::Camera,
+            PermissionState::Allowed,
+        );
         s.record_access("app", PermissionKind::Camera, true);
         assert_eq!(s.activity_log().len(), 1);
         assert!(s.activity_log()[0].allowed);
@@ -845,7 +998,12 @@ mod tests {
     #[test]
     fn activity_log_ring_buffer() {
         let mut s = PrivacySettings::new();
-        s.set_app_permission("app", "App", PermissionKind::Camera, PermissionState::Allowed);
+        s.set_app_permission(
+            "app",
+            "App",
+            PermissionKind::Camera,
+            PermissionState::Allowed,
+        );
         for _ in 0..600 {
             s.record_access("app", PermissionKind::Camera, true);
         }
@@ -855,7 +1013,12 @@ mod tests {
     #[test]
     fn clear_activity_log() {
         let mut s = PrivacySettings::new();
-        s.set_app_permission("app", "App", PermissionKind::Camera, PermissionState::Allowed);
+        s.set_app_permission(
+            "app",
+            "App",
+            PermissionKind::Camera,
+            PermissionState::Allowed,
+        );
         s.record_access("app", PermissionKind::Camera, true);
         s.clear_activity_log();
         assert!(s.activity_log().is_empty());
@@ -864,17 +1027,38 @@ mod tests {
     #[test]
     fn revoke_all() {
         let mut s = PrivacySettings::new();
-        s.set_app_permission("app", "App", PermissionKind::Camera, PermissionState::Allowed);
-        s.set_app_permission("app", "App", PermissionKind::Microphone, PermissionState::Allowed);
+        s.set_app_permission(
+            "app",
+            "App",
+            PermissionKind::Camera,
+            PermissionState::Allowed,
+        );
+        s.set_app_permission(
+            "app",
+            "App",
+            PermissionKind::Microphone,
+            PermissionState::Allowed,
+        );
         s.revoke_all("app");
-        assert_eq!(s.get_app_permission("app", PermissionKind::Camera), PermissionState::Denied);
-        assert_eq!(s.get_app_permission("app", PermissionKind::Microphone), PermissionState::Denied);
+        assert_eq!(
+            s.get_app_permission("app", PermissionKind::Camera),
+            PermissionState::Denied
+        );
+        assert_eq!(
+            s.get_app_permission("app", PermissionKind::Microphone),
+            PermissionState::Denied
+        );
     }
 
     #[test]
     fn remove_app() {
         let mut s = PrivacySettings::new();
-        s.set_app_permission("app", "App", PermissionKind::Camera, PermissionState::Allowed);
+        s.set_app_permission(
+            "app",
+            "App",
+            PermissionKind::Camera,
+            PermissionState::Allowed,
+        );
         s.remove_app("app");
         assert!(s.permissions_for_app("app").is_empty());
     }
@@ -940,18 +1124,31 @@ mod tests {
     #[test]
     fn ui_render_permission_detail() {
         let mut ui = PrivacySettingsUI::new();
-        ui.settings_mut().set_app_permission("cam", "Camera App", PermissionKind::Camera, PermissionState::Allowed);
+        ui.settings_mut().set_app_permission(
+            "cam",
+            "Camera App",
+            PermissionKind::Camera,
+            PermissionState::Allowed,
+        );
         ui.select_permission(Some(0)); // Camera
         let cmds = ui.render(0.0, 0.0, 500.0);
-        let has_cam = cmds.iter().any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("Camera")));
+        let has_cam = cmds
+            .iter()
+            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("Camera")));
         assert!(has_cam);
     }
 
     #[test]
     fn ui_render_activity_with_entries() {
         let mut ui = PrivacySettingsUI::new();
-        ui.settings_mut().set_app_permission("app", "App", PermissionKind::Camera, PermissionState::Allowed);
-        ui.settings_mut().record_access("app", PermissionKind::Camera, true);
+        ui.settings_mut().set_app_permission(
+            "app",
+            "App",
+            PermissionKind::Camera,
+            PermissionState::Allowed,
+        );
+        ui.settings_mut()
+            .record_access("app", PermissionKind::Camera, true);
         ui.set_active_tab(1);
         let cmds = ui.render(0.0, 0.0, 500.0);
         assert!(!cmds.is_empty());
@@ -974,7 +1171,12 @@ mod tests {
     #[test]
     fn access_count_increments() {
         let mut s = PrivacySettings::new();
-        s.set_app_permission("app", "App", PermissionKind::Camera, PermissionState::Allowed);
+        s.set_app_permission(
+            "app",
+            "App",
+            PermissionKind::Camera,
+            PermissionState::Allowed,
+        );
         s.record_access("app", PermissionKind::Camera, true);
         s.record_access("app", PermissionKind::Camera, true);
         let perms = s.apps_for_permission(PermissionKind::Camera);

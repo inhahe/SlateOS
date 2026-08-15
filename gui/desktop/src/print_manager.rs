@@ -77,8 +77,12 @@ impl PrinterCapabilities {
             duplex: true,
             max_dpi: 2400,
             paper_sizes: vec![
-                PaperSize::A4, PaperSize::Letter, PaperSize::Legal,
-                PaperSize::A3, PaperSize::A5, PaperSize::Envelope,
+                PaperSize::A4,
+                PaperSize::Letter,
+                PaperSize::Legal,
+                PaperSize::A3,
+                PaperSize::A5,
+                PaperSize::Envelope,
             ],
             supports_borderless: true,
             max_copies: 999,
@@ -310,9 +314,10 @@ impl PrintSettings {
             errors.push("Paper size not supported".to_string());
         }
         if let Some((start, end)) = self.page_range
-            && (start == 0 || end < start) {
-                errors.push("Invalid page range".to_string());
-            }
+            && (start == 0 || end < start)
+        {
+            errors.push("Invalid page range".to_string());
+        }
         if self.scale_percent == 0 || self.scale_percent > 400 {
             errors.push("Scale must be 1-400%".to_string());
         }
@@ -345,7 +350,9 @@ pub struct PrintJob {
 impl PrintJob {
     /// Progress as percentage (0-100).
     pub fn progress_pct(&self) -> u32 {
-        if self.total_pages == 0 { return 0; }
+        if self.total_pages == 0 {
+            return 0;
+        }
         ((self.pages_printed as u64 * 100) / self.total_pages as u64) as u32
     }
 
@@ -447,9 +454,10 @@ impl PrintManager {
             if self.default_printer_id == Some(id) {
                 self.default_printer_id = self.printers.first().map(|p| p.id);
                 if let Some(def_id) = self.default_printer_id
-                    && let Some(p) = self.printers.iter_mut().find(|p| p.id == def_id) {
-                        p.is_default = true;
-                    }
+                    && let Some(p) = self.printers.iter_mut().find(|p| p.id == def_id)
+                {
+                    p.is_default = true;
+                }
             }
             true
         } else {
@@ -472,7 +480,8 @@ impl PrintManager {
 
     /// Get the default printer.
     pub fn default_printer(&self) -> Option<&Printer> {
-        self.default_printer_id.and_then(|id| self.printers.iter().find(|p| p.id == id))
+        self.default_printer_id
+            .and_then(|id| self.printers.iter().find(|p| p.id == id))
     }
 
     /// Submit a print job. Returns job ID.
@@ -540,20 +549,22 @@ impl PrintManager {
     /// Pause a job.
     pub fn pause_job(&mut self, job_id: u32) -> bool {
         if let Some(job) = self.jobs.iter_mut().find(|j| j.id == job_id)
-            && (job.state == JobState::Printing || job.state == JobState::Queued) {
-                job.state = JobState::Paused;
-                return true;
-            }
+            && (job.state == JobState::Printing || job.state == JobState::Queued)
+        {
+            job.state = JobState::Paused;
+            return true;
+        }
         false
     }
 
     /// Resume a paused job.
     pub fn resume_job(&mut self, job_id: u32) -> bool {
         if let Some(job) = self.jobs.iter_mut().find(|j| j.id == job_id)
-            && job.state == JobState::Paused {
-                job.state = JobState::Queued;
-                return true;
-            }
+            && job.state == JobState::Paused
+        {
+            job.state = JobState::Queued;
+            return true;
+        }
         false
     }
 
@@ -581,12 +592,18 @@ impl PrintManager {
 
     /// Get all active (non-terminal) jobs.
     pub fn active_jobs(&self) -> Vec<&PrintJob> {
-        self.jobs.iter().filter(|j| !j.state.is_terminal()).collect()
+        self.jobs
+            .iter()
+            .filter(|j| !j.state.is_terminal())
+            .collect()
     }
 
     /// Get all jobs for a specific printer.
     pub fn jobs_for_printer(&self, printer_id: u32) -> Vec<&PrintJob> {
-        self.jobs.iter().filter(|j| j.printer_id == printer_id).collect()
+        self.jobs
+            .iter()
+            .filter(|j| j.printer_id == printer_id)
+            .collect()
     }
 
     /// Purge completed/cancelled/failed jobs from history.
@@ -598,7 +615,8 @@ impl PrintManager {
 
     /// Total pages printed across all completed jobs.
     pub fn total_pages_printed(&self) -> u64 {
-        self.jobs.iter()
+        self.jobs
+            .iter()
             .filter(|j| j.state == JobState::Completed)
             .map(|j| j.pages_printed as u64)
             .sum()
@@ -666,7 +684,14 @@ impl PrintDialog {
     }
 
     /// Render the print dialog.
-    pub fn render(&self, printers: &[Printer], x: f32, y: f32, w: f32, h: f32) -> Vec<RenderCommand> {
+    pub fn render(
+        &self,
+        printers: &[Printer],
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+    ) -> Vec<RenderCommand> {
         let mut cmds = Vec::new();
         if !self.visible {
             return cmds;
@@ -674,7 +699,10 @@ impl PrintDialog {
 
         // Overlay background.
         cmds.push(RenderCommand::FillRect {
-            x, y, width: w, height: h,
+            x,
+            y,
+            width: w,
+            height: h,
             color: Color::rgba(0, 0, 0, 128),
             corner_radii: CornerRadii::ZERO,
         });
@@ -686,49 +714,64 @@ impl PrintDialog {
         let dy = y + (h - dh) / 2.0;
 
         cmds.push(RenderCommand::FillRect {
-            x: dx, y: dy, width: dw, height: dh,
+            x: dx,
+            y: dy,
+            width: dw,
+            height: dh,
             color: MOCHA_BASE,
             corner_radii: CornerRadii::all(12.0),
         });
 
         // Title.
         cmds.push(RenderCommand::Text {
-            x: dx + 20.0, y: dy + 16.0,
+            x: dx + 20.0,
+            y: dy + 16.0,
             text: "Print".to_string(),
-            font_size: 16.0, color: MOCHA_TEXT,
+            font_size: 16.0,
+            color: MOCHA_TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: None,
         });
 
         // Document name.
         cmds.push(RenderCommand::Text {
-            x: dx + 20.0, y: dy + 40.0,
+            x: dx + 20.0,
+            y: dy + 40.0,
             text: format!("Document: {}", self.document_name),
-            font_size: 12.0, color: MOCHA_SUBTEXT0,
+            font_size: 12.0,
+            color: MOCHA_SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
         });
 
         // Printer selector.
         cmds.push(RenderCommand::Text {
-            x: dx + 20.0, y: dy + 68.0,
+            x: dx + 20.0,
+            y: dy + 68.0,
             text: "Printer:".to_string(),
-            font_size: 12.0, color: MOCHA_TEXT,
+            font_size: 12.0,
+            color: MOCHA_TEXT,
             font_weight: FontWeightHint::Regular,
             max_width: None,
         });
-        let printer_name = printers.get(self.selected_printer_idx)
+        let printer_name = printers
+            .get(self.selected_printer_idx)
             .map(|p| p.name.as_str())
             .unwrap_or("None");
         cmds.push(RenderCommand::FillRect {
-            x: dx + 100.0, y: dy + 62.0, width: 280.0, height: 24.0,
+            x: dx + 100.0,
+            y: dy + 62.0,
+            width: 280.0,
+            height: 24.0,
             color: MOCHA_SURFACE0,
             corner_radii: CornerRadii::all(4.0),
         });
         cmds.push(RenderCommand::Text {
-            x: dx + 108.0, y: dy + 66.0,
+            x: dx + 108.0,
+            y: dy + 66.0,
             text: printer_name.to_string(),
-            font_size: 12.0, color: MOCHA_BLUE,
+            font_size: 12.0,
+            color: MOCHA_BLUE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
         });
@@ -738,24 +781,53 @@ impl PrintDialog {
         let settings_rows = [
             ("Copies:", format!("{}", self.settings.copies)),
             ("Paper:", self.settings.paper_size.label().to_string()),
-            ("Orientation:", if self.settings.orientation == Orientation::Portrait { "Portrait" } else { "Landscape" }.to_string()),
+            (
+                "Orientation:",
+                if self.settings.orientation == Orientation::Portrait {
+                    "Portrait"
+                } else {
+                    "Landscape"
+                }
+                .to_string(),
+            ),
             ("Quality:", self.settings.quality.label().to_string()),
-            ("Color:", match self.settings.color_mode { ColorMode::Color => "Color", ColorMode::Grayscale => "Grayscale", ColorMode::MonoBlack => "Black & White" }.to_string()),
-            ("Duplex:", if self.settings.duplex { "On" } else { "Off" }.to_string()),
-            ("Pages:", self.settings.page_range.map(|(s, e)| format!("{}-{}", s, e)).unwrap_or_else(|| "All".to_string())),
+            (
+                "Color:",
+                match self.settings.color_mode {
+                    ColorMode::Color => "Color",
+                    ColorMode::Grayscale => "Grayscale",
+                    ColorMode::MonoBlack => "Black & White",
+                }
+                .to_string(),
+            ),
+            (
+                "Duplex:",
+                if self.settings.duplex { "On" } else { "Off" }.to_string(),
+            ),
+            (
+                "Pages:",
+                self.settings
+                    .page_range
+                    .map(|(s, e)| format!("{}-{}", s, e))
+                    .unwrap_or_else(|| "All".to_string()),
+            ),
         ];
         for (label, value) in &settings_rows {
             cmds.push(RenderCommand::Text {
-                x: dx + 20.0, y: cy,
+                x: dx + 20.0,
+                y: cy,
                 text: label.to_string(),
-                font_size: 12.0, color: MOCHA_TEXT,
+                font_size: 12.0,
+                color: MOCHA_TEXT,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
             });
             cmds.push(RenderCommand::Text {
-                x: dx + 120.0, y: cy,
+                x: dx + 120.0,
+                y: cy,
                 text: value.clone(),
-                font_size: 12.0, color: MOCHA_SUBTEXT0,
+                font_size: 12.0,
+                color: MOCHA_SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
             });
@@ -765,9 +837,11 @@ impl PrintDialog {
         // Validation errors.
         for err in &self.validation_errors {
             cmds.push(RenderCommand::Text {
-                x: dx + 20.0, y: cy,
+                x: dx + 20.0,
+                y: cy,
                 text: err.clone(),
-                font_size: 11.0, color: MOCHA_RED,
+                font_size: 11.0,
+                color: MOCHA_RED,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
             });
@@ -777,26 +851,36 @@ impl PrintDialog {
         // Buttons.
         let btn_y = dy + dh - 44.0;
         cmds.push(RenderCommand::FillRect {
-            x: dx + dw - 180.0, y: btn_y, width: 70.0, height: 28.0,
+            x: dx + dw - 180.0,
+            y: btn_y,
+            width: 70.0,
+            height: 28.0,
             color: MOCHA_BLUE,
             corner_radii: CornerRadii::all(6.0),
         });
         cmds.push(RenderCommand::Text {
-            x: dx + dw - 166.0, y: btn_y + 7.0,
+            x: dx + dw - 166.0,
+            y: btn_y + 7.0,
             text: "Print".to_string(),
-            font_size: 12.0, color: MOCHA_BASE,
+            font_size: 12.0,
+            color: MOCHA_BASE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
         });
         cmds.push(RenderCommand::FillRect {
-            x: dx + dw - 100.0, y: btn_y, width: 80.0, height: 28.0,
+            x: dx + dw - 100.0,
+            y: btn_y,
+            width: 80.0,
+            height: 28.0,
             color: MOCHA_SURFACE1,
             corner_radii: CornerRadii::all(6.0),
         });
         cmds.push(RenderCommand::Text {
-            x: dx + dw - 84.0, y: btn_y + 7.0,
+            x: dx + dw - 84.0,
+            y: btn_y + 7.0,
             text: "Cancel".to_string(),
-            font_size: 12.0, color: MOCHA_TEXT,
+            font_size: 12.0,
+            color: MOCHA_TEXT,
             font_weight: FontWeightHint::Regular,
             max_width: None,
         });
@@ -914,9 +998,15 @@ mod tests {
     #[test]
     fn test_printer_status() {
         let mut p = Printer {
-            id: 1, name: "Test".to_string(), model: "Test".to_string(),
-            connection: PrinterConnection::Usb, capabilities: PrinterCapabilities::basic(),
-            online: true, is_default: false, queue_count: 0, ink_level: Some(80),
+            id: 1,
+            name: "Test".to_string(),
+            model: "Test".to_string(),
+            connection: PrinterConnection::Usb,
+            capabilities: PrinterCapabilities::basic(),
+            online: true,
+            is_default: false,
+            queue_count: 0,
+            ink_level: Some(80),
         };
         assert_eq!(p.status_label(), "Ready");
         p.queue_count = 3;
@@ -940,10 +1030,17 @@ mod tests {
     #[test]
     fn test_job_progress() {
         let mut job = PrintJob {
-            id: 1, document_name: "test.pdf".to_string(), printer_id: 1,
-            state: JobState::Printing, settings: PrintSettings::default_settings(),
-            total_pages: 10, pages_printed: 5, submitted_at: 0,
-            completed_at: None, size_bytes: 50000, owner: "user".to_string(),
+            id: 1,
+            document_name: "test.pdf".to_string(),
+            printer_id: 1,
+            state: JobState::Printing,
+            settings: PrintSettings::default_settings(),
+            total_pages: 10,
+            pages_printed: 5,
+            submitted_at: 0,
+            completed_at: None,
+            size_bytes: 50000,
+            owner: "user".to_string(),
         };
         assert_eq!(job.progress_pct(), 50);
         job.pages_printed = 0;
@@ -953,10 +1050,17 @@ mod tests {
     #[test]
     fn test_job_size_display() {
         let job = PrintJob {
-            id: 1, document_name: "test".to_string(), printer_id: 1,
-            state: JobState::Queued, settings: PrintSettings::default_settings(),
-            total_pages: 1, pages_printed: 0, submitted_at: 0,
-            completed_at: None, size_bytes: 2048, owner: "user".to_string(),
+            id: 1,
+            document_name: "test".to_string(),
+            printer_id: 1,
+            state: JobState::Queued,
+            settings: PrintSettings::default_settings(),
+            total_pages: 1,
+            pages_printed: 0,
+            submitted_at: 0,
+            completed_at: None,
+            size_bytes: 2048,
+            owner: "user".to_string(),
         };
         assert_eq!(job.size_display(), "2.0 KB");
     }
@@ -973,9 +1077,15 @@ mod tests {
     fn test_add_printer() {
         let mut mgr = PrintManager::new();
         let p = Printer {
-            id: 0, name: "HP".to_string(), model: "LaserJet".to_string(),
-            connection: PrinterConnection::Network, capabilities: PrinterCapabilities::basic(),
-            online: true, is_default: false, queue_count: 0, ink_level: None,
+            id: 0,
+            name: "HP".to_string(),
+            model: "LaserJet".to_string(),
+            connection: PrinterConnection::Network,
+            capabilities: PrinterCapabilities::basic(),
+            online: true,
+            is_default: false,
+            queue_count: 0,
+            ink_level: None,
         };
         let id = mgr.add_printer(p);
         assert!(id.is_some());
@@ -994,9 +1104,15 @@ mod tests {
     fn test_set_default() {
         let mut mgr = PrintManager::new();
         let p = Printer {
-            id: 0, name: "HP".to_string(), model: "LJ".to_string(),
-            connection: PrinterConnection::Usb, capabilities: PrinterCapabilities::basic(),
-            online: true, is_default: false, queue_count: 0, ink_level: None,
+            id: 0,
+            name: "HP".to_string(),
+            model: "LJ".to_string(),
+            connection: PrinterConnection::Usb,
+            capabilities: PrinterCapabilities::basic(),
+            online: true,
+            is_default: false,
+            queue_count: 0,
+            ink_level: None,
         };
         let id = mgr.add_printer(p).unwrap();
         assert!(mgr.set_default(id));
@@ -1007,7 +1123,15 @@ mod tests {
     fn test_submit_job() {
         let mut mgr = PrintManager::new();
         let pid = mgr.printers[0].id;
-        let jid = mgr.submit_job("doc.pdf", pid, PrintSettings::default_settings(), 10, 5000, "user", 1000);
+        let jid = mgr.submit_job(
+            "doc.pdf",
+            pid,
+            PrintSettings::default_settings(),
+            10,
+            5000,
+            "user",
+            1000,
+        );
         assert!(jid.is_some());
         assert_eq!(mgr.jobs.len(), 1);
         assert_eq!(mgr.printers[0].queue_count, 1);
@@ -1018,7 +1142,15 @@ mod tests {
         let mut mgr = PrintManager::new();
         mgr.printers[0].online = false;
         let pid = mgr.printers[0].id;
-        let jid = mgr.submit_job("doc.pdf", pid, PrintSettings::default_settings(), 1, 100, "u", 0);
+        let jid = mgr.submit_job(
+            "doc.pdf",
+            pid,
+            PrintSettings::default_settings(),
+            1,
+            100,
+            "u",
+            0,
+        );
         assert!(jid.is_none());
     }
 
@@ -1027,7 +1159,15 @@ mod tests {
         let mut mgr = PrintManager::new();
         mgr.set_spooler(false);
         let pid = mgr.printers[0].id;
-        let jid = mgr.submit_job("doc.pdf", pid, PrintSettings::default_settings(), 1, 100, "u", 0);
+        let jid = mgr.submit_job(
+            "doc.pdf",
+            pid,
+            PrintSettings::default_settings(),
+            1,
+            100,
+            "u",
+            0,
+        );
         assert!(jid.is_none());
     }
 
@@ -1035,7 +1175,17 @@ mod tests {
     fn test_cancel_job() {
         let mut mgr = PrintManager::new();
         let pid = mgr.printers[0].id;
-        let jid = mgr.submit_job("doc.pdf", pid, PrintSettings::default_settings(), 10, 5000, "u", 0).unwrap();
+        let jid = mgr
+            .submit_job(
+                "doc.pdf",
+                pid,
+                PrintSettings::default_settings(),
+                10,
+                5000,
+                "u",
+                0,
+            )
+            .unwrap();
         assert!(mgr.cancel_job(jid));
         assert_eq!(mgr.jobs[0].state, JobState::Cancelled);
     }
@@ -1044,7 +1194,17 @@ mod tests {
     fn test_cancel_completed_job_fails() {
         let mut mgr = PrintManager::new();
         let pid = mgr.printers[0].id;
-        let jid = mgr.submit_job("doc.pdf", pid, PrintSettings::default_settings(), 1, 100, "u", 0).unwrap();
+        let jid = mgr
+            .submit_job(
+                "doc.pdf",
+                pid,
+                PrintSettings::default_settings(),
+                1,
+                100,
+                "u",
+                0,
+            )
+            .unwrap();
         mgr.advance_job(jid); // complete
         assert!(!mgr.cancel_job(jid));
     }
@@ -1053,7 +1213,17 @@ mod tests {
     fn test_pause_resume_job() {
         let mut mgr = PrintManager::new();
         let pid = mgr.printers[0].id;
-        let jid = mgr.submit_job("doc.pdf", pid, PrintSettings::default_settings(), 5, 100, "u", 0).unwrap();
+        let jid = mgr
+            .submit_job(
+                "doc.pdf",
+                pid,
+                PrintSettings::default_settings(),
+                5,
+                100,
+                "u",
+                0,
+            )
+            .unwrap();
         assert!(mgr.pause_job(jid));
         assert_eq!(mgr.jobs[0].state, JobState::Paused);
         assert!(mgr.resume_job(jid));
@@ -1064,7 +1234,17 @@ mod tests {
     fn test_advance_job_to_completion() {
         let mut mgr = PrintManager::new();
         let pid = mgr.printers[0].id;
-        let jid = mgr.submit_job("doc.pdf", pid, PrintSettings::default_settings(), 3, 100, "u", 0).unwrap();
+        let jid = mgr
+            .submit_job(
+                "doc.pdf",
+                pid,
+                PrintSettings::default_settings(),
+                3,
+                100,
+                "u",
+                0,
+            )
+            .unwrap();
         mgr.advance_job(jid); // page 1
         mgr.advance_job(jid); // page 2
         mgr.advance_job(jid); // page 3 → completed
@@ -1076,8 +1256,24 @@ mod tests {
     fn test_active_jobs() {
         let mut mgr = PrintManager::new();
         let pid = mgr.printers[0].id;
-        mgr.submit_job("a.pdf", pid, PrintSettings::default_settings(), 5, 100, "u", 0);
-        mgr.submit_job("b.pdf", pid, PrintSettings::default_settings(), 1, 100, "u", 0);
+        mgr.submit_job(
+            "a.pdf",
+            pid,
+            PrintSettings::default_settings(),
+            5,
+            100,
+            "u",
+            0,
+        );
+        mgr.submit_job(
+            "b.pdf",
+            pid,
+            PrintSettings::default_settings(),
+            1,
+            100,
+            "u",
+            0,
+        );
         let jid2 = mgr.jobs[1].id;
         mgr.advance_job(jid2); // complete b.pdf
         assert_eq!(mgr.active_jobs().len(), 1);
@@ -1087,8 +1283,24 @@ mod tests {
     fn test_purge_terminal() {
         let mut mgr = PrintManager::new();
         let pid = mgr.printers[0].id;
-        mgr.submit_job("a.pdf", pid, PrintSettings::default_settings(), 1, 100, "u", 0);
-        mgr.submit_job("b.pdf", pid, PrintSettings::default_settings(), 5, 100, "u", 0);
+        mgr.submit_job(
+            "a.pdf",
+            pid,
+            PrintSettings::default_settings(),
+            1,
+            100,
+            "u",
+            0,
+        );
+        mgr.submit_job(
+            "b.pdf",
+            pid,
+            PrintSettings::default_settings(),
+            5,
+            100,
+            "u",
+            0,
+        );
         let jid1 = mgr.jobs[0].id;
         mgr.advance_job(jid1);
         let purged = mgr.purge_terminal_jobs();
@@ -1100,12 +1312,32 @@ mod tests {
     fn test_total_pages_printed() {
         let mut mgr = PrintManager::new();
         let pid = mgr.printers[0].id;
-        mgr.submit_job("a.pdf", pid, PrintSettings::default_settings(), 3, 100, "u", 0);
-        mgr.submit_job("b.pdf", pid, PrintSettings::default_settings(), 2, 100, "u", 0);
+        mgr.submit_job(
+            "a.pdf",
+            pid,
+            PrintSettings::default_settings(),
+            3,
+            100,
+            "u",
+            0,
+        );
+        mgr.submit_job(
+            "b.pdf",
+            pid,
+            PrintSettings::default_settings(),
+            2,
+            100,
+            "u",
+            0,
+        );
         let jid1 = mgr.jobs[0].id;
         let jid2 = mgr.jobs[1].id;
-        for _ in 0..3 { mgr.advance_job(jid1); }
-        for _ in 0..2 { mgr.advance_job(jid2); }
+        for _ in 0..3 {
+            mgr.advance_job(jid1);
+        }
+        for _ in 0..2 {
+            mgr.advance_job(jid2);
+        }
         assert_eq!(mgr.total_pages_printed(), 5);
     }
 

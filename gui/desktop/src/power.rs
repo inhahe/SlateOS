@@ -185,9 +185,9 @@ impl Default for PowerConfig {
         Self {
             profile: PowerProfile::Balanced,
             dim_timeout_secs: 180,        // 3 minutes
-            screen_off_timeout_secs: 300,  // 5 minutes
-            suspend_timeout_secs: 900,     // 15 minutes
-            screensaver_timeout_secs: 0,   // disabled by default
+            screen_off_timeout_secs: 300, // 5 minutes
+            suspend_timeout_secs: 900,    // 15 minutes
+            screensaver_timeout_secs: 0,  // disabled by default
             screensaver_style: ScreenSaverStyle::Clock,
             lid_close_action: PowerAction::Suspend,
             power_button_action: PowerAction::Shutdown,
@@ -238,18 +238,45 @@ impl PowerConfig {
         out.push_str("# Power Management Configuration\n");
         out.push_str(&format!("profile={}\n", profile_str(self.profile)));
         out.push_str(&format!("dim_timeout={}\n", self.dim_timeout_secs));
-        out.push_str(&format!("screen_off_timeout={}\n", self.screen_off_timeout_secs));
+        out.push_str(&format!(
+            "screen_off_timeout={}\n",
+            self.screen_off_timeout_secs
+        ));
         out.push_str(&format!("suspend_timeout={}\n", self.suspend_timeout_secs));
-        out.push_str(&format!("screensaver_timeout={}\n", self.screensaver_timeout_secs));
-        out.push_str(&format!("screensaver_style={}\n", screensaver_str(self.screensaver_style)));
-        out.push_str(&format!("lid_close_action={}\n", action_str(self.lid_close_action)));
-        out.push_str(&format!("power_button_action={}\n", action_str(self.power_button_action)));
-        out.push_str(&format!("sleep_button_action={}\n", action_str(self.sleep_button_action)));
+        out.push_str(&format!(
+            "screensaver_timeout={}\n",
+            self.screensaver_timeout_secs
+        ));
+        out.push_str(&format!(
+            "screensaver_style={}\n",
+            screensaver_str(self.screensaver_style)
+        ));
+        out.push_str(&format!(
+            "lid_close_action={}\n",
+            action_str(self.lid_close_action)
+        ));
+        out.push_str(&format!(
+            "power_button_action={}\n",
+            action_str(self.power_button_action)
+        ));
+        out.push_str(&format!(
+            "sleep_button_action={}\n",
+            action_str(self.sleep_button_action)
+        ));
         out.push_str(&format!("low_battery_pct={}\n", self.low_battery_pct));
-        out.push_str(&format!("critical_battery_pct={}\n", self.critical_battery_pct));
-        out.push_str(&format!("critical_battery_action={}\n", action_str(self.critical_battery_action)));
+        out.push_str(&format!(
+            "critical_battery_pct={}\n",
+            self.critical_battery_pct
+        ));
+        out.push_str(&format!(
+            "critical_battery_action={}\n",
+            action_str(self.critical_battery_action)
+        ));
         out.push_str(&format!("wake_on_lan={}\n", self.wake_on_lan));
-        out.push_str(&format!("cpu_governor={}\n", governor_str(self.cpu_governor)));
+        out.push_str(&format!(
+            "cpu_governor={}\n",
+            governor_str(self.cpu_governor)
+        ));
         out.push_str(&format!("dim_brightness={}\n", self.dim_brightness_pct));
         out.push_str(&format!("show_battery_pct={}\n", self.show_battery_pct));
         out
@@ -394,13 +421,15 @@ impl BatteryInfo {
 
     /// Whether battery is in a warning state.
     pub fn is_warning(&self, config: &PowerConfig) -> bool {
-        self.present && self.charge_pct <= config.low_battery_pct
+        self.present
+            && self.charge_pct <= config.low_battery_pct
             && self.state == BatteryState::Discharging
     }
 
     /// Whether battery is in a critical state.
     pub fn is_critical(&self, config: &PowerConfig) -> bool {
-        self.present && self.charge_pct <= config.critical_battery_pct
+        self.present
+            && self.charge_pct <= config.critical_battery_pct
             && (self.state == BatteryState::Discharging || self.state == BatteryState::Critical)
     }
 }
@@ -642,12 +671,7 @@ impl PowerManager {
 
     /// Add an inhibitor preventing certain power actions.
     /// Returns the inhibitor ID for later removal.
-    pub fn add_inhibitor(
-        &mut self,
-        app_name: &str,
-        reason: &str,
-        what: InhibitTarget,
-    ) -> u32 {
+    pub fn add_inhibitor(&mut self, app_name: &str, reason: &str, what: InhibitTarget) -> u32 {
         let id = self.next_inhibitor_id;
         self.next_inhibitor_id = self.next_inhibitor_id.saturating_add(1);
         self.inhibitors.push(PowerInhibitor {
@@ -676,7 +700,9 @@ impl PowerManager {
 
     /// Check if a specific action is inhibited.
     pub fn is_inhibited(&self, target: InhibitTarget) -> bool {
-        self.inhibitors.iter().any(|i| i.what == target || i.what == InhibitTarget::All)
+        self.inhibitors
+            .iter()
+            .any(|i| i.what == target || i.what == InhibitTarget::All)
     }
 
     /// Get the transition log.
@@ -729,7 +755,11 @@ impl PowerManager {
             && self.idle_secs >= cfg.screen_off_timeout_secs
             && !self.is_inhibited(InhibitTarget::ScreenOff)
         {
-            self.transition_to(PowerState::ScreenOff, now_secs, TransitionReason::IdleTimeout);
+            self.transition_to(
+                PowerState::ScreenOff,
+                now_secs,
+                TransitionReason::IdleTimeout,
+            );
             return Some(PowerAction::ScreenOff);
         }
 
@@ -744,7 +774,11 @@ impl PowerManager {
             && self.idle_secs >= cfg.screen_off_timeout_secs
             && !self.is_inhibited(InhibitTarget::ScreenOff)
         {
-            self.transition_to(PowerState::ScreenOff, now_secs, TransitionReason::IdleTimeout);
+            self.transition_to(
+                PowerState::ScreenOff,
+                now_secs,
+                TransitionReason::IdleTimeout,
+            );
             return Some(PowerAction::ScreenOff);
         }
 
@@ -753,7 +787,11 @@ impl PowerManager {
             && self.idle_secs >= cfg.suspend_timeout_secs
             && !self.is_inhibited(InhibitTarget::Suspend)
         {
-            self.transition_to(PowerState::Suspended, now_secs, TransitionReason::IdleTimeout);
+            self.transition_to(
+                PowerState::Suspended,
+                now_secs,
+                TransitionReason::IdleTimeout,
+            );
             return Some(PowerAction::Suspend);
         }
 
@@ -811,7 +849,7 @@ impl PowerManager {
 struct Star {
     x: f32,
     y: f32,
-    z: f32,  // depth (1.0 = far, 0.01 = close)
+    z: f32, // depth (1.0 = far, 0.01 = close)
     speed: f32,
 }
 
@@ -1275,11 +1313,7 @@ pub fn render_battery_icon(
 }
 
 /// Render a power profile indicator (for settings or quick settings).
-pub fn render_power_profile_badge(
-    profile: PowerProfile,
-    x: f32,
-    y: f32,
-) -> Vec<RenderCommand> {
+pub fn render_power_profile_badge(profile: PowerProfile, x: f32, y: f32) -> Vec<RenderCommand> {
     let (label, color) = match profile {
         PowerProfile::Balanced => ("Balanced", COL_BLUE),
         PowerProfile::Performance => ("Performance", COL_PEACH),
@@ -1844,7 +1878,11 @@ mod tests {
         pm.max_log_entries = 3;
         for i in 0..5 {
             pm.transition_to(
-                if i % 2 == 0 { PowerState::Dimmed } else { PowerState::Active },
+                if i % 2 == 0 {
+                    PowerState::Dimmed
+                } else {
+                    PowerState::Active
+                },
                 i as u64,
                 TransitionReason::UserActivity,
             );

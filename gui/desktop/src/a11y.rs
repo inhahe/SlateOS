@@ -123,33 +123,47 @@ impl ColorFilter {
             Self::None => color,
             Self::Grayscale => {
                 // Perceptual luminance weighting.
-                let lum = ((color.r as u32 * 77) + (color.g as u32 * 150) + (color.b as u32 * 29)) / 256;
+                let lum =
+                    ((color.r as u32 * 77) + (color.g as u32 * 150) + (color.b as u32 * 29)) / 256;
                 let l = lum.min(255) as u8;
                 Color::rgba(l, l, l, color.a)
             }
-            Self::Inverted => {
-                Color::rgba(255 - color.r, 255 - color.g, 255 - color.b, color.a)
-            }
+            Self::Inverted => Color::rgba(255 - color.r, 255 - color.g, 255 - color.b, color.a),
             Self::Protanopia => {
                 // Simplified simulation: reduce red sensitivity.
                 let r = ((color.r as u32 * 56) + (color.g as u32 * 43) + color.b as u32) / 100;
                 let g = ((color.r as u32 * 55) + (color.g as u32 * 44) + color.b as u32) / 100;
                 let b = ((color.g as u32 * 24) + (color.b as u32 * 76)) / 100;
-                Color::rgba(r.min(255) as u8, g.min(255) as u8, b.min(255) as u8, color.a)
+                Color::rgba(
+                    r.min(255) as u8,
+                    g.min(255) as u8,
+                    b.min(255) as u8,
+                    color.a,
+                )
             }
             Self::Deuteranopia => {
                 // Simplified simulation: reduce green sensitivity.
                 let r = ((color.r as u32 * 63) + (color.g as u32 * 37)) / 100;
                 let g = ((color.r as u32 * 70) + (color.g as u32 * 30)) / 100;
                 let b = ((color.g as u32 * 30) + (color.b as u32 * 70)) / 100;
-                Color::rgba(r.min(255) as u8, g.min(255) as u8, b.min(255) as u8, color.a)
+                Color::rgba(
+                    r.min(255) as u8,
+                    g.min(255) as u8,
+                    b.min(255) as u8,
+                    color.a,
+                )
             }
             Self::Tritanopia => {
                 // Simplified simulation: reduce blue sensitivity.
                 let r = ((color.r as u32 * 95) + (color.g as u32 * 5)) / 100;
                 let g = ((color.g as u32 * 43) + (color.b as u32 * 57)) / 100;
                 let b = ((color.g as u32 * 47) + (color.b as u32 * 53)) / 100;
-                Color::rgba(r.min(255) as u8, g.min(255) as u8, b.min(255) as u8, color.a)
+                Color::rgba(
+                    r.min(255) as u8,
+                    g.min(255) as u8,
+                    b.min(255) as u8,
+                    color.a,
+                )
             }
         }
     }
@@ -831,24 +845,30 @@ impl AccessibilityConfig {
         out.push_str("# Accessibility Configuration\n");
 
         if let Some(hc) = &self.high_contrast {
-            out.push_str(&format!("high_contrast={}\n", match hc {
-                HighContrastTheme::BlackOnWhite => "black_on_white",
-                HighContrastTheme::WhiteOnBlack => "white_on_black",
-                HighContrastTheme::YellowOnBlack => "yellow_on_black",
-                HighContrastTheme::GreenOnBlack => "green_on_black",
-            }));
+            out.push_str(&format!(
+                "high_contrast={}\n",
+                match hc {
+                    HighContrastTheme::BlackOnWhite => "black_on_white",
+                    HighContrastTheme::WhiteOnBlack => "white_on_black",
+                    HighContrastTheme::YellowOnBlack => "yellow_on_black",
+                    HighContrastTheme::GreenOnBlack => "green_on_black",
+                }
+            ));
         } else {
             out.push_str("high_contrast=off\n");
         }
 
-        out.push_str(&format!("color_filter={}\n", match self.color_filter {
-            ColorFilter::None => "none",
-            ColorFilter::Protanopia => "protanopia",
-            ColorFilter::Deuteranopia => "deuteranopia",
-            ColorFilter::Tritanopia => "tritanopia",
-            ColorFilter::Grayscale => "grayscale",
-            ColorFilter::Inverted => "inverted",
-        }));
+        out.push_str(&format!(
+            "color_filter={}\n",
+            match self.color_filter {
+                ColorFilter::None => "none",
+                ColorFilter::Protanopia => "protanopia",
+                ColorFilter::Deuteranopia => "deuteranopia",
+                ColorFilter::Tritanopia => "tritanopia",
+                ColorFilter::Grayscale => "grayscale",
+                ColorFilter::Inverted => "inverted",
+            }
+        ));
 
         out.push_str(&format!("reduced_motion={}\n", self.reduced_motion));
         out.push_str(&format!("magnifier_enabled={}\n", self.magnifier.enabled));

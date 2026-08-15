@@ -90,10 +90,7 @@ pub enum HotkeyError {
         existing: HotkeyAction,
     },
     /// The configuration text contains an invalid line.
-    ParseError {
-        line_number: usize,
-        message: String,
-    },
+    ParseError { line_number: usize, message: String },
     /// An unrecognized key name was encountered.
     UnknownKey(String),
     /// An unrecognized action name was encountered.
@@ -517,10 +514,7 @@ fn register_defaults(reg: &mut HotkeyRegistry) {
             HotkeyAction::CycleWindows,
         ),
         // Search, run, settings
-        (
-            Hotkey::bare(Key::LeftSuper),
-            HotkeyAction::ShowSearch,
-        ),
+        (Hotkey::bare(Key::LeftSuper), HotkeyAction::ShowSearch),
         (
             Hotkey::new(Key::R, mods(false, false, false, true)),
             HotkeyAction::ShowRun,
@@ -544,32 +538,17 @@ fn register_defaults(reg: &mut HotkeyRegistry) {
             HotkeyAction::ShowTaskManager,
         ),
         // Screenshots
-        (
-            Hotkey::bare(Key::PrintScreen),
-            HotkeyAction::Screenshot,
-        ),
+        (Hotkey::bare(Key::PrintScreen), HotkeyAction::Screenshot),
         (
             Hotkey::new(Key::S, mods(false, false, true, true)),
             HotkeyAction::ScreenshotRegion,
         ),
         // Media keys (mapped as bare keys with no modifiers, since hardware
         // media keys generate dedicated key codes).
-        (
-            Hotkey::bare(Key::Unknown(0xAF)),
-            HotkeyAction::VolumeUp,
-        ),
-        (
-            Hotkey::bare(Key::Unknown(0xAE)),
-            HotkeyAction::VolumeDown,
-        ),
-        (
-            Hotkey::bare(Key::Unknown(0xAD)),
-            HotkeyAction::VolumeMute,
-        ),
-        (
-            Hotkey::bare(Key::Unknown(0xE0)),
-            HotkeyAction::BrightnessUp,
-        ),
+        (Hotkey::bare(Key::Unknown(0xAF)), HotkeyAction::VolumeUp),
+        (Hotkey::bare(Key::Unknown(0xAE)), HotkeyAction::VolumeDown),
+        (Hotkey::bare(Key::Unknown(0xAD)), HotkeyAction::VolumeMute),
+        (Hotkey::bare(Key::Unknown(0xE0)), HotkeyAction::BrightnessUp),
         (
             Hotkey::bare(Key::Unknown(0xE1)),
             HotkeyAction::BrightnessDown,
@@ -635,11 +614,12 @@ impl HotkeyConfig {
                 message: format!("{}", e),
             })?;
 
-            let action =
-                HotkeyAction::from_config_value(value_part).map_err(|e| HotkeyError::ParseError {
+            let action = HotkeyAction::from_config_value(value_part).map_err(|e| {
+                HotkeyError::ParseError {
                     line_number: line_idx + 1,
                     message: format!("{}", e),
-                })?;
+                }
+            })?;
 
             bindings.push((hotkey, action));
         }
@@ -1353,10 +1333,7 @@ mod tests {
         let hk = Hotkey::new(Key::D, mods(false, false, false, true));
         reg.register(hk, HotkeyAction::ShowDesktop).ok();
 
-        assert_eq!(
-            reg.conflicts_with(&hk),
-            Some(&HotkeyAction::ShowDesktop)
-        );
+        assert_eq!(reg.conflicts_with(&hk), Some(&HotkeyAction::ShowDesktop));
 
         let free = Hotkey::bare(Key::A);
         assert!(reg.conflicts_with(&free).is_none());
@@ -1724,10 +1701,7 @@ mod tests {
             HotkeyAction::LaunchApp("x".into()).display_label(),
             "Launch App"
         );
-        assert_eq!(
-            HotkeyAction::Custom("x".into()).display_label(),
-            "Custom"
-        );
+        assert_eq!(HotkeyAction::Custom("x".into()).display_label(), "Custom");
     }
 
     // ====================================================================

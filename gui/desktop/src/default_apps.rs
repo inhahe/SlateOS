@@ -108,18 +108,18 @@ impl ContentCategory {
     /// Icon character for display.
     pub fn icon(self) -> &'static str {
         match self {
-            Self::WebBrowser => "\u{1F310}",    // globe
-            Self::EmailClient => "\u{2709}",    // envelope
-            Self::MusicPlayer => "\u{1F3B5}",   // music note
-            Self::VideoPlayer => "\u{1F3AC}",   // clapper board
-            Self::ImageViewer => "\u{1F5BC}",   // frame with picture
+            Self::WebBrowser => "\u{1F310}",     // globe
+            Self::EmailClient => "\u{2709}",     // envelope
+            Self::MusicPlayer => "\u{1F3B5}",    // music note
+            Self::VideoPlayer => "\u{1F3AC}",    // clapper board
+            Self::ImageViewer => "\u{1F5BC}",    // frame with picture
             Self::DocumentReader => "\u{1F4C4}", // page facing up
-            Self::TextEditor => "\u{1F4DD}",    // memo
+            Self::TextEditor => "\u{1F4DD}",     // memo
             Self::ArchiveManager => "\u{1F4E6}", // package
-            Self::Terminal => "\u{1F4BB}",      // laptop
-            Self::FileManager => "\u{1F4C1}",   // file folder
-            Self::Calculator => "\u{1F522}",    // input numbers
-            Self::Calendar => "\u{1F4C5}",      // calendar
+            Self::Terminal => "\u{1F4BB}",       // laptop
+            Self::FileManager => "\u{1F4C1}",    // file folder
+            Self::Calculator => "\u{1F522}",     // input numbers
+            Self::Calendar => "\u{1F4C5}",       // calendar
         }
     }
 
@@ -130,9 +130,13 @@ impl ContentCategory {
             Self::EmailClient => &["eml", "msg"],
             Self::MusicPlayer => &["mp3", "flac", "ogg", "wav", "aac", "m4a", "wma", "opus"],
             Self::VideoPlayer => &["mp4", "avi", "mkv", "webm", "mov", "wmv", "flv", "m4v"],
-            Self::ImageViewer => &["png", "jpg", "jpeg", "bmp", "gif", "webp", "svg", "ico", "tiff"],
+            Self::ImageViewer => &[
+                "png", "jpg", "jpeg", "bmp", "gif", "webp", "svg", "ico", "tiff",
+            ],
             Self::DocumentReader => &["pdf", "epub", "djvu", "xps"],
-            Self::TextEditor => &["txt", "log", "cfg", "ini", "md", "rst", "yaml", "yml", "toml", "json", "xml"],
+            Self::TextEditor => &[
+                "txt", "log", "cfg", "ini", "md", "rst", "yaml", "yml", "toml", "json", "xml",
+            ],
             Self::ArchiveManager => &["zip", "tar", "gz", "bz2", "xz", "7z", "rar", "zst"],
             Self::Terminal => &[],
             Self::FileManager => &[],
@@ -148,7 +152,13 @@ impl ContentCategory {
             Self::EmailClient => &["message/rfc822", "x-scheme-handler/mailto"],
             Self::MusicPlayer => &["audio/mpeg", "audio/flac", "audio/ogg", "audio/wav"],
             Self::VideoPlayer => &["video/mp4", "video/x-matroska", "video/webm", "video/avi"],
-            Self::ImageViewer => &["image/png", "image/jpeg", "image/bmp", "image/gif", "image/webp"],
+            Self::ImageViewer => &[
+                "image/png",
+                "image/jpeg",
+                "image/bmp",
+                "image/gif",
+                "image/webp",
+            ],
             Self::DocumentReader => &["application/pdf", "application/epub+zip"],
             Self::TextEditor => &["text/plain", "text/markdown", "application/json"],
             Self::ArchiveManager => &["application/zip", "application/x-tar", "application/gzip"],
@@ -231,10 +241,22 @@ pub fn builtin_apps() -> Vec<AppInfo> {
             icon_name: "text-editor".to_string(),
             supported_categories: vec![ContentCategory::TextEditor],
             supported_extensions: vec![
-                "txt".into(), "log".into(), "cfg".into(), "ini".into(),
-                "md".into(), "rst".into(), "yaml".into(), "yml".into(),
-                "toml".into(), "json".into(), "xml".into(), "rs".into(),
-                "py".into(), "c".into(), "cpp".into(), "h".into(),
+                "txt".into(),
+                "log".into(),
+                "cfg".into(),
+                "ini".into(),
+                "md".into(),
+                "rst".into(),
+                "yaml".into(),
+                "yml".into(),
+                "toml".into(),
+                "json".into(),
+                "xml".into(),
+                "rs".into(),
+                "py".into(),
+                "c".into(),
+                "cpp".into(),
+                "h".into(),
             ],
             supported_mime_types: vec![
                 "text/plain".to_string(),
@@ -251,12 +273,20 @@ pub fn builtin_apps() -> Vec<AppInfo> {
             icon_name: "image-viewer".to_string(),
             supported_categories: vec![ContentCategory::ImageViewer],
             supported_extensions: vec![
-                "png".into(), "jpg".into(), "jpeg".into(), "bmp".into(),
-                "gif".into(), "webp".into(), "svg".into(), "ico".into(),
+                "png".into(),
+                "jpg".into(),
+                "jpeg".into(),
+                "bmp".into(),
+                "gif".into(),
+                "webp".into(),
+                "svg".into(),
+                "ico".into(),
             ],
             supported_mime_types: vec![
-                "image/png".to_string(), "image/jpeg".to_string(),
-                "image/bmp".to_string(), "image/gif".to_string(),
+                "image/png".to_string(),
+                "image/jpeg".to_string(),
+                "image/bmp".to_string(),
+                "image/gif".to_string(),
             ],
             is_system: true,
         },
@@ -268,12 +298,19 @@ pub fn builtin_apps() -> Vec<AppInfo> {
             icon_name: "music".to_string(),
             supported_categories: vec![ContentCategory::MusicPlayer],
             supported_extensions: vec![
-                "mp3".into(), "flac".into(), "ogg".into(), "wav".into(),
-                "aac".into(), "m4a".into(), "opus".into(),
+                "mp3".into(),
+                "flac".into(),
+                "ogg".into(),
+                "wav".into(),
+                "aac".into(),
+                "m4a".into(),
+                "opus".into(),
             ],
             supported_mime_types: vec![
-                "audio/mpeg".to_string(), "audio/flac".to_string(),
-                "audio/ogg".to_string(), "audio/wav".to_string(),
+                "audio/mpeg".to_string(),
+                "audio/flac".to_string(),
+                "audio/ogg".to_string(),
+                "audio/wav".to_string(),
             ],
             is_system: true,
         },
@@ -285,11 +322,17 @@ pub fn builtin_apps() -> Vec<AppInfo> {
             icon_name: "video".to_string(),
             supported_categories: vec![ContentCategory::VideoPlayer],
             supported_extensions: vec![
-                "mp4".into(), "avi".into(), "mkv".into(), "webm".into(),
-                "mov".into(), "wmv".into(), "flv".into(),
+                "mp4".into(),
+                "avi".into(),
+                "mkv".into(),
+                "webm".into(),
+                "mov".into(),
+                "wmv".into(),
+                "flv".into(),
             ],
             supported_mime_types: vec![
-                "video/mp4".to_string(), "video/x-matroska".to_string(),
+                "video/mp4".to_string(),
+                "video/x-matroska".to_string(),
                 "video/webm".to_string(),
             ],
             is_system: true,
@@ -316,8 +359,14 @@ pub fn builtin_apps() -> Vec<AppInfo> {
             icon_name: "archive".to_string(),
             supported_categories: vec![ContentCategory::ArchiveManager],
             supported_extensions: vec![
-                "zip".into(), "tar".into(), "gz".into(), "bz2".into(),
-                "7z".into(), "rar".into(), "xz".into(), "zst".into(),
+                "zip".into(),
+                "tar".into(),
+                "gz".into(),
+                "bz2".into(),
+                "7z".into(),
+                "rar".into(),
+                "xz".into(),
+                "zst".into(),
             ],
             supported_mime_types: vec![
                 "application/zip".to_string(),
@@ -434,8 +483,7 @@ impl DefaultAppsSettings {
         {
             entry.1 = app_id.to_string();
         } else {
-            self.category_defaults
-                .push((category, app_id.to_string()));
+            self.category_defaults.push((category, app_id.to_string()));
         }
         true
     }
@@ -542,12 +590,10 @@ impl DefaultAppsSettings {
         let builtin = builtin_apps();
         for entry in &mut self.category_defaults {
             if entry.1 == app_id
-                && let Some(fallback) = builtin
-                    .iter()
-                    .find(|a| a.handles_category(entry.0))
-                {
-                    entry.1 = fallback.id.clone();
-                }
+                && let Some(fallback) = builtin.iter().find(|a| a.handles_category(entry.0))
+            {
+                entry.1 = fallback.id.clone();
+            }
         }
     }
 
@@ -724,13 +770,7 @@ impl DefaultAppsUI {
     }
 
     /// Render the categories tab.
-    fn render_categories_tab(
-        &self,
-        cmds: &mut Vec<RenderCommand>,
-        x: f32,
-        y: f32,
-        width: f32,
-    ) {
+    fn render_categories_tab(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, width: f32) {
         let mut row_y = y;
 
         cmds.push(RenderCommand::Text {
@@ -800,9 +840,7 @@ impl DefaultAppsUI {
             });
 
             // Current default app
-            let app_name = default_app
-                .map(|a| a.name.as_str())
-                .unwrap_or("None set");
+            let app_name = default_app.map(|a| a.name.as_str()).unwrap_or("None set");
             cmds.push(RenderCommand::Text {
                 x: x + 44.0,
                 y: row_y + 30.0,
@@ -869,13 +907,7 @@ impl DefaultAppsUI {
     }
 
     /// Render the file types tab.
-    fn render_filetypes_tab(
-        &self,
-        cmds: &mut Vec<RenderCommand>,
-        x: f32,
-        y: f32,
-        width: f32,
-    ) {
+    fn render_filetypes_tab(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, width: f32) {
         let mut row_y = y;
 
         // Search bar
@@ -1139,11 +1171,8 @@ impl DefaultAppsUI {
             }
 
             // Categories this app handles
-            let categories: Vec<&str> = app
-                .supported_categories
-                .iter()
-                .map(|c| c.label())
-                .collect();
+            let categories: Vec<&str> =
+                app.supported_categories.iter().map(|c| c.label()).collect();
             if !categories.is_empty() {
                 cmds.push(RenderCommand::Text {
                     x: x + 16.0,
@@ -1240,10 +1269,7 @@ mod tests {
     fn test_set_default() {
         let mut settings = DefaultAppsSettings::default();
         // Can't set an app that doesn't handle the category
-        assert!(!settings.set_default(
-            ContentCategory::WebBrowser,
-            "org.slateos.calculator"
-        ));
+        assert!(!settings.set_default(ContentCategory::WebBrowser, "org.slateos.calculator"));
     }
 
     #[test]

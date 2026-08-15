@@ -381,22 +381,33 @@ impl TouchpadConfig {
 
     /// Find the gesture binding for a given finger count and direction.
     pub fn find_gesture(&self, fingers: u8, direction: SwipeDirection) -> Option<&GestureBinding> {
-        self.gestures.iter().find(|g| g.fingers == fingers && g.direction == direction)
+        self.gestures
+            .iter()
+            .find(|g| g.fingers == fingers && g.direction == direction)
     }
 
     /// Set a gesture binding (replaces existing, or adds new).
     pub fn set_gesture(&mut self, fingers: u8, direction: SwipeDirection, action: GestureAction) {
-        if let Some(g) = self.gestures.iter_mut().find(|g| g.fingers == fingers && g.direction == direction) {
+        if let Some(g) = self
+            .gestures
+            .iter_mut()
+            .find(|g| g.fingers == fingers && g.direction == direction)
+        {
             g.action = action;
         } else {
-            self.gestures.push(GestureBinding { fingers, direction, action });
+            self.gestures.push(GestureBinding {
+                fingers,
+                direction,
+                action,
+            });
         }
     }
 
     /// Remove a gesture binding.
     pub fn remove_gesture(&mut self, fingers: u8, direction: SwipeDirection) -> bool {
         let before = self.gestures.len();
-        self.gestures.retain(|g| !(g.fingers == fingers && g.direction == direction));
+        self.gestures
+            .retain(|g| !(g.fingers == fingers && g.direction == direction));
         self.gestures.len() < before
     }
 
@@ -405,34 +416,55 @@ impl TouchpadConfig {
         let mut out = String::new();
         out.push_str(&format!("enabled|{}\n", self.enabled));
         out.push_str(&format!("pointer_speed|{}\n", self.pointer_speed));
-        out.push_str(&format!("acceleration|{}\n", match self.acceleration {
-            AccelerationProfile::Linear => "linear",
-            AccelerationProfile::Adaptive => "adaptive",
-            AccelerationProfile::Flat => "flat",
-        }));
-        out.push_str(&format!("scroll_direction|{}\n", match self.scroll_direction {
-            ScrollDirection::Natural => "natural",
-            ScrollDirection::Traditional => "traditional",
-        }));
-        out.push_str(&format!("scroll_method|{}\n", match self.scroll_method {
-            ScrollMethod::TwoFinger => "two_finger",
-            ScrollMethod::Edge => "edge",
-            ScrollMethod::Disabled => "disabled",
-        }));
+        out.push_str(&format!(
+            "acceleration|{}\n",
+            match self.acceleration {
+                AccelerationProfile::Linear => "linear",
+                AccelerationProfile::Adaptive => "adaptive",
+                AccelerationProfile::Flat => "flat",
+            }
+        ));
+        out.push_str(&format!(
+            "scroll_direction|{}\n",
+            match self.scroll_direction {
+                ScrollDirection::Natural => "natural",
+                ScrollDirection::Traditional => "traditional",
+            }
+        ));
+        out.push_str(&format!(
+            "scroll_method|{}\n",
+            match self.scroll_method {
+                ScrollMethod::TwoFinger => "two_finger",
+                ScrollMethod::Edge => "edge",
+                ScrollMethod::Disabled => "disabled",
+            }
+        ));
         out.push_str(&format!("scroll_speed|{}\n", self.scroll_speed));
         out.push_str(&format!("horizontal_scroll|{}\n", self.horizontal_scroll));
         out.push_str(&format!("tap_enabled|{}\n", self.tap.enabled));
         out.push_str(&format!("tap_and_drag|{}\n", self.tap.tap_and_drag));
         out.push_str(&format!("drag_lock|{}\n", self.tap.drag_lock));
-        out.push_str(&format!("palm_rejection|{}\n", match self.palm_rejection {
-            PalmRejection::Off => "off",
-            PalmRejection::Low => "low",
-            PalmRejection::Medium => "medium",
-            PalmRejection::High => "high",
-        }));
-        out.push_str(&format!("disable_while_typing|{}\n", self.disable_while_typing));
-        out.push_str(&format!("typing_disable_delay_ms|{}\n", self.typing_disable_delay_ms));
-        out.push_str(&format!("disable_with_external_mouse|{}\n", self.disable_with_external_mouse));
+        out.push_str(&format!(
+            "palm_rejection|{}\n",
+            match self.palm_rejection {
+                PalmRejection::Off => "off",
+                PalmRejection::Low => "low",
+                PalmRejection::Medium => "medium",
+                PalmRejection::High => "high",
+            }
+        ));
+        out.push_str(&format!(
+            "disable_while_typing|{}\n",
+            self.disable_while_typing
+        ));
+        out.push_str(&format!(
+            "typing_disable_delay_ms|{}\n",
+            self.typing_disable_delay_ms
+        ));
+        out.push_str(&format!(
+            "disable_with_external_mouse|{}\n",
+            self.disable_with_external_mouse
+        ));
         out.push_str(&format!("click_pressure|{}\n", self.click_pressure));
         for g in &self.gestures {
             let dir = match g.direction {
@@ -441,7 +473,12 @@ impl TouchpadConfig {
                 SwipeDirection::Left => "left",
                 SwipeDirection::Right => "right",
             };
-            out.push_str(&format!("gesture|{}|{}|{}\n", g.fingers, dir, g.action.label()));
+            out.push_str(&format!(
+                "gesture|{}|{}|{}\n",
+                g.fingers,
+                dir,
+                g.action.label()
+            ));
         }
         out
     }
@@ -550,7 +587,8 @@ impl TouchpadManager {
         if !self.is_active() {
             return GestureAction::None;
         }
-        self.config.find_gesture(fingers, direction)
+        self.config
+            .find_gesture(fingers, direction)
             .map(|g| g.action.clone())
             .unwrap_or(GestureAction::None)
     }
@@ -621,26 +659,41 @@ impl TouchpadSettingsUI {
     }
 
     /// Render the touchpad settings panel.
-    pub fn render(&self, mgr: &TouchpadManager, x: f32, y: f32, w: f32, h: f32) -> Vec<RenderCommand> {
+    pub fn render(
+        &self,
+        mgr: &TouchpadManager,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+    ) -> Vec<RenderCommand> {
         let mut cmds = Vec::new();
 
         // Background.
         cmds.push(RenderCommand::FillRect {
-            x, y, width: w, height: h,
+            x,
+            y,
+            width: w,
+            height: h,
             color: MOCHA_BASE,
             corner_radii: CornerRadii::all(8.0),
         });
 
         // Title bar.
         cmds.push(RenderCommand::FillRect {
-            x, y, width: w, height: 40.0,
+            x,
+            y,
+            width: w,
+            height: 40.0,
             color: MOCHA_MANTLE,
             corner_radii: CornerRadii::ZERO,
         });
         cmds.push(RenderCommand::Text {
-            x: x + 16.0, y: y + 12.0,
+            x: x + 16.0,
+            y: y + 12.0,
             text: "Touchpad & Gestures".to_string(),
-            font_size: 16.0, color: MOCHA_TEXT,
+            font_size: 16.0,
+            color: MOCHA_TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: None,
         });
@@ -648,9 +701,11 @@ impl TouchpadSettingsUI {
         // Device name.
         if let Some(dev) = mgr.active_device() {
             cmds.push(RenderCommand::Text {
-                x: x + w - 250.0, y: y + 14.0,
+                x: x + w - 250.0,
+                y: y + 14.0,
                 text: dev.name.clone(),
-                font_size: 12.0, color: MOCHA_SUBTEXT0,
+                font_size: 12.0,
+                color: MOCHA_SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
             });
@@ -670,16 +725,24 @@ impl TouchpadSettingsUI {
             let active = self.section == *section;
             let tw = 90.0;
             cmds.push(RenderCommand::FillRect {
-                x: tx, y: tab_y, width: tw, height: 28.0,
+                x: tx,
+                y: tab_y,
+                width: tw,
+                height: 28.0,
                 color: if active { MOCHA_BLUE } else { MOCHA_SURFACE0 },
                 corner_radii: CornerRadii::all(6.0),
             });
             cmds.push(RenderCommand::Text {
-                x: tx + 10.0, y: tab_y + 7.0,
+                x: tx + 10.0,
+                y: tab_y + 7.0,
                 text: label.to_string(),
                 font_size: 11.0,
                 color: if active { MOCHA_BASE } else { MOCHA_TEXT },
-                font_weight: if active { FontWeightHint::Bold } else { FontWeightHint::Regular },
+                font_weight: if active {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
                 max_width: None,
             });
             tx += tw + 6.0;
@@ -708,11 +771,26 @@ impl TouchpadSettingsUI {
         cmds
     }
 
-    fn render_general(&self, cmds: &mut Vec<RenderCommand>, mgr: &TouchpadManager, x: f32, y: f32, _w: f32) {
+    fn render_general(
+        &self,
+        cmds: &mut Vec<RenderCommand>,
+        mgr: &TouchpadManager,
+        x: f32,
+        y: f32,
+        _w: f32,
+    ) {
         let mut cy = y;
         self.render_toggle(cmds, x, cy, "Touchpad enabled", mgr.config.enabled);
         cy += 32.0;
-        self.render_slider_label(cmds, x, cy, "Pointer speed", mgr.config.pointer_speed, 0.1, 3.0);
+        self.render_slider_label(
+            cmds,
+            x,
+            cy,
+            "Pointer speed",
+            mgr.config.pointer_speed,
+            0.1,
+            3.0,
+        );
         cy += 32.0;
 
         let accel_label = match mgr.config.acceleration {
@@ -732,20 +810,32 @@ impl TouchpadSettingsUI {
             ("Active", MOCHA_GREEN)
         };
         cmds.push(RenderCommand::FillRect {
-            x, y: cy, width: 12.0, height: 12.0,
+            x,
+            y: cy,
+            width: 12.0,
+            height: 12.0,
             color,
             corner_radii: CornerRadii::all(6.0),
         });
         cmds.push(RenderCommand::Text {
-            x: x + 18.0, y: cy,
+            x: x + 18.0,
+            y: cy,
             text: format!("Status: {}", status),
-            font_size: 12.0, color: MOCHA_TEXT,
+            font_size: 12.0,
+            color: MOCHA_TEXT,
             font_weight: FontWeightHint::Regular,
             max_width: None,
         });
     }
 
-    fn render_scroll(&self, cmds: &mut Vec<RenderCommand>, mgr: &TouchpadManager, x: f32, y: f32, _w: f32) {
+    fn render_scroll(
+        &self,
+        cmds: &mut Vec<RenderCommand>,
+        mgr: &TouchpadManager,
+        x: f32,
+        y: f32,
+        _w: f32,
+    ) {
         let mut cy = y;
         let dir_label = match mgr.config.scroll_direction {
             ScrollDirection::Natural => "Natural (content follows finger)",
@@ -762,13 +852,34 @@ impl TouchpadSettingsUI {
         self.render_choice(cmds, x, cy, "Method", method_label);
         cy += 32.0;
 
-        self.render_slider_label(cmds, x, cy, "Scroll speed", mgr.config.scroll_speed, 0.1, 5.0);
+        self.render_slider_label(
+            cmds,
+            x,
+            cy,
+            "Scroll speed",
+            mgr.config.scroll_speed,
+            0.1,
+            5.0,
+        );
         cy += 32.0;
 
-        self.render_toggle(cmds, x, cy, "Horizontal scrolling", mgr.config.horizontal_scroll);
+        self.render_toggle(
+            cmds,
+            x,
+            cy,
+            "Horizontal scrolling",
+            mgr.config.horizontal_scroll,
+        );
     }
 
-    fn render_taps(&self, cmds: &mut Vec<RenderCommand>, mgr: &TouchpadManager, x: f32, y: f32, _w: f32) {
+    fn render_taps(
+        &self,
+        cmds: &mut Vec<RenderCommand>,
+        mgr: &TouchpadManager,
+        x: f32,
+        y: f32,
+        _w: f32,
+    ) {
         let mut cy = y;
         self.render_toggle(cmds, x, cy, "Tap-to-click", mgr.config.tap.enabled);
         cy += 32.0;
@@ -795,13 +906,22 @@ impl TouchpadSettingsUI {
         self.render_toggle(cmds, x, cy, "Drag lock", mgr.config.tap.drag_lock);
     }
 
-    fn render_gestures(&self, cmds: &mut Vec<RenderCommand>, mgr: &TouchpadManager, x: f32, y: f32, _w: f32) {
+    fn render_gestures(
+        &self,
+        cmds: &mut Vec<RenderCommand>,
+        mgr: &TouchpadManager,
+        x: f32,
+        y: f32,
+        _w: f32,
+    ) {
         let mut cy = y;
 
         cmds.push(RenderCommand::Text {
-            x, y: cy,
+            x,
+            y: cy,
             text: "Multi-finger gestures".to_string(),
-            font_size: 13.0, color: MOCHA_TEXT,
+            font_size: 13.0,
+            color: MOCHA_TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: None,
         });
@@ -809,31 +929,41 @@ impl TouchpadSettingsUI {
 
         // Column headers.
         cmds.push(RenderCommand::Text {
-            x, y: cy,
+            x,
+            y: cy,
             text: "Fingers".to_string(),
-            font_size: 10.0, color: MOCHA_SUBTEXT0,
+            font_size: 10.0,
+            color: MOCHA_SUBTEXT0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
         });
         cmds.push(RenderCommand::Text {
-            x: x + 70.0, y: cy,
+            x: x + 70.0,
+            y: cy,
             text: "Direction".to_string(),
-            font_size: 10.0, color: MOCHA_SUBTEXT0,
+            font_size: 10.0,
+            color: MOCHA_SUBTEXT0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
         });
         cmds.push(RenderCommand::Text {
-            x: x + 160.0, y: cy,
+            x: x + 160.0,
+            y: cy,
             text: "Action".to_string(),
-            font_size: 10.0, color: MOCHA_SUBTEXT0,
+            font_size: 10.0,
+            color: MOCHA_SUBTEXT0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
         });
         cy += 20.0;
 
         cmds.push(RenderCommand::Line {
-            x1: x, y1: cy, x2: x + 400.0, y2: cy,
-            color: MOCHA_SURFACE1, width: 1.0,
+            x1: x,
+            y1: cy,
+            x2: x + 400.0,
+            y2: cy,
+            color: MOCHA_SURFACE1,
+            width: 1.0,
         });
         cy += 4.0;
 
@@ -841,16 +971,21 @@ impl TouchpadSettingsUI {
             let selected = i == self.selected_gesture_idx;
             if selected {
                 cmds.push(RenderCommand::FillRect {
-                    x: x - 4.0, y: cy - 2.0, width: 420.0, height: 22.0,
+                    x: x - 4.0,
+                    y: cy - 2.0,
+                    width: 420.0,
+                    height: 22.0,
                     color: MOCHA_SURFACE0,
                     corner_radii: CornerRadii::all(4.0),
                 });
             }
 
             cmds.push(RenderCommand::Text {
-                x, y: cy + 2.0,
+                x,
+                y: cy + 2.0,
                 text: format!("{}", g.fingers),
-                font_size: 12.0, color: MOCHA_LAVENDER,
+                font_size: 12.0,
+                color: MOCHA_LAVENDER,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
             });
@@ -862,17 +997,21 @@ impl TouchpadSettingsUI {
                 SwipeDirection::Right => "Right",
             };
             cmds.push(RenderCommand::Text {
-                x: x + 70.0, y: cy + 2.0,
+                x: x + 70.0,
+                y: cy + 2.0,
                 text: dir_str.to_string(),
-                font_size: 12.0, color: MOCHA_TEXT,
+                font_size: 12.0,
+                color: MOCHA_TEXT,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
             });
 
             cmds.push(RenderCommand::Text {
-                x: x + 160.0, y: cy + 2.0,
+                x: x + 160.0,
+                y: cy + 2.0,
                 text: g.action.label(),
-                font_size: 12.0, color: MOCHA_BLUE,
+                font_size: 12.0,
+                color: MOCHA_BLUE,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
             });
@@ -891,7 +1030,14 @@ impl TouchpadSettingsUI {
         self.render_choice(cmds, x, cy, "Pinch gesture", pinch_label);
     }
 
-    fn render_advanced(&self, cmds: &mut Vec<RenderCommand>, mgr: &TouchpadManager, x: f32, y: f32, _w: f32) {
+    fn render_advanced(
+        &self,
+        cmds: &mut Vec<RenderCommand>,
+        mgr: &TouchpadManager,
+        x: f32,
+        y: f32,
+        _w: f32,
+    ) {
         let mut cy = y;
 
         let palm_label = match mgr.config.palm_rejection {
@@ -903,34 +1049,61 @@ impl TouchpadSettingsUI {
         self.render_choice(cmds, x, cy, "Palm rejection", palm_label);
         cy += 32.0;
 
-        self.render_toggle(cmds, x, cy, "Disable while typing", mgr.config.disable_while_typing);
+        self.render_toggle(
+            cmds,
+            x,
+            cy,
+            "Disable while typing",
+            mgr.config.disable_while_typing,
+        );
         cy += 32.0;
 
         cmds.push(RenderCommand::Text {
-            x, y: cy,
+            x,
+            y: cy,
             text: format!("Typing delay: {} ms", mgr.config.typing_disable_delay_ms),
-            font_size: 12.0, color: MOCHA_TEXT,
+            font_size: 12.0,
+            color: MOCHA_TEXT,
             font_weight: FontWeightHint::Regular,
             max_width: None,
         });
         cy += 32.0;
 
-        self.render_toggle(cmds, x, cy, "Disable with external mouse", mgr.config.disable_with_external_mouse);
+        self.render_toggle(
+            cmds,
+            x,
+            cy,
+            "Disable with external mouse",
+            mgr.config.disable_with_external_mouse,
+        );
         cy += 32.0;
 
-        self.render_slider_label(cmds, x, cy, "Click pressure", mgr.config.click_pressure, 0.0, 1.0);
+        self.render_slider_label(
+            cmds,
+            x,
+            cy,
+            "Click pressure",
+            mgr.config.click_pressure,
+            0.0,
+            1.0,
+        );
         cy += 40.0;
 
         // Reset button.
         cmds.push(RenderCommand::FillRect {
-            x, y: cy, width: 120.0, height: 28.0,
+            x,
+            y: cy,
+            width: 120.0,
+            height: 28.0,
             color: MOCHA_RED,
             corner_radii: CornerRadii::all(6.0),
         });
         cmds.push(RenderCommand::Text {
-            x: x + 12.0, y: cy + 7.0,
+            x: x + 12.0,
+            y: cy + 7.0,
             text: "Reset to defaults".to_string(),
-            font_size: 12.0, color: MOCHA_BASE,
+            font_size: 12.0,
+            color: MOCHA_BASE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
         });
@@ -938,35 +1111,61 @@ impl TouchpadSettingsUI {
 
     // --- Shared rendering helpers ---
 
-    fn render_toggle(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, label: &str, value: bool) {
+    fn render_toggle(
+        &self,
+        cmds: &mut Vec<RenderCommand>,
+        x: f32,
+        y: f32,
+        label: &str,
+        value: bool,
+    ) {
         cmds.push(RenderCommand::Text {
-            x, y: y + 2.0,
+            x,
+            y: y + 2.0,
             text: label.to_string(),
-            font_size: 12.0, color: MOCHA_TEXT,
+            font_size: 12.0,
+            color: MOCHA_TEXT,
             font_weight: FontWeightHint::Regular,
             max_width: None,
         });
         // Toggle track.
         let track_x = x + 250.0;
         cmds.push(RenderCommand::FillRect {
-            x: track_x, y: y + 1.0, width: 36.0, height: 18.0,
+            x: track_x,
+            y: y + 1.0,
+            width: 36.0,
+            height: 18.0,
             color: if value { MOCHA_GREEN } else { MOCHA_SURFACE2 },
             corner_radii: CornerRadii::all(9.0),
         });
         // Toggle knob.
         let knob_x = if value { track_x + 20.0 } else { track_x + 2.0 };
         cmds.push(RenderCommand::FillRect {
-            x: knob_x, y: y + 3.0, width: 14.0, height: 14.0,
+            x: knob_x,
+            y: y + 3.0,
+            width: 14.0,
+            height: 14.0,
             color: MOCHA_TEXT,
             corner_radii: CornerRadii::all(7.0),
         });
     }
 
-    fn render_slider_label(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, label: &str, value: f32, min: f32, max: f32) {
+    fn render_slider_label(
+        &self,
+        cmds: &mut Vec<RenderCommand>,
+        x: f32,
+        y: f32,
+        label: &str,
+        value: f32,
+        min: f32,
+        max: f32,
+    ) {
         cmds.push(RenderCommand::Text {
-            x, y: y + 2.0,
+            x,
+            y: y + 2.0,
             text: label.to_string(),
-            font_size: 12.0, color: MOCHA_TEXT,
+            font_size: 12.0,
+            color: MOCHA_TEXT,
             font_weight: FontWeightHint::Regular,
             max_width: None,
         });
@@ -974,7 +1173,10 @@ impl TouchpadSettingsUI {
         let track_x = x + 250.0;
         let track_w = 150.0;
         cmds.push(RenderCommand::FillRect {
-            x: track_x, y: y + 8.0, width: track_w, height: 4.0,
+            x: track_x,
+            y: y + 8.0,
+            width: track_w,
+            height: 4.0,
             color: MOCHA_SURFACE1,
             corner_radii: CornerRadii::all(2.0),
         });
@@ -982,43 +1184,65 @@ impl TouchpadSettingsUI {
         let frac = (value - min) / (max - min);
         let fill_w = track_w * frac.clamp(0.0, 1.0);
         cmds.push(RenderCommand::FillRect {
-            x: track_x, y: y + 8.0, width: fill_w, height: 4.0,
+            x: track_x,
+            y: y + 8.0,
+            width: fill_w,
+            height: 4.0,
             color: MOCHA_BLUE,
             corner_radii: CornerRadii::all(2.0),
         });
         // Knob.
         cmds.push(RenderCommand::FillRect {
-            x: track_x + fill_w - 6.0, y: y + 4.0, width: 12.0, height: 12.0,
+            x: track_x + fill_w - 6.0,
+            y: y + 4.0,
+            width: 12.0,
+            height: 12.0,
             color: MOCHA_BLUE,
             corner_radii: CornerRadii::all(6.0),
         });
         // Value text.
         cmds.push(RenderCommand::Text {
-            x: track_x + track_w + 10.0, y: y + 2.0,
+            x: track_x + track_w + 10.0,
+            y: y + 2.0,
             text: format!("{:.1}", value),
-            font_size: 11.0, color: MOCHA_SUBTEXT0,
+            font_size: 11.0,
+            color: MOCHA_SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
         });
     }
 
-    fn render_choice(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, label: &str, value: &str) {
+    fn render_choice(
+        &self,
+        cmds: &mut Vec<RenderCommand>,
+        x: f32,
+        y: f32,
+        label: &str,
+        value: &str,
+    ) {
         cmds.push(RenderCommand::Text {
-            x, y: y + 2.0,
+            x,
+            y: y + 2.0,
             text: label.to_string(),
-            font_size: 12.0, color: MOCHA_TEXT,
+            font_size: 12.0,
+            color: MOCHA_TEXT,
             font_weight: FontWeightHint::Regular,
             max_width: None,
         });
         cmds.push(RenderCommand::FillRect {
-            x: x + 250.0, y, width: 200.0, height: 22.0,
+            x: x + 250.0,
+            y,
+            width: 200.0,
+            height: 22.0,
             color: MOCHA_SURFACE0,
             corner_radii: CornerRadii::all(4.0),
         });
         cmds.push(RenderCommand::Text {
-            x: x + 258.0, y: y + 4.0,
+            x: x + 258.0,
+            y: y + 4.0,
             text: value.to_string(),
-            font_size: 11.0, color: MOCHA_BLUE,
+            font_size: 11.0,
+            color: MOCHA_BLUE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
         });
@@ -1063,8 +1287,14 @@ mod tests {
         assert_eq!(GestureAction::None.label(), "Nothing");
         assert_eq!(GestureAction::ShowOverview.label(), "Show overview");
         assert_eq!(GestureAction::VolumeUp.label(), "Volume up");
-        assert_eq!(GestureAction::LaunchApp("Firefox".to_string()).label(), "Launch: Firefox");
-        assert_eq!(GestureAction::CustomKeybind("Ctrl+N".to_string()).label(), "Key: Ctrl+N");
+        assert_eq!(
+            GestureAction::LaunchApp("Firefox".to_string()).label(),
+            "Launch: Firefox"
+        );
+        assert_eq!(
+            GestureAction::CustomKeybind("Ctrl+N".to_string()).label(),
+            "Key: Ctrl+N"
+        );
     }
 
     #[test]

@@ -327,7 +327,9 @@ impl ClipboardHistory {
             .iter()
             .filter(|e| {
                 e.preview.to_lowercase().contains(&q)
-                    || e.source_app.as_ref().is_some_and(|a| a.to_lowercase().contains(&q))
+                    || e.source_app
+                        .as_ref()
+                        .is_some_and(|a| a.to_lowercase().contains(&q))
                     || e.format.label().to_lowercase().contains(&q)
             })
             .collect()
@@ -550,7 +552,11 @@ impl ClipboardViewer {
 
         // Search field.
         let search_y = y + 36.0;
-        let search_bg = if self.search_focused { COL_SURFACE1 } else { COL_SURFACE0 };
+        let search_bg = if self.search_focused {
+            COL_SURFACE1
+        } else {
+            COL_SURFACE0
+        };
         cmds.push(RenderCommand::FillRect {
             x: x + 8.0,
             y: search_y,
@@ -670,7 +676,10 @@ impl ClipboardViewer {
                 let preview_text = entry.preview.lines().next().unwrap_or("").to_string();
                 let max_preview_len = 40;
                 let display_text = if preview_text.len() > max_preview_len {
-                    format!("{}...", &preview_text[..max_preview_len.min(preview_text.len())])
+                    format!(
+                        "{}...",
+                        &preview_text[..max_preview_len.min(preview_text.len())]
+                    )
                 } else {
                     preview_text
                 };

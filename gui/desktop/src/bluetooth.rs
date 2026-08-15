@@ -193,11 +193,17 @@ impl BluetoothDevice {
         match self.rssi {
             None => 0,
             Some(rssi) => {
-                if rssi > -50 { 4 }
-                else if rssi > -60 { 3 }
-                else if rssi > -70 { 2 }
-                else if rssi > -80 { 1 }
-                else { 0 }
+                if rssi > -50 {
+                    4
+                } else if rssi > -60 {
+                    3
+                } else if rssi > -70 {
+                    2
+                } else if rssi > -80 {
+                    1
+                } else {
+                    0
+                }
             }
         }
     }
@@ -269,7 +275,9 @@ pub struct FileTransfer {
 
 impl FileTransfer {
     pub fn progress_pct(&self) -> u32 {
-        if self.total_bytes == 0 { return 0; }
+        if self.total_bytes == 0 {
+            return 0;
+        }
         ((self.transferred_bytes * 100) / self.total_bytes) as u32
     }
 }
@@ -315,7 +323,9 @@ impl BluetoothManager {
 
     /// Start device discovery scan.
     pub fn start_discovery(&mut self) -> bool {
-        if !self.adapter.powered { return false; }
+        if !self.adapter.powered {
+            return false;
+        }
         self.adapter.discovering = true;
         true
     }
@@ -327,7 +337,9 @@ impl BluetoothManager {
 
     /// Toggle discoverable mode.
     pub fn set_discoverable(&mut self, on: bool) -> bool {
-        if !self.adapter.powered { return false; }
+        if !self.adapter.powered {
+            return false;
+        }
         self.adapter.discoverable = on;
         true
     }
@@ -339,7 +351,11 @@ impl BluetoothManager {
         }
         if self.devices.iter().any(|d| d.address == device.address) {
             // Update existing.
-            if let Some(d) = self.devices.iter_mut().find(|d| d.address == device.address) {
+            if let Some(d) = self
+                .devices
+                .iter_mut()
+                .find(|d| d.address == device.address)
+            {
                 d.rssi = device.rssi;
                 d.last_seen = device.last_seen;
                 if d.name.is_empty() && !device.name.is_empty() {
@@ -356,10 +372,11 @@ impl BluetoothManager {
     /// Pair with a device.
     pub fn pair(&mut self, address: &str) -> bool {
         if let Some(d) = self.devices.iter_mut().find(|d| d.address == address)
-            && d.state == ConnectionState::Disconnected {
-                d.state = ConnectionState::Connecting;
-                return true;
-            }
+            && d.state == ConnectionState::Disconnected
+        {
+            d.state = ConnectionState::Connecting;
+            return true;
+        }
         false
     }
 
@@ -378,10 +395,14 @@ impl BluetoothManager {
     /// Connect to a paired device.
     pub fn connect(&mut self, address: &str) -> bool {
         if let Some(d) = self.devices.iter_mut().find(|d| d.address == address)
-            && matches!(d.state, ConnectionState::Paired | ConnectionState::PairedNotConnected) {
-                d.state = ConnectionState::Connecting;
-                return true;
-            }
+            && matches!(
+                d.state,
+                ConnectionState::Paired | ConnectionState::PairedNotConnected
+            )
+        {
+            d.state = ConnectionState::Connecting;
+            return true;
+        }
         false
     }
 
@@ -399,10 +420,11 @@ impl BluetoothManager {
     /// Disconnect a device.
     pub fn disconnect(&mut self, address: &str) -> bool {
         if let Some(d) = self.devices.iter_mut().find(|d| d.address == address)
-            && d.state.is_connected() {
-                d.state = ConnectionState::PairedNotConnected;
-                return true;
-            }
+            && d.state.is_connected()
+        {
+            d.state = ConnectionState::PairedNotConnected;
+            return true;
+        }
         false
     }
 
@@ -425,24 +447,42 @@ impl BluetoothManager {
 
     /// Get all connected devices.
     pub fn connected_devices(&self) -> Vec<&BluetoothDevice> {
-        self.devices.iter().filter(|d| d.state.is_connected()).collect()
+        self.devices
+            .iter()
+            .filter(|d| d.state.is_connected())
+            .collect()
     }
 
     /// Get all paired devices (connected or not).
     pub fn paired_devices(&self) -> Vec<&BluetoothDevice> {
-        self.devices.iter().filter(|d| {
-            matches!(d.state, ConnectionState::Connected | ConnectionState::Paired | ConnectionState::PairedNotConnected)
-        }).collect()
+        self.devices
+            .iter()
+            .filter(|d| {
+                matches!(
+                    d.state,
+                    ConnectionState::Connected
+                        | ConnectionState::Paired
+                        | ConnectionState::PairedNotConnected
+                )
+            })
+            .collect()
     }
 
     /// Get nearby (discovered but not paired) devices.
     pub fn nearby_devices(&self) -> Vec<&BluetoothDevice> {
-        self.devices.iter().filter(|d| d.state == ConnectionState::Disconnected).collect()
+        self.devices
+            .iter()
+            .filter(|d| d.state == ConnectionState::Disconnected)
+            .collect()
     }
 
     /// Start a file transfer.
     pub fn send_file(&mut self, address: &str, filename: &str, size: u64) -> Option<u32> {
-        if !self.devices.iter().any(|d| d.address == address && d.state.is_connected()) {
+        if !self
+            .devices
+            .iter()
+            .any(|d| d.address == address && d.state.is_connected())
+        {
             return None;
         }
         let id = self.next_transfer_id;
@@ -462,7 +502,11 @@ impl BluetoothManager {
 
     /// Advance a transfer.
     pub fn advance_transfer(&mut self, id: u32, bytes: u64) {
-        if let Some(t) = self.transfers.iter_mut().find(|t| t.id == id && !t.completed && !t.failed) {
+        if let Some(t) = self
+            .transfers
+            .iter_mut()
+            .find(|t| t.id == id && !t.completed && !t.failed)
+        {
             t.transferred_bytes = t.transferred_bytes.saturating_add(bytes);
             if t.transferred_bytes >= t.total_bytes {
                 t.transferred_bytes = t.total_bytes;
@@ -480,7 +524,10 @@ impl BluetoothManager {
 
     /// Count connected audio devices.
     pub fn audio_device_count(&self) -> usize {
-        self.connected_devices().iter().filter(|d| d.is_audio()).count()
+        self.connected_devices()
+            .iter()
+            .filter(|d| d.is_audio())
+            .count()
     }
 }
 
@@ -511,26 +558,41 @@ impl BluetoothSettingsUI {
     }
 
     /// Render the bluetooth settings panel.
-    pub fn render(&self, mgr: &BluetoothManager, x: f32, y: f32, w: f32, h: f32) -> Vec<RenderCommand> {
+    pub fn render(
+        &self,
+        mgr: &BluetoothManager,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+    ) -> Vec<RenderCommand> {
         let mut cmds = Vec::new();
 
         // Background.
         cmds.push(RenderCommand::FillRect {
-            x, y, width: w, height: h,
+            x,
+            y,
+            width: w,
+            height: h,
             color: MOCHA_BASE,
             corner_radii: CornerRadii::all(8.0),
         });
 
         // Title bar.
         cmds.push(RenderCommand::FillRect {
-            x, y, width: w, height: 40.0,
+            x,
+            y,
+            width: w,
+            height: 40.0,
             color: MOCHA_MANTLE,
             corner_radii: CornerRadii::ZERO,
         });
         cmds.push(RenderCommand::Text {
-            x: x + 16.0, y: y + 12.0,
+            x: x + 16.0,
+            y: y + 12.0,
             text: "Bluetooth".to_string(),
-            font_size: 16.0, color: MOCHA_TEXT,
+            font_size: 16.0,
+            color: MOCHA_TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: None,
         });
@@ -538,22 +600,38 @@ impl BluetoothSettingsUI {
         // Power toggle.
         let power_x = x + w - 80.0;
         cmds.push(RenderCommand::FillRect {
-            x: power_x, y: y + 11.0, width: 36.0, height: 18.0,
-            color: if mgr.adapter.powered { MOCHA_BLUE } else { MOCHA_SURFACE1 },
+            x: power_x,
+            y: y + 11.0,
+            width: 36.0,
+            height: 18.0,
+            color: if mgr.adapter.powered {
+                MOCHA_BLUE
+            } else {
+                MOCHA_SURFACE1
+            },
             corner_radii: CornerRadii::all(9.0),
         });
-        let knob_x = if mgr.adapter.powered { power_x + 20.0 } else { power_x + 2.0 };
+        let knob_x = if mgr.adapter.powered {
+            power_x + 20.0
+        } else {
+            power_x + 2.0
+        };
         cmds.push(RenderCommand::FillRect {
-            x: knob_x, y: y + 13.0, width: 14.0, height: 14.0,
+            x: knob_x,
+            y: y + 13.0,
+            width: 14.0,
+            height: 14.0,
             color: MOCHA_TEXT,
             corner_radii: CornerRadii::all(7.0),
         });
 
         if !mgr.adapter.powered {
             cmds.push(RenderCommand::Text {
-                x: x + 16.0, y: y + 60.0,
+                x: x + 16.0,
+                y: y + 60.0,
                 text: "Bluetooth is turned off".to_string(),
-                font_size: 14.0, color: MOCHA_OVERLAY0,
+                font_size: 14.0,
+                color: MOCHA_OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
             });
@@ -564,26 +642,41 @@ impl BluetoothSettingsUI {
 
         // Adapter info.
         cmds.push(RenderCommand::Text {
-            x: x + 16.0, y: cy,
+            x: x + 16.0,
+            y: cy,
             text: format!("{} (v{})", mgr.adapter.name, mgr.adapter.version),
-            font_size: 11.0, color: MOCHA_SUBTEXT0,
+            font_size: 11.0,
+            color: MOCHA_SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
         });
         cy += 20.0;
 
         // Discovery button.
-        let disc_color = if mgr.adapter.discovering { MOCHA_PEACH } else { MOCHA_BLUE };
-        let disc_label = if mgr.adapter.discovering { "Scanning..." } else { "Scan for devices" };
+        let disc_color = if mgr.adapter.discovering {
+            MOCHA_PEACH
+        } else {
+            MOCHA_BLUE
+        };
+        let disc_label = if mgr.adapter.discovering {
+            "Scanning..."
+        } else {
+            "Scan for devices"
+        };
         cmds.push(RenderCommand::FillRect {
-            x: x + 16.0, y: cy, width: 140.0, height: 28.0,
+            x: x + 16.0,
+            y: cy,
+            width: 140.0,
+            height: 28.0,
             color: disc_color,
             corner_radii: CornerRadii::all(6.0),
         });
         cmds.push(RenderCommand::Text {
-            x: x + 28.0, y: cy + 7.0,
+            x: x + 28.0,
+            y: cy + 7.0,
             text: disc_label.to_string(),
-            font_size: 12.0, color: MOCHA_BASE,
+            font_size: 12.0,
+            color: MOCHA_BASE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
         });
@@ -593,9 +686,11 @@ impl BluetoothSettingsUI {
         let connected = mgr.connected_devices();
         if !connected.is_empty() {
             cmds.push(RenderCommand::Text {
-                x: x + 16.0, y: cy,
+                x: x + 16.0,
+                y: cy,
                 text: format!("Connected ({})", connected.len()),
-                font_size: 13.0, color: MOCHA_TEXT,
+                font_size: 13.0,
+                color: MOCHA_TEXT,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
             });
@@ -608,15 +703,24 @@ impl BluetoothSettingsUI {
         }
 
         // Paired devices.
-        let paired_not_connected: Vec<&BluetoothDevice> = mgr.devices.iter()
-            .filter(|d| matches!(d.state, ConnectionState::PairedNotConnected | ConnectionState::Paired))
+        let paired_not_connected: Vec<&BluetoothDevice> = mgr
+            .devices
+            .iter()
+            .filter(|d| {
+                matches!(
+                    d.state,
+                    ConnectionState::PairedNotConnected | ConnectionState::Paired
+                )
+            })
             .collect();
         if !paired_not_connected.is_empty() {
             cy += 8.0;
             cmds.push(RenderCommand::Text {
-                x: x + 16.0, y: cy,
+                x: x + 16.0,
+                y: cy,
                 text: format!("Paired ({})", paired_not_connected.len()),
-                font_size: 13.0, color: MOCHA_TEXT,
+                font_size: 13.0,
+                color: MOCHA_TEXT,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
             });
@@ -634,9 +738,11 @@ impl BluetoothSettingsUI {
             if !nearby.is_empty() {
                 cy += 8.0;
                 cmds.push(RenderCommand::Text {
-                    x: x + 16.0, y: cy,
+                    x: x + 16.0,
+                    y: cy,
                     text: format!("Nearby ({})", nearby.len()),
-                    font_size: 13.0, color: MOCHA_TEXT,
+                    font_size: 13.0,
+                    color: MOCHA_TEXT,
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
                 });
@@ -652,53 +758,80 @@ impl BluetoothSettingsUI {
         cmds
     }
 
-    fn render_device_row(&self, cmds: &mut Vec<RenderCommand>, dev: &BluetoothDevice, x: f32, y: f32, w: f32) {
+    fn render_device_row(
+        &self,
+        cmds: &mut Vec<RenderCommand>,
+        dev: &BluetoothDevice,
+        x: f32,
+        y: f32,
+        w: f32,
+    ) {
         // Row background.
         cmds.push(RenderCommand::FillRect {
-            x, y, width: w, height: 44.0,
+            x,
+            y,
+            width: w,
+            height: 44.0,
             color: MOCHA_SURFACE0,
             corner_radii: CornerRadii::all(6.0),
         });
 
         // Icon circle.
         cmds.push(RenderCommand::FillRect {
-            x: x + 8.0, y: y + 8.0, width: 28.0, height: 28.0,
+            x: x + 8.0,
+            y: y + 8.0,
+            width: 28.0,
+            height: 28.0,
             color: MOCHA_LAVENDER,
             corner_radii: CornerRadii::all(14.0),
         });
         cmds.push(RenderCommand::Text {
-            x: x + 16.0, y: y + 13.0,
+            x: x + 16.0,
+            y: y + 13.0,
             text: dev.device_type.icon_char().to_string(),
-            font_size: 14.0, color: MOCHA_BASE,
+            font_size: 14.0,
+            color: MOCHA_BASE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
         });
 
         // Name.
         cmds.push(RenderCommand::Text {
-            x: x + 44.0, y: y + 8.0,
+            x: x + 44.0,
+            y: y + 8.0,
             text: dev.name.clone(),
-            font_size: 12.0, color: MOCHA_TEXT,
+            font_size: 12.0,
+            color: MOCHA_TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: None,
         });
 
         // Status.
         cmds.push(RenderCommand::Text {
-            x: x + 44.0, y: y + 26.0,
+            x: x + 44.0,
+            y: y + 26.0,
             text: dev.state.label().to_string(),
-            font_size: 10.0, color: dev.state.color(),
+            font_size: 10.0,
+            color: dev.state.color(),
             font_weight: FontWeightHint::Regular,
             max_width: None,
         });
 
         // Battery (right side).
         if let Some(bat) = dev.battery {
-            let bat_color = if bat > 50 { MOCHA_GREEN } else if bat > 20 { MOCHA_YELLOW } else { MOCHA_RED };
+            let bat_color = if bat > 50 {
+                MOCHA_GREEN
+            } else if bat > 20 {
+                MOCHA_YELLOW
+            } else {
+                MOCHA_RED
+            };
             cmds.push(RenderCommand::Text {
-                x: x + w - 60.0, y: y + 8.0,
+                x: x + w - 60.0,
+                y: y + 8.0,
                 text: format!("{}%", bat),
-                font_size: 11.0, color: bat_color,
+                font_size: 11.0,
+                color: bat_color,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
             });
@@ -711,8 +844,10 @@ impl BluetoothSettingsUI {
             let bh = 4.0 + (i as f32) * 3.0;
             let color = if i < bars { MOCHA_BLUE } else { MOCHA_SURFACE1 };
             cmds.push(RenderCommand::FillRect {
-                x: bar_x + (i as f32) * 6.0, y: y + 30.0 - bh,
-                width: 4.0, height: bh,
+                x: bar_x + (i as f32) * 6.0,
+                y: y + 30.0 - bh,
+                width: 4.0,
+                height: bh,
                 color,
                 corner_radii: CornerRadii::all(1.0),
             });
@@ -831,10 +966,14 @@ mod tests {
     #[test]
     fn test_transfer_progress() {
         let t = FileTransfer {
-            id: 1, device_address: "AA:BB".to_string(),
+            id: 1,
+            device_address: "AA:BB".to_string(),
             filename: "test.jpg".to_string(),
-            total_bytes: 1000, transferred_bytes: 500,
-            sending: true, completed: false, failed: false,
+            total_bytes: 1000,
+            transferred_bytes: 500,
+            sending: true,
+            completed: false,
+            failed: false,
         };
         assert_eq!(t.progress_pct(), 50);
     }
@@ -842,10 +981,14 @@ mod tests {
     #[test]
     fn test_transfer_progress_zero() {
         let t = FileTransfer {
-            id: 1, device_address: "AA:BB".to_string(),
+            id: 1,
+            device_address: "AA:BB".to_string(),
             filename: "x".to_string(),
-            total_bytes: 0, transferred_bytes: 0,
-            sending: true, completed: false, failed: false,
+            total_bytes: 0,
+            transferred_bytes: 0,
+            sending: true,
+            completed: false,
+            failed: false,
         };
         assert_eq!(t.progress_pct(), 0);
     }

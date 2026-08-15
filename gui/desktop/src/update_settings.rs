@@ -141,7 +141,9 @@ impl AvailableUpdate {
             kind,
             size_bytes: size,
             version: version.into(),
-            requires_restart: kind == UpdateKind::System || kind == UpdateKind::Security || kind == UpdateKind::Feature,
+            requires_restart: kind == UpdateKind::System
+                || kind == UpdateKind::Security
+                || kind == UpdateKind::Feature,
             selected: true,
         }
     }
@@ -194,7 +196,12 @@ impl UpdateSchedule {
         }
     }
 
-    pub const ALL: [Self; 4] = [Self::Automatic, Self::DownloadOnly, Self::NotifyOnly, Self::Manual];
+    pub const ALL: [Self; 4] = [
+        Self::Automatic,
+        Self::DownloadOnly,
+        Self::NotifyOnly,
+        Self::Manual,
+    ];
 }
 
 // ============================================================================
@@ -310,7 +317,11 @@ impl UpdateSettings {
     }
 
     pub fn selected_size(&self) -> u64 {
-        self.available.iter().filter(|u| u.selected).map(|u| u.size_bytes).sum()
+        self.available
+            .iter()
+            .filter(|u| u.selected)
+            .map(|u| u.size_bytes)
+            .sum()
     }
 
     pub fn toggle_selection(&mut self, id: &str) {
@@ -349,7 +360,9 @@ impl UpdateSettings {
     }
 
     pub fn any_requires_restart(&self) -> bool {
-        self.available.iter().any(|u| u.selected && u.requires_restart)
+        self.available
+            .iter()
+            .any(|u| u.selected && u.requires_restart)
     }
 }
 
@@ -411,16 +424,21 @@ impl UpdateSettingsUI {
         let mut cy = y;
 
         cmds.push(RenderCommand::FillRect {
-            x, y, width, height: 800.0,
+            x,
+            y,
+            width,
+            height: 800.0,
             color: BASE,
             corner_radii: CornerRadii::all(8.0),
         });
 
         cy += pad;
         cmds.push(RenderCommand::Text {
-            x: x + pad, y: cy,
+            x: x + pad,
+            y: cy,
             text: "System Updates".into(),
-            font_size: 20.0, color: TEXT,
+            font_size: 20.0,
+            color: TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: Some(inner),
         });
@@ -428,9 +446,14 @@ impl UpdateSettingsUI {
 
         // OS version
         cmds.push(RenderCommand::Text {
-            x: x + pad, y: cy,
-            text: format!("Version {} (Build {})", self.settings.os_version, self.settings.os_build),
-            font_size: 12.0, color: OVERLAY0,
+            x: x + pad,
+            y: cy,
+            text: format!(
+                "Version {} (Build {})",
+                self.settings.os_version, self.settings.os_build
+            ),
+            font_size: 12.0,
+            color: OVERLAY0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(inner),
         });
@@ -439,14 +462,19 @@ impl UpdateSettingsUI {
         // Status banner
         let status = self.settings.status;
         cmds.push(RenderCommand::FillRect {
-            x: x + pad, y: cy, width: inner, height: 36.0,
+            x: x + pad,
+            y: cy,
+            width: inner,
+            height: 36.0,
             color: MANTLE,
             corner_radii: CornerRadii::all(6.0),
         });
         cmds.push(RenderCommand::Text {
-            x: x + pad + 12.0, y: cy + 10.0,
+            x: x + pad + 12.0,
+            y: cy + 10.0,
             text: status.label().into(),
-            font_size: 14.0, color: status.color(),
+            font_size: 14.0,
+            color: status.color(),
             font_weight: FontWeightHint::Bold,
             max_width: Some(inner - 24.0),
         });
@@ -455,9 +483,11 @@ impl UpdateSettingsUI {
         // Pause warning
         if self.settings.config.is_paused() {
             cmds.push(RenderCommand::Text {
-                x: x + pad, y: cy,
+                x: x + pad,
+                y: cy,
                 text: "⏸ Updates are paused".into(),
-                font_size: 12.0, color: YELLOW,
+                font_size: 12.0,
+                color: YELLOW,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(inner),
             });
@@ -470,16 +500,24 @@ impl UpdateSettingsUI {
             let tx = x + pad + tab_w * i as f32;
             let active = self.active_tab == i;
             cmds.push(RenderCommand::FillRect {
-                x: tx, y: cy, width: tab_w - 2.0, height: 30.0,
+                x: tx,
+                y: cy,
+                width: tab_w - 2.0,
+                height: 30.0,
                 color: if active { SURFACE0 } else { MANTLE },
                 corner_radii: CornerRadii::all(6.0),
             });
             cmds.push(RenderCommand::Text {
-                x: tx + 8.0, y: cy + 8.0,
+                x: tx + 8.0,
+                y: cy + 8.0,
                 text: (*label).into(),
                 font_size: 12.0,
                 color: if active { BLUE } else { SUBTEXT0 },
-                font_weight: if active { FontWeightHint::Bold } else { FontWeightHint::Regular },
+                font_weight: if active {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
                 max_width: Some(tab_w - 16.0),
             });
         }
@@ -498,9 +536,11 @@ impl UpdateSettingsUI {
     fn render_status_tab(&self, cmds: &mut Vec<RenderCommand>, x: f32, mut y: f32, width: f32) {
         if self.settings.available.is_empty() {
             cmds.push(RenderCommand::Text {
-                x, y,
+                x,
+                y,
                 text: "No updates available.".into(),
-                font_size: 13.0, color: OVERLAY0,
+                font_size: 13.0,
+                color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width),
             });
@@ -508,12 +548,16 @@ impl UpdateSettingsUI {
         }
 
         cmds.push(RenderCommand::Text {
-            x, y,
-            text: format!("{} updates available ({} selected, {})",
+            x,
+            y,
+            text: format!(
+                "{} updates available ({} selected, {})",
                 self.settings.available.len(),
                 self.settings.selected_count(),
-                format_size(self.settings.selected_size())),
-            font_size: 13.0, color: TEXT,
+                format_size(self.settings.selected_size())
+            ),
+            font_size: 13.0,
+            color: TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
         });
@@ -522,23 +566,45 @@ impl UpdateSettingsUI {
         for upd in &self.settings.available {
             let bg = if upd.selected { SURFACE0 } else { MANTLE };
             cmds.push(RenderCommand::FillRect {
-                x, y, width, height: 44.0,
+                x,
+                y,
+                width,
+                height: 44.0,
                 color: bg,
                 corner_radii: CornerRadii::all(4.0),
             });
             let check = if upd.selected { "☑" } else { "☐" };
             cmds.push(RenderCommand::Text {
-                x: x + 8.0, y: y + 4.0,
-                text: format!("{} {} {} v{}", check, upd.kind.icon(), upd.title, upd.version),
-                font_size: 13.0, color: TEXT,
+                x: x + 8.0,
+                y: y + 4.0,
+                text: format!(
+                    "{} {} {} v{}",
+                    check,
+                    upd.kind.icon(),
+                    upd.title,
+                    upd.version
+                ),
+                font_size: 13.0,
+                color: TEXT,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 16.0),
             });
-            let restart_tag = if upd.requires_restart { " (restart required)" } else { "" };
+            let restart_tag = if upd.requires_restart {
+                " (restart required)"
+            } else {
+                ""
+            };
             cmds.push(RenderCommand::Text {
-                x: x + 28.0, y: y + 24.0,
-                text: format!("{} — {}{}", upd.kind.label(), format_size(upd.size_bytes), restart_tag),
-                font_size: 11.0, color: SUBTEXT0,
+                x: x + 28.0,
+                y: y + 24.0,
+                text: format!(
+                    "{} — {}{}",
+                    upd.kind.label(),
+                    format_size(upd.size_bytes),
+                    restart_tag
+                ),
+                font_size: 11.0,
+                color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 36.0),
             });
@@ -548,9 +614,11 @@ impl UpdateSettingsUI {
         if self.settings.any_requires_restart() {
             y += 4.0;
             cmds.push(RenderCommand::Text {
-                x, y,
+                x,
+                y,
                 text: "⚠ Some updates require a restart to complete".into(),
-                font_size: 12.0, color: PEACH,
+                font_size: 12.0,
+                color: PEACH,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width),
             });
@@ -561,9 +629,11 @@ impl UpdateSettingsUI {
         let cfg = &self.settings.config;
 
         cmds.push(RenderCommand::Text {
-            x, y,
+            x,
+            y,
             text: "Update schedule".into(),
-            font_size: 14.0, color: LAVENDER,
+            font_size: 14.0,
+            color: LAVENDER,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
         });
@@ -572,13 +642,17 @@ impl UpdateSettingsUI {
         for sched in UpdateSchedule::ALL {
             let active = cfg.schedule == sched;
             cmds.push(RenderCommand::FillRect {
-                x, y, width, height: 28.0,
+                x,
+                y,
+                width,
+                height: 28.0,
                 color: if active { SURFACE0 } else { MANTLE },
                 corner_radii: CornerRadii::all(4.0),
             });
             let indicator = if active { "● " } else { "○ " };
             cmds.push(RenderCommand::Text {
-                x: x + 8.0, y: y + 6.0,
+                x: x + 8.0,
+                y: y + 6.0,
                 text: format!("{}{}", indicator, sched.label()),
                 font_size: 13.0,
                 color: if active { BLUE } else { TEXT },
@@ -589,35 +663,86 @@ impl UpdateSettingsUI {
         }
 
         y += 8.0;
-        Self::render_kv(cmds, x, y, width, "Active hours",
-            &format!("{:02}:00 — {:02}:00", cfg.active_hours_start, cfg.active_hours_end));
+        Self::render_kv(
+            cmds,
+            x,
+            y,
+            width,
+            "Active hours",
+            &format!(
+                "{:02}:00 — {:02}:00",
+                cfg.active_hours_start, cfg.active_hours_end
+            ),
+        );
         y += 24.0;
-        Self::render_toggle(cmds, x, y, width, "Auto-restart outside active hours", cfg.auto_restart);
+        Self::render_toggle(
+            cmds,
+            x,
+            y,
+            width,
+            "Auto-restart outside active hours",
+            cfg.auto_restart,
+        );
         y += 28.0;
-        Self::render_toggle(cmds, x, y, width, "Include driver updates", cfg.include_drivers);
+        Self::render_toggle(
+            cmds,
+            x,
+            y,
+            width,
+            "Include driver updates",
+            cfg.include_drivers,
+        );
         y += 28.0;
-        Self::render_toggle(cmds, x, y, width, "Include feature updates", cfg.include_features);
+        Self::render_toggle(
+            cmds,
+            x,
+            y,
+            width,
+            "Include feature updates",
+            cfg.include_features,
+        );
         y += 28.0;
-        Self::render_toggle(cmds, x, y, width, "Defer on metered connections", cfg.defer_on_metered);
+        Self::render_toggle(
+            cmds,
+            x,
+            y,
+            width,
+            "Defer on metered connections",
+            cfg.defer_on_metered,
+        );
         y += 28.0;
 
         if cfg.defer_features_weeks > 0 {
-            Self::render_kv(cmds, x, y, width, "Feature update deferral",
-                &format!("{} weeks", cfg.defer_features_weeks));
+            Self::render_kv(
+                cmds,
+                x,
+                y,
+                width,
+                "Feature update deferral",
+                &format!("{} weeks", cfg.defer_features_weeks),
+            );
             y += 24.0;
         }
         if cfg.defer_security_days > 0 {
-            Self::render_kv(cmds, x, y, width, "Security update deferral",
-                &format!("{} days", cfg.defer_security_days));
+            Self::render_kv(
+                cmds,
+                x,
+                y,
+                width,
+                "Security update deferral",
+                &format!("{} days", cfg.defer_security_days),
+            );
         }
     }
 
     fn render_history_tab(&self, cmds: &mut Vec<RenderCommand>, x: f32, mut y: f32, width: f32) {
         if self.settings.history.is_empty() {
             cmds.push(RenderCommand::Text {
-                x, y,
+                x,
+                y,
                 text: "No update history.".into(),
-                font_size: 13.0, color: OVERLAY0,
+                font_size: 13.0,
+                color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width),
             });
@@ -627,9 +752,11 @@ impl UpdateSettingsUI {
         let rollbacks = self.settings.rollback_available_count();
         if rollbacks > 0 {
             cmds.push(RenderCommand::Text {
-                x, y,
+                x,
+                y,
                 text: format!("{} updates can be rolled back", rollbacks),
-                font_size: 12.0, color: LAVENDER,
+                font_size: 12.0,
+                color: LAVENDER,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width),
             });
@@ -640,30 +767,49 @@ impl UpdateSettingsUI {
             let status_icon = if entry.success { "✓" } else { "✕" };
             let color = if entry.success { GREEN } else { RED };
             cmds.push(RenderCommand::FillRect {
-                x, y, width, height: 32.0,
+                x,
+                y,
+                width,
+                height: 32.0,
                 color: MANTLE,
                 corner_radii: CornerRadii::all(4.0),
             });
             cmds.push(RenderCommand::Text {
-                x: x + 8.0, y: y + 4.0,
-                text: format!("{} {} {} v{}", status_icon, entry.kind.icon(), entry.title, entry.version),
-                font_size: 12.0, color,
+                x: x + 8.0,
+                y: y + 4.0,
+                text: format!(
+                    "{} {} {} v{}",
+                    status_icon,
+                    entry.kind.icon(),
+                    entry.title,
+                    entry.version
+                ),
+                font_size: 12.0,
+                color,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width * 0.7),
             });
-            let rollback_tag = if entry.rollback_available { "↩ rollback" } else { "" };
+            let rollback_tag = if entry.rollback_available {
+                "↩ rollback"
+            } else {
+                ""
+            };
             cmds.push(RenderCommand::Text {
-                x: x + width * 0.75, y: y + 4.0,
+                x: x + width * 0.75,
+                y: y + 4.0,
                 text: rollback_tag.into(),
-                font_size: 11.0, color: LAVENDER,
+                font_size: 11.0,
+                color: LAVENDER,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width * 0.25),
             });
             if let Some(err) = &entry.error_msg {
                 cmds.push(RenderCommand::Text {
-                    x: x + 28.0, y: y + 18.0,
+                    x: x + 28.0,
+                    y: y + 18.0,
                     text: err.clone(),
-                    font_size: 10.0, color: RED,
+                    font_size: 10.0,
+                    color: RED,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(width - 36.0),
                 });
@@ -674,36 +820,60 @@ impl UpdateSettingsUI {
 
     fn render_kv(cmds: &mut Vec<RenderCommand>, x: f32, y: f32, width: f32, key: &str, val: &str) {
         cmds.push(RenderCommand::Text {
-            x: x + 8.0, y, text: key.into(),
-            font_size: 13.0, color: SUBTEXT0,
+            x: x + 8.0,
+            y,
+            text: key.into(),
+            font_size: 13.0,
+            color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width * 0.5),
         });
         cmds.push(RenderCommand::Text {
-            x: x + width * 0.55, y, text: val.into(),
-            font_size: 13.0, color: TEXT,
+            x: x + width * 0.55,
+            y,
+            text: val.into(),
+            font_size: 13.0,
+            color: TEXT,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width * 0.4),
         });
     }
 
-    fn render_toggle(cmds: &mut Vec<RenderCommand>, x: f32, y: f32, width: f32, label: &str, on: bool) {
+    fn render_toggle(
+        cmds: &mut Vec<RenderCommand>,
+        x: f32,
+        y: f32,
+        width: f32,
+        label: &str,
+        on: bool,
+    ) {
         cmds.push(RenderCommand::Text {
-            x: x + 8.0, y, text: label.into(),
-            font_size: 13.0, color: SUBTEXT0,
+            x: x + 8.0,
+            y,
+            text: label.into(),
+            font_size: 13.0,
+            color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width * 0.65),
         });
         let tx = x + width - 48.0;
         let bg = if on { GREEN } else { SURFACE1 };
         cmds.push(RenderCommand::FillRect {
-            x: tx, y, width: 40.0, height: 20.0,
-            color: bg, corner_radii: CornerRadii::all(10.0),
+            x: tx,
+            y,
+            width: 40.0,
+            height: 20.0,
+            color: bg,
+            corner_radii: CornerRadii::all(10.0),
         });
         let knob_x = if on { tx + 22.0 } else { tx + 2.0 };
         cmds.push(RenderCommand::FillRect {
-            x: knob_x, y: y + 2.0, width: 16.0, height: 16.0,
-            color: TEXT, corner_radii: CornerRadii::all(8.0),
+            x: knob_x,
+            y: y + 2.0,
+            width: 16.0,
+            height: 16.0,
+            color: TEXT,
+            corner_radii: CornerRadii::all(8.0),
         });
     }
 }
@@ -718,8 +888,14 @@ mod tests {
 
     #[test]
     fn update_status_labels() {
-        for s in [UpdateStatus::UpToDate, UpdateStatus::Checking, UpdateStatus::Available,
-                  UpdateStatus::Downloading, UpdateStatus::PendingRestart, UpdateStatus::Error] {
+        for s in [
+            UpdateStatus::UpToDate,
+            UpdateStatus::Checking,
+            UpdateStatus::Available,
+            UpdateStatus::Downloading,
+            UpdateStatus::PendingRestart,
+            UpdateStatus::Error,
+        ] {
             assert!(!s.label().is_empty());
             let _ = s.color();
         }
@@ -727,8 +903,13 @@ mod tests {
 
     #[test]
     fn update_kind_labels() {
-        for k in [UpdateKind::System, UpdateKind::Security, UpdateKind::Application,
-                  UpdateKind::Driver, UpdateKind::Feature] {
+        for k in [
+            UpdateKind::System,
+            UpdateKind::Security,
+            UpdateKind::Application,
+            UpdateKind::Driver,
+            UpdateKind::Feature,
+        ] {
             assert!(!k.label().is_empty());
             assert!(!k.icon().is_empty());
         }
@@ -783,7 +964,13 @@ mod tests {
     #[test]
     fn add_available_update() {
         let mut s = UpdateSettings::new();
-        s.add_available(AvailableUpdate::new("u1", "Patch", UpdateKind::Security, 5_000_000, "1.0.1"));
+        s.add_available(AvailableUpdate::new(
+            "u1",
+            "Patch",
+            UpdateKind::Security,
+            5_000_000,
+            "1.0.1",
+        ));
         assert_eq!(s.available_updates().len(), 1);
         assert_eq!(s.status, UpdateStatus::Available);
     }
@@ -791,8 +978,20 @@ mod tests {
     #[test]
     fn selected_count_and_size() {
         let mut s = UpdateSettings::new();
-        s.add_available(AvailableUpdate::new("u1", "A", UpdateKind::System, 1000, "1.0"));
-        s.add_available(AvailableUpdate::new("u2", "B", UpdateKind::Application, 2000, "2.0"));
+        s.add_available(AvailableUpdate::new(
+            "u1",
+            "A",
+            UpdateKind::System,
+            1000,
+            "1.0",
+        ));
+        s.add_available(AvailableUpdate::new(
+            "u2",
+            "B",
+            UpdateKind::Application,
+            2000,
+            "2.0",
+        ));
         assert_eq!(s.selected_count(), 2);
         assert_eq!(s.selected_size(), 3000);
     }
@@ -800,7 +999,13 @@ mod tests {
     #[test]
     fn toggle_selection() {
         let mut s = UpdateSettings::new();
-        s.add_available(AvailableUpdate::new("u1", "A", UpdateKind::System, 1000, "1.0"));
+        s.add_available(AvailableUpdate::new(
+            "u1",
+            "A",
+            UpdateKind::System,
+            1000,
+            "1.0",
+        ));
         s.toggle_selection("u1");
         assert_eq!(s.selected_count(), 0);
         s.toggle_selection("u1");
@@ -810,8 +1015,20 @@ mod tests {
     #[test]
     fn select_deselect_all() {
         let mut s = UpdateSettings::new();
-        s.add_available(AvailableUpdate::new("u1", "A", UpdateKind::System, 1000, "1.0"));
-        s.add_available(AvailableUpdate::new("u2", "B", UpdateKind::Driver, 2000, "1.0"));
+        s.add_available(AvailableUpdate::new(
+            "u1",
+            "A",
+            UpdateKind::System,
+            1000,
+            "1.0",
+        ));
+        s.add_available(AvailableUpdate::new(
+            "u2",
+            "B",
+            UpdateKind::Driver,
+            2000,
+            "1.0",
+        ));
         s.deselect_all();
         assert_eq!(s.selected_count(), 0);
         s.select_all();
@@ -821,7 +1038,13 @@ mod tests {
     #[test]
     fn clear_available() {
         let mut s = UpdateSettings::new();
-        s.add_available(AvailableUpdate::new("u1", "A", UpdateKind::System, 1000, "1.0"));
+        s.add_available(AvailableUpdate::new(
+            "u1",
+            "A",
+            UpdateKind::System,
+            1000,
+            "1.0",
+        ));
         s.clear_available();
         assert!(s.available_updates().is_empty());
         assert_eq!(s.status, UpdateStatus::UpToDate);
@@ -846,9 +1069,21 @@ mod tests {
     #[test]
     fn any_requires_restart() {
         let mut s = UpdateSettings::new();
-        s.add_available(AvailableUpdate::new("u1", "App", UpdateKind::Application, 1000, "1.0"));
+        s.add_available(AvailableUpdate::new(
+            "u1",
+            "App",
+            UpdateKind::Application,
+            1000,
+            "1.0",
+        ));
         assert!(!s.any_requires_restart()); // Application doesn't require restart
-        s.add_available(AvailableUpdate::new("u2", "Sys", UpdateKind::System, 1000, "1.0"));
+        s.add_available(AvailableUpdate::new(
+            "u2",
+            "Sys",
+            UpdateKind::System,
+            1000,
+            "1.0",
+        ));
         assert!(s.any_requires_restart());
     }
 
@@ -887,9 +1122,17 @@ mod tests {
     #[test]
     fn ui_render_with_updates() {
         let mut ui = UpdateSettingsUI::new();
-        ui.settings_mut().add_available(AvailableUpdate::new("u1", "Security Patch", UpdateKind::Security, 5_000_000, "1.0.1"));
+        ui.settings_mut().add_available(AvailableUpdate::new(
+            "u1",
+            "Security Patch",
+            UpdateKind::Security,
+            5_000_000,
+            "1.0.1",
+        ));
         let cmds = ui.render(0.0, 0.0, 500.0);
-        let has_update = cmds.iter().any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("Security Patch")));
+        let has_update = cmds.iter().any(
+            |c| matches!(c, RenderCommand::Text { text, .. } if text.contains("Security Patch")),
+        );
         assert!(has_update);
     }
 
@@ -898,7 +1141,9 @@ mod tests {
         let mut ui = UpdateSettingsUI::new();
         ui.settings_mut().config.paused_until_secs = 99999;
         let cmds = ui.render(0.0, 0.0, 500.0);
-        let has_paused = cmds.iter().any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("paused")));
+        let has_paused = cmds
+            .iter()
+            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("paused")));
         assert!(has_paused);
     }
 
@@ -906,13 +1151,19 @@ mod tests {
     fn ui_render_history() {
         let mut ui = UpdateSettingsUI::new();
         ui.settings_mut().add_history(UpdateHistoryEntry {
-            title: "Old Patch".into(), kind: UpdateKind::System,
-            version: "0.9.1".into(), installed_at_secs: 500, success: true,
-            error_msg: None, rollback_available: false,
+            title: "Old Patch".into(),
+            kind: UpdateKind::System,
+            version: "0.9.1".into(),
+            installed_at_secs: 500,
+            success: true,
+            error_msg: None,
+            rollback_available: false,
         });
         ui.set_active_tab(2);
         let cmds = ui.render(0.0, 0.0, 500.0);
-        let has_hist = cmds.iter().any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("Old Patch")));
+        let has_hist = cmds
+            .iter()
+            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("Old Patch")));
         assert!(has_hist);
     }
 

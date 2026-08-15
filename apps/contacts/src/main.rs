@@ -88,8 +88,8 @@ const NOTES_FONT_SIZE: f32 = 13.0;
 const NOTES_LINE_HEIGHT: f32 = 18.0;
 
 const ALPHABET: &[char] = &[
-    'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M',
-    'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z',
+    'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S',
+    'T', 'U', 'V', 'W', 'X', 'Y', 'Z',
 ];
 
 // ============================================================================
@@ -634,9 +634,10 @@ impl Contact {
             result.push(c.to_ascii_uppercase());
         }
         if result.is_empty()
-            && let Some(c) = self.company.chars().next() {
-                result.push(c.to_ascii_uppercase());
-            }
+            && let Some(c) = self.company.chars().next()
+        {
+            result.push(c.to_ascii_uppercase());
+        }
         if result.is_empty() {
             result.push('?');
         }
@@ -687,7 +688,10 @@ impl Contact {
             vcard_escape(&self.last_name),
             vcard_escape(&self.first_name)
         ));
-        lines.push(format!("FN:{}", vcard_escape(&self.computed_display_name())));
+        lines.push(format!(
+            "FN:{}",
+            vcard_escape(&self.computed_display_name())
+        ));
 
         if !self.nickname.is_empty() {
             lines.push(format!("NICKNAME:{}", vcard_escape(&self.nickname)));
@@ -802,16 +806,16 @@ impl Contact {
                     "TEL" => {
                         let ptype = PhoneType::from_vcard(&prop_upper);
                         let primary = prop_upper.contains("PREF");
-                        contact
-                            .phones
-                            .push(PhoneNumber::new(&vcard_unescape(value), ptype).with_primary(primary));
+                        contact.phones.push(
+                            PhoneNumber::new(&vcard_unescape(value), ptype).with_primary(primary),
+                        );
                     }
                     "EMAIL" => {
                         let etype = EmailType::from_vcard(&prop_upper);
                         let primary = prop_upper.contains("PREF");
-                        contact
-                            .emails
-                            .push(EmailAddress::new(&vcard_unescape(value), etype).with_primary(primary));
+                        contact.emails.push(
+                            EmailAddress::new(&vcard_unescape(value), etype).with_primary(primary),
+                        );
                     }
                     "ADR" => {
                         let atype = AddressType::from_vcard(&prop_upper);
@@ -861,20 +865,82 @@ impl Contact {
 // vCard helpers
 // ============================================================================
 
-/// Escape special chars for vCard values.
+/// Escape a string for use as a vCard property value, per RFC 6350 §3.4.
+///
+/// A single left-to-right pass, for the same reason [`vcard_unescape`] is one:
+/// a chain of `.replace()` calls has to get its ordering right, and the only
+/// order that works here is the non-obvious one (backslash first, or every
+/// rule after it re-escapes the backslashes it just introduced). A pass that
+/// emits each character's escape as it reads it cannot get the order wrong,
+/// because there is no order to get wrong.
+///
+/// A carriage return has no escape sequence in vCard — the grammar defines
+/// only `\\`, `\,`, `\;` and `\n` — and vCard lines are CRLF-terminated, so a
+/// raw CR left in a value ends the property line early and the rest of the
+/// value is read as a new property. Since a CR in a text field *means* a line
+/// break, it is folded into one rather than written out where it would corrupt
+/// the record. A CRLF pair yields one break, not two.
 fn vcard_escape(s: &str) -> String {
-    s.replace('\\', "\\\\")
-        .replace(',', "\\,")
-        .replace(';', "\\;")
-        .replace('\n', "\\n")
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            ',' => out.push_str("\\,"),
+            ';' => out.push_str("\\;"),
+            '\n' => out.push_str("\\n"),
+            '\r' => {
+                if chars.peek() == Some(&'\n') {
+                    chars.next();
+                }
+                out.push_str("\\n");
+            }
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
-/// Unescape vCard value.
+/// Decode a vCard property value, undoing [`vcard_escape`].
+///
+/// Single left-to-right pass. A chain of `.replace()` calls is *wrong* here,
+/// and was the bug this replaced: decoding `\n` before `\\` means the escaped
+/// form of the two-character text `\n` — a backslash followed by the letter n,
+/// which `vcard_escape` writes as `\\n` — has its leading `\\` read as a
+/// newline escape by the first pass. A contact note containing a Windows path
+/// or a regex came back with a real line break in it: `C:\new` decoded to
+/// `C:\`, a newline, and `ew`.
+///
+/// The corruption happens once, on the first load, and the damaged value is
+/// then a fixed point — re-saving does not degrade it further. That makes it
+/// *quieter*, not milder: the wrong value is what gets written back, so after
+/// one load-and-save cycle the user's original text is gone, with no
+/// accumulating drift to make the loss noticeable.
+///
+/// A single pass structurally cannot make that mistake: it consumes the
+/// backslash and whatever follows it together, and never re-examines output it
+/// has already produced.
 fn vcard_unescape(s: &str) -> String {
-    s.replace("\\n", "\n")
-        .replace("\\,", ",")
-        .replace("\\;", ";")
-        .replace("\\\\", "\\")
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.next() {
+                Some('n' | 'N') => out.push('\n'),
+                Some(',') => out.push(','),
+                Some(';') => out.push(';'),
+                Some('\\') => out.push('\\'),
+                // Unknown escape: malformed input. Keep the following
+                // character as-is rather than dropping it.
+                Some(other) => out.push(other),
+                // Trailing backslash with nothing after it: keep it literally.
+                None => out.push('\\'),
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// Unfold vCard continuation lines (lines starting with space/tab are
@@ -927,11 +993,10 @@ pub fn import_vcards(data: &str, start_id: u64) -> Vec<Contact> {
         } else if line.trim().eq_ignore_ascii_case("END:VCARD") {
             current_block.push_str(line);
             current_block.push('\n');
-            if in_vcard
-                && let Some(c) = Contact::from_vcard(&current_block, next_id) {
-                    contacts.push(c);
-                    next_id = next_id.saturating_add(1);
-                }
+            if in_vcard && let Some(c) = Contact::from_vcard(&current_block, next_id) {
+                contacts.push(c);
+                next_id = next_id.saturating_add(1);
+            }
             in_vcard = false;
             current_block.clear();
         } else if in_vcard {
@@ -1059,8 +1124,7 @@ pub fn find_duplicates(contacts: &[Contact]) -> Vec<DuplicateMatch> {
                 && a.first_name.eq_ignore_ascii_case(&b.first_name)
                 && a.last_name.eq_ignore_ascii_case(&b.last_name)
             {
-                let reason = if !a.company.is_empty()
-                    && a.company.eq_ignore_ascii_case(&b.company)
+                let reason = if !a.company.is_empty() && a.company.eq_ignore_ascii_case(&b.company)
                 {
                     DuplicateReason::SameNameAndCompany
                 } else {
@@ -1128,9 +1192,10 @@ pub fn merge_contacts(primary: &Contact, secondary: &Contact, merged_id: u64) ->
 
     // Merge phones (add any from secondary that aren't already in primary)
     for phone in &secondary.phones {
-        let already = merged.phones.iter().any(|p| {
-            normalize_phone(&p.number) == normalize_phone(&phone.number)
-        });
+        let already = merged
+            .phones
+            .iter()
+            .any(|p| normalize_phone(&p.number) == normalize_phone(&phone.number));
         if !already {
             merged.phones.push(phone.clone());
         }
@@ -1149,9 +1214,10 @@ pub fn merge_contacts(primary: &Contact, secondary: &Contact, merged_id: u64) ->
 
     // Merge addresses
     for addr in &secondary.addresses {
-        let already = merged.addresses.iter().any(|a| {
-            a.street == addr.street && a.city == addr.city && a.zip == addr.zip
-        });
+        let already = merged
+            .addresses
+            .iter()
+            .any(|a| a.street == addr.street && a.city == addr.city && a.zip == addr.zip);
         if !already {
             merged.addresses.push(addr.clone());
         }
@@ -1329,10 +1395,11 @@ impl ContactStore {
     /// Add a contact to a group.
     pub fn add_contact_to_group(&mut self, contact_id: u64, group_id: u64) -> bool {
         if let Some(contact) = self.contacts.iter_mut().find(|c| c.id == contact_id)
-            && !contact.groups.contains(&group_id) {
-                contact.groups.push(group_id);
-                return true;
-            }
+            && !contact.groups.contains(&group_id)
+        {
+            contact.groups.push(group_id);
+            return true;
+        }
         false
     }
 
@@ -1501,7 +1568,8 @@ impl ContactStore {
         self.contacts.push(merged);
 
         // Update recently viewed
-        self.recently_viewed.retain(|&rid| rid != id_a && rid != id_b);
+        self.recently_viewed
+            .retain(|&rid| rid != id_a && rid != id_b);
 
         Some(merged_id)
     }
@@ -1526,7 +1594,12 @@ impl ContactStore {
     // ----- Birthday helpers -----
 
     /// Get contacts with upcoming birthdays.
-    pub fn upcoming_birthdays(&self, today_month: u8, today_day: u8, within_days: u16) -> Vec<&Contact> {
+    pub fn upcoming_birthdays(
+        &self,
+        today_month: u8,
+        today_day: u8,
+        within_days: u16,
+    ) -> Vec<&Contact> {
         self.contacts
             .iter()
             .filter(|c| {
@@ -1733,14 +1806,14 @@ impl ContactsApp {
         contact.birthday = SimpleDate::parse(&self.edit_birthday);
 
         if !self.edit_phone.is_empty() {
-            contact.phones.push(
-                PhoneNumber::new(&self.edit_phone, self.edit_phone_type).with_primary(true),
-            );
+            contact
+                .phones
+                .push(PhoneNumber::new(&self.edit_phone, self.edit_phone_type).with_primary(true));
         }
         if !self.edit_email.is_empty() {
-            contact.emails.push(
-                EmailAddress::new(&self.edit_email, self.edit_email_type).with_primary(true),
-            );
+            contact
+                .emails
+                .push(EmailAddress::new(&self.edit_email, self.edit_email_type).with_primary(true));
         }
 
         if !self.edit_street.is_empty()
@@ -1911,11 +1984,9 @@ impl ContactsApp {
             height: list_height,
         });
 
-        let contacts = self.store.filtered_sorted(
-            &self.filter,
-            self.sort_order,
-            &self.search_query,
-        );
+        let contacts =
+            self.store
+                .filtered_sorted(&self.filter, self.sort_order, &self.search_query);
 
         let mut cy = list_y - self.scroll_offset;
         let mut current_letter: Option<char> = None;
@@ -1956,7 +2027,11 @@ impl ContactsApp {
                     if id == contact.id
                 );
 
-                let row_bg = if is_selected { SURFACE0 } else { Color::TRANSPARENT };
+                let row_bg = if is_selected {
+                    SURFACE0
+                } else {
+                    Color::TRANSPARENT
+                };
                 cmds.push(RenderCommand::FillRect {
                     x: 0.0,
                     y: cy,
@@ -2133,12 +2208,7 @@ impl ContactsApp {
     }
 
     /// Render empty state (no contact selected).
-    fn render_empty_state(
-        &self,
-        cmds: &mut Vec<RenderCommand>,
-        panel_x: f32,
-        panel_width: f32,
-    ) {
+    fn render_empty_state(&self, cmds: &mut Vec<RenderCommand>, panel_x: f32, panel_width: f32) {
         let center_x = panel_x + panel_width / 2.0 - 80.0;
         let center_y = self.window_height / 2.0 - 40.0;
 
@@ -2336,7 +2406,11 @@ impl ContactsApp {
                 cmds.push(RenderCommand::Text {
                     x: cx + 8.0,
                     y: cy,
-                    text: format!("{}: {}{pref_marker}", phone.phone_type.label(), phone.number),
+                    text: format!(
+                        "{}: {}{pref_marker}",
+                        phone.phone_type.label(),
+                        phone.number
+                    ),
                     font_size: 13.0,
                     color: TEXT_COLOR,
                     font_weight: FontWeightHint::Regular,
@@ -2364,11 +2438,7 @@ impl ContactsApp {
                 cmds.push(RenderCommand::Text {
                     x: cx + 8.0,
                     y: cy,
-                    text: format!(
-                        "{}: {}{pref_marker}",
-                        email.email_type.label(),
-                        email.email
-                    ),
+                    text: format!("{}: {}{pref_marker}", email.email_type.label(), email.email),
                     font_size: 13.0,
                     color: TEXT_COLOR,
                     font_weight: FontWeightHint::Regular,
@@ -2512,8 +2582,7 @@ impl ContactsApp {
             let mut chip_x = cx;
             for &gid in &contact.groups {
                 if let Some(group) = self.store.get_group(gid) {
-                    let chip_w =
-                        text::padded_width(&group.name, 8.0, 11.0, FontWeightHint::Bold);
+                    let chip_w = text::padded_width(&group.name, 8.0, 11.0, FontWeightHint::Bold);
                     cmds.push(RenderCommand::FillRect {
                         x: chip_x,
                         y: cy,
@@ -2677,7 +2746,11 @@ impl ContactsApp {
             } else {
                 value.to_string()
             };
-            let text_color = if value.is_empty() { OVERLAY0 } else { TEXT_COLOR };
+            let text_color = if value.is_empty() {
+                OVERLAY0
+            } else {
+                TEXT_COLOR
+            };
             cmds.push(RenderCommand::Text {
                 x: cx + 10.0,
                 y: cy + 10.0,
@@ -2882,12 +2955,7 @@ impl ContactsApp {
     }
 
     /// Render the groups management panel.
-    fn render_groups_panel(
-        &self,
-        cmds: &mut Vec<RenderCommand>,
-        panel_x: f32,
-        panel_width: f32,
-    ) {
+    fn render_groups_panel(&self, cmds: &mut Vec<RenderCommand>, panel_x: f32, panel_width: f32) {
         let pad = DETAIL_PADDING;
         let cx = panel_x + pad;
         let mut cy = pad;
@@ -2919,10 +2987,7 @@ impl ContactsApp {
         }
 
         for (gid, name, count) in &stats {
-            let group_color = self
-                .store
-                .get_group(*gid)
-                .map_or(BLUE, |g| g.color);
+            let group_color = self.store.get_group(*gid).map_or(BLUE, |g| g.color);
 
             cmds.push(RenderCommand::FillRect {
                 x: cx,
@@ -2984,15 +3049,22 @@ impl ContactsApp {
         c1.company = String::from("Acme Corp");
         c1.job_title = String::from("Software Engineer");
         c1.department = String::from("Engineering");
-        c1.phones.push(PhoneNumber::new("+1-555-0101", PhoneType::Mobile).with_primary(true));
-        c1.phones.push(PhoneNumber::new("+1-555-0102", PhoneType::Work));
-        c1.emails.push(EmailAddress::new("alice@example.com", EmailType::Personal).with_primary(true));
-        c1.emails.push(EmailAddress::new("alice.anderson@acme.com", EmailType::Work));
+        c1.phones
+            .push(PhoneNumber::new("+1-555-0101", PhoneType::Mobile).with_primary(true));
+        c1.phones
+            .push(PhoneNumber::new("+1-555-0102", PhoneType::Work));
+        c1.emails
+            .push(EmailAddress::new("alice@example.com", EmailType::Personal).with_primary(true));
+        c1.emails.push(EmailAddress::new(
+            "alice.anderson@acme.com",
+            EmailType::Work,
+        ));
         c1.birthday = SimpleDate::new(1990, 3, 15);
         c1.favorite = true;
         c1.groups.push(g2);
         c1.groups.push(g3);
-        c1.social_accounts.push(SocialAccount::new(SocialPlatform::GitHub, "@alice"));
+        c1.social_accounts
+            .push(SocialAccount::new(SocialPlatform::GitHub, "@alice"));
         c1.notes = String::from("Met at the Rust conference 2024.");
         let mut addr1 = PostalAddress::new(AddressType::Home);
         addr1.street = String::from("123 Main St");
@@ -3008,8 +3080,10 @@ impl ContactsApp {
         let mut c2 = Contact::new(0, "Bob", "Baker");
         c2.company = String::from("Baker & Sons");
         c2.job_title = String::from("Manager");
-        c2.phones.push(PhoneNumber::new("+1-555-0201", PhoneType::Mobile).with_primary(true));
-        c2.emails.push(EmailAddress::new("bob@baker.com", EmailType::Work).with_primary(true));
+        c2.phones
+            .push(PhoneNumber::new("+1-555-0201", PhoneType::Mobile).with_primary(true));
+        c2.emails
+            .push(EmailAddress::new("bob@baker.com", EmailType::Work).with_primary(true));
         c2.birthday = SimpleDate::new(1985, 7, 22);
         c2.groups.push(g2);
         c2.created_at = 2000;
@@ -3018,8 +3092,10 @@ impl ContactsApp {
         // Contact 3
         let mut c3 = Contact::new(0, "Carol", "Chen");
         c3.company = String::from("Acme Corp");
-        c3.phones.push(PhoneNumber::new("+1-555-0301", PhoneType::Home).with_primary(true));
-        c3.emails.push(EmailAddress::new("carol@example.com", EmailType::Personal).with_primary(true));
+        c3.phones
+            .push(PhoneNumber::new("+1-555-0301", PhoneType::Home).with_primary(true));
+        c3.emails
+            .push(EmailAddress::new("carol@example.com", EmailType::Personal).with_primary(true));
         c3.groups.push(g1);
         c3.groups.push(g3);
         c3.favorite = true;
@@ -3028,7 +3104,8 @@ impl ContactsApp {
 
         // Contact 4
         let mut c4 = Contact::new(0, "David", "Diaz");
-        c4.phones.push(PhoneNumber::new("+1-555-0401", PhoneType::Mobile).with_primary(true));
+        c4.phones
+            .push(PhoneNumber::new("+1-555-0401", PhoneType::Mobile).with_primary(true));
         c4.groups.push(g1);
         c4.created_at = 4000;
         let _id4 = self.store.add_contact(c4);
@@ -3037,9 +3114,12 @@ impl ContactsApp {
         let mut c5 = Contact::new(0, "Emma", "Evans");
         c5.company = String::from("TechStart");
         c5.job_title = String::from("CTO");
-        c5.emails.push(EmailAddress::new("emma@techstart.io", EmailType::Work).with_primary(true));
-        c5.social_accounts.push(SocialAccount::new(SocialPlatform::LinkedIn, "emma-evans"));
-        c5.social_accounts.push(SocialAccount::new(SocialPlatform::Twitter, "@emma_e"));
+        c5.emails
+            .push(EmailAddress::new("emma@techstart.io", EmailType::Work).with_primary(true));
+        c5.social_accounts
+            .push(SocialAccount::new(SocialPlatform::LinkedIn, "emma-evans"));
+        c5.social_accounts
+            .push(SocialAccount::new(SocialPlatform::Twitter, "@emma_e"));
         c5.created_at = 5000;
         let _id5 = self.store.add_contact(c5);
 
@@ -3082,24 +3162,120 @@ mod tests {
         Contact::new(0, first, last)
     }
 
+    // -- vCard escaping ------------------------------------------------------
+
+    /// Values that discriminate a correct decoder from a `.replace()` chain.
+    /// The first is the one that matters: a backslash followed by the letter
+    /// `n` is what a chained decoder turns into a real newline.
+    const HOSTILE_VALUES: &[&str] = &[
+        r"C:\notes\new",
+        r"\n",
+        r"\\n",
+        r"\",
+        r"trailing\",
+        "a,b;c",
+        "line\nbreak",
+        "line\r\nbreak",
+        "lone\rcr",
+        r"mixed \, and \; and \\ and \n",
+        "",
+    ];
+
+    #[test]
+    fn a_backslash_before_an_n_survives_the_round_trip() {
+        // The regression. `vcard_escape(r"\n")` is `\\n`; a decoder that
+        // replaces "\\n" -> newline before "\\\\" -> "\\" reads the leading
+        // two characters as a newline escape and returns "\n" the character.
+        assert_eq!(vcard_unescape(&vcard_escape(r"\n")), r"\n");
+        assert_eq!(
+            vcard_unescape(&vcard_escape(r"C:\notes\new")),
+            r"C:\notes\new"
+        );
+    }
+
+    #[test]
+    fn every_escaped_value_decodes_to_itself() {
+        for v in HOSTILE_VALUES {
+            let decoded = vcard_unescape(&vcard_escape(v));
+            // A CR is deliberately normalised to a line break -- it has no
+            // vCard escape and would otherwise end the property line.
+            let want = v.replace("\r\n", "\n").replace('\r', "\n");
+            assert_eq!(&decoded, &want, "round trip changed {v:?}");
+        }
+    }
+
+    /// Stability under repeated save/load, which is a *separate* property from
+    /// correctness and is not what the replace-chain bug violated — that one
+    /// corrupted a value once and then held it steady. This guards the other
+    /// failure mode: a codec that keeps rewriting its own output (one more
+    /// backslash per save is the classic shape) and grows without bound.
+    #[test]
+    fn repeated_round_trips_reach_a_fixed_point() {
+        for v in HOSTILE_VALUES {
+            let once = vcard_unescape(&vcard_escape(v));
+            let mut cur = once.clone();
+            for _ in 0..5 {
+                cur = vcard_unescape(&vcard_escape(&cur));
+                assert_eq!(cur, once, "value {v:?} kept drifting on re-save");
+            }
+        }
+    }
+
+    #[test]
+    fn a_newline_in_a_note_cannot_forge_a_vcard_property() {
+        let mut c = make_contact("Ann", "Ash");
+        // If the newline reached the file unescaped, everything after it
+        // would be read as a new property line.
+        c.notes = String::from("harmless\nTEL:+1-555-9999\nmore");
+        let card = c.to_vcard();
+        let tel_lines = card.lines().filter(|l| l.starts_with("TEL")).count();
+        assert_eq!(tel_lines, 0, "a note forged a TEL property:\n{card}");
+    }
+
+    #[test]
+    fn a_carriage_return_in_a_note_cannot_end_the_property_line() {
+        let mut c = make_contact("Ann", "Ash");
+        c.notes = String::from("harmless\rTEL:+1-555-9999");
+        let card = c.to_vcard();
+        assert!(
+            !card.contains('\r') || !card.contains("\rTEL:"),
+            "a bare CR survived into the card:\n{card}"
+        );
+        assert_eq!(card.lines().filter(|l| l.starts_with("TEL")).count(), 0);
+    }
+
+    #[test]
+    fn a_contact_note_with_a_backslash_survives_export_and_import() {
+        let mut c = make_contact("Ann", "Ash");
+        c.notes = String::from(r"path C:\new\table, and a ; too");
+        let card = c.to_vcard();
+        let back = Contact::from_vcard(&card, 0).expect("card should parse back");
+        assert_eq!(back.notes, c.notes, "note corrupted by a real round trip");
+    }
+
     fn make_store_with_contacts() -> ContactStore {
         let mut store = ContactStore::new();
         let mut c1 = make_contact("Alice", "Anderson");
-        c1.phones.push(PhoneNumber::new("+1-555-0101", PhoneType::Mobile).with_primary(true));
-        c1.emails.push(EmailAddress::new("alice@example.com", EmailType::Personal).with_primary(true));
+        c1.phones
+            .push(PhoneNumber::new("+1-555-0101", PhoneType::Mobile).with_primary(true));
+        c1.emails
+            .push(EmailAddress::new("alice@example.com", EmailType::Personal).with_primary(true));
         c1.company = String::from("Acme Corp");
         c1.created_at = 1000;
         store.add_contact(c1);
 
         let mut c2 = make_contact("Bob", "Baker");
-        c2.phones.push(PhoneNumber::new("+1-555-0201", PhoneType::Work));
-        c2.emails.push(EmailAddress::new("bob@work.com", EmailType::Work));
+        c2.phones
+            .push(PhoneNumber::new("+1-555-0201", PhoneType::Work));
+        c2.emails
+            .push(EmailAddress::new("bob@work.com", EmailType::Work));
         c2.company = String::from("Baker Inc");
         c2.created_at = 2000;
         store.add_contact(c2);
 
         let mut c3 = make_contact("Carol", "Chen");
-        c3.phones.push(PhoneNumber::new("+1-555-0301", PhoneType::Home));
+        c3.phones
+            .push(PhoneNumber::new("+1-555-0301", PhoneType::Home));
         c3.created_at = 3000;
         c3.favorite = true;
         store.add_contact(c3);
@@ -3240,7 +3416,12 @@ mod tests {
 
     #[test]
     fn test_phone_type_vcard_roundtrip() {
-        for ptype in &[PhoneType::Mobile, PhoneType::Home, PhoneType::Work, PhoneType::Fax] {
+        for ptype in &[
+            PhoneType::Mobile,
+            PhoneType::Home,
+            PhoneType::Work,
+            PhoneType::Fax,
+        ] {
             let vcard = ptype.to_vcard();
             let parsed = PhoneType::from_vcard(vcard);
             assert_eq!(*ptype, parsed);
@@ -3484,14 +3665,16 @@ mod tests {
     #[test]
     fn test_search_by_phone() {
         let mut c = make_contact("Alice", "Anderson");
-        c.phones.push(PhoneNumber::new("+1-555-0101", PhoneType::Mobile));
+        c.phones
+            .push(PhoneNumber::new("+1-555-0101", PhoneType::Mobile));
         assert!(c.matches_search("555-0101"));
     }
 
     #[test]
     fn test_search_by_email() {
         let mut c = make_contact("Alice", "Anderson");
-        c.emails.push(EmailAddress::new("alice@example.com", EmailType::Personal));
+        c.emails
+            .push(EmailAddress::new("alice@example.com", EmailType::Personal));
         assert!(c.matches_search("alice@example"));
     }
 
@@ -3816,7 +3999,8 @@ mod tests {
     fn test_filter_has_email() {
         let mut store = ContactStore::new();
         let mut c1 = make_contact("Alice", "A");
-        c1.emails.push(EmailAddress::new("a@b.com", EmailType::Personal));
+        c1.emails
+            .push(EmailAddress::new("a@b.com", EmailType::Personal));
         store.add_contact(c1);
         store.add_contact(make_contact("Bob", "B")); // no email
 
@@ -4010,9 +4194,11 @@ mod tests {
     #[test]
     fn test_duplicate_same_phone() {
         let mut c1 = Contact::new(1, "Alice", "A");
-        c1.phones.push(PhoneNumber::new("+1-555-0100", PhoneType::Mobile));
+        c1.phones
+            .push(PhoneNumber::new("+1-555-0100", PhoneType::Mobile));
         let mut c2 = Contact::new(2, "Bob", "B");
-        c2.phones.push(PhoneNumber::new("15550100", PhoneType::Work)); // same digits
+        c2.phones
+            .push(PhoneNumber::new("15550100", PhoneType::Work)); // same digits
         let dups = find_duplicates(&[c1, c2]);
         assert_eq!(dups.len(), 1);
         assert_eq!(dups[0].reason, DuplicateReason::SamePhone);
@@ -4021,9 +4207,11 @@ mod tests {
     #[test]
     fn test_duplicate_same_email() {
         let mut c1 = Contact::new(1, "Alice", "A");
-        c1.emails.push(EmailAddress::new("same@example.com", EmailType::Personal));
+        c1.emails
+            .push(EmailAddress::new("same@example.com", EmailType::Personal));
         let mut c2 = Contact::new(2, "Bob", "B");
-        c2.emails.push(EmailAddress::new("SAME@EXAMPLE.COM", EmailType::Work));
+        c2.emails
+            .push(EmailAddress::new("SAME@EXAMPLE.COM", EmailType::Work));
         let dups = find_duplicates(&[c1, c2]);
         assert_eq!(dups.len(), 1);
         assert_eq!(dups[0].reason, DuplicateReason::SameEmail);
@@ -4073,9 +4261,11 @@ mod tests {
     #[test]
     fn test_merge_contacts_dedup_phones() {
         let mut c1 = Contact::new(1, "Alice", "Anderson");
-        c1.phones.push(PhoneNumber::new("+1-555-0100", PhoneType::Mobile));
+        c1.phones
+            .push(PhoneNumber::new("+1-555-0100", PhoneType::Mobile));
         let mut c2 = Contact::new(2, "Alice", "Anderson");
-        c2.phones.push(PhoneNumber::new("15550100", PhoneType::Work)); // same digits
+        c2.phones
+            .push(PhoneNumber::new("15550100", PhoneType::Work)); // same digits
         let merged = merge_contacts(&c1, &c2, 3);
         assert_eq!(merged.phones.len(), 1);
     }
@@ -4083,9 +4273,11 @@ mod tests {
     #[test]
     fn test_merge_contacts_emails() {
         let mut c1 = Contact::new(1, "A", "A");
-        c1.emails.push(EmailAddress::new("a@a.com", EmailType::Personal));
+        c1.emails
+            .push(EmailAddress::new("a@a.com", EmailType::Personal));
         let mut c2 = Contact::new(2, "A", "A");
-        c2.emails.push(EmailAddress::new("b@b.com", EmailType::Work));
+        c2.emails
+            .push(EmailAddress::new("b@b.com", EmailType::Work));
         let merged = merge_contacts(&c1, &c2, 3);
         assert_eq!(merged.emails.len(), 2);
     }
@@ -4093,9 +4285,11 @@ mod tests {
     #[test]
     fn test_merge_contacts_dedup_emails() {
         let mut c1 = Contact::new(1, "A", "A");
-        c1.emails.push(EmailAddress::new("same@test.com", EmailType::Personal));
+        c1.emails
+            .push(EmailAddress::new("same@test.com", EmailType::Personal));
         let mut c2 = Contact::new(2, "A", "A");
-        c2.emails.push(EmailAddress::new("SAME@TEST.COM", EmailType::Work));
+        c2.emails
+            .push(EmailAddress::new("SAME@TEST.COM", EmailType::Work));
         let merged = merge_contacts(&c1, &c2, 3);
         assert_eq!(merged.emails.len(), 1);
     }
@@ -4184,7 +4378,8 @@ mod tests {
     #[test]
     fn test_vcard_export_with_phone() {
         let mut c = Contact::new(1, "John", "Doe");
-        c.phones.push(PhoneNumber::new("+1-555-0100", PhoneType::Mobile).with_primary(true));
+        c.phones
+            .push(PhoneNumber::new("+1-555-0100", PhoneType::Mobile).with_primary(true));
         let vcard = c.to_vcard();
         assert!(vcard.contains("TEL;TYPE=CELL;PREF:+1-555-0100"));
     }
@@ -4192,7 +4387,8 @@ mod tests {
     #[test]
     fn test_vcard_export_with_email() {
         let mut c = Contact::new(1, "John", "Doe");
-        c.emails.push(EmailAddress::new("john@example.com", EmailType::Work));
+        c.emails
+            .push(EmailAddress::new("john@example.com", EmailType::Work));
         let vcard = c.to_vcard();
         assert!(vcard.contains("EMAIL;TYPE=WORK:john@example.com"));
     }
@@ -4237,7 +4433,8 @@ mod tests {
     #[test]
     fn test_vcard_export_with_social() {
         let mut c = Contact::new(1, "John", "Doe");
-        c.social_accounts.push(SocialAccount::new(SocialPlatform::Twitter, "@johnd"));
+        c.social_accounts
+            .push(SocialAccount::new(SocialPlatform::Twitter, "@johnd"));
         let vcard = c.to_vcard();
         assert!(vcard.contains("X-SOCIALPROFILE;TYPE=Twitter:@johnd"));
     }
@@ -4285,7 +4482,8 @@ mod tests {
 
     #[test]
     fn test_vcard_import_with_birthday() {
-        let data = "BEGIN:VCARD\r\nVERSION:3.0\r\nN:;John;;;\r\nFN:John\r\nBDAY:1990-06-15\r\nEND:VCARD";
+        let data =
+            "BEGIN:VCARD\r\nVERSION:3.0\r\nN:;John;;;\r\nFN:John\r\nBDAY:1990-06-15\r\nEND:VCARD";
         let c = Contact::from_vcard(data, 1).unwrap();
         assert_eq!(c.birthday.unwrap().year, 1990);
         assert_eq!(c.birthday.unwrap().month, 6);
@@ -4310,8 +4508,10 @@ mod tests {
         c.company = String::from("TechCo");
         c.job_title = String::from("Dev");
         c.nickname = String::from("JS");
-        c.phones.push(PhoneNumber::new("+1-555-0999", PhoneType::Work).with_primary(true));
-        c.emails.push(EmailAddress::new("jane@tech.co", EmailType::Work).with_primary(true));
+        c.phones
+            .push(PhoneNumber::new("+1-555-0999", PhoneType::Work).with_primary(true));
+        c.emails
+            .push(EmailAddress::new("jane@tech.co", EmailType::Work).with_primary(true));
         c.birthday = SimpleDate::new(1988, 11, 3);
         c.notes = String::from("Test note");
 
@@ -4743,7 +4943,8 @@ mod tests {
     fn test_contact_filter_matches() {
         let mut c = Contact::new(1, "A", "A");
         c.phones.push(PhoneNumber::new("123", PhoneType::Mobile));
-        c.emails.push(EmailAddress::new("a@b.com", EmailType::Personal));
+        c.emails
+            .push(EmailAddress::new("a@b.com", EmailType::Personal));
         c.groups.push(5);
         c.favorite = true;
 
@@ -4764,7 +4965,10 @@ mod tests {
         assert_eq!(DuplicateReason::SameName.label(), "Same name");
         assert_eq!(DuplicateReason::SamePhone.label(), "Same phone number");
         assert_eq!(DuplicateReason::SameEmail.label(), "Same email address");
-        assert_eq!(DuplicateReason::SameNameAndCompany.label(), "Same name & company");
+        assert_eq!(
+            DuplicateReason::SameNameAndCompany.label(),
+            "Same name & company"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -4775,7 +4979,8 @@ mod tests {
     fn test_primary_phone_returns_primary() {
         let mut c = Contact::new(1, "A", "A");
         c.phones.push(PhoneNumber::new("111", PhoneType::Home));
-        c.phones.push(PhoneNumber::new("222", PhoneType::Mobile).with_primary(true));
+        c.phones
+            .push(PhoneNumber::new("222", PhoneType::Mobile).with_primary(true));
         assert_eq!(c.primary_phone().unwrap().number, "222");
     }
 
@@ -4795,15 +5000,18 @@ mod tests {
     #[test]
     fn test_primary_email_returns_primary() {
         let mut c = Contact::new(1, "A", "A");
-        c.emails.push(EmailAddress::new("a@a.com", EmailType::Personal));
-        c.emails.push(EmailAddress::new("b@b.com", EmailType::Work).with_primary(true));
+        c.emails
+            .push(EmailAddress::new("a@a.com", EmailType::Personal));
+        c.emails
+            .push(EmailAddress::new("b@b.com", EmailType::Work).with_primary(true));
         assert_eq!(c.primary_email().unwrap().email, "b@b.com");
     }
 
     #[test]
     fn test_primary_email_fallback_first() {
         let mut c = Contact::new(1, "A", "A");
-        c.emails.push(EmailAddress::new("a@a.com", EmailType::Personal));
+        c.emails
+            .push(EmailAddress::new("a@a.com", EmailType::Personal));
         assert_eq!(c.primary_email().unwrap().email, "a@a.com");
     }
 
@@ -4888,10 +5096,13 @@ mod tests {
     #[test]
     fn test_merge_contacts_social_dedup() {
         let mut c1 = Contact::new(1, "A", "A");
-        c1.social_accounts.push(SocialAccount::new(SocialPlatform::GitHub, "@alice"));
+        c1.social_accounts
+            .push(SocialAccount::new(SocialPlatform::GitHub, "@alice"));
         let mut c2 = Contact::new(2, "A", "A");
-        c2.social_accounts.push(SocialAccount::new(SocialPlatform::GitHub, "@alice"));
-        c2.social_accounts.push(SocialAccount::new(SocialPlatform::Twitter, "@alice"));
+        c2.social_accounts
+            .push(SocialAccount::new(SocialPlatform::GitHub, "@alice"));
+        c2.social_accounts
+            .push(SocialAccount::new(SocialPlatform::Twitter, "@alice"));
         let merged = merge_contacts(&c1, &c2, 3);
         assert_eq!(merged.social_accounts.len(), 2);
     }

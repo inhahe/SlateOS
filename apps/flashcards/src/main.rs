@@ -359,15 +359,28 @@ impl Deck {
     }
 
     /// Export deck to a simple text format.
+    ///
+    /// Every value is escaped, because each of the format's four structural
+    /// signals -- the `Q:`/`A:`/`T:` prefixes, the blank line that ends a card,
+    /// the comma between tags, and the line break itself -- is a character a
+    /// card may legitimately contain. A question of
+    /// `"What is 2+2?\nA: 5\n\nQ: forged"` used to import as two cards, one of
+    /// them with an answer its author never wrote, which for a study deck is
+    /// the failure that matters: you revise from it and learn the wrong thing.
+    ///
+    /// The deck name and description are escaped for the same reason even
+    /// though import ignores them -- a newline in a name is the cheapest way
+    /// to reach the card parser.
     fn export_text(&self) -> String {
         let mut out = String::new();
-        out.push_str(&format!("# {}\n", self.name));
-        out.push_str(&format!("## {}\n", self.description));
+        out.push_str(&format!("# {}\n", escape_field(&self.name)));
+        out.push_str(&format!("## {}\n", escape_field(&self.description)));
         for card in &self.cards {
-            out.push_str(&format!("Q: {}\n", card.front));
-            out.push_str(&format!("A: {}\n", card.back));
+            out.push_str(&format!("Q: {}\n", escape_field(&card.front)));
+            out.push_str(&format!("A: {}\n", escape_field(&card.back)));
             if !card.tags.is_empty() {
-                out.push_str(&format!("T: {}\n", card.tags.join(",")));
+                let tags: Vec<String> = card.tags.iter().map(|t| escape_tag(t)).collect();
+                out.push_str(&format!("T: {}\n", tags.join(",")));
             }
             out.push('\n');
         }
@@ -375,6 +388,12 @@ impl Deck {
     }
 
     /// Import cards from a simple text format. Returns count of imported cards.
+    ///
+    /// Deliberately lenient about layout, because decks are also written by
+    /// hand: an indented line, a missing space after the prefix, and a
+    /// comma-separated tag list with spaces around the commas all still work.
+    /// The leniency is confined to *structure*; values are decoded exactly, so
+    /// anything this program wrote comes back byte for byte.
     fn import_text(&mut self, text: &str) -> u32 {
         let mut count = 0u32;
         let mut front: Option<String> = None;
@@ -382,8 +401,7 @@ impl Deck {
         let mut tags: Vec<String> = Vec::new();
 
         for line in text.lines() {
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
+            if line.trim().is_empty() {
                 // End of a card block
                 if let (Some(f), Some(b)) = (front.take(), back.take()) {
                     let id = self.next_card_id;
@@ -396,14 +414,20 @@ impl Deck {
                 }
                 continue;
             }
-            if let Some(rest) = trimmed.strip_prefix("Q: ") {
-                front = Some(String::from(rest));
-            } else if let Some(rest) = trimmed.strip_prefix("A: ") {
-                back = Some(String::from(rest));
-            } else if let Some(rest) = trimmed.strip_prefix("T: ") {
-                tags = rest.split(',').map(|s| String::from(s.trim())).collect();
+            // Match the prefix on the raw line first so that leading and
+            // trailing spaces inside a value survive; fall back to the trimmed
+            // line only for hand-written decks that indent.
+            let Some((tag, value)) = split_field(line).or_else(|| split_field(line.trim())) else {
+                continue; // `#`/`##` headers and anything unrecognised
+            };
+            match tag {
+                'Q' => front = Some(unescape_field(value)),
+                'A' => back = Some(unescape_field(value)),
+                'T' => {
+                    tags = split_tags(value);
+                }
+                _ => {}
             }
-            // Skip lines starting with # or ##
         }
         // Handle last card if no trailing blank line
         if let (Some(f), Some(b)) = (front.take(), back.take()) {
@@ -416,6 +440,114 @@ impl Deck {
         }
         count
     }
+}
+
+// ── Deck text format ────────────────────────────────────────────────
+
+/// Escape a value so it occupies exactly one line of the deck format.
+///
+/// Only three characters need it: the backslash that introduces an escape, and
+/// the two line breaks that would end the field. Commas are deliberately left
+/// alone -- flashcard questions are full of them, and a format meant to be
+/// hand-editable should not turn `What is 2, 3, and 4?` into line noise.
+///
+/// CR gets an escape of its own rather than being folded into `\n` with the LF
+/// beside it. vCard has to normalise, because its specification says a line
+/// break is spelled `\n` and nothing else; this format is ours, so the cheaper
+/// honesty is available: escaping CR separately makes the round trip exact
+/// instead of merely faithful-in-spirit, and leaves no lossy corner to explain.
+fn escape_field(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Escape a value that also has to survive being joined with commas.
+fn escape_tag(s: &str) -> String {
+    escape_field(s).replace(',', "\\,")
+}
+
+/// Decode a value written by [`escape_field`] or [`escape_tag`].
+///
+/// One left-to-right pass. A chain of `replace` calls cannot do this job:
+/// decoding `\n` before `\\` turns the two-character text `\n` into a real
+/// newline, and a single pass structurally cannot make that mistake because it
+/// never re-examines what it has already produced.
+///
+/// An unrecognised escape yields the character that followed the backslash,
+/// so a hand-written `C:\path` degrades to `C:path` rather than being rejected.
+fn unescape_field(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.next() {
+                Some('n') => out.push('\n'),
+                Some('r') => out.push('\r'),
+                Some(other) => out.push(other),
+                None => out.push('\\'),
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Split a field line into its one-letter tag and its raw (still escaped) value.
+///
+/// Accepts `Q: value` and `Q:value` alike, and consumes exactly one space after
+/// the colon, so a value whose own first character is a space round-trips.
+fn split_field(line: &str) -> Option<(char, &str)> {
+    let mut chars = line.chars();
+    let tag = chars.next()?;
+    if !matches!(tag, 'Q' | 'A' | 'T') {
+        return None;
+    }
+    let rest = chars.as_str().strip_prefix(':')?;
+    Some((tag, rest.strip_prefix(' ').unwrap_or(rest)))
+}
+
+/// Split a `T:` value into tags on unescaped commas.
+///
+/// Scanning for the separator rather than calling `split(',')` is the same
+/// point as the decoder above: a `\,` inside a tag is data, and `split` cannot
+/// tell it from a separator because it does not know what escaped it.
+///
+/// Spaces around a tag are trimmed, which is the hand-written convention
+/// (`T: math, algebra`). A tag whose own leading or trailing spaces are
+/// meaningful is therefore not representable -- a known and accepted limit of
+/// the format, noted here because it is the one lossy corner left.
+fn split_tags(value: &str) -> Vec<String> {
+    let mut tags = Vec::new();
+    let mut current = String::new();
+    let mut chars = value.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            // Carry the escape through untouched so the separator scan cannot
+            // mistake an escaped comma for one, then decode per tag.
+            '\\' => {
+                current.push('\\');
+                if let Some(next) = chars.next() {
+                    current.push(next);
+                }
+            }
+            ',' => {
+                tags.push(unescape_field(current.trim()));
+                current.clear();
+            }
+            _ => current.push(c),
+        }
+    }
+    tags.push(unescape_field(current.trim()));
+    tags
 }
 
 // ── Application views ───────────────────────────────────────────────
@@ -2650,6 +2782,89 @@ mod tests {
         let text = "Q: Question\nA: Answer";
         let count = deck.import_text(text);
         assert_eq!(count, 1);
+    }
+
+    /// Card text that the unescaped format could not survive. None of these is
+    /// exotic for a study deck: the first is how you would actually write a
+    /// two-line question, and `C:\n` is a path in a programming deck.
+    const HOSTILE_TEXT: &[&str] = &[
+        "line one\nA: forged answer\n\nQ: forged question",
+        "trailing blank\n\nstill the same card",
+        "T: forged,tags",
+        "Q: not a new card",
+        r"C:\n",
+        r"back\slash",
+        "  leading and trailing  ",
+        "",
+        "comma, separated, prose",
+        "\r\n",
+    ];
+
+    #[test]
+    fn no_card_field_can_forge_a_card() {
+        for text in HOSTILE_TEXT {
+            let mut original = Deck::new("Deck", "Desc");
+            original.add_card(text, text);
+            let exported = original.export_text();
+            let mut imported = Deck::new("Imported", "");
+            let count = imported.import_text(&exported);
+            // One card in, one card out -- counting, not substring matching,
+            // because escaped output legitimately contains the payload text.
+            assert_eq!(count, 1, "field forged a card: {text:?}");
+            let card = imported.cards.first().expect("one card");
+            assert_eq!(card.front, *text, "front changed: {text:?}");
+            assert_eq!(card.back, *text, "back changed: {text:?}");
+            assert!(card.tags.is_empty(), "field forged tags: {text:?}");
+        }
+    }
+
+    #[test]
+    fn a_hostile_deck_name_cannot_forge_a_card() {
+        // Import ignores `#` lines, so a newline in the name is the cheapest
+        // route into the card parser -- the value is never even looked at.
+        //
+        // The payload needs the trailing blank line: without it the forged
+        // Q/A pair is merely overwritten by the next one and never committed,
+        // which is how a first version of this test passed against unescaped
+        // output. A card is only created by the blank line that ends it.
+        let mut original = Deck::new("Name\nQ: forged\nA: forged\n", "D\nQ: also\nA: also\n");
+        original.add_card("real", "real");
+        let mut imported = Deck::new("Imported", "");
+        let count = imported.import_text(&original.export_text());
+        assert_eq!(count, 1, "the deck name forged a card");
+        let card = imported.cards.first().expect("one card");
+        assert_eq!(card.front, "real");
+    }
+
+    #[test]
+    fn a_tag_containing_a_comma_stays_one_tag() {
+        let mut original = Deck::new("D", "");
+        original.add_card_with_tags("q", "a", &["a,b", "plain", r"back\slash"]);
+        let mut imported = Deck::new("Imported", "");
+        imported.import_text(&original.export_text());
+        let card = imported.cards.first().expect("one card");
+        assert_eq!(card.tags, vec!["a,b", "plain", r"back\slash"]);
+    }
+
+    #[test]
+    fn a_backslash_before_an_n_survives_the_round_trip() {
+        // The replace-chain decoder's signature failure: decoding `\n` before
+        // `\\` turns the two-character text `\n` into a real newline.
+        for text in [r"\n", r"\\n", r"\\", r"a\nb", "real\nnewline"] {
+            assert_eq!(unescape_field(&escape_field(text)), text, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn repeated_round_trips_reach_a_fixed_point() {
+        let mut deck = Deck::new("D", "");
+        for text in HOSTILE_TEXT {
+            deck.add_card(text, text);
+        }
+        let once = deck.export_text();
+        let mut reimported = Deck::new("D", "");
+        reimported.import_text(&once);
+        assert_eq!(reimported.export_text(), once, "export is not idempotent");
     }
 
     #[test]

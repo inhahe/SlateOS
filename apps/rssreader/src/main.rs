@@ -252,6 +252,35 @@ impl<'a> XmlParser<'a> {
             "gt" => Ok('>'),
             "quot" => Ok('"'),
             "apos" => Ok('\''),
+            // XML defines only the five above, but feeds are written by tools
+            // that think in HTML and these turn up constantly. Decoding them
+            // is the difference between readable prose and one littered with
+            // `&nbsp;` and `&rsquo;`.
+            "nbsp" => Ok('\u{A0}'),
+            "ndash" => Ok('–'),
+            "mdash" => Ok('—'),
+            "hellip" => Ok('…'),
+            "lsquo" => Ok('\u{2018}'),
+            "rsquo" => Ok('\u{2019}'),
+            "ldquo" => Ok('\u{201C}'),
+            "rdquo" => Ok('\u{201D}'),
+            "laquo" => Ok('«'),
+            "raquo" => Ok('»'),
+            "copy" => Ok('©'),
+            "reg" => Ok('®'),
+            "trade" => Ok('™'),
+            "deg" => Ok('°'),
+            "middot" => Ok('·'),
+            "bull" => Ok('•'),
+            "eacute" => Ok('é'),
+            "egrave" => Ok('è'),
+            "agrave" => Ok('à'),
+            "ccedil" => Ok('ç'),
+            "uuml" => Ok('ü'),
+            "ouml" => Ok('ö'),
+            "auml" => Ok('ä'),
+            "szlig" => Ok('ß'),
+            "ntilde" => Ok('ñ'),
             s if s.starts_with('#') => {
                 let numeric = &s[1..];
                 let codepoint = if let Some(hex) = numeric.strip_prefix('x') {
@@ -269,28 +298,48 @@ impl<'a> XmlParser<'a> {
     }
 
     /// Decode XML entities in a string.
-    fn decode_entities(text: &str) -> Result<String, XmlError> {
+    ///
+    /// Infallible by design. An entity this parser does not recognise is left
+    /// exactly as it was written rather than rejected: real feeds are full of
+    /// HTML entities that XML does not define (`&nbsp;` above all) and of bare
+    /// `&` in query strings, and erroring on one of those used to throw away
+    /// the entire feed. Text nodes already degraded this way; attribute values
+    /// propagated the error with `?` and so were the fatal path.
+    fn decode_entities(text: &str) -> String {
         let mut result = String::with_capacity(text.len());
-        let mut chars = text.chars();
-        while let Some(ch) = chars.next() {
-            if ch == '&' {
-                let mut entity = String::new();
-                for ec in chars.by_ref() {
-                    if ec == ';' {
-                        break;
-                    }
-                    entity.push(ec);
-                }
-                let decoded = Self::decode_entity(&entity)?;
+        let mut rest = text;
+        // `&` and `;` are ASCII, so every index taken here is a character
+        // boundary and the slices below cannot split a character.
+        while let Some(amp) = rest.find('&') {
+            result.push_str(rest.get(..amp).unwrap_or_default());
+            let after = rest.get(amp.saturating_add(1)..).unwrap_or_default();
+            let Some(semi) = after.find(';') else {
+                // A bare `&` with no terminator at all: the rest is literal.
+                result.push('&');
+                result.push_str(after);
+                return result;
+            };
+            let entity = after.get(..semi).unwrap_or_default();
+            if let Ok(decoded) = Self::decode_entity(entity) {
                 result.push(decoded);
             } else {
-                result.push(ch);
+                result.push('&');
+                result.push_str(entity);
+                result.push(';');
             }
+            rest = after.get(semi.saturating_add(1)..).unwrap_or_default();
         }
-        Ok(result)
+        result.push_str(rest);
+        result
     }
 
     /// Read a quoted attribute value.
+    ///
+    /// The value is sliced out whole, the way every other reader in this parser
+    /// does it. Accumulating it as `value.push(b as char)` read each UTF-8 byte
+    /// as the Latin-1 scalar of that value, so any non-ASCII attribute — an
+    /// enclosure URL, a title, an author — arrived as mojibake, straight off a
+    /// remote feed.
     fn read_attribute_value(&mut self) -> Result<String, XmlError> {
         self.skip_whitespace();
         let quote = self.advance().ok_or(XmlError::UnexpectedEof)?;
@@ -299,12 +348,19 @@ impl<'a> XmlParser<'a> {
                 "expected quote for attribute value".to_string(),
             ));
         }
-        let mut value = String::new();
-        while let Some(b) = self.advance() {
+        let start = self.pos;
+        while let Some(b) = self.peek() {
             if b == quote {
-                return Self::decode_entities(&value);
+                // Both delimiters are ASCII, so `start` and `self.pos` are
+                // character boundaries; and the input came from a `&str`, so
+                // the lossy decode is exact.
+                let raw =
+                    String::from_utf8_lossy(self.input.get(start..self.pos).unwrap_or_default())
+                        .into_owned();
+                self.pos = self.pos.saturating_add(1);
+                return Ok(Self::decode_entities(&raw));
             }
-            value.push(b as char);
+            self.pos = self.pos.saturating_add(1);
         }
         Err(XmlError::UnexpectedEof)
     }
@@ -532,12 +588,9 @@ impl<'a> XmlParser<'a> {
                 self.pos += 1;
             }
             let raw = String::from_utf8_lossy(&self.input[text_start..self.pos]).to_string();
-            if let Ok(decoded) = Self::decode_entities(&raw) {
-                if !decoded.trim().is_empty() {
-                    elem.children.push(XmlNode::Text(decoded));
-                }
-            } else if !raw.trim().is_empty() {
-                elem.children.push(XmlNode::Text(raw));
+            let decoded = Self::decode_entities(&raw);
+            if !decoded.trim().is_empty() {
+                elem.children.push(XmlNode::Text(decoded));
             }
         }
     }
@@ -4106,6 +4159,78 @@ mod tests {
         let elem = parse_xml(xml).unwrap();
         assert_eq!(elem.tag, "root");
         assert_eq!(elem.text_content(), "hello");
+    }
+
+    /// Attribute values come straight off a remote feed. Accumulating them one
+    /// byte at a time as `b as char` is a Latin-1 decode, so every non-ASCII
+    /// attribute arrived as mojibake.
+    #[test]
+    fn a_non_ascii_attribute_value_is_read_unchanged() {
+        for value in [
+            "Café Corner",
+            "日本語のニュース",
+            "Ωμέγα",
+            "https://example.com/écoute/🚀.mp3",
+            "Ω日🚀",
+        ] {
+            let xml = format!("<root title=\"{value}\">x</root>");
+            let elem = parse_xml(&xml).unwrap_or_else(|e| panic!("{xml} failed: {e}"));
+            assert_eq!(
+                elem.attributes.get("title").map(String::as_str),
+                Some(value),
+                "attribute changed for {value}"
+            );
+        }
+    }
+
+    /// Single-quoted values take the same path.
+    #[test]
+    fn a_non_ascii_single_quoted_attribute_is_read_unchanged() {
+        let elem = parse_xml("<root href='https://ex.com/日本'>x</root>").unwrap();
+        assert_eq!(
+            elem.attributes.get("href").map(String::as_str),
+            Some("https://ex.com/日本")
+        );
+    }
+
+    /// An entity this parser does not define used to abort the whole feed when
+    /// it appeared in an attribute. `&nbsp;` is in a large fraction of real
+    /// feeds, so that is one unknown entity between the user and any content.
+    #[test]
+    fn an_unknown_entity_does_not_destroy_the_feed() {
+        let elem = parse_xml("<root title=\"a&unknownthing;b\">t&unknownthing;u</root>")
+            .expect("an unrecognised entity must not fail the parse");
+        assert_eq!(
+            elem.attributes.get("title").map(String::as_str),
+            Some("a&unknownthing;b"),
+            "an unknown entity should be left exactly as written"
+        );
+        assert_eq!(elem.text_content(), "t&unknownthing;u");
+    }
+
+    /// A bare `&` in a URL is technically invalid XML and utterly ubiquitous.
+    #[test]
+    fn a_bare_ampersand_does_not_destroy_the_feed() {
+        let elem = parse_xml("<root href=\"http://e.com/?a=1&b=2\">x</root>")
+            .expect("a bare ampersand must not fail the parse");
+        assert_eq!(
+            elem.attributes.get("href").map(String::as_str),
+            Some("http://e.com/?a=1&b=2")
+        );
+    }
+
+    /// The HTML entities feeds actually use, plus the five XML defines and
+    /// numeric references in both bases.
+    #[test]
+    fn common_entities_are_decoded() {
+        let elem = parse_xml(
+            "<root title=\"&amp;&lt;&gt;&quot;&apos;&nbsp;&mdash;&rsquo;&eacute;&#65;&#x65e5;\">x</root>",
+        )
+        .expect("entities should parse");
+        assert_eq!(
+            elem.attributes.get("title").map(String::as_str),
+            Some("&<>\"'\u{A0}—\u{2019}éA日")
+        );
     }
 
     #[test]

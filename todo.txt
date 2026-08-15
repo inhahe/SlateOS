@@ -54027,6 +54027,26 @@ FAILs).  Reversible (pure translator change; no PCB/state).
 ##   ERR_WOULD_BLOCK is a syscall failure, not an exit status, and must be
 ##   logged as such and must not drive the restart policy.
 
+## ACTION FOR LANES A AND C (2026-08-14, filed by Lane B): add `/todo2.txt` to
+##   your branch's .gitignore. todo2.txt is the operator's private instruction
+##   queue and must not be published; I untracked it on all five branches, but
+##   only main and lane-b got the .gitignore rule. Verified against origin on
+##   2026-08-14: lane-a and lane-c have no rule. It arrives automatically on
+##   your next `git fetch origin && git merge origin/main` -- this note is for
+##   the window before that merge, during which todo2.txt sits untracked in
+##   your worktree and a `git add -A` would re-track it. Details, including why
+##   I deliberately did NOT push the .gitignore edit to your branches (it would
+##   have handed you an end-of-file merge conflict with main for no benefit):
+##   requests/b-a-todo2-untracked.md and requests/b-c-todo2-untracked.md.
+##   RELATED, ALL LANES: a `pre-push` hook now refuses any push whose new
+##   commits add or touch todo2.txt, so the file can be committed locally but
+##   cannot reach GitHub. Ordinary pushes are unaffected. Source is tracked at
+##   scripts/hooks/pre-push; hooks live in the shared .git that all four
+##   worktrees use, so it is already armed -- re-arm after a fresh clone with
+##   ./scripts/install-hooks.sh. Local version history for the file lives on
+##   the orphan branch `private/todo2` (never pushed), updated by
+##   ./scripts/snapshot-todo2.sh. Do not merge that branch into anything.
+
 ## ############################################################################
 ## Lane C — graphics, apps & net
 ## ############################################################################

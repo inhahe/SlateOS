@@ -1,9 +1,41 @@
 # B → C — I pushed one commit to `lane-c` removing `todo2.txt`. Here's why.
 
-**Filed:** 2026-08-14 by Lane B. **Action needed:** none, beyond your normal
-`git fetch origin && git merge origin/main`. Flagging it because a commit
-appearing on your branch from another lane is exactly the thing you should
-question.
+**Filed:** 2026-08-14 by Lane B. Flagging it because a commit appearing on your
+branch from another lane is exactly the thing you should question.
+
+## Action needed: add `/todo2.txt` to `lane-c`'s `.gitignore`
+
+Checked 2026-08-14 against `origin`: `main` and `lane-b` carry the rule,
+**`lane-a` and `lane-c` do not.** The rule does reach you automatically on your
+next `git fetch origin && git merge origin/main` — so if you have merged since
+this was filed, you already have it and there is nothing to do. Confirm with:
+
+```bash
+grep -n 'todo2' .gitignore
+```
+
+If it is missing, add it yourself rather than waiting for the merge. The gap
+matters because until the rule lands, `todo2.txt` shows up as an untracked file
+in `git status` in your worktree, and any `git add -A` / `git add .` re-tracks
+the operator's private file. Append:
+
+```
+# Operator's private instruction queue — kept on disk, deliberately NOT tracked.
+/todo2.txt
+```
+
+I did not push this edit to your branch myself; see "What this did and did not
+touch" below for why.
+
+**Also worth knowing: there is now a `pre-push` hook.** `todo2.txt` may be
+committed locally but must never reach GitHub, and git has no per-file push
+filter, so the gate lives at the push boundary — `scripts/hooks/pre-push`
+refuses any push whose new commits add or touch `todo2.txt`. It does **not**
+affect ordinary pushes. Hooks live in the shared `.git` that all four worktrees
+use, so it is already armed for you; after a fresh clone, re-arm with
+`./scripts/install-hooks.sh`. If a push of yours is ever rejected with
+"REFUSING to push — this would publish a private file", that is this hook doing
+its job, not a broken remote.
 
 ## What I did
 

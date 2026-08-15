@@ -61482,14 +61482,49 @@ faces have to be surveyed for which of them cover those scripts at all — on a
 Windows development host that is likely to be very few, which is itself an
 argument for doing it after the things the host *can* measure.
 
-**Proper fix.** USE first, since it subsumes the most scripts: the cluster
-grammar from the Unicode Shaping Engine spec, the same stage driver
-`indic_shape.rs` already has, and `Plan`'s probing of what the face declares.
-Khmer and Myanmar are variants of the Indic model and can reuse
-`initial_reordering_syllable`'s base-finding. Thai/Lao is not a reordering
-shaper at all — it is the PUA fallback for Thai fonts with no `GSUB`, plus a
-`ccmp`-like normalization of the vowel/tone order — and is the smallest of the
-four.
+**The survey has now been run** (2026-08-15, `gui/font/tools/script_survey.py`,
+579 faces), and it contradicts the guess above. Counting only faces that both
+cover the script *and* register its tag in `GSUB` — the sharper test, since a
+face that declares nothing gives both implementations nothing to do and agrees
+trivially:
+
+| shaper | script | measuring faces |
+|---|---|---|
+| Thai | Thai | **8** |
+| Thai | Lao | **19** |
+| Khmer | Khmer | 3 |
+| Myanmar | Myanmar | 2 |
+| USE | Tifinagh | 6 |
+| USE | Buginese | 4 |
+| USE | Tibetan / Javanese / Balinese / Sinhala / Cham | 1 each |
+| USE | Tai Tham | 0 (covered by one face, declared by none) |
+| *(control)* Indic | Devanagari | 5 |
+| *(control)* Arabic | Arabic | 43 |
+
+The control row is the point: **Devanagari, already written and measured from
+`misplaced 13` to `0`, had only five faces to measure against.** Thai has eight
+and Lao nineteen. So the host is not thin for these scripts at all — it is
+thin for exactly one of the four families, USE, where most scripts have a
+single face and Tai Tham has none.
+
+**Proper fix — order revised by the survey.** ~~USE first, since it subsumes
+the most scripts.~~ USE subsumes the most scripts and is the *least*
+measurable of the four; writing it first means writing the largest piece of
+shaping left with an oracle that can barely disagree with it. Take them in
+order of how well the host can check the work:
+
+1. **Thai/Lao first** — best measured (27 faces between them) and smallest.
+   It is not a reordering shaper at all: it is the PUA fallback for Thai fonts
+   with no `GSUB`, plus a `ccmp`-like normalization of the vowel/tone order.
+2. **Khmer, then Myanmar** — 3 and 2 faces, variants of the Indic model that
+   can reuse `initial_reordering_syllable`'s base-finding.
+3. **USE last** — the cluster grammar from the Unicode Shaping Engine spec,
+   the same stage driver `indic_shape.rs` already has, and `Plan`'s probing of
+   what the face declares. By then the three smaller shapers will have shaken
+   out the stage driver against faces that can actually object.
+
+Each step needs its corpus strings added to `harfbuzz_sweep.py` first, or the
+sweep reports agreement it never tested.
 
 **Where.** `gui/font/src/sfnt.rs` — `Face::substitute`, which dispatches on
 `Script::shaping` and would gain the other families; `gui/font/src/indic.rs`

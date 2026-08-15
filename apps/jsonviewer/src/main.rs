@@ -307,7 +307,13 @@ impl<'a> Parser<'a> {
         if byte == b'\n' {
             self.line += 1;
             self.col = 1;
-        } else {
+        } else if byte & 0xC0 != 0x80 {
+            // `col` is shown to the user as "Ln 3, Col 17" and is meant to be a
+            // character position. A UTF-8 continuation byte (0b10xx_xxxx) is
+            // the tail of a character whose leading byte already counted, so
+            // only leading bytes advance the column — otherwise an error after
+            // a run of CJK is reported up to three columns per character too
+            // far right, pointing at text that isn't there.
             self.col += 1;
         }
         Some(byte)
@@ -4331,6 +4337,35 @@ mod tests {
     fn parse_error_line_column() {
         let err = parse_json("{\n  \"a\": }").unwrap_err();
         assert!(err.line >= 2);
+    }
+
+    /// The reported column is shown to the user as "Ln n, Col m" and is meant
+    /// to be a character position. Counting UTF-8 bytes would push the column
+    /// two or three places right for every non-ASCII character before it.
+    #[test]
+    fn error_column_counts_characters_not_bytes() {
+        // Same document three times: the string value differs only in the
+        // width of its characters, so the reported column must not differ.
+        let ascii = parse_json("{\"a\": \"xxx\" }}").unwrap_err();
+        for value in ["\"日本語\"", "\"ΩΩΩ\"", "\"😀😀😀\""] {
+            let doc = format!("{{\"a\": {value} }}}}");
+            let err = parse_json(&doc).unwrap_err();
+            assert_eq!(
+                err.column, ascii.column,
+                "column shifted for {value}: got {} want {}",
+                err.column, ascii.column
+            );
+        }
+    }
+
+    /// Control: an all-ASCII document reports exactly the column it always did.
+    #[test]
+    fn error_column_on_ascii_is_unchanged() {
+        let err = parse_json("{\"a\": \"xxx\" }}").unwrap_err();
+        assert_eq!(err.line, 1);
+        // `}}` — the first `}` closes the object, the second is trailing junk
+        // at 1-based character 14.
+        assert_eq!(err.column, 14);
     }
 
     #[test]

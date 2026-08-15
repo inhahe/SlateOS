@@ -83,7 +83,12 @@ mod tests {
 
     #[test]
     fn test_dxfer_negative_distinct() {
-        let d = [SG_DXFER_NONE, SG_DXFER_TO_DEV, SG_DXFER_FROM_DEV, SG_DXFER_TO_FROM_DEV];
+        let d = [
+            SG_DXFER_NONE,
+            SG_DXFER_TO_DEV,
+            SG_DXFER_FROM_DEV,
+            SG_DXFER_TO_FROM_DEV,
+        ];
         for a in 0..d.len() {
             for b in (a + 1)..d.len() {
                 assert_ne!(d[a], d[b]);

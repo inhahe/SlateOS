@@ -95,8 +95,7 @@ mod tests {
     #[test]
     fn test_class_codes_dense_0_to_7() {
         let c = [
-            BPF_LD, BPF_LDX, BPF_ST, BPF_STX, BPF_ALU, BPF_JMP, BPF_JMP32,
-            BPF_ALU64,
+            BPF_LD, BPF_LDX, BPF_ST, BPF_STX, BPF_ALU, BPF_JMP, BPF_JMP32, BPF_ALU64,
         ];
         for (i, &v) in c.iter().enumerate() {
             assert_eq!(v as usize, i);
@@ -117,8 +116,8 @@ mod tests {
     #[test]
     fn test_alu_ops_high_nibble_dense_0_to_d() {
         let a = [
-            BPF_ADD, BPF_SUB, BPF_MUL, BPF_DIV, BPF_OR, BPF_AND, BPF_LSH,
-            BPF_RSH, BPF_NEG, BPF_MOD, BPF_XOR, BPF_MOV, BPF_ARSH, BPF_END,
+            BPF_ADD, BPF_SUB, BPF_MUL, BPF_DIV, BPF_OR, BPF_AND, BPF_LSH, BPF_RSH, BPF_NEG,
+            BPF_MOD, BPF_XOR, BPF_MOV, BPF_ARSH, BPF_END,
         ];
         for (i, &v) in a.iter().enumerate() {
             // Op codes occupy the high nibble, stepping by 0x10.

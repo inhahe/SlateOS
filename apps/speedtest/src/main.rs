@@ -18,6 +18,7 @@
 use guitk::color::Color;
 #[allow(unused_imports)]
 use guitk::event::{Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEventKind};
+use guitk::fold;
 #[allow(unused_imports)]
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
 #[allow(unused_imports)]
@@ -170,10 +171,25 @@ impl SpeedTestResult {
     }
 
     /// Format the full result as a multi-line text report.
+    ///
+    /// `server_name` is folded because it is the one field here that is not a
+    /// number: it is the name a *test server* gave for itself, and this report
+    /// is built from `--- ... ---` section headers that the reader assumes the
+    /// report wrote. Every field is preceded on its line by its own label, so
+    /// a folded value cannot begin a line and cannot be read as a header. See
+    /// [`guitk::fold`].
+    ///
+    /// Today `servers` is filled from a hardcoded `default_servers()`, so this
+    /// is defence in depth rather than a live bug -- but the field is
+    /// *semantically* remote, and it will stop being hardcoded the moment
+    /// server discovery is real.
     fn to_text_report(&self) -> String {
         let mut out = String::with_capacity(256);
         out.push_str("--- Speed Test Result ---\n");
-        out.push_str(&format!("Server:       {}\n", self.server_name));
+        out.push_str(&format!(
+            "Server:       {}\n",
+            fold::line(&self.server_name)
+        ));
         out.push_str(&format!("Download:     {:.2} Mbps\n", self.download_mbps));
         out.push_str(&format!("Upload:       {:.2} Mbps\n", self.upload_mbps));
         out.push_str(&format!("Latency:      {:.2} ms\n", self.latency_ms));
@@ -985,19 +1001,18 @@ impl SpeedTestUI {
             && x <= btn_x + BUTTON_WIDTH
             && y >= btn_y
             && y <= btn_y + BUTTON_HEIGHT
-            && (self.phase.is_idle() || self.phase.is_complete() || matches!(self.phase, SpeedTestPhase::Error(_))) {
-                self.simulate_test();
-                return EventResult::Consumed;
-            }
+            && (self.phase.is_idle()
+                || self.phase.is_complete()
+                || matches!(self.phase, SpeedTestPhase::Error(_)))
+        {
+            self.simulate_test();
+            return EventResult::Consumed;
+        }
 
         // Export button.
         let export_x = GRAPH_X;
         let export_y = GRAPH_Y + GRAPH_HEIGHT + 10.0;
-        if x >= export_x
-            && x <= export_x + 100.0
-            && y >= export_y
-            && y <= export_y + 28.0
-        {
+        if x >= export_x && x <= export_x + 100.0 && y >= export_y && y <= export_y + 28.0 {
             let _export = self.history.export_as_text();
             self.export_button_hover = true;
             return EventResult::Consumed;
@@ -1048,10 +1063,8 @@ impl SpeedTestUI {
         // Update button hover states.
         let btn_x = GAUGE_CENTER_X - BUTTON_WIDTH / 2.0;
         let btn_y = GAUGE_CENTER_Y + GAUGE_RADIUS + 20.0;
-        self.start_button_hover = x >= btn_x
-            && x <= btn_x + BUTTON_WIDTH
-            && y >= btn_y
-            && y <= btn_y + BUTTON_HEIGHT;
+        self.start_button_hover =
+            x >= btn_x && x <= btn_x + BUTTON_WIDTH && y >= btn_y && y <= btn_y + BUTTON_HEIGHT;
 
         let export_x = GRAPH_X;
         let export_y = GRAPH_Y + GRAPH_HEIGHT + 10.0;
@@ -1167,7 +1180,11 @@ impl SpeedTestUI {
         });
 
         // Dropdown arrow.
-        let arrow_text = if self.server_dropdown_open { "\u{25B2}" } else { "\u{25BC}" };
+        let arrow_text = if self.server_dropdown_open {
+            "\u{25B2}"
+        } else {
+            "\u{25BC}"
+        };
         tree.push(RenderCommand::Text {
             x: x + w - 20.0,
             y: y + 7.0,
@@ -1221,7 +1238,11 @@ impl SpeedTestUI {
                 x: x + 10.0,
                 y: iy + 6.0,
                 text: format!("{} ({})", server.name, server.location),
-                color: if i == self.selected_server { BLUE } else { TEXT_COLOR },
+                color: if i == self.selected_server {
+                    BLUE
+                } else {
+                    TEXT_COLOR
+                },
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(w - 20.0),
@@ -1639,9 +1660,7 @@ impl SpeedTestUI {
 
         // Plot data.
         if samples.len() >= 2 {
-            let max_time = samples
-                .last()
-                .map_or(1.0, |s| s.elapsed_secs.max(0.1));
+            let max_time = samples.last().map_or(1.0, |s| s.elapsed_secs.max(0.1));
 
             for pair in samples.windows(2) {
                 let s0 = &pair[0];
@@ -1820,7 +1839,11 @@ impl SpeedTestUI {
             y,
             width: 100.0,
             height: 28.0,
-            color: if self.export_button_hover { SURFACE1 } else { SURFACE0 },
+            color: if self.export_button_hover {
+                SURFACE1
+            } else {
+                SURFACE0
+            },
             corner_radii: CornerRadii::all(4.0),
         });
         tree.push(RenderCommand::Text {
@@ -1901,7 +1924,10 @@ mod tests {
 
     #[test]
     fn phase_label_testing_download() {
-        assert_eq!(SpeedTestPhase::Testing(TestKind::Download).label(), "Download");
+        assert_eq!(
+            SpeedTestPhase::Testing(TestKind::Download).label(),
+            "Download"
+        );
     }
 
     #[test]
@@ -2370,6 +2396,93 @@ mod tests {
             assert!(!server.name.is_empty());
             assert!(!server.url.is_empty());
         }
+    }
+
+    // --- Report forgery tests ---
+
+    /// Server names shaped to redraw the report they are written into.
+    const HOSTILE_SERVERS: &[&str] = &[
+        "\n--- Speed Test Result ---",
+        "Metro East\nDownload:     9999.00 Mbps",
+        "\n--- Summary ---\n",
+        "a\r\nb",
+        "tab\there",
+    ];
+
+    /// Lines that look like one of the report's own section headers.
+    ///
+    /// Positional, not textual, on purpose: a correctly folded name may still
+    /// *contain* the text `--- Summary ---` in the middle of its line, which
+    /// is harmless. What must never happen is a line that *is* a header. A
+    /// `contains` assertion here would fail against correct output.
+    fn header_lines(report: &str) -> Vec<&str> {
+        report
+            .lines()
+            .filter(|l| l.starts_with("--- ") && l.ends_with(" ---"))
+            .collect()
+    }
+
+    fn result_named(name: &str) -> SpeedTestResult {
+        let mut r = make_result(100.0, 50.0, 10.0);
+        r.server_name = name.into();
+        r
+    }
+
+    #[test]
+    fn a_server_name_cannot_forge_a_report_section() {
+        for &name in HOSTILE_SERVERS {
+            let report = result_named(name).to_text_report();
+            assert_eq!(
+                header_lines(&report),
+                vec!["--- Speed Test Result ---"],
+                "server name {name:?} changed the report's section structure",
+            );
+        }
+    }
+
+    #[test]
+    fn a_server_name_stays_on_its_own_field_line() {
+        // A result report has exactly seven labelled fields under one header.
+        for &name in HOSTILE_SERVERS {
+            let report = result_named(name).to_text_report();
+            assert_eq!(
+                report.lines().count(),
+                8,
+                "server name {name:?} spilled onto extra lines: {report:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn a_hostile_server_name_cannot_forge_a_history_header() {
+        let mut h = SpeedTestHistory::new(HOSTILE_SERVERS.len());
+        for &name in HOSTILE_SERVERS {
+            h.push(result_named(name));
+        }
+        let text = h.export_as_text();
+        let headers = header_lines(&text);
+        assert_eq!(
+            headers.iter().filter(|l| **l == "--- Summary ---").count(),
+            1,
+            "a server name forged a Summary section: {headers:?}",
+        );
+        assert_eq!(
+            headers
+                .iter()
+                .filter(|l| **l == "--- Speed Test Result ---")
+                .count(),
+            HOSTILE_SERVERS.len(),
+            "one header per recorded result, no more: {headers:?}",
+        );
+    }
+
+    #[test]
+    fn an_ordinary_server_name_is_reported_verbatim() {
+        let report = result_named("Metro East").to_text_report();
+        assert!(
+            report.contains("Server:       Metro East\n"),
+            "folding altered a name that needed no folding: {report:?}",
+        );
     }
 
     // --- Test helper ---

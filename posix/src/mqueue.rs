@@ -10,10 +10,7 @@
 //
 // Bounds are established locally but clippy cannot see across the
 // check.
-#![allow(
-    clippy::indexing_slicing,
-    clippy::arithmetic_side_effects,
-)]
+#![allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 
 //! POSIX message queues (`<mqueue.h>`).
 //!
@@ -70,7 +67,6 @@
 use crate::errno;
 use crate::perprocess::process_global;
 use crate::stat::Timespec;
-use core::sync::atomic::{AtomicBool, Ordering};
 
 // ---------------------------------------------------------------------------
 // Public types & constants
@@ -183,11 +179,10 @@ impl Descriptor {
 // Static state
 // ---------------------------------------------------------------------------
 
-static MQ_LOCK: AtomicBool = AtomicBool::new(false);
 process_global! {
     /// This process's POSIX message queues, keyed by name.
     ///
-    /// `MQ_LOCK` already makes concurrent access memory-safe; the per-thread
+    /// [`mq_lock`] already makes concurrent access memory-safe; the per-thread
     /// host storage is about test isolation.  A test that fills all
     /// `MAX_QUEUES` and asserts the next `mq_open` fails is broken by any
     /// concurrent `mq_unlink`, and no amount of locking fixes that.
@@ -197,32 +192,23 @@ process_global! {
     /// table, so it shares the queue table's scope.
     fn mq_descs_storage() -> [Descriptor; MAX_DESCRIPTORS] =
         [const { Descriptor::EMPTY }; MAX_DESCRIPTORS];
+
+    /// Serialises every scan of both tables above.
+    ///
+    /// Declared *inside* the `process_global!` block on purpose: it used to be
+    /// a plain `static AtomicBool`, which on the host is one shared lock over
+    /// per-thread tables — harmless in isolation, but it couples every test
+    /// thread to every other one, so a panic while holding it would wedge
+    /// threads that share no data.  A lock must have the same scope as the
+    /// table it guards; see [`crate::perprocess::PoolLock`].
+    fn mq_lock() -> crate::perprocess::PoolLock = crate::perprocess::PoolLock::new();
 }
 
-fn lock_acquire() {
-    while MQ_LOCK
-        .compare_exchange_weak(false, true, Ordering::AcqRel, Ordering::Relaxed)
-        .is_err()
-    {
-        core::hint::spin_loop();
-    }
-}
-
-fn lock_release() {
-    MQ_LOCK.store(false, Ordering::Release);
-}
-
-/// RAII guard that releases the global mqueue lock on drop.
-struct Guard;
-impl Drop for Guard {
-    fn drop(&mut self) {
-        lock_release();
-    }
-}
-
-fn lock() -> Guard {
-    lock_acquire();
-    Guard
+/// Take [`mq_lock`] for the duration of a queue- or descriptor-table scan.
+fn lock() -> crate::perprocess::PoolGuard<'static> {
+    // SAFETY: `mq_lock()` is this context's lock, valid as long as the tables
+    // it guards.
+    unsafe { crate::perprocess::lock_pool(mq_lock()) }
 }
 
 // ---------------------------------------------------------------------------
@@ -436,7 +422,9 @@ pub extern "C" fn mq_open(name: *const u8, oflag: i32, _mode: u32, attr: *const 
     // Validate name outside the lock — it's read-only and bounded.
     // Linux's `getname(u_name)` runs before `do_open`, so name errors
     // (EFAULT/ENOENT/ENAMETOOLONG) surface before access-mode EINVAL.
-    let Some((name_buf, name_len)) = (unsafe { validate_name(name) }) else { return -1 };
+    let Some((name_buf, name_len)) = (unsafe { validate_name(name) }) else {
+        return -1;
+    };
 
     // Access-mode validation: the two-bit field `oflag & O_ACCMODE`
     // has four encodings, but only three are legal (RDONLY=0,
@@ -529,7 +517,9 @@ pub extern "C" fn mq_open(name: *const u8, oflag: i32, _mode: u32, attr: *const 
 pub extern "C" fn mq_close(mqdes: MqdT) -> i32 {
     let _g = lock();
     // SAFETY: Lock held.
-    let Some((didx, qidx, _nonblock)) = (unsafe { resolve(mqdes) }) else { return -1 };
+    let Some((didx, qidx, _nonblock)) = (unsafe { resolve(mqdes) }) else {
+        return -1;
+    };
     unsafe {
         let d = descs_ptr().add(didx);
         (*d).in_use = false;
@@ -553,7 +543,9 @@ pub extern "C" fn mq_close(mqdes: MqdT) -> i32 {
 /// The queue is destroyed once the last open descriptor closes.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn mq_unlink(name: *const u8) -> i32 {
-    let Some((name_buf, name_len)) = (unsafe { validate_name(name) }) else { return -1 };
+    let Some((name_buf, name_len)) = (unsafe { validate_name(name) }) else {
+        return -1;
+    };
     let _g = lock();
     // SAFETY: Lock held.
     let Some(qidx) = (unsafe { find_queue_by_name(&name_buf[..name_len]) }) else {
@@ -661,7 +653,9 @@ fn send_common(
         let inserted = {
             let _g = lock();
             // SAFETY: Lock held.
-            let Some((_didx, qidx, nonblock)) = (unsafe { resolve(mqdes) }) else { return -1 };
+            let Some((_didx, qidx, nonblock)) = (unsafe { resolve(mqdes) }) else {
+                return -1;
+            };
             if unsafe { validate_send_args(qidx, msg, len, prio) }.is_err() {
                 return -1;
             }
@@ -706,7 +700,9 @@ pub extern "C" fn mq_timedsend(
     msg_prio: u32,
     abs_timeout: *const Timespec,
 ) -> i32 {
-    let Ok(deadline) = deadline_from_timespec(abs_timeout) else { return -1 };
+    let Ok(deadline) = deadline_from_timespec(abs_timeout) else {
+        return -1;
+    };
     send_common(mqdes, msg_ptr, msg_len, msg_prio, Some(deadline))
 }
 
@@ -775,7 +771,9 @@ fn recv_common(
         let result = {
             let _g = lock();
             // SAFETY: Lock held.
-            let Some((_didx, qidx, nonblock)) = (unsafe { resolve(mqdes) }) else { return -1 };
+            let Some((_didx, qidx, nonblock)) = (unsafe { resolve(mqdes) }) else {
+                return -1;
+            };
             if unsafe { validate_recv_args(qidx, buf, buf_len) }.is_err() {
                 return -1;
             }
@@ -830,7 +828,9 @@ pub extern "C" fn mq_timedreceive(
     msg_prio: *mut u32,
     abs_timeout: *const Timespec,
 ) -> isize {
-    let Ok(deadline) = deadline_from_timespec(abs_timeout) else { return -1 };
+    let Ok(deadline) = deadline_from_timespec(abs_timeout) else {
+        return -1;
+    };
     recv_common(mqdes, msg_ptr, msg_len, msg_prio, Some(deadline))
 }
 
@@ -847,7 +847,9 @@ pub extern "C" fn mq_getattr(mqdes: MqdT, attr: *mut MqAttr) -> i32 {
     }
     let _g = lock();
     // SAFETY: Lock held.
-    let Some((_didx, qidx, nonblock)) = (unsafe { resolve(mqdes) }) else { return -1 };
+    let Some((_didx, qidx, nonblock)) = (unsafe { resolve(mqdes) }) else {
+        return -1;
+    };
     let q = unsafe { queues_ptr().add(qidx) };
     // SAFETY: attr non-null.
     unsafe {
@@ -876,7 +878,9 @@ pub extern "C" fn mq_setattr(mqdes: MqdT, newattr: *const MqAttr, oldattr: *mut 
     }
     let _g = lock();
     // SAFETY: Lock held.
-    let Some((didx, qidx, nonblock_old)) = (unsafe { resolve(mqdes) }) else { return -1 };
+    let Some((didx, qidx, nonblock_old)) = (unsafe { resolve(mqdes) }) else {
+        return -1;
+    };
     let q = unsafe { queues_ptr().add(qidx) };
     if !oldattr.is_null() {
         // SAFETY: caller contract.
@@ -985,7 +989,16 @@ fn deadline_from_timespec(p: *const Timespec) -> Result<u64, ()> {
     }
     // SAFETY: caller contract.
     let ts = unsafe { *p };
-    if ts.tv_nsec < 0 || ts.tv_nsec >= 1_000_000_000 {
+    // The kernel's rule, not glibc's: `mq_timedsend`/`mq_timedreceive` are
+    // bare syscalls, so the deadline is vetted by `prepare_timeout`
+    // (ipc/mqueue.c) → `timespec64_valid` (include/linux/time64.h), which
+    // rejects `tv_sec < 0` outright ("Dates before 1970 are bogus") as well
+    // as an out-of-range `tv_nsec`.  That is stricter than glibc's
+    // `valid_nanoseconds`, which the pthread and semaphore timed waits use
+    // and which treats a negative `tv_sec` as a deadline in the past rather
+    // than a malformed timespec.  Both rules are right for their own
+    // callers; do not share one predicate between them.
+    if ts.tv_sec < 0 || !crate::time::valid_nanoseconds(ts.tv_nsec) {
         errno::set_errno(errno::EINVAL);
         return Err(());
     }
@@ -1525,6 +1538,38 @@ mod tests {
             tv_nsec: 2_000_000_000,
         };
         let r = mq_timedsend(fd, b"x".as_ptr(), 1, 0, &raw const bad);
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+        assert_eq!(mq_close(fd), 0);
+    }
+
+    /// The mq_* deadline is vetted by the kernel, not by glibc:
+    /// `prepare_timeout` (ipc/mqueue.c) calls `timespec64_valid`, which
+    /// rejects `tv_sec < 0` ("Dates before 1970 are bogus").  glibc's
+    /// `valid_nanoseconds` — used by the pthread and semaphore timed waits —
+    /// does not, and there a negative `tv_sec` merely times out.  The two
+    /// families follow different rules on purpose.
+    #[test]
+    fn test_timedsend_negative_tv_sec_einval() {
+        let fd = open_default(b"/qtnegsec\0", O_NONBLOCK);
+        assert!(fd > 0);
+        let bad = Timespec {
+            tv_sec: -1,
+            tv_nsec: 0,
+        };
+        let r = mq_timedsend(fd, b"x".as_ptr(), 1, 0, &raw const bad);
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+        // Same rule on the receive side; both go through
+        // `deadline_from_timespec`.
+        let mut buf = [0u8; 64];
+        let r = mq_timedreceive(
+            fd,
+            buf.as_mut_ptr(),
+            64,
+            core::ptr::null_mut(),
+            &raw const bad,
+        );
         assert_eq!(r, -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
         assert_eq!(mq_close(fd), 0);

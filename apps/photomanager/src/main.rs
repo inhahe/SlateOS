@@ -39,6 +39,7 @@
 use guitk::Color;
 use guitk::render::{FontWeightHint, RenderCommand};
 use guitk::style::CornerRadii;
+use guitk::text;
 
 use std::collections::HashMap;
 
@@ -2111,7 +2112,7 @@ impl PhotoApp {
                 2 => self.view_mode == ViewMode::Timeline,
                 _ => false,
             };
-            let btn_w = label.len() as f32 * 8.0 + 16.0;
+            let btn_w = text::padded_width(label, 8.0, 11.0, FontWeightHint::Regular);
             let bg = if is_active { SURFACE1 } else { SURFACE0 };
             let fg = if is_active { BLUE } else { SUBTEXT0 };
             cmds.push(RenderCommand::FillRect {

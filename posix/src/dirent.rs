@@ -675,6 +675,14 @@ const MAX_OPEN_DIRS: usize = 8;
 /// 8 × 68 KiB = 544 KiB — acceptable for a POSIX compat layer.
 static mut DIR_POOL: [DirSlot; MAX_OPEN_DIRS] = [const { DirSlot::EMPTY }; MAX_OPEN_DIRS];
 
+/// Serialises the scans of [`DIR_POOL`] in [`alloc_dir`] and [`free_dir`].
+///
+/// A plain `static`, not a [`crate::perprocess::process_global!`] one,
+/// because `DIR_POOL` is itself a plain `static mut`: the lock has to be
+/// shared exactly as widely as the table it guards.  See
+/// [`crate::perprocess::PoolLock`].
+static DIR_POOL_LOCK: crate::perprocess::PoolLock = crate::perprocess::PoolLock::new();
+
 struct DirSlot {
     in_use: bool,
     dir: Dir,
@@ -704,9 +712,16 @@ impl DirSlot {
 /// Returns a raw pointer to an available Dir slot, or null if the pool
 /// is exhausted.  Uses `addr_of_mut!` to avoid creating `&mut` references
 /// to `static mut` (which is UB in Rust 2024).
+///
+/// The scan runs under [`DIR_POOL_LOCK`], so two threads calling `opendir`
+/// at once cannot both be handed the same slot.  The lock covers only the
+/// claim: once a caller holds its `DIR *`, `readdir` on it is unsynchronised,
+/// which is where POSIX puts the obligation anyway.
 fn alloc_dir() -> *mut Dir {
-    // SAFETY: Single-threaded access (no threads yet).
-    // When threading is added, this needs synchronization.
+    // SAFETY: `DIR_POOL_LOCK` is a `static`, so it outlives the guard.
+    let _guard = unsafe { crate::perprocess::lock_pool((&raw const DIR_POOL_LOCK).cast_mut()) };
+    // SAFETY: the guard is held, and every scan of `DIR_POOL` takes it, so
+    // this is the only live view of the table.
     unsafe {
         let pool = core::ptr::addr_of_mut!(DIR_POOL).cast::<DirSlot>();
         let mut i: usize = 0;
@@ -727,8 +742,15 @@ fn alloc_dir() -> *mut Dir {
 /// Return a Dir to the static pool.
 ///
 /// Uses raw pointer comparison to find the matching slot.
+///
+/// Takes [`DIR_POOL_LOCK`] for the same reason [`alloc_dir`] does — and not
+/// only to order the two against each other: clearing `in_use` outside the
+/// lock would be a plain data race with a concurrent `alloc_dir` reading it,
+/// and could let the slot be reissued before this release was visible.
 fn free_dir(dir: *mut Dir) {
-    // SAFETY: Single-threaded access.
+    // SAFETY: `DIR_POOL_LOCK` is a `static`, so it outlives the guard.
+    let _guard = unsafe { crate::perprocess::lock_pool((&raw const DIR_POOL_LOCK).cast_mut()) };
+    // SAFETY: the guard is held, so this is the only live view of the table.
     unsafe {
         let pool = core::ptr::addr_of_mut!(DIR_POOL).cast::<DirSlot>();
         let mut i: usize = 0;
@@ -844,12 +866,27 @@ impl GetdentsCache {
 static mut GETDENTS_POOL: [GetdentsCache; MAX_GETDENTS_CACHES] =
     [const { GetdentsCache::EMPTY }; MAX_GETDENTS_CACHES];
 
+/// Serialises every scan of [`GETDENTS_POOL`].
+///
+/// Plain `static` to match `GETDENTS_POOL`'s own scope; see
+/// [`crate::perprocess::PoolLock`].
+static GETDENTS_POOL_LOCK: crate::perprocess::PoolLock = crate::perprocess::PoolLock::new();
+
 /// Find the cache slot owning `fd`, if any.
+///
+/// Only ever finds a slot that has been *published* by
+/// [`publish_getdents_cache`], i.e. one whose snapshot is complete.  A slot
+/// that has been claimed but not yet filled still carries `fd == -1` and so
+/// matches no caller — which is what keeps a second thread from reading a
+/// buffer the first has not written yet.
 fn find_getdents_cache(fd: i32) -> Option<*mut GetdentsCache> {
     if fd < 0 {
         return None;
     }
-    // SAFETY: Single-threaded access (consistent with the rest of posix).
+    // SAFETY: `GETDENTS_POOL_LOCK` is a `static`, so it outlives the guard.
+    let _guard =
+        unsafe { crate::perprocess::lock_pool((&raw const GETDENTS_POOL_LOCK).cast_mut()) };
+    // SAFETY: the guard is held, and every scan of the pool takes it.
     unsafe {
         let base = core::ptr::addr_of_mut!(GETDENTS_POOL).cast::<GetdentsCache>();
         let mut i: usize = 0;
@@ -864,9 +901,19 @@ fn find_getdents_cache(fd: i32) -> Option<*mut GetdentsCache> {
     None
 }
 
-/// Allocate a free cache slot, or return null if the pool is exhausted.
-fn alloc_getdents_cache(fd: i32) -> *mut GetdentsCache {
-    // SAFETY: Single-threaded access.
+/// Claim a free cache slot, or return null if the pool is exhausted.
+///
+/// The slot comes back **unpublished** — `in_use` is set, so no other thread
+/// can claim it, but `fd` is still `-1`, so no other thread can *find* it
+/// either.  The caller fills the snapshot and then calls
+/// [`publish_getdents_cache`].  Splitting the claim from the publication is
+/// what lets the (comparatively slow) `SYS_FS_LIST_DIR` that fills the buffer
+/// run with the pool lock released.
+fn claim_getdents_cache() -> *mut GetdentsCache {
+    // SAFETY: `GETDENTS_POOL_LOCK` is a `static`, so it outlives the guard.
+    let _guard =
+        unsafe { crate::perprocess::lock_pool((&raw const GETDENTS_POOL_LOCK).cast_mut()) };
+    // SAFETY: the guard is held, and every scan of the pool takes it.
     unsafe {
         let base = core::ptr::addr_of_mut!(GETDENTS_POOL).cast::<GetdentsCache>();
         let mut i: usize = 0;
@@ -874,7 +921,7 @@ fn alloc_getdents_cache(fd: i32) -> *mut GetdentsCache {
             let slot = base.add(i);
             if !(*slot).in_use {
                 (*slot).in_use = true;
-                (*slot).fd = fd;
+                (*slot).fd = -1;
                 (*slot).count = 0;
                 (*slot).pos = 0;
                 return slot;
@@ -885,12 +932,40 @@ fn alloc_getdents_cache(fd: i32) -> *mut GetdentsCache {
     core::ptr::null_mut()
 }
 
+/// Make a filled slot visible to [`find_getdents_cache`].
+///
+/// Taking the lock for a single store is not ceremony: it is what pairs this
+/// write's `Release` with the `Acquire` in every later scan, so a thread that
+/// finds the slot also sees the snapshot the claimer wrote into it.
+fn publish_getdents_cache(slot: *mut GetdentsCache, fd: i32) {
+    if slot.is_null() {
+        return;
+    }
+    // SAFETY: `GETDENTS_POOL_LOCK` is a `static`, so it outlives the guard.
+    let _guard =
+        unsafe { crate::perprocess::lock_pool((&raw const GETDENTS_POOL_LOCK).cast_mut()) };
+    // SAFETY: the caller owns `slot` (it holds the only claim on it) and the
+    // guard excludes every concurrent scan.
+    unsafe {
+        (*slot).fd = fd;
+    }
+}
+
 /// Release a cache slot back to the pool.
+///
+/// Under the pool lock, so that clearing `in_use` is not a data race with a
+/// concurrent [`claim_getdents_cache`] reading it — and so that a claimer who
+/// then wins the slot sees the cleared `fd`/`count`/`pos` rather than this
+/// caller's stale snapshot.
 fn free_getdents_cache(slot: *mut GetdentsCache) {
     if slot.is_null() {
         return;
     }
-    // SAFETY: caller guarantees `slot` points into GETDENTS_POOL.
+    // SAFETY: `GETDENTS_POOL_LOCK` is a `static`, so it outlives the guard.
+    let _guard =
+        unsafe { crate::perprocess::lock_pool((&raw const GETDENTS_POOL_LOCK).cast_mut()) };
+    // SAFETY: caller guarantees `slot` points into GETDENTS_POOL, and the
+    // guard excludes every concurrent scan of it.
     unsafe {
         (*slot).in_use = false;
         (*slot).fd = -1;
@@ -1023,14 +1098,16 @@ pub extern "C" fn getdents64(fd: i32, dirp: *mut u8, count: usize) -> i64 {
             crate::errno::set_errno(crate::errno::ENOTDIR);
             return -1;
         }
-        let slot = alloc_getdents_cache(fd);
+        let slot = claim_getdents_cache();
         if slot.is_null() {
             crate::errno::set_errno(crate::errno::ENFILE);
             return -1;
         }
         // Snapshot the directory listing into the cache buffer.
         // SAFETY: slot is a valid pointer into GETDENTS_POOL; the
-        // buffer is owned exclusively while in_use is true.
+        // buffer is owned exclusively while in_use is true, and the slot
+        // is still unpublished (`fd == -1`), so no other thread can even
+        // find it, let alone read the buffer being written here.
         let buf_ptr = unsafe { core::ptr::addr_of_mut!((*slot).buf) }.cast::<u8>();
         let ret = syscall3(
             SYS_FS_LIST_DIR,
@@ -1048,6 +1125,8 @@ pub extern "C" fn getdents64(fd: i32, dirp: *mut u8, count: usize) -> i64 {
             (*slot).count = ret as usize;
             (*slot).pos = 0;
         }
+        // The snapshot is complete, so the slot may now be found by fd.
+        publish_getdents_cache(slot, fd);
         slot
     };
 

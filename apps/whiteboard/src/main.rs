@@ -20,6 +20,7 @@
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand};
 use guitk::style::CornerRadii;
+use guitk::text;
 
 use std::collections::VecDeque;
 
@@ -56,6 +57,13 @@ const LAYER_ROW_HEIGHT: f32 = 30.0;
 const PALETTE_SWATCH_SIZE: f32 = 22.0;
 const PALETTE_GAP: f32 = 3.0;
 const PAGE_TAB_HEIGHT: f32 = 28.0;
+
+/// Inset of a sticky note's text from each edge of the note, in canvas units.
+const STICKY_PADDING: f32 = 8.0;
+/// Point size a sticky note's text is laid out at, before zoom.
+const STICKY_FONT_SIZE: f32 = 12.0;
+/// Line-to-line spacing of a sticky note's text, before zoom.
+const STICKY_LINE_HEIGHT: f32 = 16.0;
 
 const MIN_ZOOM: f32 = 0.1;
 const MAX_ZOOM: f32 = 10.0;
@@ -238,7 +246,12 @@ pub struct Rect {
 
 impl Rect {
     pub fn new(x: f32, y: f32, width: f32, height: f32) -> Self {
-        Self { x, y, width, height }
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
     }
 
     pub fn from_points(p1: Point, p2: Point) -> Self {
@@ -246,12 +259,16 @@ impl Rect {
         let y = p1.y.min(p2.y);
         let width = (p1.x - p2.x).abs();
         let height = (p1.y - p2.y).abs();
-        Self { x, y, width, height }
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
     }
 
     pub fn contains(&self, px: f32, py: f32) -> bool {
-        px >= self.x && px <= self.x + self.width
-            && py >= self.y && py <= self.y + self.height
+        px >= self.x && px <= self.x + self.width && py >= self.y && py <= self.y + self.height
     }
 
     pub fn intersects(&self, other: &Rect) -> bool {
@@ -319,10 +336,18 @@ impl Shape {
                 let mut max_x = f32::MIN;
                 let mut max_y = f32::MIN;
                 for p in points {
-                    if p.x < min_x { min_x = p.x; }
-                    if p.y < min_y { min_y = p.y; }
-                    if p.x > max_x { max_x = p.x; }
-                    if p.y > max_y { max_y = p.y; }
+                    if p.x < min_x {
+                        min_x = p.x;
+                    }
+                    if p.y < min_y {
+                        min_y = p.y;
+                    }
+                    if p.x > max_x {
+                        max_x = p.x;
+                    }
+                    if p.y > max_y {
+                        max_y = p.y;
+                    }
                 }
                 let pad = self.stroke.thickness as f32 / 2.0;
                 Rect::new(
@@ -364,17 +389,15 @@ impl Shape {
             ShapeKind::Freehand { points } => {
                 for window in points.windows(2) {
                     if let (Some(a), Some(b)) = (window.first(), window.get(1))
-                        && point_to_segment_distance(px, py, a.x, a.y, b.x, b.y)
-                            <= threshold
-                        {
-                            return true;
-                        }
+                        && point_to_segment_distance(px, py, a.x, a.y, b.x, b.y) <= threshold
+                    {
+                        return true;
+                    }
                 }
                 false
             }
             ShapeKind::Line { start, end } | ShapeKind::Arrow { start, end } => {
-                point_to_segment_distance(px, py, start.x, start.y, end.x, end.y)
-                    <= threshold
+                point_to_segment_distance(px, py, start.x, start.y, end.x, end.y) <= threshold
             }
             ShapeKind::Rectangle { bounds } => bounds.contains(px, py),
             ShapeKind::Ellipse { bounds } => {
@@ -439,6 +462,27 @@ fn point_to_segment_distance(px: f32, py: f32, x1: f32, y1: f32, x2: f32, y2: f3
     let proj_x = x1 + t * dx;
     let proj_y = y1 + t * dy;
     ((px - proj_x).powi(2) + (py - proj_y).powi(2)).sqrt()
+}
+
+/// A sticky note's content, broken into the lines that fit across the note.
+///
+/// Laid out in canvas units rather than screen pixels, so zooming moves and
+/// scales the note without reflowing it — where the lines break is a property
+/// of the note, not of how closely the user happens to be looking at it. A
+/// glyph whose scaled advance does not divide evenly then leaves a line a
+/// fraction too wide for the note at some zoom levels; the `max_width` on the
+/// drawn command clips that fraction, which costs a character at the margin
+/// rather than letting the text run off the note.
+fn sticky_note_lines(bounds: &Rect, content: &str) -> Vec<String> {
+    if content.is_empty() {
+        return Vec::new();
+    }
+    text::wrap(
+        content,
+        bounds.width - STICKY_PADDING * 2.0,
+        STICKY_FONT_SIZE,
+        FontWeightHint::Regular,
+    )
 }
 
 // ============================================================================
@@ -706,11 +750,7 @@ pub struct WhiteboardApp {
 impl WhiteboardApp {
     pub fn new(width: f32, height: f32) -> Self {
         let first_page = Page::new("Board 1".to_string());
-        let first_layer_id = first_page
-            .layers
-            .first()
-            .map(|l| l.id)
-            .unwrap_or(1);
+        let first_layer_id = first_page.layers.first().map(|l| l.id).unwrap_or(1);
 
         Self {
             win_width: width,
@@ -950,12 +990,7 @@ impl WhiteboardApp {
             },
             Action::AddLayer(layer) => Action::DeleteLayer(layer.id),
             Action::DeleteLayer(id) => {
-                if let Some(layer) = self
-                    .current_page()
-                    .layers
-                    .iter()
-                    .find(|l| l.id == *id)
-                {
+                if let Some(layer) = self.current_page().layers.iter().find(|l| l.id == *id) {
                     Action::AddLayer(layer.clone())
                 } else {
                     Action::DeleteLayer(*id)
@@ -980,8 +1015,11 @@ impl WhiteboardApp {
                 new_order: old_order.clone(),
             },
             Action::Batch(actions) => {
-                let reversed: Vec<Action> =
-                    actions.iter().rev().map(|a| self.reverse_action(a)).collect();
+                let reversed: Vec<Action> = actions
+                    .iter()
+                    .rev()
+                    .map(|a| self.reverse_action(a))
+                    .collect();
                 Action::Batch(reversed)
             }
         }
@@ -1128,29 +1166,31 @@ impl WhiteboardApp {
     pub fn move_layer_up(&mut self, layer_id: LayerId) {
         let page = self.current_page_mut();
         if let Some(idx) = page.find_layer_index(layer_id)
-            && idx + 1 < page.layers.len() {
-                let old_order: Vec<LayerId> = page.layers.iter().map(|l| l.id).collect();
-                page.layers.swap(idx, idx + 1);
-                let new_order: Vec<LayerId> = page.layers.iter().map(|l| l.id).collect();
-                self.push_action(Action::ReorderLayers {
-                    old_order,
-                    new_order,
-                });
-            }
+            && idx + 1 < page.layers.len()
+        {
+            let old_order: Vec<LayerId> = page.layers.iter().map(|l| l.id).collect();
+            page.layers.swap(idx, idx + 1);
+            let new_order: Vec<LayerId> = page.layers.iter().map(|l| l.id).collect();
+            self.push_action(Action::ReorderLayers {
+                old_order,
+                new_order,
+            });
+        }
     }
 
     pub fn move_layer_down(&mut self, layer_id: LayerId) {
         let page = self.current_page_mut();
         if let Some(idx) = page.find_layer_index(layer_id)
-            && idx > 0 {
-                let old_order: Vec<LayerId> = page.layers.iter().map(|l| l.id).collect();
-                page.layers.swap(idx, idx - 1);
-                let new_order: Vec<LayerId> = page.layers.iter().map(|l| l.id).collect();
-                self.push_action(Action::ReorderLayers {
-                    old_order,
-                    new_order,
-                });
-            }
+            && idx > 0
+        {
+            let old_order: Vec<LayerId> = page.layers.iter().map(|l| l.id).collect();
+            page.layers.swap(idx, idx - 1);
+            let new_order: Vec<LayerId> = page.layers.iter().map(|l| l.id).collect();
+            self.push_action(Action::ReorderLayers {
+                old_order,
+                new_order,
+            });
+        }
     }
 
     /// Check if the active layer is locked.
@@ -1305,24 +1345,20 @@ impl WhiteboardApp {
 
         // Extract move delta from drag state without holding a mutable borrow
         // across the shape mutation below.
-        let move_delta: Option<(f32, f32)> = if let DragState::Moving {
-            last_x, last_y, ..
-        } = &self.drag
-        {
-            Some((canvas_pt.x - *last_x, canvas_pt.y - *last_y))
-        } else {
-            None
-        };
+        let move_delta: Option<(f32, f32)> =
+            if let DragState::Moving { last_x, last_y, .. } = &self.drag {
+                Some((canvas_pt.x - *last_x, canvas_pt.y - *last_y))
+            } else {
+                None
+            };
 
         // Extract pan delta similarly to avoid borrow conflict.
-        let pan_delta: Option<(f32, f32)> = if let DragState::Panning {
-            last_x, last_y,
-        } = &self.drag
-        {
-            Some((sx - *last_x, sy - *last_y))
-        } else {
-            None
-        };
+        let pan_delta: Option<(f32, f32)> =
+            if let DragState::Panning { last_x, last_y } = &self.drag {
+                Some((sx - *last_x, sy - *last_y))
+            } else {
+                None
+            };
 
         if let Some((dx, dy)) = move_delta {
             // Move all selected shapes, then update drag state.
@@ -1362,9 +1398,7 @@ impl WhiteboardApp {
             DragState::PlacingStickyNote { current, .. } => {
                 *current = snapped;
             }
-            DragState::Panning { .. }
-            | DragState::Moving { .. }
-            | DragState::None => {}
+            DragState::Panning { .. } | DragState::Moving { .. } | DragState::None => {}
         }
     }
 
@@ -1581,12 +1615,21 @@ impl WhiteboardApp {
         let page = self.current_page();
         let mut out = String::new();
         out.push_str("<whiteboard>\n");
-        out.push_str(&format!("  <page name=\"{}\">\n", page.name));
+        // Page, layer and shape text are all user-typed, and all land inside a
+        // markup document: unescaped, a `<` or `&` makes the export
+        // unparseable and a `</text>` injects arbitrary elements.
+        out.push_str(&format!(
+            "  <page name=\"{}\">\n",
+            guitk::escape::xml(&page.name)
+        ));
 
         for layer in &page.layers {
             out.push_str(&format!(
                 "    <layer name=\"{}\" visible=\"{}\" locked=\"{}\" opacity=\"{:.2}\">\n",
-                layer.name, layer.visible, layer.locked, layer.opacity
+                guitk::escape::xml(&layer.name),
+                layer.visible,
+                layer.locked,
+                layer.opacity
             ));
 
             for shape in &page.shapes {
@@ -1596,7 +1639,9 @@ impl WhiteboardApp {
                 let color = shape.stroke.effective_color();
                 let color_str = format!(
                     "rgba({},{},{},{:.2})",
-                    color.r, color.g, color.b,
+                    color.r,
+                    color.g,
+                    color.b,
                     color.a as f32 / 255.0
                 );
                 let thickness = shape.stroke.thickness;
@@ -1663,7 +1708,10 @@ impl WhiteboardApp {
                     ShapeKind::TextLabel { position, content } => {
                         out.push_str(&format!(
                             "      <text x=\"{:.1}\" y=\"{:.1}\" fill=\"{}\">{}</text>\n",
-                            position.x, position.y, color_str, content
+                            position.x,
+                            position.y,
+                            color_str,
+                            guitk::escape::xml(content)
                         ));
                     }
                     ShapeKind::StickyNote {
@@ -1681,7 +1729,7 @@ impl WhiteboardApp {
                             bg_color.r,
                             bg_color.g,
                             bg_color.b,
-                            content
+                            guitk::escape::xml(content)
                         ));
                     }
                 }
@@ -1787,7 +1835,11 @@ impl WhiteboardApp {
         });
 
         // Grid toggle indicator
-        let grid_label = if self.show_grid { "Grid:ON" } else { "Grid:OFF" };
+        let grid_label = if self.show_grid {
+            "Grid:ON"
+        } else {
+            "Grid:OFF"
+        };
         cmds.push(RenderCommand::Text {
             x: 300.0,
             y: 14.0,
@@ -1880,9 +1932,13 @@ impl WhiteboardApp {
         let mut tx = TOOLBAR_WIDTH + 4.0;
         for (i, page) in self.pages.iter().enumerate() {
             let is_active = i == self.active_page;
-            let tab_width = (page.name.len() as f32 * 8.0).max(60.0) + 16.0;
+            let tab_width = text::padded_width_any_weight(&page.name, 8.0, 12.0).max(76.0);
 
-            let bg = if is_active { MOCHA_BASE } else { MOCHA_SURFACE0 };
+            let bg = if is_active {
+                MOCHA_BASE
+            } else {
+                MOCHA_SURFACE0
+            };
             cmds.push(RenderCommand::FillRect {
                 x: tx,
                 y: y + 2.0,
@@ -1897,7 +1953,11 @@ impl WhiteboardApp {
                 },
             });
 
-            let text_color = if is_active { MOCHA_TEXT } else { MOCHA_SUBTEXT0 };
+            let text_color = if is_active {
+                MOCHA_TEXT
+            } else {
+                MOCHA_SUBTEXT0
+            };
             cmds.push(RenderCommand::Text {
                 x: tx + 8.0,
                 y: y + 8.0,
@@ -2121,8 +2181,7 @@ impl WhiteboardApp {
         if let DragState::Marquee { start, current } = &self.drag {
             let r = Rect::from_points(*start, *current);
             let screen_start = self.canvas_to_screen(r.x, r.y);
-            let screen_end =
-                self.canvas_to_screen(r.x + r.width, r.y + r.height);
+            let screen_end = self.canvas_to_screen(r.x + r.width, r.y + r.height);
             cmds.push(RenderCommand::FillRect {
                 x: screen_start.x,
                 y: screen_start.y,
@@ -2184,12 +2243,7 @@ impl WhiteboardApp {
         }
     }
 
-    fn render_shape(
-        &self,
-        cmds: &mut Vec<RenderCommand>,
-        shape: &Shape,
-        selected: bool,
-    ) {
+    fn render_shape(&self, cmds: &mut Vec<RenderCommand>, shape: &Shape, selected: bool) {
         let color = shape.stroke.effective_color();
         let lw = shape.stroke.thickness as f32 * self.zoom;
 
@@ -2325,16 +2379,29 @@ impl WhiteboardApp {
                     color: *bg_color,
                     corner_radii: CornerRadii::all(4.0),
                 });
-                // Text (dark for readability on colored background)
-                if !content.is_empty() {
+                // Text (dark for readability on colored background), one
+                // command per wrapped line. `RenderCommand::Text` clips at
+                // `max_width` rather than wrapping, so the whole content used
+                // to come out as the first line's worth of characters and
+                // nothing else — a note is a paragraph the user wrote and
+                // expects to read back.
+                let text_width = bounds.width - STICKY_PADDING * 2.0;
+                for (n, line) in sticky_note_lines(bounds, content).iter().enumerate() {
+                    let line_top = STICKY_PADDING + n as f32 * STICKY_LINE_HEIGHT;
+                    // A note is a fixed box the user drew; text that does not
+                    // fit is left undrawn rather than spilling onto the canvas
+                    // over whatever else is there.
+                    if line_top + STICKY_LINE_HEIGHT > bounds.height {
+                        break;
+                    }
                     cmds.push(RenderCommand::Text {
-                        x: (bounds.x + 8.0) * self.zoom,
-                        y: (bounds.y + 8.0) * self.zoom,
-                        text: content.clone(),
+                        x: (bounds.x + STICKY_PADDING) * self.zoom,
+                        y: (bounds.y + line_top) * self.zoom,
+                        text: line.clone(),
                         color: MOCHA_CRUST,
-                        font_size: 12.0 * self.zoom,
+                        font_size: STICKY_FONT_SIZE * self.zoom,
                         font_weight: FontWeightHint::Regular,
-                        max_width: Some((bounds.width - 16.0) * self.zoom),
+                        max_width: Some(text_width * self.zoom),
                     });
                 }
             }
@@ -2866,10 +2933,7 @@ mod tests {
 
     #[test]
     fn test_tool_shortcuts_unique() {
-        let shortcuts: Vec<char> = Tool::all()
-            .iter()
-            .filter_map(|t| t.shortcut())
-            .collect();
+        let shortcuts: Vec<char> = Tool::all().iter().filter_map(|t| t.shortcut()).collect();
         for (i, a) in shortcuts.iter().enumerate() {
             for b in shortcuts.iter().skip(i + 1) {
                 assert_ne!(a, b, "Duplicate shortcut");
@@ -3070,10 +3134,7 @@ mod tests {
         let shape = Shape {
             id: 1,
             kind: ShapeKind::Freehand {
-                points: vec![
-                    Point::new(10.0, 20.0),
-                    Point::new(50.0, 60.0),
-                ],
+                points: vec![Point::new(10.0, 20.0), Point::new(50.0, 60.0)],
             },
             stroke: StrokeProps {
                 thickness: 2,
@@ -3695,9 +3756,10 @@ mod tests {
         app.on_canvas_move(sx + 40.0, sy + 10.0);
         app.on_canvas_release(sx + 40.0, sy + 10.0);
         assert_eq!(app.current_page().shapes.len(), 1);
-        assert!(
-            matches!(app.current_page().shapes[0].kind, ShapeKind::Freehand { .. })
-        );
+        assert!(matches!(
+            app.current_page().shapes[0].kind,
+            ShapeKind::Freehand { .. }
+        ));
     }
 
     #[test]
@@ -3708,9 +3770,10 @@ mod tests {
         app.on_canvas_press(area.x + 10.0, area.y + 10.0, false);
         app.on_canvas_release(area.x + 100.0, area.y + 100.0);
         assert_eq!(app.current_page().shapes.len(), 1);
-        assert!(
-            matches!(app.current_page().shapes[0].kind, ShapeKind::Line { .. })
-        );
+        assert!(matches!(
+            app.current_page().shapes[0].kind,
+            ShapeKind::Line { .. }
+        ));
     }
 
     #[test]
@@ -3791,9 +3854,10 @@ mod tests {
         let area = app.canvas_rect();
         app.on_canvas_press(area.x + 50.0, area.y + 50.0, false);
         assert_eq!(app.current_page().shapes.len(), 1);
-        assert!(
-            matches!(app.current_page().shapes[0].kind, ShapeKind::TextLabel { .. })
-        );
+        assert!(matches!(
+            app.current_page().shapes[0].kind,
+            ShapeKind::TextLabel { .. }
+        ));
         assert!(app.text_input_buffer.is_empty());
     }
 
@@ -3807,9 +3871,10 @@ mod tests {
         app.on_canvas_move(area.x + 250.0, area.y + 200.0);
         app.on_canvas_release(area.x + 250.0, area.y + 200.0);
         assert_eq!(app.current_page().shapes.len(), 1);
-        assert!(
-            matches!(app.current_page().shapes[0].kind, ShapeKind::StickyNote { .. })
-        );
+        assert!(matches!(
+            app.current_page().shapes[0].kind,
+            ShapeKind::StickyNote { .. }
+        ));
     }
 
     // ---- Pan / scroll ----
@@ -3848,6 +3913,69 @@ mod tests {
         assert!(svg.contains("<whiteboard>"));
         assert!(svg.contains("</whiteboard>"));
         assert!(svg.contains("Board 1"));
+    }
+
+    /// Text a user types must not be able to change the structure of the
+    /// export. A sticky note reading `</sticky><rect/>` previously closed its
+    /// own element and injected a sibling.
+    #[test]
+    fn user_text_cannot_inject_elements_into_the_export() {
+        let mut app = WhiteboardApp::new(800.0, 600.0);
+        app.add_shape(ShapeKind::TextLabel {
+            position: Point { x: 1.0, y: 2.0 },
+            content: "</text><rect x=\"0\"/><text>".to_string(),
+        });
+        app.add_shape(ShapeKind::StickyNote {
+            bounds: Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 10.0,
+                height: 10.0,
+            },
+            content: "</sticky><rect x=\"0\"/><sticky>".to_string(),
+            bg_color: Color::rgb(1, 2, 3),
+        });
+        let svg = app.export_svg_text();
+
+        // Exactly the elements we meant to write, and no injected `rect`.
+        assert_eq!(svg.matches("<text ").count(), 1, "{svg}");
+        assert_eq!(svg.matches("</text>").count(), 1, "{svg}");
+        assert_eq!(svg.matches("<sticky ").count(), 1, "{svg}");
+        assert_eq!(svg.matches("</sticky>").count(), 1, "{svg}");
+        assert_eq!(svg.matches("<rect").count(), 0, "injected element: {svg}");
+    }
+
+    /// The same for an attribute: a quote in a page or layer name must not be
+    /// able to close the attribute and add another one.
+    #[test]
+    fn a_quote_in_a_page_name_cannot_close_the_attribute() {
+        let mut app = WhiteboardApp::new(800.0, 600.0);
+        app.current_page_mut().name = "My\" evil=\"yes".to_string();
+        let svg = app.export_svg_text();
+
+        let line = svg
+            .lines()
+            .find(|l| l.trim_start().starts_with("<page "))
+            .expect("a page line");
+        assert_eq!(
+            line.matches('"').count(),
+            2,
+            "the name attribute was closed early: {line}"
+        );
+        assert!(!line.contains("evil=\""), "{line}");
+    }
+
+    /// An ampersand is the character that makes the difference between an
+    /// export that parses and one that does not.
+    #[test]
+    fn an_ampersand_in_user_text_is_escaped() {
+        let mut app = WhiteboardApp::new(800.0, 600.0);
+        app.add_shape(ShapeKind::TextLabel {
+            position: Point { x: 0.0, y: 0.0 },
+            content: "Tom & Jerry".to_string(),
+        });
+        let svg = app.export_svg_text();
+        assert!(svg.contains("Tom &amp; Jerry"), "{svg}");
     }
 
     #[test]
@@ -3958,6 +4086,105 @@ mod tests {
         });
         let cmds = app.render();
         assert!(cmds.len() > 10);
+    }
+
+    /// The `(y, text)` of every line drawn into a sticky note at `bounds`.
+    ///
+    /// Identified by the note's own left edge, so nothing else drawn in the
+    /// note's colour can be mistaken for its body.
+    fn sticky_lines_drawn(app: &WhiteboardApp, bounds: &Rect) -> Vec<(f32, String)> {
+        let left = (bounds.x + STICKY_PADDING) * app.zoom;
+        app.render()
+            .into_iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text {
+                    x, y, text, color, ..
+                } if color == MOCHA_CRUST && (x - left).abs() < 0.01 => Some((y, text)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A note big enough for several lines of the paragraph below.
+    fn app_with_sticky(bounds: Rect, content: &str) -> WhiteboardApp {
+        let mut app = WhiteboardApp::new(1280.0, 800.0);
+        app.add_shape(ShapeKind::StickyNote {
+            bounds,
+            content: content.to_string(),
+            bg_color: MOCHA_YELLOW,
+        });
+        app
+    }
+
+    const STICKY_PARAGRAPH: &str = "Remember to check the deployment schedule \
+        with the release team before the freeze, and to file the rollback plan \
+        alongside it so nobody has to invent one under pressure.";
+
+    #[test]
+    fn a_long_sticky_note_is_wrapped_not_truncated_to_one_line() {
+        // `RenderCommand::Text` clips at `max_width`, so the whole note used to
+        // come out as its first line's worth of characters and nothing else.
+        let bounds = Rect::new(40.0, 40.0, 220.0, 240.0);
+        let app = app_with_sticky(bounds, STICKY_PARAGRAPH);
+        let lines = sticky_lines_drawn(&app, &bounds);
+
+        assert!(
+            lines.len() > 1,
+            "the note was drawn as {} command(s); it needs one per line",
+            lines.len()
+        );
+        // Every word the user typed is still on the note somewhere.
+        let drawn: String = lines
+            .iter()
+            .map(|(_, t)| t.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        for word in STICKY_PARAGRAPH.split_whitespace() {
+            assert!(drawn.contains(word), "the note lost the word {word:?}");
+        }
+    }
+
+    #[test]
+    fn sticky_note_text_stays_inside_the_note() {
+        // A note is a fixed box the user drew, so text longer than it fits is
+        // dropped rather than spilling onto the canvas over other shapes.
+        let bounds = Rect::new(40.0, 40.0, 120.0, 60.0);
+        let app = app_with_sticky(bounds, STICKY_PARAGRAPH);
+
+        let bottom = (bounds.y + bounds.height) * app.zoom;
+        for (y, text) in sticky_lines_drawn(&app, &bounds) {
+            assert!(
+                y + STICKY_LINE_HEIGHT * app.zoom <= bottom + 0.01,
+                "line {text:?} at {y} runs past the bottom of the note at {bottom}"
+            );
+        }
+    }
+
+    #[test]
+    fn zooming_a_sticky_note_does_not_reflow_it() {
+        // Line breaks are laid out in canvas units, so they are a property of
+        // the note rather than of how closely the user is looking at it.
+        let bounds = Rect::new(40.0, 40.0, 220.0, 400.0);
+        let mut app = app_with_sticky(bounds, STICKY_PARAGRAPH);
+        let at_1x: Vec<String> = sticky_lines_drawn(&app, &bounds)
+            .into_iter()
+            .map(|(_, t)| t)
+            .collect();
+
+        app.set_zoom(2.5);
+        let at_2_5x: Vec<String> = sticky_lines_drawn(&app, &bounds)
+            .into_iter()
+            .map(|(_, t)| t)
+            .collect();
+
+        assert_eq!(at_1x, at_2_5x, "zooming re-broke the note's lines");
+    }
+
+    #[test]
+    fn an_empty_sticky_note_draws_no_text() {
+        let bounds = Rect::new(40.0, 40.0, 150.0, 100.0);
+        let app = app_with_sticky(bounds, "");
+        assert!(sticky_lines_drawn(&app, &bounds).is_empty());
     }
 
     #[test]

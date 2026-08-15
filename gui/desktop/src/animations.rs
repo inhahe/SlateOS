@@ -365,8 +365,12 @@ impl WindowAnimation {
     /// Create a minimize animation (shrink toward a taskbar position).
     pub fn minimize(
         window_id: u64,
-        x: f32, y: f32, w: f32, h: f32,
-        taskbar_x: f32, taskbar_y: f32,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        taskbar_x: f32,
+        taskbar_y: f32,
         ticks: u32,
     ) -> Self {
         Self {
@@ -383,8 +387,14 @@ impl WindowAnimation {
     /// Create a snap animation (move+resize to target zone).
     pub fn snap(
         window_id: u64,
-        from_x: f32, from_y: f32, from_w: f32, from_h: f32,
-        to_x: f32, to_y: f32, to_w: f32, to_h: f32,
+        from_x: f32,
+        from_y: f32,
+        from_w: f32,
+        from_h: f32,
+        to_x: f32,
+        to_y: f32,
+        to_w: f32,
+        to_h: f32,
         ticks: u32,
     ) -> Self {
         Self {
@@ -411,8 +421,11 @@ impl WindowAnimation {
 
     /// Whether all sub-animations have completed.
     pub fn is_done(&self) -> bool {
-        self.x.is_done() && self.y.is_done() && self.width.is_done()
-            && self.height.is_done() && self.opacity.is_done()
+        self.x.is_done()
+            && self.y.is_done()
+            && self.width.is_done()
+            && self.height.is_done()
+            && self.opacity.is_done()
     }
 }
 
@@ -840,7 +853,13 @@ mod tests {
     #[test]
     fn test_window_minimize_animation() {
         let mut wa = WindowAnimation::minimize(3, 100.0, 100.0, 400.0, 300.0, 500.0, 900.0, 8);
-        let mut rect = AnimatedRect { x: 0.0, y: 0.0, width: 0.0, height: 0.0, opacity: 0.0 };
+        let mut rect = AnimatedRect {
+            x: 0.0,
+            y: 0.0,
+            width: 0.0,
+            height: 0.0,
+            opacity: 0.0,
+        };
         for _ in 0..8 {
             rect = wa.tick();
         }
@@ -850,12 +869,8 @@ mod tests {
 
     #[test]
     fn test_window_snap_animation() {
-        let mut wa = WindowAnimation::snap(
-            4,
-            100.0, 100.0, 400.0, 300.0,
-            0.0, 0.0, 960.0, 1080.0,
-            10,
-        );
+        let mut wa =
+            WindowAnimation::snap(4, 100.0, 100.0, 400.0, 300.0, 0.0, 0.0, 960.0, 1080.0, 10);
         for _ in 0..10 {
             wa.tick();
         }

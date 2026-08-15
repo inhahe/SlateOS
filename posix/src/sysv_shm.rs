@@ -57,7 +57,6 @@
 
 use crate::errno;
 use core::cell::UnsafeCell;
-use core::sync::atomic::{AtomicBool, Ordering};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -188,7 +187,12 @@ impl Segment {
 // Static state
 // ---------------------------------------------------------------------------
 
-static SHM_TABLE_LOCK: AtomicBool = AtomicBool::new(false);
+/// Serialises every scan of `SHM_META`.
+///
+/// A plain `static`, matching `SHM_META`'s plain `static mut`: the lock must
+/// have the same scope as the table it guards.  See
+/// [`crate::perprocess::PoolLock`].
+static SHM_TABLE_LOCK: crate::perprocess::PoolLock = crate::perprocess::PoolLock::new();
 static mut SHM_META: [Segment; MAX_SEGMENTS] = [const { Segment::EMPTY }; MAX_SEGMENTS];
 static SHM_STORAGE: [SegmentStorage; MAX_SEGMENTS] = [
     SegmentStorage {
@@ -205,29 +209,10 @@ static SHM_STORAGE: [SegmentStorage; MAX_SEGMENTS] = [
     },
 ];
 
-fn lock_acquire() {
-    while SHM_TABLE_LOCK
-        .compare_exchange_weak(false, true, Ordering::AcqRel, Ordering::Relaxed)
-        .is_err()
-    {
-        core::hint::spin_loop();
-    }
-}
-
-fn lock_release() {
-    SHM_TABLE_LOCK.store(false, Ordering::Release);
-}
-
-struct Guard;
-impl Drop for Guard {
-    fn drop(&mut self) {
-        lock_release();
-    }
-}
-
-fn lock() -> Guard {
-    lock_acquire();
-    Guard
+/// Take `SHM_TABLE_LOCK` for the duration of a segment-table scan.
+fn lock() -> crate::perprocess::PoolGuard<'static> {
+    // SAFETY: `SHM_TABLE_LOCK` is a `static`, so it outlives the guard.
+    unsafe { crate::perprocess::lock_pool((&raw const SHM_TABLE_LOCK).cast_mut()) }
 }
 
 // ---------------------------------------------------------------------------

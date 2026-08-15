@@ -28,11 +28,7 @@
 // bounded widget dimensions. Allow defensive lints file-wide; allow
 // dead_code for the SURFACE2/LAVENDER palette constants kept for theme
 // future-proofing.
-#![allow(
-    clippy::arithmetic_side_effects,
-    clippy::indexing_slicing,
-    dead_code,
-)]
+#![allow(clippy::arithmetic_side_effects, clippy::indexing_slicing, dead_code)]
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -2087,6 +2083,8 @@ impl Default for ClientSettings {
 
 use guitk::render::{FontWeightHint, RenderCommand};
 use guitk::style::CornerRadii;
+use guitk::table::{Column, Fit, Table};
+use guitk::text;
 
 /// Catppuccin Mocha palette
 mod colors {
@@ -2110,6 +2108,77 @@ mod colors {
     pub const OVERLAY0: Color = Color::from_hex(0x6C7086);
     pub const MAUVE: Color = Color::from_hex(0xCBA6F7);
 }
+
+/// Font size used for every detail-table header and cell.
+const TABLE_FONT: f32 = 11.0;
+
+/// Columns of the Peers detail table.
+const PEER_COLUMNS: &[Column] = &[
+    Column {
+        label: "Address",
+        width: 160.0,
+    },
+    Column {
+        label: "Client",
+        width: 140.0,
+    },
+    Column {
+        label: "↓ Speed",
+        width: 80.0,
+    },
+    Column {
+        label: "↑ Speed",
+        width: 80.0,
+    },
+    Column {
+        label: "Downloaded",
+        width: 90.0,
+    },
+    Column {
+        label: "Flags",
+        width: 80.0,
+    },
+];
+
+/// Columns of the Files detail table.
+const FILE_COLUMNS: &[Column] = &[
+    Column {
+        label: "Name",
+        width: 300.0,
+    },
+    Column {
+        label: "Size",
+        width: 80.0,
+    },
+    Column {
+        label: "Priority",
+        width: 80.0,
+    },
+];
+
+/// Columns of the Trackers detail table.
+const TRACKER_COLUMNS: &[Column] = &[
+    Column {
+        label: "URL",
+        width: 300.0,
+    },
+    Column {
+        label: "Status",
+        width: 100.0,
+    },
+    Column {
+        label: "Seeds",
+        width: 60.0,
+    },
+    Column {
+        label: "Leechers",
+        width: 60.0,
+    },
+    Column {
+        label: "Tier",
+        width: 40.0,
+    },
+];
 
 /// Active UI tab
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -2475,7 +2544,7 @@ impl TorrentApp {
         ];
         let mut bx = 120.0;
         for label in &buttons {
-            let bw = label.len() as f32 * 8.0 + 24.0;
+            let bw = text::padded_width(label, 12.0, 12.0, FontWeightHint::Regular);
             cmds.push(RenderCommand::FillRect {
                 x: bx,
                 y: 8.0,
@@ -2611,7 +2680,7 @@ impl TorrentApp {
         let mut tx = content_x + 8.0;
         for tab in &Tab::ALL {
             let is_active = *tab == self.active_tab;
-            let tw = tab.label().len() as f32 * 8.0 + 20.0;
+            let tw = text::padded_width_any_weight(tab.label(), 10.0, 12.0);
             if is_active {
                 cmds.push(RenderCommand::FillRect {
                     x: tx,
@@ -3049,28 +3118,8 @@ impl TorrentApp {
             return;
         };
 
-        // Headers
-        let headers = [
-            ("Address", 160.0),
-            ("Client", 140.0),
-            ("↓ Speed", 80.0),
-            ("↑ Speed", 80.0),
-            ("Downloaded", 90.0),
-            ("Flags", 80.0),
-        ];
-        let mut cx = x + 8.0;
-        for (label, cw) in &headers {
-            cmds.push(RenderCommand::Text {
-                x: cx,
-                y: y + 4.0,
-                text: label.to_string(),
-                font_size: 11.0,
-                color: colors::OVERLAY0,
-                font_weight: FontWeightHint::Bold,
-                max_width: Some(*cw),
-            });
-            cx += cw + 8.0;
-        }
+        let table = Table::new(PEER_COLUMNS, x);
+        table.header(cmds, y + 4.0, colors::OVERLAY0, TABLE_FONT);
 
         let mut py = y + 24.0;
         for peer in &torrent.peers {
@@ -3078,69 +3127,6 @@ impl TorrentApp {
                 break;
             }
 
-            let mut cx = x + 8.0;
-
-            // Address
-            cmds.push(RenderCommand::Text {
-                x: cx,
-                y: py,
-                text: format!("{}:{}", peer.address, peer.port),
-                font_size: 11.0,
-                color: colors::SUBTEXT1,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(160.0),
-            });
-            cx += 168.0;
-
-            // Client
-            cmds.push(RenderCommand::Text {
-                x: cx,
-                y: py,
-                text: peer.client_name.clone(),
-                font_size: 11.0,
-                color: colors::TEXT,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(140.0),
-            });
-            cx += 148.0;
-
-            // Down speed
-            cmds.push(RenderCommand::Text {
-                x: cx,
-                y: py,
-                text: format_speed(peer.download_rate),
-                font_size: 11.0,
-                color: colors::TEAL,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-            });
-            cx += 88.0;
-
-            // Up speed
-            cmds.push(RenderCommand::Text {
-                x: cx,
-                y: py,
-                text: format_speed(peer.upload_rate),
-                font_size: 11.0,
-                color: colors::PEACH,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-            });
-            cx += 88.0;
-
-            // Downloaded
-            cmds.push(RenderCommand::Text {
-                x: cx,
-                y: py,
-                text: format_size(peer.downloaded),
-                font_size: 11.0,
-                color: colors::SUBTEXT0,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-            });
-            cx += 98.0;
-
-            // Flags
             let mut flags = String::new();
             if !peer.am_choking {
                 flags.push('u');
@@ -3157,15 +3143,30 @@ impl TorrentApp {
             if peer.supports_extensions {
                 flags.push('e');
             }
-            cmds.push(RenderCommand::Text {
-                x: cx,
-                y: py,
-                text: flags,
-                font_size: 11.0,
-                color: colors::SUBTEXT0,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-            });
+
+            let cells: [(String, guitk::Color, Fit); 6] = [
+                (
+                    format!("{}:{}", peer.address, peer.port),
+                    colors::SUBTEXT1,
+                    Fit::Start,
+                ),
+                // A peer's client name is whatever the peer says it is: it
+                // arrives in the handshake from an untrusted party, so it is
+                // fitted like any other wire-supplied string.
+                (peer.client_name.clone(), colors::TEXT, Fit::Start),
+                (format_speed(peer.download_rate), colors::TEAL, Fit::Start),
+                (format_speed(peer.upload_rate), colors::PEACH, Fit::Start),
+                (format_size(peer.downloaded), colors::SUBTEXT0, Fit::Start),
+                (flags, colors::SUBTEXT0, Fit::Start),
+            ];
+            debug_assert_eq!(
+                cells.len(),
+                table.len(),
+                "a cell with no column is positioned past the table and drawn empty",
+            );
+            for (i, (cell, color, fit)) in cells.iter().enumerate() {
+                table.cell(cmds, i, py, cell, *color, TABLE_FONT, *fit);
+            }
 
             py += 24.0;
         }
@@ -3207,21 +3208,8 @@ impl TorrentApp {
             .as_ref()
             .map_or(&[] as &[TorrentFile], |m| &m.files);
 
-        // Headers
-        let headers = [("Name", 300.0), ("Size", 80.0), ("Priority", 80.0)];
-        let mut cx = x + 8.0;
-        for (label, cw) in &headers {
-            cmds.push(RenderCommand::Text {
-                x: cx,
-                y: y + 4.0,
-                text: label.to_string(),
-                font_size: 11.0,
-                color: colors::OVERLAY0,
-                font_weight: FontWeightHint::Bold,
-                max_width: Some(*cw),
-            });
-            cx += cw + 8.0;
-        }
+        let table = Table::new(FILE_COLUMNS, x);
+        table.header(cmds, y + 4.0, colors::OVERLAY0, TABLE_FONT);
 
         let mut fy = y + 24.0;
         for (i, file) in meta_files.iter().enumerate() {
@@ -3234,45 +3222,30 @@ impl TorrentApp {
                 .get(i)
                 .copied()
                 .unwrap_or(FilePriority::Normal);
-            let mut cx = x + 8.0;
-
-            cmds.push(RenderCommand::Text {
-                x: cx,
-                y: fy,
-                text: file.path.clone(),
-                font_size: 11.0,
-                color: colors::TEXT,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(300.0),
-            });
-            cx += 308.0;
-
-            cmds.push(RenderCommand::Text {
-                x: cx,
-                y: fy,
-                text: format_size(file.length),
-                font_size: 11.0,
-                color: colors::SUBTEXT1,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-            });
-            cx += 88.0;
-
             let prio_color = match priority {
                 FilePriority::Skip => colors::OVERLAY0,
                 FilePriority::Low => colors::YELLOW,
                 FilePriority::Normal => colors::TEXT,
                 FilePriority::High => colors::GREEN,
             };
-            cmds.push(RenderCommand::Text {
-                x: cx,
-                y: fy,
-                text: priority.to_string(),
-                font_size: 11.0,
-                color: prio_color,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-            });
+
+            // The path is elided from the *front*: it comes from the torrent's
+            // metainfo and is routinely longer than the column, and what
+            // identifies a file is its name, not the directory chain above it.
+            // Cut the usual way, every episode in a season reads identically.
+            let cells: [(String, guitk::Color, Fit); 3] = [
+                (file.path.clone(), colors::TEXT, Fit::End),
+                (format_size(file.length), colors::SUBTEXT1, Fit::Start),
+                (priority.to_string(), prio_color, Fit::Start),
+            ];
+            debug_assert_eq!(
+                cells.len(),
+                table.len(),
+                "a cell with no column is positioned past the table and drawn empty",
+            );
+            for (i, (cell, color, fit)) in cells.iter().enumerate() {
+                table.cell(cmds, i, fy, cell, *color, TABLE_FONT, *fit);
+            }
 
             fy += 22.0;
         }
@@ -3297,44 +3270,14 @@ impl TorrentApp {
             return;
         };
 
-        let headers = [
-            ("URL", 300.0),
-            ("Status", 100.0),
-            ("Seeds", 60.0),
-            ("Leechers", 60.0),
-            ("Tier", 40.0),
-        ];
-        let mut cx = x + 8.0;
-        for (label, cw) in &headers {
-            cmds.push(RenderCommand::Text {
-                x: cx,
-                y: y + 4.0,
-                text: label.to_string(),
-                font_size: 11.0,
-                color: colors::OVERLAY0,
-                font_weight: FontWeightHint::Bold,
-                max_width: Some(*cw),
-            });
-            cx += cw + 8.0;
-        }
+        let table = Table::new(TRACKER_COLUMNS, x);
+        table.header(cmds, y + 4.0, colors::OVERLAY0, TABLE_FONT);
 
         let mut ty = y + 24.0;
         for tracker in &torrent.trackers {
             if ty + 22.0 > y + h {
                 break;
             }
-            let mut cx = x + 8.0;
-
-            cmds.push(RenderCommand::Text {
-                x: cx,
-                y: ty,
-                text: tracker.url.clone(),
-                font_size: 11.0,
-                color: colors::TEXT,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(300.0),
-            });
-            cx += 308.0;
 
             let status_color = match tracker.status {
                 TrackerStatus::Working => colors::GREEN,
@@ -3342,48 +3285,26 @@ impl TorrentApp {
                 TrackerStatus::Error => colors::RED,
                 _ => colors::SUBTEXT0,
             };
-            cmds.push(RenderCommand::Text {
-                x: cx,
-                y: ty,
-                text: tracker.status.to_string(),
-                font_size: 11.0,
-                color: status_color,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-            });
-            cx += 108.0;
 
-            cmds.push(RenderCommand::Text {
-                x: cx,
-                y: ty,
-                text: tracker.seeders.to_string(),
-                font_size: 11.0,
-                color: colors::GREEN,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-            });
-            cx += 68.0;
-
-            cmds.push(RenderCommand::Text {
-                x: cx,
-                y: ty,
-                text: tracker.leechers.to_string(),
-                font_size: 11.0,
-                color: colors::PEACH,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-            });
-            cx += 68.0;
-
-            cmds.push(RenderCommand::Text {
-                x: cx,
-                y: ty,
-                text: tracker.tier.to_string(),
-                font_size: 11.0,
-                color: colors::SUBTEXT0,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-            });
+            // A tracker URL is elided from the front for the same reason a file
+            // path is: the announce path at the end is what distinguishes two
+            // trackers on the same host, and cutting the usual way keeps only
+            // the scheme and hostname they share.
+            let cells: [(String, guitk::Color, Fit); 5] = [
+                (tracker.url.clone(), colors::TEXT, Fit::End),
+                (tracker.status.to_string(), status_color, Fit::Start),
+                (tracker.seeders.to_string(), colors::GREEN, Fit::Start),
+                (tracker.leechers.to_string(), colors::PEACH, Fit::Start),
+                (tracker.tier.to_string(), colors::SUBTEXT0, Fit::Start),
+            ];
+            debug_assert_eq!(
+                cells.len(),
+                table.len(),
+                "a cell with no column is positioned past the table and drawn empty",
+            );
+            for (i, (cell, color, fit)) in cells.iter().enumerate() {
+                table.cell(cmds, i, ty, cell, *color, TABLE_FONT, *fit);
+            }
 
             ty += 22.0;
         }
@@ -4163,5 +4084,244 @@ mod tests {
         assert_eq!(settings.listen_port, 6881);
         assert!(settings.dht_enabled);
         assert_eq!(settings.encryption_mode, EncryptionMode::Prefer);
+    }
+
+    // ─── Detail-table column fitting ─────────────────────────────────
+    //
+    // Every cell in the Peers / Files / Trackers tables holds a string that
+    // arrived over the network. These tests hold the tables to the rule that
+    // no cell may draw past the right edge of the column it lives in, and
+    // that when one is shortened the cut is *marked* and the identifying end
+    // of a path or URL is the end that survives.
+
+    /// The `(left, right)` x-range of each column, asked of the same `Table`
+    /// the renderer used, so the test cannot disagree with it about where a
+    /// column is.
+    fn column_edges(columns: &[Column], x: f32) -> Vec<(f32, f32)> {
+        Table::new(columns, x).spans()
+    }
+
+    /// A torrent whose every wire-supplied string is far too long for its
+    /// column, alongside a short one that must be left alone.
+    fn app_with_a_shouting_torrent() -> TorrentApp {
+        let mut app = TorrentApp::new();
+        let mut meta =
+            create_sample_torrent("Shouty", 4096, 256, "http://tracker.example.com/announce");
+        meta.files = vec![
+            TorrentFile {
+                path: "Some Show/Season 1/Episode 01 - A Very Long Episode Title Indeed \
+                       That Will Certainly Not Fit In The Column.mkv"
+                    .to_string(),
+                length: 4096,
+                md5sum: None,
+            },
+            TorrentFile {
+                path: "readme.txt".to_string(),
+                length: 12,
+                md5sum: None,
+            },
+        ];
+        let id = app.add_torrent(meta, None);
+        app.selected_torrent = Some(id);
+        if let Some(t) = app.torrents.iter_mut().find(|t| t.id == id) {
+            let mut loud = PeerInfo::new("192.168.100.200", 51413);
+            loud.client_name =
+                "qBittorrent 4.6.2 (a client that has chosen to name itself at truly \
+                 extravagant length)"
+                    .to_string();
+            loud.download_rate = 1_048_576;
+            loud.upload_rate = 4096;
+            loud.downloaded = 1_073_741_824;
+            loud.supports_extensions = true;
+            t.peers.push(loud);
+
+            let mut quiet = PeerInfo::new("10.0.0.1", 6881);
+            quiet.client_name = "Deluge".to_string();
+            t.peers.push(quiet);
+
+            t.trackers.push(TrackerEntry {
+                url: "http://tracker.a-very-long-hostname-indeed.example.invalid:6969\
+                      /announce/with/a/long/path?key=abcdef"
+                    .to_string(),
+                tier: 1,
+                status: TrackerStatus::Working,
+                seeders: 10,
+                leechers: 3,
+                last_announce: None,
+                next_announce: None,
+                announce_count: 1,
+                error_message: None,
+            });
+        }
+        app
+    }
+
+    /// Assert that every bounded text command sitting at a column's x draws
+    /// within that column, and that we actually inspected `expected` of them
+    /// — without the count the assertion passes vacuously if the panel
+    /// stopped drawing rows altogether.
+    fn assert_cells_fit(
+        cmds: &[RenderCommand],
+        columns: &[Column],
+        x: f32,
+        expected: usize,
+        what: &str,
+    ) {
+        let edges = column_edges(columns, x);
+        let mut checked = 0usize;
+        for cmd in cmds {
+            let RenderCommand::Text {
+                x: tx,
+                text,
+                font_size,
+                font_weight,
+                max_width: Some(_),
+                ..
+            } = cmd
+            else {
+                continue;
+            };
+            let Some(&(_, right)) = edges.iter().find(|(left, _)| (left - tx).abs() < 0.01) else {
+                continue;
+            };
+            let drawn = tx + text::measure(text, *font_size, *font_weight);
+            assert!(
+                drawn <= right + 0.5,
+                "{what}: cell {text:?} starting at {tx} runs to {drawn}, \
+                 past its column's right edge {right}",
+            );
+            checked += 1;
+        }
+        assert!(
+            checked >= expected,
+            "{what}: only {checked} cells checked, expected at least {expected}",
+        );
+    }
+
+    /// The texts drawn in a table's first column, header excluded.
+    fn first_column_cells(cmds: &[RenderCommand], columns: &[Column], x: f32) -> Vec<String> {
+        let edges = column_edges(columns, x);
+        let left = edges.first().map_or(f32::NAN, |&(l, _)| l);
+        cmds.iter()
+            .filter_map(|cmd| match cmd {
+                RenderCommand::Text {
+                    x: tx,
+                    text,
+                    font_weight: FontWeightHint::Regular,
+                    max_width: Some(_),
+                    ..
+                } if (tx - left).abs() < 0.01 => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn no_peer_row_cell_escapes_its_column() {
+        let app = app_with_a_shouting_torrent();
+        let mut cmds = Vec::new();
+        // Render the panel directly rather than the whole app: a full render
+        // puts toolbar and sidebar text at x values that happen to fall inside
+        // a column's range, and the assertion would then fail on chrome that
+        // was never part of this table.
+        app.render_peers(&mut cmds, 0.0, 0.0, 900.0, 400.0);
+        // 6 header labels + 2 peers x 6 cells.
+        assert_cells_fit(&cmds, PEER_COLUMNS, 0.0, 18, "peers");
+    }
+
+    #[test]
+    fn no_file_row_cell_escapes_its_column() {
+        let app = app_with_a_shouting_torrent();
+        let mut cmds = Vec::new();
+        app.render_files(&mut cmds, 0.0, 0.0, 900.0, 400.0);
+        // 3 header labels + 2 files x 3 cells.
+        assert_cells_fit(&cmds, FILE_COLUMNS, 0.0, 9, "files");
+    }
+
+    #[test]
+    fn no_tracker_row_cell_escapes_its_column() {
+        let app = app_with_a_shouting_torrent();
+        let mut cmds = Vec::new();
+        app.render_trackers(&mut cmds, 0.0, 0.0, 900.0, 400.0);
+        // 5 header labels + at least the one over-long tracker's 5 cells.
+        assert_cells_fit(&cmds, TRACKER_COLUMNS, 0.0, 10, "trackers");
+    }
+
+    #[test]
+    fn an_overlong_file_path_keeps_its_filename() {
+        let app = app_with_a_shouting_torrent();
+        let mut cmds = Vec::new();
+        app.render_files(&mut cmds, 0.0, 0.0, 900.0, 400.0);
+        let names = first_column_cells(&cmds, FILE_COLUMNS, 0.0);
+        let long = names
+            .iter()
+            .find(|n| n.ends_with(".mkv"))
+            .expect("the long file's name cell should be drawn");
+        assert!(
+            long.starts_with('…'),
+            "the cut should be marked at the front, got {long:?}"
+        );
+        assert!(
+            long.ends_with("Not Fit In The Column.mkv"),
+            "the filename is what identifies the file and must survive, got {long:?}"
+        );
+    }
+
+    #[test]
+    fn a_short_file_path_is_left_alone() {
+        let app = app_with_a_shouting_torrent();
+        let mut cmds = Vec::new();
+        app.render_files(&mut cmds, 0.0, 0.0, 900.0, 400.0);
+        let names = first_column_cells(&cmds, FILE_COLUMNS, 0.0);
+        assert!(
+            names.iter().any(|n| n == "readme.txt"),
+            "a path that fits must be drawn verbatim, got {names:?}"
+        );
+    }
+
+    #[test]
+    fn an_overlong_tracker_url_keeps_its_announce_path() {
+        let app = app_with_a_shouting_torrent();
+        let mut cmds = Vec::new();
+        app.render_trackers(&mut cmds, 0.0, 0.0, 900.0, 400.0);
+        let urls = first_column_cells(&cmds, TRACKER_COLUMNS, 0.0);
+        let long = urls
+            .iter()
+            .find(|u| u.ends_with("key=abcdef"))
+            .expect("the long tracker's URL cell should be drawn");
+        assert!(
+            long.starts_with('…'),
+            "the cut should be marked at the front, got {long:?}"
+        );
+    }
+
+    #[test]
+    fn an_overlong_peer_client_name_is_marked_as_cut() {
+        let app = app_with_a_shouting_torrent();
+        let mut cmds = Vec::new();
+        app.render_peers(&mut cmds, 0.0, 0.0, 900.0, 400.0);
+        let edges = column_edges(PEER_COLUMNS, 0.0);
+        let (client_x, _) = edges[1];
+        let clients: Vec<&String> = cmds
+            .iter()
+            .filter_map(|cmd| match cmd {
+                RenderCommand::Text {
+                    x: tx,
+                    text,
+                    font_weight: FontWeightHint::Regular,
+                    ..
+                } if (tx - client_x).abs() < 0.01 => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            clients.iter().any(|c| c.ends_with('…')),
+            "a peer-supplied client name too long for its column must be \
+             visibly cut, not silently clipped: {clients:?}"
+        );
+        assert!(
+            clients.iter().any(|c| *c == "Deluge"),
+            "a client name that fits must be drawn verbatim: {clients:?}"
+        );
     }
 }

@@ -36,6 +36,7 @@ use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
+use guitk::text;
 
 use std::collections::BTreeMap;
 
@@ -2385,8 +2386,7 @@ impl SchedulerUI {
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
 
-        let text_width = label.len() as f32 * FONT_SIZE * 0.6;
-        let text_x = x + (w - text_width) / 2.0;
+        let text_x = text::center_x(label, x + w / 2.0, FONT_SIZE, FontWeightHint::Bold);
         let text_y = y + (h - FONT_SIZE) / 2.0;
 
         cmds.push(RenderCommand::Text {

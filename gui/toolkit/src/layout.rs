@@ -332,10 +332,7 @@ pub fn flex_layout(
         }
     } else if free_space < 0.0 {
         // Shrink
-        let total_shrink: f32 = items
-            .iter()
-            .map(|item| item.shrink * item.main_size)
-            .sum();
+        let total_shrink: f32 = items.iter().map(|item| item.shrink * item.main_size).sum();
         if total_shrink > 0.0 {
             let overflow = -free_space;
             for item in &mut items {
@@ -364,20 +361,12 @@ pub fn flex_layout(
                 0.0
             }
         }
-        FlexJustify::SpaceEvenly => {
-            remaining / (items.len() as f32 + 1.0)
-        }
+        FlexJustify::SpaceEvenly => remaining / (items.len() as f32 + 1.0),
     };
 
     let between_space = match flex.justify {
-        FlexJustify::SpaceBetween
-            if items.len() > 1 => {
-                remaining / (items.len() - 1) as f32
-            }
-        FlexJustify::SpaceAround
-            if !items.is_empty() => {
-                remaining / items.len() as f32
-            }
+        FlexJustify::SpaceBetween if items.len() > 1 => remaining / (items.len() - 1) as f32,
+        FlexJustify::SpaceAround if !items.is_empty() => remaining / items.len() as f32,
         FlexJustify::SpaceEvenly => remaining / (items.len() as f32 + 1.0),
         _ => 0.0,
     };
@@ -406,9 +395,7 @@ pub fn flex_layout(
 
     // Align items along cross axis
     for item in &mut items {
-        let align = item
-            .align_self
-            .unwrap_or(flex.align_items);
+        let align = item.align_self.unwrap_or(flex.align_items);
 
         match align {
             FlexAlign::Start => {

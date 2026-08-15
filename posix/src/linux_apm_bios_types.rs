@@ -113,12 +113,7 @@ mod tests {
 
     #[test]
     fn test_ac_states_distinct() {
-        let a = [
-            APM_AC_OFFLINE,
-            APM_AC_ONLINE,
-            APM_AC_BACKUP,
-            APM_AC_UNKNOWN,
-        ];
+        let a = [APM_AC_OFFLINE, APM_AC_ONLINE, APM_AC_BACKUP, APM_AC_UNKNOWN];
         for i in 0..a.len() {
             for j in (i + 1)..a.len() {
                 assert_ne!(a[i], a[j]);

@@ -6,6 +6,7 @@
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand};
 use guitk::style::CornerRadii;
+use guitk::text;
 
 // The same zone engine the libc's `localtime`, osh's `printf '%(…)T'` and the
 // taskbar clock use.  This panel is where the machine's zone is *chosen*, so of
@@ -159,25 +160,85 @@ pub fn default_timezones() -> Vec<TimezoneInfo> {
     // it happens.
     [
         TimezoneInfo::new("Pacific/Honolulu", "Hawaii", "HST10", "Honolulu"),
-        TimezoneInfo::new("America/Anchorage", "Alaska", "AKST9AKDT,M3.2.0,M11.1.0", "Anchorage"),
-        TimezoneInfo::new("America/Los_Angeles", "Pacific Time", "PST8PDT,M3.2.0,M11.1.0", "Los Angeles"),
-        TimezoneInfo::new("America/Denver", "Mountain Time", "MST7MDT,M3.2.0,M11.1.0", "Denver"),
-        TimezoneInfo::new("America/Chicago", "Central Time", "CST6CDT,M3.2.0,M11.1.0", "Chicago"),
-        TimezoneInfo::new("America/New_York", "Eastern Time", "EST5EDT,M3.2.0,M11.1.0", "New York"),
-        TimezoneInfo::new("America/Sao_Paulo", "Brasilia Time", "<-03>3", "S\u{00e3}o Paulo"),
+        TimezoneInfo::new(
+            "America/Anchorage",
+            "Alaska",
+            "AKST9AKDT,M3.2.0,M11.1.0",
+            "Anchorage",
+        ),
+        TimezoneInfo::new(
+            "America/Los_Angeles",
+            "Pacific Time",
+            "PST8PDT,M3.2.0,M11.1.0",
+            "Los Angeles",
+        ),
+        TimezoneInfo::new(
+            "America/Denver",
+            "Mountain Time",
+            "MST7MDT,M3.2.0,M11.1.0",
+            "Denver",
+        ),
+        TimezoneInfo::new(
+            "America/Chicago",
+            "Central Time",
+            "CST6CDT,M3.2.0,M11.1.0",
+            "Chicago",
+        ),
+        TimezoneInfo::new(
+            "America/New_York",
+            "Eastern Time",
+            "EST5EDT,M3.2.0,M11.1.0",
+            "New York",
+        ),
+        TimezoneInfo::new(
+            "America/Sao_Paulo",
+            "Brasilia Time",
+            "<-03>3",
+            "S\u{00e3}o Paulo",
+        ),
         TimezoneInfo::new("Atlantic/Reykjavik", "Iceland", "GMT0", "Reykjavik"),
-        TimezoneInfo::new("Europe/London", "GMT/BST", "GMT0BST,M3.5.0/1,M10.5.0", "London"),
-        TimezoneInfo::new("Europe/Paris", "Central European", "CET-1CEST,M3.5.0,M10.5.0/3", "Paris"),
-        TimezoneInfo::new("Europe/Berlin", "Central European", "CET-1CEST,M3.5.0,M10.5.0/3", "Berlin"),
-        TimezoneInfo::new("Europe/Helsinki", "Eastern European", "EET-2EEST,M3.5.0/3,M10.5.0/4", "Helsinki"),
+        TimezoneInfo::new(
+            "Europe/London",
+            "GMT/BST",
+            "GMT0BST,M3.5.0/1,M10.5.0",
+            "London",
+        ),
+        TimezoneInfo::new(
+            "Europe/Paris",
+            "Central European",
+            "CET-1CEST,M3.5.0,M10.5.0/3",
+            "Paris",
+        ),
+        TimezoneInfo::new(
+            "Europe/Berlin",
+            "Central European",
+            "CET-1CEST,M3.5.0,M10.5.0/3",
+            "Berlin",
+        ),
+        TimezoneInfo::new(
+            "Europe/Helsinki",
+            "Eastern European",
+            "EET-2EEST,M3.5.0/3,M10.5.0/4",
+            "Helsinki",
+        ),
         TimezoneInfo::new("Europe/Moscow", "Moscow Time", "MSK-3", "Moscow"),
         TimezoneInfo::new("Asia/Dubai", "Gulf Standard", "<+04>-4", "Dubai"),
         TimezoneInfo::new("Asia/Kolkata", "India Standard", "IST-5:30", "Mumbai"),
         TimezoneInfo::new("Asia/Shanghai", "China Standard", "CST-8", "Shanghai"),
         TimezoneInfo::new("Asia/Tokyo", "Japan Standard", "JST-9", "Tokyo"),
         TimezoneInfo::new("Asia/Seoul", "Korea Standard", "KST-9", "Seoul"),
-        TimezoneInfo::new("Australia/Sydney", "Australian Eastern", "AEST-10AEDT,M10.1.0,M4.1.0/3", "Sydney"),
-        TimezoneInfo::new("Pacific/Auckland", "New Zealand", "NZST-12NZDT,M9.5.0,M4.1.0/3", "Auckland"),
+        TimezoneInfo::new(
+            "Australia/Sydney",
+            "Australian Eastern",
+            "AEST-10AEDT,M10.1.0,M4.1.0/3",
+            "Sydney",
+        ),
+        TimezoneInfo::new(
+            "Pacific/Auckland",
+            "New Zealand",
+            "NZST-12NZDT,M9.5.0,M4.1.0/3",
+            "Auckland",
+        ),
     ]
     .into_iter()
     .flatten()
@@ -346,7 +407,9 @@ impl Default for DateTimeSettings {
 impl DateTimeSettings {
     /// Get info about the current timezone.
     pub fn current_timezone(&self) -> Option<&TimezoneInfo> {
-        self.available_timezones.iter().find(|t| t.tz_id == self.timezone)
+        self.available_timezones
+            .iter()
+            .find(|t| t.tz_id == self.timezone)
     }
 
     /// Set the timezone (validates against available list).
@@ -364,7 +427,8 @@ impl DateTimeSettings {
         if self.additional_clocks.len() >= 4 {
             return false;
         }
-        self.additional_clocks.push(AdditionalClock::new(tz_id, label));
+        self.additional_clocks
+            .push(AdditionalClock::new(tz_id, label));
         true
     }
 
@@ -381,7 +445,8 @@ impl DateTimeSettings {
     /// Search available timezones.
     pub fn search_timezones(&self, query: &str) -> Vec<&TimezoneInfo> {
         let q = query.to_lowercase();
-        self.available_timezones.iter()
+        self.available_timezones
+            .iter()
             .filter(|t| {
                 t.tz_id.to_lowercase().contains(&q)
                     || t.display_name.to_lowercase().contains(&q)
@@ -447,13 +512,17 @@ impl DateTimeSettingsUI {
         let mut cmds = Vec::new();
 
         cmds.push(RenderCommand::FillRect {
-            x: 0.0, y: 0.0, width, height,
+            x: 0.0,
+            y: 0.0,
+            width,
+            height,
             color: BASE,
             corner_radii: CornerRadii::all(8.0),
         });
 
         cmds.push(RenderCommand::Text {
-            x: 24.0, y: 24.0,
+            x: 24.0,
+            y: 24.0,
             text: "Date & Time".into(),
             font_size: 22.0,
             color: TEXT,
@@ -462,23 +531,36 @@ impl DateTimeSettingsUI {
         });
 
         // Tabs
-        let tabs = [DateTimeTab::DateTime, DateTimeTab::Timezone, DateTimeTab::Ntp, DateTimeTab::Clocks];
+        let tabs = [
+            DateTimeTab::DateTime,
+            DateTimeTab::Timezone,
+            DateTimeTab::Ntp,
+            DateTimeTab::Clocks,
+        ];
         let tab_y = 60.0;
         let mut tx = 24.0;
         for &tab in &tabs {
             let active = tab == self.active_tab;
-            let tw = tab.label().len() as f32 * 7.5 + 20.0;
+            let tw = text::padded_width_any_weight(tab.label(), 10.0, 13.0);
             cmds.push(RenderCommand::FillRect {
-                x: tx, y: tab_y, width: tw, height: 32.0,
+                x: tx,
+                y: tab_y,
+                width: tw,
+                height: 32.0,
                 color: if active { BLUE } else { SURFACE0 },
                 corner_radii: CornerRadii::all(6.0),
             });
             cmds.push(RenderCommand::Text {
-                x: tx + 10.0, y: tab_y + 8.0,
+                x: tx + 10.0,
+                y: tab_y + 8.0,
                 text: tab.label().into(),
                 font_size: 13.0,
                 color: if active { CRUST } else { SUBTEXT0 },
-                font_weight: if active { FontWeightHint::Bold } else { FontWeightHint::Regular },
+                font_weight: if active {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
                 max_width: Some(tw - 20.0),
             });
             tx += tw + 8.0;
@@ -503,14 +585,18 @@ impl DateTimeSettingsUI {
         // Current time display
         if let Some((hour, minute)) = self.settings.local_time(self.current_utc) {
             cmds.push(RenderCommand::FillRect {
-                x, y: cy, width, height: 80.0,
+                x,
+                y: cy,
+                width,
+                height: 80.0,
                 color: SURFACE0,
                 corner_radii: CornerRadii::all(12.0),
             });
 
             let time_str = format!("{:02}:{:02}", hour, minute);
             cmds.push(RenderCommand::Text {
-                x: x + width * 0.5 - 60.0, y: cy + 12.0,
+                x: x + width * 0.5 - 60.0,
+                y: cy + 12.0,
                 text: time_str,
                 font_size: 36.0,
                 color: TEXT,
@@ -520,7 +606,8 @@ impl DateTimeSettingsUI {
 
             if let Some(tz) = self.settings.current_timezone() {
                 cmds.push(RenderCommand::Text {
-                    x: x + width * 0.5 - 60.0, y: cy + 56.0,
+                    x: x + width * 0.5 - 60.0,
+                    y: cy + 56.0,
                     text: format!(
                         "{} — {} ({})",
                         tz.display_name,
@@ -538,7 +625,8 @@ impl DateTimeSettingsUI {
 
         // Clock display options
         cmds.push(RenderCommand::Text {
-            x, y: cy,
+            x,
+            y: cy,
             text: "Taskbar Clock".into(),
             font_size: 15.0,
             color: LAVENDER,
@@ -547,9 +635,23 @@ impl DateTimeSettingsUI {
         });
         cy += 26.0;
 
-        self.render_toggle_row(cmds, x, cy, width, "Show Seconds", self.settings.show_seconds);
+        self.render_toggle_row(
+            cmds,
+            x,
+            cy,
+            width,
+            "Show Seconds",
+            self.settings.show_seconds,
+        );
         cy += 32.0;
-        self.render_toggle_row(cmds, x, cy, width, "Show Day of Week", self.settings.show_day_of_week);
+        self.render_toggle_row(
+            cmds,
+            x,
+            cy,
+            width,
+            "Show Day of Week",
+            self.settings.show_day_of_week,
+        );
         cy += 32.0;
         self.render_toggle_row(cmds, x, cy, width, "Show Date", self.settings.show_date);
         let _ = cy;
@@ -561,12 +663,16 @@ impl DateTimeSettingsUI {
         // Current timezone
         if let Some(tz) = self.settings.current_timezone() {
             cmds.push(RenderCommand::FillRect {
-                x, y: cy, width, height: 44.0,
+                x,
+                y: cy,
+                width,
+                height: 44.0,
                 color: SURFACE1,
                 corner_radii: CornerRadii::all(8.0),
             });
             cmds.push(RenderCommand::Text {
-                x: x + 12.0, y: cy + 6.0,
+                x: x + 12.0,
+                y: cy + 6.0,
                 text: format!(
                     "Current: {} ({})",
                     tz.display_name,
@@ -578,7 +684,8 @@ impl DateTimeSettingsUI {
                 max_width: Some(width - 24.0),
             });
             cmds.push(RenderCommand::Text {
-                x: x + 12.0, y: cy + 26.0,
+                x: x + 12.0,
+                y: cy + 26.0,
                 // The abbreviation is the live half of this line: a zone that
                 // observes DST reads `EST` in January and `EDT` in July, and
                 // saying so is what tells the user the offset above is not a
@@ -593,12 +700,22 @@ impl DateTimeSettingsUI {
         }
 
         // Auto-detect toggle
-        self.render_toggle_row(cmds, x, cy, width, "Auto-detect Timezone", self.settings.auto_timezone);
+        self.render_toggle_row(
+            cmds,
+            x,
+            cy,
+            width,
+            "Auto-detect Timezone",
+            self.settings.auto_timezone,
+        );
         cy += 40.0;
 
         // Search
         cmds.push(RenderCommand::FillRect {
-            x, y: cy, width, height: 30.0,
+            x,
+            y: cy,
+            width,
+            height: 30.0,
             color: SURFACE0,
             corner_radii: CornerRadii::all(6.0),
         });
@@ -608,10 +725,15 @@ impl DateTimeSettingsUI {
             self.tz_search.clone()
         };
         cmds.push(RenderCommand::Text {
-            x: x + 10.0, y: cy + 7.0,
+            x: x + 10.0,
+            y: cy + 7.0,
             text: search_text,
             font_size: 13.0,
-            color: if self.tz_search.is_empty() { OVERLAY0 } else { TEXT },
+            color: if self.tz_search.is_empty() {
+                OVERLAY0
+            } else {
+                TEXT
+            },
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - 20.0),
         });
@@ -629,30 +751,42 @@ impl DateTimeSettingsUI {
             let is_current = tz.tz_id == self.settings.timezone;
 
             cmds.push(RenderCommand::FillRect {
-                x, y: cy, width, height: 36.0,
+                x,
+                y: cy,
+                width,
+                height: 36.0,
                 color: if is_selected { SURFACE1 } else { SURFACE0 },
                 corner_radii: CornerRadii::all(4.0),
             });
 
             if is_current {
                 cmds.push(RenderCommand::FillRect {
-                    x: x + 4.0, y: cy + 4.0, width: 4.0, height: 28.0,
+                    x: x + 4.0,
+                    y: cy + 4.0,
+                    width: 4.0,
+                    height: 28.0,
                     color: BLUE,
                     corner_radii: CornerRadii::all(2.0),
                 });
             }
 
             cmds.push(RenderCommand::Text {
-                x: x + 16.0, y: cy + 4.0,
+                x: x + 16.0,
+                y: cy + 4.0,
                 text: format!("{} — {}", tz.city, tz.display_name),
                 font_size: 13.0,
                 color: if is_current { BLUE } else { TEXT },
-                font_weight: if is_current { FontWeightHint::Bold } else { FontWeightHint::Regular },
+                font_weight: if is_current {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
                 max_width: Some(width * 0.65),
             });
 
             cmds.push(RenderCommand::Text {
-                x: x + width - 100.0, y: cy + 4.0,
+                x: x + width - 100.0,
+                y: cy + 4.0,
                 text: tz.offset_string(self.current_utc),
                 font_size: 13.0,
                 color: SUBTEXT0,
@@ -667,7 +801,8 @@ impl DateTimeSettingsUI {
             // standard time and it is New York that has jumped.
             if tz.is_dst_at(self.current_utc) {
                 cmds.push(RenderCommand::Text {
-                    x: x + width - 100.0, y: cy + 20.0,
+                    x: x + width - 100.0,
+                    y: cy + 20.0,
                     text: "DST".into(),
                     font_size: 10.0,
                     color: YELLOW,
@@ -685,7 +820,8 @@ impl DateTimeSettingsUI {
         let ntp = &self.settings.ntp;
 
         cmds.push(RenderCommand::Text {
-            x, y: cy,
+            x,
+            y: cy,
             text: "Time Synchronization".into(),
             font_size: 15.0,
             color: LAVENDER,
@@ -700,17 +836,24 @@ impl DateTimeSettingsUI {
         // Status
         let status_color = ntp.status.color();
         cmds.push(RenderCommand::FillRect {
-            x, y: cy, width, height: 36.0,
+            x,
+            y: cy,
+            width,
+            height: 36.0,
             color: SURFACE0,
             corner_radii: CornerRadii::all(6.0),
         });
         cmds.push(RenderCommand::FillRect {
-            x: x + 8.0, y: cy + 12.0, width: 12.0, height: 12.0,
+            x: x + 8.0,
+            y: cy + 12.0,
+            width: 12.0,
+            height: 12.0,
             color: status_color,
             corner_radii: CornerRadii::all(6.0),
         });
         cmds.push(RenderCommand::Text {
-            x: x + 28.0, y: cy + 10.0,
+            x: x + 28.0,
+            y: cy + 10.0,
             text: format!("Status: {}", ntp.status.label()),
             font_size: 13.0,
             color: TEXT,
@@ -721,7 +864,14 @@ impl DateTimeSettingsUI {
 
         // Last sync
         if let Some(ts) = ntp.last_sync_at {
-            self.render_label_value(cmds, x, cy, width, "Last sync", &format!("{}s ago", self.current_utc.saturating_sub(ts)));
+            self.render_label_value(
+                cmds,
+                x,
+                cy,
+                width,
+                "Last sync",
+                &format!("{}s ago", self.current_utc.saturating_sub(ts)),
+            );
             cy += 24.0;
         }
 
@@ -733,7 +883,10 @@ impl DateTimeSettingsUI {
 
         // Interval
         self.render_label_value(
-            cmds, x, cy, width,
+            cmds,
+            x,
+            cy,
+            width,
             "Sync interval",
             &format!("{} min", ntp.sync_interval_secs / 60),
         );
@@ -741,7 +894,8 @@ impl DateTimeSettingsUI {
 
         // NTP servers
         cmds.push(RenderCommand::Text {
-            x, y: cy,
+            x,
+            y: cy,
             text: "NTP Servers".into(),
             font_size: 15.0,
             color: LAVENDER,
@@ -752,12 +906,16 @@ impl DateTimeSettingsUI {
 
         for server in &ntp.servers {
             cmds.push(RenderCommand::FillRect {
-                x, y: cy, width, height: 28.0,
+                x,
+                y: cy,
+                width,
+                height: 28.0,
                 color: SURFACE0,
                 corner_radii: CornerRadii::all(4.0),
             });
             cmds.push(RenderCommand::Text {
-                x: x + 10.0, y: cy + 6.0,
+                x: x + 10.0,
+                y: cy + 6.0,
                 text: server.clone(),
                 font_size: 13.0,
                 color: TEXT,
@@ -772,7 +930,8 @@ impl DateTimeSettingsUI {
         let mut cy = y;
 
         cmds.push(RenderCommand::Text {
-            x, y: cy,
+            x,
+            y: cy,
             text: "Additional Clocks".into(),
             font_size: 15.0,
             color: LAVENDER,
@@ -782,8 +941,12 @@ impl DateTimeSettingsUI {
         cy += 24.0;
 
         cmds.push(RenderCommand::Text {
-            x, y: cy,
-            text: format!("{}/4 clocks configured", self.settings.additional_clocks.len()),
+            x,
+            y: cy,
+            text: format!(
+                "{}/4 clocks configured",
+                self.settings.additional_clocks.len()
+            ),
             font_size: 12.0,
             color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
@@ -793,7 +956,8 @@ impl DateTimeSettingsUI {
 
         if self.settings.additional_clocks.is_empty() {
             cmds.push(RenderCommand::Text {
-                x: x + 10.0, y: cy + 20.0,
+                x: x + 10.0,
+                y: cy + 20.0,
                 text: "No additional clocks. Add one to track time in another city.".into(),
                 font_size: 13.0,
                 color: OVERLAY0,
@@ -804,17 +968,25 @@ impl DateTimeSettingsUI {
         }
 
         for clock in &self.settings.additional_clocks {
-            let tz = self.settings.available_timezones.iter().find(|t| t.tz_id == clock.tz_id);
+            let tz = self
+                .settings
+                .available_timezones
+                .iter()
+                .find(|t| t.tz_id == clock.tz_id);
 
             cmds.push(RenderCommand::FillRect {
-                x, y: cy, width, height: 60.0,
+                x,
+                y: cy,
+                width,
+                height: 60.0,
                 color: SURFACE0,
                 corner_radii: CornerRadii::all(8.0),
             });
 
             // Clock label
             cmds.push(RenderCommand::Text {
-                x: x + 12.0, y: cy + 6.0,
+                x: x + 12.0,
+                y: cy + 6.0,
                 text: clock.label.clone(),
                 font_size: 14.0,
                 color: TEXT,
@@ -826,7 +998,8 @@ impl DateTimeSettingsUI {
             if let Some(tz_info) = tz {
                 let (h, m) = tz_info.local_time(self.current_utc);
                 cmds.push(RenderCommand::Text {
-                    x: x + width - 100.0, y: cy + 6.0,
+                    x: x + width - 100.0,
+                    y: cy + 6.0,
                     text: format!("{:02}:{:02}", h, m),
                     font_size: 20.0,
                     color: BLUE,
@@ -835,7 +1008,8 @@ impl DateTimeSettingsUI {
                 });
 
                 cmds.push(RenderCommand::Text {
-                    x: x + 12.0, y: cy + 28.0,
+                    x: x + 12.0,
+                    y: cy + 28.0,
                     text: format!(
                         "{} — {} ({})",
                         tz_info.display_name,
@@ -852,7 +1026,8 @@ impl DateTimeSettingsUI {
             // Visibility indicator
             if !clock.visible {
                 cmds.push(RenderCommand::Text {
-                    x: x + 12.0, y: cy + 44.0,
+                    x: x + 12.0,
+                    y: cy + 44.0,
                     text: "Hidden".into(),
                     font_size: 10.0,
                     color: OVERLAY0,
@@ -865,9 +1040,18 @@ impl DateTimeSettingsUI {
         }
     }
 
-    fn render_toggle_row(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, width: f32, label: &str, enabled: bool) {
+    fn render_toggle_row(
+        &self,
+        cmds: &mut Vec<RenderCommand>,
+        x: f32,
+        y: f32,
+        width: f32,
+        label: &str,
+        enabled: bool,
+    ) {
         cmds.push(RenderCommand::Text {
-            x, y: y + 4.0,
+            x,
+            y: y + 4.0,
             text: label.into(),
             font_size: 14.0,
             color: TEXT,
@@ -876,21 +1060,36 @@ impl DateTimeSettingsUI {
         });
         let sw_x = x + width - 44.0;
         cmds.push(RenderCommand::FillRect {
-            x: sw_x, y: y + 2.0, width: 40.0, height: 22.0,
+            x: sw_x,
+            y: y + 2.0,
+            width: 40.0,
+            height: 22.0,
             color: if enabled { GREEN } else { SURFACE2 },
             corner_radii: CornerRadii::all(11.0),
         });
         let knob_x = if enabled { sw_x + 20.0 } else { sw_x + 2.0 };
         cmds.push(RenderCommand::FillRect {
-            x: knob_x, y: y + 4.0, width: 18.0, height: 18.0,
+            x: knob_x,
+            y: y + 4.0,
+            width: 18.0,
+            height: 18.0,
             color: TEXT,
             corner_radii: CornerRadii::all(9.0),
         });
     }
 
-    fn render_label_value(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, width: f32, label: &str, value: &str) {
+    fn render_label_value(
+        &self,
+        cmds: &mut Vec<RenderCommand>,
+        x: f32,
+        y: f32,
+        width: f32,
+        label: &str,
+        value: &str,
+    ) {
         cmds.push(RenderCommand::Text {
-            x, y,
+            x,
+            y,
             text: label.into(),
             font_size: 13.0,
             color: SUBTEXT0,
@@ -898,7 +1097,8 @@ impl DateTimeSettingsUI {
             max_width: Some(width * 0.4),
         });
         cmds.push(RenderCommand::Text {
-            x: x + width * 0.45, y,
+            x: x + width * 0.45,
+            y,
             text: value.into(),
             font_size: 13.0,
             color: TEXT,
@@ -950,7 +1150,10 @@ mod tests {
 
     #[test]
     fn test_offset_string_zero() {
-        assert_eq!(shipped("Atlantic/Reykjavik").offset_string(JUL), "UTC+00:00");
+        assert_eq!(
+            shipped("Atlantic/Reykjavik").offset_string(JUL),
+            "UTC+00:00"
+        );
     }
 
     #[test]
@@ -970,7 +1173,10 @@ mod tests {
     fn test_local_time_negative_offset() {
         // 03:00 UTC on a January day is 22:00 the previous day in New York,
         // which is on standard time then.
-        assert_eq!(shipped("America/New_York").local_time(JAN - 32_400), (22, 0));
+        assert_eq!(
+            shipped("America/New_York").local_time(JAN - 32_400),
+            (22, 0)
+        );
     }
 
     #[test]

@@ -29,8 +29,7 @@ pub const BUGFLAG_NO_CUT_HERE: u16 = 1 << 3;
 pub const BUGFLAG_RUNTIME_MASK: u16 = BUGFLAG_DONE;
 
 /// Mask of build-time flags (set by the WARN_ONCE/BUG_ON macros).
-pub const BUGFLAG_BUILDTIME_MASK: u16 =
-    BUGFLAG_WARNING | BUGFLAG_ONCE | BUGFLAG_NO_CUT_HERE;
+pub const BUGFLAG_BUILDTIME_MASK: u16 = BUGFLAG_WARNING | BUGFLAG_ONCE | BUGFLAG_NO_CUT_HERE;
 
 // ---------------------------------------------------------------------------
 // Bug-table entry field offsets (relative bug_addr, file, line, flags)

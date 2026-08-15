@@ -8,6 +8,7 @@
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand};
 use guitk::style::CornerRadii;
+use guitk::text;
 
 // ============================================================================
 // Catppuccin Mocha palette
@@ -128,7 +129,9 @@ impl std::fmt::Display for Ipv4Addr {
 impl Ipv4Addr {
     /// Create from four octets.
     pub fn new(a: u8, b: u8, c: u8, d: u8) -> Self {
-        Self { octets: [a, b, c, d] }
+        Self {
+            octets: [a, b, c, d],
+        }
     }
 
     /// Parse from dotted decimal string.
@@ -146,10 +149,7 @@ impl Ipv4Addr {
 
     /// Check if this is a private address.
     pub fn is_private(&self) -> bool {
-        matches!(
-            self.octets,
-            [10, ..] | [172, 16..=31, ..] | [192, 168, ..]
-        )
+        matches!(self.octets, [10, ..] | [172, 16..=31, ..] | [192, 168, ..])
     }
 
     /// Check if this is a loopback address.
@@ -216,9 +216,10 @@ impl Ipv4Config {
             }
         }
         if let Some(ref addr) = self.address
-            && addr.is_loopback() {
-                return Err("Cannot assign loopback address to interface");
-            }
+            && addr.is_loopback()
+        {
+            return Err("Cannot assign loopback address to interface");
+        }
         Ok(())
     }
 
@@ -736,8 +737,7 @@ impl FirewallConfig {
         self.rules
             .iter()
             .filter(|r| {
-                r.enabled
-                    && (r.direction == direction || r.direction == FirewallDirection::Both)
+                r.enabled && (r.direction == direction || r.direction == FirewallDirection::Both)
             })
             .collect()
     }
@@ -976,7 +976,12 @@ impl NetworkSettings {
     pub fn active_interface_count(&self) -> usize {
         self.interfaces
             .iter()
-            .filter(|i| matches!(i.state, ConnectionState::Connected | ConnectionState::Limited))
+            .filter(|i| {
+                matches!(
+                    i.state,
+                    ConnectionState::Connected | ConnectionState::Limited
+                )
+            })
             .count()
     }
 }
@@ -1101,7 +1106,7 @@ impl NetworkSettingsUI {
         let mut tab_x = x + 16.0;
         for tab in NetworkSettingsTab::all() {
             let label = tab.label();
-            let tw = label.len() as f32 * 8.0 + 24.0;
+            let tw = text::padded_width_any_weight(label, 12.0, 13.0);
             let is_active = *tab == self.active_tab;
 
             if is_active {
@@ -1453,9 +1458,7 @@ impl NetworkSettingsUI {
             });
         } else {
             for net in &networks {
-                let is_selected = self
-                    .selected_wifi
-                    .as_ref() == Some(&net.ssid);
+                let is_selected = self.selected_wifi.as_ref() == Some(&net.ssid);
 
                 let bg = if is_selected { SURFACE1 } else { SURFACE0 };
                 let row_h = if is_selected { 64.0 } else { 44.0 };
@@ -1590,11 +1593,7 @@ impl NetworkSettingsUI {
                     "{} — {}{}",
                     profile.ssid,
                     profile.security.label(),
-                    if profile.auto_connect {
-                        " (auto)"
-                    } else {
-                        ""
-                    }
+                    if profile.auto_connect { " (auto)" } else { "" }
                 ),
                 font_size: 12.0,
                 color: TEXT,
@@ -2266,7 +2265,10 @@ impl NetworkSettingsUI {
 
         // Options
         let options = [
-            ("Log blocked connections", self.settings.firewall.log_blocked),
+            (
+                "Log blocked connections",
+                self.settings.firewall.log_blocked,
+            ),
             ("Block ICMP (ping)", self.settings.firewall.block_icmp),
             ("Stealth mode", self.settings.firewall.stealth_mode),
         ];

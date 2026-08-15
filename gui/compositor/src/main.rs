@@ -43,9 +43,11 @@ use std::time::{Duration, Instant};
 #[allow(unused_imports)]
 use guitk::color::Color;
 #[allow(unused_imports)]
-use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
+use guitk::render::{FontFamily, FontWeightHint, RenderCommand, RenderTree};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
+use osfont::raster::GlyphMask;
+use osfont::system::{Family, FontCache, Weight};
 
 mod buffer;
 pub use buffer::{BufferFormat, SharedBuffer};
@@ -76,11 +78,9 @@ const TITLE_BUTTON_SPACING: u32 = 4;
 /// Default window opacity (fully opaque).
 const DEFAULT_OPACITY: f32 = 1.0;
 
-/// Monospace font character width in pixels (for basic text rendering).
-const CHAR_WIDTH: u32 = 8;
-
-/// Monospace font character height in pixels.
-const CHAR_HEIGHT: u32 = 14;
+/// Size, in pixels, for text the compositor draws itself — window titles and
+/// the like. Text inside a window carries its own size in the render command.
+const DEFAULT_FONT_SIZE: f32 = 16.0;
 
 /// Maximum framebuffer width supported.
 const MAX_FB_WIDTH: u32 = 7680;
@@ -1432,344 +1432,78 @@ impl TranslateStack {
 }
 
 // ---------------------------------------------------------------------------
-// Basic bitmap font (8x14 monospace, ASCII subset)
+// Text rendering
 // ---------------------------------------------------------------------------
 
-/// Simple 8x14 monospace bitmap font for basic text rendering.
-/// Stores 1-bit-per-pixel glyph data for printable ASCII (32..127).
-struct BitmapFont;
-
-impl BitmapFont {
-    /// Render a character at (px, py) in the framebuffer.
-    /// Returns the advance width in pixels.
-    fn draw_char(
-        fb: &mut Framebuffer,
-        ch: char,
-        px: u32,
-        py: u32,
-        color: u32,
-        opacity: f32,
-        clip: Option<&Rect>,
-    ) -> u32 {
-        let code = ch as u32;
-        // Only render printable ASCII for now.
-        if !(32..=126).contains(&code) {
-            return CHAR_WIDTH;
-        }
-
-        // Simple procedural glyph rendering: for each character, we generate
-        // a basic pattern. A real font would use stored bitmap data.
-        let glyph = Self::glyph_data(ch);
-
-        for row in 0..CHAR_HEIGHT {
-            let bits = glyph.get(row as usize).copied().unwrap_or(0u8);
-            for col in 0..CHAR_WIDTH {
-                if bits & (0x80 >> col) != 0 {
-                    let fx = px + col;
-                    let fy = py + row;
-
-                    // Clip check
-                    if let Some(clip_rect) = clip
-                        && !clip_rect.contains(fx as i32, fy as i32) {
-                            continue;
-                        }
-
-                    fb.blend_pixel(fx, fy, color, opacity);
-                }
-            }
-        }
-
-        CHAR_WIDTH
+/// Translates the toolkit's weight hint into the one `osfont` understands.
+///
+/// `Light` maps to regular because the built-in face has two weights and no
+/// third; drawing it bold would be worse than drawing it regular.
+fn weight_of(hint: FontWeightHint) -> Weight {
+    match hint {
+        FontWeightHint::Bold => Weight::Bold,
+        FontWeightHint::Regular | FontWeightHint::Light => Weight::Regular,
     }
+}
 
-    /// Get the glyph bitmap data for a character (8 bits wide, 14 rows).
-    /// This is a simplified procedural font — enough for basic compositor text.
-    fn glyph_data(ch: char) -> [u8; 14] {
-        // Provide basic glyphs for common characters used in window titles
-        // and decorations. A production compositor would load a proper font file.
-        match ch {
-            ' ' => [0x00; 14],
-            'A' => [
-                0x00, 0x18, 0x3C, 0x66, 0x66, 0xC3, 0xC3, 0xFF, 0xC3, 0xC3, 0xC3, 0xC3, 0x00,
-                0x00,
-            ],
-            'B' => [
-                0x00, 0xFC, 0x66, 0x66, 0x66, 0x7C, 0x66, 0x66, 0x66, 0x66, 0x66, 0xFC, 0x00,
-                0x00,
-            ],
-            'C' => [
-                0x00, 0x3C, 0x66, 0xC2, 0xC0, 0xC0, 0xC0, 0xC0, 0xC0, 0xC2, 0x66, 0x3C, 0x00,
-                0x00,
-            ],
-            'D' => [
-                0x00, 0xF8, 0x6C, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x6C, 0xF8, 0x00,
-                0x00,
-            ],
-            'E' => [
-                0x00, 0xFE, 0x66, 0x62, 0x68, 0x78, 0x68, 0x60, 0x60, 0x62, 0x66, 0xFE, 0x00,
-                0x00,
-            ],
-            'F' => [
-                0x00, 0xFE, 0x66, 0x62, 0x68, 0x78, 0x68, 0x60, 0x60, 0x60, 0x60, 0xF0, 0x00,
-                0x00,
-            ],
-            'G' => [
-                0x00, 0x3C, 0x66, 0xC2, 0xC0, 0xC0, 0xDE, 0xC6, 0xC6, 0xC6, 0x66, 0x3A, 0x00,
-                0x00,
-            ],
-            'H' => [
-                0x00, 0xC6, 0xC6, 0xC6, 0xC6, 0xFE, 0xC6, 0xC6, 0xC6, 0xC6, 0xC6, 0xC6, 0x00,
-                0x00,
-            ],
-            'I' => [
-                0x00, 0x3C, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x3C, 0x00,
-                0x00,
-            ],
-            'J' => [
-                0x00, 0x1E, 0x0C, 0x0C, 0x0C, 0x0C, 0x0C, 0x0C, 0xCC, 0xCC, 0xCC, 0x78, 0x00,
-                0x00,
-            ],
-            'K' => [
-                0x00, 0xE6, 0x66, 0x6C, 0x6C, 0x78, 0x78, 0x6C, 0x6C, 0x66, 0x66, 0xE6, 0x00,
-                0x00,
-            ],
-            'L' => [
-                0x00, 0xF0, 0x60, 0x60, 0x60, 0x60, 0x60, 0x60, 0x60, 0x62, 0x66, 0xFE, 0x00,
-                0x00,
-            ],
-            'M' => [
-                0x00, 0xC6, 0xEE, 0xFE, 0xD6, 0xC6, 0xC6, 0xC6, 0xC6, 0xC6, 0xC6, 0xC6, 0x00,
-                0x00,
-            ],
-            'N' => [
-                0x00, 0xC6, 0xE6, 0xF6, 0xFE, 0xDE, 0xCE, 0xC6, 0xC6, 0xC6, 0xC6, 0xC6, 0x00,
-                0x00,
-            ],
-            'O' => [
-                0x00, 0x38, 0x6C, 0xC6, 0xC6, 0xC6, 0xC6, 0xC6, 0xC6, 0xC6, 0x6C, 0x38, 0x00,
-                0x00,
-            ],
-            'P' => [
-                0x00, 0xFC, 0x66, 0x66, 0x66, 0x7C, 0x60, 0x60, 0x60, 0x60, 0x60, 0xF0, 0x00,
-                0x00,
-            ],
-            'Q' => [
-                0x00, 0x7C, 0xC6, 0xC6, 0xC6, 0xC6, 0xC6, 0xC6, 0xD6, 0xDE, 0x7C, 0x0C, 0x00,
-                0x00,
-            ],
-            'R' => [
-                0x00, 0xFC, 0x66, 0x66, 0x66, 0x7C, 0x6C, 0x66, 0x66, 0x66, 0x66, 0xE6, 0x00,
-                0x00,
-            ],
-            'S' => [
-                0x00, 0x7C, 0xC6, 0xC6, 0x60, 0x38, 0x0C, 0x06, 0xC6, 0xC6, 0xC6, 0x7C, 0x00,
-                0x00,
-            ],
-            'T' => [
-                0x00, 0x7E, 0x7E, 0x5A, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x3C, 0x00,
-                0x00,
-            ],
-            'U' => [
-                0x00, 0xC6, 0xC6, 0xC6, 0xC6, 0xC6, 0xC6, 0xC6, 0xC6, 0xC6, 0xC6, 0x7C, 0x00,
-                0x00,
-            ],
-            'V' => [
-                0x00, 0xC6, 0xC6, 0xC6, 0xC6, 0xC6, 0xC6, 0xC6, 0x6C, 0x38, 0x10, 0x10, 0x00,
-                0x00,
-            ],
-            'W' => [
-                0x00, 0xC6, 0xC6, 0xC6, 0xC6, 0xC6, 0xD6, 0xD6, 0xFE, 0xEE, 0xC6, 0xC6, 0x00,
-                0x00,
-            ],
-            'X' => [
-                0x00, 0xC6, 0xC6, 0x6C, 0x38, 0x38, 0x38, 0x38, 0x6C, 0xC6, 0xC6, 0xC6, 0x00,
-                0x00,
-            ],
-            'Y' => [
-                0x00, 0x66, 0x66, 0x66, 0x66, 0x3C, 0x18, 0x18, 0x18, 0x18, 0x18, 0x3C, 0x00,
-                0x00,
-            ],
-            'Z' => [
-                0x00, 0xFE, 0xC6, 0x86, 0x0C, 0x18, 0x30, 0x60, 0xC0, 0xC2, 0xC6, 0xFE, 0x00,
-                0x00,
-            ],
-            'a' => [
-                0x00, 0x00, 0x00, 0x00, 0x78, 0x0C, 0x7C, 0xCC, 0xCC, 0xCC, 0xCC, 0x76, 0x00,
-                0x00,
-            ],
-            'b' => [
-                0x00, 0xE0, 0x60, 0x60, 0x78, 0x6C, 0x66, 0x66, 0x66, 0x66, 0x6C, 0x78, 0x00,
-                0x00,
-            ],
-            'c' => [
-                0x00, 0x00, 0x00, 0x00, 0x7C, 0xC6, 0xC0, 0xC0, 0xC0, 0xC0, 0xC6, 0x7C, 0x00,
-                0x00,
-            ],
-            'd' => [
-                0x00, 0x1C, 0x0C, 0x0C, 0x3C, 0x6C, 0xCC, 0xCC, 0xCC, 0xCC, 0x6C, 0x3C, 0x00,
-                0x00,
-            ],
-            'e' => [
-                0x00, 0x00, 0x00, 0x00, 0x7C, 0xC6, 0xFE, 0xC0, 0xC0, 0xC0, 0xC6, 0x7C, 0x00,
-                0x00,
-            ],
-            'f' => [
-                0x00, 0x1C, 0x36, 0x32, 0x30, 0x7C, 0x30, 0x30, 0x30, 0x30, 0x30, 0x78, 0x00,
-                0x00,
-            ],
-            'g' => [
-                0x00, 0x00, 0x00, 0x00, 0x76, 0xCC, 0xCC, 0xCC, 0xCC, 0x7C, 0x0C, 0xCC, 0x78,
-                0x00,
-            ],
-            'h' => [
-                0x00, 0xE0, 0x60, 0x60, 0x6C, 0x76, 0x66, 0x66, 0x66, 0x66, 0x66, 0xE6, 0x00,
-                0x00,
-            ],
-            'i' => [
-                0x00, 0x18, 0x18, 0x00, 0x38, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x3C, 0x00,
-                0x00,
-            ],
-            'j' => [
-                0x00, 0x06, 0x06, 0x00, 0x0E, 0x06, 0x06, 0x06, 0x06, 0x06, 0x66, 0x66, 0x3C,
-                0x00,
-            ],
-            'k' => [
-                0x00, 0xE0, 0x60, 0x60, 0x66, 0x6C, 0x78, 0x78, 0x6C, 0x66, 0x66, 0xE6, 0x00,
-                0x00,
-            ],
-            'l' => [
-                0x00, 0x38, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x3C, 0x00,
-                0x00,
-            ],
-            'm' => [
-                0x00, 0x00, 0x00, 0x00, 0xEC, 0xFE, 0xD6, 0xD6, 0xD6, 0xD6, 0xC6, 0xC6, 0x00,
-                0x00,
-            ],
-            'n' => [
-                0x00, 0x00, 0x00, 0x00, 0xDC, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x00,
-                0x00,
-            ],
-            'o' => [
-                0x00, 0x00, 0x00, 0x00, 0x7C, 0xC6, 0xC6, 0xC6, 0xC6, 0xC6, 0xC6, 0x7C, 0x00,
-                0x00,
-            ],
-            'p' => [
-                0x00, 0x00, 0x00, 0x00, 0xDC, 0x66, 0x66, 0x66, 0x66, 0x7C, 0x60, 0x60, 0xF0,
-                0x00,
-            ],
-            'q' => [
-                0x00, 0x00, 0x00, 0x00, 0x76, 0xCC, 0xCC, 0xCC, 0xCC, 0x7C, 0x0C, 0x0C, 0x1E,
-                0x00,
-            ],
-            'r' => [
-                0x00, 0x00, 0x00, 0x00, 0xDC, 0x76, 0x66, 0x60, 0x60, 0x60, 0x60, 0xF0, 0x00,
-                0x00,
-            ],
-            's' => [
-                0x00, 0x00, 0x00, 0x00, 0x7C, 0xC6, 0x60, 0x38, 0x0C, 0x06, 0xC6, 0x7C, 0x00,
-                0x00,
-            ],
-            't' => [
-                0x00, 0x10, 0x30, 0x30, 0xFC, 0x30, 0x30, 0x30, 0x30, 0x30, 0x36, 0x1C, 0x00,
-                0x00,
-            ],
-            'u' => [
-                0x00, 0x00, 0x00, 0x00, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0x76, 0x00,
-                0x00,
-            ],
-            'v' => [
-                0x00, 0x00, 0x00, 0x00, 0xC6, 0xC6, 0xC6, 0xC6, 0xC6, 0x6C, 0x38, 0x10, 0x00,
-                0x00,
-            ],
-            'w' => [
-                0x00, 0x00, 0x00, 0x00, 0xC6, 0xC6, 0xD6, 0xD6, 0xD6, 0xFE, 0xEE, 0x6C, 0x00,
-                0x00,
-            ],
-            'x' => [
-                0x00, 0x00, 0x00, 0x00, 0xC6, 0x6C, 0x38, 0x38, 0x38, 0x6C, 0xC6, 0xC6, 0x00,
-                0x00,
-            ],
-            'y' => [
-                0x00, 0x00, 0x00, 0x00, 0xC6, 0xC6, 0xC6, 0xC6, 0xC6, 0x7E, 0x06, 0x0C, 0xF8,
-                0x00,
-            ],
-            'z' => [
-                0x00, 0x00, 0x00, 0x00, 0xFE, 0xCC, 0x18, 0x30, 0x60, 0xC0, 0xC6, 0xFE, 0x00,
-                0x00,
-            ],
-            '0' => [
-                0x00, 0x7C, 0xC6, 0xCE, 0xDE, 0xF6, 0xE6, 0xC6, 0xC6, 0xC6, 0xC6, 0x7C, 0x00,
-                0x00,
-            ],
-            '1' => [
-                0x00, 0x18, 0x38, 0x78, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x7E, 0x00,
-                0x00,
-            ],
-            '2' => [
-                0x00, 0x7C, 0xC6, 0x06, 0x0C, 0x18, 0x30, 0x60, 0xC0, 0xC0, 0xC6, 0xFE, 0x00,
-                0x00,
-            ],
-            '3' => [
-                0x00, 0x7C, 0xC6, 0x06, 0x06, 0x3C, 0x06, 0x06, 0x06, 0x06, 0xC6, 0x7C, 0x00,
-                0x00,
-            ],
-            '4' => [
-                0x00, 0x0C, 0x1C, 0x3C, 0x6C, 0xCC, 0xFE, 0x0C, 0x0C, 0x0C, 0x0C, 0x1E, 0x00,
-                0x00,
-            ],
-            '5' => [
-                0x00, 0xFE, 0xC0, 0xC0, 0xC0, 0xFC, 0x06, 0x06, 0x06, 0x06, 0xC6, 0x7C, 0x00,
-                0x00,
-            ],
-            '6' => [
-                0x00, 0x38, 0x60, 0xC0, 0xC0, 0xFC, 0xC6, 0xC6, 0xC6, 0xC6, 0xC6, 0x7C, 0x00,
-                0x00,
-            ],
-            '7' => [
-                0x00, 0xFE, 0xC6, 0x06, 0x0C, 0x18, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x00,
-                0x00,
-            ],
-            '8' => [
-                0x00, 0x7C, 0xC6, 0xC6, 0xC6, 0x7C, 0xC6, 0xC6, 0xC6, 0xC6, 0xC6, 0x7C, 0x00,
-                0x00,
-            ],
-            '9' => [
-                0x00, 0x7C, 0xC6, 0xC6, 0xC6, 0xC6, 0x7E, 0x06, 0x06, 0x06, 0x0C, 0x78, 0x00,
-                0x00,
-            ],
-            '-' => [
-                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFE, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                0x00,
-            ],
-            '_' => [
-                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF,
-                0x00,
-            ],
-            '.' => [
-                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x18, 0x18, 0x00,
-                0x00,
-            ],
-            ':' => [
-                0x00, 0x00, 0x00, 0x18, 0x18, 0x00, 0x00, 0x00, 0x18, 0x18, 0x00, 0x00, 0x00,
-                0x00,
-            ],
-            '/' => [
-                0x00, 0x02, 0x06, 0x0C, 0x18, 0x30, 0x60, 0xC0, 0x80, 0x00, 0x00, 0x00, 0x00,
-                0x00,
-            ],
-            '(' => [
-                0x00, 0x0C, 0x18, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x18, 0x0C, 0x00,
-                0x00,
-            ],
-            ')' => [
-                0x00, 0x30, 0x18, 0x0C, 0x0C, 0x0C, 0x0C, 0x0C, 0x0C, 0x0C, 0x18, 0x30, 0x00,
-                0x00,
-            ],
-            // For any character without a specific glyph, render a filled box.
-            _ => [
-                0x00, 0x00, 0xFE, 0xFE, 0xFE, 0xFE, 0xFE, 0xFE, 0xFE, 0xFE, 0xFE, 0x00, 0x00,
-                0x00,
-            ],
+/// Translates the toolkit's family into the one `osfont` understands.
+fn family_of(family: FontFamily) -> Family {
+    match family {
+        FontFamily::Ui => Family::Ui,
+        FontFamily::Mono => Family::Mono,
+    }
+}
+
+/// Blend one glyph's coverage into the framebuffer.
+///
+/// Free rather than a method so it can run while a `&mut SystemFont` borrowed
+/// out of `RenderEngine::text` is still alive — the glyph cache hands out a
+/// reference into itself, so the font stays borrowed for as long as the mask
+/// is being read.
+///
+/// `pen`/`baseline` are the pen position on the baseline, matching `mask.left`
+/// and `mask.top`.
+fn blend_mask(
+    fb: &mut Framebuffer,
+    mask: &GlyphMask,
+    pen: f32,
+    baseline: f32,
+    color: u32,
+    opacity: f32,
+    clip: Option<&Rect>,
+) {
+    // The origin comes from another process's layout, so it may be anything at
+    // all; a non-finite one is dropped rather than cast, because `as` turns
+    // NaN into 0 and would stamp the glyph at the top-left of the screen.
+    let (ox, oy) = (pen + mask.left as f32, baseline + mask.top as f32);
+    if !ox.is_finite() || !oy.is_finite() {
+        return;
+    }
+    let (ox, oy) = (ox.round() as i32, oy.round() as i32);
+
+    for row in 0..mask.height {
+        let fy = oy.saturating_add(row as i32);
+        if fy < 0 {
+            continue;
+        }
+        for col in 0..mask.width {
+            let coverage = mask.at(col, row);
+            if coverage == 0 {
+                continue;
+            }
+            let fx = ox.saturating_add(col as i32);
+            if fx < 0 {
+                continue;
+            }
+            if let Some(clip_rect) = clip
+                && !clip_rect.contains(fx, fy)
+            {
+                continue;
+            }
+            // Coverage scales the window's opacity; `blend_pixel` clamps and
+            // discards anything outside the framebuffer.
+            let alpha = opacity * (coverage as f32 / 255.0);
+            fb.blend_pixel(fx as u32, fy as u32, color, alpha);
         }
     }
 }
@@ -1782,13 +1516,51 @@ impl BitmapFont {
 struct RenderEngine {
     clip_stack: ClipStack,
     translate_stack: TranslateStack,
+    /// Same type, same rounding rule, and — because the faces are installed by
+    /// [`guitk::text::install_ui_faces`] rather than chosen here — the same
+    /// files as the toolkit measured with. A label the toolkit sized therefore
+    /// cannot be drawn in a different font than the one it was measured in.
+    ///
+    /// A cache of its own, rather than the toolkit's process-global one,
+    /// because this process only ever draws: it would take that cache's lock
+    /// for every glyph run and never once measure anything.
+    fonts: FontCache,
+    /// The families pushed by [`RenderCommand::PushFont`], innermost last.
+    ///
+    /// A stack rather than a single value so the scopes nest the way the clip
+    /// and translate ones do: a terminal pane inside a UI window pushes `Mono`,
+    /// and the status bar drawn after it must get the UI face back rather than
+    /// whatever the last push happened to be.
+    font_stack: Vec<FontFamily>,
 }
 
 impl RenderEngine {
     fn new() -> Self {
+        let mut fonts = FontCache::new();
+        match guitk::text::install_ui_faces(&mut fonts) {
+            Some(family) => eprintln!("compositor: UI font: {family}"),
+            // Not fatal: the cache keeps its built-in bitmap face, so text
+            // still draws. Worth saying out loud, though, since every label on
+            // the screen will look wrong and the cause is off-screen.
+            None => eprintln!(
+                "compositor: no system UI font found, falling back to the built-in bitmap face"
+            ),
+        }
+        // Resolved here for the same reason as the UI face: the process that
+        // measured a terminal's grid picked its family from this same list, so
+        // resolving it the same way is what keeps the cells the app laid out
+        // and the glyphs drawn into them the same width.
+        match guitk::text::install_mono_faces(&mut fonts) {
+            Some(family) => eprintln!("compositor: monospace font: {family}"),
+            None => eprintln!(
+                "compositor: no monospace font found, falling back to the built-in bitmap face"
+            ),
+        }
         Self {
             clip_stack: ClipStack::default(),
             translate_stack: TranslateStack::default(),
+            fonts,
+            font_stack: Vec::new(),
         }
     }
 
@@ -1807,6 +1579,7 @@ impl RenderEngine {
         // Set up initial clip to the window's client area.
         self.clip_stack.clear();
         self.translate_stack.clear();
+        self.font_stack.clear();
         self.clip_stack.push(Rect::new(
             window_x,
             window_y,
@@ -1823,6 +1596,10 @@ impl RenderEngine {
 
         self.clip_stack.clear();
         self.translate_stack.clear();
+        // Cleared rather than asserted empty: the command list came from
+        // another process, so an unbalanced push is that process's bug and
+        // must not leak into the next window this engine draws.
+        self.font_stack.clear();
     }
 
     fn execute_command(&mut self, fb: &mut Framebuffer, cmd: &RenderCommand, opacity: f32) {
@@ -1864,14 +1641,24 @@ impl RenderEngine {
                 y,
                 text,
                 color,
-                font_size: _,
-                font_weight: _,
+                font_size,
+                font_weight,
                 max_width,
             } => {
                 let px = (*x + tx) as i32;
                 let py = (*y + ty) as i32;
                 let max_w = max_width.map(|w| w as u32);
-                self.draw_text(fb, px, py, text, color_to_argb(color), opacity, max_w);
+                self.draw_text(
+                    fb,
+                    px,
+                    py,
+                    text,
+                    color_to_argb(color),
+                    opacity,
+                    max_w,
+                    *font_size,
+                    *font_weight,
+                );
             }
             RenderCommand::Line {
                 x1,
@@ -1906,6 +1693,12 @@ impl RenderEngine {
             }
             RenderCommand::PopTranslate => {
                 self.translate_stack.pop();
+            }
+            RenderCommand::PushFont { family } => {
+                self.font_stack.push(*family);
+            }
+            RenderCommand::PopFont => {
+                self.font_stack.pop();
             }
             RenderCommand::Image { .. } => {
                 // Image rendering requires an asset store — stub for now.
@@ -2016,9 +1809,21 @@ impl RenderEngine {
         );
     }
 
-    /// Draw text using the bitmap font.
+    /// Draw a run of text with its **top-left** at `(x, y)`.
+    ///
+    /// Top-left rather than the baseline `osfont` works in, because that is
+    /// what every caller here already passes and what the toolkit's layout
+    /// produces; the ascent is added once, below, instead of at each call
+    /// site.
+    ///
+    /// Glyph coverage is folded into the per-window opacity rather than blended
+    /// by `osfont` itself. The compositor's pixels go through a clip stack and
+    /// a window opacity that `osfont::Target` does not model, so it asks for
+    /// the coverage values and does its own blending — a half-covered pixel of
+    /// a half-transparent window is a quarter opaque, which is exactly what
+    /// multiplying the two gives.
     fn draw_text(
-        &self,
+        &mut self,
         fb: &mut Framebuffer,
         x: i32,
         y: i32,
@@ -2026,29 +1831,52 @@ impl RenderEngine {
         color: u32,
         opacity: f32,
         max_width: Option<u32>,
+        size: f32,
+        weight: FontWeightHint,
     ) {
         let clip = self.clip_stack.current().copied();
-        let mut cursor_x = x;
-        let max_x = max_width.map(|w| x + w as i32);
+        let family = self.font_stack.last().copied().unwrap_or_default();
+        let font = self.fonts.get(size, weight_of(weight), family_of(family));
+        let baseline = y as f32 + font.metrics().ascent;
+        let max_x = max_width.map(|w| x.saturating_add(w as i32));
+        let mut pen = x as f32;
 
-        for ch in text.chars() {
+        // Shaped rather than walked character by character, so this run is
+        // spaced exactly as the toolkit measured it — same kerning, same
+        // ligatures, same tab width. Laying text out here by a different rule
+        // from the process that sized the widget is how every centred label
+        // ends up off by half the difference, with neither process looking
+        // wrong on its own.
+        let run = font.shape(text);
+        // Drawing order, not logical order: the two differ only when the run
+        // contains right-to-left text, and there the logical order would put
+        // the first letter of a Hebrew word on the left — the word backwards.
+        // The truncation below is a further reason: `max_width` has to cut the
+        // glyphs that fall off the *right of the line*, which is what this
+        // walk reaches last only in this order.
+        for shaped in run.draw_order() {
+            let advance = shaped.advance;
+            // Measured before drawing, so a glyph that would cross the limit is
+            // dropped whole rather than clipped down the middle.
             if let Some(mx) = max_x
-                && cursor_x + CHAR_WIDTH as i32 > mx {
-                    break;
-                }
-
-            if cursor_x >= 0 && y >= 0 {
-                BitmapFont::draw_char(
+                && pen + advance > mx as f32
+            {
+                break;
+            }
+            if let Some(mask) = font.glyph_mask(shaped.key) {
+                // `offset` is zero except on an attached combining mark, and
+                // its `y` points up where the screen's points down.
+                blend_mask(
                     fb,
-                    ch,
-                    cursor_x as u32,
-                    y as u32,
+                    mask,
+                    pen + shaped.offset.0,
+                    baseline - shaped.offset.1,
                     color,
                     opacity,
                     clip.as_ref(),
                 );
             }
-            cursor_x += CHAR_WIDTH as i32;
+            pen += advance;
         }
     }
 
@@ -3542,7 +3370,14 @@ impl Compositor {
             self.theme.title_text_unfocused
         };
         let text_x = tb_x + 8;
-        let text_y = tb_y + (TITLE_BAR_HEIGHT as i32 - CHAR_HEIGHT as i32) / 2;
+        // Centred on the font's own line height rather than a hardcoded cell
+        // size, so the title stays centred if the title-bar font ever changes.
+        let line_height = self
+            .render_engine
+            .fonts
+            .get(DEFAULT_FONT_SIZE, Weight::Regular, Family::Ui)
+            .line_height();
+        let text_y = tb_y + (TITLE_BAR_HEIGHT as i32 - line_height as i32) / 2;
         let max_text_width = tb_width.saturating_sub(
             (TITLE_BUTTON_SIZE + TITLE_BUTTON_SPACING) * 3 + 16,
         );
@@ -3554,6 +3389,8 @@ impl Compositor {
             text_color,
             opacity,
             Some(max_text_width),
+            DEFAULT_FONT_SIZE,
+            FontWeightHint::Regular,
         );
 
         // Close button (red circle/square).
@@ -5370,5 +5207,169 @@ mod tests {
         assert_eq!(at(250, 150), bg);
         // A pixel just left of the client rect (still background region).
         assert_eq!(at(10, 50), bg);
+    }
+
+    // ---- text rendering ----------------------------------------------------
+
+    /// Draws `text` on a black surface and returns the rows and columns that
+    /// received ink, so a test can talk about where the glyphs landed instead
+    /// of about individual pixels.
+    fn ink_of(
+        text: &str,
+        size: f32,
+        weight: FontWeightHint,
+        max_width: Option<u32>,
+    ) -> (Vec<u32>, Vec<u32>) {
+        const W: u32 = 200;
+        const H: u32 = 120;
+        let mut fb = Framebuffer::new(W, H).unwrap();
+        fb.clear(0xFF_00_00_00);
+        let mut engine = RenderEngine::new();
+        engine.draw_text(
+            &mut fb,
+            4,
+            4,
+            text,
+            0xFF_FF_FF_FF,
+            1.0,
+            max_width,
+            size,
+            weight,
+        );
+        let lit = |x: u32, y: u32| fb.get_pixel(x, y).is_some_and(|p| p & 0x00FF_FFFF != 0);
+        let rows = (0..H).filter(|&y| (0..W).any(|x| lit(x, y))).collect();
+        let cols = (0..W).filter(|&x| (0..H).any(|y| lit(x, y))).collect();
+        (rows, cols)
+    }
+
+    #[test]
+    fn test_text_honors_font_size() {
+        // The old private face was a fixed 8x14 cell, so `font_size` from an
+        // app's render tree was parsed and then thrown away. Two sizes must now
+        // produce visibly different text.
+        let (small_rows, small_cols) = ink_of("Ag", 16.0, FontWeightHint::Regular, None);
+        let (big_rows, big_cols) = ink_of("Ag", 48.0, FontWeightHint::Regular, None);
+        assert!(!small_rows.is_empty(), "nothing drawn at 16px");
+        assert!(
+            big_rows.len() > small_rows.len(),
+            "48px text covers {} rows, 16px covers {} — size was ignored",
+            big_rows.len(),
+            small_rows.len()
+        );
+        assert!(
+            big_cols.len() > small_cols.len(),
+            "48px text is no wider than 16px text"
+        );
+    }
+
+    #[test]
+    fn test_text_honors_bold_weight() {
+        // Same reason: `font_weight` used to be discarded.
+        let (_, regular) = ink_of("lll", 16.0, FontWeightHint::Regular, None);
+        let (_, bold) = ink_of("lll", 16.0, FontWeightHint::Bold, None);
+        assert!(
+            bold.len() > regular.len(),
+            "bold covers {} columns, regular {} — weight was ignored",
+            bold.len(),
+            regular.len()
+        );
+    }
+
+    #[test]
+    fn test_text_draws_beyond_ascii() {
+        // The private face had glyphs for about ninety ASCII characters and
+        // drew a filled box for everything else, which made any non-English
+        // window title unreadable. Two different non-ASCII characters must now
+        // produce two different shapes.
+        let (rows_a, cols_a) = ink_of("\u{2500}", 16.0, FontWeightHint::Regular, None);
+        let (rows_b, cols_b) = ink_of("\u{00e9}", 16.0, FontWeightHint::Regular, None);
+        assert!(!rows_a.is_empty(), "box-drawing character drew nothing");
+        assert!(!rows_b.is_empty(), "e-acute drew nothing");
+        assert_ne!(
+            (rows_a, cols_a),
+            (rows_b, cols_b),
+            "two different characters produced identical ink — both are tofu"
+        );
+    }
+
+    #[test]
+    fn test_text_max_width_drops_whole_glyphs() {
+        // Truncation must happen between glyphs: half a letter reads as a
+        // rendering fault rather than as elided text.
+        let (_, unclipped) = ink_of("MMMMMMMM", 16.0, FontWeightHint::Regular, None);
+        let (_, clipped) = ink_of("MMMMMMMM", 16.0, FontWeightHint::Regular, Some(20));
+        assert!(!clipped.is_empty(), "max_width dropped everything");
+        assert!(
+            clipped.len() < unclipped.len(),
+            "max_width did not truncate"
+        );
+        let last = clipped.iter().max().copied().unwrap();
+        assert!(
+            last < 4 + 20,
+            "ink at column {last} spills past the 20px limit from x=4"
+        );
+    }
+
+    #[test]
+    fn test_text_at_absurd_coordinates_is_clipped_not_wrapped() {
+        // Coordinates arrive from another process, so they may be anything.
+        // A wrapped or NaN-folded coordinate would land back inside the
+        // framebuffer and paint over unrelated pixels.
+        let mut fb = Framebuffer::new(64, 32).unwrap();
+        fb.clear(0xFF_00_00_00);
+        let mut engine = RenderEngine::new();
+        for (x, y) in [
+            (i32::MIN, 8),
+            (i32::MAX, 8),
+            (8, i32::MIN),
+            (8, i32::MAX),
+            (-1000, -1000),
+        ] {
+            engine.draw_text(
+                &mut fb,
+                x,
+                y,
+                "leak",
+                0xFF_FF_FF_FF,
+                1.0,
+                None,
+                16.0,
+                FontWeightHint::Regular,
+            );
+        }
+        for y in 0..32 {
+            for x in 0..64 {
+                assert_eq!(
+                    fb.get_pixel(x, y),
+                    Some(0xFF_00_00_00),
+                    "off-surface text leaked into ({x},{y})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_light_weight_falls_back_to_regular_not_bold() {
+        // The built-in face has two weights. Rendering `Light` as bold would
+        // be the opposite of what was asked for, so it must map to regular.
+        assert_eq!(weight_of(FontWeightHint::Light), Weight::Regular);
+        assert_eq!(weight_of(FontWeightHint::Regular), Weight::Regular);
+        assert_eq!(weight_of(FontWeightHint::Bold), Weight::Bold);
+    }
+
+    #[test]
+    fn test_font_size_from_a_hostile_client_still_draws() {
+        // `font_size` crosses a process boundary, so it is not necessarily a
+        // number at all. A nonsense size must fall back to a readable one
+        // rather than panicking or drawing nothing.
+        for size in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, -1.0, 0.0] {
+            let (rows, _) = ink_of("W", size, FontWeightHint::Regular, None);
+            assert!(!rows.is_empty(), "font_size = {size} drew nothing");
+        }
+        // An enormous size is clamped rather than honoured — a 1e30-pixel face
+        // would be a memory bomb — so its glyphs are merely too big for this
+        // 200x120 surface. What matters is that asking does not panic.
+        let (rows, _) = ink_of("W", 1e30, FontWeightHint::Regular, None);
+        assert!(rows.is_empty(), "a 512px glyph should not fit in 120 rows");
     }
 }

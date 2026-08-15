@@ -152,9 +152,6 @@ mod tests {
     fn test_cmd_status_pair() {
         assert_eq!(VIRTIO_BALLOON_CMD_ID_STOP, 0);
         assert_eq!(VIRTIO_BALLOON_CMD_ID_DONE, 1);
-        assert_eq!(
-            VIRTIO_BALLOON_CMD_ID_DONE - VIRTIO_BALLOON_CMD_ID_STOP,
-            1
-        );
+        assert_eq!(VIRTIO_BALLOON_CMD_ID_DONE - VIRTIO_BALLOON_CMD_ID_STOP, 1);
     }
 }

@@ -95,9 +95,7 @@ impl AccountType {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Avatar {
     /// Colored circle with initials.
-    Initials {
-        color_index: u8,
-    },
+    Initials { color_index: u8 },
     /// System-provided icon by ID.
     SystemIcon(u32),
     /// Custom image path.
@@ -365,7 +363,12 @@ impl Default for AccountManager {
 impl AccountManager {
     /// Create a new manager with a default admin account.
     pub fn new() -> Self {
-        let mut admin = UserAccount::new(1000, "admin", "System Administrator", AccountType::Administrator);
+        let mut admin = UserAccount::new(
+            1000,
+            "admin",
+            "System Administrator",
+            AccountType::Administrator,
+        );
         admin.is_current = true;
         admin.is_logged_in = true;
 
@@ -475,25 +478,22 @@ impl AccountManager {
         // If demoting admin, check we have another admin
         if let Some(acct) = self.get(uid)
             && acct.account_type == AccountType::Administrator
-                && new_type != AccountType::Administrator
-            {
-                let admin_count = self
-                    .accounts
-                    .iter()
-                    .filter(|a| a.account_type == AccountType::Administrator)
-                    .count();
-                if admin_count <= 1 {
-                    return Err("Cannot demote the last administrator");
-                }
+            && new_type != AccountType::Administrator
+        {
+            let admin_count = self
+                .accounts
+                .iter()
+                .filter(|a| a.account_type == AccountType::Administrator)
+                .count();
+            if admin_count <= 1 {
+                return Err("Cannot demote the last administrator");
             }
+        }
 
         if let Some(acct) = self.get_mut(uid) {
             acct.account_type = new_type;
-            self.activity_log.record(
-                uid,
-                ActivityEvent::AccountTypeChanged(new_type),
-                timestamp,
-            );
+            self.activity_log
+                .record(uid, ActivityEvent::AccountTypeChanged(new_type), timestamp);
             Ok(())
         } else {
             Err("Account not found")
@@ -727,7 +727,11 @@ impl AccountSettingsUI {
                 y: tab_y + 6.0,
                 text: tab.display_name().to_string(),
                 font_size: 12.0,
-                color: if is_active { MOCHA_BLUE } else { MOCHA_SUBTEXT0 },
+                color: if is_active {
+                    MOCHA_BLUE
+                } else {
+                    MOCHA_SUBTEXT0
+                },
                 font_weight: if is_active {
                     FontWeightHint::Bold
                 } else {
@@ -749,7 +753,13 @@ impl AccountSettingsUI {
                 self.render_other_users(&mut cmds, x + 16.0, content_y, width - 32.0, content_h);
             }
             AccountsTab::SignInOptions => {
-                self.render_sign_in_options(&mut cmds, x + 16.0, content_y, width - 32.0, content_h);
+                self.render_sign_in_options(
+                    &mut cmds,
+                    x + 16.0,
+                    content_y,
+                    width - 32.0,
+                    content_h,
+                );
             }
             AccountsTab::ActivityLog => {
                 self.render_activity_log(&mut cmds, x + 16.0, content_y, width - 32.0, content_h);
@@ -1021,7 +1031,10 @@ impl AccountSettingsUI {
 
             // Auto-login toggle
             self.render_toggle_row(
-                cmds, x, row_y, width,
+                cmds,
+                x,
+                row_y,
+                width,
                 "Auto sign-in at boot",
                 user.login_options.auto_login,
             );
@@ -1029,7 +1042,10 @@ impl AccountSettingsUI {
 
             // Require password on wake
             self.render_toggle_row(
-                cmds, x, row_y, width,
+                cmds,
+                x,
+                row_y,
+                width,
                 "Require password on wake",
                 user.login_options.require_password_on_wake,
             );
@@ -1037,7 +1053,10 @@ impl AccountSettingsUI {
 
             // Password hint
             self.render_info_row(
-                cmds, x, row_y, width,
+                cmds,
+                x,
+                row_y,
+                width,
                 "Password hint",
                 if user.login_options.password_hint.is_empty() {
                     "(not set)"
@@ -1359,10 +1378,7 @@ mod tests {
     fn test_manager_new_has_admin() {
         let mgr = AccountManager::new();
         assert_eq!(mgr.accounts().len(), 1);
-        assert_eq!(
-            mgr.accounts()[0].account_type,
-            AccountType::Administrator
-        );
+        assert_eq!(mgr.accounts()[0].account_type, AccountType::Administrator);
         assert!(mgr.accounts()[0].is_current);
     }
 
@@ -1446,8 +1462,7 @@ mod tests {
     fn test_manager_demote_last_admin_fails() {
         let mut mgr = AccountManager::new();
         let admin_uid = mgr.accounts()[0].uid;
-        let result =
-            mgr.change_account_type(admin_uid, AccountType::Standard, 1000);
+        let result = mgr.change_account_type(admin_uid, AccountType::Standard, 1000);
         assert!(result.is_err());
     }
 
@@ -1521,7 +1536,10 @@ mod tests {
     #[test]
     fn test_activity_event_display() {
         assert_eq!(ActivityEvent::Login.display_text(), "Logged in");
-        assert_eq!(ActivityEvent::PasswordChanged.display_text(), "Password changed");
+        assert_eq!(
+            ActivityEvent::PasswordChanged.display_text(),
+            "Password changed"
+        );
     }
 
     // ---- UI tests ----

@@ -102,12 +102,7 @@ mod tests {
 
     #[test]
     fn test_status_bits_distinct() {
-        let bits = [
-            STATUS_BUSY,
-            STATUS_NON_DMA,
-            STATUS_DIR,
-            STATUS_READY,
-        ];
+        let bits = [STATUS_BUSY, STATUS_NON_DMA, STATUS_DIR, STATUS_READY];
         for i in 0..bits.len() {
             for j in (i + 1)..bits.len() {
                 assert_ne!(bits[i], bits[j]);

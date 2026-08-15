@@ -3,3 +3,7 @@ name = "guitk"
 version = "0.1.0"
 edition = "2024"
 description = "SlateOS GUI toolkit — widget library with Flexbox/Grid layout engine"
+
+[dependencies]
+osfont = { path = "../font" }
+textfmt = { path = "../../textfmt" }

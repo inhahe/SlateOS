@@ -19,6 +19,7 @@
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand};
 use guitk::style::CornerRadii;
+use guitk::text;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -1410,7 +1411,7 @@ pub fn render_toolbar(
 
     for btn in &buttons {
         let text = format!("[{}] {}", btn.icon, btn.label);
-        let btn_w = text.len() as f32 * 7.5 + 16.0;
+        let btn_w = text::padded_width(&text, 8.0, 12.0, FontWeightHint::Regular);
         let bg = if btn.enabled {
             theme::SURFACE1
         } else {

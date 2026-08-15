@@ -1060,40 +1060,63 @@ process_global! {
 
 /// Get the hostname.
 ///
-/// Copies the stored hostname into `name` (null-terminated).
+/// Copies the stored hostname into `name` (null-terminated when it fits).
 /// Defaults to "localhost" until changed via `sethostname()`.
 ///
-/// Returns 0 on success, -1 on error (ENAMETOOLONG if buffer too small).
+/// Returns 0 on success, -1 with `ENAMETOOLONG` when the buffer is too small.
+///
+/// # Order of operations
+///
+/// glibc's `__gethostname` (sysdeps/posix/gethostname.c) never checks `name`.
+/// It reads the name into its *own* `struct utsname` via `uname`, so the
+/// caller's buffer never reaches the kernel, and then does:
+///
+/// ```c
+/// memcpy (name, buf.nodename, len < node_len ? len : node_len);
+/// if (node_len > len) { __set_errno (ENAMETOOLONG); return -1; }
+/// ```
+///
+/// Three consequences, all of which we now match:
+///
+/// 1. `len == 0` copies nothing, so a NULL `name` is *safe* and the call
+///    reports `ENAMETOOLONG` instead of faulting.  We used to return `EFAULT`.
+/// 2. A too-small but non-zero `len` still fills the buffer with as much of
+///    the name as fits — truncated and *not* null-terminated — before
+///    reporting `ENAMETOOLONG`.  We used to leave the caller's buffer
+///    untouched, so a caller that ignored the return value saw whatever was
+///    there before rather than a truncated hostname.
+/// 3. Any other NULL `name` segfaults in glibc; `EFAULT` is our substitute
+///    (`design-decisions.md` §303).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn gethostname(name: *mut u8, len: usize) -> i32 {
-    if name.is_null() {
-        errno::set_errno(errno::EFAULT);
-        return -1;
-    }
-
     // SAFETY: single-address-space, no concurrent writes during read.
     // Use raw pointers to comply with Rust 2024 `static_mut_refs` rules.
     let (hostname_ptr, hlen) = unsafe { (hostname_buf_ptr().cast_const(), *hostname_len_ptr()) };
     let needed = hlen.wrapping_add(1); // +null
-    if len < needed {
-        errno::set_errno(errno::ENAMETOOLONG);
+    let copy = if len < needed { len } else { needed };
+
+    // glibc's `memcpy` faults only when it actually has bytes to move.
+    if copy > 0 && name.is_null() {
+        errno::set_errno(errno::EFAULT);
         return -1;
     }
 
     let mut idx: usize = 0;
-    while idx < hlen {
-        // SAFETY: idx < hlen <= HOST_NAME_MAX, the hostname buffer is
-        // HOST_NAME_MAX+1 bytes, and `name` has at least `needed` bytes.
+    while idx < copy {
+        // SAFETY: idx < copy <= needed = hlen + 1, which is within the
+        // HOST_NAME_MAX+1-byte hostname buffer; and copy <= len, so
+        // `name.add(idx)` is within the caller's buffer.  `name` is non-null
+        // whenever `copy > 0`.
         unsafe {
             let byte = *hostname_ptr.cast::<u8>().add(idx);
             *name.add(idx) = byte;
         }
         idx = idx.wrapping_add(1);
     }
-    // Null-terminate.
-    // SAFETY: idx == hlen < len, so name.add(idx) is valid.
-    unsafe {
-        *name.add(idx) = 0;
+
+    if len < needed {
+        errno::set_errno(errno::ENAMETOOLONG);
+        return -1;
     }
     0
 }
@@ -1104,18 +1127,35 @@ pub extern "C" fn gethostname(name: *mut u8, len: usize) -> i32 {
 /// Defaults to "(none)" until changed via `setdomainname()`.
 ///
 /// Returns 0 on success, -1 on error (EINVAL if buffer too small).
+///
+/// # Deliberate divergence from glibc
+///
+/// glibc's `getdomainname` (misc/getdomain.c, the `_UTSNAME_DOMAIN_LENGTH`
+/// branch that Linux takes) has **no** length rejection at all: it does
+/// `memcpy (name, u.domainname, MIN (u_len + 1, len))` and returns 0
+/// unconditionally, so a too-small buffer receives a truncated,
+/// *unterminated* domain name and the caller is never told. We report
+/// `EINVAL` instead — silently handing back a string that is not
+/// null-terminated is the kind of quiet corruption this codebase forbids, and
+/// the Linux man page documents `EINVAL` for exactly this case.
+///
+/// Because that check is *ours*, we also decide where it sits: first, ahead of
+/// the pointer test, so `getdomainname(NULL, 0)` is `EINVAL` (0 is too small)
+/// rather than `EFAULT`. That keeps the family consistent with the NPTL rule
+/// in `design-decisions.md` §303 — a scalar the function rejects itself is
+/// decided before the pointer is examined. `EFAULT` then covers only the case
+/// where glibc would have faulted in its `memcpy`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn getdomainname(name: *mut u8, len: usize) -> i32 {
-    if name.is_null() {
-        errno::set_errno(errno::EFAULT);
-        return -1;
-    }
-
     // SAFETY: single-address-space, no concurrent writes during read.
     let (domain_ptr, dlen) = unsafe { (domain_buf_ptr().cast_const(), *domain_len_ptr()) };
     let needed = dlen.wrapping_add(1); // +null
     if len < needed {
         errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    if name.is_null() {
+        errno::set_errno(errno::EFAULT);
         return -1;
     }
 
@@ -2063,14 +2103,33 @@ pub extern "C" fn getrandom(buf: *mut u8, buflen: usize, flags: u32) -> isize {
 ///
 /// Like `getrandom` but with no flags and returns 0/errno.
 /// Maximum 256 bytes per call (POSIX requirement).
+///
+/// # Argument order
+///
+/// glibc's `getentropy` (sysdeps/unix/sysv/linux/getentropy.c) is implemented
+/// entirely in userspace and opens with the length test —
+/// `if (length > 256) { __set_errno (EIO); return -1; }` — *before* it forms
+/// `end = buffer + length` or calls `getrandom`.  So:
+///
+/// 1. `buflen > 256` → `EIO`, whatever `buf` is.  We used to check `buf`
+///    first, so `getentropy(NULL, 512)` returned `EFAULT` where glibc returns
+///    `EIO`.
+/// 2. `buflen == 0` → success without touching `buf`, because glibc's
+///    `while (buffer < end)` loop does not run and no syscall is issued.  A
+///    null buffer is therefore fine here, exactly as in [`getrandom`].
+/// 3. Otherwise a null `buf` is `EFAULT` — that is the one case where the
+///    pointer reaches `getrandom` and the kernel's `copy_to_user` faults.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn getentropy(buf: *mut u8, buflen: usize) -> i32 {
-    if buf.is_null() {
-        errno::set_errno(errno::EFAULT);
-        return -1;
-    }
     if buflen > 256 {
         errno::set_errno(errno::EIO);
+        return -1;
+    }
+    if buflen == 0 {
+        return 0;
+    }
+    if buf.is_null() {
+        errno::set_errno(errno::EFAULT);
         return -1;
     }
 
@@ -2243,7 +2302,9 @@ mod nnp {
     // `try_with` rather than `with`: a read during thread-local teardown
     // must degrade to the cold-boot value, not panic.
     pub(super) fn get() -> bool {
-        NO_NEW_PRIVS.try_with(core::cell::Cell::get).unwrap_or(false)
+        NO_NEW_PRIVS
+            .try_with(core::cell::Cell::get)
+            .unwrap_or(false)
     }
     pub(super) fn set(v: bool) {
         // A failed `try_with` means the thread is shutting down and the
@@ -3345,10 +3406,11 @@ pub extern "C" fn klogctl(cmd: i32, buf: *mut u8, len: i32) -> i32 {
             }
         }
         SYSLOG_ACTION_CONSOLE_LEVEL
-            if !(SYSLOG_LOG_LEVEL_MIN..=SYSLOG_LOG_LEVEL_MAX).contains(&len) => {
-                errno::set_errno(errno::EINVAL);
-                return -1;
-            }
+            if !(SYSLOG_LOG_LEVEL_MIN..=SYSLOG_LOG_LEVEL_MAX).contains(&len) =>
+        {
+            errno::set_errno(errno::EINVAL);
+            return -1;
+        }
         _ => {
             // CLOSE, OPEN, CLEAR, CONSOLE_OFF, CONSOLE_ON,
             // SIZE_UNREAD, SIZE_BUFFER — no buf/len validation needed.
@@ -4994,7 +5056,47 @@ mod tests {
 
     #[test]
     fn test_gethostname_null() {
+        errno::set_errno(0);
         assert_eq!(gethostname(core::ptr::null_mut(), 10), -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    /// glibc's `__gethostname` (sysdeps/posix/gethostname.c) copies
+    /// `min (len, node_len)` bytes, so `len == 0` copies nothing and the NULL
+    /// pointer is never dereferenced — the call falls through to
+    /// `node_len > len` and reports `ENAMETOOLONG`.  We used to return
+    /// `EFAULT`.  See `design-decisions.md` §303.
+    #[test]
+    fn test_gethostname_zero_len_is_enametoolong_even_for_a_null_buffer() {
+        errno::set_errno(0);
+        assert_eq!(gethostname(core::ptr::null_mut(), 0), -1);
+        assert_eq!(errno::get_errno(), errno::ENAMETOOLONG);
+    }
+
+    /// glibc fills the caller's buffer with as much of the name as fits
+    /// *before* reporting `ENAMETOOLONG` — the `memcpy` runs unconditionally
+    /// and the length test follows it.  The result is truncated and not
+    /// null-terminated.  We used to leave the buffer untouched, so a caller
+    /// that ignored the return value saw stale contents rather than a
+    /// truncated hostname.
+    ///
+    /// The assertion deliberately does not name the hostname: other tests in
+    /// this module call `sethostname` and libtest runs them concurrently, so
+    /// only the *shape* of the result is stable. What it pins is that the
+    /// buffer was written at all, which is exactly what changed.
+    #[test]
+    fn test_gethostname_truncates_into_a_short_buffer_before_failing() {
+        let mut buf = [0xAAu8; 4];
+        errno::set_errno(0);
+        assert_eq!(gethostname(buf.as_mut_ptr(), buf.len()), -1);
+        assert_eq!(errno::get_errno(), errno::ENAMETOOLONG);
+        assert_ne!(buf, [0xAAu8; 4], "the prefix must have been copied");
+        for &b in &buf {
+            assert!(
+                b.is_ascii_graphic(),
+                "copied byte {b:#x} is not part of a hostname"
+            );
+        }
     }
 
     #[test]
@@ -5042,7 +5144,21 @@ mod tests {
 
     #[test]
     fn test_getdomainname_null() {
+        errno::set_errno(0);
         assert_eq!(getdomainname(core::ptr::null_mut(), 10), -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    /// The `EINVAL` for a too-small buffer is *our* check — glibc has none and
+    /// truncates silently — so it is ours to order, and it goes first, in
+    /// keeping with `design-decisions.md` §303: a scalar the function rejects
+    /// itself is decided before the pointer is examined.  A zero length is too
+    /// small for any domain name, so `getdomainname(NULL, 0)` is `EINVAL`.
+    #[test]
+    fn test_getdomainname_short_len_outranks_a_null_buffer() {
+        errno::set_errno(0);
+        assert_eq!(getdomainname(core::ptr::null_mut(), 0), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
     }
 
     #[test]
@@ -5116,8 +5232,8 @@ mod tests {
         }
         impl CapGuard {
             fn snapshot() -> Self {
-            let (lo, hi) = crate::sys_capability::current_caps_effective();
-            Self { lo, hi }
+                let (lo, hi) = crate::sys_capability::current_caps_effective();
+                Self { lo, hi }
             }
         }
         impl Drop for CapGuard {
@@ -5770,8 +5886,8 @@ mod tests {
         }
         impl CapGuard {
             fn snapshot() -> Self {
-            let (lo, hi) = crate::sys_capability::current_caps_effective();
-            Self { lo, hi }
+                let (lo, hi) = crate::sys_capability::current_caps_effective();
+                Self { lo, hi }
             }
         }
         impl Drop for CapGuard {
@@ -6138,8 +6254,8 @@ mod tests {
         }
         impl CapGuard {
             fn snapshot() -> Self {
-            let (lo, hi) = crate::sys_capability::current_caps_effective();
-            Self { lo, hi }
+                let (lo, hi) = crate::sys_capability::current_caps_effective();
+                Self { lo, hi }
             }
         }
         impl Drop for CapGuard {
@@ -6493,16 +6609,14 @@ mod tests {
         use super::*;
 
         struct CapGuard {
-
             lo: u32,
 
             hi: u32,
-
         }
         impl CapGuard {
             fn snapshot() -> Self {
-            let (lo, hi) = crate::sys_capability::current_caps_effective();
-            Self { lo, hi }
+                let (lo, hi) = crate::sys_capability::current_caps_effective();
+                Self { lo, hi }
             }
         }
         impl Drop for CapGuard {
@@ -6830,16 +6944,14 @@ mod tests {
         use super::*;
 
         struct CapGuard {
-
             lo: u32,
 
             hi: u32,
-
         }
         impl CapGuard {
             fn snapshot() -> Self {
-            let (lo, hi) = crate::sys_capability::current_caps_effective();
-            Self { lo, hi }
+                let (lo, hi) = crate::sys_capability::current_caps_effective();
+                Self { lo, hi }
             }
         }
         impl Drop for CapGuard {
@@ -7204,16 +7316,14 @@ mod tests {
         use super::*;
 
         struct CapGuard {
-
             lo: u32,
 
             hi: u32,
-
         }
         impl CapGuard {
             fn snapshot() -> Self {
-            let (lo, hi) = crate::sys_capability::current_caps_effective();
-            Self { lo, hi }
+                let (lo, hi) = crate::sys_capability::current_caps_effective();
+                Self { lo, hi }
             }
         }
         impl Drop for CapGuard {
@@ -7759,6 +7869,25 @@ mod tests {
     fn test_getentropy_small() {
         let mut buf = [0u8; 16];
         assert_eq!(getentropy(buf.as_mut_ptr(), 16), 0);
+    }
+
+    /// glibc's `getentropy` (sysdeps/unix/sysv/linux/getentropy.c) opens with
+    /// `if (length > 256) { __set_errno (EIO); return -1; }`, before it forms
+    /// `end = buffer + length` or calls `getrandom`.  So the length outranks
+    /// the buffer; we used to check the buffer first and return `EFAULT`.
+    /// See `design-decisions.md` §303.
+    #[test]
+    fn test_getentropy_length_outranks_a_null_buffer() {
+        errno::set_errno(0);
+        assert_eq!(getentropy(core::ptr::null_mut(), 257), -1);
+        assert_eq!(errno::get_errno(), errno::EIO);
+    }
+
+    /// A zero length never reaches the buffer: glibc's `while (buffer < end)`
+    /// loop does not run and no syscall is issued, so a NULL pointer is safe.
+    #[test]
+    fn test_getentropy_zero_length_accepts_a_null_buffer() {
+        assert_eq!(getentropy(core::ptr::null_mut(), 0), 0);
     }
 
     // ------------------------------------------------------------------
@@ -8444,8 +8573,8 @@ mod tests {
         }
         impl CapGuard {
             fn snapshot() -> Self {
-            let (lo, hi) = crate::sys_capability::current_caps_effective();
-            Self { lo, hi }
+                let (lo, hi) = crate::sys_capability::current_caps_effective();
+                Self { lo, hi }
             }
         }
         impl Drop for CapGuard {
@@ -8969,8 +9098,8 @@ mod tests {
         }
         impl CapGuard {
             fn snapshot() -> Self {
-            let (lo, hi) = crate::sys_capability::current_caps_effective();
-            Self { lo, hi }
+                let (lo, hi) = crate::sys_capability::current_caps_effective();
+                Self { lo, hi }
             }
         }
         impl Drop for CapGuard {
@@ -10498,8 +10627,8 @@ mod tests {
         }
         impl CapGuard {
             fn snapshot() -> Self {
-            let (lo, hi) = crate::sys_capability::current_caps_effective();
-            Self { lo, hi }
+                let (lo, hi) = crate::sys_capability::current_caps_effective();
+                Self { lo, hi }
             }
         }
         impl Drop for CapGuard {

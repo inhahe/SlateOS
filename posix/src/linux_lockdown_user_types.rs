@@ -113,7 +113,11 @@ mod tests {
 
     #[test]
     fn test_selection_strings_lowercase() {
-        for s in [LOCKDOWN_STR_NONE, LOCKDOWN_STR_INTEGRITY, LOCKDOWN_STR_CONFIDENTIALITY] {
+        for s in [
+            LOCKDOWN_STR_NONE,
+            LOCKDOWN_STR_INTEGRITY,
+            LOCKDOWN_STR_CONFIDENTIALITY,
+        ] {
             for b in s.as_bytes() {
                 assert!(b.is_ascii_lowercase());
             }

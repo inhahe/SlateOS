@@ -25,6 +25,7 @@ use guitk::event::{Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, Mo
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
+use guitk::text;
 
 use std::collections::VecDeque;
 
@@ -64,6 +65,10 @@ const BUTTON_HEIGHT: f32 = 32.0;
 const BUTTON_WIDTH: f32 = 110.0;
 const LOG_ENTRY_HEIGHT: f32 = 22.0;
 const TAB_HEIGHT: f32 = 32.0;
+/// Point size of a profile's free-text notes.
+const NOTES_FONT_SIZE: f32 = 12.0;
+/// Line spacing of a profile's notes.
+const NOTES_LINE_HEIGHT: f32 = 17.0;
 
 // ============================================================================
 // Core Data Types
@@ -1869,16 +1874,19 @@ fn render_tab_overview(
     // Notes
     if !profile.notes.is_empty() {
         y = render_section_title(tree, "Notes", px + SECTION_PADDING, y);
-        tree.push(RenderCommand::Text {
-            x: px + SECTION_PADDING + 8.0,
-            y,
-            text: profile.notes.clone(),
-            font_size: 12.0,
-            color: SUBTEXT0,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(pw - SECTION_PADDING * 2.0 - 16.0),
-        });
-        let _ = y; // suppress unused
+        // `RenderCommand::Text` clips at `max_width` rather than wrapping, so
+        // notes longer than the panel is wide used to be shown as their first
+        // line and no more. Nothing is drawn under them and the whole tab is
+        // clipped to the panel, so they can simply run as long as they are.
+        text::Paragraph::new(&profile.notes, SUBTEXT0)
+            .at(
+                px + SECTION_PADDING + 8.0,
+                y,
+                pw - SECTION_PADDING * 2.0 - 16.0,
+            )
+            .font(NOTES_FONT_SIZE, FontWeightHint::Regular)
+            .line_height(NOTES_LINE_HEIGHT)
+            .draw(tree);
     }
 
     // Connection summary
@@ -3337,6 +3345,88 @@ mod tests {
     fn test_format_duration_long_hours() {
         assert_eq!(format_duration_long(7200), "2h 0m");
         assert_eq!(format_duration_long(3660), "1h 1m");
+    }
+
+    // --- Overview tab prose ---
+
+    /// Longer than the overview panel is wide at 12pt, with a distinctive
+    /// final word to check nothing was dropped off the end.
+    const LONG_NOTES: &str = "Use this profile for the Stockholm office only \
+        — the London gateway rejects the certificate that ships with it, and \
+        the support desk has asked twice now that we stop opening tickets \
+        about it. Renew in March.";
+
+    /// The lines of the notes field: every 12pt body text drawn below the
+    /// "Notes" section heading, top to bottom.
+    fn notes_lines(mgr: &VpnManager) -> Vec<(f32, String)> {
+        let mut tree = RenderTree::new();
+        render_tab_overview(&mut tree, mgr, 0.0, 0.0, 600.0);
+        let heading_y = tree
+            .commands
+            .iter()
+            .find_map(|c| match c {
+                RenderCommand::Text { text, y, .. } if text == "Notes" => Some(*y),
+                _ => None,
+            })
+            .expect("the notes heading is drawn");
+        let mut lines: Vec<(f32, String)> = tree
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text {
+                    y,
+                    text,
+                    color,
+                    font_size,
+                    ..
+                } if *color == SUBTEXT0
+                    && (*font_size - NOTES_FONT_SIZE).abs() < 0.01
+                    && *y > heading_y =>
+                {
+                    Some((*y, text.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        lines.sort_by(|a, b| a.0.total_cmp(&b.0));
+        lines
+    }
+
+    #[test]
+    fn long_profile_notes_are_wrapped_not_truncated() {
+        let mut mgr = VpnManager::new();
+        mgr.profiles[0].notes = LONG_NOTES.to_string();
+        mgr.selected_profile = Some(0);
+        let lines = notes_lines(&mgr);
+        assert!(
+            lines.len() > 1,
+            "paragraph-length notes were drawn as {} line(s)",
+            lines.len()
+        );
+        let drawn = lines
+            .iter()
+            .map(|(_, t)| t.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            drawn.contains("March"),
+            "the end of the notes was cut off: {drawn}"
+        );
+    }
+
+    #[test]
+    fn profile_notes_lines_do_not_sit_on_top_of_one_another() {
+        let mut mgr = VpnManager::new();
+        mgr.profiles[0].notes = LONG_NOTES.to_string();
+        mgr.selected_profile = Some(0);
+        let lines = notes_lines(&mgr);
+        for pair in lines.windows(2) {
+            let gap = pair[1].0 - pair[0].0;
+            assert!(
+                gap >= NOTES_FONT_SIZE,
+                "two notes lines are {gap} apart, closer than the text is tall"
+            );
+        }
     }
 
     // --- VpnManager CRUD tests ---

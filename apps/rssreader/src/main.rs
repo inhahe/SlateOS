@@ -28,6 +28,7 @@ use std::collections::HashMap;
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand};
 use guitk::style::CornerRadii;
+use guitk::text;
 
 // ============================================================================
 // Catppuccin Mocha palette
@@ -97,9 +98,10 @@ impl XmlElement {
     pub fn find_child(&self, tag: &str) -> Option<&XmlElement> {
         for child in &self.children {
             if let XmlNode::Element(elem) = child
-                && elem.tag == tag {
-                    return Some(elem);
-                }
+                && elem.tag == tag
+            {
+                return Some(elem);
+            }
         }
         None
     }
@@ -109,9 +111,10 @@ impl XmlElement {
         let mut result = Vec::new();
         for child in &self.children {
             if let XmlNode::Element(elem) = child
-                && elem.tag == tag {
-                    result.push(elem);
-                }
+                && elem.tag == tag
+            {
+                result.push(elem);
+            }
         }
         result
     }
@@ -167,7 +170,10 @@ impl core::fmt::Display for XmlError {
             Self::UnexpectedEof => write!(f, "unexpected end of input"),
             Self::MalformedTag(s) => write!(f, "malformed tag: {s}"),
             Self::MismatchedClose { expected, found } => {
-                write!(f, "mismatched close tag: expected </{expected}>, found </{found}>")
+                write!(
+                    f,
+                    "mismatched close tag: expected </{expected}>, found </{found}>"
+                )
             }
             Self::InvalidEntity(s) => write!(f, "invalid entity: {s}"),
             Self::InvalidAttribute(s) => write!(f, "invalid attribute: {s}"),
@@ -246,6 +252,35 @@ impl<'a> XmlParser<'a> {
             "gt" => Ok('>'),
             "quot" => Ok('"'),
             "apos" => Ok('\''),
+            // XML defines only the five above, but feeds are written by tools
+            // that think in HTML and these turn up constantly. Decoding them
+            // is the difference between readable prose and one littered with
+            // `&nbsp;` and `&rsquo;`.
+            "nbsp" => Ok('\u{A0}'),
+            "ndash" => Ok('–'),
+            "mdash" => Ok('—'),
+            "hellip" => Ok('…'),
+            "lsquo" => Ok('\u{2018}'),
+            "rsquo" => Ok('\u{2019}'),
+            "ldquo" => Ok('\u{201C}'),
+            "rdquo" => Ok('\u{201D}'),
+            "laquo" => Ok('«'),
+            "raquo" => Ok('»'),
+            "copy" => Ok('©'),
+            "reg" => Ok('®'),
+            "trade" => Ok('™'),
+            "deg" => Ok('°'),
+            "middot" => Ok('·'),
+            "bull" => Ok('•'),
+            "eacute" => Ok('é'),
+            "egrave" => Ok('è'),
+            "agrave" => Ok('à'),
+            "ccedil" => Ok('ç'),
+            "uuml" => Ok('ü'),
+            "ouml" => Ok('ö'),
+            "auml" => Ok('ä'),
+            "szlig" => Ok('ß'),
+            "ntilde" => Ok('ñ'),
             s if s.starts_with('#') => {
                 let numeric = &s[1..];
                 let codepoint = if let Some(hex) = numeric.strip_prefix('x') {
@@ -256,36 +291,55 @@ impl<'a> XmlParser<'a> {
                         .parse::<u32>()
                         .map_err(|_| XmlError::InvalidEntity(entity.to_string()))?
                 };
-                char::from_u32(codepoint)
-                    .ok_or_else(|| XmlError::InvalidEntity(entity.to_string()))
+                char::from_u32(codepoint).ok_or_else(|| XmlError::InvalidEntity(entity.to_string()))
             }
             _ => Err(XmlError::InvalidEntity(entity.to_string())),
         }
     }
 
     /// Decode XML entities in a string.
-    fn decode_entities(text: &str) -> Result<String, XmlError> {
+    ///
+    /// Infallible by design. An entity this parser does not recognise is left
+    /// exactly as it was written rather than rejected: real feeds are full of
+    /// HTML entities that XML does not define (`&nbsp;` above all) and of bare
+    /// `&` in query strings, and erroring on one of those used to throw away
+    /// the entire feed. Text nodes already degraded this way; attribute values
+    /// propagated the error with `?` and so were the fatal path.
+    fn decode_entities(text: &str) -> String {
         let mut result = String::with_capacity(text.len());
-        let mut chars = text.chars();
-        while let Some(ch) = chars.next() {
-            if ch == '&' {
-                let mut entity = String::new();
-                for ec in chars.by_ref() {
-                    if ec == ';' {
-                        break;
-                    }
-                    entity.push(ec);
-                }
-                let decoded = Self::decode_entity(&entity)?;
+        let mut rest = text;
+        // `&` and `;` are ASCII, so every index taken here is a character
+        // boundary and the slices below cannot split a character.
+        while let Some(amp) = rest.find('&') {
+            result.push_str(rest.get(..amp).unwrap_or_default());
+            let after = rest.get(amp.saturating_add(1)..).unwrap_or_default();
+            let Some(semi) = after.find(';') else {
+                // A bare `&` with no terminator at all: the rest is literal.
+                result.push('&');
+                result.push_str(after);
+                return result;
+            };
+            let entity = after.get(..semi).unwrap_or_default();
+            if let Ok(decoded) = Self::decode_entity(entity) {
                 result.push(decoded);
             } else {
-                result.push(ch);
+                result.push('&');
+                result.push_str(entity);
+                result.push(';');
             }
+            rest = after.get(semi.saturating_add(1)..).unwrap_or_default();
         }
-        Ok(result)
+        result.push_str(rest);
+        result
     }
 
     /// Read a quoted attribute value.
+    ///
+    /// The value is sliced out whole, the way every other reader in this parser
+    /// does it. Accumulating it as `value.push(b as char)` read each UTF-8 byte
+    /// as the Latin-1 scalar of that value, so any non-ASCII attribute — an
+    /// enclosure URL, a title, an author — arrived as mojibake, straight off a
+    /// remote feed.
     fn read_attribute_value(&mut self) -> Result<String, XmlError> {
         self.skip_whitespace();
         let quote = self.advance().ok_or(XmlError::UnexpectedEof)?;
@@ -294,12 +348,19 @@ impl<'a> XmlParser<'a> {
                 "expected quote for attribute value".to_string(),
             ));
         }
-        let mut value = String::new();
-        while let Some(b) = self.advance() {
+        let start = self.pos;
+        while let Some(b) = self.peek() {
             if b == quote {
-                return Self::decode_entities(&value);
+                // Both delimiters are ASCII, so `start` and `self.pos` are
+                // character boundaries; and the input came from a `&str`, so
+                // the lossy decode is exact.
+                let raw =
+                    String::from_utf8_lossy(self.input.get(start..self.pos).unwrap_or_default())
+                        .into_owned();
+                self.pos = self.pos.saturating_add(1);
+                return Ok(Self::decode_entities(&raw));
             }
-            value.push(b as char);
+            self.pos = self.pos.saturating_add(1);
         }
         Err(XmlError::UnexpectedEof)
     }
@@ -348,9 +409,7 @@ impl<'a> XmlParser<'a> {
 
     /// Skip a CDATA section and return its content.
     fn try_read_cdata(&mut self) -> Option<String> {
-        if self.pos + 8 < self.input.len()
-            && &self.input[self.pos..self.pos + 9] == b"<![CDATA["
-        {
+        if self.pos + 8 < self.input.len() && &self.input[self.pos..self.pos + 9] == b"<![CDATA[" {
             self.pos += 9;
             let start = self.pos;
             while self.pos + 2 < self.input.len() {
@@ -358,15 +417,13 @@ impl<'a> XmlParser<'a> {
                     && self.input[self.pos + 1] == b']'
                     && self.input[self.pos + 2] == b'>'
                 {
-                    let content =
-                        String::from_utf8_lossy(&self.input[start..self.pos]).to_string();
+                    let content = String::from_utf8_lossy(&self.input[start..self.pos]).to_string();
                     self.pos += 3;
                     return Some(content);
                 }
                 self.pos += 1;
             }
-            let content =
-                String::from_utf8_lossy(&self.input[start..self.input.len()]).to_string();
+            let content = String::from_utf8_lossy(&self.input[start..self.input.len()]).to_string();
             self.pos = self.input.len();
             return Some(content);
         }
@@ -425,9 +482,7 @@ impl<'a> XmlParser<'a> {
                 Some(b'/') => {
                     self.pos += 1;
                     if self.advance() != Some(b'>') {
-                        return Err(XmlError::MalformedTag(
-                            "expected '>' after '/'".to_string(),
-                        ));
+                        return Err(XmlError::MalformedTag("expected '>' after '/'".to_string()));
                     }
                     // Self-closing tag
                     return Ok(elem);
@@ -533,12 +588,9 @@ impl<'a> XmlParser<'a> {
                 self.pos += 1;
             }
             let raw = String::from_utf8_lossy(&self.input[text_start..self.pos]).to_string();
-            if let Ok(decoded) = Self::decode_entities(&raw) {
-                if !decoded.trim().is_empty() {
-                    elem.children.push(XmlNode::Text(decoded));
-                }
-            } else if !raw.trim().is_empty() {
-                elem.children.push(XmlNode::Text(raw));
+            let decoded = Self::decode_entities(&raw);
+            if !decoded.trim().is_empty() {
+                elem.children.push(XmlNode::Text(decoded));
             }
         }
     }
@@ -784,9 +836,7 @@ pub fn format_timestamp(ts: u64) -> String {
     // Simple year/month/day from days since epoch (1970-01-01)
     let (year, month, day) = days_to_ymd(days);
 
-    format!(
-        "{year:04}-{month:02}-{day:02} {hours:02}:{minutes:02}"
-    )
+    format!("{year:04}-{month:02}-{day:02} {hours:02}:{minutes:02}")
 }
 
 /// Convert days since Unix epoch to (year, month, day).
@@ -852,10 +902,7 @@ pub fn parse_date_string(date_str: &str) -> Option<u64> {
 /// Try to parse an ISO 8601 date string.
 fn try_parse_iso8601(s: &str) -> Option<u64> {
     // Strip timezone suffix
-    let base = s
-        .trim_end_matches('Z')
-        .split('+')
-        .next()?;
+    let base = s.trim_end_matches('Z').split('+').next()?;
     let base = base.split('-').collect::<Vec<_>>();
     // Need at least year-month-day
     if base.len() < 3 {
@@ -888,10 +935,13 @@ fn parse_time_components(time: &str) -> (u64, u64, u64) {
     let parts: Vec<&str> = time.split(':').collect();
     let hours: u64 = parts.first().and_then(|s| s.parse().ok()).unwrap_or(0);
     let minutes: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
-    let seconds: u64 = parts.get(2).and_then(|s| {
-        // Handle fractional seconds like "30.123"
-        s.split('.').next().and_then(|w| w.parse().ok())
-    }).unwrap_or(0);
+    let seconds: u64 = parts
+        .get(2)
+        .and_then(|s| {
+            // Handle fractional seconds like "30.123"
+            s.split('.').next().and_then(|w| w.parse().ok())
+        })
+        .unwrap_or(0);
     (hours, minutes, seconds)
 }
 
@@ -1103,9 +1153,7 @@ pub fn parse_rss2(root: &XmlElement) -> Option<ParsedFeed> {
             .unwrap_or_default();
         let item_pub_date = item.child_text("pubDate").unwrap_or_default();
         let item_description = item.child_text("description").unwrap_or_default();
-        let item_content = item
-            .child_text("content:encoded")
-            .unwrap_or_default();
+        let item_content = item.child_text("content:encoded").unwrap_or_default();
 
         let published = parse_date_string(&item_pub_date).unwrap_or(0);
 
@@ -1136,9 +1184,7 @@ pub fn parse_atom1(root: &XmlElement) -> Option<ParsedFeed> {
     let link = root
         .find_children("link")
         .iter()
-        .find(|l| {
-            l.attr("rel").unwrap_or("alternate") == "alternate"
-        })
+        .find(|l| l.attr("rel").unwrap_or("alternate") == "alternate")
         .and_then(|l| l.attr("href"))
         .unwrap_or("")
         .to_string();
@@ -1151,9 +1197,7 @@ pub fn parse_atom1(root: &XmlElement) -> Option<ParsedFeed> {
         let entry_link = entry
             .find_children("link")
             .iter()
-            .find(|l| {
-                l.attr("rel").unwrap_or("alternate") == "alternate"
-            })
+            .find(|l| l.attr("rel").unwrap_or("alternate") == "alternate")
             .and_then(|l| l.attr("href"))
             .unwrap_or("")
             .to_string();
@@ -1357,15 +1401,16 @@ pub fn discover_feeds(html: &str) -> Vec<DiscoveredFeed> {
         // Check if it's a feed link
         for &(mime_type, label) in &feed_types {
             if tag_content.to_lowercase().contains(mime_type)
-                && let Some(href) = extract_attribute(tag_content, "href") {
-                    let title = extract_attribute(tag_content, "title")
-                        .unwrap_or_else(|| label.to_string());
-                    results.push(DiscoveredFeed {
-                        url: href,
-                        title,
-                        feed_type: label.to_string(),
-                    });
-                }
+                && let Some(href) = extract_attribute(tag_content, "href")
+            {
+                let title =
+                    extract_attribute(tag_content, "title").unwrap_or_else(|| label.to_string());
+                results.push(DiscoveredFeed {
+                    url: href,
+                    title,
+                    feed_type: label.to_string(),
+                });
+            }
         }
 
         pos = tag_end;
@@ -1689,7 +1734,9 @@ impl OfflineCache {
 
     /// Get cached content for an article.
     pub fn get_cached(&self, article_id: ArticleId) -> Option<&str> {
-        self.entries.get(&article_id).map(|e| e.text_content.as_str())
+        self.entries
+            .get(&article_id)
+            .map(|e| e.text_content.as_str())
     }
 
     /// Remove the oldest cached entry.
@@ -1701,9 +1748,10 @@ impl OfflineCache {
             .map(|(id, _)| *id);
 
         if let Some(id) = oldest_id
-            && let Some(entry) = self.entries.remove(&id) {
-                self.current_size = self.current_size.saturating_sub(entry.size_bytes);
-            }
+            && let Some(entry) = self.entries.remove(&id)
+        {
+            self.current_size = self.current_size.saturating_sub(entry.size_bytes);
+        }
     }
 
     /// Check if an article is cached.
@@ -1968,18 +2016,20 @@ impl RssReaderApp {
     pub fn toggle_read(&mut self) {
         let filtered = self.filtered_article_indices();
         if let Some(&idx) = filtered.get(self.selected_article_index)
-            && let Some(article) = self.articles.get_mut(idx) {
-                article.is_read = !article.is_read;
-            }
+            && let Some(article) = self.articles.get_mut(idx)
+        {
+            article.is_read = !article.is_read;
+        }
     }
 
     /// Toggle star state for the selected article.
     pub fn toggle_star(&mut self) {
         let filtered = self.filtered_article_indices();
         if let Some(&idx) = filtered.get(self.selected_article_index)
-            && let Some(article) = self.articles.get_mut(idx) {
-                article.is_starred = !article.is_starred;
-            }
+            && let Some(article) = self.articles.get_mut(idx)
+        {
+            article.is_starred = !article.is_starred;
+        }
     }
 
     /// Mark all visible articles as read.
@@ -2147,9 +2197,10 @@ impl RssReaderApp {
             // This is a feed
             let feed_id = self.add_feed(&outline.text, url, parent_folder);
             if let Some(ref html_url) = outline.html_url
-                && let Some(feed) = self.feeds.iter_mut().find(|f| f.id == feed_id) {
-                    feed.link = html_url.clone();
-                }
+                && let Some(feed) = self.feeds.iter_mut().find(|f| f.id == feed_id)
+            {
+                feed.link = html_url.clone();
+            }
             count += 1;
         } else if !outline.children.is_empty() {
             // This is a folder
@@ -2182,9 +2233,10 @@ impl RssReaderApp {
 
         // Add new articles (dedup by title+link)
         for pa in &parsed.articles {
-            let already_exists = self.articles.iter().any(|a| {
-                a.feed_id == feed_id && a.title == pa.title && a.link == pa.link
-            });
+            let already_exists = self
+                .articles
+                .iter()
+                .any(|a| a.feed_id == feed_id && a.title == pa.title && a.link == pa.link);
             if !already_exists {
                 let id = self.next_article_id;
                 self.next_article_id += 1;
@@ -2235,11 +2287,7 @@ impl RssReaderApp {
             "https://arxiv.org/rss/cs.AI",
             Some(science_folder),
         );
-        let lobsters_feed = self.add_feed(
-            "Lobsters",
-            "https://lobste.rs/rss",
-            Some(tech_folder),
-        );
+        let lobsters_feed = self.add_feed("Lobsters", "https://lobste.rs/rss", Some(tech_folder));
         let planet_feed = self.add_feed(
             "Planet Rust",
             "https://planet.rust-lang.org/atom.xml",
@@ -2258,8 +2306,12 @@ impl RssReaderApp {
 
         // Simulate an error on one feed
         if let Some(arxiv) = self.feeds.iter_mut().find(|f| f.id == arxiv_feed) {
-            arxiv.health.record_failure(1_700_100_000, "Connection timeout");
-            arxiv.health.record_failure(1_700_200_000, "Connection timeout");
+            arxiv
+                .health
+                .record_failure(1_700_100_000, "Connection timeout");
+            arxiv
+                .health
+                .record_failure(1_700_200_000, "Connection timeout");
         }
 
         // Create sample articles
@@ -2519,7 +2571,13 @@ impl RssReaderApp {
             let content_pane_x = self.sidebar_width + self.article_list_width;
             let content_pane_width = self.width - content_pane_x;
 
-            self.render_sidebar(&mut cmds, sidebar_x, content_y, self.sidebar_width, content_height);
+            self.render_sidebar(
+                &mut cmds,
+                sidebar_x,
+                content_y,
+                self.sidebar_width,
+                content_height,
+            );
 
             // Sidebar/list separator
             cmds.push(RenderCommand::Line {
@@ -2883,7 +2941,11 @@ impl RssReaderApp {
                 y: cy,
                 width: panel_width - 8.0,
                 height: item_height,
-                color: if starred_highlight { SURFACE1 } else { SURFACE0 },
+                color: if starred_highlight {
+                    SURFACE1
+                } else {
+                    SURFACE0
+                },
                 corner_radii: CornerRadii::all(4.0),
             });
         }
@@ -2892,7 +2954,11 @@ impl RssReaderApp {
             y: cy + 6.0,
             text: "Starred".to_string(),
             font_size: 13.0,
-            color: if is_starred_selected { YELLOW } else { SUBTEXT0 },
+            color: if is_starred_selected {
+                YELLOW
+            } else {
+                SUBTEXT0
+            },
             font_weight: FontWeightHint::Regular,
             max_width: Some(panel_width - 60.0),
         });
@@ -2932,8 +2998,7 @@ impl RssReaderApp {
         // Folders and feeds
         for folder in &self.folders {
             // Folder header
-            let is_folder_selected =
-                self.sidebar_selection == SidebarSelection::Folder(folder.id);
+            let is_folder_selected = self.sidebar_selection == SidebarSelection::Folder(folder.id);
             let folder_highlight = is_folder_selected && self.active_pane == ActivePane::Sidebar;
             if is_folder_selected {
                 cmds.push(RenderCommand::FillRect {
@@ -3064,10 +3129,8 @@ impl RssReaderApp {
             cy += 8.0;
 
             for feed in ungrouped {
-                let is_feed_selected =
-                    self.sidebar_selection == SidebarSelection::Feed(feed.id);
-                let feed_highlight =
-                    is_feed_selected && self.active_pane == ActivePane::Sidebar;
+                let is_feed_selected = self.sidebar_selection == SidebarSelection::Feed(feed.id);
+                let feed_highlight = is_feed_selected && self.active_pane == ActivePane::Sidebar;
                 if is_feed_selected {
                     cmds.push(RenderCommand::FillRect {
                         x: x + 4.0,
@@ -3251,27 +3314,39 @@ impl RssReaderApp {
                 max_width: Some(panel_width - 40.0),
             });
 
-            // Summary preview
-            let preview = if article.summary.len() > 100 {
-                format!("{}...", &article.summary[..100])
-            } else if article.summary.is_empty() {
-                let content = article.display_content();
-                if content.len() > 100 {
-                    format!("{}...", &content[..100])
-                } else {
-                    content.to_string()
-                }
+            // Summary preview. Elided by *measured width*, not by byte count.
+            // The previous `&article.summary[..100]` aborted whenever byte 100
+            // landed inside a multi-byte character — and the `len() > 100`
+            // guard made that *more* likely rather than less, because a
+            // 40-character Japanese summary is 120 bytes and so always took
+            // the truncating branch. Every non-Latin feed crashed here.
+            //
+            // A byte budget was never the right constraint anyway: 100 bytes
+            // is either far short of or far past the room actually available,
+            // depending on the panel width. Elide against the width the text
+            // is drawn into and the two agree by construction.
+            let preview_size = 11.0;
+            let preview_width = (panel_width - 40.0).max(0.0);
+            let raw = if article.summary.is_empty() {
+                article.display_content()
             } else {
-                article.summary.clone()
+                article.summary.as_str()
             };
+            let preview = text::elide(
+                raw,
+                preview_width,
+                "...",
+                preview_size,
+                FontWeightHint::Light,
+            );
             cmds.push(RenderCommand::Text {
                 x: x + 24.0,
                 y: cy + 44.0,
                 text: preview,
-                font_size: 11.0,
+                font_size: preview_size,
                 color: SURFACE2,
                 font_weight: FontWeightHint::Light,
-                max_width: Some(panel_width - 40.0),
+                max_width: Some(preview_width),
             });
 
             cy += item_height;
@@ -3529,11 +3604,7 @@ impl RssReaderApp {
         cmds.push(RenderCommand::Text {
             x: 120.0,
             y: y + 7.0,
-            text: format!(
-                "{} | {}",
-                self.filter_mode.label(),
-                self.sort_order.label()
-            ),
+            text: format!("{} | {}", self.filter_mode.label(), self.sort_order.label()),
             font_size: 11.0,
             color: OVERLAY0,
             font_weight: FontWeightHint::Regular,
@@ -3978,11 +4049,7 @@ impl RssReaderApp {
 
             // Status text
             let status = feed.health.status_text();
-            let status_color = if feed.health.is_healthy() {
-                GREEN
-            } else {
-                RED
-            };
+            let status_color = if feed.health.is_healthy() { GREEN } else { RED };
             cmds.push(RenderCommand::Text {
                 x: dx + 280.0,
                 y: row_y + 2.0,
@@ -4092,6 +4159,78 @@ mod tests {
         let elem = parse_xml(xml).unwrap();
         assert_eq!(elem.tag, "root");
         assert_eq!(elem.text_content(), "hello");
+    }
+
+    /// Attribute values come straight off a remote feed. Accumulating them one
+    /// byte at a time as `b as char` is a Latin-1 decode, so every non-ASCII
+    /// attribute arrived as mojibake.
+    #[test]
+    fn a_non_ascii_attribute_value_is_read_unchanged() {
+        for value in [
+            "Café Corner",
+            "日本語のニュース",
+            "Ωμέγα",
+            "https://example.com/écoute/🚀.mp3",
+            "Ω日🚀",
+        ] {
+            let xml = format!("<root title=\"{value}\">x</root>");
+            let elem = parse_xml(&xml).unwrap_or_else(|e| panic!("{xml} failed: {e}"));
+            assert_eq!(
+                elem.attributes.get("title").map(String::as_str),
+                Some(value),
+                "attribute changed for {value}"
+            );
+        }
+    }
+
+    /// Single-quoted values take the same path.
+    #[test]
+    fn a_non_ascii_single_quoted_attribute_is_read_unchanged() {
+        let elem = parse_xml("<root href='https://ex.com/日本'>x</root>").unwrap();
+        assert_eq!(
+            elem.attributes.get("href").map(String::as_str),
+            Some("https://ex.com/日本")
+        );
+    }
+
+    /// An entity this parser does not define used to abort the whole feed when
+    /// it appeared in an attribute. `&nbsp;` is in a large fraction of real
+    /// feeds, so that is one unknown entity between the user and any content.
+    #[test]
+    fn an_unknown_entity_does_not_destroy_the_feed() {
+        let elem = parse_xml("<root title=\"a&unknownthing;b\">t&unknownthing;u</root>")
+            .expect("an unrecognised entity must not fail the parse");
+        assert_eq!(
+            elem.attributes.get("title").map(String::as_str),
+            Some("a&unknownthing;b"),
+            "an unknown entity should be left exactly as written"
+        );
+        assert_eq!(elem.text_content(), "t&unknownthing;u");
+    }
+
+    /// A bare `&` in a URL is technically invalid XML and utterly ubiquitous.
+    #[test]
+    fn a_bare_ampersand_does_not_destroy_the_feed() {
+        let elem = parse_xml("<root href=\"http://e.com/?a=1&b=2\">x</root>")
+            .expect("a bare ampersand must not fail the parse");
+        assert_eq!(
+            elem.attributes.get("href").map(String::as_str),
+            Some("http://e.com/?a=1&b=2")
+        );
+    }
+
+    /// The HTML entities feeds actually use, plus the five XML defines and
+    /// numeric references in both bases.
+    #[test]
+    fn common_entities_are_decoded() {
+        let elem = parse_xml(
+            "<root title=\"&amp;&lt;&gt;&quot;&apos;&nbsp;&mdash;&rsquo;&eacute;&#65;&#x65e5;\">x</root>",
+        )
+        .expect("entities should parse");
+        assert_eq!(
+            elem.attributes.get("title").map(String::as_str),
+            Some("&<>\"'\u{A0}—\u{2019}éA日")
+        );
     }
 
     #[test]
@@ -4553,7 +4692,10 @@ mod tests {
 
     #[test]
     fn test_escape_xml() {
-        assert_eq!(escape_xml("a&b<c>d\"e'f"), "a&amp;b&lt;c&gt;d&quot;e&apos;f");
+        assert_eq!(
+            escape_xml("a&b<c>d\"e'f"),
+            "a&amp;b&lt;c&gt;d&quot;e&apos;f"
+        );
     }
 
     #[test]
@@ -4610,10 +4752,7 @@ mod tests {
             extract_attribute(tag, "href"),
             Some("http://example.com".to_string())
         );
-        assert_eq!(
-            extract_attribute(tag, "rel"),
-            Some("alternate".to_string())
-        );
+        assert_eq!(extract_attribute(tag, "rel"), Some("alternate".to_string()));
     }
 
     #[test]
@@ -4912,7 +5051,11 @@ mod tests {
         let initial_count = app.folders.len();
         let id = app.add_folder("Test Folder");
         assert_eq!(app.folders.len(), initial_count + 1);
-        assert!(app.folders.iter().any(|f| f.id == id && f.name == "Test Folder"));
+        assert!(
+            app.folders
+                .iter()
+                .any(|f| f.id == id && f.name == "Test Folder")
+        );
     }
 
     #[test]
@@ -5512,5 +5655,119 @@ mod tests {
         };
         assert!(format!("{err}").contains("a"));
         assert!(format!("{err}").contains("b"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Article-list preview: non-ASCII safety and width discipline
+    // -----------------------------------------------------------------------
+
+    /// Summaries chosen so that byte 100 — the offset the old code sliced at —
+    /// falls *inside* a multi-byte character, which is an abort rather than a
+    /// cosmetic fault. The last one pins the boundary exactly: 99 ASCII bytes
+    /// then a two-byte `é`, so byte 100 is that character's continuation byte.
+    fn adversarial_summaries() -> Vec<String> {
+        vec![
+            "日本語のニュース記事の要約がここに入ります。".repeat(5),
+            "Ελληνικά νέα και ανακοινώσεις από την περιοχή. ".repeat(4),
+            "Здравствуйте, это очень длинное описание статьи. ".repeat(4),
+            "emoji everywhere 🌍🚀🛰 and then a good deal more text after it \
+             so that the whole thing runs well past a hundred bytes"
+                .to_string(),
+            format!("{}é{}", "a".repeat(99), "b".repeat(99)),
+        ]
+    }
+
+    fn list_with_summaries(summaries: &[String], panel_width: f32) -> Vec<RenderCommand> {
+        let mut app = RssReaderApp::new(1200.0, 800.0);
+        let feed_id = app.feeds[0].id;
+        app.sidebar_selection = SidebarSelection::AllFeeds;
+        app.filter_mode = FilterMode::All;
+        app.article_scroll_offset = 0.0;
+        app.articles.clear();
+        for (i, summary) in summaries.iter().enumerate() {
+            let mut article = Article::new(i as ArticleId + 1, feed_id, "headline");
+            article.summary = summary.clone();
+            app.articles.push(article);
+        }
+        let mut cmds = Vec::new();
+        app.render_article_list(&mut cmds, 0.0, 0.0, panel_width, 4000.0);
+        cmds
+    }
+
+    #[test]
+    fn a_non_ascii_summary_does_not_abort_the_article_list() {
+        // Regression: the preview was `&article.summary[..100]`, guarded by
+        // `summary.len() > 100`. The guard made the abort *more* likely rather
+        // than less — a 40-character Japanese summary is 120 bytes, so it
+        // always took the truncating branch. Any non-Latin feed crashed the
+        // reader on the very first paint of its article list.
+        let summaries = adversarial_summaries();
+        for panel_width in [80.0_f32, 160.0, 240.0, 320.0, 480.0, 900.0] {
+            // The assertion is that this returns at all.
+            let cmds = list_with_summaries(&summaries, panel_width);
+            assert!(
+                !cmds.is_empty(),
+                "at width {panel_width} the article list drew nothing"
+            );
+        }
+    }
+
+    #[test]
+    fn a_non_ascii_preview_stays_inside_the_panel() {
+        // Byte-truncation also had nothing to do with the room available: 100
+        // bytes is either far short of or far past it depending on the panel.
+        // Eliding against the drawn width makes the two agree by construction.
+        let summaries = adversarial_summaries();
+        let mut checked = 0usize;
+        for panel_width in [160.0_f32, 240.0, 320.0, 480.0, 900.0] {
+            let room = panel_width - 40.0;
+            for cmd in list_with_summaries(&summaries, panel_width) {
+                let RenderCommand::Text {
+                    x,
+                    text,
+                    font_size,
+                    font_weight,
+                    ..
+                } = cmd
+                else {
+                    continue;
+                };
+                // Previews are the only 11pt Light run this pane draws when it
+                // has articles; the other one belongs to the empty state.
+                if font_weight != FontWeightHint::Light || font_size != 11.0 {
+                    continue;
+                }
+                let drawn = text::measure(&text, font_size, font_weight);
+                assert!(
+                    drawn <= room + 0.5,
+                    "at panel width {panel_width} the preview {text:?} draws \
+                     {drawn} wide from {x}, past the {room} available"
+                );
+                checked += 1;
+            }
+        }
+        assert!(
+            checked >= 10,
+            "only {checked} previews examined — the filter matched almost nothing, \
+             so this test would pass without measuring anything"
+        );
+    }
+
+    #[test]
+    fn a_short_summary_is_previewed_verbatim() {
+        // The mirror of the elision test: something that fits must not be cut,
+        // or "it fits" would be trivially satisfiable by drawing nothing.
+        let summaries = vec!["короткий".to_string()];
+        let texts: Vec<String> = list_with_summaries(&summaries, 900.0)
+            .into_iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            texts.iter().any(|t| t == "короткий"),
+            "the short summary was not drawn intact; got {texts:?}"
+        );
     }
 }

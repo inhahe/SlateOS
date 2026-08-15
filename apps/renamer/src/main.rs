@@ -37,6 +37,8 @@
 use guitk::Color;
 use guitk::render::{FontWeightHint, RenderCommand};
 use guitk::style::CornerRadii;
+use guitk::table::{Column, Fit, Table};
+use guitk::text;
 
 // ============================================================================
 // Catppuccin Mocha theme
@@ -79,6 +81,81 @@ const HEADER_TEXT: f32 = 15.0;
 const TITLE_TEXT: f32 = 17.0;
 const BUTTON_HEIGHT: f32 = 28.0;
 const INPUT_HEIGHT: f32 = 26.0;
+
+/// Columns of the rename-preview file list.
+///
+/// One definition read by both the header row and the body rows. Previously
+/// each width lived in the `headers` array *and* as a literal in the row
+/// cursor's increment (250.0 and `cx += 258.0`), which agreed only by hand.
+const FILE_COLUMNS: &[Column] = &[
+    Column {
+        label: "",
+        width: 30.0,
+    },
+    Column {
+        label: "Original Name",
+        width: 250.0,
+    },
+    Column {
+        label: "→",
+        width: 20.0,
+    },
+    Column {
+        label: "New Name",
+        width: 250.0,
+    },
+    Column {
+        label: "Size",
+        width: 80.0,
+    },
+    Column {
+        label: "Status",
+        width: 80.0,
+    },
+];
+
+const COL_CHECK: usize = 0;
+const COL_ORIGINAL: usize = 1;
+const COL_ARROW: usize = 2;
+const COL_NEW: usize = 3;
+const COL_SIZE: usize = 4;
+const COL_STATUS: usize = 5;
+
+/// Width available to an operation row's detail line in the operation list.
+const OP_DETAIL_WIDTH: f32 = SIDEBAR_WIDTH - 40.0;
+/// Font size of that detail line.
+const OP_DETAIL_SIZE: f32 = SMALL_TEXT - 1.0;
+
+/// Frame a user-typed string in developer-authored text, fitting `width`.
+///
+/// The frame is what tells the user *which* operation this is — "at start"
+/// distinguishes an insert from every other insert — so the frame always
+/// survives and the user's string is elided to whatever is left. Eliding the
+/// whole line instead would cut the frame off the end and leave two operations
+/// looking identical.
+fn framed_detail(prefix: &str, user: &str, suffix: &str, width: f32) -> String {
+    let frame_width = text::measure(
+        &format!("{prefix}{suffix}"),
+        OP_DETAIL_SIZE,
+        FontWeightHint::Regular,
+    );
+    let room = (width - frame_width).max(0.0);
+    let fitted = text::elide(user, room, "…", OP_DETAIL_SIZE, FontWeightHint::Regular);
+    format!("{prefix}{fitted}{suffix}")
+}
+
+/// Summarise a find→replace pair for a fixed-width row.
+///
+/// Both halves matter — the row exists so the user can tell one operation from
+/// the next — so each is elided against its own share of the row. Eliding the
+/// line as a whole would let a long search string push the replacement off the
+/// end entirely, which is the half that says what the rename will *do*.
+fn find_replace_detail(find: &str, replace: &str, width: f32) -> String {
+    let frame_width = text::measure("\"\" → \"\"", OP_DETAIL_SIZE, FontWeightHint::Regular);
+    let half = (width - frame_width).max(0.0) / 2.0;
+    let fit = |s: &str| text::elide(s, half, "…", OP_DETAIL_SIZE, FontWeightHint::Regular);
+    format!("\"{}\" → \"{}\"", fit(find), fit(replace))
+}
 
 const MAX_FILES: usize = 10_000;
 const MAX_OPERATIONS: usize = 50;
@@ -283,11 +360,17 @@ struct FileEntry {
 
 impl FileEntry {
     fn new(path: &str, name: &str, size: u64, modified_ms: u64) -> Self {
+        // An extension is what follows the *last* dot, and only when there is
+        // something before that dot. `rsplit('.').next()` does not say that:
+        // the `len() < name.len()` guard it was paired with rejects a dotless
+        // name but still accepts a leading dot, so `.bashrc` was indexed with
+        // extension `bashrc` -- shown in the details pane as its type, and
+        // swept up by a `bashrc` extension filter alongside real `x.bashrc`
+        // files.
         let extension = name
-            .rsplit('.')
-            .next()
-            .filter(|e| e.len() < name.len())
-            .unwrap_or("")
+            .rsplit_once('.')
+            .filter(|(stem, _)| !stem.is_empty())
+            .map_or("", |(_, ext)| ext)
             .to_string();
         Self {
             original_path: path.to_string(),
@@ -308,6 +391,26 @@ impl FileEntry {
             _ => (name, ""),
         }
     }
+}
+
+/// The byte offset of character `chars`, or the end of `s` if it is shorter.
+///
+/// Every position a rename rule takes — "insert at 3", "remove 2 from 5" — is a
+/// position in **characters**, because characters are what the user can see in
+/// the name they are typing a rule against. `InsertPosition::At`'s own doc
+/// comment has always said "character index".
+///
+/// The code did not: it clamped with `.min(stem.len())`, a *byte* length, and
+/// then sliced. For any name that is not pure ASCII that is a different
+/// position from the one the user asked for, and not necessarily a character
+/// boundary at all — "insert at 1" into `"\u{65e5}\u{672c}\u{8a9e}"` sliced
+/// inside the first kanji and aborted the renamer partway through a batch.
+///
+/// Going through here makes the position mean what it says, and makes the
+/// slices sound as a side effect. For ASCII names the two are the same number,
+/// so no existing rule changes behaviour.
+fn char_offset(s: &str, chars: usize) -> usize {
+    s.char_indices().nth(chars).map_or(s.len(), |(i, _)| i)
 }
 
 // ============================================================================
@@ -344,18 +447,18 @@ impl RenameEngine {
                 let insert_pos = match position {
                     InsertPosition::Start => 0,
                     InsertPosition::End => stem.len(),
-                    InsertPosition::At(pos) => (*pos).min(stem.len()),
+                    InsertPosition::At(pos) => char_offset(stem, *pos),
                 };
-                let mut new_stem =
-                    String::with_capacity(stem.len().saturating_add(text.len()));
+                let mut new_stem = String::with_capacity(stem.len().saturating_add(text.len()));
                 new_stem.push_str(&stem[..insert_pos]);
                 new_stem.push_str(text);
                 new_stem.push_str(&stem[insert_pos..]);
                 format!("{new_stem}{ext}")
             }
             RenameOp::Remove { from, count } => {
-                let from_clamped = (*from).min(stem.len());
-                let end = (from_clamped.saturating_add(*count)).min(stem.len());
+                // `from` and `count` are both counts of characters.
+                let from_clamped = char_offset(stem, *from);
+                let end = char_offset(stem, from.saturating_add(*count));
                 let mut new_stem = String::with_capacity(stem.len());
                 new_stem.push_str(&stem[..from_clamped]);
                 new_stem.push_str(&stem[end..]);
@@ -383,7 +486,7 @@ impl RenameEngine {
                     InsertPosition::Start => format!("{insert_str}{stem}{ext}"),
                     InsertPosition::End => format!("{stem}{insert_str}{ext}"),
                     InsertPosition::At(pos) => {
-                        let pos = (*pos).min(stem.len());
+                        let pos = char_offset(stem, *pos);
                         let mut s = String::new();
                         s.push_str(&stem[..pos]);
                         s.push_str(&insert_str);
@@ -403,7 +506,7 @@ impl RenameEngine {
                     InsertPosition::Start => format!("{date_str}{separator}{stem}{ext}"),
                     InsertPosition::End => format!("{stem}{separator}{date_str}{ext}"),
                     InsertPosition::At(pos) => {
-                        let pos = (*pos).min(stem.len());
+                        let pos = char_offset(stem, *pos);
                         let mut s = String::new();
                         s.push_str(&stem[..pos]);
                         s.push_str(separator);
@@ -957,7 +1060,7 @@ impl RenamerApp {
         ];
         let mut bx = 220.0;
         for (label, color) in buttons {
-            let bw = label.len() as f32 * 8.0 + 20.0;
+            let bw = text::padded_width(label, 10.0, 12.0, FontWeightHint::Regular);
             cmds.push(RenderCommand::FillRect {
                 x: bx,
                 y: 6.0,
@@ -1137,18 +1240,21 @@ impl RenamerApp {
             });
 
             // Operation details
+            // The user-typed halves of these summaries are elided against the
+            // row's real width; the row is a fixed 34px, so wrapping is not an
+            // option and a silent cut would leave two operations looking alike.
             let detail = match op {
                 RenameOp::FindReplace { find, replace, .. } => {
-                    format!("\"{find}\" → \"{replace}\"")
+                    find_replace_detail(find, replace, OP_DETAIL_WIDTH)
                 }
-                RenameOp::Insert { text, position } => format!(
-                    "\"{text}\" at {}",
-                    match position {
-                        InsertPosition::Start => "start".into(),
-                        InsertPosition::End => "end".into(),
+                RenameOp::Insert { text, position } => {
+                    let where_ = match position {
+                        InsertPosition::Start => "start".to_string(),
+                        InsertPosition::End => "end".to_string(),
                         InsertPosition::At(n) => format!("pos {n}"),
-                    }
-                ),
+                    };
+                    framed_detail("\"", text, &format!("\" at {where_}"), OP_DETAIL_WIDTH)
+                }
                 RenameOp::ChangeCase(mode) => mode.label().into(),
                 RenameOp::Number {
                     start,
@@ -1157,8 +1263,8 @@ impl RenamerApp {
                     ..
                 } => format!("from {start} step {step} pad {padding}"),
                 RenameOp::Extension(ext_op) => match ext_op {
-                    ExtensionOp::Replace(e) => format!("→ .{e}"),
-                    ExtensionOp::Add(e) => format!("+ .{e}"),
+                    ExtensionOp::Replace(e) => framed_detail("→ .", e, "", OP_DETAIL_WIDTH),
+                    ExtensionOp::Add(e) => framed_detail("+ .", e, "", OP_DETAIL_WIDTH),
                     ExtensionOp::Remove => "remove".into(),
                     ExtensionOp::Lower => "lowercase".into(),
                     ExtensionOp::Upper => "UPPERCASE".into(),
@@ -1170,10 +1276,10 @@ impl RenamerApp {
                     x: x + 18.0,
                     y: oy + 17.0,
                     text: detail,
-                    font_size: SMALL_TEXT - 1.0,
+                    font_size: OP_DETAIL_SIZE,
                     color: OVERLAY0,
                     font_weight: FontWeightHint::Regular,
-                    max_width: Some(SIDEBAR_WIDTH - 40.0),
+                    max_width: Some(OP_DETAIL_WIDTH),
                 });
             }
 
@@ -1373,27 +1479,8 @@ impl RenamerApp {
             corner_radii: CornerRadii::ZERO,
         });
 
-        let headers = [
-            ("", 30.0),
-            ("Original Name", 250.0),
-            ("→", 20.0),
-            ("New Name", 250.0),
-            ("Size", 80.0),
-            ("Status", 80.0),
-        ];
-        let mut hx = x + 4.0;
-        for (label, col_w) in &headers {
-            cmds.push(RenderCommand::Text {
-                x: hx,
-                y: y + 5.0,
-                text: (*label).into(),
-                font_size: SMALL_TEXT,
-                color: SUBTEXT1,
-                font_weight: FontWeightHint::Bold,
-                max_width: Some(*col_w),
-            });
-            hx += col_w + 8.0;
-        }
+        let table = Table::new(FILE_COLUMNS, x);
+        table.header(cmds, y + 5.0, SUBTEXT1, SMALL_TEXT);
 
         // File rows
         let filtered = self.filtered_files();
@@ -1422,12 +1509,13 @@ impl RenamerApp {
                 corner_radii: CornerRadii::ZERO,
             });
 
-            let mut cx = x + 4.0;
+            // The checkbox is a graphic, not a text cell, so it is placed
+            // against its column's left edge by hand.
+            let cx = table.left(COL_CHECK);
 
-            // Checkbox
             let check_color = if file.selected { GREEN } else { SURFACE2 };
             cmds.push(RenderCommand::FillRect {
-                x: cx + 4.0,
+                x: cx,
                 y: ry + 4.0,
                 width: 14.0,
                 height: 14.0,
@@ -1436,7 +1524,7 @@ impl RenamerApp {
             });
             if file.selected {
                 cmds.push(RenderCommand::Text {
-                    x: cx + 6.0,
+                    x: cx + 2.0,
                     y: ry + 4.0,
                     text: "✓".into(),
                     font_size: 10.0,
@@ -1445,34 +1533,37 @@ impl RenamerApp {
                     max_width: Some(12.0),
                 });
             }
-            cx += 38.0;
 
-            // Original name
-            cmds.push(RenderCommand::Text {
-                x: cx,
-                y: ry + 4.0,
-                text: file.original_name.clone(),
-                font_size: SMALL_TEXT,
-                color: TEXT,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(250.0),
-            });
-            cx += 258.0;
-
-            // Arrow
             let changed = file.original_name != file.new_name;
-            cmds.push(RenderCommand::Text {
-                x: cx,
-                y: ry + 4.0,
-                text: if changed { "→" } else { "=" }.into(),
-                font_size: SMALL_TEXT,
-                color: if changed { GREEN } else { OVERLAY0 },
-                font_weight: FontWeightHint::Bold,
-                max_width: Some(20.0),
-            });
-            cx += 28.0;
 
-            // New name
+            // Both names are cut at the *end* (`Fit::End`). This list is a
+            // rename preview, and its whole job is to let the user check what
+            // is about to happen to their files before committing. A name cut
+            // the usual way loses the extension and any numeric suffix --
+            // exactly the parts a rename usually changes -- so a batch of long
+            // names would all read identically and the user would be
+            // confirming a rename they cannot actually see.
+            table.cell(
+                cmds,
+                COL_ORIGINAL,
+                ry + 4.0,
+                &file.original_name,
+                TEXT,
+                SMALL_TEXT,
+                Fit::End,
+            );
+
+            table.cell_weighted(
+                cmds,
+                COL_ARROW,
+                ry + 4.0,
+                if changed { "→" } else { "=" },
+                if changed { GREEN } else { OVERLAY0 },
+                SMALL_TEXT,
+                Fit::Start,
+                FontWeightHint::Bold,
+            );
+
             let new_color = if file.conflict {
                 RED
             } else if changed {
@@ -1480,34 +1571,31 @@ impl RenamerApp {
             } else {
                 SUBTEXT0
             };
-            cmds.push(RenderCommand::Text {
-                x: cx,
-                y: ry + 4.0,
-                text: file.new_name.clone(),
-                font_size: SMALL_TEXT,
-                color: new_color,
-                font_weight: if changed {
+            table.cell_weighted(
+                cmds,
+                COL_NEW,
+                ry + 4.0,
+                &file.new_name,
+                new_color,
+                SMALL_TEXT,
+                Fit::End,
+                if changed {
                     FontWeightHint::Bold
                 } else {
                     FontWeightHint::Regular
                 },
-                max_width: Some(250.0),
-            });
-            cx += 258.0;
+            );
 
-            // Size
-            cmds.push(RenderCommand::Text {
-                x: cx,
-                y: ry + 4.0,
-                text: format_size(file.size),
-                font_size: SMALL_TEXT,
-                color: SUBTEXT0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(80.0),
-            });
-            cx += 88.0;
+            table.cell(
+                cmds,
+                COL_SIZE,
+                ry + 4.0,
+                &format_size(file.size),
+                SUBTEXT0,
+                SMALL_TEXT,
+                Fit::Start,
+            );
 
-            // Status
             let status = if file.conflict {
                 ("Conflict", RED)
             } else if changed {
@@ -1516,15 +1604,16 @@ impl RenamerApp {
                 ("", OVERLAY0)
             };
             if !status.0.is_empty() {
-                cmds.push(RenderCommand::Text {
-                    x: cx,
-                    y: ry + 4.0,
-                    text: status.0.into(),
-                    font_size: SMALL_TEXT,
-                    color: status.1,
-                    font_weight: FontWeightHint::Bold,
-                    max_width: Some(80.0),
-                });
+                table.cell_weighted(
+                    cmds,
+                    COL_STATUS,
+                    ry + 4.0,
+                    status.0,
+                    status.1,
+                    SMALL_TEXT,
+                    Fit::Start,
+                    FontWeightHint::Bold,
+                );
             }
 
             ry += LINE_HEIGHT;
@@ -2016,6 +2105,112 @@ mod tests {
         assert!(!cmds.is_empty());
     }
 
+    // --- Operation-list detail lines ---
+
+    /// The operation-list detail lines drawn for `ops`.
+    fn op_detail_lines(ops: Vec<RenameOp>) -> Vec<String> {
+        let mut app = RenamerApp::new();
+        app.operations = ops;
+        app.render()
+            .into_iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text {
+                    text, font_size, ..
+                } if (font_size - OP_DETAIL_SIZE).abs() < f32::EPSILON => Some(text),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Whatever the user typed, the detail line fits the row it is drawn in.
+    ///
+    /// The row is a fixed 34px in a fixed-width sidebar, so a `Text` command's
+    /// `max_width` would cut a long pattern silently — leaving two different
+    /// operations reading identically in the list.
+    #[test]
+    fn an_operation_detail_fits_its_row() {
+        let long = "W".repeat(120);
+        let ops = vec![
+            RenameOp::FindReplace {
+                find: long.clone(),
+                replace: long.clone(),
+                replace_all: true,
+                case_sensitive: true,
+            },
+            RenameOp::Insert {
+                text: long.clone(),
+                position: InsertPosition::Start,
+            },
+            RenameOp::Extension(ExtensionOp::Replace(long.clone())),
+            RenameOp::Extension(ExtensionOp::Add(long)),
+        ];
+        let expected = ops.len();
+        let mut checked = 0;
+        for line in op_detail_lines(ops) {
+            let measured = text::measure(&line, OP_DETAIL_SIZE, FontWeightHint::Regular);
+            assert!(
+                measured <= OP_DETAIL_WIDTH + 0.5,
+                "detail {line:?} measures {measured} in a {OP_DETAIL_WIDTH} row",
+            );
+            checked += 1;
+        }
+        assert!(
+            checked >= expected,
+            "expected {expected} details, saw {checked}"
+        );
+    }
+
+    /// A long search string must not push the replacement off the end: the
+    /// replacement is the half that says what the rename will actually do.
+    #[test]
+    fn a_long_search_string_does_not_hide_the_replacement() {
+        let lines = op_detail_lines(vec![RenameOp::FindReplace {
+            find: "W".repeat(120),
+            replace: "keepme".to_string(),
+            replace_all: true,
+            case_sensitive: true,
+        }]);
+        assert_eq!(lines.len(), 1, "expected one detail line: {lines:?}");
+        assert!(
+            lines[0].contains("keepme"),
+            "the replacement was elided away: {:?}",
+            lines[0],
+        );
+        assert!(
+            lines[0].contains('…'),
+            "expected the cut to be marked: {:?}",
+            lines[0]
+        );
+    }
+
+    /// The developer-authored frame survives, so an insert still says *where*
+    /// it inserts even when the inserted text is far too long for the row.
+    #[test]
+    fn a_long_insert_still_says_where_it_inserts() {
+        let lines = op_detail_lines(vec![RenameOp::Insert {
+            text: "W".repeat(120),
+            position: InsertPosition::End,
+        }]);
+        assert_eq!(lines.len(), 1, "expected one detail line: {lines:?}");
+        assert!(
+            lines[0].ends_with("\" at end"),
+            "the position was elided away: {:?}",
+            lines[0],
+        );
+    }
+
+    /// Text that already fits is left alone — no ellipsis on the common case.
+    #[test]
+    fn a_short_operation_detail_is_not_elided() {
+        let lines = op_detail_lines(vec![RenameOp::FindReplace {
+            find: "a".to_string(),
+            replace: "b".to_string(),
+            replace_all: true,
+            case_sensitive: true,
+        }]);
+        assert_eq!(lines, vec!["\"a\" → \"b\"".to_string()]);
+    }
+
     #[test]
     fn test_app_execute_rename() {
         let mut app = RenamerApp::new();
@@ -2121,5 +2316,377 @@ mod tests {
     fn test_case_insensitive_replace_all() {
         let result = RenameEngine::case_insensitive_replace("aAbBaA", "a", "X", true);
         assert_eq!(result, "XXbBXX");
+    }
+
+    // --- Extension parsing ---
+
+    #[test]
+    fn an_extension_is_what_follows_the_last_dot() {
+        let ext = |name: &str| FileEntry::new("/p", name, 0, 0).extension;
+        assert_eq!(ext("photo.jpg"), "jpg");
+        assert_eq!(ext("archive.tar.gz"), "gz");
+        // A dotless name has no extension -- it is not its own extension.
+        assert_eq!(ext("readme"), "");
+        // A leading dot makes a name, not an extension.
+        assert_eq!(ext(".bashrc"), "");
+        // A trailing dot leaves an empty extension, not the stem.
+        assert_eq!(ext("weird."), "");
+    }
+
+    #[test]
+    fn a_dotfile_is_not_swept_up_by_an_extension_filter() {
+        let mut app = RenamerApp::new();
+        app.add_file("/a/.bashrc", ".bashrc", 0, 0);
+        app.add_file("/a/backup.bashrc", "backup.bashrc", 0, 0);
+        app.filter_extension = "bashrc".into();
+        let filtered = app.filtered_files();
+        assert_eq!(
+            filtered.len(),
+            1,
+            "only the real .bashrc-suffixed file matches, got {:?}",
+            filtered
+                .iter()
+                .map(|(_, f)| f.original_name.clone())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    // --- File list layout ---
+
+    /// Two files whose names are far wider than the 250px name columns, with a
+    /// pending operation so both rows are in the "changed" state that draws
+    /// every cell (arrow, bold new name, status).
+    fn app_with_overlong_names() -> RenamerApp {
+        let mut app = RenamerApp::new();
+        app.add_file(
+            "/media/Season 1/ep.mkv",
+            "A Very Long Show Name - Season 01 - Episode 07 - The One With The Long Title.mkv",
+            1_234_567,
+            0,
+        );
+        app.add_file(
+            "/media/Season 1/ep2.mkv",
+            "A Very Long Show Name - Season 01 - Episode 08 - The One With The Other Title.mkv",
+            2_345_678,
+            0,
+        );
+        app.operations.push(RenameOp::FindReplace {
+            find: "Episode".into(),
+            replace: "Ep".into(),
+            case_sensitive: true,
+            replace_all: false,
+        });
+        app.apply_operations();
+        app
+    }
+
+    /// Assert that every bounded text command sitting at a column's left edge
+    /// draws inside that column, and that `expected` of them were actually
+    /// inspected — without the count the assertion passes vacuously if the
+    /// list stopped drawing rows at all.
+    fn assert_file_cells_fit(cmds: &[RenderCommand], expected: usize) {
+        let edges = Table::new(FILE_COLUMNS, SIDEBAR_WIDTH).spans();
+        let mut checked = 0usize;
+        for cmd in cmds {
+            let RenderCommand::Text {
+                x: tx,
+                text,
+                font_size,
+                font_weight,
+                max_width: Some(_),
+                ..
+            } = cmd
+            else {
+                continue;
+            };
+            let Some(&(_, right)) = edges.iter().find(|(left, _)| (left - tx).abs() < 0.01) else {
+                continue;
+            };
+            let drawn = tx + text::measure(text, *font_size, *font_weight);
+            assert!(
+                drawn <= right + 0.5,
+                "cell {text:?} starting at {tx} runs to {drawn}, \
+                 past its column's right edge {right}",
+            );
+            checked = checked.saturating_add(1);
+        }
+        assert!(
+            checked >= expected,
+            "only {checked} file-list cells checked, expected at least {expected}",
+        );
+    }
+
+    /// The texts drawn in one column of the file list, header included.
+    fn cells_in_column(cmds: &[RenderCommand], index: usize) -> Vec<String> {
+        let left = Table::new(FILE_COLUMNS, SIDEBAR_WIDTH).left(index);
+        cmds.iter()
+            .filter_map(|cmd| match cmd {
+                RenderCommand::Text {
+                    x: tx,
+                    text,
+                    max_width: Some(_),
+                    ..
+                } if (tx - left).abs() < 0.01 => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn no_file_row_cell_escapes_its_column() {
+        let app = app_with_overlong_names();
+        let mut cmds = Vec::new();
+        // Render the list directly rather than the whole app: a full render
+        // puts sidebar and toolbar text at x values that can coincide with a
+        // column's left edge, and the assertion would then fail on chrome that
+        // was never part of this table.
+        app.render_file_list(&mut cmds);
+        // 6 header labels + 2 rows x 5 cells (name, arrow, new name, size,
+        // status).
+        assert_file_cells_fit(&cmds, 16);
+    }
+
+    #[test]
+    fn an_overlong_rename_preview_keeps_the_end_of_both_names() {
+        let app = app_with_overlong_names();
+        let mut cmds = Vec::new();
+        app.render_file_list(&mut cmds);
+
+        // The whole point of the preview is to show what changes. Both of
+        // these names differ only in their tail, so a name cut the usual way
+        // would render the two rows identically and hide the rename.
+        let originals = cells_in_column(&cmds, COL_ORIGINAL);
+        let old = originals
+            .iter()
+            .find(|t| t.contains("Episode 07"))
+            .unwrap_or_else(|| panic!("row 1's original name should be drawn, got {originals:?}"));
+        assert!(
+            old.starts_with('…'),
+            "the cut should be marked at the front, got {old:?}"
+        );
+        assert!(
+            old.ends_with("The One With The Long Title.mkv"),
+            "the tail identifies the file and must survive, got {old:?}"
+        );
+
+        let news = cells_in_column(&cmds, COL_NEW);
+        let new = news
+            .iter()
+            .find(|t| t.contains("Ep 07"))
+            .unwrap_or_else(|| panic!("row 1's new name should be drawn, got {news:?}"));
+        assert!(
+            new.ends_with(".mkv"),
+            "a rename preview that drops the extension is unreviewable, got {new:?}"
+        );
+        assert_ne!(
+            old, new,
+            "the two names must not render identically or the preview shows nothing"
+        );
+    }
+
+    #[test]
+    fn a_short_name_is_drawn_verbatim() {
+        let mut app = RenamerApp::new();
+        app.add_file("/a.txt", "notes.txt", 12, 0);
+        let mut cmds = Vec::new();
+        app.render_file_list(&mut cmds);
+        let originals = cells_in_column(&cmds, COL_ORIGINAL);
+        assert!(
+            originals.iter().any(|t| t == "notes.txt"),
+            "a name that fits must not be marked as cut, got {originals:?}"
+        );
+    }
+
+    #[test]
+    fn the_header_and_the_rows_agree_on_where_a_column_starts() {
+        let app = app_with_overlong_names();
+        let mut cmds = Vec::new();
+        app.render_file_list(&mut cmds);
+        // The header label and the body cells of the size column share an x.
+        // Three copies of a width is what let these drift apart before the
+        // table became a single `&[Column]`.
+        let sizes = cells_in_column(&cmds, COL_SIZE);
+        assert!(
+            sizes.contains(&"Size".to_string()),
+            "the Size header should sit at the Size column's left edge, got {sizes:?}"
+        );
+        assert!(
+            sizes.len() >= 3,
+            "the header plus both rows' sizes should share that edge, got {sizes:?}"
+        );
+    }
+    // --- Positional rules count characters, not bytes ---
+
+    /// Names whose stems are not pure ASCII, so that a character position and a
+    /// byte position are different numbers, and most byte positions are not
+    /// character boundaries at all.
+    fn adversarial_names() -> Vec<&'static str> {
+        vec![
+            "\u{65e5}\u{672c}\u{8a9e}.txt",        // 3 chars, 9 bytes
+            "\u{03b1}\u{03b2}\u{03b3}\u{03b4}.md", // Greek, 2 bytes/char
+            "\u{0440}\u{0435}\u{0437}\u{0443}\u{043c}\u{0435}.pdf", // Cyrillic
+            "\u{1f600}\u{1f601}\u{1f602}.png",     // emoji, 4 bytes/char
+            "caf\u{e9}_r\u{e9}sum\u{e9}.doc",      // mostly ASCII, some not
+            "a\u{65e5}b\u{672c}c.jpg",             // alternating widths
+            "\u{65e5}",                            // no extension at all
+            "\u{4e2d}\u{6587}\u{6587}\u{4ef6}\u{540d}\u{79f0}.tar.gz",
+        ]
+    }
+
+    /// Every rule that takes a position, at every position from before the name
+    /// to past its end.
+    fn positional_ops(pos: usize) -> Vec<RenameOp> {
+        vec![
+            RenameOp::Insert {
+                text: "-mid-".into(),
+                position: InsertPosition::At(pos),
+            },
+            RenameOp::Remove {
+                from: pos,
+                count: 2,
+            },
+            RenameOp::Number {
+                start: 1,
+                step: 1,
+                padding: 3,
+                position: InsertPosition::At(pos),
+                separator: "_".into(),
+            },
+            RenameOp::DateStamp {
+                format: DateFormat::YmdHyphen,
+                position: InsertPosition::At(pos),
+                separator: "_".into(),
+            },
+        ]
+    }
+
+    #[test]
+    fn a_non_ascii_name_does_not_abort_a_positional_rule() {
+        // A rename batch runs every rule over every file. One name whose byte
+        // length exceeds the position the user typed used to slice inside a
+        // character and abort the renamer partway through the batch — after
+        // some files on disk had already been renamed.
+        let mut checked = 0usize;
+        for name in adversarial_names() {
+            let (_, ext) = FileEntry::split_name(name);
+            // Well past the longest stem here, in both characters and bytes.
+            for pos in 0..24 {
+                for op in positional_ops(pos) {
+                    let out = RenameEngine::apply(&op, name, 0);
+                    // Every positional rule rewrites the stem and re-appends
+                    // the extension untouched.
+                    assert!(
+                        out.ends_with(ext),
+                        "{op:?} at {pos} on {name:?} lost the extension: {out:?}"
+                    );
+                    checked += 1;
+                }
+            }
+        }
+        assert!(
+            checked >= 700,
+            "expected the sweep to exercise every name/position/op, got {checked}"
+        );
+    }
+
+    #[test]
+    fn insert_at_a_position_counts_characters() {
+        let op = RenameOp::Insert {
+            text: "-mid-".into(),
+            position: InsertPosition::At(1),
+        };
+        // Position 1 is after the first *character*. As a byte offset it lands
+        // inside the first kanji, which is where this used to abort.
+        assert_eq!(
+            RenameEngine::apply(&op, "\u{65e5}\u{672c}\u{8a9e}.txt", 0),
+            "\u{65e5}-mid-\u{672c}\u{8a9e}.txt"
+        );
+        let op = RenameOp::Insert {
+            text: "!".into(),
+            position: InsertPosition::At(2),
+        };
+        assert_eq!(
+            RenameEngine::apply(&op, "\u{1f600}\u{1f601}\u{1f602}.png", 0),
+            "\u{1f600}\u{1f601}!\u{1f602}.png"
+        );
+    }
+
+    #[test]
+    fn remove_counts_characters_at_both_ends() {
+        // "remove 1 character starting at character 1" — not "1 byte at byte 1".
+        let op = RenameOp::Remove { from: 1, count: 1 };
+        assert_eq!(
+            RenameEngine::apply(&op, "\u{65e5}\u{672c}\u{8a9e}.txt", 0),
+            "\u{65e5}\u{8a9e}.txt"
+        );
+        // A count that runs past the end takes the rest of the stem and stops.
+        let op = RenameOp::Remove { from: 1, count: 99 };
+        assert_eq!(
+            RenameEngine::apply(&op, "\u{65e5}\u{672c}\u{8a9e}.txt", 0),
+            "\u{65e5}.txt"
+        );
+    }
+
+    #[test]
+    fn number_and_datestamp_insert_at_a_character_position() {
+        let op = RenameOp::Number {
+            start: 1,
+            step: 1,
+            padding: 3,
+            position: InsertPosition::At(1),
+            separator: "_".into(),
+        };
+        assert_eq!(
+            RenameEngine::apply(&op, "\u{65e5}\u{672c}\u{8a9e}.txt", 0),
+            "\u{65e5}_001_\u{672c}\u{8a9e}.txt"
+        );
+        let op = RenameOp::DateStamp {
+            format: DateFormat::YmdHyphen,
+            position: InsertPosition::At(2),
+            separator: "_".into(),
+        };
+        assert_eq!(
+            RenameEngine::apply(&op, "\u{65e5}\u{672c}\u{8a9e}.txt", 0),
+            "\u{65e5}\u{672c}_2026-05-18_\u{8a9e}.txt"
+        );
+    }
+
+    #[test]
+    fn a_position_past_the_end_clamps_to_the_end() {
+        // Clamping is what `.min(stem.len())` was trying to do; it just measured
+        // the wrong quantity. Past-the-end must still mean "append".
+        let op = RenameOp::Insert {
+            text: "_z".into(),
+            position: InsertPosition::At(99),
+        };
+        assert_eq!(
+            RenameEngine::apply(&op, "\u{65e5}\u{672c}\u{8a9e}.txt", 0),
+            "\u{65e5}\u{672c}\u{8a9e}_z.txt"
+        );
+        // Exactly at the end of a 3-character stem is the same thing.
+        let op = RenameOp::Insert {
+            text: "_z".into(),
+            position: InsertPosition::At(3),
+        };
+        assert_eq!(
+            RenameEngine::apply(&op, "\u{65e5}\u{672c}\u{8a9e}.txt", 0),
+            "\u{65e5}\u{672c}\u{8a9e}_z.txt"
+        );
+    }
+
+    #[test]
+    fn an_ascii_name_is_positioned_exactly_as_before() {
+        // For ASCII the character count and the byte count are the same number,
+        // so this change must be invisible to every existing rule.
+        let op = RenameOp::Insert {
+            text: "-mid-".into(),
+            position: InsertPosition::At(4),
+        };
+        assert_eq!(
+            RenameEngine::apply(&op, "filename.txt", 0),
+            "file-mid-name.txt"
+        );
+        let op = RenameOp::Remove { from: 2, count: 3 };
+        assert_eq!(RenameEngine::apply(&op, "abcdefg.txt", 0), "abfg.txt");
     }
 }

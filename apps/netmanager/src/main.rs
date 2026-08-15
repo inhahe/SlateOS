@@ -24,6 +24,7 @@ use guitk::event::{Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, Mo
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
+use guitk::text;
 
 use std::collections::VecDeque;
 
@@ -63,10 +64,28 @@ const BUTTON_HEIGHT: f32 = 32.0;
 const BUTTON_WIDTH: f32 = 100.0;
 const WIFI_ITEM_HEIGHT: f32 = 40.0;
 const VPN_ITEM_HEIGHT: f32 = 44.0;
+/// Point size of the second line of a diagnostics row.
+const DIAG_DETAIL_FONT_SIZE: f32 = 10.0;
 const GRAPH_BAR_WIDTH: f32 = 8.0;
 const GRAPH_BAR_GAP: f32 = 2.0;
 const TRAFFIC_GRAPH_HEIGHT: f32 = 100.0;
 const DNS_ROW_HEIGHT: f32 = 28.0;
+
+/// Font size of a toolbar button's label.
+const TOOLBAR_TEXT: f32 = 12.0;
+/// Font size of a detail-pane tab's label.
+const TAB_TEXT: f32 = 11.0;
+/// Font size of a section heading.
+const SECTION_TEXT: f32 = 13.0;
+
+/// Width of the tab drawn for `tab`.
+///
+/// Measured bold whatever the tab's state, because the *active* tab is drawn
+/// bold: sizing each tab to its current weight would reflow the whole strip
+/// every time the selection moved.
+fn tab_width(tab: DetailTab) -> f32 {
+    text::measure(tab.label(), TAB_TEXT, FontWeightHint::Bold) + 16.0
+}
 
 // ============================================================================
 // Core Types
@@ -814,7 +833,7 @@ fn render_toolbar(tree: &mut RenderTree, app: &NetManagerApp) {
     let buttons = ["Refresh", "Diagnose", "Properties"];
     let mut bx = 12.0;
     for label in &buttons {
-        let bw = label.len() as f32 * 8.0 + 24.0;
+        let bw = text::measure(label, TOOLBAR_TEXT, FontWeightHint::Regular) + 24.0;
         tree.push(RenderCommand::FillRect {
             x: bx,
             y: y + 4.0,
@@ -828,7 +847,7 @@ fn render_toolbar(tree: &mut RenderTree, app: &NetManagerApp) {
             y: y + 10.0,
             text: label.to_string(),
             color: TEXT_COLOR,
-            font_size: 12.0,
+            font_size: TOOLBAR_TEXT,
             font_weight: FontWeightHint::Regular,
             max_width: None,
         });
@@ -841,7 +860,7 @@ fn render_toolbar(tree: &mut RenderTree, app: &NetManagerApp) {
     } else {
         "Enable"
     };
-    let tw = toggle_label.len() as f32 * 8.0 + 24.0;
+    let tw = text::measure(toggle_label, TOOLBAR_TEXT, FontWeightHint::Regular) + 24.0;
     let tx = WINDOW_WIDTH - tw - 12.0;
     tree.push(RenderCommand::FillRect {
         x: tx,
@@ -856,7 +875,7 @@ fn render_toolbar(tree: &mut RenderTree, app: &NetManagerApp) {
         y: y + 10.0,
         text: toggle_label.into(),
         color: TEXT_COLOR,
-        font_size: 12.0,
+        font_size: TOOLBAR_TEXT,
         font_weight: FontWeightHint::Regular,
         max_width: None,
     });
@@ -1024,7 +1043,7 @@ fn render_tab_bar(tree: &mut RenderTree, app: &NetManagerApp, px: f32, py: f32, 
     let mut tx = px + 8.0;
     for tab in DetailTab::all() {
         let label = tab.label();
-        let tw = label.len() as f32 * 7.5 + 16.0;
+        let tw = tab_width(*tab);
         let is_active = *tab == app.active_tab;
 
         if is_active {
@@ -1049,7 +1068,7 @@ fn render_tab_bar(tree: &mut RenderTree, app: &NetManagerApp, px: f32, py: f32, 
             y: py + 9.0,
             text: label.to_string(),
             color: text_color,
-            font_size: 11.0,
+            font_size: TAB_TEXT,
             font_weight: if is_active {
                 FontWeightHint::Bold
             } else {
@@ -1815,15 +1834,25 @@ fn render_tab_diagnostics(tree: &mut RenderTree, app: &NetManagerApp, px: f32, p
             max_width: Some(200.0),
         });
 
-        // Details
+        // Details. A row is a fixed two-line cell in a list meant to be
+        // scanned, so a detail wider than the row is cut rather than wrapped —
+        // but cut with a mark. `max_width` on its own stops mid-glyph, which
+        // leaves a truncated sentence reading as a complete one.
+        let detail_width = pw - SECTION_PADDING * 2.0 - 120.0;
         tree.push(RenderCommand::Text {
             x: lx + 28.0,
             y: y + 18.0,
-            text: diag.details.clone(),
+            text: text::elide(
+                &diag.details,
+                detail_width,
+                "…",
+                DIAG_DETAIL_FONT_SIZE,
+                FontWeightHint::Regular,
+            ),
             color: SUBTEXT0,
-            font_size: 10.0,
+            font_size: DIAG_DETAIL_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
-            max_width: Some(pw - SECTION_PADDING * 2.0 - 120.0),
+            max_width: Some(detail_width),
         });
 
         // Status label on right
@@ -1900,14 +1929,17 @@ fn render_section_title(tree: &mut RenderTree, title: &str, x: f32, y: f32) -> f
         y,
         text: title.to_string(),
         color: BLUE,
-        font_size: 13.0,
+        font_size: SECTION_TEXT,
         font_weight: FontWeightHint::Bold,
         max_width: None,
     });
     tree.push(RenderCommand::Line {
         x1: x,
         y1: y + 18.0,
-        x2: x + title.len() as f32 * 8.0,
+        // The rule underlines the heading, so it ends where the heading does.
+        // `len * 8.0` ran it past a short title and stopped short of a long
+        // one, and did both worse the moment the title held an accent.
+        x2: x + text::measure(title, SECTION_TEXT, FontWeightHint::Bold),
         y2: y + 18.0,
         color: SURFACE1,
         width: 1.0,
@@ -2067,16 +2099,14 @@ fn render_button(
         corner_radii: CornerRadii::all(4.0),
     });
 
-    // Approximate center text
-    let text_w = label.len() as f32 * 7.0;
-    let text_x = x + (w - text_w) / 2.0;
-    let text_y = y + (h - 12.0) / 2.0;
+    let text_x = text::center_x(label, x + w / 2.0, TOOLBAR_TEXT, FontWeightHint::Bold);
+    let text_y = y + (h - TOOLBAR_TEXT) / 2.0;
     tree.push(RenderCommand::Text {
         x: text_x,
         y: text_y,
         text: label.to_string(),
         color: TEXT_COLOR,
-        font_size: 12.0,
+        font_size: TOOLBAR_TEXT,
         font_weight: FontWeightHint::Bold,
         max_width: Some(w - 8.0),
     });
@@ -2106,10 +2136,11 @@ fn render_mini_button(tree: &mut RenderTree, label: &str, x: f32, y: f32, color:
 
 /// Render a "no interface selected" placeholder.
 fn render_no_selection(tree: &mut RenderTree, px: f32, py: f32, pw: f32) {
+    let empty = "No interface selected";
     tree.push(RenderCommand::Text {
-        x: px + pw / 2.0 - 80.0,
+        x: text::center_x(empty, px + pw / 2.0, 14.0, FontWeightHint::Regular),
         y: py + 40.0,
-        text: "No interface selected".into(),
+        text: empty.into(),
         color: OVERLAY0,
         font_size: 14.0,
         font_weight: FontWeightHint::Regular,
@@ -3092,6 +3123,64 @@ mod tests {
         assert!(has_ping);
     }
 
+    #[test]
+    fn an_overlong_diagnostic_detail_is_marked_as_cut() {
+        let mut app = NetManagerApp::new();
+        app.run_diagnostics();
+        // Far wider than a diagnostics row, which is fixed height by design.
+        let long = "The gateway did not answer within the timeout, and the \
+            route to it goes through an interface that is currently down."
+            .to_string();
+        app.diagnostics[0].details = long.clone();
+        app.set_tab(DetailTab::Diagnostics);
+
+        let mut tree = RenderTree::new();
+        render_tab_diagnostics(&mut tree, &app, 0.0, 0.0, 600.0);
+        let detail = tree
+            .commands
+            .iter()
+            .find_map(|c| match c {
+                RenderCommand::Text {
+                    text, font_size, ..
+                } if (*font_size - DIAG_DETAIL_FONT_SIZE).abs() < 0.01 => {
+                    Some(text.clone())
+                }
+                _ => None,
+            })
+            .expect("the first diagnostic's detail line is drawn");
+        assert_ne!(detail, long, "a detail too wide for its row was left whole");
+        assert!(
+            detail.ends_with('…'),
+            "a detail cut to fit its row was not marked as cut: {detail}"
+        );
+        assert!(
+            long.starts_with(detail.trim_end_matches('…')),
+            "the kept part of the detail is not its own beginning: {detail}"
+        );
+    }
+
+    #[test]
+    fn a_short_diagnostic_detail_is_left_alone() {
+        let mut app = NetManagerApp::new();
+        app.run_diagnostics();
+        app.diagnostics[0].details = "OK".to_string();
+        let mut tree = RenderTree::new();
+        render_tab_diagnostics(&mut tree, &app, 0.0, 0.0, 600.0);
+        let detail = tree
+            .commands
+            .iter()
+            .find_map(|c| match c {
+                RenderCommand::Text {
+                    text, font_size, ..
+                } if (*font_size - DIAG_DETAIL_FONT_SIZE).abs() < 0.01 => {
+                    Some(text.clone())
+                }
+                _ => None,
+            })
+            .expect("the first diagnostic's detail line is drawn");
+        assert_eq!(detail, "OK");
+    }
+
     // --- Sample data tests ---
 
     #[test]
@@ -3147,5 +3236,61 @@ mod tests {
             assert!(sample.rx_bytes_per_sec >= 0.0);
             assert!(sample.tx_bytes_per_sec >= 0.0);
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Text measurement
+    // ------------------------------------------------------------------
+
+    /// Every tab is measured in the bold weight the active one is drawn in, so
+    /// the strip does not reflow when the selection moves, and every label
+    /// fits inside its own tab with its 8 px of padding each side.
+    #[test]
+    fn tab_labels_fit_and_the_strip_does_not_reflow() {
+        for tab in DetailTab::all() {
+            let w = tab_width(*tab);
+            let bold = text::measure(tab.label(), TAB_TEXT, FontWeightHint::Bold);
+            let regular = text::measure(tab.label(), TAB_TEXT, FontWeightHint::Regular);
+            assert!(bold + 16.0 <= w + 0.01, "{:?} overflows its tab", tab);
+            assert!(w >= regular + 16.0, "{:?} is too narrow when drawn bold", tab);
+        }
+    }
+
+    /// A toolbar button is sized to hold its label with 12 px each side.
+    #[test]
+    fn toolbar_labels_fit_their_buttons() {
+        for label in ["Refresh", "Diagnose", "Properties", "Enable", "Disable"] {
+            let bw = text::measure(label, TOOLBAR_TEXT, FontWeightHint::Regular) + 24.0;
+            assert!(bw > 24.0, "{label:?} produced an empty button");
+            let drawn = text::measure(label, TOOLBAR_TEXT, FontWeightHint::Regular);
+            assert!(drawn + 24.0 <= bw + 0.01, "{label:?} overflows its button");
+        }
+    }
+
+    /// A section heading's rule underlines the heading, so it ends where the
+    /// heading does. `len * 8.0` ran past a short title and stopped short of a
+    /// long one, and did both worse the moment a title held an accent.
+    #[test]
+    fn a_section_rule_is_as_long_as_its_heading() {
+        for title in ["IP Configuration", "DNS", "Wi-Fi Networks"] {
+            let rule = text::measure(title, SECTION_TEXT, FontWeightHint::Bold);
+            assert!(rule > 0.0, "{title:?} got an invisible rule");
+            // Bold, because the heading is drawn bold.
+            let regular = text::measure(title, SECTION_TEXT, FontWeightHint::Regular);
+            assert!(rule >= regular, "{title:?}: rule sized at the wrong weight");
+        }
+    }
+
+    /// Measuring counts characters, not UTF-8 bytes -- the failure that made
+    /// every one of these estimates two to four times too wide for accented
+    /// text while looking correct for ASCII.
+    #[test]
+    fn measuring_is_not_driven_by_byte_length() {
+        let accented = text::measure("Réseau", TOOLBAR_TEXT, FontWeightHint::Regular);
+        let ascii = text::measure("Reseau", TOOLBAR_TEXT, FontWeightHint::Regular);
+        assert!(
+            (accented - ascii).abs() < ascii * 0.25,
+            "{accented} should be close to {ascii}, not to the byte count"
+        );
     }
 }

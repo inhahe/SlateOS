@@ -40,6 +40,7 @@
 use guitk::Color;
 use guitk::render::{FontWeightHint, RenderCommand};
 use guitk::style::CornerRadii;
+use guitk::text;
 
 // ============================================================================
 // Catppuccin Mocha theme
@@ -77,6 +78,21 @@ const CORNER_RADIUS: f32 = 4.0;
 const CELL_PADDING: f32 = 8.0;
 const PAGE_SIZE: usize = 50;
 const DEFAULT_COL_WIDTH: f32 = 140.0;
+
+/// Point size of the query-result message above the results table.
+const RESULT_MSG_FONT_SIZE: f32 = 11.0;
+/// Line-to-line spacing of the query-result message, which is wrapped.
+const RESULT_MSG_LINE_HEIGHT: f32 = 14.0;
+/// Gap between the last line of the message and the results table below it.
+/// Chosen so a one-line message leaves the table exactly where it has always
+/// been (`y + 22`), which is the overwhelmingly common case.
+const RESULT_MSG_GAP: f32 = 4.0;
+/// Lines the message may take when a results table follows it. A message that
+/// accompanies rows is generated ("10 rows returned in 4 ms") and short; the
+/// cap is there so a pathological one cannot crowd out the results it is
+/// describing. A message with no table under it — an error — is free to use
+/// the whole pane, because there is nothing else to show.
+const RESULT_MSG_MAX_LINES_WITH_TABLE: usize = 3;
 
 // ============================================================================
 // SQL keywords for syntax highlighting
@@ -870,18 +886,23 @@ fn matches_filter(cell: &CellValue, op: &FilterOp, value: &CellValue) -> bool {
 }
 
 /// Simple LIKE pattern matcher supporting % and _ wildcards.
+///
+/// Matches over `&[char]`, not `&[u8]`. SQL's `_` is defined as exactly one
+/// *character*, and this used to walk bytes, so `_` matched one third of a
+/// kanji: `LIKE '_'` was false for a one-character CJK cell while `LIKE '___'`
+/// was true for it. Both inputs are `&str`, so decoding always succeeds.
 fn simple_like_match(text: &str, pattern: &str) -> bool {
-    let text = text.to_lowercase();
-    let pattern = pattern.to_lowercase();
-    like_match_inner(text.as_bytes(), pattern.as_bytes())
+    let text: Vec<char> = text.to_lowercase().chars().collect();
+    let pattern: Vec<char> = pattern.to_lowercase().chars().collect();
+    like_match_inner(&text, &pattern)
 }
 
-fn like_match_inner(text: &[u8], pattern: &[u8]) -> bool {
+fn like_match_inner(text: &[char], pattern: &[char]) -> bool {
     if pattern.is_empty() {
         return text.is_empty();
     }
     if let Some(&first_p) = pattern.first() {
-        if first_p == b'%' {
+        if first_p == '%' {
             // % matches any sequence
             let rest_pattern = pattern.get(1..).unwrap_or_default();
             for i in 0..=text.len() {
@@ -890,7 +911,7 @@ fn like_match_inner(text: &[u8], pattern: &[u8]) -> bool {
                 }
             }
             false
-        } else if first_p == b'_' {
+        } else if first_p == '_' {
             // _ matches exactly one character
             if text.is_empty() {
                 return false;
@@ -2444,12 +2465,21 @@ fn execute_drop_table(db: &mut Database, name: &str, if_exists: bool) -> QueryRe
 /// Export table data as CSV.
 pub fn export_csv(table: &Table) -> String {
     let mut out = String::new();
-    // Header
-    let headers: Vec<&str> = table.columns.iter().map(|c| c.name.as_str()).collect();
+    // Header. Column names are as free-form as the cell values -- a table can
+    // be created by `import_csv` from a file we did not write -- yet every
+    // exporter in this module escaped its values and none escaped its names.
+    let headers: Vec<String> = table
+        .columns
+        .iter()
+        .map(|c| guitk::csv::field(&c.name))
+        .collect();
     out.push_str(&headers.join(","));
     out.push('\n');
 
-    // Data
+    // Data. Text is quoted unconditionally (rather than only when it needs
+    // to be) so the export keeps the text/number distinction visible; that is
+    // still conforming, and doubling the inner quotes makes commas, quotes
+    // and newlines alike inert.
     for row in &table.rows {
         let vals: Vec<String> = row
             .iter()
@@ -2473,12 +2503,20 @@ pub fn export_json(table: &Table) -> String {
             if ci > 0 {
                 out.push_str(", ");
             }
-            let col_name = table.columns.get(ci).map_or("?", |c| c.name.as_str());
+            let col_name =
+                guitk::escape::json_string(table.columns.get(ci).map_or("?", |c| c.name.as_str()));
             match val {
                 CellValue::Integer(n) => out.push_str(&format!("\"{col_name}\": {n}")),
                 CellValue::Real(n) => out.push_str(&format!("\"{col_name}\": {n}")),
                 CellValue::Text(s) => {
-                    out.push_str(&format!("\"{col_name}\": \"{}\"", s.replace('"', "\\\"")));
+                    // The old `s.replace('"', "\\\"")` was worse than doing
+                    // nothing for one input: a value ending in a backslash
+                    // became `"...\"`, escaping the closing quote and
+                    // truncating the whole document at that point.
+                    out.push_str(&format!(
+                        "\"{col_name}\": \"{}\"",
+                        guitk::escape::json_string(s)
+                    ));
                 }
                 CellValue::Blob(b) => {
                     out.push_str(&format!("\"{col_name}\": \"<blob:{}>\"", b.len()));
@@ -2497,9 +2535,19 @@ pub fn export_json(table: &Table) -> String {
 }
 
 /// Export table data as SQL INSERT statements.
+/// Quote a SQL identifier per the standard: wrap in double quotes and double
+/// any embedded double quote.
+///
+/// Identifiers were previously interpolated bare, so a table or column name
+/// containing a space, a keyword, or a `)` produced a script that either
+/// failed to parse or -- worse -- parsed as something else entirely.
+fn sql_ident(name: &str) -> String {
+    format!("\"{}\"", name.replace('"', "\"\""))
+}
+
 pub fn export_sql_inserts(table: &Table) -> String {
     let mut out = String::new();
-    let col_names: Vec<&str> = table.columns.iter().map(|c| c.name.as_str()).collect();
+    let col_names: Vec<String> = table.columns.iter().map(|c| sql_ident(&c.name)).collect();
     let cols_str = col_names.join(", ");
 
     for row in &table.rows {
@@ -2515,7 +2563,7 @@ pub fn export_sql_inserts(table: &Table) -> String {
             .collect();
         out.push_str(&format!(
             "INSERT INTO {} ({}) VALUES ({});\n",
-            table.name,
+            sql_ident(&table.name),
             cols_str,
             vals.join(", ")
         ));
@@ -2529,11 +2577,12 @@ pub fn export_sql_inserts(table: &Table) -> String {
 
 /// Import CSV data into a table. Returns the parsed table.
 pub fn import_csv(name: &str, csv_data: &str) -> Result<Table, String> {
-    let mut lines = csv_data.lines();
+    let mut records = guitk::csv::parse_records(csv_data).into_iter();
 
-    // Detect header
-    let header_line = lines.next().ok_or_else(|| "Empty CSV data".to_owned())?;
-    let headers: Vec<&str> = header_line.split(',').map(str::trim).collect();
+    // Detect header. Column names go through the same RFC 4180 decoding as
+    // the values: a quoted header field may legitimately contain a comma, and
+    // `export_csv` emits exactly that when a column name needs it.
+    let headers = records.next().ok_or_else(|| "Empty CSV data".to_owned())?;
 
     if headers.is_empty() {
         return Err("No columns found in CSV header".to_owned());
@@ -2541,18 +2590,26 @@ pub fn import_csv(name: &str, csv_data: &str) -> Result<Table, String> {
 
     let columns: Vec<ColumnDef> = headers
         .iter()
-        .map(|h| ColumnDef::new(h, DataType::Text))
+        .map(|h| ColumnDef::new(h.trimmed_if_bare(), DataType::Text))
         .collect();
 
     let mut table = Table::new(name, columns);
 
-    for line in lines {
-        if line.trim().is_empty() {
+    for values in records {
+        if values.iter().all(|v| v.text.trim().is_empty()) {
             continue;
         }
-        let values: Vec<CellValue> = parse_csv_line(line, headers.len());
-        if values.len() == table.col_count() {
-            let _ = table.insert_row(values);
+        // Pad short records so a ragged file still imports.
+        let mut cells: Vec<CellValue> = values
+            .iter()
+            .take(headers.len())
+            .map(|f| CellValue::Text(f.trimmed_if_bare().to_owned()))
+            .collect();
+        while cells.len() < headers.len() {
+            cells.push(CellValue::Null);
+        }
+        if cells.len() == table.col_count() {
+            let _ = table.insert_row(cells);
         }
     }
 
@@ -2560,51 +2617,6 @@ pub fn import_csv(name: &str, csv_data: &str) -> Result<Table, String> {
     infer_column_types(&mut table);
 
     Ok(table)
-}
-
-fn parse_csv_line(line: &str, expected_cols: usize) -> Vec<CellValue> {
-    let mut values = Vec::new();
-    let mut current = String::new();
-    let mut in_quotes = false;
-    let chars: Vec<char> = line.chars().collect();
-    let mut i = 0;
-
-    while i < chars.len() {
-        let ch = chars.get(i).copied().unwrap_or(' ');
-        if in_quotes {
-            if ch == '"' {
-                if i.saturating_add(1) < chars.len() && chars.get(i.saturating_add(1)) == Some(&'"')
-                {
-                    current.push('"');
-                    i = i.saturating_add(2);
-                } else {
-                    in_quotes = false;
-                    i = i.saturating_add(1);
-                }
-            } else {
-                current.push(ch);
-                i = i.saturating_add(1);
-            }
-        } else if ch == '"' {
-            in_quotes = true;
-            i = i.saturating_add(1);
-        } else if ch == ',' {
-            values.push(CellValue::Text(current.trim().to_owned()));
-            current.clear();
-            i = i.saturating_add(1);
-        } else {
-            current.push(ch);
-            i = i.saturating_add(1);
-        }
-    }
-    values.push(CellValue::Text(current.trim().to_owned()));
-
-    // Pad to expected length
-    while values.len() < expected_cols {
-        values.push(CellValue::Null);
-    }
-
-    values
 }
 
 /// Infer and convert column types based on data patterns.
@@ -3148,7 +3160,7 @@ impl DbViewerApp {
         let mut bx = 130.0;
         for (i, label) in buttons.iter().enumerate() {
             let color = colors.get(i).copied().unwrap_or(SUBTEXT0);
-            let btn_w = label.len() as f32 * 8.0 + 16.0;
+            let btn_w = text::padded_width(label, 8.0, 11.0, FontWeightHint::Regular);
             cmds.push(RenderCommand::FillRect {
                 x: bx,
                 y: 6.0,
@@ -3184,7 +3196,7 @@ impl DbViewerApp {
         for (i, tab) in self.tabs.iter().enumerate() {
             let is_active = i == self.active_tab;
             let tab_label = &tab.db.name;
-            let tw = tab_label.len() as f32 * 7.5 + 32.0;
+            let tw = text::padded_width_any_weight(tab_label, 16.0, 12.0);
 
             let bg = if is_active { BASE } else { CRUST };
             cmds.push(RenderCommand::FillRect {
@@ -3716,7 +3728,7 @@ impl DbViewerApp {
         for panel in BottomPanel::all() {
             let is_active = *panel == self.bottom_panel;
             let label = panel.label();
-            let tw = label.len() as f32 * 7.0 + 16.0;
+            let tw = text::padded_width_any_weight(label, 8.0, 11.0);
 
             cmds.push(RenderCommand::FillRect {
                 x: tx,
@@ -3834,8 +3846,12 @@ impl DbViewerApp {
                     SqlToken::Whitespace => (" ".to_owned(), TEXT, FontWeightHint::Regular),
                 };
 
-                let char_w = 7.2;
-                let text_w = text.len() as f32 * char_w;
+                // Measured in the token's *own* weight: keywords are drawn
+                // bold, so a fixed cell laid the next token on top of the tail
+                // of every SELECT and WHERE. And a quoted string literal is
+                // drawn with its quotes, which the byte count did include but
+                // only by accident of them being one byte each.
+                let text_w = text::measure(&text, 12.0, weight);
 
                 if tx_pos + text_w < x + max_w {
                     cmds.push(RenderCommand::Text {
@@ -3922,25 +3938,62 @@ impl DbViewerApp {
                 });
             }
             Some(result) => {
-                // Message
+                // Message. `RenderCommand::Text` clips at `max_width` rather
+                // than wrapping, so a message wider than the pane used to be
+                // cut mid-word with nothing to mark the cut — and the messages
+                // that run long are exactly the ones worth reading, the SQL
+                // errors saying what the engine rejected and where.
                 let msg_color = if result.is_error { RED } else { GREEN };
-                cmds.push(RenderCommand::Text {
-                    x: x + 12.0,
-                    y: y + 4.0,
-                    text: result.message.clone(),
-                    color: msg_color,
-                    font_size: 11.0,
-                    font_weight: FontWeightHint::Bold,
-                    max_width: Some(width - 24.0),
-                });
+                let msg_width = width - 24.0;
+                let mut message = text::wrap(
+                    &result.message,
+                    msg_width,
+                    RESULT_MSG_FONT_SIZE,
+                    FontWeightHint::Bold,
+                );
+                // The message is bounded, and the overflow is marked rather
+                // than dropped in silence.
+                let fits_in_pane =
+                    (((height - 4.0 - RESULT_MSG_GAP) / RESULT_MSG_LINE_HEIGHT) as usize).max(1);
+                let max_lines = if result.columns.is_empty() {
+                    fits_in_pane
+                } else {
+                    fits_in_pane.min(RESULT_MSG_MAX_LINES_WITH_TABLE)
+                };
+                if message.len() > max_lines {
+                    message.truncate(max_lines);
+                    if let Some(last) = message.last_mut() {
+                        *last = text::elide(
+                            &format!("{last}…"),
+                            msg_width,
+                            "…",
+                            RESULT_MSG_FONT_SIZE,
+                            FontWeightHint::Bold,
+                        );
+                    }
+                }
+                for (n, line) in message.iter().enumerate() {
+                    cmds.push(RenderCommand::Text {
+                        x: x + 12.0,
+                        y: y + 4.0 + n as f32 * RESULT_MSG_LINE_HEIGHT,
+                        text: line.clone(),
+                        color: msg_color,
+                        font_size: RESULT_MSG_FONT_SIZE,
+                        font_weight: FontWeightHint::Bold,
+                        max_width: Some(msg_width),
+                    });
+                }
 
                 // Result table
                 if !result.columns.is_empty() {
                     let col_count = result.columns.len();
                     let col_w = (width / col_count as f32).max(100.0).min(width);
 
-                    // Column headers
-                    let header_y = y + 22.0;
+                    // Column headers. The table follows the message rather than
+                    // sitting at a fixed offset from the top of the pane, so a
+                    // message that grew cannot be drawn over its own headers.
+                    let header_y =
+                        y + 4.0 + message.len() as f32 * RESULT_MSG_LINE_HEIGHT + RESULT_MSG_GAP;
                     cmds.push(RenderCommand::FillRect {
                         x,
                         y: header_y,
@@ -4420,6 +4473,126 @@ fn main() {
 )]
 mod tests {
     use super::*;
+
+    // --- LIKE pattern matching ---
+
+    #[test]
+    fn like_underscore_matches_one_character_not_one_byte() {
+        let mut checked = 0;
+        for (ch, width) in [("é", 2), ("日", 3), ("😀", 4)] {
+            assert!(
+                simple_like_match(ch, "_"),
+                "`_` should match the single character {ch:?}"
+            );
+            let many = "_".repeat(width);
+            assert!(
+                !simple_like_match(ch, &many),
+                "{width} underscores must not match the {width} bytes of {ch:?}"
+            );
+            checked += 1;
+        }
+        assert!(checked >= 3, "only {checked} checked");
+
+        assert!(simple_like_match("日本", "__"));
+        assert!(simple_like_match("日本語.txt", "___.txt"));
+        assert!(!simple_like_match("日本", "_"));
+    }
+
+    #[test]
+    fn like_percent_combined_with_underscore_counts_characters() {
+        // Literals and `%` on their own survive byte matching -- a
+        // well-formed needle can only ever match starting on a character
+        // boundary, by UTF-8 self-synchronization -- so they are not what
+        // needs pinning down here. The discriminating cases are those where
+        // `%` absorbs the slack and `_` must still count characters: under
+        // the byte matcher a single kanji had three `_`s worth of room.
+        assert!(!simple_like_match("日", "%_%_%"));
+        assert!(!simple_like_match("日本", "%_%_%_%"));
+        assert!(simple_like_match("日本", "%_%_%"));
+
+        // Sanity: non-ASCII literals and `%` still behave.
+        assert!(simple_like_match("日本語", "日%"));
+        assert!(simple_like_match("日本語", "%語"));
+        assert!(simple_like_match("日本語", "%本%"));
+        assert!(!simple_like_match("日本語", "%犬%"));
+    }
+
+    #[test]
+    fn like_on_ascii_is_unchanged() {
+        let mut checked = 0;
+        for (text, pat, want) in [
+            ("hello", "hello", true),
+            ("hello", "h%", true),
+            ("hello", "%o", true),
+            ("hello", "h_llo", true),
+            ("hello", "h__lo", true),   // _ = e, _ = l
+            ("hello", "h___lo", false), // one more character than there is
+            ("hello", "%ell%", true),
+            ("hello", "%xyz%", false),
+            ("HELLO", "hello", true), // matching is case-insensitive
+            ("", "", true),
+            ("", "%", true),
+            ("a", "", false),
+        ] {
+            assert_eq!(simple_like_match(text, pat), want, "{text:?} LIKE {pat:?}");
+            checked += 1;
+        }
+        assert!(checked >= 12, "only {checked} checked");
+    }
+
+    // --- text measurement ---
+
+    #[test]
+    fn toolbar_buttons_fit_their_labels() {
+        for label in ["Execute", "New Tab", "Export", "Import"] {
+            let w = text::padded_width(label, 8.0, 11.0, FontWeightHint::Regular);
+            let drawn = text::measure(label, 11.0, FontWeightHint::Regular);
+            assert!(drawn + 16.0 <= w + 0.01, "{label:?} overflows its button");
+        }
+    }
+
+    #[test]
+    fn a_database_tab_fits_its_name_at_either_weight() {
+        // Database names are filenames, so any byte but `/` and NUL.
+        for name in ["main.db", "inventário.sqlite", "顧客.db"] {
+            let w = text::padded_width_any_weight(name, 16.0, 12.0);
+            for weight in [FontWeightHint::Bold, FontWeightHint::Regular] {
+                assert!(
+                    text::measure(name, 12.0, weight) + 32.0 <= w + 0.01,
+                    "{name:?} overflows its tab at {weight:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn highlighted_sql_tokens_do_not_overlap() {
+        // Keywords are drawn bold. A fixed 7.2 px cell laid the next token on
+        // top of the tail of every SELECT and WHERE.
+        let tokens: [(&str, FontWeightHint); 6] = [
+            ("SELECT", FontWeightHint::Bold),
+            (" ", FontWeightHint::Regular),
+            ("*", FontWeightHint::Bold),
+            (" ", FontWeightHint::Regular),
+            ("FROM", FontWeightHint::Bold),
+            (" clientes", FontWeightHint::Regular),
+        ];
+        let mut x = 0.0_f32;
+        let mut spans = Vec::new();
+        for (t, weight) in tokens {
+            let w = text::measure(t, 12.0, weight);
+            spans.push((x, x + w));
+            x += w;
+        }
+        for pair in spans.windows(2) {
+            let (_, end) = pair[0];
+            let (next_start, _) = pair[1];
+            assert!(
+                next_start >= end - 0.01,
+                "a token starts at {next_start} but the one before it ends at {end}"
+            );
+        }
+    }
 
     // --- Data type tests ---
 
@@ -5236,8 +5409,181 @@ mod tests {
             CellValue::Text("Alice".to_owned()),
         ]);
         let sql = export_sql_inserts(&table);
-        assert!(sql.contains("INSERT INTO test"));
+        // Identifiers are quoted, so a name that collides with a keyword or
+        // contains a space still names the right object.
+        assert!(sql.contains("INSERT INTO \"test\" (\"id\", \"name\")"));
         assert!(sql.contains("1, 'Alice'"));
+    }
+
+    /// A one-row table whose *column name* is chosen by the caller. Column
+    /// names are not privileged data: `import_csv` takes them straight from
+    /// the header line of a file the user opened.
+    fn table_with_column_named(col: &str) -> Table {
+        let mut table = Table::new(
+            "test",
+            vec![
+                ColumnDef::new("id", DataType::Integer),
+                ColumnDef::new(col, DataType::Text),
+            ],
+        );
+        let _ = table.insert_row(vec![
+            CellValue::Integer(1),
+            CellValue::Text("Alice".to_owned()),
+        ]);
+        table
+    }
+
+    #[test]
+    fn a_hostile_column_name_cannot_forge_a_csv_column() {
+        let csv = export_csv(&table_with_column_named("name,forged"));
+        let header = csv.lines().next().expect("header");
+        // Walk the header the way a reader does, so an escaped comma inside
+        // a quoted name is not mistaken for a real separator.
+        let mut fields = 1;
+        let mut in_quotes = false;
+        for c in header.chars() {
+            match c {
+                '"' => in_quotes = !in_quotes,
+                ',' if !in_quotes => fields += 1,
+                _ => {}
+            }
+        }
+        assert_eq!(fields, 2, "column name forged a third column: {header}");
+    }
+
+    /// Count JSON string tokens, honouring backslash escapes.
+    ///
+    /// A bare `json.contains("\"admin\":")` cannot be used here: correctly
+    /// escaped output *does* contain that substring, preceded by a backslash
+    /// that makes it inert. The question is how many strings a parser sees.
+    fn json_string_token_count(text: &str) -> usize {
+        let mut count: usize = 0;
+        let mut in_string = false;
+        let mut escaped = false;
+        for c in text.chars() {
+            if in_string {
+                if escaped {
+                    escaped = false;
+                } else if c == '\\' {
+                    escaped = true;
+                } else if c == '"' {
+                    in_string = false;
+                }
+            } else if c == '"' {
+                in_string = true;
+                count = count.saturating_add(1);
+            }
+        }
+        count
+    }
+
+    #[test]
+    fn a_hostile_column_name_cannot_forge_a_json_key() {
+        let json = export_json(&table_with_column_named("name\", \"admin"));
+        // Three strings: the two column names and the one Text value. Left
+        // unescaped the payload would split into four.
+        assert_eq!(
+            json_string_token_count(&json),
+            3,
+            "column name forged a key: {json}"
+        );
+    }
+
+    #[test]
+    fn a_value_ending_in_a_backslash_does_not_truncate_the_json() {
+        let mut table = Table::new("test", vec![ColumnDef::new("path", DataType::Text)]);
+        let _ = table.insert_row(vec![CellValue::Text("C:\\".to_owned())]);
+        let json = export_json(&table);
+        // The backslash must be escaped, so the string is still terminated by
+        // a real closing quote and the object still closes.
+        assert!(
+            json.contains("\"path\": \"C:\\\\\""),
+            "backslash not escaped: {json}"
+        );
+        assert!(json.trim_end().ends_with(']'), "document truncated: {json}");
+    }
+
+    /// Count statement terminators the way a SQL lexer does: semicolons that
+    /// are outside both a `'...'` literal and a `"..."` identifier.
+    ///
+    /// Counting every `;` would flag correctly-quoted output, because the
+    /// hostile payload legitimately *contains* one -- inertly, inside an
+    /// identifier.
+    fn sql_statement_count(text: &str) -> usize {
+        let mut count: usize = 0;
+        let mut in_ident = false;
+        let mut in_literal = false;
+        for c in text.chars() {
+            match c {
+                '"' if !in_literal => in_ident = !in_ident,
+                '\'' if !in_ident => in_literal = !in_literal,
+                ';' if !in_ident && !in_literal => count = count.saturating_add(1),
+                _ => {}
+            }
+        }
+        count
+    }
+
+    #[test]
+    fn a_hostile_identifier_cannot_forge_a_sql_statement() {
+        let sql = export_sql_inserts(&table_with_column_named(
+            "name) VALUES (1, 'x'); DROP TABLE t--",
+        ));
+        assert_eq!(
+            sql_statement_count(&sql),
+            1,
+            "identifier forged a statement: {sql}"
+        );
+        // The payload survives verbatim as an identifier, with its `"` (none
+        // here) doubled -- it is data, not syntax.
+        assert!(
+            sql.contains("\"name) VALUES (1, 'x'); DROP TABLE t--\""),
+            "identifier not quoted: {sql}"
+        );
+    }
+
+    #[test]
+    fn a_csv_export_can_be_imported_back() {
+        // Every field here is one the old line-oriented importer mangled: a
+        // comma and a newline in a column name, and the same inside a value.
+        let mut table = Table::new(
+            "t",
+            vec![
+                ColumnDef::new("first,second", DataType::Text),
+                ColumnDef::new("with \"quotes\"", DataType::Text),
+                ColumnDef::new("two\nlines", DataType::Text),
+            ],
+        );
+        let _ = table.insert_row(vec![
+            CellValue::Text("a,b".to_owned()),
+            CellValue::Text("say \"hi\"".to_owned()),
+            CellValue::Text("line1\nline2".to_owned()),
+        ]);
+
+        let csv = export_csv(&table);
+        let back = import_csv("t", &csv).expect("re-import");
+
+        let names: Vec<&str> = back.columns.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["first,second", "with \"quotes\"", "two\nlines"]);
+        assert_eq!(back.row_count(), 1, "record count changed: {csv}");
+        let row: Vec<String> = back.rows[0].iter().map(CellValue::display).collect();
+        assert_eq!(row, ["a,b", "say \"hi\"", "line1\nline2"]);
+    }
+
+    #[test]
+    fn a_quoted_csv_field_keeps_its_spaces() {
+        // Quoting is how a writer says the whitespace is data; only unquoted
+        // fields get the lenient trim.
+        let table = import_csv("t", "a,b\n\"  padded  \",  bare  ").expect("import");
+        let row: Vec<String> = table.rows[0].iter().map(CellValue::display).collect();
+        assert_eq!(row, ["  padded  ", "bare"]);
+    }
+
+    #[test]
+    fn a_quote_in_an_identifier_is_doubled() {
+        let sql = export_sql_inserts(&table_with_column_named("na\"me"));
+        assert!(sql.contains("\"na\"\"me\""), "quote not doubled: {sql}");
+        assert_eq!(sql_statement_count(&sql), 1, "unbalanced quoting: {sql}");
     }
 
     // --- Import tests ---
@@ -5320,6 +5666,156 @@ mod tests {
         let result = app.query_result.as_ref().unwrap();
         assert!(!result.is_error);
         assert_eq!(result.rows.len(), 10);
+    }
+
+    const LONG_ERROR: &str = "near \"FORM\": syntax error at column 22 — the \
+        FROM clause of a SELECT must name a table that exists in the attached \
+        database, and no table named \"userz\" was found; did you mean \"users\"?";
+
+    /// An app whose results pane is showing `result`.
+    fn app_showing(result: QueryResult) -> DbViewerApp {
+        let mut app = DbViewerApp::new();
+        app.query_result = Some(result);
+        app.bottom_panel = BottomPanel::Results;
+        app
+    }
+
+    /// Height of the pane the results are rendered into by the helpers below.
+    const TEST_PANE_HEIGHT: f32 = 400.0;
+
+    /// Width of that pane, for the tests that do not care how wide it is.
+    const TEST_PANE_WIDTH: f32 = 1200.0;
+
+    /// The `(y, text)` of every result-message line, and the `y` of the results
+    /// table's header row.
+    ///
+    /// Renders the results pane on its own rather than the whole app, so that
+    /// text elsewhere in the window — the status bar and the SQL editor also
+    /// draw 11pt in red and green — cannot be mistaken for the message.
+    fn results_pane_layout(app: &DbViewerApp) -> (Vec<(f32, String)>, Option<f32>) {
+        results_pane_layout_at(app, TEST_PANE_WIDTH)
+    }
+
+    /// The same, at a caller-chosen width.
+    ///
+    /// Wrapping depends on how wide the host's font draws the message, so a
+    /// test about wrapping has to pick its width from that rather than from a
+    /// constant — see `a_long_query_error_is_wrapped_not_cut_mid_word`.
+    fn results_pane_layout_at(app: &DbViewerApp, width: f32) -> (Vec<(f32, String)>, Option<f32>) {
+        let mut cmds = Vec::new();
+        app.render_results(&mut cmds, 0.0, 0.0, width, TEST_PANE_HEIGHT);
+        let lines = cmds
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text {
+                    y,
+                    text,
+                    font_size,
+                    color,
+                    ..
+                } if (font_size - RESULT_MSG_FONT_SIZE).abs() < 0.01
+                    && (*color == RED || *color == GREEN) =>
+                {
+                    Some((*y, text.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        // The header row is the only 20px-tall fill in the pane.
+        let header_y = cmds.iter().find_map(|c| match c {
+            RenderCommand::FillRect { y, height, .. } if (height - 20.0).abs() < 0.01 => Some(*y),
+            _ => None,
+        });
+        (lines, header_y)
+    }
+
+    #[test]
+    fn a_long_query_error_is_wrapped_not_cut_mid_word() {
+        // `RenderCommand::Text` clips at `max_width`, so the error the engine
+        // reported used to reach the user as its first line and no more.
+        //
+        // The pane is sized from what the message *measures*, not from a
+        // constant, because the constant went stale and took the test with
+        // it. This was written against a 1200px pane, which leaves the
+        // message 1176px, back when the toolkit measured with the built-in
+        // 8x16 bitmap font and these 184 characters came to ~1470px. Once
+        // `SystemFont` began resolving a real proportional host face the same
+        // string measured 988px, fit on one line, and the test failed —
+        // reporting a wrapping bug where there was none, purely because the
+        // font got narrower. Asking for half the message's own width forces
+        // an overflow on any face, however wide it draws.
+        let msg_width = text::measure(LONG_ERROR, RESULT_MSG_FONT_SIZE, FontWeightHint::Bold) / 2.0;
+        let app = app_showing(QueryResult::error(LONG_ERROR));
+        // `render_results` gives the message the pane's width less 24.
+        let lines = results_pane_layout_at(&app, msg_width + 24.0).0;
+        assert!(
+            lines.len() > 1,
+            "the error was drawn as {} command(s) in {msg_width}px",
+            lines.len()
+        );
+        let drawn: String = lines
+            .iter()
+            .map(|(_, t)| t.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        for word in LONG_ERROR.split_whitespace() {
+            assert!(drawn.contains(word), "the error lost the word {word:?}");
+        }
+    }
+
+    #[test]
+    fn a_wordy_message_does_not_crowd_out_the_results() {
+        // The message is bounded by what is left of the pane after the table
+        // it introduces, and the cut is marked rather than silent.
+        let mut result = QueryResult::with_data(
+            vec!["id".to_owned(), "name".to_owned()],
+            vec![vec![CellValue::Integer(1), CellValue::Text("a".to_owned())]],
+        );
+        result.message = "word ".repeat(2000);
+        let app = app_showing(result);
+
+        let (lines, header_y) = results_pane_layout(&app);
+        let last = lines.last().map(|(_, t)| t.clone()).unwrap_or_default();
+        assert!(
+            last.ends_with('…'),
+            "the message was cut without a mark: {last:?}"
+        );
+        assert!(
+            lines.len() <= RESULT_MSG_MAX_LINES_WITH_TABLE,
+            "the message took {} lines over a results table",
+            lines.len()
+        );
+
+        // The column headers are still below the message, not under it.
+        let header_y = header_y.expect("the results pane drew no column headers");
+        let message_bottom = lines
+            .iter()
+            .map(|(y, _)| y + RESULT_MSG_LINE_HEIGHT)
+            .fold(f32::MIN, f32::max);
+        assert!(
+            header_y + 0.01 >= message_bottom,
+            "the headers at {header_y} sit inside the message, which ends at \
+             {message_bottom}"
+        );
+    }
+
+    #[test]
+    fn a_one_line_message_leaves_the_table_where_it_was() {
+        // The table follows the message now, so check the common case did not
+        // shift: a short message must still put the headers at y + 22.
+        let app = app_showing(QueryResult::with_data(
+            vec!["id".to_owned()],
+            vec![vec![CellValue::Integer(1)]],
+        ));
+        let (lines, header_y) = results_pane_layout(&app);
+        assert_eq!(lines.len(), 1, "the short message did not fit on one line");
+        let header_y = header_y.expect("the results pane drew no column headers");
+        // The pane is rendered at y = 0, and the header row has always been
+        // 22px down from the top of it.
+        assert!(
+            (header_y - 22.0).abs() < 0.01,
+            "the header row moved: {header_y} vs the expected 22"
+        );
     }
 
     #[test]
@@ -5454,7 +5950,7 @@ mod tests {
         let app = DbViewerApp::new();
         let sql = app.export_current_table(ExportFormat::SqlInserts);
         assert!(sql.is_some());
-        assert!(sql.unwrap().contains("INSERT INTO users"));
+        assert!(sql.unwrap().contains("INSERT INTO \"users\""));
     }
 
     #[test]

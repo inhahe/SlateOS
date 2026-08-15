@@ -1,0 +1,18 @@
+[package]
+name = "yamldoc"
+version = "0.1.0"
+edition = "2024"
+description = "Round-trip YAML config editing for SlateOS: reading and writing settings without destroying the comments and layout a human put there."
+
+[lib]
+path = "src/lib.rs"
+
+# Intentionally dependency-free and `no_std` + `alloc`, mirroring `tzrules`
+# and `netproto`. Configuration is read in places that have no `std` — the
+# service manager and the package manager both run early — and a config
+# reader that only works once `std` is up is a config reader that cannot be
+# used to decide how `std` comes up.
+[dependencies]
+
+[lints]
+workspace = true

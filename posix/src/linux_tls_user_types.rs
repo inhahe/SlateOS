@@ -142,7 +142,10 @@ mod tests {
         );
         // AES-GCM-256: only the key size differs.
         assert_eq!(TLS_CIPHER_AES_GCM_256_KEY_SIZE, 32);
-        assert_eq!(TLS_CIPHER_AES_GCM_256_IV_SIZE, TLS_CIPHER_AES_GCM_128_IV_SIZE);
+        assert_eq!(
+            TLS_CIPHER_AES_GCM_256_IV_SIZE,
+            TLS_CIPHER_AES_GCM_128_IV_SIZE
+        );
         assert_eq!(
             TLS_CIPHER_AES_GCM_256_SALT_SIZE,
             TLS_CIPHER_AES_GCM_128_SALT_SIZE

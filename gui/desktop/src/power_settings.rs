@@ -62,7 +62,12 @@ impl PowerPlan {
         }
     }
 
-    pub const ALL: [Self; 4] = [Self::BatterySaver, Self::Balanced, Self::HighPerformance, Self::Custom];
+    pub const ALL: [Self; 4] = [
+        Self::BatterySaver,
+        Self::Balanced,
+        Self::HighPerformance,
+        Self::Custom,
+    ];
 }
 
 // ============================================================================
@@ -453,12 +458,7 @@ impl PowerSettingsUI {
         }
     }
 
-    const TAB_LABELS: [&'static str; 4] = [
-        "Power Plans",
-        "Timeouts",
-        "Battery",
-        "Advanced",
-    ];
+    const TAB_LABELS: [&'static str; 4] = ["Power Plans", "Timeouts", "Battery", "Advanced"];
 
     // ------------------------------------------------------------------
     // Rendering
@@ -472,7 +472,10 @@ impl PowerSettingsUI {
 
         // Background
         cmds.push(RenderCommand::FillRect {
-            x, y, width, height: 900.0,
+            x,
+            y,
+            width,
+            height: 900.0,
             color: BASE,
             corner_radii: CornerRadii::all(8.0),
         });
@@ -480,9 +483,11 @@ impl PowerSettingsUI {
         // Title
         cy += pad;
         cmds.push(RenderCommand::Text {
-            x: x + pad, y: cy,
+            x: x + pad,
+            y: cy,
             text: "Power & Battery Settings".into(),
-            font_size: 20.0, color: TEXT,
+            font_size: 20.0,
+            color: TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: Some(inner),
         });
@@ -500,16 +505,24 @@ impl PowerSettingsUI {
             let tx = x + pad + tab_w * i as f32;
             let active = self.active_tab == i;
             cmds.push(RenderCommand::FillRect {
-                x: tx, y: cy, width: tab_w - 2.0, height: 30.0,
+                x: tx,
+                y: cy,
+                width: tab_w - 2.0,
+                height: 30.0,
                 color: if active { SURFACE0 } else { MANTLE },
                 corner_radii: CornerRadii::all(6.0),
             });
             cmds.push(RenderCommand::Text {
-                x: tx + 8.0, y: cy + 8.0,
+                x: tx + 8.0,
+                y: cy + 8.0,
                 text: (*label).into(),
                 font_size: 12.0,
                 color: if active { BLUE } else { SUBTEXT0 },
-                font_weight: if active { FontWeightHint::Bold } else { FontWeightHint::Regular },
+                font_weight: if active {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
                 max_width: Some(tab_w - 16.0),
             });
         }
@@ -535,7 +548,10 @@ impl PowerSettingsUI {
     ) -> f32 {
         // Background bar
         cmds.push(RenderCommand::FillRect {
-            x, y, width, height: 40.0,
+            x,
+            y,
+            width,
+            height: 40.0,
             color: MANTLE,
             corner_radii: CornerRadii::all(6.0),
         });
@@ -549,18 +565,27 @@ impl PowerSettingsUI {
         };
         let bar_w = (width - 16.0) * self.battery.charge_pct as f32 / 100.0;
         cmds.push(RenderCommand::FillRect {
-            x: x + 8.0, y: y + 28.0, width: bar_w, height: 6.0,
+            x: x + 8.0,
+            y: y + 28.0,
+            width: bar_w,
+            height: 6.0,
             color: charge_color,
             corner_radii: CornerRadii::all(3.0),
         });
         cmds.push(RenderCommand::FillRect {
-            x: x + 8.0, y: y + 28.0, width: width - 16.0, height: 6.0,
+            x: x + 8.0,
+            y: y + 28.0,
+            width: width - 16.0,
+            height: 6.0,
             color: SURFACE1,
             corner_radii: CornerRadii::all(3.0),
         });
         // Redraw fill on top (stacking order)
         cmds.push(RenderCommand::FillRect {
-            x: x + 8.0, y: y + 28.0, width: bar_w, height: 6.0,
+            x: x + 8.0,
+            y: y + 28.0,
+            width: bar_w,
+            height: 6.0,
             color: charge_color,
             corner_radii: CornerRadii::all(3.0),
         });
@@ -573,9 +598,11 @@ impl PowerSettingsUI {
             self.battery.remaining_formatted()
         );
         cmds.push(RenderCommand::Text {
-            x: x + 12.0, y: y + 8.0,
+            x: x + 12.0,
+            y: y + 8.0,
             text: status_text,
-            font_size: 13.0, color: TEXT,
+            font_size: 13.0,
+            color: TEXT,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - 24.0),
         });
@@ -583,23 +610,21 @@ impl PowerSettingsUI {
         y + 44.0
     }
 
-    fn render_plans_tab(
-        &self,
-        cmds: &mut Vec<RenderCommand>,
-        x: f32,
-        mut y: f32,
-        width: f32,
-    ) {
+    fn render_plans_tab(&self, cmds: &mut Vec<RenderCommand>, x: f32, mut y: f32, width: f32) {
         for plan in PowerPlan::ALL {
             let active = self.config.plan == plan;
             cmds.push(RenderCommand::FillRect {
-                x, y, width, height: 56.0,
+                x,
+                y,
+                width,
+                height: 56.0,
                 color: if active { SURFACE0 } else { MANTLE },
                 corner_radii: CornerRadii::all(6.0),
             });
             let indicator = if active { "● " } else { "○ " };
             cmds.push(RenderCommand::Text {
-                x: x + 12.0, y: y + 8.0,
+                x: x + 12.0,
+                y: y + 8.0,
                 text: format!("{}{}", indicator, plan.label()),
                 font_size: 14.0,
                 color: if active { BLUE } else { TEXT },
@@ -607,9 +632,11 @@ impl PowerSettingsUI {
                 max_width: Some(width - 24.0),
             });
             cmds.push(RenderCommand::Text {
-                x: x + 32.0, y: y + 30.0,
+                x: x + 32.0,
+                y: y + 30.0,
                 text: plan.description().into(),
-                font_size: 11.0, color: SUBTEXT0,
+                font_size: 11.0,
+                color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 44.0),
             });
@@ -617,31 +644,41 @@ impl PowerSettingsUI {
         }
     }
 
-    fn render_timeouts_tab(
-        &self,
-        cmds: &mut Vec<RenderCommand>,
-        x: f32,
-        mut y: f32,
-        width: f32,
-    ) {
+    fn render_timeouts_tab(&self, cmds: &mut Vec<RenderCommand>, x: f32, mut y: f32, width: f32) {
         let rows: &[(&str, u32, u32)] = &[
-            ("Screen off", self.config.screen_off_battery_min, self.config.screen_off_ac_min),
-            ("Sleep", self.config.sleep_battery_min, self.config.sleep_ac_min),
-            ("Hibernate", self.config.hibernate_battery_min, self.config.hibernate_ac_min),
+            (
+                "Screen off",
+                self.config.screen_off_battery_min,
+                self.config.screen_off_ac_min,
+            ),
+            (
+                "Sleep",
+                self.config.sleep_battery_min,
+                self.config.sleep_ac_min,
+            ),
+            (
+                "Hibernate",
+                self.config.hibernate_battery_min,
+                self.config.hibernate_ac_min,
+            ),
         ];
 
         // Header
         cmds.push(RenderCommand::Text {
-            x: x + width * 0.4, y,
+            x: x + width * 0.4,
+            y,
             text: "On Battery".into(),
-            font_size: 12.0, color: LAVENDER,
+            font_size: 12.0,
+            color: LAVENDER,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width * 0.25),
         });
         cmds.push(RenderCommand::Text {
-            x: x + width * 0.7, y,
+            x: x + width * 0.7,
+            y,
             text: "On AC".into(),
-            font_size: 12.0, color: LAVENDER,
+            font_size: 12.0,
+            color: LAVENDER,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width * 0.25),
         });
@@ -649,30 +686,47 @@ impl PowerSettingsUI {
 
         for (label, batt, ac) in rows {
             cmds.push(RenderCommand::FillRect {
-                x, y, width, height: 28.0,
+                x,
+                y,
+                width,
+                height: 28.0,
                 color: MANTLE,
                 corner_radii: CornerRadii::all(4.0),
             });
             cmds.push(RenderCommand::Text {
-                x: x + 12.0, y: y + 6.0,
+                x: x + 12.0,
+                y: y + 6.0,
                 text: (*label).into(),
-                font_size: 13.0, color: TEXT,
+                font_size: 13.0,
+                color: TEXT,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width * 0.35),
             });
-            let batt_str = if *batt == 0 { "Never".to_string() } else { format!("{} min", batt) };
-            let ac_str = if *ac == 0 { "Never".to_string() } else { format!("{} min", ac) };
+            let batt_str = if *batt == 0 {
+                "Never".to_string()
+            } else {
+                format!("{} min", batt)
+            };
+            let ac_str = if *ac == 0 {
+                "Never".to_string()
+            } else {
+                format!("{} min", ac)
+            };
             cmds.push(RenderCommand::Text {
-                x: x + width * 0.4, y: y + 6.0,
+                x: x + width * 0.4,
+                y: y + 6.0,
                 text: batt_str,
-                font_size: 13.0, color: SUBTEXT0,
+                font_size: 13.0,
+                color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width * 0.25),
             });
             cmds.push(RenderCommand::Text {
-                x: x + width * 0.7, y: y + 6.0,
+                x: x + width * 0.7,
+                y: y + 6.0,
                 text: ac_str,
-                font_size: 13.0, color: SUBTEXT0,
+                font_size: 13.0,
+                color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width * 0.25),
             });
@@ -682,9 +736,11 @@ impl PowerSettingsUI {
         // Button actions
         y += 8.0;
         cmds.push(RenderCommand::Text {
-            x, y,
+            x,
+            y,
             text: "Button & Lid Actions".into(),
-            font_size: 14.0, color: LAVENDER,
+            font_size: 14.0,
+            color: LAVENDER,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
         });
@@ -702,18 +758,14 @@ impl PowerSettingsUI {
         }
     }
 
-    fn render_battery_tab(
-        &self,
-        cmds: &mut Vec<RenderCommand>,
-        x: f32,
-        mut y: f32,
-        width: f32,
-    ) {
+    fn render_battery_tab(&self, cmds: &mut Vec<RenderCommand>, x: f32, mut y: f32, width: f32) {
         if self.battery.state == ChargeState::NotPresent {
             cmds.push(RenderCommand::Text {
-                x, y,
+                x,
+                y,
                 text: "No battery detected — running on AC power.".into(),
-                font_size: 13.0, color: OVERLAY0,
+                font_size: 13.0,
+                color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width),
             });
@@ -726,38 +778,107 @@ impl PowerSettingsUI {
         y += 24.0;
         Self::render_kv(cmds, x, y, width, "Status", b.state.label());
         y += 24.0;
-        Self::render_kv(cmds, x, y, width, "Time remaining", &b.remaining_formatted());
+        Self::render_kv(
+            cmds,
+            x,
+            y,
+            width,
+            "Time remaining",
+            &b.remaining_formatted(),
+        );
         y += 24.0;
-        Self::render_kv(cmds, x, y, width, "Health", &format!("{} ({}%)", b.health.label(), b.health_pct()));
+        Self::render_kv(
+            cmds,
+            x,
+            y,
+            width,
+            "Health",
+            &format!("{} ({}%)", b.health.label(), b.health_pct()),
+        );
         y += 24.0;
-        Self::render_kv(cmds, x, y, width, "Design capacity", &format!("{} mWh", b.design_capacity_mwh));
+        Self::render_kv(
+            cmds,
+            x,
+            y,
+            width,
+            "Design capacity",
+            &format!("{} mWh", b.design_capacity_mwh),
+        );
         y += 24.0;
-        Self::render_kv(cmds, x, y, width, "Full charge capacity", &format!("{} mWh", b.full_charge_capacity_mwh));
+        Self::render_kv(
+            cmds,
+            x,
+            y,
+            width,
+            "Full charge capacity",
+            &format!("{} mWh", b.full_charge_capacity_mwh),
+        );
         y += 24.0;
-        Self::render_kv(cmds, x, y, width, "Cycle count", &format!("{}", b.cycle_count));
+        Self::render_kv(
+            cmds,
+            x,
+            y,
+            width,
+            "Cycle count",
+            &format!("{}", b.cycle_count),
+        );
         y += 24.0;
-        Self::render_kv(cmds, x, y, width, "Drain rate", &format!("{} mW", b.drain_mw));
+        Self::render_kv(
+            cmds,
+            x,
+            y,
+            width,
+            "Drain rate",
+            &format!("{} mW", b.drain_mw),
+        );
         y += 24.0;
         Self::render_kv(cmds, x, y, width, "Temperature", &b.temperature_formatted());
         y += 32.0;
 
         // Battery thresholds
         cmds.push(RenderCommand::Text {
-            x, y,
+            x,
+            y,
             text: "Battery Thresholds".into(),
-            font_size: 14.0, color: LAVENDER,
+            font_size: 14.0,
+            color: LAVENDER,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
         });
         y += 24.0;
-        Self::render_kv(cmds, x, y, width, "Low battery", &format!("{}%", self.config.low_battery_pct));
+        Self::render_kv(
+            cmds,
+            x,
+            y,
+            width,
+            "Low battery",
+            &format!("{}%", self.config.low_battery_pct),
+        );
         y += 24.0;
-        Self::render_kv(cmds, x, y, width, "Critical battery", &format!("{}%", self.config.critical_battery_pct));
+        Self::render_kv(
+            cmds,
+            x,
+            y,
+            width,
+            "Critical battery",
+            &format!("{}%", self.config.critical_battery_pct),
+        );
         y += 24.0;
-        Self::render_kv(cmds, x, y, width, "Critical action", self.config.critical_battery_action.label());
+        Self::render_kv(
+            cmds,
+            x,
+            y,
+            width,
+            "Critical action",
+            self.config.critical_battery_action.label(),
+        );
         y += 24.0;
 
-        let saver_label = if self.config.auto_battery_saver { "On" } else { "Off" };
+        let saver_label = if self.config.auto_battery_saver {
+            "On"
+        } else {
+            "Off"
+        };
         Self::render_kv(cmds, x, y, width, "Auto battery saver", saver_label);
 
         // Charge history mini-graph
@@ -766,13 +887,7 @@ impl PowerSettingsUI {
         }
     }
 
-    fn render_advanced_tab(
-        &self,
-        cmds: &mut Vec<RenderCommand>,
-        x: f32,
-        mut y: f32,
-        width: f32,
-    ) {
+    fn render_advanced_tab(&self, cmds: &mut Vec<RenderCommand>, x: f32, mut y: f32, width: f32) {
         let rows: &[(&str, bool)] = &[
             ("Adaptive brightness", self.config.adaptive_brightness),
             ("USB selective suspend", self.config.usb_selective_suspend),
@@ -787,9 +902,23 @@ impl PowerSettingsUI {
         }
 
         y += 8.0;
-        Self::render_kv(cmds, x, y, width, "Brightness (battery)", &format!("{}%", self.config.brightness_battery));
+        Self::render_kv(
+            cmds,
+            x,
+            y,
+            width,
+            "Brightness (battery)",
+            &format!("{}%", self.config.brightness_battery),
+        );
         y += 24.0;
-        Self::render_kv(cmds, x, y, width, "Brightness (AC)", &format!("{}%", self.config.brightness_ac));
+        Self::render_kv(
+            cmds,
+            x,
+            y,
+            width,
+            "Brightness (AC)",
+            &format!("{}%", self.config.brightness_ac),
+        );
     }
 
     // ------------------------------------------------------------------
@@ -798,39 +927,58 @@ impl PowerSettingsUI {
 
     fn render_kv(cmds: &mut Vec<RenderCommand>, x: f32, y: f32, width: f32, key: &str, val: &str) {
         cmds.push(RenderCommand::Text {
-            x: x + 8.0, y,
+            x: x + 8.0,
+            y,
             text: key.into(),
-            font_size: 13.0, color: SUBTEXT0,
+            font_size: 13.0,
+            color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width * 0.5),
         });
         cmds.push(RenderCommand::Text {
-            x: x + width * 0.55, y,
+            x: x + width * 0.55,
+            y,
             text: val.into(),
-            font_size: 13.0, color: TEXT,
+            font_size: 13.0,
+            color: TEXT,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width * 0.4),
         });
     }
 
-    fn render_toggle(cmds: &mut Vec<RenderCommand>, x: f32, y: f32, width: f32, label: &str, on: bool) {
+    fn render_toggle(
+        cmds: &mut Vec<RenderCommand>,
+        x: f32,
+        y: f32,
+        width: f32,
+        label: &str,
+        on: bool,
+    ) {
         cmds.push(RenderCommand::Text {
-            x: x + 8.0, y,
+            x: x + 8.0,
+            y,
             text: label.into(),
-            font_size: 13.0, color: SUBTEXT0,
+            font_size: 13.0,
+            color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width * 0.65),
         });
         let tx = x + width - 48.0;
         let bg = if on { GREEN } else { SURFACE1 };
         cmds.push(RenderCommand::FillRect {
-            x: tx, y, width: 40.0, height: 20.0,
+            x: tx,
+            y,
+            width: 40.0,
+            height: 20.0,
             color: bg,
             corner_radii: CornerRadii::all(10.0),
         });
         let knob_x = if on { tx + 22.0 } else { tx + 2.0 };
         cmds.push(RenderCommand::FillRect {
-            x: knob_x, y: y + 2.0, width: 16.0, height: 16.0,
+            x: knob_x,
+            y: y + 2.0,
+            width: 16.0,
+            height: 16.0,
             color: TEXT,
             corner_radii: CornerRadii::all(8.0),
         });
@@ -846,7 +994,11 @@ impl PowerSettingsUI {
             return None;
         }
         let idx = (offset / tab_w) as usize;
-        if idx < Self::TAB_LABELS.len() { Some(idx) } else { None }
+        if idx < Self::TAB_LABELS.len() {
+            Some(idx)
+        } else {
+            None
+        }
     }
 }
 
@@ -988,7 +1140,12 @@ mod tests {
 
     #[test]
     fn battery_health_labels_and_colors() {
-        for h in [BatteryHealth::Good, BatteryHealth::Fair, BatteryHealth::Poor, BatteryHealth::Critical] {
+        for h in [
+            BatteryHealth::Good,
+            BatteryHealth::Fair,
+            BatteryHealth::Poor,
+            BatteryHealth::Critical,
+        ] {
             assert!(!h.label().is_empty());
             let _ = h.color();
         }
@@ -1080,7 +1237,9 @@ mod tests {
         let mut ui = PowerSettingsUI::with_battery(b);
         ui.set_active_tab(2);
         let cmds = ui.render(0.0, 0.0, 500.0);
-        let has_charge = cmds.iter().any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("35%")));
+        let has_charge = cmds
+            .iter()
+            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("35%")));
         assert!(has_charge);
     }
 
@@ -1113,7 +1272,9 @@ mod tests {
         let mut ui = PowerSettingsUI::new();
         ui.set_active_tab(2);
         let cmds = ui.render(0.0, 0.0, 500.0);
-        let has_no_battery = cmds.iter().any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("No battery")));
+        let has_no_battery = cmds
+            .iter()
+            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("No battery")));
         assert!(has_no_battery);
     }
 

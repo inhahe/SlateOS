@@ -99,7 +99,7 @@
 use bstr::ByteSlice;
 // The same TZ engine the libc's `strftime`/`localtime` use, so `printf '%(%Z)T'`
 // in osh and a C program's `date` can never disagree about local time.
-use tzrules::Tz;
+use tzrules::{Tz, TzFile, TzInfo};
 
 use std::borrow::Cow;
 use std::cell::RefCell;
@@ -108,7 +108,9 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::io::{self, BufRead, IsTerminal, Read, Seek, Write};
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command as PCommand, Stdio};
+use std::rc::Rc;
 use std::sync::{Arc, Mutex, RwLock, mpsc};
 
 use crate::arith::{self, VarLookup};
@@ -122,7 +124,7 @@ use crate::ast::{
     CondBinOp, CondBinary, CondUnary,
     CondExpr, DeclArray,
     ForArithClause, ForClause, FunctionDef, IfClause, LineMap, LoopClause, ParamOp, Pipeline,
-    Program, Redirect,
+    ProcSubBody, Program, Redirect,
     RedirectOp,
     ReplaceAnchor, SelectClause, SimpleCommand, SubshellClause, Word, WordPart,
 };
@@ -1784,28 +1786,25 @@ struct DiscardAbort {
     past_eval: bool,
 }
 
-/// An armed **fatal** abort: the status the shell ends with, and whether a
-/// handler in the way may answer 1 in its place.
+/// Where a `${ … }` scan's single forward pass stands between quotes — see
+/// [`Shell::brace_scanned_subs_slice`].
 ///
-/// The second field is the difference between bash's two ways of ending a
-/// shell from inside an expansion. Nearly all of them `jump_to_top_level`, and
-/// a jump is *interceptable*: whatever `setjmp (top_level)` sits between the
-/// error and the top — a subshell, a command substitution, a compound-command
-/// stage — catches it first and supplies its own status, which is why
-/// `set -u; ( echo $nope )` is 1 where the same reference at the top of a `-c`
-/// shell is 127. [`Shell::fatal_abort_status`] is that rule, and `demote` is
-/// how a site asks for it.
-///
-/// A few do not jump at all. `parser_error` (error.c) ends with
-///
-/// ```c
-///     if (exit_immediately_on_error)
-///       exit_shell (last_command_exit_value = 2);
-/// ```
-///
-/// — a direct call, with nothing in between to intercept. So the 2 stands
-/// wherever it was raised, in a script and inside a subshell alike, and such a
-/// site arms `demote: false`.
+/// The scan carries no quoting *context* the way an expansion does; it only
+/// steps over runs. A `'` sends it to `skip_single_quoted`, which hunts for the
+/// next `'` and reads nothing at all in between; a `"` sends it to
+/// `skip_double_quoted`, which hunts for the next `"` and reads a `$(` or a
+/// `${` on the way but has no row for `<(` or `>(`. Neither skipper knows the
+/// other's character, so each quote is an ordinary byte inside the other's run
+/// — which is why this is two flags and not one state.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct ScanQuote {
+    /// Inside a `' … '` run: nothing in it is read.
+    squote: bool,
+    /// Inside a `" … "` run: the `$(` and `${` rows still fire, the two
+    /// process-substitution spellings do not.
+    dquote: bool,
+}
+
 /// How `xparse_dolparen`'s read of a `$( … )` extent came out — see
 /// [`Shell::comsub_reparse_read`].
 ///
@@ -1870,6 +1869,28 @@ enum ArithRoute {
     Aborted,
 }
 
+/// An armed **fatal** abort: the status the shell ends with, and whether a
+/// handler in the way may answer 1 in its place.
+///
+/// The second field is the difference between bash's two ways of ending a
+/// shell from inside an expansion. Nearly all of them `jump_to_top_level`, and
+/// a jump is *interceptable*: whatever `setjmp (top_level)` sits between the
+/// error and the top — a subshell, a command substitution, a compound-command
+/// stage — catches it first and supplies its own status, which is why
+/// `set -u; ( echo $nope )` is 1 where the same reference at the top of a `-c`
+/// shell is 127. [`Shell::fatal_abort_status`] is that rule, and `demote` is
+/// how a site asks for it.
+///
+/// A few do not jump at all. `parser_error` (error.c) ends with
+///
+/// ```c
+///     if (exit_immediately_on_error)
+///       exit_shell (last_command_exit_value = 2);
+/// ```
+///
+/// — a direct call, with nothing in between to intercept. So the 2 stands
+/// wherever it was raised, in a script and inside a subshell alike, and such a
+/// site arms `demote: false`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct FatalAbort {
     /// The status the shell ends with where nothing intercepts the abort.
@@ -3945,12 +3966,12 @@ struct BoundCompound {
     /// Where the operand sat among the builtin's own words (`args`, i.e.
     /// `argv[1..]`), so it takes its turn at the position it was written.
     at: usize,
-    /// The operand as it was written, which the builtin's diagnostics name —
-    /// not `target`, which a nameref operand resolves to.
+    /// The operand as it was written, which is both what the builtin's
+    /// diagnostics name and what its operand loop is handed: bash's third
+    /// command is the word truncated at the `=` (`expand_declaration_argument`,
+    /// subst.c:12493), so it resolves the name for itself rather than
+    /// inheriting wherever phase 1's binding landed.
     name: String,
-    /// Where phase 1's binding actually landed, which is what the builtin's
-    /// attributes are applied to.
-    target: String,
     /// The builtin's half of a refusal phase 1 already reported once (a
     /// `noassign` name or a readonly global, both refused twice over). Present
     /// means the operand was abandoned whole: bash applies none of the
@@ -3968,29 +3989,6 @@ struct BoundCompound {
 enum DeclOperand<'a> {
     Word(&'a Str),
     Bound(&'a BoundCompound),
-}
-
-/// The flag letters [`Shell::apply_bound_compound`] acts on, gathered so the
-/// eleven of them travel as one argument.
-#[derive(Clone, Copy)]
-struct BoundCompoundFlags {
-    /// Both `-a` and `-A` were named in the `-` direction, which the builtin
-    /// refuses against the (associative) array the literal has already bound.
-    /// Decided by the caller rather than from `-a`/`-A` here, because only the
-    /// `declare` family makes the check at all: `readonly -aA q=(1)` and
-    /// `export -aA q=(1)` are separate entry points that never do, and `-p`
-    /// short-circuits into print mode before reaching it.
-    kind_conflict: bool,
-    unset_assoc: bool,
-    unset_indexed: bool,
-    nameref: bool,
-    unset_nameref: bool,
-    export: bool,
-    unset_export: bool,
-    readonly: bool,
-    unset_readonly: bool,
-    trace: bool,
-    unset_trace: bool,
 }
 
 /// What a declaration builtin's *word-expansion* half leaves for its *builtin*
@@ -5515,6 +5513,29 @@ pub struct Shell {
     /// the store — which is what [`Shell::with_live_binding`] does, and why the
     /// list it needs has to be visible from inside the builtin.
     declare_global_swap: Vec<(String, usize, VarSnapshot)>,
+    /// The name **step 1** of each compound operand resolved to, for the scoped
+    /// declaration currently expanding — `None` where no swap is in force.
+    ///
+    /// An array's kind is refused by whichever command is asked to change it,
+    /// and under a swap that is not the compound literal. `make_internal_declare`
+    /// runs first and refuses at declare.def:876; the literal that follows takes
+    /// one of `do_compound_assignment`'s two *scoped* branches (subst.c:3484,
+    /// 3513), and neither of those has a refusal in it —
+    /// `make_local_assoc_variable` and `convert_var_to_assoc` replace or convert
+    /// without a word. Only the unscoped `else` branch reports, which is the road
+    /// taken when there is no swap and so no entry here.
+    ///
+    /// The two commands do not resolve the same name (see
+    /// [`Shell::enter_global_scope`]), so the operand as written is not enough:
+    ///
+    /// ```sh
+    /// declare -n g=z                                  # step 1 restarts on `z`
+    /// f() { local -a g=(9); readonly -A g=([k]=v); }  # the literal stays home
+    /// ```
+    ///
+    /// `z` is unset, so nothing refuses and the frame's indexed `g` is converted
+    /// — where asking the *literal's* target would have refused it.
+    declare_step1_names: Option<Vec<(String, String)>>,
     /// Collects the `set -x` rendering of a compound assignment's elements while
     /// the literal is being expanded. `Some` only while `apply_assignment` binds a
     /// *declaration builtin's* compound operand with tracing on.
@@ -6366,6 +6387,7 @@ impl Shell {
             decl_builtin_ctx: false,
             readonly_kept_entry: false,
             declare_global_swap: Vec::new(),
+            declare_step1_names: None,
             xtrace_compound: None,
             compound_expanded: false,
             glob_error: None,
@@ -12489,7 +12511,7 @@ impl Shell {
                 }
                 // Double quotes: expand (params/cmd-sub run) but the result is
                 // matched literally, per bash.
-                WordPart::DoubleQuoted(parts) => {
+                WordPart::DoubleQuoted { parts, .. } => {
                     // Each word the quoted list broke off is escaped on its own:
                     // the break is between them, not inside either.
                     let items: Vec<Vec<EChar>> = self
@@ -12915,6 +12937,7 @@ impl Shell {
             decl_builtin_ctx: false,
             readonly_kept_entry: false,
             declare_global_swap: Vec::new(),
+            declare_step1_names: None,
             xtrace_compound: None,
             compound_expanded: false,
             glob_error: None,
@@ -16012,6 +16035,30 @@ impl Shell {
         self.scalar_for_subscript(name).map_or_else(Vec::new, |v| vec![v])
     }
 
+    /// The bounds text of a slice whose `(` never closed — bash reports
+    /// ``bad substitution: no closing `)' in <text>`` *instead of* either bound,
+    /// and only here, after everything that answers before the bounds are
+    /// measured (an unset parameter, an empty array). See
+    /// [`crate::ast::WordPart::ArraySlice`]'s `unclosed`, which documents the
+    /// cut this comes from.
+    ///
+    /// `no_longjmp_on_fatal_error` — [`Shell::prompt_expanding`] — **suppresses**
+    /// it rather than rewording it, and with the complaint gone the characters
+    /// go on to the evaluator, so the same text under `${x@P}` or `PS4` reports
+    /// the *arithmetic* error. Measured, `z=abcdef` and `x='${z:(1}'`:
+    /// `echo "${z:(1}"` is the bad substitution and the command is discarded,
+    /// while `echo "${x@P}"` says ``z: (1: missing `)'`` and prints `${z:(1}`.
+    ///
+    /// Returns `true` when it reported, which is every caller's "no field".
+    fn slice_bounds_unclosed(&mut self, unclosed: Option<&Str>) -> bool {
+        let Some(text) = unclosed.filter(|_| !self.prompt_expanding) else {
+            return false;
+        };
+        self.perrln(&bfmt![b"bad substitution: no closing `)' in ", text]);
+        self.arm_discard(1);
+        true
+    }
+
     /// Compute an array/positional slice (`${a[@]:off:len}`, `${@:off:len}`).
     ///
     /// The offset is a **subscript**, not a position, whenever the parameter has
@@ -16047,6 +16094,7 @@ impl Shell {
         star: bool,
         offset: &Word,
         length: &Option<Box<Word>>,
+        unclosed: Option<&Str>,
     ) -> Vec<Str> {
         let positional = name == "@" || name == "*";
         // The reference bash tags an offset/length arithmetic error with:
@@ -16080,7 +16128,7 @@ impl Shell {
         // bash's own walk does for it. See [`Self::in_target_scope`].
         let target = resolved.clone().and_then(RefTarget::into_name);
         self.in_opt_target_scope(resolved.as_ref(), move |sh| {
-            sh.slice_elements_resolved(target, positional, param_ref, offset, length)
+            sh.slice_elements_resolved(target, positional, param_ref, offset, length, unclosed)
         })
     }
 
@@ -16094,6 +16142,7 @@ impl Shell {
         param_ref: Str,
         offset: &Word,
         length: &Option<Box<Word>>,
+        unclosed: Option<&Str>,
     ) -> Vec<Str> {
         // A name that is no array at all is not a one-element list: bash falls
         // through to the plain `${v:off:len}` substring operator, so `v=scalar`
@@ -16103,7 +16152,7 @@ impl Shell {
             && !self.assoc.contains_key(t)
             && let Some(value) = self.vars.get(t).cloned()
         {
-            return self.scalar_slice(&value, offset, length, &param_ref);
+            return self.scalar_slice(&value, offset, length, unclosed, &param_ref);
         }
         // An associative array has no subscripts to count and bash does not
         // count its positions the ordinary way either. An *empty* one is left
@@ -16115,7 +16164,7 @@ impl Shell {
             .map(|m| m.values().cloned().collect::<Vec<Str>>())
             .filter(|v| !v.is_empty());
         if let Some(values) = assoc {
-            return self.assoc_slice(&values, offset, length, &param_ref);
+            return self.assoc_slice(&values, offset, length, unclosed, &param_ref);
         }
         // A real indexed array answers with its subscripts; everything else is
         // a gapless list whose position stands in for one.
@@ -16151,6 +16200,9 @@ impl Shell {
         // and neither does a set-but-empty scalar, which has one position and
         // went to [`Shell::scalar_slice`] above.
         if elems.is_empty() {
+            return Vec::new();
+        }
+        if self.slice_bounds_unclosed(unclosed) {
             return Vec::new();
         }
         let Some(mut off) = self.eval_arith_substr_bound(offset, &param_ref) else {
@@ -16240,8 +16292,12 @@ impl Shell {
         values: &[Str],
         offset: &Word,
         length: &Option<Box<Word>>,
+        unclosed: Option<&Str>,
         param_ref: BStr<'_>,
     ) -> Vec<Str> {
+        if self.slice_bounds_unclosed(unclosed) {
+            return Vec::new();
+        }
         let Some(off) = self.eval_arith_substr_bound(offset, param_ref) else {
             return Vec::new();
         };
@@ -16292,8 +16348,12 @@ impl Shell {
         value: BStr<'_>,
         offset: &Word,
         length: &Option<Box<Word>>,
+        unclosed: Option<&Str>,
         param_ref: BStr<'_>,
     ) -> Vec<Str> {
+        if self.slice_bounds_unclosed(unclosed) {
+            return Vec::new();
+        }
         let Some(off) = self.eval_arith_substr_bound(offset, param_ref) else {
             return Vec::new();
         };
@@ -18919,8 +18979,11 @@ impl Shell {
         let (epoch, _) = unix_time();
         let epoch = epoch as i64;
         // One reading for the whole prompt: `\t` and `\D{%Z}` in the same `PS1`
-        // must not straddle a `TZ` change, just as they share one `epoch`.
-        let tz = self.shell_tz();
+        // must not straddle a `TZ` change, just as they share one `epoch`. The
+        // snapshot owns its zoneinfo bytes, so the borrowed view below stays
+        // valid for the whole prompt even though the escapes take `&mut self`.
+        let zone = self.shell_tz();
+        let tz = zone.view();
         // The escapes insert *values* — the working directory, `$0`, the host
         // name — so what comes out is bytes even though the prompt source is
         // text: `PS1='\w$ '` in a directory whose name is not UTF-8 must still
@@ -21601,7 +21664,22 @@ impl Shell {
             names.iter().map(|n| (n, false)).chain(compound.iter().map(|n| (n, true)))
         {
             let bind = self.global_bind_names(name, compound, flags);
-            if flags.chklocal && self.chklocal_reaches_this_frame(name) {
+            // Which name the question is asked of, then, is the whole of the
+            // difference. `declare_internal` asks it of `nameref_cell (refvar)`
+            // — the cell the *global-only* walk ended on — and only falls back
+            // on the name as written where that walk found no reference at all
+            // (declare.def:735-741). [`Shell::global_chain_path`] is that walk,
+            // and its last element is that cell. A name no reference moves
+            // answers as itself, so the two questions part only over a chain.
+            let end = match compound {
+                true => None,
+                false => self.global_chain_path(name).and_then(|p| p.last().cloned()),
+            };
+            let asked = end.as_deref().unwrap_or(name.as_str());
+            if flags.chklocal && self.chklocal_reaches_this_frame(asked) {
+                // The literal stayed home while the restart went on: what step 1
+                // made at the far end is left behind, unswapped and empty, for
+                // there is nothing here to bind it to.
                 if let Some(last) = bind.names.last()
                     && last != name
                     && !self.chklocal_reaches_this_frame(last)
@@ -21804,6 +21882,33 @@ impl Shell {
         let names = match &end {
             GlobalChainEnd::Reached(RefTarget { base, sub: None, scope: RefScope::Live })
                 if base == name =>
+            {
+                Vec::new()
+            }
+            // The two walks land on the same variable, so there is nothing for
+            // the swap to move — and moving anything would be worse than
+            // useless. `find_global_variable` reads only its *first* link from
+            // the global table and every link after it innermost-first
+            // (variables.c:2400), so a chain that re-enters a name a local
+            // holds runs *through* that local: `declare -n g=z; declare -n z=g`
+            // under `local -n g=w` reads `g(global)→z→g(local)→w` and answers
+            // `w`. Un-shadowing `g` would splice the local out of the middle of
+            // that chain and leave `g→z→g`, a cycle — a different answer, and a
+            // pair of warnings bash never prints.
+            //
+            // It takes a **reference** in the global table for the two walks to
+            // differ at all, though: where the global binding is an ordinary
+            // variable the walk is one link long and stops on it, and then the
+            // swap is the whole of how it is reached — the live walk may spin
+            // through a local cycle to the same name and must not be the one
+            // that runs.
+            //
+            // Only the builtin's own walk is this walk. The compound literal
+            // asks a different question and is left to the arms below.
+            GlobalChainEnd::Reached(t)
+                if !compound
+                    && self.nameref_cell_in(name, 0).is_some()
+                    && self.walk_ref_name(name).target.as_ref() == Some(t) =>
             {
                 Vec::new()
             }
@@ -26980,23 +27085,33 @@ impl Shell {
     ///   word with two failing substitutions reports once, where the same word
     ///   under a prompt expansion (which suppresses the jump) reports twice.
     fn gobble_scan(&mut self, word: &Word) -> bool {
-        // bash never reaches the scanner for a word with no `{` in it at all
-        // (`brace_expand_word_list`'s `mbschr (…, LBRACE)`, subst.c:9905), and a
-        // word with no substitution in it has nothing for the scan to read
-        // either way. The second test is the cheap one and subsumes the first
-        // for this purpose: a `${` carries its own `{`.
+        // A word with no substitution in it has nothing for the scan to read.
+        // This is the cheap test, so it goes first.
         if self.expansion_failed() || !Self::has_gobbled_sub(&word.parts, false) {
+            return false;
+        }
+        // And bash never reaches the scanner at all for a word with no `{` in it
+        // — `brace_expand_word_list`'s `mbschr (…, LBRACE)` (subst.c:9905), over
+        // the word as written. A `${` carries its own `{` and so passes this on
+        // its own, but a backquote body does not: ``echo "p`echo $(fi)`q"``
+        // reaches the scanner nowhere and reports from the body's own run
+        // instead, where the same word with a `{,}` on the end is scanned.
+        let src = crate::unparse::word_src(word);
+        if !src.contains(&b'{') {
             return false;
         }
         // The tails have to be re-measured, because the gobbler's string is the
         // whole word — brackets included — and the parsed word carries the
         // scopes every other reader wants. See [`crate::unparse::gobbler_word`].
-        let scoped = crate::unparse::gobbler_word(word);
-        let mut subs: Vec<&WordPart> = Vec::new();
-        Self::gobbled_subs(&scoped.parts, false, &mut subs);
+        let scoped = crate::unparse::gobbler_word(word, self.parse_opts());
+        let mut subs: Vec<WordPart> = Vec::new();
+        self.gobbled_subs(&scoped.parts, false, &mut subs);
+        // …and the one spelling no part can stand for is found in the text.
+        self.gobbled_procsubs(&src, &mut subs);
+        let subs: Vec<&WordPart> = subs.iter().collect();
         // Whatever the read complains about, it is the scanner complaining and
         // the scanner was handed the whole word. See [`Shell::enter_scanned_word`].
-        let saved = self.enter_scanned_word(crate::unparse::word_src(word));
+        let saved = self.enter_scanned_word(src);
         let read = self.extent_read_of_subs(&subs);
         self.leave_inner_source(saved);
         matches!(read, ExtentRead::Aborted)
@@ -27010,8 +27125,39 @@ impl Shell {
             if Self::gobbler_reads(p) {
                 return true;
             }
-            if let WordPart::SingleQuoted { parts: sub, .. } = p {
-                return dquoted && sub.as_ref().is_some_and(|w| Self::has_gobbled_sub(w, true));
+            // A backquote inside `" … "` is answered yes without looking, since
+            // looking means lexing its body ([`Shell::gobbled_subs`]) and this
+            // is the test that exists to be cheap. Over-answering costs a scan
+            // that finds nothing and reports nothing; under-answering would lose
+            // the diagnostic outright.
+            if dquoted && matches!(p, WordPart::CommandSub { body: CmdSubBody::Backtick { .. } }) {
+                return true;
+            }
+            // A `<( … )` the parse left as characters is answered from the
+            // characters, and answered wide: the scan reads one only where its
+            // flat `quoted` has been cleared again, and this walk's `dquoted` is
+            // the *parse's* nesting, which says only that a run of quotes is in
+            // play at all. [`Shell::gobbled_procsubs`] settles it over the word's
+            // own text, and a scan that finds nothing reports nothing.
+            if let WordPart::Literal(text) = p {
+                return dquoted
+                    && (bytes::contains(text, b"<(") || bytes::contains(text, b">("));
+            }
+            if let WordPart::SingleQuoted { text, parts: sub, .. } = p {
+                if !dquoted {
+                    // The `'` row *is* reached at the top level, so the run is
+                    // skipped whole and holds nothing for the scan.
+                    return false;
+                }
+                if let Some(w) = sub.as_ref() {
+                    return Self::has_gobbled_sub(w, true);
+                }
+                // Otherwise the second reading has not been filled in yet —
+                // [`crate::unparse::gobbler_word`] does that, and it runs after
+                // this test. So answer from the text, and answer wide: inside
+                // `" … "` the only row of the gobbler that fires between the
+                // quotes is `$(`, and a scan that finds nothing reports nothing.
+                return bytes::contains(text, b"$(");
             }
             crate::unparse::nested_parts(p)
                 .into_iter()
@@ -27027,41 +27173,205 @@ impl Shell {
     /// [`WordPart::SingleQuoted`] met with `dquoted` false — the gobbler's
     /// `quoted` is 0 there, its `'` row is reached, and the run goes by unread.
     /// Inside `" … "` the `quoted` is `"`, that row is never reached, and the
-    /// run is read straight through; the parse can follow it because a subscript
-    /// and a substring bound carry the run's arithmetic reading beside its text
-    /// (see [`crate::ast::WordPart::SingleQuoted`]), which is precisely where
-    /// bash's own parser left a `'` standing as a character.
+    /// run is read straight through; the walk can follow it because the run
+    /// carries a second reading beside its text (see
+    /// [`crate::ast::WordPart::SingleQuoted`]) — the parser's own where a
+    /// subscript or a substring bound left a `'` standing as a character, and
+    /// otherwise the one [`crate::unparse::fill_quoted_runs`] makes for this
+    /// scan alone.
     ///
-    /// A `` ` … ` `` is left out for the same structural reason, and is *not*
-    /// exact: at the top level the gobbler's `quoted` becomes `` ` `` and the
-    /// body is skipped, which is what leaving it out gives — but inside `" … "`
-    /// a backquote is only a character to it, so a `$( … )` in the body is read
-    /// there. osh keeps a backquote body as text rather than as parts, so this
-    /// scan cannot reach it; see TD-OILS-A-BACKQUOTE-BODY-INSIDE-DOUBLE-QUOTES-
-    /// IS-NOT-GOBBLED in known-issues.md.
-    fn gobbled_subs<'a>(parts: &'a [WordPart], dquoted: bool, out: &mut Vec<&'a WordPart>) {
+    /// A `` ` … ` `` is two different things to the gobbler depending on the
+    /// same state. At the top level its `` ` `` row is reached, `quoted` becomes
+    /// `` ` ``, and the body is skipped whole — nothing to collect. Inside
+    /// `" … "` that row is *not* reached, so the backquote is only a character
+    /// and the scan reads straight on into the body, where the `$(` row of the
+    /// `quoted == '"'` branch still fires. So the body is lexed here, as what it
+    /// is to the scan — more double-quoted text — and walked like any other
+    /// nested scope.
+    ///
+    /// The lexed body's own tails stop at its end, and the gobbler's do not: it
+    /// was handed the whole word, so `extract_command_subst` there takes the
+    /// rest of the *word* and a diagnostic quotes it. Hence the glue —
+    /// `body tail` + `` ` `` + [`crate::ast::CmdSubBody::Backtick::tail`] — laid
+    /// on every substitution the body contributes. Measured against bash 5.2.37,
+    /// ``echo "p`echo "$(fi)"`q{,}"`` quotes ``fi)"`q{,}"``: the body's `"`, the
+    /// closing backquote, and the rest of the word.
+    ///
+    /// Neither a body nor a run is lexed whole, because the scan's state does
+    /// not nest: a `"` inside either one is `c == quoted` and clears it, after
+    /// which a `'` or a `` ` `` opens a stretch the `$(` row cannot fire in.
+    /// Both readers ask [`crate::wordscan::gobbler_readable`] which stretches
+    /// the scan is reading in and lex only those.
+    fn gobbled_subs(&mut self, parts: &[WordPart], dquoted: bool, out: &mut Vec<WordPart>) {
         for p in parts {
             if Self::gobbler_reads(p) {
-                out.push(p);
+                out.push(p.clone());
+                continue;
+            }
+            if let WordPart::CommandSub { body: CmdSubBody::Backtick { verbatim, tail, .. } } = p {
+                if dquoted {
+                    self.gobbled_backtick_subs(verbatim, tail, out);
+                }
                 continue;
             }
             // …and inside `" … "` the `'` row is not reached, so the run is read
-            // straight through. The only such run the parse carries is a
-            // subscript's or a substring bound's, which is exactly where bash's
-            // own parser left a `'` standing as a character; its interior is the
-            // second reading beside the text. See
+            // straight through. Its interior is the second reading carried
+            // beside the text — filled at parse time for a subscript and a
+            // substring bound, where bash's own parser left a `'` standing as a
+            // character, and by [`crate::unparse::fill_quoted_runs`] for every
+            // other run this scan walks into. See
             // [`crate::ast::WordPart::SingleQuoted`].
             if let WordPart::SingleQuoted { parts: sub, .. } = p {
                 if let (true, Some(w)) = (dquoted, sub.as_ref()) {
-                    Self::gobbled_subs(w, true, out);
+                    self.gobbled_subs(w, true, out);
                 }
                 continue;
             }
             // Every other scope, a `[ … ]` subscript included: the gobbler has
             // no bracket row, so it simply reads on through them.
             for (kind, w) in crate::unparse::nested_parts(p) {
-                Self::gobbled_subs(w, dquoted || kind == Nested::Quoted, out);
+                self.gobbled_subs(w, dquoted || kind == Nested::Quoted, out);
             }
+        }
+    }
+
+    /// The substitutions a backquote body contributes when the gobbler walks
+    /// into it — which it does only from inside `" … "`. See
+    /// [`Shell::gobbled_subs`].
+    ///
+    /// The body is lexed as double-quoted text because that is exactly what the
+    /// scan takes it for: its `` ` `` row is unreachable there, so the opening
+    /// backquote never changed `quoted` and everything after it is still being
+    /// read in the `"` state. A body that will not lex holds nothing this scan
+    /// can read — the same answer [`Shell::extent_read_of_rest`] gives its own
+    /// remainder, and not a diagnostic of its own.
+    ///
+    /// It is lexed in stretches rather than whole, because the scan's state is
+    /// flat: a `"` **inside** the body is `c == quoted` and clears it, after
+    /// which a `'` or a `` ` `` opens a stretch the `$(` row cannot fire in.
+    /// [`crate::wordscan::gobbler_readable`] says which stretches those are, and
+    /// only they are read. What follows a stretch is still part of every
+    /// diagnostic raised inside it, though — `extract_command_subst` was handed
+    /// the whole word — so the glue carries the rest of the body as well as the
+    /// closing backquote and the word's own remainder.
+    fn gobbled_backtick_subs(
+        &mut self,
+        verbatim: BStr<'_>,
+        tail: BStr<'_>,
+        out: &mut Vec<WordPart>,
+    ) {
+        for r in crate::wordscan::gobbler_readable(verbatim, true) {
+            let Some(piece) = verbatim.get(r.clone()) else {
+                continue;
+            };
+            let Ok(body) = crate::parser::dquote_word_from_source(piece, self.parse_opts()) else {
+                continue;
+            };
+            // Re-scoped for the gobbler like the enclosing word was: its
+            // brackets are not a scope either, and a backquote nested in this
+            // stretch wants the remainder of *this* stretch before the glue
+            // below carries it further out.
+            let body = crate::unparse::gobbler_word(&body, self.parse_opts());
+            let start = out.len();
+            self.gobbled_subs(&body.parts, true, out);
+            let rest = verbatim.get(r.end..).unwrap_or_default();
+            let suffix = bfmt![rest, b"`", tail];
+            for p in out.iter_mut().skip(start) {
+                Self::extend_gobbled_tail(p, &suffix);
+            }
+        }
+    }
+
+    /// The `<( … )` and `>( … )` the gobbler reads that the parse left standing
+    /// as characters, spliced into `out` where the scan meets them.
+    ///
+    /// bash's parser reads a process substitution wherever it meets one —
+    /// `parse_matched_pair` names `<(`, `>(` and `$(` in one breath
+    /// (parse.y:5028) — but its `" … "` is a recursive call of that same
+    /// function with no such row, so a `<(` written inside a quoted run is
+    /// characters and nothing else. The gobbler's state does not nest, and the
+    /// *inner* `"` of `"${z:-"<(fi)"}"` clears it outright, so those same
+    /// characters are its unquoted comsub row (braces.c:675) and it parses them.
+    /// Measured against bash 5.2.37, that word reports `` `fi)"}"' `` where the
+    /// quotes one place over — `"${z:-"a"<(fi)"b"}"`, whose `<(` the parity
+    /// leaves *inside* the quotes — is a script syntax error instead, the parser
+    /// having reached that one. So there is no [`WordPart`] to walk to here and
+    /// [`Shell::gobbled_subs`] cannot answer: the text is the only record.
+    ///
+    /// The body is not carved out with a paren count but lexed, because a count
+    /// is not what the gobbler does with the extent: `extract_command_subst`
+    /// hands it to `xparse_dolparen`, a real parse, to which a `(` inside a
+    /// quoted run of the body is not a nesting level. Lexing `$(` and the rest
+    /// of the word *is* that read — the two spellings reach the same function —
+    /// and it settles the body, the remainder and whether there was a `)` at all
+    /// in one go.
+    ///
+    /// Where each lands among the substitutions the structural walk already
+    /// found is read off the remainders: every one of them is measured against
+    /// the whole word ([`crate::unparse::gobbler_word`]), so a longer remainder
+    /// is an earlier meeting.
+    fn gobbled_procsubs(&mut self, src: BStr<'_>, out: &mut Vec<WordPart>) {
+        for at in crate::wordscan::gobbler_procsubs(src, false) {
+            let Some(rest) = src.get(at.saturating_add(2)..) else {
+                continue;
+            };
+            let probe = bfmt![b"$(", rest];
+            let Ok(word) = crate::parser::dquote_word_from_source(&probe, self.parse_opts()) else {
+                continue;
+            };
+            // A body that begins `(` is the one shape the swap does not carry:
+            // the lexer reads `$((` as an arithmetic, where the gobbler's row
+            // was the `<(` and the `(` is only the body's first byte. Nothing
+            // this scan reports hangs on it — an arithmetic extent cannot fail
+            // the way a parse can — so it is passed over rather than modelled.
+            let Some(part @ WordPart::CommandSub { body: CmdSubBody::Unread { .. } }) =
+                word.parts.first()
+            else {
+                continue;
+            };
+            let tail = Self::gobbled_tail_len(part).unwrap_or(0);
+            let idx = out
+                .iter()
+                .position(|p| Self::gobbled_tail_len(p).is_some_and(|n| n < tail))
+                .unwrap_or(out.len());
+            out.insert(idx, part.clone());
+        }
+    }
+
+    /// How much of the word follows a substitution this scan read — the key
+    /// [`Shell::gobbled_procsubs`] orders by, and `None` for a part carrying no
+    /// remainder at all.
+    fn gobbled_tail_len(p: &WordPart) -> Option<usize> {
+        match p {
+            WordPart::ArithSub { tail, .. }
+            | WordPart::CommandSub {
+                body:
+                    CmdSubBody::Unread { tail, .. }
+                    | CmdSubBody::ArithFallback { tail, .. }
+                    | CmdSubBody::Backtick { tail, .. },
+            } => Some(tail.len()),
+            WordPart::CommandSub { body: CmdSubBody::Parsed { tail, .. } } => {
+                tail.as_ref().map(Vec::len)
+            }
+            _ => None,
+        }
+    }
+
+    /// Carry a substitution's remainder past the end of the string it was lexed
+    /// from — the glue [`Shell::gobbled_backtick_subs`] lays on.
+    fn extend_gobbled_tail(p: &mut WordPart, suffix: BStr<'_>) {
+        match p {
+            WordPart::ArithSub { tail, .. }
+            | WordPart::CommandSub {
+                body:
+                    CmdSubBody::Unread { tail, .. }
+                    | CmdSubBody::ArithFallback { tail, .. }
+                    | CmdSubBody::Backtick { tail, .. },
+            } => tail.extend_from_slice(suffix),
+            WordPart::CommandSub { body: CmdSubBody::Parsed { tail, .. } } => {
+                tail.get_or_insert_with(Str::new).extend_from_slice(suffix);
+            }
+            _ => {}
         }
     }
 
@@ -27243,7 +27553,7 @@ impl Shell {
                     push_chars(&mut cur, s.as_bytes(), true);
                     started = true;
                 }
-                WordPart::DoubleQuoted(parts) => {
+                WordPart::DoubleQuoted { parts, .. } => {
                     let items = quoted_echars(&self.cond_dquote_items(parts));
                     lay_out_fields(&items, &mut broken, &mut cur, &mut open);
                     started = true;
@@ -27354,8 +27664,9 @@ impl Shell {
                 star: false,
                 offset,
                 length,
+                unclosed,
             } => {
-                let elems = self.slice_elements(name, false, offset, length);
+                let elems = self.slice_elements(name, false, offset, length, unclosed.as_ref());
                 Some(self.join_derived_nosplit(&elems))
             }
             WordPart::ArrayKeys { name, star: false } => {
@@ -27557,10 +27868,11 @@ impl Shell {
                     star,
                     offset,
                     length,
+                    unclosed,
                 },
             ] if !*star || self.star_unjoins() => {
                 self.saw_quoted_list |= !*star;
-                Some(self.slice_elements(name, *star, offset, length))
+                Some(self.slice_elements(name, *star, offset, length, unclosed.as_ref()))
             }
             // `"${a[@]#pat}"` / `"${@^^}"` — one field per element
             // after the element-wise transform.
@@ -27777,7 +28089,7 @@ impl Shell {
                     }
                     open = true;
                 }
-                WordPart::DoubleQuoted(parts) => {
+                WordPart::DoubleQuoted { parts, .. } => {
                     // `"${arr[@]}"` (and `"$@"`) expand to one field per element,
                     // preserving embedded whitespace; empty arrays yield no field.
                     // `"${!arr[@]}"` does the same over the keys/indices.
@@ -28305,9 +28617,10 @@ impl Shell {
             }
             let WordPart::Literal(text) = part else {
                 out.push(match part {
-                    WordPart::DoubleQuoted(inner) => {
-                        WordPart::DoubleQuoted(self.arith_subscript_parts(inner))
-                    }
+                    WordPart::DoubleQuoted { parts: inner, closed } => WordPart::DoubleQuoted {
+                        parts: self.arith_subscript_parts(inner),
+                        closed: *closed,
+                    },
                     other => other.clone(),
                 });
                 cur = pe;
@@ -28496,7 +28809,7 @@ impl Shell {
                     cur.extend_from_slice(t.as_bytes());
                     at_tilde_pos = false;
                 }
-                WordPart::DoubleQuoted(parts) => {
+                WordPart::DoubleQuoted { parts, .. } => {
                     cur.extend_from_slice(&self.expand_double_quoted(parts));
                     at_tilde_pos = false;
                 }
@@ -28563,7 +28876,7 @@ impl Shell {
                     out.extend_from_slice(t.as_bytes());
                     at_tilde_pos = false;
                 }
-                WordPart::DoubleQuoted(parts) => {
+                WordPart::DoubleQuoted { parts, .. } => {
                     out.extend_from_slice(&self.expand_double_quoted(parts));
                     at_tilde_pos = false;
                 }
@@ -28826,7 +29139,7 @@ impl Shell {
             match part {
                 WordPart::Literal(s) => self.push_literal_annotated(&mut buf, s, idx == 0),
                 WordPart::SingleQuoted { text, .. } => push_chars(&mut buf, text.as_bytes(), true),
-                WordPart::DoubleQuoted(parts) => {
+                WordPart::DoubleQuoted { parts, .. } => {
                     let items = quoted_echars(&self.cond_dquote_items(parts));
                     lay_out_fields(&items, &mut broken, &mut buf, &mut open);
                 }
@@ -29129,7 +29442,7 @@ impl Shell {
                     // Single-quoted: fully literal, including any `&`.
                     out.extend(bytes::chars(s.as_bytes()).map(ReplTok::Lit));
                 }
-                WordPart::DoubleQuoted(parts) => {
+                WordPart::DoubleQuoted { parts, .. } => {
                     // Double-quoted: the expansion is quoted, so `&` is literal.
                     let s = self.expand_double_quoted(parts);
                     out.extend(bytes::chars(s.as_bytes()).map(ReplTok::Lit));
@@ -29252,7 +29565,7 @@ impl Shell {
         // the scan would be *inside*, and the substitutions in them are read
         // where they stand — by [`Self::command_sub_body_inner`], which answers
         // the string-level rule instead.
-        if matches!(part, WordPart::DoubleQuoted(_)) {
+        if matches!(part, WordPart::DoubleQuoted { .. }) {
             return false;
         }
         // Nor is a `$(( … ))` or a `$[ … ]`. Its own arm reads it —
@@ -29344,6 +29657,23 @@ impl Shell {
                     None => continue,
                     Some(read) => return read,
                 }
+            }
+            // The other two spellings of the same read, and the same read of
+            // them: `extract_command_subst` does not know which delimiter sent
+            // it, so a body that will not parse fails identically. See
+            // [`crate::ast::ProcSubBody::Unread`].
+            if let WordPart::ProcSub { body: ProcSubBody::Unread { src, tail, closed }, .. } = sub {
+                let read = self.comsub_reparse_read(src, tail, *closed);
+                if let ExtentRead::Abandoned { rest, .. } = &read {
+                    if !rest.is_empty() {
+                        return self.extent_read_of_rest(&rest.clone());
+                    }
+                    return read;
+                }
+                if read != ExtentRead::Closed {
+                    return read;
+                }
+                continue;
             }
             let WordPart::CommandSub { body } = sub else {
                 continue;
@@ -29557,7 +29887,7 @@ impl Shell {
             // `if (c == '"') { dquote = !dquote; i++; continue; }` — the quote
             // itself never reaches `temp`, and what it held is scanned by the
             // same loop with `dquote` raised.
-            if let WordPart::DoubleQuoted(inner) = p {
+            if let WordPart::DoubleQuoted { parts: inner, .. } = p {
                 Self::stripdq_quoted_text(inner, &mut out);
             } else {
                 out.push_str(&crate::unparse::parts_src(std::slice::from_ref(p)));
@@ -29618,11 +29948,11 @@ impl Shell {
                 WordPart::Literal(_) => {}
                 // A `"` is stripped and what it held is scanned by the same
                 // loop, which is the state this walk is already in.
-                WordPart::DoubleQuoted(inner) => Self::rhs_scanned_subs(inner, out),
+                WordPart::DoubleQuoted { parts: inner, .. } => Self::rhs_scanned_subs(inner, out),
                 // The `${` half of the same row hands the brace to
                 // `extract_dollar_brace_string` — the brace scan, entered fresh,
                 // so its single-quote state neither inherits nor leaks.
-                _ => Self::brace_scanned_subs_in(p, out, &mut false),
+                _ => Self::brace_scanned_subs_in(p, out, &mut ScanQuote::default()),
             }
         }
     }
@@ -29636,12 +29966,50 @@ impl Shell {
     fn extent_read_of_rest(&mut self, rest: BStr<'_>) -> ExtentRead {
         // A remainder that will not lex holds nothing this scan can read, and is
         // not a diagnostic of its own — see [`Shell::expand_extent_rest`].
-        let Ok(word) = crate::parser::dquote_word_from_source(rest, self.parse_opts()) else {
+        //
+        // …and lexed the way the *scan* walks it, not the way the expansion
+        // does: this text is the scan's own remainder, so its `<( … )` and
+        // `>( … )` are read for their extent exactly as a `$( … )` is. See
+        // [`crate::parser::brace_scan_word_from_source`]. Whether the scan was
+        // inside a quote when it reached one of them is
+        // [`Shell::brace_scanned_subs_slice`]'s question, below.
+        let Ok(word) = crate::parser::brace_scan_word_from_source(rest, self.parse_opts()) else {
             return ExtentRead::Closed;
         };
         let mut subs: Vec<&WordPart> = Vec::new();
-        Self::brace_scanned_subs_slice(&word.parts, &mut subs, &mut false);
+        Self::brace_scanned_subs_slice(&word.parts, &mut subs, &mut ScanQuote::default());
         self.extent_read_of_subs(&subs)
+    }
+
+    /// The reads a `${ … }` scan had already made by the time it discovered it
+    /// had no `}` — run here because the discovery is the *last* thing
+    /// `extract_dollar_brace_string` does and every read it passed on the way
+    /// has already reported.
+    ///
+    /// The scan is one forward pass that reports as it goes (subst.c:1874-1960):
+    /// its `$(` row hands the rest of the string to `xparse_dolparen`, whose
+    /// diagnostic is printed there and then, and only when the walk finally runs
+    /// out of text does `if (c == 0 && nesting_level)` raise the `bad
+    /// substitution` (subst.c:1975-1988). So the two are ordered, and both
+    /// happen: measured against bash 5.2.37 under `${…@P}`, `A${z:-P1$(echo
+    /// hi⏎S1}B` prints `unexpected EOF while looking for matching `)'` and
+    /// *then* names the whole word. [`Shell::brace_extent_scan`] is this same
+    /// pass for a brace that did close; this is the arm for one that did not,
+    /// where there is no `${ … }` part left to hand it and only the undecoded
+    /// text survives.
+    ///
+    /// `src` is that text, from the `$` — the body is what follows the `${`, and
+    /// it is lexed as the string it is for the reason
+    /// [`Shell::extent_read_of_rest`] lexes its own remainder. The `}` the scan
+    /// never found is an ordinary byte to that lex, which is exactly right: it
+    /// is a byte the scan never reached either.
+    ///
+    /// `true` means the read raised the jump ([`ExtentRead::Aborted`]) and the
+    /// brace's own ending is never reached — the caller returns without a
+    /// second complaint.
+    fn unclosed_brace_reads(&mut self, src: BStr<'_>) -> bool {
+        let body = src.get(2..).unwrap_or_default().to_vec();
+        matches!(self.extent_read_of_rest(&body), ExtentRead::Aborted)
     }
 
     /// The `$((` count a `${ … }` scan runs over `s`, for the two spellings
@@ -30091,24 +30459,34 @@ impl Shell {
     /// single quotes — so the run starts fresh and leaves the outer state as it
     /// found it.
     fn brace_scanned_subs<'a>(part: &'a WordPart, out: &mut Vec<&'a WordPart>) {
-        Self::brace_scanned_subs_in(part, out, &mut false);
+        Self::brace_scanned_subs_in(part, out, &mut ScanQuote::default());
     }
 
     fn brace_scanned_subs_in<'a>(
         part: &'a WordPart,
         out: &mut Vec<&'a WordPart>,
-        squote: &mut bool,
+        q: &mut ScanQuote,
     ) {
-        let dq = matches!(part, WordPart::DoubleQuoted(_));
-        let saved = dq.then(|| std::mem::replace(squote, false));
+        // A double-quoted *part* is a `"` the word lex found — which is the
+        // scan's `"` only where the scan was not already inside a `' … '` run
+        // of its own. Inside one the quotes are ordinary characters it stepped
+        // over, so the run's contents sit at brace level as far as the scan is
+        // concerned and its state simply carries on through them (the `'` that
+        // ends the run is in there too, and closes it where it stands).
+        //
+        // Outside one the `"` really does open `skip_double_quoted`, which
+        // reads a `$(` but knows nothing of single quotes — so the run starts
+        // fresh and leaves the outer state as it found it.
+        let dq = matches!(part, WordPart::DoubleQuoted { .. }) && !q.squote;
+        let saved = dq.then(|| std::mem::replace(q, ScanQuote { squote: false, dquote: true }));
         for (kind, parts) in crate::unparse::nested_parts(part) {
             if kind == crate::unparse::Nested::Index {
                 continue;
             }
-            Self::brace_scanned_subs_slice(parts, out, squote);
+            Self::brace_scanned_subs_slice(parts, out, q);
         }
         if let Some(s) = saved {
-            *squote = s;
+            *q = s;
         }
     }
 
@@ -30119,7 +30497,7 @@ impl Shell {
     fn brace_scanned_subs_slice<'a>(
         parts: &'a [WordPart],
         out: &mut Vec<&'a WordPart>,
-        squote: &mut bool,
+        q: &mut ScanQuote,
     ) {
         for p in parts {
             match p {
@@ -30129,13 +30507,39 @@ impl Shell {
                 // order (subst.c:1431-1437). A `$[ … ]` is not that row —
                 // `string[i+1]` is `[`, not `(` — so nothing reads it and the
                 // scan meets what is inside it directly.
-                WordPart::CommandSub { .. } | WordPart::ArithSub { bracket: false, .. } => {
-                    if !*squote {
+                // The scan's `$(` row is really three: `extract_dollar_brace_
+                // string` names `$(`, `<(` and `>(` together and hands each to
+                // the same `extract_command_subst` (subst.c:1881-1950). So a
+                // process substitution in a body is read for its extent exactly
+                // as the dollar spelling is, wherever in the braces it sits —
+                // measured, `x='A${z#<(fi)}B'; echo "${x@P}"` reports the parse
+                // twice and then `bad substitution`, byte for byte as
+                // `$(fi)` there does.
+                //
+                // Only the unread spelling is here. A body a parser read is a
+                // [`crate::ast::ProcSubBody::Parsed`], and what this scan meets
+                // of one is its re-print, which parses back.
+                WordPart::CommandSub { .. }
+                | WordPart::ArithSub { bracket: false, .. }
+                | WordPart::ProcSub { body: ProcSubBody::Unread { .. }, .. } => {
+                    // A `' … '` run hides all three; a `" … "` run hides only
+                    // the two process-substitution spellings, because the `"`
+                    // sends the scan into `skip_double_quoted`, whose own row
+                    // is the `$(`/`${` pair alone. Measured against bash
+                    // 5.2.37 under `${…@P}`: `A${z:-"P1<(echo hi⏎S1}B` reports
+                    // nothing but `bad substitution`, where the same word
+                    // written `$(` reports the unterminated read first.
+                    let hidden = if q.dquote { Self::procsub_spelling(p) } else { q.squote };
+                    if !hidden {
                         out.push(p);
                     }
                 }
                 // The literal runs *are* the raw text between the constructs,
-                // which is the only text the scan reads a quote out of.
+                // which is the only text the scan reads a quote out of. Each
+                // quote is invisible inside the other's run, exactly as the two
+                // skippers are: `skip_single_quoted` hunts for a `'` and
+                // `skip_double_quoted` for a `"`, and neither knows the other
+                // character at all.
                 WordPart::Literal(t) => {
                     let mut it = t.iter();
                     while let Some(&b) = it.next() {
@@ -30143,13 +30547,26 @@ impl Shell {
                             b'\\' => {
                                 it.next();
                             }
-                            b'\'' => *squote = !*squote,
+                            b'\'' if !q.dquote => q.squote = !q.squote,
+                            b'"' if !q.squote => q.dquote = !q.dquote,
                             _ => {}
                         }
                     }
                 }
-                _ => Self::brace_scanned_subs_in(p, out, squote),
+                _ => Self::brace_scanned_subs_in(p, out, q),
             }
+        }
+    }
+
+    /// Whether `part` is one of the scan's two *process*-substitution
+    /// spellings — the ones `skip_double_quoted` does not have a row for. Both
+    /// carry their delimiter because a body no parser read has one shape for
+    /// all three openers; see [`crate::ast::SubDelim`].
+    fn procsub_spelling(part: &WordPart) -> bool {
+        match part {
+            WordPart::ProcSub { body: ProcSubBody::Unread { .. }, .. } => true,
+            WordPart::CommandSub { body: CmdSubBody::Unread { delim, .. } } => !delim.is_performed(),
+            _ => false,
         }
     }
 
@@ -30268,6 +30685,7 @@ impl Shell {
                 index,
                 offset,
                 length,
+                unclosed,
             } => {
                 // `${x:off:len}` — a malformed offset/length is fatal (bash), and
                 // a negative length that puts the end before the start is a fatal
@@ -30309,7 +30727,7 @@ impl Shell {
                             .ref_label
                             .clone()
                             .unwrap_or_else(|| crate::unparse::name_sub(name, index));
-                        self.scalar_slice(&value, offset, length, &param_ref)
+                        self.scalar_slice(&value, offset, length, unclosed.as_ref(), &param_ref)
                             .into_iter()
                             .next()
                             .unwrap_or_default()
@@ -30391,8 +30809,9 @@ impl Shell {
                 star,
                 offset,
                 length,
+                unclosed,
             } => {
-                let fields = self.slice_elements(name, *star, offset, length);
+                let fields = self.slice_elements(name, *star, offset, length, unclosed.as_ref());
                 self.join_derived(&fields, *star)
             }
             WordPart::ArrayBulk { name, star, op } => {
@@ -30433,7 +30852,7 @@ impl Shell {
             // The substitution's path is a temp file name this shell generates,
             // so it is ASCII by construction — the only place a value's bytes are
             // known to be text.
-            WordPart::ProcSub { input, body } => self.proc_sub(*input, body).into_bytes(),
+            WordPart::ProcSub { input, body } => self.proc_sub_body(*input, body),
             // The extent read comes first, exactly as it does for a `${ … }`:
             // `param_expand` extracts the whole `$(( … ))` before it expands a
             // byte of it, and a `$( … )` inside is really parsed there. See
@@ -30646,7 +31065,7 @@ impl Shell {
             WordPart::TokenText(raw) => raw.clone(),
             // Literal/quoted handled by callers.
             WordPart::Literal(s) | WordPart::SingleQuoted { text: s, .. } => s.clone(),
-            WordPart::DoubleQuoted(parts) => self.expand_double_quoted(parts),
+            WordPart::DoubleQuoted { parts, .. } => self.expand_double_quoted(parts),
             // Not handled by callers: the text this produces is `add_string`ed
             // into the word being built, so it joins as ordinary *unquoted*
             // characters — which is what every walk's fall-through arm does with
@@ -31018,7 +31437,44 @@ impl Shell {
             return Str::new();
         }
         match u {
-            Unclosed::BadSubst { close, text, .. } => {
+            Unclosed::BadSubst { close, src, text } => {
+                // A `${ … }` that ran out is not necessarily the missing brace.
+                // `parameter_brace_expand` reads the *name* first (subst.c:9545)
+                // and judges it (subst.c:9694, 9803) before it ever calls
+                // `extract_dollar_brace_string` (subst.c:9891), so a name that
+                // swallowed the rest of the text — or one no variable could be
+                // called — is a plain "bad substitution" raised where the brace
+                // has not yet been missed. Which it is turns on the name alone;
+                // see [`Shell::unterminated_brace_kind`], which the arithmetic
+                // scanner already asks the same question of.
+                //
+                // This runs ahead of the reads below because bash's do: the
+                // nested `$( … )` of `a${m$(fi) b` is inside the *name*, which
+                // `string_extract` walks over without parsing, so bash names the
+                // bad substitution and never sees the `fi`.
+                if *close == '}' {
+                    match Self::unterminated_brace_kind(src.get(2..).unwrap_or_default()) {
+                        UntermBrace::BadSub => return self.unclosed_bad_substitution(text),
+                        UntermBrace::Indir(name) => {
+                            // The pointer is resolved in the missing brace's
+                            // place, and its own failures come out instead.
+                            if !self.arith_indir_resolves(&name) {
+                                return Str::new();
+                            }
+                        }
+                        UntermBrace::NoClosing => {}
+                    }
+                }
+                // The scan reported everything it read before it ran out of
+                // text to read; only then is there a brace with nothing to
+                // close on. See [`Shell::unclosed_brace_reads`] — and note the
+                // `$[` spelling makes no reads at all, its
+                // `extract_arithmetic_subst` passing flags `0` (subst.c:1299),
+                // so `v='A$[1+$(for⏎xB'` is silent in bash where the same body
+                // between braces names the `for`.
+                if *close == '}' && self.unclosed_brace_reads(src) {
+                    return Str::new();
+                }
                 if self.prompt_expanding {
                     if *close == '}' {
                         self.emit_stderr(&bfmt![
@@ -31063,11 +31519,11 @@ impl Shell {
                     b"\n"
                 ]);
             }
-            Unclosed::Backquote { src } => {
+            Unclosed::Backquote { text, .. } => {
                 self.emit_stderr(&bfmt![
                     self.err_prefix(),
                     b"bad substitution: no closing \"`\" in ",
-                    src,
+                    text,
                     b"\n"
                 ]);
                 if self.prompt_expanding {
@@ -31085,6 +31541,29 @@ impl Shell {
         // `echo after=$?` after `cat <<E`/`${x:-a`/`E`, while `set -e` does not.
         self.note_shell_error(FatalWhen::ErrexitOnly);
         Str::new()
+    }
+
+    /// The "bad substitution" of a `${ … }` in unread text whose *name* scan is
+    /// what gave up — see [`Shell::unterminated_brace_kind`].
+    ///
+    /// `text` is bash's `string`, and `string` is what the report echoes
+    /// (`report_error ("%s: bad substitution", string)`, subst.c:10029), so it is
+    /// named outright rather than left to whatever word context happens to be
+    /// standing: a here-document body names the body, and an arithmetic fragment
+    /// names the fragment, in both cases including the text around the
+    /// construct.
+    fn unclosed_bad_substitution(&mut self, text: &Str) -> Str {
+        if self.prompt_expanding {
+            // `no_longjmp_on_fatal_error` costs the expansion nothing but its
+            // value here — the same arm the missing-brace spelling takes below.
+            self.emit_stderr(&bfmt![self.err_prefix(), text, b": bad substitution\n"]);
+            self.prompt_failed = true;
+            return Str::new();
+        }
+        let saved = self.bad_sub_word.replace(text.clone());
+        let out = self.bad_substitution_with(text, false);
+        self.bad_sub_word = saved;
+        out
     }
 
     /// The fatal "bad substitution" raised by an unrecognised `@` transform
@@ -33635,9 +34114,14 @@ impl Shell {
                 star,
                 offset,
                 length,
-            } => Some(SplitItems::List(
-                self.slice_elements(name, *star, offset, length),
-            )),
+                unclosed,
+            } => Some(SplitItems::List(self.slice_elements(
+                name,
+                *star,
+                offset,
+                length,
+                unclosed.as_ref(),
+            ))),
             WordPart::ArrayOp {
                 name,
                 star,
@@ -33970,6 +34454,22 @@ impl Shell {
     /// body's own error was itself fatal (a nested `$( … )`) — and carries on
     /// with the enclosing command.
     fn command_sub_body(&mut self, body: &CmdSubBody) -> Str {
+        // Only the `$(` spelling is *performed*. The other two reach a body
+        // here when a `${ … }` scan read their extent and nothing else did:
+        // `extract_dollar_brace_string` names all three in one row
+        // (subst.c:1881-1950), so the read is shared, but the text it read is
+        // then expanded as a word — and `expand_word_internal` declines a
+        // process substitution under `W_DQUOTE` (subst.c:9942), which the
+        // re-read of a `${x@P}` always is. Measured against bash 5.2.37:
+        // `x='A${z:-<(echo HI)}B'; echo ${x@P}` prints `A<(echo HI)B` and runs
+        // nothing, quoted or not. So the part stands as the text it was
+        // written as — no child, and no `comsub_count` bump either, because no
+        // substitution ran. See [`crate::ast::SubDelim`].
+        if let CmdSubBody::Unread { delim, src, closed, .. } = body
+            && !delim.is_performed()
+        {
+            return bfmt![delim.bytes(), src, if *closed { b")".as_slice() } else { b"" }];
+        }
         // Count every command substitution so callers (e.g. pure assignments)
         // can tell whether one ran while expanding a value.
         self.comsub_count = self.comsub_count.wrapping_add(1);
@@ -34729,6 +35229,30 @@ impl Shell {
     /// enclosing command finishes (see [`Shell::finish_procsubs`]). This is not
     /// streaming — a `<(tail -f)`-style infinite producer would block here — which
     /// is a documented limitation (see known-issues TD-OILS22).
+    /// [`Shell::proc_sub`] over whichever read found the body — see
+    /// [`ProcSubBody`].
+    ///
+    /// An unread body is parsed here rather than at parse time, because no
+    /// parser read the text it was written in. Reaching this at all means the
+    /// `${ … }` scan's own read of it succeeded
+    /// ([`Shell::extent_read_of_subs`]), so it parses; the one caller that can
+    /// arrive with a body that does not is a prompt expansion, where that read
+    /// is suppressed, and there the construct stands as the text it was written
+    /// as — nothing ran, so there is no path to substitute.
+    fn proc_sub_body(&mut self, input: bool, body: &ProcSubBody) -> Str {
+        let open: &[u8] = if input { b"<(" } else { b">(" };
+        match body {
+            ProcSubBody::Parsed(prog) => self.proc_sub(input, prog).into_bytes(),
+            ProcSubBody::Unread { src, closed, .. } => {
+                let line = self.source_line();
+                match crate::parser::parse_procsub_body(src, line, self.parse_opts()) {
+                    Ok(prog) => self.proc_sub(input, &prog).into_bytes(),
+                    Err(_) => bfmt![open, src, if *closed { b")".as_slice() } else { b"" }],
+                }
+            }
+        }
+    }
+
     fn proc_sub(&mut self, input: bool, body: &Program) -> String {
         let path = unique_temp_path("osh_psub");
         // A substitution runs in its own process in bash, so its status never
@@ -34987,7 +35511,7 @@ impl Shell {
                         out.push(b'\'');
                     }
                 }
-                WordPart::DoubleQuoted(parts) => {
+                WordPart::DoubleQuoted { parts, .. } => {
                     let s = self.expand_double_quoted(parts);
                     out.extend_from_slice(&s);
                 }
@@ -37579,18 +38103,59 @@ impl Shell {
     /// arrives already exported (see [`Self::import_environment`]), and
     /// assigning to an exported name keeps the attribute.
     ///
-    /// An unset, empty or unparseable `TZ` is UTC, matching both POSIX and
+    /// `TZ` may be a POSIX rule string or the name of a binary zoneinfo file,
+    /// and both are resolved here exactly as the libc's `tzset` resolves them
+    /// (`posix::tz::resolve_tz_value`) — same search order (rule first, file
+    /// second, `:` forcing the file), same [`TZDIR`](Self::zoneinfo_dir)
+    /// override, same `/etc/localtime` default, same refusal of a `..` in the
+    /// name. That duplication is the point: osh cannot call the SlateOS libc's
+    /// `tzset` (it is a Rust program with its own runtime), so the only way
+    /// `date` and `printf '%(%T)T'` can agree is for both to walk the same
+    /// rules over the same [`tzrules`] engine.
+    ///
+    /// An unset, empty or unresolvable `TZ` is UTC, matching both POSIX and
     /// [`tzrules::Tz::parse`]'s contract. A shell that has not imported the
     /// environment (every unit test) has nothing in `exported`, so tests render
     /// in UTC no matter what the host's `TZ` says — the determinism is a
-    /// consequence of bash's rule, not a carve-out from it.
-    fn shell_tz(&mut self) -> Tz {
+    /// consequence of bash's rule, not a carve-out from it, and it is why the
+    /// `/etc/localtime` default is taken only by a shell that really did
+    /// inherit a process environment.
+    fn shell_tz(&mut self) -> ShellZone {
         if !self.exported.contains("TZ") {
-            return Tz::UTC;
+            // No exported `TZ` at all: a real shell follows the machine's own
+            // zone, as glibc does when `TZ` is unset. A test shell has no
+            // machine to follow — it never imported an environment — so it
+            // stays on UTC and renders the same time on every host.
+            if self.env_imported {
+                return ShellZone::from_file(Path::new(LOCALTIME_PATH));
+            }
+            return ShellZone::Posix(Tz::UTC);
         }
+        let dir = self.zoneinfo_dir();
         match self.param_value("TZ") {
-            Some(raw) if !raw.is_empty() => Tz::parse(&raw).unwrap_or(Tz::UTC),
-            _ => Tz::UTC,
+            Some(raw) if !raw.is_empty() => ShellZone::resolve(&raw, &dir),
+            _ => ShellZone::Posix(Tz::UTC),
+        }
+    }
+
+    /// The tree a bare zone name is looked up in, from the shell's exported
+    /// `TZDIR` (glibc's override) or the compiled-in default.
+    ///
+    /// Read from the shell's own variables rather than `std::env`, for the same
+    /// reason [`Self::shell_tz`] reads `TZ` there: an exported assignment is
+    /// what a child `date` would see, so the shell's own rendering must agree
+    /// with it. It also keeps the lookup independent of the host the tests run
+    /// on. A non-UTF-8 or empty value falls back to the default — such a
+    /// directory names nothing in any real tzdata tree.
+    fn zoneinfo_dir(&mut self) -> String {
+        if !self.exported.contains("TZDIR") {
+            return TZDIR_DEFAULT.to_string();
+        }
+        match self.param_value("TZDIR") {
+            Some(raw) if !raw.is_empty() => {
+                String::from_utf8(raw).unwrap_or_else(|_| TZDIR_DEFAULT.to_string())
+            }
+            _ => TZDIR_DEFAULT.to_string(),
         }
     }
 
@@ -38708,6 +39273,11 @@ impl Shell {
         // `kill -TERM -9 1` signals process group 9. And nothing is judged
         // here: a spec's validity only matters once there is a signal to
         // deliver, which is why `kill -l -x 15` still answers `TERM`.
+        // Posix mode takes the `SIG` prefix away from every spelling `kill`
+        // reads — `-SIGTERM`, `-s SIGTERM` and `kill -l SIGTERM` alike — while
+        // leaving `-n 15` and `trap ':' SIGTERM` alone. Read once, before the
+        // run, because reading it borrows the shell.
+        let posix = self.shell_option_enabled("posix");
         let mut signum: Option<u16> = Some(15);
         let mut sigspec: Option<BStr<'_>> = None;
         let mut list_names = false;
@@ -38766,7 +39336,7 @@ impl Shell {
             sigspec = Some(spec);
             // bash reads a lone `0` as the existence check without consulting
             // the table at all.
-            signum = if spec == b"0" { Some(0) } else { decode_signal(spec) };
+            signum = if spec == b"0" { Some(0) } else { decode_signal_flags(spec, !posix) };
             i += width;
         }
 
@@ -38991,18 +39561,24 @@ impl Shell {
         true
     }
 
-    /// `kill -l [sigspec…]` — with no specs, print the columnar signal table;
-    /// otherwise answer each spec with its counterpart, a number for a name and
-    /// a name for a number.
+    /// `kill -l [sigspec…]` — with no specs, print the signal table; otherwise
+    /// answer each spec with its counterpart, a number for a name and a name
+    /// for a number.
     ///
     /// The translation is not [`decode_signal`] run backwards and forwards: a
     /// number here may also be the *exit status* a signal produces, so
     /// `kill -l $?` names what killed the last command. A name, on the other
     /// hand, is looked up in the whole table, pseudo signals included — which
     /// is the one place their numbers can be seen.
+    ///
+    /// Posix mode changes both halves: the table prints as one line of bare
+    /// names ([`signal_list_posix`]), and a `SIG`-prefixed name stops being a
+    /// name at all (see [`decode_signal_flags`]). The *number*→name direction
+    /// is untouched, because it never printed the prefix in either mode.
     fn kill_list(&mut self, specs: &[Str], out: &mut Out, redir: &RedirPlan) -> i32 {
+        let posix = self.shell_option_enabled("posix");
         if specs.is_empty() {
-            let buf = signal_list_columns();
+            let buf = if posix { signal_list_posix() } else { signal_list_columns() };
             return self.write_bytes(out, redir, buf.as_bytes());
         }
         let mut status = 0;
@@ -39011,7 +39587,7 @@ impl Shell {
                 let n = if n > 128 && n < 128 + i64::from(NSIG) { n - 128 } else { n };
                 u16::try_from(n).ok().filter(|n| *n < NSIG).and_then(signal_spec_name)
             } else {
-                decode_signal(spec).map(|n| n.to_string())
+                decode_signal_flags(spec, !posix).map(|n| n.to_string())
             };
             match answer {
                 Some(text) => {
@@ -39576,6 +40152,7 @@ impl Shell {
                 parts: vec![WordPart::SingleQuoted {
                     text: a.clone(),
                     escaped: false,
+                    closed: true,
                     parts: None,
                 }],
             });
@@ -43376,8 +43953,8 @@ impl Shell {
         // Resolved once for the whole format, not per `%(…)T`: bash calls
         // `tzset()` at assignment time, so every conversion in one `printf`
         // sees the same zone even if the format somehow changed it.
-        let tz = self.shell_tz();
-        let text = format_printf(fmt, fargs, &mut diags, &tz);
+        let zone = self.shell_tz();
+        let text = format_printf(fmt, fargs, &mut diags, &zone.view());
         let PrintfDiags { errors, warnings, notes, fatal, .. } = diags;
         let num_status = i32::from(!errors.is_empty() || fatal.is_some());
         // Merge errors and warnings into one offset-ordered message stream so
@@ -43780,6 +44357,7 @@ impl Shell {
                 parts: vec![WordPart::SingleQuoted {
                     text: value,
                     escaped: false,
+                    closed: true,
                     parts: None,
                 }],
             }),
@@ -45245,75 +45823,6 @@ impl Shell {
         status
     }
 
-    /// The builtin's half of a compound `name=(…)` operand: the refusals it
-    /// raises against the array phase 1 already bound, and the attributes only
-    /// it applies. Returns whether the operand was refused, which fails the
-    /// command.
-    ///
-    /// Each refusal abandons the operand where bash's builtin would have gone on
-    /// to the attributes, so none of them is applied afterwards — that is what
-    /// leaves `declare -x +a q=(1 2)` an unexported array. The order of the
-    /// three is bash's: a `-n` breach outranks the destroy refusal, which
-    /// outranks the `-a`/`-A` self-conflict (`declare -a q=(1); declare -aA +a q`
-    /// reports "cannot destroy" because both come from the same lookup and the
-    /// destroy check is first).
-    fn apply_bound_compound(
-        &mut self,
-        c: &BoundCompound,
-        tag: &str,
-        f: BoundCompoundFlags,
-    ) -> bool {
-        // Refused as a local in phase 1, which reported the compound-assignment
-        // machinery's half of the diagnostic; this is the builtin's. bash
-        // abandons such an operand whole, so nothing below runs for it.
-        if let Some(msg) = &c.refused_local {
-            self.berrln(msg);
-            return true;
-        }
-        if c.refused_nameref {
-            self.perrln(&format!("{tag}: {}: reference variable cannot be an array", c.name));
-            return true;
-        }
-        if (f.unset_indexed && self.arrays.contains_key(&c.target))
-            || (f.unset_assoc && self.assoc.contains_key(&c.target))
-        {
-            self.perrln(&format!(
-                "{tag}: {}: cannot destroy array variables in this way",
-                c.name
-            ));
-            return true;
-        }
-        if f.kind_conflict {
-            self.perrln(&format!(
-                "{tag}: {}: cannot convert associative to indexed array",
-                c.name
-            ));
-            return true;
-        }
-        // The nameref attribute is the one that goes on the operand as written
-        // rather than on the name the binding landed under: `+n` is about the
-        // reference itself.
-        if f.unset_nameref {
-            self.nameref_attr.remove(&c.name);
-        } else if f.nameref {
-            self.nameref_attr.insert(c.name.clone());
-        }
-        if f.unset_trace {
-            self.trace_attr.remove(&c.target);
-        } else if f.trace {
-            self.trace_attr.insert(c.target.clone());
-        }
-        if f.unset_export {
-            self.exported.remove(&c.target);
-        } else if f.export {
-            self.mark_exported(c.target.clone());
-        }
-        if f.readonly && !f.unset_readonly {
-            self.readonly.insert(c.target.clone());
-        }
-        false
-    }
-
     /// The declaration proper, run with the bindings it is to act on already
     /// live — so it never has to care whether `-g` was given beyond skipping the
     /// local-shadowing step.
@@ -45580,39 +46089,47 @@ impl Shell {
             ops.push(DeclOperand::Bound(c));
         }
         for op in &ops {
-            let name_val = match op {
-                DeclOperand::Word(w) => *w,
-                // A compound operand: phase 1 bound it, so all that is left is
-                // what the *builtin* would have done to it — the refusals it
-                // raises and the attributes only it applies. Everything else in
-                // this loop (identifier validation, the local shadow, the
-                // assignment, the kind and value attributes) already happened
-                // there, before the literal bound.
-                DeclOperand::Bound(c) => {
-                    if self.apply_bound_compound(
-                        c,
-                        tag,
-                        BoundCompoundFlags {
-                            // This loop is the `declare` family's, which is the
-                            // only one that makes the check; see the field.
-                            kind_conflict: assoc && indexed && !print_mode,
-                            unset_assoc,
-                            unset_indexed,
-                            nameref,
-                            unset_nameref,
-                            export,
-                            unset_export,
-                            readonly,
-                            unset_readonly,
-                            trace,
-                            unset_trace,
-                        },
-                    ) {
-                        status = 1;
-                    }
+            // A compound operand enters this loop as the **bare name**, which is
+            // what bash's third command is: `expand_declaration_argument`
+            // (subst.c:12653) hands step 3 the operand truncated at the `=`
+            // (subst.c:12493) and runs it as the real builtin. So `declare -gGa
+            // g=(1 2)` ends in a genuine `declare -gGa g`, and every letter it
+            // carries lands wherever *this* loop's own lookup goes — which is
+            // not where the literal went, since only the builtin half reads the
+            // uppercase `G` (see [`Shell::in_declare_global_scope`]).
+            //
+            // The word has no `=`, so `value` below is `None` and the whole
+            // assignment arm is skipped of its own accord: step 3 sets the
+            // letters *as attributes only*, never re-folding or re-evaluating
+            // what the variable already holds, and converts the shape only when
+            // a kind letter was given — carrying an old scalar in as element 0,
+            // exactly as `declare -a` over an existing scalar does.
+            //
+            // [`BoundCompound`] is then only what genuinely happened *earlier*:
+            // the refusals phase 1 recorded, which bash raises here because its
+            // step 1 raised them here.
+            let (name_val, bound): (BStr<'_>, Option<&BoundCompound>) = match op {
+                DeclOperand::Word(w) => (w.as_slice(), None),
+                DeclOperand::Bound(c) => (c.name.as_bytes(), Some(c)),
+            };
+            // Refused back in phase 1, which spoke the compound-assignment
+            // machinery's half of the diagnostic; this is the builtin's. bash
+            // abandons such an operand whole, so nothing below runs for it.
+            if let Some(c) = bound {
+                if let Some(msg) = &c.refused_local {
+                    self.berrln(msg);
+                    status = 1;
                     continue;
                 }
-            };
+                if c.refused_nameref {
+                    self.perrln(&format!(
+                        "{tag}: {}: reference variable cannot be an array",
+                        c.name
+                    ));
+                    status = 1;
+                    continue;
+                }
+            }
             // `local -` does two things, not one.
             //
             // The documented half makes the shell's `set` options local to this
@@ -45648,7 +46165,7 @@ impl Shell {
             //
             // `-` is not a valid identifier, so nothing else can ever create
             // this name and no other code path has to guard against it.
-            if is_local && name_val.as_slice() == b"-" {
+            if is_local && name_val == b"-" {
                 // Only the first `local -` in the frame captures; a later one
                 // must not overwrite the earlier baseline (bash restores to the
                 // state at the first `local -`).
@@ -45685,7 +46202,7 @@ impl Shell {
             // all, so `1x=v`, `=5` and `bad@name=v` stay whole and are quoted
             // back whole by the refusal below, exactly as bash quotes them.
             let (name, append, value): (BStr<'_>, bool, Option<Str>) =
-                match attr_assignment_split(name_val.as_slice()) {
+                match attr_assignment_split(name_val) {
                     Some(eq) => {
                         let plus = eq > 0 && name_val.get(eq - 1) == Some(&b'+');
                         let end = if plus { eq - 1 } else { eq };
@@ -45695,7 +46212,7 @@ impl Shell {
                             Some(name_val.get(eq + 1..).unwrap_or_default().to_vec()),
                         )
                     }
-                    None => (name_val.as_slice(), false, None),
+                    None => (name_val, false, None),
                 };
             // An empty name is no name, and bash says so rather than passing
             // over the operand: `declare ""`, `declare -- ""`, `declare -a ""`,
@@ -45778,7 +46295,7 @@ impl Shell {
                     self.err_prefix(),
                     tag,
                     b": `",
-                    name_val.as_slice(),
+                    name_val,
                     b"': not a valid identifier"
                 ]);
                 status = 1;
@@ -47054,7 +47571,7 @@ impl Shell {
                             self.err_prefix(),
                             tag,
                             b": `",
-                            name_val.as_slice(),
+                            name_val,
                             b"': operand is not valid text"
                         ]);
                         status = 1;
@@ -47995,9 +48512,16 @@ impl Shell {
             flags.global = flags.assn_global || global_builtin;
         }
         if !flags.global && !global_builtin {
-            return body(self);
+            // No swap, so the literal takes `do_compound_assignment`'s unscoped
+            // `else` branch and refuses an array-kind change for itself. Clear
+            // any outer declaration's answer rather than letting it leak into a
+            // command substitution nested in this one's literal.
+            let prev = self.declare_step1_names.take();
+            let outcome = body(self);
+            self.declare_step1_names = prev;
+            return outcome;
         }
-        let names = if global_builtin {
+        let mut names = if global_builtin {
             Vec::new()
         } else {
             Self::declare_operand_names(argv.get(1..).unwrap_or_default())
@@ -48008,13 +48532,34 @@ impl Shell {
         flags.chklocal = flags.chklocal || global_builtin;
         flags.assn_global = flags.assn_global || global_builtin;
         // Compound operands were lifted out of `argv` into `decl_arrays`, so
-        // their names have to be collected separately — and kept apart, since
-        // the name a compound literal binds is not found the same way (see
-        // [`Shell::global_bind_name`]).
+        // their names have to be collected separately.
+        //
+        // Which of the two lists they belong in is decided by *which command*
+        // this half is. In the **expansion half** they are the compound literal
+        // (bash's step 2), which finds the name it binds its own way — see
+        // [`Shell::global_bind_names`] — so they are kept apart. In the
+        // `declare` family's **builtin half** they are bash's step 3, `declare
+        // -gGa g`, an ordinary bare-name operand of `declare_internal`: it
+        // resolves exactly as step 1 did, which is what `names` models. Sorting
+        // them into `compound` there would give step 3 the *literal's* answer,
+        // and a `declare -n` restart is precisely where the two part — the
+        // letters would land on the frame's own `g` where bash carries them out
+        // to `z`.
+        //
+        // `export` and `readonly` are excepted because their third command is
+        // not `declare_internal` at all — it is their own operand loop, which
+        // has no `mkglobal` restart to make and asks `chklocal` of the name as
+        // written. `declare -n g=z; f() { local g=5; readonly -a g=(1 2); }`
+        // marks *the frame's own* `g` and leaves the `z` step 1 made unmarked.
         let mut compound: Vec<String> = Vec::new();
         for d in decl_arrays {
-            if !names.contains(&d.assign.name) && !compound.contains(&d.assign.name) {
+            if names.contains(&d.assign.name) || compound.contains(&d.assign.name) {
+                continue;
+            }
+            if expansion_half || global_builtin {
                 compound.push(d.assign.name.clone());
+            } else {
+                names.push(d.assign.name.clone());
             }
         }
         // A **frame-local** reference the swap is about to hide is still the
@@ -48051,6 +48596,23 @@ impl Shell {
         } else {
             Vec::new()
         };
+        // The name each compound operand's **step 1** resolved to, read here
+        // because the swap below is about to rewrite the chain it is read from.
+        // It is the same walk [`Shell::enter_global_scope`] asks `chklocal` of —
+        // `nameref_cell (refvar)`, the cell the global-only walk ended on
+        // (declare.def:735-741), falling back on the name where that walk found
+        // no reference at all. See [`Shell::declare_step1_names`] for what is
+        // asked of it.
+        let step1 = expansion_half.then(|| {
+            decl_arrays
+                .iter()
+                .map(|d| {
+                    let n = &d.assign.name;
+                    let end = self.global_chain_path(n).and_then(|p| p.last().cloned());
+                    (n.clone(), end.unwrap_or_else(|| n.clone()))
+                })
+                .collect()
+        });
         let saved = self.enter_global_scope(&names, &compound, flags);
         // Whatever the swap really did hide, it owes for — and only that: where
         // the global side of the lookup was empty the swap is made for the
@@ -48063,7 +48625,9 @@ impl Shell {
             }
         }
         let prev = std::mem::replace(&mut self.declare_global_swap, saved);
+        let prev_step1 = std::mem::replace(&mut self.declare_step1_names, step1);
         let outcome = body(self);
+        self.declare_step1_names = prev_step1;
         let saved = std::mem::replace(&mut self.declare_global_swap, prev);
         self.leave_global_scope(saved);
         outcome
@@ -48588,7 +49152,6 @@ impl Shell {
                     bound.push(BoundCompound {
                         at,
                         name: a.name.clone(),
-                        target: spelled.clone().unwrap_or_else(|| a.name.clone()),
                         refused_local: Some(held),
                         refused_nameref: false,
                     });
@@ -48712,7 +49275,6 @@ impl Shell {
             bound.push(BoundCompound {
                 at,
                 name: a.name.clone(),
-                target: target.clone(),
                 refused_local: None,
                 refused_nameref: false,
             });
@@ -48828,7 +49390,21 @@ impl Shell {
             // `self.arrays` — which looks exactly like silent data loss to a
             // script. Reject with bash's message and status 1, leaving the
             // variable untouched (`unset` first is the way to change kind).
-            if let Some(kinds) = self.array_kind_conflict(&target, assoc, indexed) {
+            //
+            // *Which* variable is asked, though, belongs to whichever command
+            // does the refusing — and under a scope swap that is step 1 rather
+            // than the literal, which is by then in one of the two scoped
+            // branches that convert without a word. So the name comes from
+            // [`Shell::declare_step1_names`], read before the swap; the lookup
+            // is made here, after it, because the swap is what puts the global
+            // binding of a name step 1 read globally in reach.
+            let step1_name = self
+                .declare_step1_names
+                .as_ref()
+                .and_then(|m| m.iter().find(|(n, _)| *n == a.name))
+                .map(|(_, t)| t.clone());
+            let asked = step1_name.as_deref().unwrap_or(target.as_str());
+            if let Some(kinds) = self.array_kind_conflict(asked, assoc, indexed) {
                 let Some(held) = self.compound_kind_refusal(&a.name, kinds, cmd) else {
                     return Err(Flow::Discard);
                 };
@@ -48842,6 +49418,24 @@ impl Shell {
             // the array is indexed unless the command asked for the other kind.
             if local_array_fallback {
                 self.vars.remove(&target);
+            }
+            // Past the refusal above with the *other* kind still in the table is
+            // a road only a scope swap opens: the refusal belongs to step 1, and
+            // step 1 asks it of its own name (see [`Shell::declare_step1_names`]).
+            // The literal is then in one of `do_compound_assignment`'s scoped
+            // branches, whose `convert_var_to_assoc` / `convert_var_to_array`
+            // (subst.c:3520-3527) *replace* the storage rather than reinterpret
+            // it — what the old kind held is gone, and nothing is carried in as
+            // element 0 either:
+            //
+            // ```sh
+            // declare -n g=z
+            // f() { local -a g=(9); readonly -A g=([k]=v); }   # declare -Ar g=([k]="v" )
+            // ```
+            if assoc {
+                self.arrays.remove(&target);
+            } else if indexed {
+                self.assoc.remove(&target);
             }
             if assoc {
                 self.array_kind_apply(&target, true);
@@ -49205,8 +49799,8 @@ impl Shell {
             // A printing command still reaches the builtin with the operand it
             // was refused, so the builtin's half of a phase-1 local refusal is
             // still spoken — it is only the *attributes* a printing command
-            // applies none of, which is why the rest of `apply_bound_compound`
-            // is skipped here rather than the whole of it.
+            // applies none of, which is why only that refusal is spoken here
+            // rather than the operand loop being run at all.
             for c in bound {
                 if let Some(msg) = &c.refused_local {
                     self.berrln(msg);
@@ -57356,7 +57950,7 @@ fn part_has_quoted_at(part: &WordPart, quoted: bool) -> bool {
         return true;
     }
     match part {
-        WordPart::DoubleQuoted(inner) => parts_have_quoted_at(inner, true),
+        WordPart::DoubleQuoted { parts: inner, .. } => parts_have_quoted_at(inner, true),
         // The `:-`/`:+` operand, whose word is expanded where the substitution
         // stands. Only these two carry a word that makes fields of its own; a
         // pattern or a subscript is text by the time it matters.
@@ -58183,7 +58777,7 @@ fn word_is_all_quoted(w: &Word) -> bool {
     !w.parts.is_empty()
         && w.parts
             .iter()
-            .all(|p| matches!(p, WordPart::SingleQuoted { .. } | WordPart::DoubleQuoted(_)))
+            .all(|p| matches!(p, WordPart::SingleQuoted { .. } | WordPart::DoubleQuoted { .. }))
 }
 
 /// Case-aware glob match whose pattern carries per-character quoting
@@ -58645,6 +59239,27 @@ fn signal_list_columns() -> String {
     buf
 }
 
+/// Render the full signal table the way posix mode spells it: every bare name
+/// on one line, single-space separated, one closing newline and no trailing
+/// space.
+///
+/// POSIX spells a signal without its `SIG`, and gives `kill -l` no numbers to
+/// print — so the columnar `N) SIGNAME` layout goes entirely, taking the
+/// numbering with it. Measured against bash 5.2.37: `kill -L`, whose whole
+/// purpose is to *force* the columns, takes this form too, so the mode wins
+/// over the option rather than the other way round.
+fn signal_list_posix() -> String {
+    let mut buf = String::new();
+    for (idx, (_, name)) in SIGNALS.iter().enumerate() {
+        if idx != 0 {
+            buf.push(' ');
+        }
+        buf.push_str(name);
+    }
+    buf.push('\n');
+    buf
+}
+
 /// bash's `NUMBER_LEN` macro: the decimal digit count of `n`, saturating at
 /// six digits (bash's own comment concedes it "does not handle numbers >
 /// 1000000 at all"). Zero is one digit wide, as in bash.
@@ -58854,6 +59469,23 @@ fn sh_invalidnum_kind(word: BStr<'_>) -> &'static str {
 /// is spelled with the prefix, so `SIG` may be dropped from `SIGTERM` but never
 /// added to `EXIT`. Case is not significant either way.
 fn decode_signal(spec: BStr<'_>) -> Option<u16> {
+    decode_signal_flags(spec, true)
+}
+
+/// [`decode_signal`] with bash's `DSIG_SIGPREFIX` made explicit: when
+/// `sig_prefix` is false, the `SIG`-prefixed spelling of a real signal is not a
+/// name the table answers to.
+///
+/// bash compares the spec against both `SIGHUP` and `HUP` and drops the first
+/// comparison in posix mode, which is why `SIGHUP` becomes an "invalid signal
+/// specification" there while `HUP` keeps working. Only `kill` passes false —
+/// `trap ':' SIGUSR1` is accepted in posix mode too, measured against bash
+/// 5.2.37.
+///
+/// The pseudo signals are untouched by the flag: none of them has a `SIG`
+/// spelling to lose, so `kill -l EXIT` and `kill -l DEBUG` answer in both modes
+/// and `SIGEXIT` is refused in both.
+fn decode_signal_flags(spec: BStr<'_>, sig_prefix: bool) -> Option<u16> {
     if let Some(n) = legal_number(spec) {
         // A number names a slot in the table directly, and the table's real
         // entries stop at NSIG — so no number reaches the pseudo signals.
@@ -58868,7 +59500,13 @@ fn decode_signal(spec: BStr<'_>) -> Option<u16> {
     if let Some((num, _)) = PSEUDO_SIGNALS.iter().find(|(_, name)| name.as_bytes() == upper) {
         return Some(*num);
     }
-    let bare = upper.strip_prefix(b"SIG".as_slice()).unwrap_or(&upper);
+    let bare = match upper.strip_prefix(b"SIG".as_slice()) {
+        Some(bare) if sig_prefix => bare,
+        // A refused prefix must not fall through to the whole word: `SIGHUP`
+        // has to fail, not be looked up as the signal named `SIGHUP`.
+        Some(_) => return None,
+        None => &upper,
+    };
     SIGNALS.iter().find(|(_, name)| name.as_bytes() == bare).map(|(num, _)| u16::from(*num))
 }
 
@@ -63625,11 +64263,12 @@ fn array_target_part(part: &WordPart, name: String, star: bool) -> Option<WordPa
             star,
             op: BulkOp::BadTransform { op: op.clone() },
         },
-        WordPart::ParamSubstr { offset, length, .. } => WordPart::ArraySlice {
+        WordPart::ParamSubstr { offset, length, unclosed, .. } => WordPart::ArraySlice {
             name,
             star,
             offset: offset.clone(),
             length: length.clone(),
+            unclosed: unclosed.clone(),
         },
         _ => return None,
     })
@@ -63821,7 +64460,7 @@ struct PrintfDiags {
     base: usize,
 }
 
-fn format_printf(fmt: &[u8], args: &[Str], diags: &mut PrintfDiags, tz: &Tz) -> Str {
+fn format_printf(fmt: &[u8], args: &[Str], diags: &mut PrintfDiags, tz: &Zone<'_>) -> Str {
     // Bash reuses the format string until all arguments are consumed. Repeat the
     // format while arguments remain, stopping if a pass consumes none (the
     // format has no argument-consuming conversions) to avoid an infinite loop.
@@ -63891,7 +64530,7 @@ fn format_printf_once(
     args: &[Str],
     arg_i: &mut usize,
     diags: &mut PrintfDiags,
-    tz: &Tz,
+    tz: &Zone<'_>,
 ) -> (Str, bool) {
     let mut out = Str::new();
     // A format string is a shell word: its *syntax* is ASCII, but its literal
@@ -63937,7 +64576,7 @@ fn format_conversion(
     arg_i: &mut usize,
     out: &mut Str,
     diags: &mut PrintfDiags,
-    tz: &Tz,
+    tz: &Zone<'_>,
 ) -> bool {
     // Literal `%%` short-circuit (no flags/width may precede it).
     if chars.peek() == Some(&b'%') {
@@ -64510,14 +65149,150 @@ fn iso_week(year: i64, yday: i64, wday: usize) -> (i64, i64) {
     }
 }
 
-/// Render a `strftime`-style format for `printf '%(FORMAT)T'`. `epoch` is
-/// seconds since the Unix epoch and `tz` is the zone to render it in — see
-/// [`Shell::shell_tz`], which resolves it from the shell's *exported* `TZ`
-/// exactly as bash's `sv_tz` does. Supports the common specifiers
-/// `%Y %C %y %m %d %e %H %I %k %l %M %S %p %P %A %a %B %b %h %j %u %w %s %z %Z
-/// %V %G %g %n %t %F %T %R %D %r %c %x %X %%`; an unknown specifier is emitted
-/// verbatim. `%z` and `%Z` report the offset and abbreviation `tz` was in at
-/// `epoch`, so they follow a DST rule across its transitions.
+// ---------------------------------------------------------------------------
+// The shell's timezone
+// ---------------------------------------------------------------------------
+
+/// Where zoneinfo files live when `TZ` names one without a leading `/`.
+const TZDIR_DEFAULT: &str = "/usr/share/zoneinfo";
+
+/// The system-wide zone, followed when no `TZ` is exported.
+const LOCALTIME_PATH: &str = "/etc/localtime";
+
+/// Largest zoneinfo file the shell will load. The biggest in tzdata is under
+/// 4 KiB, so this is generous; the cap exists so a `TZ` pointing at a huge file
+/// cannot make the shell read it into memory on every prompt.
+const MAX_ZONEINFO_BYTES: usize = 64 * 1024;
+
+/// An owned snapshot of the shell's timezone.
+///
+/// Owned rather than borrowed because a zoneinfo zone *is* the file's bytes: a
+/// [`TzFile`] reads the transition table out of them on every lookup instead of
+/// copying it, so something has to hold them. Taking a snapshot — rather than
+/// borrowing the shell — is what lets `prompt_decode` keep one zone for a whole
+/// prompt while still calling `&mut self` methods for `\w` and `\u`.
+///
+/// See [`Shell::shell_tz`] for how `TZ` selects between the two arms.
+#[derive(Clone, Debug)]
+enum ShellZone {
+    /// A POSIX `TZ` rule string, or the UTC default.
+    Posix(Tz),
+    /// The bytes of a zoneinfo file, already known to parse as TZif.
+    ///
+    /// `Rc`, so that handing a caller a snapshot per prompt is a refcount bump
+    /// rather than a few kilobytes of memcpy.
+    File(Rc<[u8]>),
+}
+
+impl ShellZone {
+    /// Resolve a non-empty `TZ` value, falling back to UTC.
+    ///
+    /// A leading `:` forces the file interpretation, which is how POSIX spells
+    /// "the rest is implementation-defined" and how every libc reads it.
+    /// Otherwise a POSIX rule string is tried first and a file only if that
+    /// fails — the order glibc uses, and it matters because `EST5EDT` is both a
+    /// valid rule *and* a file name in the zoneinfo tree.
+    fn resolve(value: &[u8], dir: &str) -> Self {
+        if let Some(name) = value.strip_prefix(b":") {
+            return Self::from_name(name, dir);
+        }
+        match Tz::parse(value) {
+            Some(tz) => Self::Posix(tz),
+            None => Self::from_name(value, dir),
+        }
+    }
+
+    /// Load the zoneinfo file `name` refers to under `dir`, falling back to UTC.
+    fn from_name(name: &[u8], dir: &str) -> Self {
+        let Some(path) = zoneinfo_path(name, dir) else {
+            return Self::Posix(Tz::UTC);
+        };
+        Self::from_file(&path)
+    }
+
+    /// Read and validate a zoneinfo file, falling back to UTC.
+    ///
+    /// The bytes are parsed *here* so that a file which is not TZif never
+    /// becomes a zone: every later lookup then has a file it already knows
+    /// parses, and cannot silently answer UTC halfway through a prompt.
+    fn from_file(path: &Path) -> Self {
+        let Ok(file) = std::fs::File::open(path) else {
+            return Self::Posix(Tz::UTC);
+        };
+        // One byte past the cap, so an oversized file is *refused* rather than
+        // silently truncated to a prefix that might still parse as TZif — and so
+        // that `TZ=/dev/zero` cannot be read until the shell runs out of memory.
+        let mut bytes = Vec::new();
+        if std::io::Read::take(file, MAX_ZONEINFO_BYTES as u64 + 1)
+            .read_to_end(&mut bytes)
+            .is_err()
+            || bytes.len() > MAX_ZONEINFO_BYTES
+        {
+            return Self::Posix(Tz::UTC);
+        }
+        if TzFile::parse(&bytes).is_none() {
+            return Self::Posix(Tz::UTC);
+        }
+        Self::File(bytes.into())
+    }
+
+    /// Borrow this zone as something that can answer lookups.
+    fn view(&self) -> Zone<'_> {
+        match self {
+            Self::Posix(tz) => Zone::Posix(*tz),
+            // `from_file`/`resolve` only build this arm from bytes that parsed,
+            // so the fallback is unreachable; it exists so a shell rendering a
+            // prompt cannot panic.
+            Self::File(bytes) => TzFile::parse(bytes).map_or(Zone::Posix(Tz::UTC), Zone::File),
+        }
+    }
+}
+
+/// A borrowed view of a [`ShellZone`], which is what the rendering code needs.
+#[derive(Clone, Copy, Debug)]
+enum Zone<'a> {
+    /// A POSIX rule.
+    Posix(Tz),
+    /// A zoneinfo file's transition table.
+    File(TzFile<'a>),
+}
+
+impl Zone<'_> {
+    /// The zone state at UTC instant `t`.
+    fn lookup(&self, t: i64) -> TzInfo {
+        match self {
+            Self::Posix(tz) => tz.lookup(t),
+            Self::File(f) => f.lookup(t),
+        }
+    }
+}
+
+/// Build the path of the zoneinfo file `name` names, or `None` for a name that
+/// must not be resolved.
+///
+/// `TZ` is inherited from whoever started the shell, so a name containing a
+/// `..` component is refused: without that check `TZ=../../../etc/shadow` would
+/// make the shell open an arbitrary file and reveal, through whether the time
+/// changed, that it parsed as TZif. `dir` is the tree to look in — see
+/// [`Shell::zoneinfo_dir`].
+fn zoneinfo_path(name: &[u8], dir: &str) -> Option<PathBuf> {
+    if name.is_empty() || name.contains(&0) {
+        return None;
+    }
+    // A `..` *inside* a component is not a traversal; only a whole component is.
+    if name.split(|&b| b == b'/').any(|part| part == b"..") {
+        return None;
+    }
+    // A zone name is a file name, and file names are bytes — but `Path` on the
+    // host build is UTF-8-ish, and a non-UTF-8 zone name names nothing in any
+    // real tzdata tree, so refusing it loses nothing.
+    let name = std::str::from_utf8(name).ok()?;
+    if name.starts_with('/') {
+        return Some(PathBuf::from(name));
+    }
+    Some(Path::new(dir).join(name))
+}
+
 /// Append a strftime rendering to a prompt buffer.
 ///
 /// **TD-OILS-BYTE-STRINGS scaffold.** Prompt expansion is still `String`-based,
@@ -64526,11 +65301,20 @@ fn iso_week(year: i64, yday: i64, wday: usize) -> (i64, i64) {
 /// pure ASCII and so pass through unharmed; this whole helper disappears when
 /// prompt expansion becomes byte-native.
 #[allow(deprecated)]
-fn push_prompt_strftime(out: &mut Str, fmt: &[u8], epoch: i64, tz: &Tz) {
+fn push_prompt_strftime(out: &mut Str, fmt: &[u8], epoch: i64, tz: &Zone<'_>) {
     out.extend_from_slice(&format_strftime(fmt, epoch, tz));
 }
 
-fn format_strftime(fmt: &[u8], epoch: i64, tz: &Tz) -> Str {
+/// Render a `strftime`-style format for `printf '%(FORMAT)T'`. `epoch` is
+/// seconds since the Unix epoch and `tz` is the zone to render it in — see
+/// [`Shell::shell_tz`], which resolves it from the shell's *exported* `TZ`
+/// exactly as bash's `sv_tz` does. Supports the common specifiers
+/// `%Y %C %y %m %d %e %H %I %k %l %M %S %p %P %A %a %B %b %h %j %u %w %s %z %Z
+/// %V %G %g %n %t %F %T %R %D %r %c %x %X %%`; an unknown specifier is emitted
+/// verbatim. `%z` and `%Z` report the offset and abbreviation `tz` was in at
+/// `epoch`, so they follow a DST rule across its transitions — whether that
+/// rule came from a `TZ` string or from a zoneinfo file's transition table.
+fn format_strftime(fmt: &[u8], epoch: i64, tz: &Zone<'_>) -> Str {
     const WDAY_FULL: [&[u8]; 7] = [
         b"Sunday", b"Monday", b"Tuesday", b"Wednesday", b"Thursday", b"Friday", b"Saturday",
     ];
@@ -73754,19 +74538,198 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         );
     }
 
-    /// An unset, empty or unparseable `TZ` is UTC — POSIX's rule and
-    /// [`tzrules::Tz::parse`]'s contract. Notably a bare zoneinfo name such as
-    /// `America/New_York` is *not* a POSIX TZ string and lands here, because
-    /// SlateOS has no tzdata to resolve it against yet.
+    /// An unset, empty or unresolvable `TZ` is UTC — POSIX's rule and
+    /// [`tzrules::Tz::parse`]'s contract.
+    ///
+    /// A bare zoneinfo name is now *looked up* rather than rejected outright
+    /// (see [`Shell::shell_tz`]), so the names here are pointed at a tree that
+    /// does not exist: what is being pinned is the fallback when the lookup
+    /// finds nothing, not the old "a name is never a zone" behaviour.
     #[test]
-    fn printf_time_falls_back_to_utc_for_a_zone_it_cannot_parse() {
-        for tz in ["", "America/New_York", "EST5EDT,garbage", "%%%"] {
+    fn printf_time_falls_back_to_utc_for_a_zone_it_cannot_resolve() {
+        for tz in [
+            "",
+            "America/New_York",
+            "EST5EDT,garbage",
+            "%%%",
+            // Refused before it is opened: a `..` component would let an
+            // inherited `TZ` walk out of the zoneinfo tree.
+            "../../../etc/passwd",
+        ] {
             assert_eq!(
-                run(&format!("export TZ='{tz}'; printf '%(%H %Z)T\\n' 1000000000")).0,
+                run(&format!(
+                    "export TZDIR=/nonexistent-zoneinfo; export TZ='{tz}'; \
+                     printf '%(%H %Z)T\\n' 1000000000"
+                ))
+                .0,
                 "01 UTC\n",
                 "TZ={tz:?} should render as UTC"
             );
         }
+    }
+
+    /// A TZif v2 file for a US-eastern-like zone: two recorded transitions in
+    /// 2020 and an `EST5EDT,M3.2.0,M11.1.0` footer — the shape `zic -b slim`
+    /// emits, with a zero-transition v1 block ahead of the v2 one.
+    ///
+    /// Built here rather than copied from tzdata so the test needs no zoneinfo
+    /// on the host, and so what it asserts is legible from the bytes.
+    fn eastern_tzif() -> Vec<u8> {
+        fn header(out: &mut Vec<u8>, timecnt: u32, typecnt: u32, charcnt: u32) {
+            out.extend_from_slice(b"TZif2");
+            out.extend_from_slice(&[0; 15]);
+            for n in [0, 0, 0, timecnt, typecnt, charcnt] {
+                out.extend_from_slice(&u32::to_be_bytes(n));
+            }
+        }
+        fn ttinfo(out: &mut Vec<u8>, utoff: i32, isdst: u8, desigidx: u8) {
+            out.extend_from_slice(&i32::to_be_bytes(utoff));
+            out.extend_from_slice(&[isdst, desigidx]);
+        }
+        let mut b = Vec::new();
+        // v1 block: the two types, no transitions (what a slim file carries).
+        header(&mut b, 0, 2, 8);
+        ttinfo(&mut b, -5 * 3600, 0, 0);
+        ttinfo(&mut b, -4 * 3600, 1, 4);
+        b.extend_from_slice(b"EST\0EDT\0");
+        // v2 block: 8-byte transition times.
+        header(&mut b, 2, 2, 8);
+        b.extend_from_slice(&i64::to_be_bytes(1_583_650_800)); // 2020-03-08 EST->EDT
+        b.extend_from_slice(&i64::to_be_bytes(1_604_210_400)); // 2020-11-01 EDT->EST
+        b.extend_from_slice(&[1, 0]);
+        ttinfo(&mut b, -5 * 3600, 0, 0);
+        ttinfo(&mut b, -4 * 3600, 1, 4);
+        b.extend_from_slice(b"EST\0EDT\0");
+        b.extend_from_slice(b"\nEST5EDT,M3.2.0,M11.1.0\n");
+        b
+    }
+
+    /// [`eastern_tzif`] written to a scratch `TZDIR` as `Fixture/Eastern`.
+    fn eastern_zoneinfo_dir() -> ScratchDir {
+        let dir = ScratchDir::new("osh_tzdir");
+        std::fs::create_dir(dir.join("Fixture")).expect("create fixture zone dir");
+        std::fs::write(dir.join("Fixture/Eastern"), eastern_tzif()).expect("write fixture zone");
+        dir
+    }
+
+    /// A `TZ` naming a real zoneinfo file renders from that file's transition
+    /// table, so osh and a child `date` agree once tzdata ships. The fixture is
+    /// written to a scratch tree and reached via an exported `TZDIR`, which is
+    /// why this test needs no tzdata on the host.
+    #[test]
+    fn printf_time_reads_a_zoneinfo_file() {
+        let dir = eastern_zoneinfo_dir();
+        let tzdir = dir.slashed();
+        // 1593561600 = 2020-07-01 00:00 UTC, between the fixture's two recorded
+        // transitions: the answer comes from the transition table, not the
+        // footer, and is EDT (-4h) — 20:00 the previous day.
+        assert_eq!(
+            run(&format!(
+                "export TZDIR='{tzdir}'; export TZ=Fixture/Eastern; \
+                 printf '%(%H %Z %z)T\\n' 1593561600"
+            ))
+            .0,
+            "20 EDT -0400\n"
+        );
+        // Winter, still inside the table: the standard half.
+        assert_eq!(
+            run(&format!(
+                "export TZDIR='{tzdir}'; export TZ=Fixture/Eastern; \
+                 printf '%(%Z %z)T\\n' 1583020800"
+            ))
+            .0,
+            "EST -0500\n"
+        );
+        // 1908000000 = 2030-06-21, past the last recorded transition, where the
+        // POSIX footer governs. Without it the zone would freeze on the table's
+        // final entry (EST) and report the wrong offset for every future date.
+        assert_eq!(
+            run(&format!(
+                "export TZDIR='{tzdir}'; export TZ=Fixture/Eastern; \
+                 printf '%(%Z %z)T\\n' 1908000000"
+            ))
+            .0,
+            "EDT -0400\n"
+        );
+        // A leading `:` forces the file interpretation, which is how POSIX
+        // spells "the rest is implementation-defined".
+        assert_eq!(
+            run(&format!(
+                "export TZDIR='{tzdir}'; export TZ=:Fixture/Eastern; \
+                 printf '%(%Z)T\\n' 1593561600"
+            ))
+            .0,
+            "EDT\n"
+        );
+    }
+
+    /// A name that is *both* a valid POSIX rule and a file resolves as the rule,
+    /// matching glibc — the file is reached only through a leading `:`. The two
+    /// disagree here on purpose: the fixture file is US-eastern, the rule is
+    /// a fixed +0 zone, so which one answered is unambiguous.
+    #[test]
+    fn printf_time_prefers_a_tz_rule_over_a_file_of_the_same_name() {
+        let dir = eastern_zoneinfo_dir();
+        std::fs::write(dir.join("XXX0"), eastern_tzif()).expect("write rule-named zone");
+        let tzdir = dir.slashed();
+        assert_eq!(
+            run(&format!(
+                "export TZDIR='{tzdir}'; export TZ=XXX0; printf '%(%Z %z)T\\n' 1593561600"
+            ))
+            .0,
+            "XXX +0000\n"
+        );
+        assert_eq!(
+            run(&format!(
+                "export TZDIR='{tzdir}'; export TZ=:XXX0; printf '%(%Z %z)T\\n' 1593561600"
+            ))
+            .0,
+            "EDT -0400\n"
+        );
+    }
+
+    /// A file that is not TZif is not a zone: the shell keeps UTC rather than
+    /// rendering from whatever the bytes happened to decode to. Checked at load
+    /// time, so a prompt cannot start in one zone and finish in another.
+    #[test]
+    fn printf_time_refuses_a_zoneinfo_file_that_is_not_tzif() {
+        let dir = eastern_zoneinfo_dir();
+        std::fs::write(dir.join("Fixture/Junk"), b"not a zoneinfo file").expect("write junk");
+        // Truncated after a header whose counts all still add up: rejected by
+        // the mandatory v2 footer, not by a count check.
+        let full = eastern_tzif();
+        let cut = full.len() - b"\nEST5EDT,M3.2.0,M11.1.0\n".len();
+        std::fs::write(dir.join("Fixture/Cut"), &full[..cut]).expect("write truncated");
+        let tzdir = dir.slashed();
+        for name in ["Fixture/Junk", "Fixture/Cut", "Fixture/Missing"] {
+            assert_eq!(
+                run(&format!(
+                    "export TZDIR='{tzdir}'; export TZ={name}; printf '%(%H %Z)T\\n' 1000000000"
+                ))
+                .0,
+                "01 UTC\n",
+                "TZ={name} should render as UTC"
+            );
+        }
+    }
+
+    /// The prompt escapes take one zone snapshot for the whole prompt, and that
+    /// snapshot owns its zoneinfo bytes — so a `\D{…}` rendering from a file is
+    /// the same zone the `%(…)T` conversion would have used.
+    #[test]
+    fn prompt_time_escapes_read_a_zoneinfo_file() {
+        let dir = eastern_zoneinfo_dir();
+        let mut sh = new_shell();
+        sh.run_source(format!("export TZDIR='{}'", dir.slashed()).as_bytes());
+        sh.run_source(b"export TZ=Fixture/Eastern");
+        // Renders *now*, so only the fact that it came from the file — an
+        // eastern abbreviation with a matching offset — can be asserted.
+        let out = sh.prompt_decode("\\D{%Z %z}");
+        assert!(
+            out == b"EST -0500".to_vec() || out == b"EDT -0400".to_vec(),
+            "prompt rendered {:?}, expected an eastern zone from the fixture file",
+            String::from_utf8_lossy(&out)
+        );
     }
 
     /// The `\t`-family prompt escapes share the printf engine, so a prompt and
@@ -76766,6 +77729,136 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             );
             assert_eq!(st, 0, "{cmd}");
         }
+    }
+
+    /// The third command a compound declaration decomposes into is a **real
+    /// operand of the real builtin**, and its letters land where *it* resolves.
+    ///
+    /// `expand_declaration_argument` (subst.c:12653) hands the builtin the
+    /// operand truncated at the `=` (subst.c:12493), so `declare -gGa g=(1 2)`
+    /// ends in a genuine `declare -gGa g`. Having no `=`, it assigns nothing: it
+    /// sets the letters *as attributes only* — never re-folding and never
+    /// re-evaluating what the variable already holds — and converts the shape
+    /// only when a kind letter was given, carrying an old scalar in as element
+    /// 0, exactly as `declare -a` over an existing scalar does.
+    ///
+    /// Where it lands is its own question, and not the literal's: only the
+    /// builtin half reads the uppercase `G` (execute_cmd.c:4246), and only it
+    /// makes the `mkglobal` restart (declare.def:735). Corpus:
+    /// `the-letters-of-a-compound-declaration-land-a-third-time-where-the-builtin-resolves.sh`.
+    #[test]
+    fn the_letters_of_a_compound_declaration_land_a_third_time_where_the_builtin_resolves() {
+        // No literal at all: the letters land, the value is left as it stands.
+        for (cmd, want) in [
+            ("declare -gGa g", "declare -a g=([0]=\"old\")\n"),
+            ("declare -gGi g", "declare -i g=\"old\"\n"),
+            ("declare -gGu g", "declare -u g=\"old\"\n"),
+        ] {
+            let (out, st) = run(&format!("g=old; f() {{ {cmd}; declare -p g; }}; f"));
+            assert_eq!(out, want, "{cmd}");
+            assert_eq!(st, 0, "{cmd}");
+        }
+
+        // And the same with a literal in front of them. The fold and the
+        // arithmetic belong to the assignment step 2 already made.
+        for (cmd, want) in [
+            ("declare -gGl g=(1 2)", "declare -l g=\"Ab7+1\"\n"),
+            ("declare -gGu g=(1 2)", "declare -u g=\"Ab7+1\"\n"),
+            ("declare -gGi g=(1 2)", "declare -i g=\"Ab7+1\"\n"),
+            ("declare -gGa g=(1 2)", "declare -a g=([0]=\"Ab7+1\")\n"),
+            ("declare -gGA g=(1 2)", "declare -A g=([0]=\"Ab7+1\" )\n"),
+        ] {
+            let (out, st) = run(&format!("f() {{ local g=Ab7+1; {cmd}; declare -p g; }}; f"));
+            assert_eq!(out, want, "{cmd}");
+            assert_eq!(st, 0, "{cmd}");
+        }
+
+        // Step 1 sets the letters *before* step 2 stores, though, so a literal's
+        // own elements do fold and do evaluate.
+        let (out, st) = run("g=abC; f() { declare -gGu g=(x yZ); declare -p g; }; f");
+        assert_eq!(out, "declare -au g=([0]=\"X\" [1]=\"YZ\")\n");
+        assert_eq!(st, 0);
+        let (out, st) = run("g=2+3; f() { declare -gGi g=(4+5 6); declare -p g; }; f");
+        assert_eq!(out, "declare -ai g=([0]=\"9\" [1]=\"6\")\n");
+        assert_eq!(st, 0);
+
+        // `chklocal` keeps the builtin at home where nothing moves it, and the
+        // lowercase letter alone carries it out — so the very same literal
+        // leaves two different frames' bindings behind.
+        let (out, st) = run(
+            "g=old; f() { local g=loc; declare -gGa g=(1 2); declare -p g; }; f; declare -p g",
+        );
+        assert_eq!(
+            out,
+            "declare -a g=([0]=\"loc\")\ndeclare -a g=([0]=\"1\" [1]=\"2\")\n"
+        );
+        assert_eq!(st, 0);
+        let (out, st) =
+            run("g=old; f() { local g=loc; declare -ga g=(1 2); declare -p g; }; f; declare -p g");
+        assert_eq!(
+            out,
+            "declare -- g=\"loc\"\ndeclare -a g=([0]=\"1\" [1]=\"2\")\n"
+        );
+        assert_eq!(st, 0);
+    }
+
+    /// An array's kind is refused by whichever command is asked to change it,
+    /// and under a scope swap that is **step 1** — `make_internal_declare`,
+    /// which refuses at declare.def:876. The compound literal that follows is by
+    /// then in one of `do_compound_assignment`'s two *scoped* branches
+    /// (subst.c:3484, 3513), and neither of those has a refusal in it:
+    /// `convert_var_to_assoc` and its indexed twin replace the storage without a
+    /// word. Only the unscoped `else` branch — `assign_array_from_string` →
+    /// `find_or_make_array_variable` (arrayfunc.c:504) — reports, which is the
+    /// road taken where there is no swap at all.
+    ///
+    /// The two commands do not resolve the same name (see
+    /// [`Shell::enter_global_scope`]), so *which* variable is asked is the whole
+    /// of it: a `declare -n` restart carries step 1 out to a name that answers
+    /// differently, and the frame's own array is then converted rather than
+    /// refused.
+    #[test]
+    fn the_kind_of_an_array_is_refused_by_the_command_that_would_convert_it() {
+        // No swap: the literal's own road refuses, untagged.
+        let (out, st) = run("declare -a g=(7); declare -A g=([k]=v); declare -p g");
+        assert_eq!(out, "");
+        assert_eq!(st, 1);
+        // A swap, but the two commands agree on the name.
+        let (out, st) = run("f() { local -a g=(9); readonly -A g=([k]=v); declare -p g; }; f");
+        assert_eq!(out, "");
+        assert_eq!(st, 1);
+        // The restart parts them, and `z` is unset — so nothing refuses, and the
+        // literal converts the frame's own indexed array.
+        for cmd in ["readonly", "export"] {
+            let mark = if cmd == "readonly" { "r" } else { "x" };
+            let (out, st) = run(&format!(
+                "declare -n g=z; f() {{ local -a g=(9); {cmd} -A g=([k]=v); declare -p g; }}; f; declare -p z"
+            ));
+            assert_eq!(out, format!("declare -A{mark} g=([k]=\"v\" )\ndeclare -A z\n"), "{cmd}");
+            assert_eq!(st, 0, "{cmd}");
+        }
+        // `z` already holds the kind asked for: still nothing to refuse.
+        let (out, st) = run(
+            "declare -n g=z; declare -A z=([q]=1)
+             f() { local -a g=(9); readonly -A g=([k]=v); declare -p g; }; f; declare -p z",
+        );
+        assert_eq!(out, "declare -Ar g=([k]=\"v\" )\ndeclare -A z=([q]=\"1\" )\n");
+        assert_eq!(st, 0);
+        // `z` holds the *other* kind, so step 1 refuses — naming `g`, the name
+        // as written, the restart not having happened.
+        let (out, st) = run(
+            "declare -n g=z; declare -a z=(7)
+             f() { local -a g=(9); readonly -A g=([k]=v); declare -p g; }; f",
+        );
+        assert_eq!(out, "");
+        assert_eq!(st, 1);
+        // The conversion replaces the storage: nothing is carried across as
+        // element 0, the way `declare -a` widens a *scalar*.
+        let (out, st) = run(
+            "declare -n g=z; f() { local -a g=(1 2 3); readonly -A g=([k]=v); declare -p g; }; f",
+        );
+        assert_eq!(out, "declare -Ar g=([k]=\"v\" )\n");
+        assert_eq!(st, 0);
     }
 
     /// A nameref walk gives up two ways — it closes on a name it has already
@@ -88903,6 +89996,87 @@ st=1
         assert_eq!(s, 1);
     }
 
+    /// Posix mode prints the signal table as one line of bare names.
+    ///
+    /// Checked in a lib test rather than the corpus because the *set* of
+    /// signals is the target's, not the host's — see
+    /// TD-OILS-SIGNAL-TABLE-IS-LINUXS-NOT-THE-HOSTS. The layout is what is
+    /// being pinned, and every figure below was measured against bash 5.2.37.
+    #[test]
+    fn posix_mode_lists_signals_on_one_line_without_the_sig_prefix() {
+        let (o, s) = run("set -o posix; kill -l");
+        assert_eq!(s, 0);
+        // One line, and it is the whole table.
+        assert_eq!(o.lines().count(), 1, "got {o:?}");
+        assert!(o.ends_with('\n'), "got {o:?}");
+        let names: Vec<&str> = o.trim_end_matches('\n').split(' ').collect();
+        assert_eq!(names.len(), SIGNALS.len(), "got {o:?}");
+        for (name, (_, expected)) in names.iter().zip(SIGNALS) {
+            assert_eq!(name, expected);
+        }
+        // Single-space separated with no trailing space, and no numbers, no
+        // tabs and no `SIG` anywhere — the columnar layout is gone entirely.
+        assert!(!o.contains("  ") && !o.contains(" \n"), "got {o:?}");
+        assert!(!o.contains('\t') && !o.contains(')') && !o.contains("SIG"), "got {o:?}");
+        // `-L` exists to *force* the columns, and the mode wins over it.
+        assert_eq!(run("set -o posix; kill -L").0, o);
+        // The mode is `$POSIXLY_CORRECT`, so the environment spelling agrees.
+        assert_eq!(run("POSIXLY_CORRECT=1 kill -l").0, o);
+        // Leaving the mode restores the columns.
+        assert_eq!(run("set -o posix; set +o posix; kill -l").0, run("kill -l").0);
+        // `trap -l` is *not* in this rule: bash moves only `kill`'s listing.
+        assert_eq!(run("set -o posix; trap -l").0, run("trap -l").0);
+    }
+
+    /// Posix mode takes the `SIG` prefix away from every spelling `kill` reads
+    /// a signal in, and from nothing else.
+    #[test]
+    fn posix_mode_refuses_a_sig_prefixed_name_to_kill() {
+        // Both directions of `kill -l`: the prefixed name stops resolving…
+        assert_eq!(run("kill -l SIGTERM").0, "15\n");
+        let (o, s) = run("set -o posix; kill -l SIGTERM 2>&1");
+        assert!(o.contains("kill: SIGTERM: invalid signal specification"), "got {o:?}");
+        assert_eq!(s, 1);
+        // …while the bare name still does, and case is still insignificant for
+        // it. The refusal is case-insensitive too: it is the prefix that is
+        // gone, not one spelling of it.
+        assert_eq!(run("set -o posix; kill -l TERM").0, "15\n");
+        assert_eq!(run("set -o posix; kill -l term").0, "15\n");
+        let (o, _) = run("set -o posix; kill -l sIgTeRm 2>&1");
+        assert!(o.contains("kill: sIgTeRm: invalid signal specification"), "got {o:?}");
+        // The number → name direction never printed the prefix, so it is
+        // unmoved — including the exit-status form and `0`.
+        assert_eq!(run("set -o posix; kill -l 9").0, "KILL\n");
+        assert_eq!(run("set -o posix; kill -l 137").0, "KILL\n");
+        assert_eq!(run("set -o posix; kill -l 0").0, "EXIT\n");
+        // A pseudo signal has no `SIG` spelling to lose, so it answers in both
+        // modes — and `SIGEXIT` is refused in both, for the same reason.
+        assert_eq!(run("set -o posix; kill -l EXIT").0, run("kill -l EXIT").0);
+        assert_eq!(run("set -o posix; kill -l DEBUG").0, run("kill -l DEBUG").0);
+        let (o, s) = run("kill -l SIGEXIT 2>&1");
+        assert!(o.contains("kill: SIGEXIT: invalid signal specification"), "got {o:?}");
+        assert_eq!(s, 1);
+        // Every sending spelling takes the same gate: `-SIG…`, `-s SIG…` and
+        // `-n SIG…`. (`kill -0` on the shell's own pid is the harmless probe;
+        // what is asserted is which spec was refused, not the delivery.)
+        for form in ["-SIGCONT", "-s SIGCONT", "-sSIGCONT", "-n SIGCONT"] {
+            let (o, _) = run(&format!("set -o posix; kill {form} $$ 2>&1"));
+            assert!(
+                o.contains("kill: SIGCONT: invalid signal specification"),
+                "{form}: got {o:?}"
+            );
+        }
+        // …and the bare spellings, plus a number, are untouched.
+        for form in ["-CONT", "-s CONT", "-sCONT", "-n 18", "-18"] {
+            let (o, _) = run(&format!("set -o posix; kill {form} $$ 2>&1"));
+            assert!(!o.contains("invalid signal specification"), "{form}: got {o:?}");
+        }
+        // `trap` is not in this rule at all — measured against bash 5.2.37.
+        let (o, s) = run("set -o posix; trap ':' SIGUSR1; trap -p");
+        assert!(o.contains("USR1"), "got {o:?}");
+        assert_eq!(s, 0);
+    }
+
     #[test]
     fn nsig_is_one_past_the_last_real_signal() {
         // `NSIG` is what bounds a *numeric* signal spec and where the pseudo
@@ -93547,13 +94721,15 @@ st=1
         let mut sh = new_shell();
         // An operand-less `wait` spares the `$!` job from being marked reported
         // when it had already finished, so the status is still `-n`-answerable…
-        sh.run_source("( exit 3 ) & sleep 0.2".as_bytes());
+        sh.run_source("( exit 3 ) &".as_bytes());
+        settle_jobs(&mut sh);
         assert_eq!(sh.run_source("wait".as_bytes()), 0);
         assert_eq!(sh.run_source("wait -n".as_bytes()), 3, "spared job is still answerable");
         // …until a `jobs` listing announces it, after which bash denies the job
         // exists at all: 127 from a bare `-n`, and `no such job` for one named by
         // pid — while a *targeted* `wait PID` still replays the status.
-        sh.run_source("( exit 5 ) & p=$!; sleep 0.2".as_bytes());
+        sh.run_source("( exit 5 ) & p=$!".as_bytes());
+        settle_jobs(&mut sh);
         assert_eq!(sh.run_source("wait".as_bytes()), 0);
         assert_eq!(listing(&mut sh, "jobs").lines().count(), 1);
         assert!(
@@ -93926,6 +95102,27 @@ st=1
                 return;
             };
             if job.status.is_some() {
+                return;
+            }
+            std::thread::yield_now();
+        }
+    }
+
+    /// [`settle_job`] for the whole table — for a test that backgrounds a job
+    /// and does not keep its id, and so cannot name the one to wait for.
+    ///
+    /// Sleeping a fixed span instead is what made
+    /// `wait_n_ignores_a_job_whose_status_was_already_reported` flake under
+    /// parallel test load: the assertion there turns on the shell having
+    /// *already* noticed the exit when the operand-less `wait` arrives, and no
+    /// constant is long enough to promise that on a loaded machine.
+    fn settle_jobs(sh: &mut Shell) {
+        // The same grace as [`settle_job`], and for the same reason: a death
+        // inside it is not yet news. See [`Job::born_at`].
+        std::thread::sleep(JOB_EXIT_NOTICE_GRACE + std::time::Duration::from_millis(5));
+        loop {
+            sh.poll_jobs();
+            if sh.jobs.iter().all(|j| j.status.is_some()) {
                 return;
             }
             std::thread::yield_now();
@@ -100285,5 +101482,54 @@ st=1
         assert!(!gate(b"a[0]${b}"));
         // A closed reference does not hide a divergent one after it.
         assert!(gate(b"${a[0]}${h[}x]}"));
+    }
+
+    /// A backquote is a quote to `brace_gobbler` only where its `` ` `` row is
+    /// reached, which is the unquoted state alone. Inside `" … "` the `quoted`
+    /// branch is taken first, the backquote is merely a character, and the scan
+    /// reads on into the body — where the `$(` row of that branch still fires
+    /// and takes the rest of the *word* for its remainder.
+    ///
+    /// The tell is which of the two endings a failing body gets: the scanner's
+    /// is `jump_to_top_level (DISCARD)`, so the `echo` never runs and `$?` is 1;
+    /// the backquote's own run is just a substitution that expanded to nothing,
+    /// so the `echo` prints and `$?` is 0.
+    #[test]
+    fn a_backquote_body_inside_double_quotes_is_read_by_the_brace_scanner() {
+        // The top level: the body is hidden, and the word brace-expands into
+        // two `echo` arguments that each run the backquote for real.
+        assert_eq!(run("echo p`echo $(fi)`q{,}"), ("pq pq\n".into(), 0));
+        // Inside double quotes the scan reads the body, and the read fails.
+        for src in [
+            r#"echo "p`echo $(fi)`q{,}""#,
+            r#"echo "p`echo ${z:-'$(fi)'}`q{,}""#,
+            r#"echo "p`echo '$(fi)'`q{,}""#,
+            r#"echo "p`echo "$(fi)"`q{,}""#,
+            r#"echo p"`echo $(fi)`"q{,}"#,
+            r#"echo "p${z:-`echo $(fi)`}q{,}""#,
+            // The `$((` spelling is the same `$(` row; the `$[` one is not the
+            // row at all, so the scan meets the `$( … )` inside it directly.
+            r#"echo "p`echo $((1+$(fi)))`q{,}""#,
+            r#"echo "p`echo $[1+$(fi)]`q{,}""#,
+        ] {
+            assert_eq!(run(src), (String::new(), 1), "{src}");
+        }
+        // Rows that do *not* fire in the `"` state, leaving the body to its own
+        // run: `<(` belongs to the unquoted comsub row alone, a `\` passes the
+        // next character over, and a nested backquote is a quote again.
+        for src in [
+            r#"echo "p`echo <(fi)`q{,}""#,
+            r#"echo "p`echo \$(fi)`q{,}""#,
+            r#"echo "p`echo ${z:-\$(fi)}`q{,}""#,
+            r#"echo "p`echo \`fi\``q{,}""#,
+        ] {
+            assert_eq!(run(src), ("pq{,}\n".into(), 0), "{src}");
+        }
+        // No `{` in the word, so `brace_expand_word_list` never calls the
+        // scanner and the body is left to its own run.
+        assert_eq!(run(r#"echo "p`echo $(fi)`q""#), ("pq\n".into(), 0));
+        // A body that parses is read and thrown away, not run — the `SIDE` here
+        // is the backquote's own later expansion, printed once.
+        assert_eq!(run(r#"echo "p`echo $(echo SIDE)`q{,}""#), ("pSIDEq{,}\n".into(), 0));
     }
 }

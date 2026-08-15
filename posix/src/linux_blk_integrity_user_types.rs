@@ -57,10 +57,8 @@ pub const BLK_INTEGRITY_CSUM_CRC64: u8 = 3;
 pub const SYSFS_INTEGRITY_FORMAT: &str = "format";
 pub const SYSFS_INTEGRITY_READ_VERIFY: &str = "read_verify";
 pub const SYSFS_INTEGRITY_WRITE_GENERATE: &str = "write_generate";
-pub const SYSFS_INTEGRITY_DEVICE_IS_INTEGRITY_CAPABLE: &str =
-    "device_is_integrity_capable";
-pub const SYSFS_INTEGRITY_PROTECTION_INTERVAL_BYTES: &str =
-    "protection_interval_bytes";
+pub const SYSFS_INTEGRITY_DEVICE_IS_INTEGRITY_CAPABLE: &str = "device_is_integrity_capable";
+pub const SYSFS_INTEGRITY_PROTECTION_INTERVAL_BYTES: &str = "protection_interval_bytes";
 pub const SYSFS_INTEGRITY_TAG_SIZE: &str = "tag_size";
 
 // ---------------------------------------------------------------------------

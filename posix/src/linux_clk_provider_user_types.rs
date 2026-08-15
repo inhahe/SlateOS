@@ -119,7 +119,11 @@ mod tests {
 
     #[test]
     fn test_gate_flags_dense_low_3_bits() {
-        let f = [CLK_GATE_SET_TO_DISABLE, CLK_GATE_HIWORD_MASK, CLK_GATE_BIG_ENDIAN];
+        let f = [
+            CLK_GATE_SET_TO_DISABLE,
+            CLK_GATE_HIWORD_MASK,
+            CLK_GATE_BIG_ENDIAN,
+        ];
         for (i, &v) in f.iter().enumerate() {
             assert_eq!(v, 1 << i);
         }

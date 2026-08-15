@@ -12,10 +12,9 @@
 #![allow(dead_code)]
 
 use crate::{
-    CpuInfo, DiskInfo, DisplayInfo, DmaInfo, DriverInfo, IoPortInfo, IrqInfo,
-    MemoryInfo, MemoryMapEntry, MemorySlot, NetworkAdapterInfo, PartitionInfo,
-    PciDeviceInfo, ProcessEntry, ServiceInfo, SoundInfo, StartupEntry,
-    UsbDeviceInfo,
+    CpuInfo, DiskInfo, DisplayInfo, DmaInfo, DriverInfo, IoPortInfo, IrqInfo, MemoryInfo,
+    MemoryMapEntry, MemorySlot, NetworkAdapterInfo, PartitionInfo, PciDeviceInfo, ProcessEntry,
+    ServiceInfo, SoundInfo, StartupEntry, UsbDeviceInfo,
 };
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -238,18 +237,9 @@ impl SyscallProvider {
                 .get("vendor")
                 .cloned()
                 .unwrap_or_else(|| "Unknown".to_string()),
-            family: kv
-                .get("family")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(0),
-            model: kv
-                .get("model")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(0),
-            stepping: kv
-                .get("stepping")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(0),
+            family: kv.get("family").and_then(|v| v.parse().ok()).unwrap_or(0),
+            model: kv.get("model").and_then(|v| v.parse().ok()).unwrap_or(0),
+            stepping: kv.get("stepping").and_then(|v| v.parse().ok()).unwrap_or(0),
             physical_cores: kv
                 .get("physical_cores")
                 .and_then(|v| v.parse().ok())
@@ -274,15 +264,11 @@ impl SyscallProvider {
                 .get("l1_inst_kb")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0),
-            l2_kb: kv
-                .get("l2_kb")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(0),
-            l3_kb: kv
-                .get("l3_kb")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(0),
-            features: Self::parse_cpu_features(kv.get("features").map(|s| s.as_str()).unwrap_or("")),
+            l2_kb: kv.get("l2_kb").and_then(|v| v.parse().ok()).unwrap_or(0),
+            l3_kb: kv.get("l3_kb").and_then(|v| v.parse().ok()).unwrap_or(0),
+            features: Self::parse_cpu_features(
+                kv.get("features").map(|s| s.as_str()).unwrap_or(""),
+            ),
         })
     }
 
@@ -307,7 +293,10 @@ impl SyscallProvider {
 
     /// Parse a list of records from a sysfs directory.
     /// Each entry is a subdirectory with key=value files.
-    fn read_sysfs_dir_entries(&self, base_path: &str) -> Result<Vec<HashMap<String, String>>, HwQueryError> {
+    fn read_sysfs_dir_entries(
+        &self,
+        base_path: &str,
+    ) -> Result<Vec<HashMap<String, String>>, HwQueryError> {
         // On the actual OS, this would list directory entries and read each one.
         // For cross-platform dev, try filesystem read.
         let content = self.read_sysfs(base_path)?;
@@ -359,16 +348,20 @@ impl HardwareProvider for SyscallProvider {
             if let Some(name) = kv.get(&format!("{prefix}name")) {
                 slots.push(MemorySlot {
                     slot_name: name.clone(),
-                    size_mb: kv.get(&format!("{prefix}size_mb"))
+                    size_mb: kv
+                        .get(&format!("{prefix}size_mb"))
                         .and_then(|v| v.parse().ok())
                         .unwrap_or(0),
-                    mem_type: kv.get(&format!("{prefix}type"))
+                    mem_type: kv
+                        .get(&format!("{prefix}type"))
                         .cloned()
                         .unwrap_or_default(),
-                    speed_mhz: kv.get(&format!("{prefix}speed_mhz"))
+                    speed_mhz: kv
+                        .get(&format!("{prefix}speed_mhz"))
                         .and_then(|v| v.parse().ok())
                         .unwrap_or(0),
-                    manufacturer: kv.get(&format!("{prefix}manufacturer"))
+                    manufacturer: kv
+                        .get(&format!("{prefix}manufacturer"))
                         .cloned()
                         .unwrap_or_default(),
                 });
@@ -378,20 +371,22 @@ impl HardwareProvider for SyscallProvider {
         let slots_used = slots.iter().filter(|s| s.size_mb > 0).count() as u32;
 
         Ok(MemoryInfo {
-            total_mb: kv.get("total_mb")
+            total_mb: kv.get("total_mb").and_then(|v| v.parse().ok()).unwrap_or(0),
+            available_mb: kv
+                .get("available_mb")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0),
-            available_mb: kv.get("available_mb")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(0),
-            mem_type: kv.get("type")
+            mem_type: kv
+                .get("type")
                 .cloned()
                 .unwrap_or_else(|| "Unknown".to_string()),
-            speed_mhz: kv.get("speed_mhz")
+            speed_mhz: kv
+                .get("speed_mhz")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0),
             slots_used,
-            slots_total: kv.get("slots_total")
+            slots_total: kv
+                .get("slots_total")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(slots.len() as u32),
             slots,
@@ -410,19 +405,24 @@ impl HardwareProvider for SyscallProvider {
                 if let Some(label) = entry.get(&format!("{prefix}label")) {
                     partitions.push(PartitionInfo {
                         label: label.clone(),
-                        filesystem: entry.get(&format!("{prefix}fs"))
+                        filesystem: entry
+                            .get(&format!("{prefix}fs"))
                             .cloned()
                             .unwrap_or_default(),
-                        capacity_gb: entry.get(&format!("{prefix}capacity_gb"))
+                        capacity_gb: entry
+                            .get(&format!("{prefix}capacity_gb"))
                             .and_then(|v| v.parse().ok())
                             .unwrap_or(0.0),
-                        used_gb: entry.get(&format!("{prefix}used_gb"))
+                        used_gb: entry
+                            .get(&format!("{prefix}used_gb"))
                             .and_then(|v| v.parse().ok())
                             .unwrap_or(0.0),
-                        free_gb: entry.get(&format!("{prefix}free_gb"))
+                        free_gb: entry
+                            .get(&format!("{prefix}free_gb"))
                             .and_then(|v| v.parse().ok())
                             .unwrap_or(0.0),
-                        mount_point: entry.get(&format!("{prefix}mount"))
+                        mount_point: entry
+                            .get(&format!("{prefix}mount"))
                             .cloned()
                             .unwrap_or_default(),
                     });
@@ -430,19 +430,18 @@ impl HardwareProvider for SyscallProvider {
             }
 
             disks.push(DiskInfo {
-                model: entry.get("model")
+                model: entry
+                    .get("model")
                     .cloned()
                     .unwrap_or_else(|| "Unknown Disk".to_string()),
-                capacity_gb: entry.get("capacity_gb")
+                capacity_gb: entry
+                    .get("capacity_gb")
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(0.0),
-                interface: entry.get("interface")
-                    .cloned()
-                    .unwrap_or_default(),
-                serial: entry.get("serial")
-                    .cloned()
-                    .unwrap_or_default(),
-                smart_status: entry.get("smart_status")
+                interface: entry.get("interface").cloned().unwrap_or_default(),
+                serial: entry.get("serial").cloned().unwrap_or_default(),
+                smart_status: entry
+                    .get("smart_status")
                     .cloned()
                     .unwrap_or_else(|| "Unknown".to_string()),
                 partitions,
@@ -466,14 +465,17 @@ impl HardwareProvider for SyscallProvider {
                 subnet: entry.get("subnet").cloned().unwrap_or_default(),
                 gateway: entry.get("gateway").cloned().unwrap_or_default(),
                 dns: entry.get("dns").cloned().unwrap_or_default(),
-                speed_mbps: entry.get("speed_mbps")
+                speed_mbps: entry
+                    .get("speed_mbps")
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(0),
                 duplex: entry.get("duplex").cloned().unwrap_or_default(),
-                bytes_sent: entry.get("bytes_sent")
+                bytes_sent: entry
+                    .get("bytes_sent")
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(0),
-                bytes_received: entry.get("bytes_received")
+                bytes_received: entry
+                    .get("bytes_received")
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(0),
             });
@@ -490,7 +492,8 @@ impl HardwareProvider for SyscallProvider {
         for i in 0..8 {
             let key = format!("output{i}");
             if let Some(name) = kv.get(&key) {
-                let connected = kv.get(&format!("{key}_connected"))
+                let connected = kv
+                    .get(&format!("{key}_connected"))
                     .map(|v| v == "true" || v == "1")
                     .unwrap_or(false);
                 outputs.push((name.clone(), connected));
@@ -502,7 +505,10 @@ impl HardwareProvider for SyscallProvider {
             vendor: kv.get("vendor").cloned().unwrap_or_default(),
             vram_mb: kv.get("vram_mb").and_then(|v| v.parse().ok()).unwrap_or(0),
             resolution: kv.get("resolution").cloned().unwrap_or_default(),
-            refresh_rate_hz: kv.get("refresh_rate_hz").and_then(|v| v.parse().ok()).unwrap_or(0),
+            refresh_rate_hz: kv
+                .get("refresh_rate_hz")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0),
             outputs,
             driver_version: kv.get("driver_version").cloned().unwrap_or_default(),
         })
@@ -515,12 +521,20 @@ impl HardwareProvider for SyscallProvider {
         for entry in &entries {
             devices.push(PciDeviceInfo {
                 bus: entry.get("bus").and_then(|v| v.parse().ok()).unwrap_or(0),
-                device: entry.get("device").and_then(|v| v.parse().ok()).unwrap_or(0),
-                function: entry.get("function").and_then(|v| v.parse().ok()).unwrap_or(0),
-                vendor_id: entry.get("vendor_id")
+                device: entry
+                    .get("device")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0),
+                function: entry
+                    .get("function")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0),
+                vendor_id: entry
+                    .get("vendor_id")
                     .and_then(|v| u16::from_str_radix(v.trim_start_matches("0x"), 16).ok())
                     .unwrap_or(0),
-                device_id: entry.get("device_id")
+                device_id: entry
+                    .get("device_id")
                     .and_then(|v| u16::from_str_radix(v.trim_start_matches("0x"), 16).ok())
                     .unwrap_or(0),
                 class: entry.get("class").cloned().unwrap_or_default(),
@@ -539,10 +553,12 @@ impl HardwareProvider for SyscallProvider {
         for entry in &entries {
             devices.push(UsbDeviceInfo {
                 port: entry.get("port").cloned().unwrap_or_default(),
-                vendor_id: entry.get("vendor_id")
+                vendor_id: entry
+                    .get("vendor_id")
                     .and_then(|v| u16::from_str_radix(v.trim_start_matches("0x"), 16).ok())
                     .unwrap_or(0),
-                product_id: entry.get("product_id")
+                product_id: entry
+                    .get("product_id")
                     .and_then(|v| u16::from_str_radix(v.trim_start_matches("0x"), 16).ok())
                     .unwrap_or(0),
                 description: entry.get("description").cloned().unwrap_or_default(),
@@ -577,7 +593,10 @@ impl HardwareProvider for SyscallProvider {
             irqs.push(IrqInfo {
                 irq_number: entry.get("irq").and_then(|v| v.parse().ok()).unwrap_or(0),
                 device: entry.get("device").cloned().unwrap_or_default(),
-                irq_type: entry.get("type").cloned().unwrap_or_else(|| "Edge".to_string()),
+                irq_type: entry
+                    .get("type")
+                    .cloned()
+                    .unwrap_or_else(|| "Edge".to_string()),
             });
         }
 
@@ -590,10 +609,12 @@ impl HardwareProvider for SyscallProvider {
 
         for entry in &entries {
             ports.push(IoPortInfo {
-                start: entry.get("start")
+                start: entry
+                    .get("start")
                     .and_then(|v| u16::from_str_radix(v.trim_start_matches("0x"), 16).ok())
                     .unwrap_or(0),
-                end: entry.get("end")
+                end: entry
+                    .get("end")
                     .and_then(|v| u16::from_str_radix(v.trim_start_matches("0x"), 16).ok())
                     .unwrap_or(0),
                 device: entry.get("device").cloned().unwrap_or_default(),
@@ -609,10 +630,12 @@ impl HardwareProvider for SyscallProvider {
 
         for entry in &entries {
             regions.push(MemoryMapEntry {
-                start: entry.get("start")
+                start: entry
+                    .get("start")
                     .and_then(|v| u64::from_str_radix(v.trim_start_matches("0x"), 16).ok())
                     .unwrap_or(0),
-                end: entry.get("end")
+                end: entry
+                    .get("end")
                     .and_then(|v| u64::from_str_radix(v.trim_start_matches("0x"), 16).ok())
                     .unwrap_or(0),
                 region_type: entry.get("type").cloned().unwrap_or_default(),
@@ -629,7 +652,10 @@ impl HardwareProvider for SyscallProvider {
 
         for entry in &entries {
             channels.push(DmaInfo {
-                channel: entry.get("channel").and_then(|v| v.parse().ok()).unwrap_or(0),
+                channel: entry
+                    .get("channel")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0),
                 device: entry.get("device").cloned().unwrap_or_default(),
                 mode: entry.get("mode").cloned().unwrap_or_default(),
             });
@@ -661,8 +687,14 @@ impl HardwareProvider for SyscallProvider {
             procs.push(ProcessEntry {
                 pid: entry.get("pid").and_then(|v| v.parse().ok()).unwrap_or(0),
                 name: entry.get("name").cloned().unwrap_or_default(),
-                memory_kb: entry.get("memory_kb").and_then(|v| v.parse().ok()).unwrap_or(0),
-                cpu_percent: entry.get("cpu_percent").and_then(|v| v.parse().ok()).unwrap_or(0.0),
+                memory_kb: entry
+                    .get("memory_kb")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0),
+                cpu_percent: entry
+                    .get("cpu_percent")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0.0),
             });
         }
 
@@ -852,15 +884,21 @@ impl HardwareProvider for StubProvider {
     fn query_pci(&self) -> Result<Vec<PciDeviceInfo>, HwQueryError> {
         Ok(vec![
             PciDeviceInfo {
-                bus: 0, device: 0, function: 0,
-                vendor_id: 0x8086, device_id: 0xA700,
+                bus: 0,
+                device: 0,
+                function: 0,
+                vendor_id: 0x8086,
+                device_id: 0xA700,
                 class: "Host Bridge".to_string(),
                 description: "Intel 13th Gen Core Host Bridge".to_string(),
                 vendor_name: "Intel Corporation".to_string(),
             },
             PciDeviceInfo {
-                bus: 0, device: 2, function: 0,
-                vendor_id: 0x1002, device_id: 0x744C,
+                bus: 0,
+                device: 2,
+                function: 0,
+                vendor_id: 0x1002,
+                device_id: 0x744C,
                 class: "VGA Controller".to_string(),
                 description: "AMD Radeon RX 7900 XTX".to_string(),
                 vendor_name: "Advanced Micro Devices".to_string(),
@@ -871,7 +909,8 @@ impl HardwareProvider for StubProvider {
     fn query_usb(&self) -> Result<Vec<UsbDeviceInfo>, HwQueryError> {
         Ok(vec![UsbDeviceInfo {
             port: "1-1".to_string(),
-            vendor_id: 0x046D, product_id: 0xC548,
+            vendor_id: 0x046D,
+            product_id: 0xC548,
             description: "Logitech G Pro Wireless Mouse".to_string(),
             speed: "USB 2.0 (12 Mbps)".to_string(),
         }])
@@ -888,67 +927,115 @@ impl HardwareProvider for StubProvider {
 
     fn query_irqs(&self) -> Result<Vec<IrqInfo>, HwQueryError> {
         Ok(vec![
-            IrqInfo { irq_number: 0, device: "Timer".to_string(), irq_type: "Edge".to_string() },
-            IrqInfo { irq_number: 1, device: "Keyboard".to_string(), irq_type: "Edge".to_string() },
+            IrqInfo {
+                irq_number: 0,
+                device: "Timer".to_string(),
+                irq_type: "Edge".to_string(),
+            },
+            IrqInfo {
+                irq_number: 1,
+                device: "Keyboard".to_string(),
+                irq_type: "Edge".to_string(),
+            },
         ])
     }
 
     fn query_io_ports(&self) -> Result<Vec<IoPortInfo>, HwQueryError> {
         Ok(vec![
-            IoPortInfo { start: 0x0060, end: 0x0064, device: "Keyboard Controller".to_string() },
-            IoPortInfo { start: 0x03F8, end: 0x03FF, device: "COM1 (Serial)".to_string() },
-        ])
-    }
-
-    fn query_memory_map(&self) -> Result<Vec<MemoryMapEntry>, HwQueryError> {
-        Ok(vec![
-            MemoryMapEntry {
-                start: 0x0000_0000, end: 0x0009_FFFF,
-                region_type: "Conventional".to_string(),
-                description: "Low memory (640 KiB)".to_string(),
+            IoPortInfo {
+                start: 0x0060,
+                end: 0x0064,
+                device: "Keyboard Controller".to_string(),
+            },
+            IoPortInfo {
+                start: 0x03F8,
+                end: 0x03FF,
+                device: "COM1 (Serial)".to_string(),
             },
         ])
     }
 
+    fn query_memory_map(&self) -> Result<Vec<MemoryMapEntry>, HwQueryError> {
+        Ok(vec![MemoryMapEntry {
+            start: 0x0000_0000,
+            end: 0x0009_FFFF,
+            region_type: "Conventional".to_string(),
+            description: "Low memory (640 KiB)".to_string(),
+        }])
+    }
+
     fn query_dma(&self) -> Result<Vec<DmaInfo>, HwQueryError> {
-        Ok(vec![
-            DmaInfo { channel: 2, device: "Floppy (legacy)".to_string(), mode: "Single".to_string() },
-        ])
+        Ok(vec![DmaInfo {
+            channel: 2,
+            device: "Floppy (legacy)".to_string(),
+            mode: "Single".to_string(),
+        }])
     }
 
     fn query_services(&self) -> Result<Vec<ServiceInfo>, HwQueryError> {
         Ok(vec![
-            ServiceInfo { name: "compositor".to_string(), status: "Running".to_string(), start_type: "Automatic".to_string() },
-            ServiceInfo { name: "network-manager".to_string(), status: "Running".to_string(), start_type: "Automatic".to_string() },
+            ServiceInfo {
+                name: "compositor".to_string(),
+                status: "Running".to_string(),
+                start_type: "Automatic".to_string(),
+            },
+            ServiceInfo {
+                name: "network-manager".to_string(),
+                status: "Running".to_string(),
+                start_type: "Automatic".to_string(),
+            },
         ])
     }
 
     fn query_processes(&self) -> Result<Vec<ProcessEntry>, HwQueryError> {
         Ok(vec![
-            ProcessEntry { pid: 1, name: "init".to_string(), memory_kb: 2048, cpu_percent: 0.0 },
-            ProcessEntry { pid: 2, name: "compositor".to_string(), memory_kb: 128000, cpu_percent: 3.2 },
+            ProcessEntry {
+                pid: 1,
+                name: "init".to_string(),
+                memory_kb: 2048,
+                cpu_percent: 0.0,
+            },
+            ProcessEntry {
+                pid: 2,
+                name: "compositor".to_string(),
+                memory_kb: 128000,
+                cpu_percent: 3.2,
+            },
         ])
     }
 
     fn query_drivers(&self) -> Result<Vec<DriverInfo>, HwQueryError> {
         Ok(vec![
-            DriverInfo { name: "nvme".to_string(), path: "/drivers/storage/nvme.drv".to_string(), status: "Loaded".to_string() },
-            DriverInfo { name: "amdgpu".to_string(), path: "/drivers/gpu/amdgpu.drv".to_string(), status: "Loaded".to_string() },
+            DriverInfo {
+                name: "nvme".to_string(),
+                path: "/drivers/storage/nvme.drv".to_string(),
+                status: "Loaded".to_string(),
+            },
+            DriverInfo {
+                name: "amdgpu".to_string(),
+                path: "/drivers/gpu/amdgpu.drv".to_string(),
+                status: "Loaded".to_string(),
+            },
         ])
     }
 
     fn query_env_vars(&self) -> Result<Vec<(String, String)>, HwQueryError> {
         Ok(vec![
-            ("PATH".to_string(), "/bin:/sbin:/usr/bin:/usr/local/bin".to_string()),
+            (
+                "PATH".to_string(),
+                "/bin:/sbin:/usr/bin:/usr/local/bin".to_string(),
+            ),
             ("HOME".to_string(), "/home/user".to_string()),
             ("SHELL".to_string(), "/bin/osh".to_string()),
         ])
     }
 
     fn query_startup(&self) -> Result<Vec<StartupEntry>, HwQueryError> {
-        Ok(vec![
-            StartupEntry { name: "Network Manager".to_string(), path: "/usr/bin/network-manager".to_string(), source: "System".to_string() },
-        ])
+        Ok(vec![StartupEntry {
+            name: "Network Manager".to_string(),
+            path: "/usr/bin/network-manager".to_string(),
+            source: "System".to_string(),
+        }])
     }
 
     fn provider_name(&self) -> &str {
@@ -993,24 +1080,60 @@ macro_rules! fallback_query {
 }
 
 impl HardwareProvider for FallbackProvider {
-    fn query_cpu(&self) -> Result<CpuInfo, HwQueryError> { fallback_query!(self, query_cpu) }
-    fn query_memory(&self) -> Result<MemoryInfo, HwQueryError> { fallback_query!(self, query_memory) }
-    fn query_storage(&self) -> Result<Vec<DiskInfo>, HwQueryError> { fallback_query!(self, query_storage) }
-    fn query_network(&self) -> Result<Vec<NetworkAdapterInfo>, HwQueryError> { fallback_query!(self, query_network) }
-    fn query_display(&self) -> Result<DisplayInfo, HwQueryError> { fallback_query!(self, query_display) }
-    fn query_pci(&self) -> Result<Vec<PciDeviceInfo>, HwQueryError> { fallback_query!(self, query_pci) }
-    fn query_usb(&self) -> Result<Vec<UsbDeviceInfo>, HwQueryError> { fallback_query!(self, query_usb) }
-    fn query_sound(&self) -> Result<Vec<SoundInfo>, HwQueryError> { fallback_query!(self, query_sound) }
-    fn query_irqs(&self) -> Result<Vec<IrqInfo>, HwQueryError> { fallback_query!(self, query_irqs) }
-    fn query_io_ports(&self) -> Result<Vec<IoPortInfo>, HwQueryError> { fallback_query!(self, query_io_ports) }
-    fn query_memory_map(&self) -> Result<Vec<MemoryMapEntry>, HwQueryError> { fallback_query!(self, query_memory_map) }
-    fn query_dma(&self) -> Result<Vec<DmaInfo>, HwQueryError> { fallback_query!(self, query_dma) }
-    fn query_services(&self) -> Result<Vec<ServiceInfo>, HwQueryError> { fallback_query!(self, query_services) }
-    fn query_processes(&self) -> Result<Vec<ProcessEntry>, HwQueryError> { fallback_query!(self, query_processes) }
-    fn query_drivers(&self) -> Result<Vec<DriverInfo>, HwQueryError> { fallback_query!(self, query_drivers) }
-    fn query_env_vars(&self) -> Result<Vec<(String, String)>, HwQueryError> { fallback_query!(self, query_env_vars) }
-    fn query_startup(&self) -> Result<Vec<StartupEntry>, HwQueryError> { fallback_query!(self, query_startup) }
-    fn provider_name(&self) -> &str { "FallbackProvider (live → stub)" }
+    fn query_cpu(&self) -> Result<CpuInfo, HwQueryError> {
+        fallback_query!(self, query_cpu)
+    }
+    fn query_memory(&self) -> Result<MemoryInfo, HwQueryError> {
+        fallback_query!(self, query_memory)
+    }
+    fn query_storage(&self) -> Result<Vec<DiskInfo>, HwQueryError> {
+        fallback_query!(self, query_storage)
+    }
+    fn query_network(&self) -> Result<Vec<NetworkAdapterInfo>, HwQueryError> {
+        fallback_query!(self, query_network)
+    }
+    fn query_display(&self) -> Result<DisplayInfo, HwQueryError> {
+        fallback_query!(self, query_display)
+    }
+    fn query_pci(&self) -> Result<Vec<PciDeviceInfo>, HwQueryError> {
+        fallback_query!(self, query_pci)
+    }
+    fn query_usb(&self) -> Result<Vec<UsbDeviceInfo>, HwQueryError> {
+        fallback_query!(self, query_usb)
+    }
+    fn query_sound(&self) -> Result<Vec<SoundInfo>, HwQueryError> {
+        fallback_query!(self, query_sound)
+    }
+    fn query_irqs(&self) -> Result<Vec<IrqInfo>, HwQueryError> {
+        fallback_query!(self, query_irqs)
+    }
+    fn query_io_ports(&self) -> Result<Vec<IoPortInfo>, HwQueryError> {
+        fallback_query!(self, query_io_ports)
+    }
+    fn query_memory_map(&self) -> Result<Vec<MemoryMapEntry>, HwQueryError> {
+        fallback_query!(self, query_memory_map)
+    }
+    fn query_dma(&self) -> Result<Vec<DmaInfo>, HwQueryError> {
+        fallback_query!(self, query_dma)
+    }
+    fn query_services(&self) -> Result<Vec<ServiceInfo>, HwQueryError> {
+        fallback_query!(self, query_services)
+    }
+    fn query_processes(&self) -> Result<Vec<ProcessEntry>, HwQueryError> {
+        fallback_query!(self, query_processes)
+    }
+    fn query_drivers(&self) -> Result<Vec<DriverInfo>, HwQueryError> {
+        fallback_query!(self, query_drivers)
+    }
+    fn query_env_vars(&self) -> Result<Vec<(String, String)>, HwQueryError> {
+        fallback_query!(self, query_env_vars)
+    }
+    fn query_startup(&self) -> Result<Vec<StartupEntry>, HwQueryError> {
+        fallback_query!(self, query_startup)
+    }
+    fn provider_name(&self) -> &str {
+        "FallbackProvider (live → stub)"
+    }
 }
 
 // ============================================================================
@@ -1082,9 +1205,9 @@ pub struct RefreshManager {
 }
 
 /// Default TTL values for different categories.
-const TTL_STATIC_SECS: u64 = 300;    // CPU, display, PCI: rarely change
-const TTL_DYNAMIC_SECS: u64 = 5;     // Processes, memory usage: change constantly
-const TTL_MODERATE_SECS: u64 = 30;   // Network stats, services: change occasionally
+const TTL_STATIC_SECS: u64 = 300; // CPU, display, PCI: rarely change
+const TTL_DYNAMIC_SECS: u64 = 5; // Processes, memory usage: change constantly
+const TTL_MODERATE_SECS: u64 = 30; // Network stats, services: change occasionally
 
 impl RefreshManager {
     /// Create a new refresh manager with a fallback provider and default TTLs.
@@ -1177,25 +1300,43 @@ impl RefreshManager {
     pub fn cpu(&mut self) -> CpuInfo {
         let now = Self::now();
         if let Some(ref entry) = self.cpu_cache
-            && !entry.is_stale(now) {
-                return entry.data.clone();
-            }
+            && !entry.is_stale(now)
+        {
+            return entry.data.clone();
+        }
         self.refresh_count = self.refresh_count.saturating_add(1);
         match self.provider.query_cpu() {
             Ok(info) => {
-                self.cpu_cache = Some(CacheEntry { data: info.clone(), timestamp: now, ttl_secs: self.cpu_ttl });
+                self.cpu_cache = Some(CacheEntry {
+                    data: info.clone(),
+                    timestamp: now,
+                    ttl_secs: self.cpu_ttl,
+                });
                 info
             }
-            Err(_) => self.cpu_cache.as_ref().map(|e| e.data.clone()).unwrap_or_else(|| {
-                // Last resort: empty default
-                CpuInfo {
-                    brand: "Unknown".to_string(), vendor: "Unknown".to_string(),
-                    family: 0, model: 0, stepping: 0, physical_cores: 0,
-                    logical_processors: 0, base_clock_mhz: 0, max_turbo_mhz: 0,
-                    l1_data_kb: 0, l1_inst_kb: 0, l2_kb: 0, l3_kb: 0,
-                    features: Vec::new(),
-                }
-            })
+            Err(_) => self
+                .cpu_cache
+                .as_ref()
+                .map(|e| e.data.clone())
+                .unwrap_or_else(|| {
+                    // Last resort: empty default
+                    CpuInfo {
+                        brand: "Unknown".to_string(),
+                        vendor: "Unknown".to_string(),
+                        family: 0,
+                        model: 0,
+                        stepping: 0,
+                        physical_cores: 0,
+                        logical_processors: 0,
+                        base_clock_mhz: 0,
+                        max_turbo_mhz: 0,
+                        l1_data_kb: 0,
+                        l1_inst_kb: 0,
+                        l2_kb: 0,
+                        l3_kb: 0,
+                        features: Vec::new(),
+                    }
+                }),
         }
     }
 
@@ -1203,21 +1344,33 @@ impl RefreshManager {
     pub fn memory(&mut self) -> MemoryInfo {
         let now = Self::now();
         if let Some(ref entry) = self.memory_cache
-            && !entry.is_stale(now) {
-                return entry.data.clone();
-            }
+            && !entry.is_stale(now)
+        {
+            return entry.data.clone();
+        }
         self.refresh_count = self.refresh_count.saturating_add(1);
         match self.provider.query_memory() {
             Ok(info) => {
-                self.memory_cache = Some(CacheEntry { data: info.clone(), timestamp: now, ttl_secs: self.memory_ttl });
+                self.memory_cache = Some(CacheEntry {
+                    data: info.clone(),
+                    timestamp: now,
+                    ttl_secs: self.memory_ttl,
+                });
                 info
             }
-            Err(_) => self.memory_cache.as_ref().map(|e| e.data.clone()).unwrap_or_else(|| {
-                MemoryInfo {
-                    total_mb: 0, available_mb: 0, mem_type: "Unknown".to_string(),
-                    speed_mhz: 0, slots_used: 0, slots_total: 0, slots: Vec::new(),
-                }
-            })
+            Err(_) => self
+                .memory_cache
+                .as_ref()
+                .map(|e| e.data.clone())
+                .unwrap_or_else(|| MemoryInfo {
+                    total_mb: 0,
+                    available_mb: 0,
+                    mem_type: "Unknown".to_string(),
+                    speed_mhz: 0,
+                    slots_used: 0,
+                    slots_total: 0,
+                    slots: Vec::new(),
+                }),
         }
     }
 
@@ -1225,16 +1378,25 @@ impl RefreshManager {
     pub fn storage(&mut self) -> Vec<DiskInfo> {
         let now = Self::now();
         if let Some(ref entry) = self.storage_cache
-            && !entry.is_stale(now) {
-                return entry.data.clone();
-            }
+            && !entry.is_stale(now)
+        {
+            return entry.data.clone();
+        }
         self.refresh_count = self.refresh_count.saturating_add(1);
         match self.provider.query_storage() {
             Ok(info) => {
-                self.storage_cache = Some(CacheEntry { data: info.clone(), timestamp: now, ttl_secs: self.storage_ttl });
+                self.storage_cache = Some(CacheEntry {
+                    data: info.clone(),
+                    timestamp: now,
+                    ttl_secs: self.storage_ttl,
+                });
                 info
             }
-            Err(_) => self.storage_cache.as_ref().map(|e| e.data.clone()).unwrap_or_default()
+            Err(_) => self
+                .storage_cache
+                .as_ref()
+                .map(|e| e.data.clone())
+                .unwrap_or_default(),
         }
     }
 
@@ -1242,16 +1404,25 @@ impl RefreshManager {
     pub fn network(&mut self) -> Vec<NetworkAdapterInfo> {
         let now = Self::now();
         if let Some(ref entry) = self.network_cache
-            && !entry.is_stale(now) {
-                return entry.data.clone();
-            }
+            && !entry.is_stale(now)
+        {
+            return entry.data.clone();
+        }
         self.refresh_count = self.refresh_count.saturating_add(1);
         match self.provider.query_network() {
             Ok(info) => {
-                self.network_cache = Some(CacheEntry { data: info.clone(), timestamp: now, ttl_secs: self.network_ttl });
+                self.network_cache = Some(CacheEntry {
+                    data: info.clone(),
+                    timestamp: now,
+                    ttl_secs: self.network_ttl,
+                });
                 info
             }
-            Err(_) => self.network_cache.as_ref().map(|e| e.data.clone()).unwrap_or_default()
+            Err(_) => self
+                .network_cache
+                .as_ref()
+                .map(|e| e.data.clone())
+                .unwrap_or_default(),
         }
     }
 
@@ -1259,22 +1430,33 @@ impl RefreshManager {
     pub fn display(&mut self) -> DisplayInfo {
         let now = Self::now();
         if let Some(ref entry) = self.display_cache
-            && !entry.is_stale(now) {
-                return entry.data.clone();
-            }
+            && !entry.is_stale(now)
+        {
+            return entry.data.clone();
+        }
         self.refresh_count = self.refresh_count.saturating_add(1);
         match self.provider.query_display() {
             Ok(info) => {
-                self.display_cache = Some(CacheEntry { data: info.clone(), timestamp: now, ttl_secs: self.display_ttl });
+                self.display_cache = Some(CacheEntry {
+                    data: info.clone(),
+                    timestamp: now,
+                    ttl_secs: self.display_ttl,
+                });
                 info
             }
-            Err(_) => self.display_cache.as_ref().map(|e| e.data.clone()).unwrap_or_else(|| {
-                DisplayInfo {
-                    gpu_name: "Unknown".to_string(), vendor: "Unknown".to_string(),
-                    vram_mb: 0, resolution: "Unknown".to_string(), refresh_rate_hz: 0,
-                    outputs: Vec::new(), driver_version: "Unknown".to_string(),
-                }
-            })
+            Err(_) => self
+                .display_cache
+                .as_ref()
+                .map(|e| e.data.clone())
+                .unwrap_or_else(|| DisplayInfo {
+                    gpu_name: "Unknown".to_string(),
+                    vendor: "Unknown".to_string(),
+                    vram_mb: 0,
+                    resolution: "Unknown".to_string(),
+                    refresh_rate_hz: 0,
+                    outputs: Vec::new(),
+                    driver_version: "Unknown".to_string(),
+                }),
         }
     }
 
@@ -1282,16 +1464,25 @@ impl RefreshManager {
     pub fn pci(&mut self) -> Vec<PciDeviceInfo> {
         let now = Self::now();
         if let Some(ref entry) = self.pci_cache
-            && !entry.is_stale(now) {
-                return entry.data.clone();
-            }
+            && !entry.is_stale(now)
+        {
+            return entry.data.clone();
+        }
         self.refresh_count = self.refresh_count.saturating_add(1);
         match self.provider.query_pci() {
             Ok(info) => {
-                self.pci_cache = Some(CacheEntry { data: info.clone(), timestamp: now, ttl_secs: self.pci_ttl });
+                self.pci_cache = Some(CacheEntry {
+                    data: info.clone(),
+                    timestamp: now,
+                    ttl_secs: self.pci_ttl,
+                });
                 info
             }
-            Err(_) => self.pci_cache.as_ref().map(|e| e.data.clone()).unwrap_or_default()
+            Err(_) => self
+                .pci_cache
+                .as_ref()
+                .map(|e| e.data.clone())
+                .unwrap_or_default(),
         }
     }
 
@@ -1299,16 +1490,25 @@ impl RefreshManager {
     pub fn usb(&mut self) -> Vec<UsbDeviceInfo> {
         let now = Self::now();
         if let Some(ref entry) = self.usb_cache
-            && !entry.is_stale(now) {
-                return entry.data.clone();
-            }
+            && !entry.is_stale(now)
+        {
+            return entry.data.clone();
+        }
         self.refresh_count = self.refresh_count.saturating_add(1);
         match self.provider.query_usb() {
             Ok(info) => {
-                self.usb_cache = Some(CacheEntry { data: info.clone(), timestamp: now, ttl_secs: self.usb_ttl });
+                self.usb_cache = Some(CacheEntry {
+                    data: info.clone(),
+                    timestamp: now,
+                    ttl_secs: self.usb_ttl,
+                });
                 info
             }
-            Err(_) => self.usb_cache.as_ref().map(|e| e.data.clone()).unwrap_or_default()
+            Err(_) => self
+                .usb_cache
+                .as_ref()
+                .map(|e| e.data.clone())
+                .unwrap_or_default(),
         }
     }
 
@@ -1316,16 +1516,25 @@ impl RefreshManager {
     pub fn sound(&mut self) -> Vec<SoundInfo> {
         let now = Self::now();
         if let Some(ref entry) = self.sound_cache
-            && !entry.is_stale(now) {
-                return entry.data.clone();
-            }
+            && !entry.is_stale(now)
+        {
+            return entry.data.clone();
+        }
         self.refresh_count = self.refresh_count.saturating_add(1);
         match self.provider.query_sound() {
             Ok(info) => {
-                self.sound_cache = Some(CacheEntry { data: info.clone(), timestamp: now, ttl_secs: self.sound_ttl });
+                self.sound_cache = Some(CacheEntry {
+                    data: info.clone(),
+                    timestamp: now,
+                    ttl_secs: self.sound_ttl,
+                });
                 info
             }
-            Err(_) => self.sound_cache.as_ref().map(|e| e.data.clone()).unwrap_or_default()
+            Err(_) => self
+                .sound_cache
+                .as_ref()
+                .map(|e| e.data.clone())
+                .unwrap_or_default(),
         }
     }
 
@@ -1333,16 +1542,25 @@ impl RefreshManager {
     pub fn irqs(&mut self) -> Vec<IrqInfo> {
         let now = Self::now();
         if let Some(ref entry) = self.irq_cache
-            && !entry.is_stale(now) {
-                return entry.data.clone();
-            }
+            && !entry.is_stale(now)
+        {
+            return entry.data.clone();
+        }
         self.refresh_count = self.refresh_count.saturating_add(1);
         match self.provider.query_irqs() {
             Ok(info) => {
-                self.irq_cache = Some(CacheEntry { data: info.clone(), timestamp: now, ttl_secs: self.irq_ttl });
+                self.irq_cache = Some(CacheEntry {
+                    data: info.clone(),
+                    timestamp: now,
+                    ttl_secs: self.irq_ttl,
+                });
                 info
             }
-            Err(_) => self.irq_cache.as_ref().map(|e| e.data.clone()).unwrap_or_default()
+            Err(_) => self
+                .irq_cache
+                .as_ref()
+                .map(|e| e.data.clone())
+                .unwrap_or_default(),
         }
     }
 
@@ -1350,16 +1568,25 @@ impl RefreshManager {
     pub fn io_ports(&mut self) -> Vec<IoPortInfo> {
         let now = Self::now();
         if let Some(ref entry) = self.ioport_cache
-            && !entry.is_stale(now) {
-                return entry.data.clone();
-            }
+            && !entry.is_stale(now)
+        {
+            return entry.data.clone();
+        }
         self.refresh_count = self.refresh_count.saturating_add(1);
         match self.provider.query_io_ports() {
             Ok(info) => {
-                self.ioport_cache = Some(CacheEntry { data: info.clone(), timestamp: now, ttl_secs: self.ioport_ttl });
+                self.ioport_cache = Some(CacheEntry {
+                    data: info.clone(),
+                    timestamp: now,
+                    ttl_secs: self.ioport_ttl,
+                });
                 info
             }
-            Err(_) => self.ioport_cache.as_ref().map(|e| e.data.clone()).unwrap_or_default()
+            Err(_) => self
+                .ioport_cache
+                .as_ref()
+                .map(|e| e.data.clone())
+                .unwrap_or_default(),
         }
     }
 
@@ -1367,16 +1594,25 @@ impl RefreshManager {
     pub fn memory_map(&mut self) -> Vec<MemoryMapEntry> {
         let now = Self::now();
         if let Some(ref entry) = self.memmap_cache
-            && !entry.is_stale(now) {
-                return entry.data.clone();
-            }
+            && !entry.is_stale(now)
+        {
+            return entry.data.clone();
+        }
         self.refresh_count = self.refresh_count.saturating_add(1);
         match self.provider.query_memory_map() {
             Ok(info) => {
-                self.memmap_cache = Some(CacheEntry { data: info.clone(), timestamp: now, ttl_secs: self.memmap_ttl });
+                self.memmap_cache = Some(CacheEntry {
+                    data: info.clone(),
+                    timestamp: now,
+                    ttl_secs: self.memmap_ttl,
+                });
                 info
             }
-            Err(_) => self.memmap_cache.as_ref().map(|e| e.data.clone()).unwrap_or_default()
+            Err(_) => self
+                .memmap_cache
+                .as_ref()
+                .map(|e| e.data.clone())
+                .unwrap_or_default(),
         }
     }
 
@@ -1384,16 +1620,25 @@ impl RefreshManager {
     pub fn dma(&mut self) -> Vec<DmaInfo> {
         let now = Self::now();
         if let Some(ref entry) = self.dma_cache
-            && !entry.is_stale(now) {
-                return entry.data.clone();
-            }
+            && !entry.is_stale(now)
+        {
+            return entry.data.clone();
+        }
         self.refresh_count = self.refresh_count.saturating_add(1);
         match self.provider.query_dma() {
             Ok(info) => {
-                self.dma_cache = Some(CacheEntry { data: info.clone(), timestamp: now, ttl_secs: self.dma_ttl });
+                self.dma_cache = Some(CacheEntry {
+                    data: info.clone(),
+                    timestamp: now,
+                    ttl_secs: self.dma_ttl,
+                });
                 info
             }
-            Err(_) => self.dma_cache.as_ref().map(|e| e.data.clone()).unwrap_or_default()
+            Err(_) => self
+                .dma_cache
+                .as_ref()
+                .map(|e| e.data.clone())
+                .unwrap_or_default(),
         }
     }
 
@@ -1401,16 +1646,25 @@ impl RefreshManager {
     pub fn services(&mut self) -> Vec<ServiceInfo> {
         let now = Self::now();
         if let Some(ref entry) = self.service_cache
-            && !entry.is_stale(now) {
-                return entry.data.clone();
-            }
+            && !entry.is_stale(now)
+        {
+            return entry.data.clone();
+        }
         self.refresh_count = self.refresh_count.saturating_add(1);
         match self.provider.query_services() {
             Ok(info) => {
-                self.service_cache = Some(CacheEntry { data: info.clone(), timestamp: now, ttl_secs: self.service_ttl });
+                self.service_cache = Some(CacheEntry {
+                    data: info.clone(),
+                    timestamp: now,
+                    ttl_secs: self.service_ttl,
+                });
                 info
             }
-            Err(_) => self.service_cache.as_ref().map(|e| e.data.clone()).unwrap_or_default()
+            Err(_) => self
+                .service_cache
+                .as_ref()
+                .map(|e| e.data.clone())
+                .unwrap_or_default(),
         }
     }
 
@@ -1418,16 +1672,25 @@ impl RefreshManager {
     pub fn processes(&mut self) -> Vec<ProcessEntry> {
         let now = Self::now();
         if let Some(ref entry) = self.process_cache
-            && !entry.is_stale(now) {
-                return entry.data.clone();
-            }
+            && !entry.is_stale(now)
+        {
+            return entry.data.clone();
+        }
         self.refresh_count = self.refresh_count.saturating_add(1);
         match self.provider.query_processes() {
             Ok(info) => {
-                self.process_cache = Some(CacheEntry { data: info.clone(), timestamp: now, ttl_secs: self.process_ttl });
+                self.process_cache = Some(CacheEntry {
+                    data: info.clone(),
+                    timestamp: now,
+                    ttl_secs: self.process_ttl,
+                });
                 info
             }
-            Err(_) => self.process_cache.as_ref().map(|e| e.data.clone()).unwrap_or_default()
+            Err(_) => self
+                .process_cache
+                .as_ref()
+                .map(|e| e.data.clone())
+                .unwrap_or_default(),
         }
     }
 
@@ -1435,16 +1698,25 @@ impl RefreshManager {
     pub fn drivers(&mut self) -> Vec<DriverInfo> {
         let now = Self::now();
         if let Some(ref entry) = self.driver_cache
-            && !entry.is_stale(now) {
-                return entry.data.clone();
-            }
+            && !entry.is_stale(now)
+        {
+            return entry.data.clone();
+        }
         self.refresh_count = self.refresh_count.saturating_add(1);
         match self.provider.query_drivers() {
             Ok(info) => {
-                self.driver_cache = Some(CacheEntry { data: info.clone(), timestamp: now, ttl_secs: self.driver_ttl });
+                self.driver_cache = Some(CacheEntry {
+                    data: info.clone(),
+                    timestamp: now,
+                    ttl_secs: self.driver_ttl,
+                });
                 info
             }
-            Err(_) => self.driver_cache.as_ref().map(|e| e.data.clone()).unwrap_or_default()
+            Err(_) => self
+                .driver_cache
+                .as_ref()
+                .map(|e| e.data.clone())
+                .unwrap_or_default(),
         }
     }
 
@@ -1452,16 +1724,25 @@ impl RefreshManager {
     pub fn env_vars(&mut self) -> Vec<(String, String)> {
         let now = Self::now();
         if let Some(ref entry) = self.env_cache
-            && !entry.is_stale(now) {
-                return entry.data.clone();
-            }
+            && !entry.is_stale(now)
+        {
+            return entry.data.clone();
+        }
         self.refresh_count = self.refresh_count.saturating_add(1);
         match self.provider.query_env_vars() {
             Ok(info) => {
-                self.env_cache = Some(CacheEntry { data: info.clone(), timestamp: now, ttl_secs: self.env_ttl });
+                self.env_cache = Some(CacheEntry {
+                    data: info.clone(),
+                    timestamp: now,
+                    ttl_secs: self.env_ttl,
+                });
                 info
             }
-            Err(_) => self.env_cache.as_ref().map(|e| e.data.clone()).unwrap_or_default()
+            Err(_) => self
+                .env_cache
+                .as_ref()
+                .map(|e| e.data.clone())
+                .unwrap_or_default(),
         }
     }
 
@@ -1469,16 +1750,25 @@ impl RefreshManager {
     pub fn startup(&mut self) -> Vec<StartupEntry> {
         let now = Self::now();
         if let Some(ref entry) = self.startup_cache
-            && !entry.is_stale(now) {
-                return entry.data.clone();
-            }
+            && !entry.is_stale(now)
+        {
+            return entry.data.clone();
+        }
         self.refresh_count = self.refresh_count.saturating_add(1);
         match self.provider.query_startup() {
             Ok(info) => {
-                self.startup_cache = Some(CacheEntry { data: info.clone(), timestamp: now, ttl_secs: self.startup_ttl });
+                self.startup_cache = Some(CacheEntry {
+                    data: info.clone(),
+                    timestamp: now,
+                    ttl_secs: self.startup_ttl,
+                });
                 info
             }
-            Err(_) => self.startup_cache.as_ref().map(|e| e.data.clone()).unwrap_or_default()
+            Err(_) => self
+                .startup_cache
+                .as_ref()
+                .map(|e| e.data.clone())
+                .unwrap_or_default(),
         }
     }
 }
@@ -1495,14 +1785,21 @@ mod tests {
 
     #[test]
     fn test_error_display() {
-        let e = HwQueryError::NotAvailable { path: "/sys/cpu".to_string() };
+        let e = HwQueryError::NotAvailable {
+            path: "/sys/cpu".to_string(),
+        };
         assert!(e.to_string().contains("/sys/cpu"));
 
-        let e = HwQueryError::ParseError { detail: "bad int".to_string() };
+        let e = HwQueryError::ParseError {
+            detail: "bad int".to_string(),
+        };
         assert!(e.to_string().contains("bad int"));
 
         assert_eq!(HwQueryError::Timeout.to_string(), "query timed out");
-        assert_eq!(HwQueryError::PermissionDenied.to_string(), "permission denied");
+        assert_eq!(
+            HwQueryError::PermissionDenied.to_string(),
+            "permission denied"
+        );
     }
 
     // -- Stub provider --
@@ -1715,8 +2012,8 @@ mod tests {
         };
         assert!(!entry.is_stale(1010)); // 10s < 30s TTL
         assert!(!entry.is_stale(1029)); // 29s < 30s TTL
-        assert!(entry.is_stale(1030));  // 30s >= 30s TTL
-        assert!(entry.is_stale(1100));  // 100s > 30s TTL
+        assert!(entry.is_stale(1030)); // 30s >= 30s TTL
+        assert!(entry.is_stale(1100)); // 100s > 30s TTL
     }
 
     // -- Refresh manager --

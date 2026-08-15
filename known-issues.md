@@ -1,5 +1,730 @@
 # Known Issues — OS kernel
 
+## Byte-indexed display truncation panics on non-ASCII text (lane C)
+
+**Status: FIXED 2026-08-15** (lane C, commits `f508f76cf`, `f53562a09`,
+`feb695bbd`, `8208fad9d`, `83dfaff21`, `5750232c5`, `a8d659199`, `ffbdec410`,
+`54fd94f2b`, `5305d139f`, `b3373ad17`, `db06a8c3c`, `de378bab6`, `37ee779ae`,
+`10db32f9c`). Found while surveying app tables for unbounded columns. Eighteen
+sites across `apps/` and `gui/` confused a byte count with a character count, usually
+while truncating a *display* string:
+
+```rust
+let display = if title.len() > 20 {
+    format!("{}...", &title[..17])   // panics if byte 17 is inside a character
+} else {
+    title
+};
+```
+
+`str::len` is bytes and `&s[..17]` is a byte index, so any string whose 17th
+byte falls inside a multi-byte character panics with
+`byte index 17 is not a char boundary`. The guard makes it *more* likely, not
+less: a 20-character Japanese title is 60 bytes, so it takes the truncating
+branch and then slices mid-character. This is not an edge case for these
+particular apps — it is their ordinary input.
+
+| Site | String | Exposure |
+|---|---|---|
+| `apps/rssreader/src/main.rs:3256,3260` | `article.summary` / `display_content()` | **Remote.** Straight off an RSS feed; any non-English feed crashes the reader. |
+| `apps/pdfviewer/src/main.rs:1452` | the PDF's own `/Title` | Attacker-supplied file metadata. |
+| `gui/desktop/src/file_drop.rs:65` | dropped text | And our paths are byte strings by design. |
+| `apps/flashcards/src/main.rs:1313,1370` | card front/back | A flashcard app is *the* place for CJK and accented text. |
+| `apps/stickynotes/src/main.rs:973` | the note's first line | The user's own text. |
+| `apps/procexplorer/src/main.rs:2359` | `KEY=value` from the environment | Environment strings are arbitrary bytes. |
+| `gui/toolkit/src/colorpicker.rs:175` | `&s[..6]` on a typed hex string | Any multi-byte character in the field. |
+| `gui/desktop/src/clipboard_viewer.rs:112` | `content[..197]` on a clipping | Copying any non-Latin text aborted the shell. |
+| `gui/desktop/src/clipboard_viewer.rs:678` | `&preview_text[..40]` on the same | Same, one layer up. |
+| `apps/videoplayer/src/main.rs:538` | `padded[..3]` in the SRT timestamp parser | **A subtitle file the user merely opened.** |
+| `apps/renamer/src/main.rs:450,460,489,509` | the filename stem, cut at a position the user types | **Any non-ASCII filename**, and it aborts a batch rename *partway through*. |
+| `apps/markdowneditor/src/main.rs` (14 sites) | `cursor_col`, the selection anchor, undo columns | **Press Down onto a line with a wide character, then type.** Aborts with the document unsaved. |
+| `apps/backup/src/main.rs:302` | the `?` glob wildcard, over path bytes | **Not a panic** — an include/exclude pattern silently stops matching, so a file the user believed was covered is not backed up. |
+| `apps/filesearch/src/main.rs` (both matchers) | every single-character construct in the glob *and* regex engines | **Not a panic** — a search over non-ASCII filenames silently returns wrong results, in both directions. |
+| `apps/dbviewer/src/main.rs:895` | SQL `LIKE`'s `_` wildcard | `LIKE '_'` was false for a one-character CJK cell and `LIKE '___'` was true for it. |
+| `apps/indexer/src/main.rs:709` | the `?` wildcard and `[...]` classes of a third glob matcher | Same as filesearch's, in the file indexer. |
+| `apps/indexer/src/main.rs:826` | `levenshtein_bounded`, the fuzzy-match edit distance | One substituted kanji cost 3 of a budget the user reads as "a couple of typos", so near-exact CJK matches were rejected. |
+| `apps/jsonviewer/src/main.rs:304` | the parser's `col`, shown as "Ln 3, Col 17" | Not a panic and not a wrong result — a wrong *report*. The caret pointed up to two columns per preceding character too far right. |
+
+The last ten were found while fixing the first seven and were not in the
+original count. `gui/clipboard/src/main.rs:183` looked like another but is not:
+it already goes through `find_char_boundary`.
+
+The videoplayer one is worth calling out because it does not match the grep
+shape above — there is no `if x.len() > N` guard in sight. It is
+`format!("{ms_str:0<3}")` followed by `padded[..3]`, and the bug is that
+`format!`'s width is counted in **characters** while the slice indexes
+**bytes**. For a fractional part of `"ab日"` the padding adds nothing (already
+3 characters) and byte 3 lands inside the kanji. So the class is wider than
+"a byte budget with a byte guard": it is *any* place where a character count
+and a byte count are used interchangeably. Rust's own `format!` width is a
+character count, which makes it a natural source of the confusion.
+
+**`apps/renamer` is the one site where the byte/character confusion was also a
+*semantic* bug, and the most damaging of the seventeen.** Four rename rules —
+insert-at, remove-from, number-at, datestamp-at — slice the filename stem at a
+position the *user types into the rule*, clamped only with `.min(stem.len())`,
+a byte length. `InsertPosition::At`'s own doc comment has always read "insert at
+a specific character index", so the code contradicted its documented intent: for
+`日本語.txt`, "insert at 3" is past the end of a 3-character stem and should
+append, but the byte clamp put it after the *first* kanji. And unlike a
+truncated label, a wrong position here writes the wrong name to disk. The panic
+is worse still, because a rename batch applies each rule to each file in turn:
+one non-ASCII name aborted the renamer *after* earlier files had already been
+renamed, leaving the batch half-applied with no undo record. Fixed with a
+`char_offset(s, chars)` helper that all four sites route through, which makes
+the position mean what it says and makes the slices sound as a side effect. For
+ASCII names the two numbers coincide, so no existing rule changed behaviour —
+the pre-existing tests confirm it.
+
+**`apps/markdowneditor` is the largest instance, and the only one where the
+bad offset *persists in state* rather than being recomputed each frame.** Every
+column in the editor -- `cursor_col`, the selection anchor, the columns recorded
+in undo actions -- is a byte offset into a line, which is what lets an edit
+apply without re-scanning. Fourteen places kept such an offset in range with
+`.min(line.len())`, and a byte length is the wrong bound: it keeps the offset
+inside the line but says nothing about whether it lands *on* a character.
+
+Pressing Down is enough to reach it. `move_cursor_down` carries the column to
+the next line, so from column 1 of `"abc"` onto `"\u{65e5}x"` the clamp leaves 1,
+inside the kanji. Nothing fails yet -- the cursor is simply in an impossible
+place. The abort comes on the *next* keystroke, in whichever of Backspace,
+Delete, insert, Enter, arrow-key or selection the user happens to press, by
+which point the document is unsaved and the user has been typing. Go-to-line, an
+undo replayed against a line that changed underneath it, and a reload after the
+file changed on disk all reach the same state without any cursor movement at
+all.
+
+Fixed with one `clamp_col(line, byte)` that rounds *down* to a character
+boundary, used at all fourteen sites. Rounding down puts the cursor at the start
+of the character it landed in -- where a user who pressed Down onto a wide
+character expects to be -- and for an all-ASCII document it returns exactly what
+`.min(line.len())` did, which a test asserts directly.
+
+**`apps/backup`'s `?` wildcard is the only member of the class that never
+panics, which is exactly what made it the easiest to miss.** The glob matcher
+works on `&[u8]` throughout, which is *correct* — our paths are byte strings
+that need not be UTF-8 (`CLAUDE.md` item 7), and rewriting it over `&str` would
+have been the wrong fix. But `?` is documented as "any single character except
+`/`" and advanced `ti` by one **byte**, so against `日本.txt` it matched one
+third of a kanji. `file?.txt` silently stopped matching `file日.txt`. In a
+backup tool a pattern that quietly fails to match is worse than a crash: an
+exclude that misses copies a directory the user meant to skip, and an include
+that misses leaves a file unprotected with the run still reporting success.
+
+Fixed with `utf8_char_len(text, i)`, so `?` advances one character. Only `?`
+needed it. `*` is byte-greedy but can only ever *succeed* on a boundary — a
+well-formed needle cannot match starting inside another sequence, by UTF-8
+self-synchronization — and `/` is ASCII, so it can never occur inside a
+multi-byte character.
+
+The interesting part was ill-formed input. The first version clamped a
+truncated sequence to the bytes remaining (`want.min(len - i).max(1)`), which
+my own test caught as a real defect rather than a wrong expectation: for the
+bytes `[0xE6, b'/']` a lead byte announcing three bytes consumes both, and `?`
+has crossed a separator — the one thing it must never do. The rule that works
+is **validate, then consume**: only treat a lead byte as multi-byte if the
+continuation bytes it announces are actually present and in `0x80..=0xBF`,
+otherwise advance one byte and let the literal comparison decide. That keeps
+the separator invariant and still guarantees forward progress.
+
+**`apps/filesearch` is the same bug as `backup`'s `?`, but as a whole engine
+rather than one branch — and it was found by asking "where else does a matcher
+step a byte at a time?" rather than by any grep.** filesearch has two engines,
+a glob matcher and a small regex matcher, and both stepped `ti` by one byte.
+That made *every* single-character construct wrong: `?` and `.`, the character
+classes `[...]`, and `\d`/`\w`/`\s` with their negations. It is wrong in both
+directions at once, which is what makes it hard to notice from one example:
+
+- **False negatives.** `?.txt` did not match `\u{65e5}.txt`; `h.llo` needed
+  three dots for one kanji.
+- **False positives.** `\W\W\W` matched exactly one kanji, because every byte
+  of a multi-byte character fails `is_ascii_alphanumeric`. `[\u{e9}]*` matched
+  `\u{e8}b`, because `\u{e9}` and `\u{e8}` share a lead byte and the class
+  compared one byte. A class *range* like `[\u{430}-\u{44f}]` was not merely
+  wrong but meaningless — it compared bytes of the endpoints' encodings.
+
+Unlike `backup`, both entry points here take `&str`, so the inputs are already
+validated UTF-8 and character semantics is achievable, not just desirable.
+Both engines were converted to `&[char]`. That is the whole fix: with `&[char]`
+every index is a character index by construction, so `?`/`.`/classes/ranges are
+all correct at once and there is no per-construct rule to remember or to get
+wrong again later. The public `&str` entry points are unchanged; the two
+bulk-search paths gained `*_chars` variants so the pattern is decoded once per
+search instead of once per indexed file.
+
+The regression test that earned the most was the *control*:
+`an_ascii_pattern_matches_exactly_as_before` pins 20 pre-existing ASCII cases.
+Under the deliberate re-break it kept passing while all six non-ASCII tests
+failed — which is exactly the evidence wanted, since it shows the six really do
+discriminate and that the refactor changed nothing for ASCII input.
+
+Re-breaking this one is worth recording as a technique: rather than reverting
+the refactor, the byte engine was reproduced by decoding `.bytes().map(|b| b as
+char)` instead of `.chars()`. Every comparison in both engines is by scalar
+value, so mapping each byte to the char of the same value restores the old
+behaviour exactly, at 8 call sites and with no other edit.
+
+**Asking the behavioural question then found three more sites in two more apps,
+which is the strongest evidence that the question is the right tool.** Having
+noticed that no grep finds a byte-at-a-time advance, the lane's remaining
+matchers, parsers and scanners were read with one question in mind — *does this
+walk text one unit at a time, and is that unit a byte?* Three said yes:
+
+- **`dbviewer`'s SQL `LIKE`.** Its own comment reads "`_` matches exactly one
+  character"; it consumed one byte. `LIKE '_'` was false for a one-character
+  CJK cell while `LIKE '___'` was true for it.
+- **`indexer`'s glob matcher** — a third independent copy of the same `?`-and-
+  class bug, after `backup` and `filesearch`.
+- **`indexer`'s `levenshtein_bounded`.** The most interesting of the three,
+  because it is not a wildcard at all: an *edit distance* over bytes charges up
+  to 3 for one substituted kanji. Against a `FUZZY_MAX_DISTANCE` the user reads
+  as "a couple of typos", a near-exact CJK match was rejected while a much
+  worse ASCII one was accepted — and the `abs_diff` length early-out discarded
+  candidates before the DP even ran. Fuzzy matching was effectively off for
+  non-ASCII names.
+
+That three independent glob matchers in one lane each carried the same defect
+is worth noting on its own: this is not a slip someone made once, it is what
+you get by default from reaching for `as_bytes()` to walk a pattern. The
+generalisation is not "`?` is special" but that **any construct meaning "one
+unit of text" is wrong the moment the loop's unit is a byte** — wildcards,
+classes, ranges, quantifier counts and edit costs alike.
+
+A second vacuity trap turned up here, of a kind not seen before: **a test can
+fail to discriminate because the behaviour that survives the break is genuinely
+correct.** `dbviewer`'s first percent-and-literals test passed under the
+deliberate break, not through oversight but because `%` and literal matching
+really are sound over bytes — the same self-synchronization argument that
+cleared `backup`'s `*`. Only a pattern that makes `%` absorb the slack while
+`_` must still count (`"日"` against `"%_%_%"`) can tell the two engines apart.
+Generalised: when part of a construct is provably safe, a test built from that
+part cannot witness the unsafe part, however non-ASCII its input looks.
+
+**The fix was not to hunt for char boundaries at each site.** All but one of
+these is a *display* truncation, and each already had a box to draw into, so
+each became `guitk::text::elide` / `RenderTree::text_in` (or a `guitk::table`
+cell): it measures display width, cuts on a character boundary, and marks the
+cut with `…`. That also removed the second, quieter bug present at every site —
+a truncation counted in bytes has no relationship to the width of the box the
+text is drawn in, so `20` characters of a wide font overflow anyway while `20`
+of a narrow one waste half the space.
+
+Two sites needed something other than eliding:
+
+- **`colorpicker::parse_hex_color` is a parser, not a view.** It branched on
+  `s.len()` as if it were a digit count. Requiring ASCII hex digits up front
+  makes the length a digit count and every offset a character boundary, so the
+  rest of the function is sound by construction. (It also closed a smaller
+  hole: `u32::from_str_radix` accepts a sign, so `"+FFFFF"` parsed as a colour.)
+- **`ClipEntry::text`'s cap is a *retention* bound, not a display one** — a
+  clipping can be megabytes and the history holds many. That bound stayed in
+  the model but became a character count; the display bound moved to the view.
+
+Three sites had truncation in the *model*, where nothing knows how wide the
+drawing surface is: `DragDataType::description`, `NoteStore::sidebar_items`, and
+the clipboard row. All three now return full text and the caller elides.
+
+Writing the regression tests turned up four latent layout bugs the byte budgets
+had been hiding, all fixed in the same commits: pdfviewer's tab title drew 2px
+under its close glyph; flashcards' three columns overlapped below 640px;
+procexplorer's memory row sat at a flat 200px pitch and left the panel at 480px
+wide; and the clipboard row's meta line could run under the sensitive
+indicator.
+
+Grep shape, if this recurs: `&<ident>[..<literal>]` where the receiver is a
+`String`/`&str`, and its `if x.len() > N` guard. That shape found seven of the
+seventeen; the other ten needed a wider sweep for *any* mixing of the two counts.
+Three further forms showed up, none of which the grep can see: `format!` width
+(a *character* count) meeting a byte slice (videoplayer); `.min(s.len())` used
+to clamp a position the user thinks of in characters (renamer,
+markdowneditor); and a byte-at-a-time advance where a character was meant
+(backup's `?`, both of filesearch's engines), which involves no slicing and no
+`len()` at all.
+
+That last form is the one to go looking for next, because no textual pattern
+finds it — it is `ti += 1` in a loop, which matches everything. The question
+that finds it is behavioural: **"does this walk text one unit at a time, and is
+that unit a byte?"** Both remaining instances were found by asking it of every
+matcher/parser/scanner in the lane rather than by grepping. Note this is the same root
+cause as the unbounded-column survey below — **counting characters instead of
+measuring the box** — and it was worth treating as one problem.
+
+Every fix is covered by a test using Japanese/Greek/Russian/emoji input plus a
+string pinning the exact cut index to a continuation byte, and every one was
+verified non-vacuous by re-breaking the production code and confirming the test
+fails. That discipline earned its keep five times here:
+
+- `colorpicker`'s `chars[2]` index was in fact *unreachable* -- `hex_char_to_u8`
+  rejects a multi-byte char one step earlier -- so the "second panic" claimed
+  for that site did not exist.
+- An earlier `file_drop` test passed with its bound removed, because no
+  reachable payload draws both a count badge and a long description.
+- `markdowneditor`'s first sweep drove each edit through `move_cursor_down`, so
+  breaking any *edit* site changed nothing: the sweep already aborted on the
+  cursor-position assertion from the vertical move, one case earlier. Five
+  sites looked verified and were not. Replaced with a test that strands the
+  column directly, which both isolates each site and matches reality, since
+  undo replay and click-positioning strand it without any vertical move.
+- `markdowneditor`'s reload clamp passed with the clamp removed -- no test
+  reached it -- until a test was added for it specifically.
+- `backup`'s "`?` never crosses a separator" test passed under the very break
+  it existed to catch: `?c` against `[0xE6, b'/', b'c']` fails for an unrelated
+  reason, so the assertion never distinguished the two versions. Pinned with
+  `assert!(!glob_match_recursive(b"?", &[0xE6, b'/']))`, which does. A test
+  aimed at an invariant is not the same as a test that can *see* the invariant
+  break.
+
+General rule this keeps re-teaching: **when several defects can abort, break
+them one at a time**, and be suspicious of a break that leaves the failure
+count unchanged -- it usually means the new failure is the old one.
+
+One further trap, from this same session: do not re-break production code while
+a full-workspace test run is in flight. A workspace gate launched earlier picked
+up `renamer` mid-verification and reported two failures that were the
+scaffolding, not the tree.
+
+**Site eighteen shows the class reaches things that neither panic nor compute a
+wrong answer.** `apps/jsonviewer`'s parser counted `col` once per byte. Nothing
+downstream indexes with it — it is used only to *tell the user where the error
+is*, in the status bar and the error list. So the parse was right, the error was
+right, and the caret pointed at the wrong character: a document whose string
+value is `日本語` rather than `xxx` reported column 20 where the ASCII one
+reported 14. That makes it the least dangerous instance and the easiest to
+overlook, because there is no crash and no bad data to notice — just a number
+that quietly stops meaning what its label says. The fix is one line: skip the
+increment for continuation bytes (`b & 0xC0 == 0x80`), which are the tail of a
+character its leading byte already counted.
+
+**A caution about how these are found.** The same grep that turned up kanban's
+real corruption (next section) also flagged `apps/jsonviewer`'s `parse_string`,
+which does `result.push(b as char)` on the very next line — and *that* one is
+correct, because it sits under `if b < 0x80` and the non-ASCII branch rewinds
+into a real UTF-8 decoder with proper surrogate handling. Two functions, the
+same six-token expression, opposite verdicts. No pattern distinguishes them;
+only reading the enclosing guard does. Treat a grep hit in this class as a
+question, never as a finding.
+
+Violates `CLAUDE.md` self-review item 7 (never force UTF-8 assumptions on
+OS-boundary data) and trips the workspace's `clippy::indexing_slicing` warn.
+
+## `u8 as char` reinterpreted UTF-8 as Latin-1 in four parsers (lane C)
+
+**Status: FIXED 2026-08-15** (lane C, commits `237636350` kanban, `3b6b60e39`
+backup, `18f1e9abc` rssreader). Found while sweeping for byte-at-a-time text
+walkers, and it is a *different* class from the byte/character-count confusion
+above — worth keeping separate, because the symptom, the detection method and
+the fix all differ. Three JSON readers and one XML reader carried it.
+
+`apps/kanban`'s `JsonImporter::parse_string` built its result one byte at a
+time:
+
+```rust
+} else {
+    result.push(b as char);   // b: u8
+}
+```
+
+`b as char` maps a **byte value** to the Unicode scalar with that value. That is
+a Latin-1 decode. There is no count involved, nothing is truncated, and nothing
+panics: an imported card titled `日本語` (E6 97 A5 ...) simply comes back as
+`æ\u{97}¥...`. It is `String::from_utf8_lossy`'s failure mode reached by a
+different route, and it is worse than a panic in one specific way — **the damage
+persists.** The mojibake becomes the card's title in memory, and the very next
+save writes it to disk as the new truth. Import a board, glance away, and the
+original text is gone.
+
+Why the count-confusion sweep would not have found it: there is no `len()`, no
+slice, no guard, no wildcard. The tell is the cast itself. The generalisation
+worth carrying forward is that **`u8 as char` is almost always a bug on text**;
+it is sound only where the byte is already known to be ASCII — which is exactly
+the distinction that made `apps/jsonviewer`'s identical-looking line correct.
+
+The fix copies unescaped runs out as whole `&str` slices instead. That is sound
+precisely because the two bytes that terminate a run — `"` and `\` — are ASCII,
+and an ASCII byte can never occur inside a multi-byte UTF-8 sequence, so the cut
+is always on a character boundary. (This is the same self-synchronisation
+property that cleared so many near-misses in the sweep above; here it is what
+makes the fix work rather than what made the bug absent.) It is also faster than
+pushing char by char.
+
+Fixing the function properly turned up two further defects in it:
+
+- **`\uXXXX` was never decoded.** It fell through to the unknown-escape arm and
+  came back as a literal backslash, `u`, and four digits. This was not
+  hypothetical: our own `JsonExporter::escape_json` emits exactly that form for
+  every character below U+0020, so **export followed by import did not
+  round-trip** for any card whose text contained a control character. Now
+  decoded, including leading/trailing surrogate pairs — which is how JSON spells
+  anything outside the BMP, so emoji in a board exported by any other tool were
+  equally unreadable. An unpaired surrogate degrades to U+FFFD rather than
+  failing the whole import.
+- **The unknown-escape arm had the same cast** (`result.push(esc as char)`) on a
+  single byte, so a backslash followed by a multi-byte character both corrupted
+  that character and left the scan stranded mid-sequence. It now consumes a
+  whole character.
+
+Non-vacuity was checked by reinstating the byte-at-a-time parser: all four new
+tests fail under it while the ASCII control test and both pre-existing parser
+tests keep passing — the profile that shows the new tests discriminate *and*
+that the rewrite changed nothing for ASCII.
+
+Violates `CLAUDE.md` self-review item 7 in its strongest form: this is not an
+assumption about encoding, it is an actual re-encoding.
+
+### The same bug in `apps/backup`'s manifest reader — the worst instance
+
+`apps/backup`'s `parse_string` had the identical cast, but on data that makes it
+far more consequential: **the strings in a backup manifest are file paths.** A
+backup of `写真/2024.jpg` reads back as a path naming no file at all, so restore
+cannot find it and verify reports it missing. The manifest is the only record of
+what was backed up; corrupting it silently invalidates the archive.
+
+Fixing it turned up two further defects in the same function, both worse than
+the first:
+
+- **A reachable panic.** The `\u` arm did `&input[i + 1..i + 5]` with no bounds
+  or boundary check. On `"\u日本"` that cuts at byte 7, inside `本`, and Rust
+  panics on the non-boundary slice. Reachable from merely *reading a manifest
+  off disk* — no attacker needed, just a path that happens to follow a
+  backslash-u with non-ASCII text. `parse_hex4` now uses
+  `input.get(start..end).ok_or("incomplete unicode escape")?`.
+- **Silent data loss on astral characters.** The `\u` decode used a bare `u16`
+  with no surrogate pairing and `if let Some(c)` with *no `else`* — so an
+  escaped emoji or CJK-extension character in a path did not become U+FFFD, it
+  simply **vanished**, shortening the path to something else entirely. Now
+  paired properly, with U+FFFD for an unpaired surrogate.
+
+Three defects, so non-vacuity was checked with three separate breaks, each
+confirmed to fail only its own tests while the ASCII control kept passing. The
+last test builds a real `Manifest` of non-ASCII `FileEntry` paths and
+round-trips it through `serialize`/`deserialize`. 46 tests pass.
+
+### The same bug in `apps/rssreader` — the only remotely-fed instance
+
+`XmlParser::read_attribute_value` accumulated with `value.push(b as char)` on
+bytes straight off a downloaded feed, so any non-ASCII enclosure URL, title or
+author arrived as mojibake. What makes this one instructive is that it was the
+**outlier in its own file**: `read_until`, `read_name` and the text-node reader
+all already sliced the range out whole and used `from_utf8_lossy` — which is
+exact here, since `parse_xml` takes a `&str` and every delimiter is ASCII. The
+correct pattern was sitting three functions away. Fixed to slice the same way.
+
+Fixing it exposed an unrelated robustness defect in the same path, arguably more
+damaging in practice than the mojibake: `decode_entity` returned `Err` for
+anything outside XML's five entities, and `read_attribute_value` propagated it
+with `?`. So **one `&nbsp;` in any attribute failed the parse and threw away the
+entire feed** — as did a bare `&` in a query string, which is ubiquitous in
+enclosure URLs. The same entity in a *text node* merely rendered literally,
+because that caller fell back to the raw string; only the attribute path was
+fatal. `decode_entities` is now infallible: unrecognised entities are emitted
+exactly as written, bare `&` passes through, and twenty-six common HTML entities
+are decoded rather than left as source text. Two breaks, two disjoint failure
+sets. 147 tests pass.
+
+The pattern across all four: **the cast is never the only bug in the function.**
+Every site that had it also had at least one other defect in the same escape or
+delimiter handling — a panic, a dropped character, or a fatal error on ordinary
+input. Byte-at-a-time text handling seems to correlate with not having thought
+about the hard cases at all.
+
+## The file explorer's paste and delete were a weaker duplicate of its own engine (lane C)
+
+**Status: FIXED 2026-08-15** (lane C, commit `bcd1e2d5d`). Found while auditing
+`to_string_lossy` uses in `apps/explorer` — those turned out to be fine (the
+real `PathBuf` is always kept as the truth and the lossy `String` is only ever
+displayed), but the surrounding code was not.
+
+`apps/explorer/src/fileops.rs` is a complete file-operation engine: plans with a
+conflict policy, a crash-recovery journal, per-file error policy, progress, an
+undo stack, and a `RecycleBin` that stores each item with its original path so
+it can be listed and restored. `apps/explorer/src/main.rs` used **none of it.**
+`paste()` and `delete_selected()` called `fs::copy` / `fs::rename` /
+`fs::remove_file` in a loop, discarding every `Result` with `let _ =`. Three
+distinct silent failures followed:
+
+- **Paste destroyed an existing file of the same name.** `fs::copy` overwrites
+  its destination, so pasting `notes.txt` into a folder that already had one
+  replaced it with no prompt, no rename, no undo.
+- **"Move to recycle bin" produced files that could not be restored — and
+  destroyed each other.** It renamed into a flat `/var/recycle` with no
+  metadata, so `RecycleBin::list` never saw the item and `restore` had no
+  original path to restore *to*. And because `fs::rename` overwrites, deleting a
+  second `notes.txt` from a different directory silently destroyed the first
+  one already sitting in the bin. The recycle bin was, in effect, a shredder
+  with an unreliable name-collision hazard.
+- **The status line reported unconditional success.** "Paste complete" whether
+  or not any file copied; "N item(s) deleted" where N was the number
+  *selected*, not the number that worked.
+
+The fix routes both through the existing engine rather than patching the
+duplicate — `copy_dir_recursive` is deleted, not repaired. Two implementations
+of one operation is precisely how the weaker one ends up on the user-facing
+path; `CLAUDE.md`'s "watch for band-aid accumulation" rule names this shape.
+
+**A fourth defect surfaced only when the tests were written.** Every operation
+ends by calling `load_directory()`, which calls `update_status()`, which
+overwrote `status_message` with the folder/file summary. So no operation result
+was *ever* visible to the user — not a paste, not a delete, not a rename, and
+not the `Error: {e}` set when `read_dir` fails, which was assigned and then
+discarded two lines later (an unreadable directory rendered as "0 folder(s), 0
+file(s) — 0 B"). The transient result and the derived summary are now separate
+fields, with `status_bar_text()` preferring the result and navigation clearing
+it.
+
+**The root cause behind all four: `apps/explorer/src/main.rs` had no
+`#[cfg(test)]` module at all.** `columns.rs`, `dropzone.rs`, `fileops.rs` and
+`thumbs.rs` are all well tested; the file holding `ExplorerState` — navigation,
+selection, clipboard, paste, delete, rename — had zero tests. It now has 11,
+with each of the three behavioural fixes verified non-vacuous by a separate
+break. Worth generalising: **a well-tested support module is not evidence that
+the code calling it is tested**, and in this crate the untested file was the one
+users actually touch.
+
+Two smaller defects in `fileops.rs` noticed during the same read — **also FIXED
+2026-08-15**, commit `35f17dfd7`:
+
+- `RecycleBin::recycle` moved data with a bare `fs::rename`, which fails with
+  `EXDEV` across a mount point — so deleting anything from a separate data
+  partition simply errored, and `restore` had the same problem in reverse. Now
+  routed through a `move_path` helper that tries the rename and falls back to
+  copy-then-remove. Note that `fileops::same_device` exists for exactly this
+  check and was referenced only by its own test (`dropzone.rs` carries a second
+  copy of the same function); it was not used here, because attempting the
+  rename and reacting to its failure is both cheaper in the common case and
+  correct where a first-component heuristic guesses wrong.
+- `RecycleBin::recycle` wrote the original path to `meta.txt` with
+  `path.display()`, which is lossy, and `read_entry` parsed it back as UTF-8 —
+  so a non-UTF-8 path was restored under a *different name*, silently renaming
+  the user's data during an operation advertised as reversible. Same class as
+  the `u8 as char` section above, reached through `Display` instead. The path is
+  now percent-encoded from `OsStr::as_encoded_bytes`, with a version marker on
+  line 1 so an already-populated bin is still readable.
+
+A third, unlogged defect fell out of writing those tests: metadata was written
+before the data was moved but not removed if the move failed, so a failed
+recycle left the bin listing an entry whose `data/` was not there. Ordering
+kept (metadata first is the safe order — orphaned metadata is harmless, moved
+data with no metadata is unrestorable), with cleanup on the failure path.
+
+## Fixing a parser is not fixing a format: `apps/backup` corrupted paths on the *write* side (lane C)
+
+**Status: FIXED 2026-08-15** (lane C), commit below. This is a follow-up to the
+`u8 as char` section above, and the lesson is the one worth keeping.
+
+Commit `3b6b60e39` fixed `apps/backup`'s manifest **reader** — the JSON string
+parser that re-encoded UTF-8 as Latin-1. That looked like the whole bug. It was
+not. `FileEntry.path` was a `String`, and every one of those strings was
+produced by `relative_path`, which did
+`full.to_string_lossy().replace('\\', "/")`. So a filename the filesystem
+happily stored — our paths allow every byte but `/` and NUL — was flattened to
+U+FFFD *before the manifest writer ever saw it*. A backup of `café.txt`
+(0xE9, not UTF-8) recorded `caf<FFFD>.txt`; restore recreated the file under a
+different name, and `verify` reported the original as missing. The archive was
+self-consistently wrong, so nothing downstream could detect it.
+
+**Generalization: when you find a lossy conversion in a parser, the format has
+two sides — go find the writer.** A round-trip test through the parser alone
+passes vacuously, because the corruption happened upstream of the data the test
+constructs by hand. The reader fix and its tests were both real and both blind
+to this.
+
+Fixed by making the path a `PathBuf` end to end: `relative_path` now strips the
+base and rejoins components on `/` at the byte level, and the manifest stores
+paths percent-encoded from `OsStr::as_encoded_bytes` — the same escape and
+version-marker scheme just adopted for the recycle bin's `meta.txt`. A manifest
+with no `version` field is read as version 1 (paths verbatim), so archives taken
+before this change still restore.
+
+Three further defects fell out of the work:
+
+- `detect_changes` contained a dead push/pop pair and two empty `if` bodies
+  left over from a half-finished edit; it computed `modified` twice, and the
+  first computation was discarded. Rewritten as a single pass. Behaviour is
+  unchanged — the hash comparison was always the one that counted — but the
+  size/mtime "quick check" it pretended to do was never wired to anything.
+- The file-type breakdown in `stats` used `path.rsplit('.').next()`, which
+  reports the whole filename as the extension for `README` and `.gitignore`
+  alike. Now `Path::extension`.
+- Both new percent-decoders (here and in `fileops.rs`) built their `OsStr` with
+  `OsStr::from_encoded_bytes_unchecked` under a SAFETY comment claiming every
+  byte string is valid for the platform's encoding. That is true on Unix and
+  **false on Windows**, where `OsStr` is WTF-8 — and Windows is the host the
+  tests run on, so the unsound branch was the only one ever executed. Replaced
+  with a `#[cfg(unix)]` split: `OsString::from_vec` (safe and total) on the
+  real target, which is `target-family = ["unix"]`, and a documented
+  best-effort on the test host. The lossless core is now byte-level
+  (`encode_bytes`/`decode_bytes`) and tested there, so the round-trip is
+  asserted at the level the file is actually written at rather than at a level
+  the test host cannot represent.
+
+Related tooling gap, now closed: `rustup target add x86_64-unknown-linux-gnu`
+was not installed, so **no `#[cfg(unix)]` code in this lane had ever been
+compiled**, let alone checked. `cargo check --target x86_64-unknown-linux-gnu`
+needs no linker and now covers those branches.
+
+## `cargo test -p indexer` tests lane B's crate, not lane C's (lane C)
+
+**Status: OPEN 2026-08-15** (lane C, needs a cross-lane decision). Four crates
+under `apps/` carry a package name that differs from their directory, because a
+crate with the directory's name already existed under `userspace/`:
+
+| directory | package | collides with |
+|---|---|---|
+| `apps/backup` | `backup-app` | `userspace/backup` |
+| `apps/indexer` | `indexer-app` | `userspace/indexer` |
+| `apps/sysinfo` | `sysinfo-app` | `userspace/sysinfo` |
+| `apps/tmux` | `tmux-app` | `userspace/tmux` |
+
+The hazard is that `-p <dir-name>` is not an error. `cargo build -p indexer`
+and `cargo test -p indexer` both succeed, silently building **lane B's**
+`userspace/indexer` — a different program. This was hit for real: an entire
+edit-build cycle on `apps/indexer/src/main.rs` reported a clean build and
+`test result: ok. 0 passed`, and the "0 passed" against a file containing 58
+`#[test]` functions was the only visible symptom. A change with no tests of its
+own would have produced an unqualified green.
+
+**Detection:** if `cargo test -p X` reports a test count that does not match
+`grep -c '#\[test\]'` in the crate you edited, you are testing a different
+crate. `cargo test -p X -v 2>&1 | grep 'Running unittests'` prints the path.
+
+**Proper fix** is a cross-lane rename so directory and package agree — but both
+halves of each pair are real programs with overlapping purposes
+(`userspace/tmux` vs `apps/tmux`), and deciding which survives, or what the
+surviving names are, is not lane C's call to make alone. Filed here rather than
+acted on; it wants a `requests/c-b-…` once there is a concrete proposal.
+
+## `apps/indexer` stored index paths lossily and panicked on a short header (lane C)
+
+**Status: FIXED 2026-08-15** (lane C), commit below. Third instance of the
+lossy-path class, found by continuing the sweep. The index is a binary,
+length-prefixed format, so unlike `meta.txt` and the backup manifest there was
+never a readability tradeoff to weigh — it simply stored the wrong bytes:
+
+- `serialize` wrote `entry.path.to_string_lossy().as_bytes()` and
+  `deserialize` read them back with `String::from_utf8_lossy`. A file whose
+  name is not UTF-8 was indexed under a name containing U+FFFD, so the search
+  hit that named it could not be opened. Both sides now carry
+  `OsStr::as_encoded_bytes` verbatim; `INDEX_VERSION` goes 1 → 2. No migration
+  is needed — the index is a derived cache and the existing version check
+  already tells the user to reindex.
+- **Panic on a truncated index.** The header check was `data.len() < 28`, but
+  `dirs_scanned` is read from bytes `24..32`, so a file of 28..=31 bytes
+  passed the check and then indexed out of bounds. The existing
+  `test_index_deserialize_too_short` used a 4-byte input and never reached it.
+  Now `< INDEX_HEADER_LEN` (32), with a test that sweeps every length below it.
+
+Two smaller things fixed in passing: the two scanners each carried a verbatim
+copy of the directory-exclusion check (now one `is_excluded_dir`), and each
+copy tested `dir_str.ends_with(excl) || dir_str.contains(excl)` — the same
+predicate written twice, since `contains` is true whenever `ends_with` is.
+
+The `filename` field stays a lossy `String`, now documented as a **search key
+only**: a query is UTF-8 text the user typed, so matching against a lossy
+rendering is a selection heuristic. It is never displayed and never used to
+name a file — `path` is, and `path` is exact. Both producers of the key now go
+through one `filename_key` function so they cannot drift.
+
+## The thumbnail cache keyed on a lossy path, so one file showed another's image (lane C)
+
+**Status: FIXED 2026-08-15** (lane C), commit below. Fourth instance of the
+lossy-path class, and the first where the damage is not a lost name but a
+**collision**.
+
+`Thumbnail::source_path` was a `String` built with `to_string_lossy`, and it is
+the disk cache's key: `simple_hash` FNV-hashes it with the mtime to produce the
+cache filename. Every undecodable byte in a name became the same U+FFFD, so two
+genuinely different files whose names differ only in such bytes hashed to one
+cache entry — and the file explorer displayed one of them the other file's
+thumbnail. Nothing errors; the wrong picture is simply shown. `source_path` is
+now a `PathBuf` and `simple_hash` takes `&Path` and hashes
+`as_os_str().as_encoded_bytes()`.
+
+`purge_stale` had a matching problem in the other direction: it compared
+directory entries by `to_string_lossy`, so a foreign file in the cache
+directory whose name is not UTF-8 could be *rendered into* something matching
+our `{hash:016x}.thumb` shape and deleted. Now compared as bytes.
+
+**The lesson worth keeping is about the tests, not the bug.** The natural
+regression test for this class needs a path the platform cannot decode, and on
+the Windows test host `OsString` cannot hold arbitrary bytes at all — so the
+obvious test has to be `#[cfg(unix)]` and never actually *runs* here. A
+`cfg(unix)` test is compile-checked at best (and until this session, not even
+that — see the note in the `apps/backup` entry above). The fix is to find the
+host's *own* uncodable case: on Windows an unpaired surrogate is a legal
+`OsString` that `to_string_lossy` maps to U+FFFD, which reproduces exactly the
+same collision. Both tests now exist, and the Windows one was confirmed to fail
+when the lossy hash is put back. Any future test in this class should carry a
+runnable-on-the-host twin rather than a Unix-only assertion.
+
+## Almost no `apps/` crate opts into the workspace lints (lane C)
+
+**Status: OPEN 2026-08-15** (lane C). Noticed while checking whether
+`clippy::arithmetic_side_effects` applied to a fix in `apps/kanban`. It does
+not — because `apps/kanban/Cargo.toml` has no `[lints] workspace = true`.
+
+Nor do 124 of the ~126 crates under `apps/`. `apps/jsonviewer` has it;
+essentially nothing else does. So the workspace's `clippy::all = deny`,
+`pedantic = warn`, and the four correctness lints `CLAUDE.md` specifically asks
+for (`unwrap_used`, `expect_used`, `indexing_slicing`, `arithmetic_side_effects`)
+are silently not enforced across the entire application tree — which is, not
+coincidentally, where every one of the eighteen byte/character sites above
+lived. `indexing_slicing` in particular would have flagged a good number of them
+at the moment they were written.
+
+The fix is mechanical (add two lines to each `Cargo.toml`) but not free: it will
+surface a large backlog of warnings, and `clippy::all` at `deny` will outright
+break crates that currently build clean. The right shape is to land the opt-in
+crate by crate, fixing each crate's fallout as it goes, rather than as one
+tree-wide commit that has to be reverted the moment anything is red. Worth
+doing: a lint that is configured but not applied is worse than no lint, because
+the workspace config reads as though the guarantee is in force.
+
+## `apps/editor`'s syntax highlighter is complete, tested, and not connected (lane C)
+
+**Status: OPEN 2026-08-15** (lane C). Found while sweeping for byte-at-a-time
+text walkers — `highlight.rs`'s tokenizers step bytes, so it was on the list to
+audit, and the audit turned up something larger: the module is not reachable
+from the running program.
+
+`apps/editor/src/main.rs` declares `mod highlight;` and then never names
+anything from it. There is no `use crate::highlight::…`, no `highlight::`
+path anywhere outside the module, and `highlight_line` — the only public entry
+point — is called exclusively from `highlight.rs`'s own `#[cfg(test)]` block.
+That is 2328 lines implementing Rust, Python, C, JavaScript and Markdown
+tokenizers, with a large and genuinely passing test suite, wired to nothing.
+The editor's own module doc still advertises "Syntax highlighting for common
+languages".
+
+**Why the compiler did not catch it:** `highlight.rs` line 11 is
+`#![allow(dead_code)]`. Without it, every public item in the module would be
+reported unused in this binary crate. The suppression is doing real damage
+here — it is the only thing standing between this state and a build warning.
+
+**What the proper fix looks like.** Wire `highlight_line` into the text
+rendering path so a line is drawn as a run of per-token coloured spans instead
+of one uniform string, threading `HighlightState` down the visible-line loop so
+multi-line constructs (block comments, multi-line strings) carry over — the
+state machine for that already exists and is tested. Then delete the
+module-level `#![allow(dead_code)]` and fix whatever it was masking. Check
+`syntree.rs` is unaffected: it *is* wired up (`use syntree::{Pos, SyntaxTree}`),
+so this is specific to highlighting.
+
+**The byte-stepping was audited first, and it is clean — this prerequisite is
+already done.** The tokenizers scan `line.as_bytes()` and advance one byte in
+their default branches, so a token boundary landing mid-character would panic
+the moment a caller sliced by the range, and a renderer would slice on every
+keystroke. `no_tokenizer_splits_a_character` now runs all twelve languages over
+non-ASCII source — CJK, Greek, Cyrillic and emoji inside string literals,
+comments and bare identifiers — and asserts `is_char_boundary` on both ends of
+every token before slicing; `multi_line_state_survives_non_ascii` covers a
+block comment carried across three lines, the path where a tokenizer resumes at
+an offset it did not choose. Both pass: every boundary really is decided by an
+ASCII delimiter, so UTF-8 self-synchronization holds throughout. Verified
+non-vacuous by making one `push_token` emit `len - 1`, which the assertion
+catches. So wiring highlighting up is now purely a rendering job, with no
+character-boundary work left to do.
+
+
 Running list of unsolved bugs and technical debt.  Each entry should
 have enough context to act on later: what the bug or debt is, where in
 the code it lives, how to reproduce it (for bugs), and what the proper
@@ -12,9 +737,45 @@ work that should be done now."
 
 ---
 
+## ⛔ The `TD-OILS-*` family is scope-gated — read this before picking one up
+
+**design-decisions.md §305 (operator, 2026-08-14) froze osh's bash-fidelity
+scope.** There are ~325 open `TD-OILS-*` entries in this file. **They are not a
+backlog to burn down**, and the general "fix bugs immediately" rule above does
+**not** apply to them by default.
+
+GNU bash 5.2 itself cross-compiles and runs on SlateOS (since 2026-07-22 —
+`scripts/bash-spike/`, `kernel/src/proc/spawn.rs::self_test_bash_on_slateos_libc`),
+so byte-for-byte osh↔bash parity stopped being a goal. **Fix an osh divergence
+only if:**
+
+- something we actually ship or run hits it; **or**
+- it is a crash, hang, data-loss, security, or wrong-exit-status-that-propagates
+  bug — i.e. a bug on its own terms, independent of bash; **or**
+- it is a regression against an already-green corpus case.
+
+**Do not fix, and do not add a corpus case for:** diagnostic wording or the exact
+substring a message echoes; artifacts of bash being a 40-year-old C program
+(`OPTIND=4294967297` wrapping through an `int`); constructs reachable only by
+adversarial input whose only observable difference is the error text.
+
+When a divergence is real but out of scope, annotate its entry
+`SCOPE: out of frozen scope (§305)` and leave it unfixed. If something genuinely
+needs exact bash, **run bash**. Read §305 in full before doing any osh parity
+work — it also records *why* this cap exists, which is a 25-day misdirection
+worth not repeating.
+
+---
+
 ## Reference Material
 
 ### TOOLING-BASH-5.2.37-SOURCE. A local copy of the reference shell's own source, at `D:\refsrc\bash-5.2`
+
+⚠️ **Scope note (2026-08-14, §305):** the parity goal described below is now
+**capped** — see the banner at the top of this file. This source tree remains the
+right way to *answer* a parity question, but the question should only be asked
+for a divergence that passes §305's criterion. Historically, it was asked for
+everything.
 
 The oils work is driven toward byte-exact parity with the bash on this machine,
 `C:\Program Files\Git\usr\bin\bash.exe`, which reports
@@ -428,6 +1189,153 @@ makes the guarantee categorical for any *future* IRQ-context printer.
 which is a user-visible interactivity change and wants its own boot test
 and its own commit. The deadlock is the urgent half and is fixed
 independently.
+### TD-POSIX-TIMES-FLAKE. `posix::sys_times::tests::test_times_increments_each_call` fails intermittently under a full-workspace run — 2026-08-15 — filed to lane B as `requests/c-b-flaky-sys-times-test.md`
+
+**Not lane C's tree** — logged here so the next lane to hit it does not re-triage
+it from scratch. `posix/src/sys_times.rs:583-595` asserts
+`assert_eq!(t, base + i, "each call should increment by 1")` against what the
+module doc itself describes as a **process-wide** monotonic call counter, inside
+a `-p posix --lib` binary that runs **20289 tests across parallel threads**. Any
+concurrent `times()` caller bumps the shared counter between this test's own
+calls, so the exact-delta premise holds only by scheduling accident.
+
+**Symptom.** `cargo test --workspace --target x86_64-pc-windows-gnu` (674 s)
+came back `20288 passed; 1 failed` with `left: 8`. Re-running the same binary
+filtered (`-- sys_times`, 25 tests) passes every time — so it reproduces *only*
+in the full-workspace run, which is precisely the run every lane must make green
+before merging up. It therefore looks like a red tree caused by whoever is
+merging, and costs that lane a triage cycle to prove otherwise.
+
+**Correct fix** (lane B's to make): assert strict monotonicity (`t > prev`),
+which is what the implementation actually guarantees. Serialising the
+`times()`-using tests behind a `Mutex` also works but is more fragile — it holds
+only as long as every future `times()` caller in the crate remembers the lock.
+
+### TD-FONT-NO-CFF-OUTLINES. `osfont` cannot draw any `.otf` whose outlines are PostScript/CFF rather than TrueType — 2026-08-13 — ✅ FIXED 2026-08-14 (`gui/font/src/cff.rs`, `gui/font/src/sfnt.rs`, `gui/font/src/raster.rs`)
+
+**What it was.** `gui/font/src/sfnt.rs` parsed the sfnt container, `cmap`,
+`hmtx`, `loca` and `glyf`. Outlines in the `CFF `/`CFF2` tables are a
+completely different representation — a Type 2 charstring stack machine, not a
+point list — and were not implemented. `Face::parse` detected them and returned
+`SfntError::CffOutlinesUnsupported`, so **18 of 556** fonts on this host would
+not open at all: ~3% of a typical Windows font set, but a 3% that includes most
+Adobe faces and *all* of `.otf` in the colloquial sense.
+
+**Fix, in two commits so each was independently verifiable.**
+
+1. `d02567ebb` added `PathCmd::CurveTo` and a cubic flattener to `raster.rs`,
+   with `cubic_segments` deriving its subdivision count from the same chord-
+   error bound as the quadratic path (a cubic's second derivative is three
+   times a quadratic's, hence the constant 27 against the quadratic's 3 inside
+   a fourth root). This was proved **before any CFF parser existed**, using
+   degree elevation as an exact oracle: every quadratic *is* a cubic whose
+   controls sit two-thirds of the way from each endpoint to the quadratic's
+   control, so the new code path had to agree with the already-proven one to
+   within flattening error and nothing else. When CFF glyphs later came out
+   looking right, the flattener was already known-good.
+2. `3b8be9f4d` added `gui/font/src/cff.rs`: INDEX/DICT parsing (including
+   packed-BCD reals and the 1-based-from-the-preceding-byte offset convention),
+   then the charstring machine — every path operator, stem counting so
+   `hintmask` skips the right number of inline bytes, local and global
+   subroutines with the count-dependent bias, all four flex operators, `seac`
+   accent composition, CID `FDSelect` for per-glyph Private DICTs, and
+   FontMatrix reconciliation against `head.unitsPerEm`.
+
+**Measured after.** Same command as before
+(`cargo test -p osfont --target x86_64-pc-windows-gnu --test host_fonts --
+--ignored --nocapture`): **556/556** fonts open, **18/18** `.otf` files
+rasterize, 708,793 ink pixels from CFF faces. A new
+`cff_letters_look_like_letters` prints glyphs from two CFF faces and checks
+them structurally, because the aggregate ink counts would pass just as happily
+for a mirrored glyph or one wound so the counter fills instead of cancelling.
+
+**Still deliberately unsupported**, each returning
+`SfntError::CffUnsupported(&'static str)` naming the construct rather than
+drawing a plausible wrong glyph:
+
+* **CFF2** — the variable-font revision. Structurally similar to CFF (no Name
+  INDEX, blend operators, an item-variation store), which is exactly why
+  running it as CFF would misread it rather than fail. Implementing it means
+  implementing variations, which nothing needs yet.
+* **Type 1 charstrings in a CFF wrapper** — the operator sets overlap but mean
+  different things.
+* **The Type 2 arithmetic operators** (`add`, `div`, `random`, the transient
+  array, …). No shipping font uses them for outlines; they exist for
+  procedural effects.
+### TD-PKGCONF-THE-RUST-REWRITE-IS-UNFINISHED-AND-SUPERSEDED-BY-THE-UPSTREAM-PORT. 34 of upstream's 62 options, clippy-red, never run on target — kept as reference only — 2026-08-14
+
+**Where:** `userspace/pkgconf/src/` — `main.rs` (1,075 lines), `flags.rs` (454),
+`pcfile.rs` (667), `store.rs` (646), `version.rs` (301); 3,143 lines total.
+Archived complete on branch `wip/pkgconf-rust-parked`.
+
+**⚠️ Do not "finish" this without asking the operator first.** It is not a
+half-done task waiting to be completed — it is work that was **superseded while
+in progress**, and completing it would spend hours re-solving a problem that is
+already solved. Read `design-decisions.md` §307 and `scripts/pkgconf-spike/`
+before touching it.
+
+**What happened.** This crate was a from-scratch Rust reimplementation of
+pkgconf, started without first checking whether upstream pkgconf builds for
+SlateOS. It does. Upstream pkgconf 2.3.0 cross-compiles and links against
+`toolchain/sysroot/lib/libc.a` with zero source changes, zero shims and **zero
+missing symbols** on the first attempt (`scripts/pkgconf-spike/`). Per §307 and
+`roadmap-detailed.md`'s "Porting vs. Reimplementing" policy, the port wins.
+
+**What actually works** (all measured 2026-08-14, not assumed):
+
+- **112/112 unit tests pass.** `cargo +nightly test -p pkgconf --target
+  x86_64-pc-windows-gnu` **from the repo root** — 112 passed, 0 failed, 0.09s.
+- **It builds and links for the real target.** `cargo +nightly build-slateos -p
+  pkgconf` produces a 21 MB static `ET_EXEC` for `x86_64-slateos`. An earlier
+  note in the wip commit message claiming it was "never built for the
+  x86_64-slateos target" was wrong; it builds.
+- The `rpmvercmp` implementation in `version.rs` is genuinely complete and
+  well-tested, including the `~` pre-release rule that pkg-config 0.29 itself
+  gets wrong. If any part of this is worth salvaging, it is that file.
+
+**What does not work:**
+
+- **34 of upstream's 62 long options are implemented.** Missing: `about`,
+  `define-prefix`, `digraph`, `dont-relocate-paths`, `dump-personality`, `env`,
+  `env-only`, `exists-cflags`, `fragment-filter`, `ignore-conflicts`,
+  `internal-cflags`, `license`, `list-package-names`, `log-file`,
+  `maximum-traverse-depth`, `msvc-syntax`, `no-cache`, `no-provides`,
+  `no-uninstalled`, `path`, `personality`, `prefix-variable`, `pure`,
+  `relocate`, `shared`, `simulate`, `solution`, `verbose` — 28 in all.
+  (`--frobnicate` and `--weird-name` appear in the source but are test
+  fixtures for the unknown-option and `--` paths, not features.)
+- **Clippy is red: 9 errors, 2 warnings**, so the crate violates CLAUDE.md's
+  "clippy clean" bar. The errors are all cosmetic-grade
+  (`format!` appended to a `String` ×3, missing doc backticks ×2, collapsible
+  `if`, identical match arms, >3 bools in a struct, case-sensitive extension
+  compare).
+- **The 2 warnings are the real tell that it is unfinished**, not style noise:
+  `PcFile::path` is never read even though its doc comment says "`--validate`
+  and error messages quote this", and `Store::dirs()` is never called. Both are
+  scaffolding for features that were never wired up.
+- **It has never been executed under the SlateOS kernel.** No on-target
+  self-test exists.
+
+**A hazard in the working tree.** `main.rs` is *tracked and modified*, while
+`flags.rs`, `pcfile.rs`, `store.rs` and `version.rs` are *untracked*. The
+committed `main.rs` is the older ~200-line standalone version with no `mod`
+declarations. So committing `main.rs` alone would break the crate — it would
+reference four modules that do not exist in the index. Commit all five or none.
+The `wip/pkgconf-rust-parked` branch holds a consistent snapshot of all five.
+
+**The proper fix, in the operator's preferred order:**
+
+1. Ship upstream pkgconf. Needs the on-target ring-3 self-test described in
+   `scripts/pkgconf-spike/README.md` ("What this spike does *not* establish") —
+   `realpath`/`lstat`/`opendir` behaviour on our VFS and the 0x1000/0x2000
+   segment alignment against our 16 KiB pages are the open questions.
+2. Delete this crate, keeping `wip/pkgconf-rust-parked` as the archive, and
+   drop `roadmap.md`'s `[x] pkgconf/pkg-config … ~200 lines` claim to point at
+   the port instead.
+3. Only if the operator wants a native Rust pkgconf for a reason the port
+   cannot serve: finish the 28 options, clear clippy, wire up `path`/`dirs`,
+   and add the on-target test. Record the reason under §307's "Where it flips".
+
 
 ### B-MOUNT-ACCEPTS-UNREACHABLE-MOUNT-POINTS. `Vfs::mount` succeeds when the mount point's parent does not exist, producing a filesystem nothing can reach — 2026-08-13 — ✅ FIXED 2026-08-13 (`kernel/src/fs/vfs.rs`, `kernel/src/fs/overlay.rs`)
 
@@ -2868,17 +3776,39 @@ passing in isolation, is this failure class until proven otherwise — look for
 module-level mutable state the test writes, and check it against the
 carve-out list above before assuming a real regression.
 
-### TD-REPO-IS-NOT-RUSTFMT-CLEAN-SO-RUNNING-CARGO-FMT-IS-A-TRAP. `cargo fmt -p posix` rewrites 244 files you did not touch — 2026-08-12 — OPEN
+### TD-REPO-IS-NOT-RUSTFMT-CLEAN-SO-RUNNING-CARGO-FMT-IS-A-TRAP. `cargo fmt -p posix` rewrites 244 files you did not touch — 2026-08-12 — 🔶 HALF FIXED 2026-08-15 (`posix` clean; `kernel` still drifted — Lane A)
+
+> **UPDATE 2026-08-15 — the operator answered Q42 with option A, and Lane B's
+> half is done.** `design-decisions.md` **§310**: one-shot repo-wide reformat,
+> with a `.git-blame-ignore-revs` file committed alongside.
+>
+> - **`posix` is now rustfmt-clean.** `cargo fmt -p posix`, 178 files, in the
+>   formatting-only commit `06ad616e0`. Verified afterwards with
+>   `cargo fmt -p posix -- --check` (passes), `cargo +nightly check-slateos -p
+>   posix` (compiles) and the full suite — **20 289 passed, 0 failed**.
+> - **`kernel` is untouched and still carries all 16 911 hunks.** It is Lane A's
+>   tree; a single cross-lane reformat commit is exactly the silent clobber the
+>   lane split exists to prevent, and at 17 000 hunks it would be the worst
+>   possible instance. Requested in
+>   `requests/b-a-rustfmt-repo-wide-reformat.md`.
+> - **`.git-blame-ignore-revs` exists at the repo root** with the `posix` hash;
+>   Lane A appends the kernel hash. Enable it locally with
+>   `git config blame.ignoreRevsFile .git-blame-ignore-revs`. Note it does *not*
+>   cover GitHub's blame view or `git log -S` — §310 records that as accepted.
+>
+> **The working rule below still applies to `kernel` and only to `kernel`.** In
+> `posix` you may now use `cargo fmt -p posix` normally; that was the point.
+> This entry closes when Lane A's commit lands.
 
 **Where:** repo-wide, unevenly. Measured 2026-08-12 with `cargo fmt -p <crate> --
 --check`:
 
-| Crate | Hunks needing reformat |
-|---|---|
-| `kernel` | 16 911 |
-| `posix` | 389 (244 of 2 299 files, ~11%) |
-| `net` | 0 |
-| `fs` | 0 |
+| Crate | Hunks needing reformat | Status |
+|---|---|---|
+| `kernel` | 16 911 | **still drifted — Lane A** |
+| `posix` | 389 (244 of 2 299 files, ~11%) | ✅ clean since `06ad616e0` |
+| `net` | 0 | ✅ |
+| `fs` | 0 | ✅ |
 
 CLAUDE.md states the convention as "`rustfmt` defaults. No manual formatting
 overrides." Two crates comply; two do not.
@@ -2904,10 +3834,13 @@ predated me. Every fmt run in a drifted crate costs an investigation like that.
 in `kernel` or `posix`. This removes the hazard without touching history.
 
 **The proper fix is a one-shot repo-wide reformat**, which is *not* obviously
-correct and is therefore the operator's call — it rewrites `git blame` for
+correct and was therefore the operator's call — it rewrites `git blame` for
 ~17 000 hunks of kernel code, and blame is the main tool for answering "why is
 this line here?" in a codebase with no human reviewer. Raised as **Q42** in
-`open-questions.md`. Until it is answered, the working rule above holds.
+`open-questions.md`; **answered A on 2026-08-15** → `design-decisions.md` §310.
+See the update at the top of this entry: `posix` is done, `kernel` is Lane A's
+and outstanding, and until that lands the working rule above holds *for
+`kernel`*.
 
 **Also note:** `cargo fmt --all` does not run in this workspace at all — it dies
 with `The filename or extension is too long. (os error 206)`, a Windows command
@@ -3043,7 +3976,7 @@ Corpus:
 `every_builtin_has_a_help_topic` — the third-list check that would catch a
 builtin with no `HELP_TABLE` entry to answer from.
 
-### TD-OILS-THE-SHAPE-AND-FOLD-LETTERS-ARE-APPLIED-BY-THE-LITERALS-HALF-ONLY-AND-NOT-BY-THE-BUILTIN-AFTER-IT. `declare -gGa g=(1 2)` left the frame's own `g` a scalar — 2026-08-12
+### TD-OILS-THE-SHAPE-AND-FOLD-LETTERS-ARE-APPLIED-BY-THE-LITERALS-HALF-ONLY-AND-NOT-BY-THE-BUILTIN-AFTER-IT. `declare -gGa g=(1 2)` left the frame's own `g` a scalar — 2026-08-12 — ✅ FIXED 2026-08-14
 
 **Where:** `userspace/oils/src/interp.rs`,
 [`Shell::declare_compounds_scoped`] (which reads `-a`/`-A`/`-i`/`-l`/`-u`/`-c`/`-I`
@@ -3106,26 +4039,51 @@ having `apply_bound_compound` set them — would close these two rows, but it
 would be a fifth mark bolted to the reduced path and would leave
 `make_empty_global` standing. Do the structural one.
 
-**Why it is not done yet.** The operand loop is ~1950 lines
-(interp.rs:45133-47081) and every one of its steps was written on the stated
-assumption that a compound operand never enters it — the local shadow above all,
-which phase 1 already made under a *different* `-g` swap than the builtin half
-runs under, so redoing it could leave two shadows of one name. Reconciling that
-is a real piece of work against 635 corpus cases, and the observable payoff is
-two matrix rows. Deferred deliberately, not by oversight: no band-aid has been
-applied in the meantime, and the entry above is the whole of the debt.
-Do it when the next divergence in the same place raises the payoff — most
-likely alongside
-TD-OILS-A-COMPOUND-LITERAL-REFUSES-A-KIND-CHANGE-THE-BUILTIN-BEFORE-IT-HAS-ALREADY-MADE
-below, which is the same asymmetry seen from the refusal side and would be
-fixed by the same change.
+**Fixed 2026-08-14** — the structural one, as prescribed. Four changes:
+
+* [`Shell::builtin_declare_scoped`]'s operand loop takes a `DeclOperand::Bound`
+  as the **bare name** rather than as four replayed marks: `name_val` is the
+  operand truncated at the `=`, so it carries no value, `value` is `None` of its
+  own accord, and the whole assignment arm is skipped without a flag to say so.
+  `BoundCompound` keeps only what genuinely happened earlier — the phase-1 local
+  refusal, the nameref refusal — and lost its `target` field, the loop now
+  resolving the name for itself.
+* [`Shell::apply_bound_compound`] and `BoundCompoundFlags` are gone (90 lines).
+* [`Shell::in_declare_global_scope`] sorts a compound operand into `names`
+  rather than `compound` for the `declare` family's builtin half: there it is
+  bash's step 3, an ordinary bare-name operand of `declare_internal`, and
+  resolves as step 1 did. `export`/`readonly` are excepted — their third command
+  is their own operand loop, not `declare_internal`.
+* [`Shell::enter_global_scope`] asks `chklocal` of the name the **restart**
+  arrived at (`nameref_cell (refvar)`, i.e. the end of
+  [`Shell::global_chain_path`]) rather than of the name as written, which is
+  what declare.def:735-774 does and what makes `declare -gGa g=(1 2)` under
+  `declare -n g=z` leave the frame's own `g` alone. And
+  [`Shell::global_bind_names`] now makes **no swap** where the global walk and
+  the live walk land on the same variable through a global reference:
+  `find_global_variable` reads only its first link from the global table, so a
+  chain that re-enters a name a local holds runs *through* that local, and
+  un-shadowing it would splice the local out of the middle and leave a cycle
+  that warns twice where bash warns not at all.
+
+`make_empty_global` did **not** disappear: it is still what step 1 leaves behind
+for `export`/`readonly`, whose third command makes no such variable. For the
+`declare` family it is now unreachable, the swap having put step 3 on the name
+itself.
+
+Verified against bash 5.2.37: the two matrix rows above, the `-i`/`-l`/`-u`
+rows, and the whole 642-case corpus (`scripts/osh-bash-diff.py`, 642 matched, 0
+failed). Tests:
+[`interp::tests::the_letters_of_a_compound_declaration_land_a_third_time_where_the_builtin_resolves`];
+corpus
+`the-letters-of-a-compound-declaration-land-a-third-time-where-the-builtin-resolves.sh`.
 
 **How it was found:** the 240-shape kind-letter matrix, while fixing
 TD-OILS-AN-UPPERCASE-G-WAS-READ-BY-THE-HALF-OF-THE-COMMAND-THAT-ONLY-EVER-READS-THE-LOWERCASE-ONE.
 
 ---
 
-### TD-OILS-A-COMPOUND-LITERAL-REFUSES-A-KIND-CHANGE-THE-BUILTIN-BEFORE-IT-HAS-ALREADY-MADE. `readonly -A g=([k]=v)` over a frame-local indexed array refuses where bash converts — 2026-08-12
+### TD-OILS-A-COMPOUND-LITERAL-REFUSES-A-KIND-CHANGE-THE-BUILTIN-BEFORE-IT-HAS-ALREADY-MADE. `readonly -A g=([k]=v)` over a frame-local indexed array refuses where bash converts — 2026-08-12 — ✅ FIXED 2026-08-14
 
 **Where:** `userspace/oils/src/interp.rs`, [`Shell::array_kind_conflict`] /
 [`Shell::compound_kind_refusal`] and their caller in
@@ -3160,9 +4118,126 @@ and top-level declarations), which is the `find_or_make_array_variable` one.
 
 **Affected:** 4 shapes of the 240-shape kind matrix (`/tmp/kind_matrix.sh`).
 
+**Narrowed 2026-08-14** to `readonly`/`export` alone. Fixing
+TD-OILS-THE-SHAPE-AND-FOLD-LETTERS-ARE-APPLIED-BY-THE-LITERALS-HALF-ONLY-AND-NOT-BY-THE-BUILTIN-AFTER-IT
+put the `declare` family's step 3 back on the operand loop and its own restart,
+so the same shape spelled with `declare` now agrees:
+
+```sh
+( declare -n g=z; f() { local -a g=(9); declare -gGA g=([k]=v); declare -p g; }; f
+  declare -p z )
+# declare -a g=([0]="9")  /  declare -A z=([k]="v" )   — osh and bash alike
+```
+
+`readonly`/`export` still diverge because their step 3 is *not*
+`declare_internal` and so is deliberately excepted from that routing; their step
+1 still has no voice of its own here. Measured ground truth for the fix (bash
+5.2.37) — the refusal is asked of **step 1's** name, and the answer turns on
+what that name already holds:
+
+```sh
+declare -n g=z;                  f() { local -a g=(9); readonly -A g=([k]=v); }; f
+# declare -Ar g=([k]="v" ) and declare -A z    — `z` unset, so no conflict
+declare -n g=z; declare -a z=(7); f() { local -a g=(9); readonly -A g=([k]=v); }; f
+# g: cannot convert indexed to associative array — `z` is indexed, so it refuses
+```
+
+Note the second row: the refusal must be raised *before*
+[`Shell::make_empty_global`] runs, since that would otherwise put an empty
+associative entry beside the indexed `z` it was asked to refuse.
+
+**Fixed 2026-08-14.** The refusal is asked of step 1's name, and the literal
+converts rather than refuses:
+
+* [`Shell::in_declare_global_scope`] records, for each compound operand, the
+  name **step 1** resolved to — `global_chain_path(name).last()`, the
+  `nameref_cell (refvar)` of declare.def:735-741, falling back on the name
+  where that walk found no reference at all. It is read *before*
+  [`Shell::enter_global_scope`], because the swap is about to rewrite the chain
+  it is read from, and stashed in the new `Shell::declare_step1_names` for the
+  length of the expansion half. `None` there means no swap, which is exactly
+  when the literal takes `do_compound_assignment`'s unscoped `else` branch and
+  so does own the refusal.
+* [`Shell::declare_compounds_scoped`] asks [`Shell::array_kind_conflict`] of
+  that name instead of the literal's target. The *lookup* still happens after
+  the swap, which is what puts the global binding of a name step 1 read
+  globally in reach; only the name is carried across. The
+  `make_empty_global` ordering worry above turns out not to arise — the empty
+  variable step 1 makes is made in the kind that was asked for, so it can never
+  be the conflict — but it is moot either way, since a `carried` name is only
+  produced where the chain reached *nothing*, and a name nothing answers to has
+  no kind to conflict with.
+* Past the refusal with the other kind still in the table is a road only the
+  swap opens, and there the literal *converts*: `convert_var_to_assoc` /
+  `convert_var_to_array` (subst.c:3520-3527) replace the storage rather than
+  reinterpret it, so `declare_compounds_scoped` now drops the other kind's
+  entry before [`Shell::array_kind_apply`] runs. Nothing is carried in as
+  element 0 — that is what `declare -a` over a *scalar* does, not this.
+
+Corpus: `the-kind-of-an-array-is-refused-by-the-command-that-would-convert-it.sh`;
+test `the_kind_of_an_array_is_refused_by_the_command_that_would_convert_it`.
+The one shape still diverging is split out below as
+TD-OILS-AN-ASSOCIATIVE-LITERALS-WORDS-ARE-NOT-REQUOTED-WHEN-THE-CONVERSION-GOES-THE-OTHER-WAY.
+
 **How it was found:** writing the corpus case
 `the-restart-happens-before-chklocal-so-step-one-outlives-the-frames-own-binding.sh`;
 the `local -a g=(9)` section had to be dropped from it.
+
+---
+
+### TD-OILS-AN-ASSOCIATIVE-LITERALS-WORDS-ARE-NOT-REQUOTED-WHEN-THE-CONVERSION-GOES-THE-OTHER-WAY. bash expands a compound literal in the shape of the variable it *found* and assigns it in the shape it converted to — 2026-08-14 — ⚠️ OPEN
+
+**Where:** `userspace/oils/src/interp.rs`, [`Shell::declare_compounds_scoped`],
+which applies the array kind and only then expands the literal. bash does it the
+other way round, and the seam shows.
+
+`do_compound_assignment`'s scoped branches call `expand_compound_array_assignment
+(v, value, flags)` with the variable **as found**, convert it, and only then
+`assign_compound_array_list`. Where `v` is associative the expansion runs
+`quote_compound_array_list`, which single-quotes each word's subscript and value
+separately so a `[k]=v` survives re-parsing. If the command asked for `-a`, those
+already-quoted words are then assigned to an *indexed* array, quotes and all:
+
+```sh
+declare -n g=z                                        # so step 1 goes to `z`
+f() { local -A g=([j]=9); readonly -a g=(x "a b"); declare -p g; }; f
+# bash: declare -ar g=([0]="'x'" [1]="'a b'")
+# osh : declare -ar g=([0]="x"   [1]="a b")
+```
+
+and a subscript in the literal becomes an arithmetic error, the indexed
+assignment being handed `['5']=`:
+
+```sh
+declare -n g=z
+f() { local -A g=([j]=9); readonly -a g=([5]=q w); }; f
+# bash: '5': syntax error: operand expected (error token is "'5'")
+# osh : (assigns element 5)
+```
+
+The reverse direction is clean, `quote_compound_array_list` being called only for
+an associative `v`: an indexed local converted to associative by `readonly -A`
+matches already.
+
+**Proper fix.** Split the compound literal's *expansion shape* from its
+*assignment shape*: expand in the kind the target held when the operand was
+reached, requote the resulting words when that kind was associative and the
+command asked for the other one, then convert and assign the requoted words in
+the asked kind.
+
+**Why it is not done yet.** The road is only reachable through a `declare -n`
+restart that parts step 1's name from the literal's, over a frame-local
+associative array, with `-a` and a globally-scoped assignment builtin — and what
+it reproduces is a self-evident bash bug (values that grow quotes, subscripts
+that become arithmetic errors). Inverting the expand/convert order in
+`declare_compounds_scoped` touches every compound operand of every declaration
+builtin, which is a great deal of risk for four shapes of the 240-shape kind
+matrix. The substantive half — *which* variable is refused, and that the
+conversion happens at all — is fixed above.
+
+**How it was found:** fixing
+TD-OILS-A-COMPOUND-LITERAL-REFUSES-A-KIND-CHANGE-THE-BUILTIN-BEFORE-IT-HAS-ALREADY-MADE
+opened the conversion road that the old refusal had kept shut.
 
 ---
 
@@ -4663,7 +5738,7 @@ the array being non-empty.
 
 Corpus: `a-compound-assignment-binds-up-to-the-subscript-that-fails.sh`.
 
-### TD-OILS-A-BACKQUOTE-BODY-INSIDE-DOUBLE-QUOTES-IS-NOT-GOBBLED. A backquote body inside `" … "` is run where bash only scanned it — 2026-08-10
+### TD-OILS-A-BACKQUOTE-BODY-INSIDE-DOUBLE-QUOTES-IS-NOT-GOBBLED. A backquote body inside `" … "` is run where bash only scanned it — 2026-08-10 — ✅ FIXED 2026-08-14
 
 **Where:** `userspace/oils/src/interp.rs`, `Shell::gobbled_subs` — the walk that
 lists the substitutions `brace_gobbler` reads. It is structural, over
@@ -4697,13 +5772,325 @@ treated like `\{`, the `'` is not a quote, and the `$( … )` is handed to
 then no `$(` row is reached, so the body is skipped; leaving backquotes out of
 the walk is right there and wrong only inside double quotes.
 
-**The fix.** Give a backquote body parts — or a lazily-parsed view of them — so
-`gobbled_subs` can walk into one when the enclosing state is `"`. Descending
-must stay off at the top level, which is where the current `gobbler_reads`
-answer (`false` for every `CmdSubBody::Backtick`) is already correct.
+**The fix — done 2026-08-14.** `Shell::gobbled_subs` now lexes a backquote body
+as the double-quoted text the scan takes it for — `parser::dquote_word_from_
+source`, then `unparse::gobbler_word` to re-scope it — and walks the result,
+but only when `dquoted`. Descending stays off at the top level, where
+`gobbler_reads`'s `false` for every `CmdSubBody::Backtick` was already right.
+
+Two things came with it:
+
+* **The remainder a diagnostic quotes.** The lexed body's tails stop at its
+  end; the gobbler's do not, because it was handed the whole word. So
+  `CmdSubBody::Backtick` gained a `tail` field, filled by `gobbler_word` alone
+  (no parser wants it — a backquote body is `string_extract`'s byte hunt for
+  the closer), and each substitution the body contributes gets
+  `body tail` + `` ` `` + that. Measured: ``echo "p`echo "$(fi)"`q{,}"`` quotes
+  ``fi)"`q{,}"``.
+* **The `{` gate.** `gobble_scan` had relied on "a `${` carries its own `{`" to
+  subsume `brace_expand_word_list`'s `mbschr (…, LBRACE)` (subst.c:9905). A
+  backquote body carries no `{`, so the gate is now tested for real against the
+  word's source — ``echo "p`echo $(fi)`q"`` reaches no scanner where the same
+  word with a `{,}` on the end does.
+
+Corpus: `a-backquote-body-inside-double-quotes-is-read-by-the-brace-scanner.sh`.
 
 Note the same walk reaches nothing inside a `<( … )` / `>( … )` body either,
 because `crate::unparse::nested_parts` returns no scope for a `ProcSub`.
+
+### TD-OILS-AN-UNPARSEABLE-SUBSTITUTION-IN-AN-UNTERMINATED-DQUOTE-LOSES-TO-THE-EOF. bash blames the `$( … )`, osh blames the quote — 2026-08-14 — ✅ FIXED 2026-08-14
+
+**Where:** `userspace/oils/src/lexer.rs`, `Lexer::read_double_quote_until` — it
+scans a `" … "` for its closing quote and raises the unterminated-quote error at
+end of input, having lexed the `$( … )` inside it as an *unread* body that no
+one ever parses. bash's `parse_matched_pair` instead calls `parse_comsub` the
+moment it meets `$(` (parse.y), so the substitution's own syntax error is raised
+first and the missing `"` is never reached.
+
+**Reproduce.**
+
+```sh
+( eval 'echo " $(fi)' ) 2>&1; echo "rc=$?"
+```
+
+| | bash 5.2.37 | osh |
+|---|---|---|
+| stderr | ``syntax error near unexpected token `fi'`` + ``` `echo " $(fi)' ``` | ``unexpected EOF while looking for matching `"'`` |
+| `$?` | 1 | 2 |
+
+The same with a `'` in the way (`echo " ' $(fi)`) — the `'` is inside the quotes,
+so it is an ordinary character to both, and the disagreement is unchanged.
+
+A backquote is *not* affected: `` echo `x $(fi) `` gives both shells
+``unexpected EOF while looking for matching ``'`` and `$?` 2, because a
+backquote body is read as text to its mate and nothing inside it is parsed on
+the way.
+
+**Why the difference matters beyond the message.** The exit status differs too —
+2 (a lexer-level unterminated construct) against 1 (a parse error) — so a script
+branching on `$?` from an `eval` of untrusted text sees a different value.
+
+**The fix.** Parse a `$( … )` met inside a double-quoted body as bash does,
+where its error is raised as it is met rather than deferred to an unread body.
+The care needed is that `$( … )` bodies are deliberately left *unread* in many
+places (`CmdSubBody::Unread` exists because a body that will not parse must not
+be a parse error when nobody reads it — see
+TD-OILS-A-QUOTE-RUN-IN-A-PATTERN-OPERAND-IS-NOT-GOBBLED); this is the one case
+where the enclosing construct never closes, so there is no word to defer to and
+bash's own reader has already committed to the substitution.
+
+**Fixed 2026-08-14, along exactly the [`SubstBail`] line one construct further
+out.** The bodies are still lexed where they were, and are carried *out on the
+error* to be parsed by the one place that has `ParseOpts` in hand.
+
+**The scope is the whole word, not the quote.** The quote is not what makes the
+body eager — the *word* is, because a word that never finished yields no token
+at all, so its bodies would otherwise be parsed by nobody. Measured:
+`echo $(fi)x$(`, `echo $(fi)x${y`, `echo $(fi)x$((1+`, `echo $(fi)x"y`,
+`echo $(fi)x'y` and ``echo $(fi)x`y`` all name `fi`, with no quote in sight. An
+*earlier* word needs none of this — it finished, so it is a token the parser
+reaches on its own (`echo a$(fi) b$(`, `echo a$(fi); echo b$(`).
+
+- `LexError::eager_bodies: Option<Box<Vec<EagerBody>>>` — the substitution
+  bodies the word already read *and parsed where it met them*, in reading order.
+  `EagerBody { src, line, procsub }`: `procsub` picks the reference line, since
+  a `$( … )` body is numbered from its `)` (`parse_cmdsub_body`) while a
+  `<( … )` / `>( … )` body is numbered from its *opening* delimiter
+  (`parse_procsub_body`), a procsub being a child command. Both land on the line
+  the offending token is physically written on.
+- Filled by `lexer::eager_bodies_in`, which walks the finished segments for
+  `Seg::CmdSub(_, _, SubBody::Eager)`, for `Seg::ProcSub` (measured:
+  `echo <(fi)x$(` and `echo >(fi)x$(` both name `fi`), and for the spans a
+  `Seg::ParamBraced`/`Seg::Arith` stepped over (`echo " ${x:-$(fi)}`,
+  `echo " $(( $(fi) ))`), recursing into a closed `Seg::Dq` (`echo "a$(fi)"x$(`).
+  A `SubBody::Backtick` is deliberately *not* collected: that body is read as
+  text now and parsed only at expansion time, which is exactly why the backquote
+  rows disagree with nothing (``echo " `fi` ``, ``echo `fi`x$(``).
+- Attached by the `read_word_inner` wrapper, which was split so that
+  `read_word_segs` writes into the caller's `segs` — a word that gives up part
+  way therefore still leaves behind what it read. `read_double_quote_until`
+  attaches at all three of its failing exits too, not just the end-of-input one,
+  because the scan can run out *inside* a later substitution and the bodies read
+  before that one still win: `echo " $(fi) $(done` names `fi`.
+- `parser::eager_body_error`, consulted by `resolve_subst_bail` *before* the
+  `bail` path for the same reason, returns the first body error that is not
+  `is_incomplete()` — a body that merely ran out said nothing (bash's
+  `EOF_Reached` path), which is where `echo " $(a |` keeps its
+  `` matching `)' ``.
+
+Verified by
+`userspace/oils/tests/corpus/a-substitution-inside-an-unfinished-word-is-parsed-before-the-word-gives-up.sh`
+(27 rows, all matching bash 5.2.37 in message *and* rc) and the unit test
+`parser::tests::a_body_read_inside_a_word_that_ran_out_is_parsed_anyway`. That
+test cannot cover the *earlier-word* rows: its `parse` helper goes through
+`tokenize_spanned`, which fails hard, where the shell uses `tokenize_deferred`,
+which keeps a failing line's completed tokens. Those rows are corpus-only.
+
+The same change closed the last two shapes of
+TD-OILS-A-COMSUB-THAT-NEVER-CLOSES-HIDES-THE-ERROR-INSIDE-IT below.
+
+**Found by** the flat-state gobbler fix below: the repro there
+(``echo "p`echo " ' $(fi)`q{,}"``) agrees on the *scan* now, and what is left of
+its divergence is entirely this.
+
+### TD-OILS-A-QUOTE-INSIDE-A-GOBBLED-BACKQUOTE-BODY-DOES-NOT-END-THE-RUN. `brace_gobbler`'s quoting state is flat, and osh's is nested — 2026-08-14 — ✅ FIXED 2026-08-14
+
+**Where:** `userspace/oils/src/interp.rs`, `Shell::gobbled_backtick_subs`. It
+lexes a backquote body as **one** double-quoted run, so `quoted` stays `"` for
+the whole of it. bash's scan is a flat character loop, and a `"` inside the body
+is `c == quoted` — it sets `quoted = 0`, after which a `'` opens a skip, a
+`` ` `` opens another, and a `<(`/`>(` starts reading.
+
+**Reproduce.** With `z` unset:
+
+```sh
+echo "p`echo " ' $(fi)`q{,}"
+```
+
+| | bash 5.2.37 | osh |
+|---|---|---|
+| stdout | `pq{,}` | — |
+| stderr | the backquote's own run: ``` `echo " ' $(fi)' ``` | the scanner's: ``` `fi)`q{,}"' ``` |
+| `$?` | 0 | 1 |
+
+The `"` closes the gobbler's state, the `'` then opens a single-quote skip, and
+the `$(` inside it is never read — so the word brace-expands and the backquote
+runs. osh reads the `$(fi)` and drops the command.
+
+**What bash does.** braces.c:637-682, in order: `\` passes the next character
+over unless `quoted == '\''`; `${` is treated like `\{`; then `if (quoted) { if
+(c == quoted) quoted = 0; if (quoted == '"' && c == '$' && text[i+1] == '(')
+goto comsub; … }`; then the unquoted `"`/`'`/`` ` `` row; then the unquoted
+`($|<|>)(` row. Nothing about it nests.
+
+**The fix.** Split the body on the gobbler's own state machine before lexing:
+run the flat loop over the verbatim text, cut it into runs by whether `quoted`
+is one the `$(` row can fire in (`0` or `"`) or one it cannot (`'` or `` ` ``),
+lex only the former and leave the latter as literals. The catch is the comsub
+row itself — `extract_command_subst` skips a whole `$( … )` extent, and a
+quote inside *that* must not flip the state either, so the split needs an extent
+count of its own rather than a byte scan. That is the only reason this was not
+done with the fix above.
+
+Reaching this needs a `"` (or a `` ` ``) inside a backquote body inside `" … "`
+inside a word with a `{`, so it is not on any ordinary road. All 24 other cases
+of the probe matrix that produced it agree with bash.
+
+**Second site, added 2026-08-14 — and this one is a regression.**
+`unparse::fill_quoted_runs` (from
+TD-OILS-A-QUOTE-RUN-IN-A-PATTERN-OPERAND-IS-NOT-GOBBLED) lexes a `' … '` run
+inside `" … "` the same way — one double-quoted word, `quoted` pinned at `"` —
+so a `"` inside *that* run has the same unmodelled effect. Measured against
+bash 5.2.37, with `z` unset:
+
+```sh
+echo "A[${z#'a"`$(fi)`'}]"
+```
+
+| | bash 5.2.37 | osh |
+|---|---|---|
+| stdout | `A[]` | — |
+| stderr | — | ``command substitution: … `fi)`'}]"' `` |
+| `$?` | 0 | 1 |
+
+bash's `"` closes `quoted`, the `` ` `` then opens a backquote skip, and the
+`$(fi)` inside it is never read. osh keeps `quoted` at `"` for the whole run, so
+the backquote is not a skip, `gobbled_backtick_subs` walks into its body, and
+the `$(fi)` is read. Before the fill, osh did not enter the run at all and
+agreed with bash by accident — so this word matched before and does not now.
+That is the cost of the fill, taken knowingly: it is one narrow shape, against a
+common one that was wrong for every word.
+
+The fix above is one fix for both sites: a helper that runs the flat loop over
+verbatim text from a given starting `quoted` and hands back the stretches the
+`$(` row can fire in, used by `Shell::gobbled_backtick_subs` and
+`fill_quoted_runs` alike. For the latter the unreadable stretches go back in as
+`WordPart::Literal`, which keeps the run re-printing to its own bytes — the
+property every tail measured against it depends on.
+
+**Fixed 2026-08-14, both sites, exactly that way.**
+`crate::wordscan::gobbler_readable(text, dquoted)` is the flat loop itself —
+braces.c:637-682 transcribed, `skip_matched` for the `extract_command_subst`
+row so a quote inside a `$( … )` extent flips nothing — answering with the
+stretches in which `quoted` is `0` or `"`. Its ranges are in order, disjoint,
+and cover the text; a stretch may be empty, and an empty text answers with one
+empty stretch rather than none.
+
+Both readers then lex per stretch instead of whole:
+
+* `unparse::gobbler_reading` (used by `fill_quoted_runs`) lexes each readable
+  stretch with `dquote_word_from_source` and puts each skipped one back as a
+  `WordPart::Literal` of its own bytes, so the filled run still re-prints to its
+  source and every tail measured against it lands where it did. It declines the
+  whole run if that does not hold.
+* `Shell::gobbled_backtick_subs` lexes each readable stretch of the body and
+  glues `rest-of-body` + `` ` `` + the word's own remainder onto every
+  substitution the stretch contributes — the scan was handed the whole word, so
+  a diagnostic raised inside a stretch still quotes everything after it.
+
+The regression above is gone with it: `echo "A[${z#'a"`$(fi)`'}]"` gives `A[]`
+and `$?` 0 as bash does, while `'a"`x`$(fi)'` — where the backquote closes again
+and reading resumes — reports, also as bash does. Covered by
+`tests/corpus/the-brace-gobblers-quoting-is-flat-so-it-reads-inside-a-quote-run.sh`
+(12 rows) and
+`tests/corpus/a-backquote-body-inside-double-quotes-is-gobbled-in-stretches.sh`
+(9 rows), both matching bash 5.2.37 exactly.
+
+**Residual, and it is a different bug.** The original repro's *scan* now agrees
+— `pq{,}`, `$?` 0, no diagnostic from the gobbler — but its stderr still
+differs, because the backquote then runs and its body (`echo " ' $(fi)`) has an
+unterminated `"` around an unparseable `$( … )`. bash reports the substitution's
+own syntax error; osh reports the unterminated quote. That is
+TD-OILS-AN-UNPARSEABLE-SUBSTITUTION-IN-AN-UNTERMINATED-DQUOTE-LOSES-TO-THE-EOF,
+which has nothing to do with brace expansion. Fixed the same day; with both in,
+the original repro agrees end to end — same two diagnostic lines, same `pq{,}`,
+same `$?` 0.
+
+### TD-OILS-A-QUOTE-RUN-IN-A-PATTERN-OPERAND-IS-NOT-GOBBLED. `"${z#'$(fi)'}"` runs where bash drops the command — 2026-08-14 — ✅ FIXED 2026-08-14
+
+**Where:** `userspace/oils/src/interp.rs`, `Shell::has_gobbled_sub` (~27065) and
+`Shell::gobbled_subs`. Both descend into a `WordPart::SingleQuoted` only through
+its `parts` — the run's *second* reading, which is filled in for a subscript and
+a substring bound (`word_subscript_from_source_at`) and nowhere else. A pattern
+and a replacement carry `parts: None`, so whatever the run hides is invisible to
+the scan.
+
+**What is wrong.** Inside `" … "` the gobbler's `quoted` is `"`, so its `'` row
+(braces.c:670) is never reached and the run is *not* a quote to it: the `$(` row
+of the `quoted == '"'` branch fires on what is inside. bash's parser, meanwhile,
+did read the run as a quote — under `DOLBRACE_QUOTE` a `'` quotes (parse.y:3836,
+3840) — which is why the diagnostic's remainder still shows the `'`. So the two
+readers disagree by design, and only one of them is modelled here.
+
+This is the same disagreement as
+TD-OILS-A-SINGLE-QUOTED-RUN-IN-A-BARE-SUB-WORD-OF-A-BRACE-IS-A-QUOTE (fixed) and
+TD-OILS-A-QUOTE-INSIDE-A-GOBBLED-BACKQUOTE-BODY-DOES-NOT-END-THE-RUN (fixed), in
+a third place.
+
+**Reproduce.** With `z` unset:
+
+```sh
+echo "1[${z#'$(fi)'}]";     echo "1 rc=$?"
+echo "2[${z//x/'$(fi)'}]";  echo "2 rc=$?"
+echo "3[${z%'$(fi)'}]";     echo "3 rc=$?"
+echo "4[${z:-'$(fi)'}]";    echo "4 rc=$?"   # already agrees
+```
+
+| | bash 5.2.37 | osh |
+|---|---|---|
+| 1–3 stdout | — | `1[]` / `2[]` / `3[]` |
+| 1–3 stderr | ``command substitution: … `fi)'}]"' `` | — |
+| 1–3 `$?` | 1 | 0 |
+| 4 | agrees (`$?` 1, same remainder) | agrees |
+
+Row 4 agrees because a `:-`-style operand keeps its `'` as a *character* and the
+substitution stays a part of the word, which the walk already finds.
+
+**Fixed 2026-08-14.** Not new machinery — the same second reading the subscript
+case already carries, filled in one more place. `unparse::fill_quoted_runs`
+runs first thing in `gobbler_word`, the copy `gobble_scan` makes for the scan,
+and gives every `SingleQuoted` inside `" … "` a `parts: Some(…)` lexed from its
+text with `crate::parser::dquote_word_from_source` — which is what the run *is*
+to the gobbler (more double-quoted text) and which builds none but
+`CmdSubBody::Unread` bodies, so a body that will not parse stays a runtime
+diagnostic and not a parse error.
+
+Everything downstream then works unchanged: `unparse::part_src` already prints
+such a run from its parts rather than its text, so `attach_tails_by`'s sentinel
+shows through the quotes and the tails come out measured against the *whole
+word*, `walk_parts_in` already descends through a filled run, and
+`gobbled_subs`'s existing `SingleQuoted` arm collects what is inside. The one
+other change is in `has_gobbled_sub`, which runs *before* the fill and so has to
+answer from the text: inside `" … "` the only gobbler row that fires between the
+quotes is `$(`, so a run whose text holds `$(` is answered yes — wide on
+purpose, exactly as a backquote inside `" … "` already is, since a scan that
+finds nothing reports nothing.
+
+Two runs are deliberately left alone, both because filling them would move every
+tail after them: a backslash-escaped character (`a\*b`, which is a
+`SingleQuoted` with `escaped`), whose source is not a quoted run at all; and one
+whose reading does not re-print to the very same bytes, which `fill_quoted_runs`
+checks for and declines.
+
+**Carried the same flat-state limitation as the backquote fix, for one commit.**
+The run's text was lexed as *one* double-quoted word, so `quoted` stayed `"` for
+the whole of it — where bash's loop lets a `"` **inside** the run set
+`quoted = 0`, after which a following `'` or `` ` `` opens a skip the `$(` row
+cannot fire in. That was
+TD-OILS-A-QUOTE-INSIDE-A-GOBBLED-BACKQUOTE-BODY-DOES-NOT-END-THE-RUN reached
+through a second construct, and it is fixed there (2026-08-14) for both places
+at once: `wordscan::gobbler_readable` runs the flat loop over the verbatim text
+and names the stretches the `$(` row can fire in, `unparse::gobbler_reading`
+lexes those and keeps the rest as `WordPart::Literal`, and the run still
+re-prints to its own bytes.
+
+**Found by** the `$' … '` bare-splice work
+(TD-OILS-A-SINGLE-QUOTED-COMMAND-SUBSTITUTION-IN-A-BRACE-OPERAND-IS-PARSED): the
+`#`/`//` rows of its corpus case are exactly this, since a translation written
+past a `#` is re-quoted (parse.y:3866) into such a run. Those two rows were held
+out of
+`tests/corpus/an-ansi-c-translation-spliced-bare-into-a-brace-operand-was-never-read.sh`
+and are back in it now (rows 5 and 6).
 
 ### TD-OILS-A-REDIRECTION-TARGET-IS-NOT-BRACE-EXPANDED. `> f{1,2}` writes a file called `f{1,2}` where bash calls it ambiguous — 2026-08-10 — ✅ FIXED 2026-08-10
 
@@ -6106,7 +7493,7 @@ stage and a background job. Unit tests
 
 ---
 
-### TD-OILS-A-BRACE-SCAN-THAT-NEVER-FINISHES-LOSES-THE-READS-IT-ALREADY-DID. A word whose `${` or `$(` is never closed reports nothing from the extent scan — 2026-08-10
+### TD-OILS-A-BRACE-SCAN-THAT-NEVER-FINISHES-LOSES-THE-READS-IT-ALREADY-DID. A word whose `${` or `$(` is never closed reports nothing from the extent scan — 2026-08-10 — ✅ FIXED 2026-08-14 (`userspace/oils/src/lexer.rs`, `userspace/oils/src/interp.rs`)
 
 **Where:** `userspace/oils/src/interp.rs` — `Shell::brace_extent_scan` and the
 `extent_read_of*` family it drives, and the parser that has to produce a `Word`
@@ -6178,6 +7565,102 @@ unterminated body stop being executed.
 
 **Not urgent:** both shapes need `@P` to be visible at all (any other context
 takes the `longjmp` on the first failure), and both are malformed input.
+
+**Re-measured 2026-08-14, and the framing above is wrong in a way that makes
+the fix smaller — read this before the text above.** "A word that never parses
+runs no reads at all" is not what happens, and the two shapes are not two
+faults. Taken apart one read at a time (`build/pgV.sh`), osh is **exact** on
+everything except one shape:
+
+| word (inside `v='…'`, shown via `"${v@P}"`) | bash | osh |
+|---|---|---|
+| `A$(for⏎sB` — no brace at all | reports, runs `fo`, `[Apr⏎sB]` | **same** |
+| `A${z:-pr$(for⏎s)q}B` — brace, `$(` closes | reports, `[AZZB]` | **same** |
+| `A${z:-pr⏎sB` — unclosed brace, no `$(` | `bad substitution`, raw text | **same** |
+| `A${z:-P1$(for⏎S1}B` | reports, `[AZZB]` | reports, **runs `fo`**, `[A⏎S1}B]` |
+| `A${z:-P1$(echo hi⏎S1}B` | reports EOF, `bad substitution`, raw text | reports EOF, **runs `echo hi` *and* `S1}`**, `[Ahi]` |
+| `A${z:-P1$(for⏎S1B` | reports, `bad substitution`, raw text | reports, **runs `fo`**, `[A⏎S1B]` |
+
+So the fault is exactly one thing: **a `$( … )` inside a `${ … }` that never
+closes**. There osh applies the *string-level* rule — `failed_extent_split` /
+`run_abandoned_extent`, "run what was read less a byte and splice the rest" —
+where the brace-level rule applies. The lost `fi` report of shape (a) is a
+*consequence* of that, not a separate lost-report bug: each read reports
+correctly on its own, and the first one's report is lost only because the
+second one drags the word onto the string-level path.
+
+**This is worse than "a diagnostic is missing".** Row 5 runs `echo hi` — a real
+side effect — and then `S1}` as a command, where bash runs nothing at all and
+answers `bad substitution`. Malformed input in a *prompt* is attacker-adjacent
+(`PS1`, `${x@P}`), so treat this as the reason to fix it rather than as a
+formatting nicety.
+
+**Both halves of the correct behaviour are already written; neither is
+reached.** bash's `extract_dollar_brace_string` hands a nested `$(` to
+`extract_command_subst`, i.e. a *real parse*, and the two rows above are its
+two outcomes — which osh already distinguishes, in
+`Shell::brace_extent_scan`'s `ExtentRead::Abandoned` arms
+(`userspace/oils/src/interp.rs`):
+
+- the parse **errors part way** (`for⏎`), so `si` stops at that line, the brace
+  scan resumes after it and finds the `}` — `Abandoned { rest, .. } if
+  !rest.is_empty() => false`, the brace closes and expands, `[AZZB]`;
+- the parse **runs the string out** (`echo hi⏎…`), so `si` is past the end and
+  the brace has no `}` left — `Abandoned { .. }` with an empty rest, which sets
+  `extent_consumed` and emits `bad substitution`.
+
+`wordscan::edbs` independently models the *second* outcome on pure source text
+(its `$(` arm at `wordscan.rs:458` paren-counts and `break`s to `Err` on
+overrun, which `begin_word` turns into the diagnostic). It gets row 5 right for
+the wrong reason and would get row 4 wrong, because a paren count is not the
+parse: `$(for⏎S1}B` has no `)` at all, so the count overruns where bash's parse
+stops early and lets the brace close.
+
+**✅ FIXED 2026-08-14, in two halves.** Routing alone could not work, and that
+is the one thing the paragraph this replaces had wrong: *where the scan
+resumes is only knowable from a real parse*, so the lexer has to ask for one.
+
+**Half one — the lexer stops swallowing the string** (`lexer.rs`). A new
+`Lexer::unread_comsub_stop` runs `crate::parser::comsub_unclosed_error` — the
+pure model of `xparse_dolparen` — over the rest of the text **for its stopping
+point only**, keeps the consumed text as raw bytes, and leaves the enclosing
+scan looking for its own delimiter. The cut it makes in char space is
+`Shell::failed_extent_split`'s in byte space: past the stop-th newline, then
+back over the whole trailing run of newlines. Three call sites converted from
+`?` to a match on `Lexer::unread_comsub`: `read_dollar_brace_body`'s `$(` arm
+and its `<(`/`>(` arm.
+
+`read_opaque_span`'s arithmetic `$(` arm was converted too and then **reverted**
+before landing. `build/pgX.sh` had suggested the `$((` spelling was affected
+identically, but the corpus case
+`an-unterminated-construct-in-text-no-parser-read-is-a-runtime-failure`
+disagrees: an arithmetic span in unread text is reached only where the first
+failure takes the jump — a here-document body sets no
+`no_longjmp_on_fatal_error` — so the read's diagnostic is the whole report and
+there is no second act for a resumption to reach. Condemning the `$((` instead
+regressed that case. What `$((` needs is half *two*, not half one; see
+`TD-OILS-AN-ARITHMETIC-SCAN-REPORTS-NONE-OF-THE-READS-IT-MAKES` below.
+
+**Half two — the reads are emitted before the condemnation** (`interp.rs`). A
+scan that ran the text out reported everything it read *on the way*; only then
+is there a brace with nothing to close on. `Shell::unclosed_brace_reads` runs
+`extent_read_of_rest` over the undecoded body from the top of
+`expand_unclosed`'s `Unclosed::BadSubst` arm, gated on `close == '}'` because
+`$[`'s `extract_arithmetic_subst` passes flags `0` (subst.c:1299) and makes no
+reads at all. An `ExtentRead::Aborted` returns early — the jump stands and the
+brace's own ending is never reached.
+
+**Measured after: `build/pgW.sh`'s seven rows are byte-identical to bash
+5.2.37**, stderr included — including shape (b) above, whose lost `fi` report
+half two restores. Every spurious command execution is gone: rows that used to
+run `echo hi`, `S1}` and `fo` now run nothing, as bash does.
+
+**Still open, and logged separately below:** the `$((` spelling reports none of
+its reads (`TD-OILS-AN-ARITHMETIC-SCAN-REPORTS-NONE-OF-THE-READS-IT-MAKES`); a
+`<(` in an undecoded brace body is not read
+(`TD-OILS-AN-UNDECODED-BRACE-BODY-IS-RE-LEXED-AS-A-DOUBLE-QUOTED-RUN`); and
+`$[ … ]` bounds do not perform their `$( … )`
+(`TD-OILS-A-DOLLAR-BRACKET-BOUND-DOES-NOT-PERFORM-ITS-COMMAND-SUBSTITUTION`).
 
 ---
 
@@ -6395,10 +7878,41 @@ carries its arithmetic reading beside its text, and the scan follows that readin
 when it is inside `" … "`:
 TD-OILS-A-SINGLE-QUOTED-RUN-IN-A-BARE-SUB-WORD-OF-A-BRACE-IS-A-QUOTE.)
 
-The `$' … '` splice named above is a further one: bash stores the *translation* and
-the gobbler meets a bare `$( … )` in it, echoing `` `fi)}]"' `` with no `'`. osh
-sets `bare_splice` when it reads one but the spliced text is not given
-`CmdSubBody::Unread` bodies, so `"${z:-$'$(fi)'}"` is still a parse error.
+The `$' … '` splice named above was a further one: bash stores the *translation*
+and the gobbler meets a bare `$( … )` in it, echoing `` `fi)}]"' `` with no `'`,
+where osh raised only a `bare_splice` flag and parsed the spliced text like any
+other — so `"${z:-$'$(fi)'}"` was a script syntax error.
+
+**Fixed 2026-08-14.** The flag became a *list of ranges*,
+`Lexer::bare_splices`: where in the body the third row (parse.y:3887) wrote
+without reading. They ride `Seg::ParamBraced`'s fourth field, are shifted by
+`shift_ranges` at every site that splices one buffer into a longer one (the same
+rule `CmdSubSpan::range` follows), are clipped into the operand's own
+coordinates by `parser::operand_splices`, and reach
+`Lexer::read_word_verbatim` through `lex_operand_in_dquote` as *unread windows*
+— inside one, `here_text` is set exactly as a `' … '` run sets it, so a
+`$( … )` there is `CmdSubBody::Unread` and is met by the scan that reads the
+stored word rather than by a parser.
+Corpus: `tests/corpus/an-ansi-c-translation-spliced-bare-into-a-brace-operand-was-never-read.sh`.
+
+Rows 5 and 6 of that case were held back at first, and they are *not* the
+splice's: written past a `#` or `//` the translation is re-quoted
+(parse.y:3866), and reaching bash's answer for `"${z#$'$(fi)'}"` needed the run
+the re-quoting made to be gobbled — TD-OILS-A-QUOTE-RUN-IN-A-PATTERN-OPERAND-IS-NOT-GOBBLED,
+which the same probe found, which is not about `$' … '` at all
+(`"${z#'$(fi)'}"` diverges on its own), and which is now fixed. Both rows are
+back in the case.
+
+**Residual — the splice that never closes.** `echo "15[${z:-$'$(fi'}]"` splices
+`$(fi` with no `)`, so the scan runs off the end of the word. bash's reader is
+still looking for the `)` and then for the `"`, and says
+`command substitution: line N: unexpected EOF while looking for matching `"'`;
+osh's `expansion_body_len` answers `Unclosed` first and the body is deferred as
+text, which the runtime reports as
+``bad substitution: no closing `}' in "15[${z:-$(fi}]"``. `$?` is 1 either way
+and the shell carries on either way, so only the wording differs. Reaching bash's
+is the unclosed-`$( … )`-inside-an-unread-word shape, not the splice's — see
+TD-OILS-A-COMSUB-THAT-NEVER-CLOSES-HIDES-THE-ERROR-INSIDE-IT.
 
 ---
 
@@ -6535,7 +8049,7 @@ cannot simply stop pinning" worry below.
 Tests (`interp.rs`): `printf_time_renders_in_the_exported_zone`,
 `printf_time_percent_s_is_zone_independent`,
 `printf_time_ignores_an_unexported_tz`,
-`printf_time_falls_back_to_utc_for_a_zone_it_cannot_parse`,
+`printf_time_falls_back_to_utc_for_a_zone_it_cannot_resolve`,
 `prompt_time_escapes_render_in_the_exported_zone` — the last uses the DST-less
 `NPT-5:45` because a prompt renders *now*, so a DST zone's `%Z` would assert one
 thing in July and another in January.
@@ -6544,7 +8058,9 @@ thing in July and another in January.
 unset `TZ`, and a zoneinfo name like `America/New_York` (which is not a POSIX
 `TZ` string), still resolve to UTC — in the libc and the shell alike. That is
 now a *consistent* gap rather than a disagreement, and closing it needs tzdata
-on the machine.
+on the machine. *(Update 2026-08-13: the reader and the `/etc/localtime`
+default now exist on both sides; only shipping tzdata remains — see that
+entry.)*
 
 The original report follows.
 
@@ -6597,7 +8113,43 @@ comment now points at `Shell::shell_tz` and describes the real rule.)*
 
 ---
 
-### TD-NO-SYSTEM-DEFAULT-ZONE-WITHOUT-TZ. With `TZ` unset — or set to a zoneinfo name — local time is UTC — 2026-08-13 — OPEN
+### TD-NO-SYSTEM-DEFAULT-ZONE-WITHOUT-TZ. With `TZ` unset — or set to a zoneinfo name — local time is UTC — 2026-08-13 — MOSTLY FIXED 2026-08-13; residual is a packaging decision, `open-questions.md` `B-Q1`
+
+**Fixed 2026-08-13** in three commits — `tzrules: read TZif (RFC 8536) binary
+zoneinfo files`, `posix: resolve TZ through zoneinfo files, and follow
+/etc/localtime`, and `oils: resolve TZ through zoneinfo files, like the libc
+does`. Two of the three parts of the proper fix below are done:
+
+* **The reader exists.** `tzrules::TzFile` parses TZif v1/v2/v3 with no
+  allocator: a zero-copy borrowed view over the file's bytes, every structural
+  invariant checked once at parse (bounds, counts, designation indices, sorted
+  transition times, `isdst ∈ {0,1}`) so the lookup path is total and a
+  hostile `TZ=/path/to/anything` cannot steer a binary search off an array. The
+  v2+ footer is **mandatory**, which is the only check that catches a file
+  truncated exactly at the end of its data block. As predicted, the existing
+  POSIX-string engine became the *tail* rather than being replaced: `zic -b
+  slim` stops emitting transitions once the footer describes them, so `Tz`
+  governs everything at or past the last recorded transition and the file path
+  and the rule path can never disagree about a future date. 42 tests.
+* **The system default exists.** With no `TZ`, the libc now reads
+  `/etc/localtime`, and so does an osh that really imported a process
+  environment. `TZ` naming a zone is resolved under `TZDIR` (default
+  `/usr/share/zoneinfo`) with glibc's search order — rule first, file second, a
+  leading `:` forcing the file, because `EST5EDT` is both — and a `..`
+  *component* refused so an inherited `TZ` cannot walk out of the tree.
+
+**Residual: no tzdata ships.** `TZ=America/New_York` is now *looked up* rather
+than rejected outright, but there is nothing on disk to find, so it still falls
+back to UTC. Which files, from where, and how they are updated is a packaging
+decision (`pkg/`) — a full tzdata is ~450 KiB of the base image and a stale one
+is a wrong clock — so it is now `open-questions.md` `B-Q1` rather than work
+anyone should start unasked. The tests that pinned the old behaviour were
+renamed to say what they now pin (the fallback when the *lookup* finds nothing,
+not "a name is never a zone"): libc
+`test_zoneinfo_names_resolve_to_utc_until_tzdata_is_shipped`, oils
+`printf_time_falls_back_to_utc_for_a_zone_it_cannot_resolve`.
+
+The original report follows.
 
 **Where:** `posix/src/tz.rs` `read_env_tz` (the `None`/unparseable arms) and
 `userspace/oils/src/interp.rs` `Shell::shell_tz`. Both funnel into
@@ -6631,13 +8183,15 @@ The gap is one of coverage, not of consistency, and a POSIX `TZ` string
   consumers need it and neither may allocate on the parse path. TZif v2+ files
   carry a POSIX `TZ` string in their footer for times past the last recorded
   transition, so the existing engine becomes the *tail* of the new one rather
-  than being replaced.
+  than being replaced. *(Done.)*
 * Ship tzdata: which files, from where, and how they are updated is a packaging
   decision (`pkg/`) and belongs in `open-questions.md` before it is coded — a
   full tzdata is ~450 KiB of the base image, and a stale one is a wrong clock.
+  *(Filed as `open-questions.md` `B-Q1`.)*
 * A system-wide default: `/etc/localtime` (a TZif file or a symlink into the
   zoneinfo tree) is the portable spelling and is what any ported program will
-  look for, so prefer it over inventing a YAML setting.
+  look for, so prefer it over inventing a YAML setting. *(Done — `/etc/localtime`
+  it is.)*
 
 **Found and fixed while writing this warning: the taskbar clock had exactly the
 shape being warned against.** `gui/desktop/src/calendar.rs`'s
@@ -10311,11 +11865,15 @@ rest as ordinary word text. Modelled as:
   *expansion's* scan over `${body}` and answers `Same`, `Early(len)` (the
   expansion closes at `len`; `body[len+1..]` plus the parser's `}` is word text)
   or `Unclosed` (a spliced quote swallowed the `}`).
-- `Lexer::bare_splice`, a flag `read_dollar_brace_body` raises only on the third
-  row and `read_dollar` scopes to one `${ … }` (cleared going in, taken coming
-  out), landing as the fourth field of `Seg::ParamBraced`. A splice at any depth
-  inside is that segment's, because it is that segment's raw text a leftover has
-  to be carved out of.
+- `Lexer::bare_splices`, the ranges of the body `read_dollar_brace_body` wrote on
+  the third row and never read back, which `read_dollar_brace` scopes to one
+  `${ … }` (taken going in, restored coming out) and `shift_ranges` moves
+  whenever a buffer is spliced into a longer one. They land as the fourth field
+  of `Seg::ParamBraced`. A splice at any depth inside is that segment's, because
+  it is that segment's raw text a leftover has to be carved out of. (Started as a
+  `bare_splice` **flag**; it became a list when the operand needed to tell the
+  spliced bytes from the read ones — see the `$' … '` splice paragraph under
+  TD-OILS-A-SINGLE-QUOTED-COMMAND-SUBSTITUTION-IN-A-BRACE-OPERAND-IS-PARSED.)
 - `parser::seg_to_parts` — one segment, one part, except where the flag is up and
   `expansion_body_len` says anything but `Same`. Then nothing about the body's
   *shape* can be asked (`"${x:-$'a"b'}"` is the word `"${x:-a"b}"`, whose `"`
@@ -11942,6 +13500,29 @@ recurs: for the compgen case that measurement is what refuted the reaping
 theory outright (osh notices completion 20–30 ms *earlier* than bash in every
 job shape), and the same is likely true here.
 
+**Sighting 2026-08-14, and the detail was lost — read this before the next
+one.** One full-suite run came back `1490 passed; 1 failed` while a full
+`osh-bash-diff.py` sweep was running alongside it, i.e. with several hundred
+`osh`/`bash` processes being spawned on the same host. Three re-runs
+immediately after, still under the same sweep, were clean (`1491 passed`). The
+failing test's **name was not captured**, so this cannot be attributed to this
+entry or to any other — and that is the avoidable part: the run went through
+`run-timeout.py … | tail -5`, which keeps the summary line and throws away the
+`failures:` block above it, and a second attempt to re-read it with `grep` hit
+`Binary file (standard input) matches` because a corpus test writes NUL bytes
+to stdout. **Redirect to a file** (`cargo test … > /tmp/lt.txt 2>&1`) and grep
+the file, rather than piping, so a one-in-many failure is not thrown away the
+moment it finally happens.
+
+**Follow-up 2026-08-14.** The advice above was taken and it worked: a corpus
+case flaked under a sweep later the same day and the whole divergence *was*
+captured, so it is written up on its own evidence rather than guessed at — see
+TD-OILS-THE-WAIT-NO-OPERANDS-CORPUS-CASE-IS-FLAKY-UNDER-A-FULL-SWEEP. That one
+is a **different** fault from this entry (a corpus case's `wait -n`, not this
+lib test's `jobs` listing) and, unlike the compgen case, is *not* a thin margin
+— so do not merge the three. What they share is only the discipline: keep the
+saved `corpus-failures/` report, and record which loads failed to reproduce.
+
 ### TD-OILS-THE-PIPELINE-STAGE-ORDER-TEST-ASSERTS-A-PREFERENCE-AS-A-GUARANTEE — 2026-08-08 — OPEN (accepted)
 
 **Where:** the test `a_pipelines_stages_begin_in_pipeline_order`
@@ -13071,7 +14652,7 @@ which measures all four halves of the rule: the thirteen command positions,
 the six word positions, the four quoted spellings, and that `[[ … ]]` still
 closes.
 
-### TD-OILS-A-COMSUB-THAT-NEVER-CLOSES-HIDES-THE-ERROR-INSIDE-IT. bash parses a `$( … )` body as it reads it; osh scans for the `)` first — 2026-08-06 — ✅ MOSTLY FIXED 2026-08-07 (two shapes left, below)
+### TD-OILS-A-COMSUB-THAT-NEVER-CLOSES-HIDES-THE-ERROR-INSIDE-IT. bash parses a `$( … )` body as it reads it; osh scans for the `)` first — 2026-08-06 — ✅ FIXED 2026-08-07, last two shapes 2026-08-14
 
 **Where:** `userspace/oils/src/lexer.rs` — the command-substitution scanner
 (the balanced-paren scan that raises ``unexpected EOF while looking for
@@ -13170,10 +14751,11 @@ stands. Three details that are not obvious and that the tests pin:
 **Pinned by** `parser.rs::an_unterminated_substitutions_body_is_parsed_anyway`
 and `tests/corpus/a-substitution-body-is-read-before-its-closing-paren-is-missed.sh`.
 
-**What is left (two shapes), 2026-08-07.** Both want the same thing: a
-`$( … )` body parsed at the moment the `$(` is *scanned*, closed or not.
+**The last two shapes, 2026-08-07 — ✅ fixed 2026-08-14.** Both wanted the
+same thing: a `$( … )` body parsed at the moment the `$(` is *scanned*, closed
+or not.
 
-| script | bash | osh |
+| script | bash | osh before |
 |---|---|---|
 | `echo "$(fi)` | `` near `fi' `` | ``EOF matching `"' `` |
 | `echo $(fi)x$(` | `` near `fi' `` | ``EOF matching `)' `` L2 |
@@ -13182,10 +14764,15 @@ In both the substitution bash blames **closes**, so no `SubstBail` is raised
 for it, and it sits inside a word the outer scan never finished — an unclosed
 `"` in the first, an unclosed `$(` in the second — so the word yields no token
 and the eager body parse the parser does per word never happens either. bash
-has already run its nested `yyparse` over `fi` by then. Reaching it means
-lifting that parse out of the parser and into the scan: every `$( … )`,
-`<( … )` and `>( … )` body parsed left to right as it is read, its error raised
-there and then, instead of after the enclosing word is complete.
+has already run its nested `yyparse` over `fi` by then.
+
+Both now agree, by the same carry-out-on-the-error device one construct further
+out rather than by lifting the parse into the scan: a word that gives up leaves
+its already-read eager bodies behind, and they ride out on the `LexError` to be
+parsed by `parser::eager_body_error` ahead of whatever the word finally ran out
+inside. See TD-OILS-AN-UNPARSEABLE-SUBSTITUTION-IN-AN-UNTERMINATED-DQUOTE-
+LOSES-TO-THE-EOF for the design, the procsub and `Seg::Dq` details, and the
+27-row corpus that pins it.
 
 `echo $(fi) $(done` — previously listed here as a third shape — was fixed by
 the `tokenize_deferred` change under
@@ -13195,14 +14782,15 @@ parser to reach it and raise `` near `fi' `` before the parked error is due.
 The same change fixed `fi; $(done`, which was the proof that half of this
 entry was never really about substitutions.
 
-**Proper fix for the residue:** move the eager body parse out of the parser
-and into the scan. `read_balanced_body` already knows where each nested
-`$( … )` / `<( … )` / `>( … )` body begins and ends; parsing each one as the
-scan closes it — and raising its error there, before the enclosing word is
-finished, let alone tokenized — is bash's own order and is what both shapes
-need. The `SubstBail` path then becomes the special case it should always
-have been: the *last*, unterminated body, parsed on the way out because there
-is no `)` to close it on.
+**The fix considered and not taken:** moving the eager body parse out of the
+parser and into the scan — `read_balanced_body` already knows where each nested
+`$( … )` / `<( … )` / `>( … )` body begins and ends, so it could parse each one
+as it closes it, which is bash's own order. It was not needed: the scan has no
+`ParseOpts`, and carrying the read bodies out on the error reaches the same
+measured behaviour with a strictly smaller change along the line `SubstBail`
+already established. `SubstBail` accordingly stays what it is — the *last*,
+unterminated body, parsed on the way out because there is no `)` to close it
+on — and `eager_bodies` covers every body that did close.
 
 ### TD-OILS-A-CONDITIONAL-RHS-THAT-DIES-AT-EOF-GETS-ONLY-ONE-OF-BASHS-TWO-DIAGNOSTICS. `[[ x =~ ( ]]` — 2026-08-06 — ✅ FIXED 2026-08-07
 
@@ -15188,7 +16776,27 @@ What that bind then *stores* is still not modelled — see
 `TD-OILS-A-DECLARATION-WITH-NOTHING-TO-DO-BINDS-A-NULL-THROUGH-THE-REFERENCE`
 below.
 
-### TD-OILS-A-DECLARATION-WITH-NOTHING-TO-DO-BINDS-A-NULL-THROUGH-THE-REFERENCE. `declare -n q='n[1]'; declare q` makes bash's `n` read as empty — 2026-08-06 — OPEN, operator-gated (`open-questions.md` Q40)
+### TD-OILS-A-DECLARATION-WITH-NOTHING-TO-DO-BINDS-A-NULL-THROUGH-THE-REFERENCE. `declare -n q='n[1]'; declare q` makes bash's `n` read as empty — 2026-08-06 — ⚖️ WAIVED 2026-08-15 by the operator (`design-decisions.md` §309)
+
+> **RESOLVED 2026-08-15 — deliberately NOT reproduced.** The operator answered
+> `open-questions.md` Q40 with **option B**: osh keeps `Str` array elements and
+> the array reads normally. This is a **knowing, documented divergence from
+> measured bash** — the first of its kind in oils — not an unfixed bug. Do not
+> "fix" it by implementing option A.
+>
+> **This entry stays open-shaped on purpose**, because it is the record that
+> makes the divergence reversible: if a real script is ever found that depends
+> on the null-element behaviour, everything needed to reproduce it is below.
+>
+> **The precedent it set matters more than the case.** Byte-fidelity with bash
+> now has an *"unless it is a defect"* clause. Per §309, a measured behaviour may
+> be waived only when all three hold: (i) it is unreachable except through a
+> construct built to reach it, (ii) it is inconsistent with bash's own
+> observable model, and (iii) reproducing it would degrade osh's value model.
+> **Any future waiver must be argued against those three tests, here, in
+> writing** — a waiver that is not written down is a divergence, not a decision.
+> This does not loosen §305's frozen fidelity scope: §305 says what is in scope,
+> §309 says something in scope may still be waived as a defect.
 
 **Where:** `userspace/oils/src/interp.rs` — `Shell::declare_ref_bind_read` reads
 the element the reference designates but performs no store; the store would have
@@ -19508,10 +21116,45 @@ printed — `Shell::is_null_command` gates a `shell_times` argument to
 TD-OILS-TIMEFORMAT-IS-UNIMPLEMENTED and the CPU accounting with TD-OILS10 — so
 the case counts lines and matches rather than showing them.)
 
+**Also done since — posix mode respells `kill`'s signal names, both ways.** The
+manual gives this as two items and they turned out to be independent, so both
+were probed separately against bash 5.2.37:
+
+* **The listing.** `kill -l` with no operands prints every *bare* name on one
+  line, single-space separated, one closing newline and no trailing space —
+  POSIX spells a signal without its `SIG`, and gives the listing no numbers, so
+  the columnar `N) SIGNAME` layout goes entirely and takes the numbering with
+  it. `kill -L`, whose whole purpose is to force the columns, takes this form
+  too: the mode wins over the option. `trap -l` is **not** in the rule and keeps
+  its columns in both modes, which a reading of the manual's one-line item would
+  miss.
+* **The lookup.** A `SIG`-prefixed name stops being a name, in every spelling
+  `kill` reads one: `-SIGTERM`, `-s SIGTERM`, `-sSIGTERM`, `-n SIGTERM` and
+  `kill -l SIGTERM` all become `invalid signal specification` (status 1), while
+  `-TERM`, `-s TERM`, `-n 15` and `-18` keep working. The refusal is
+  case-insensitive (`sIgTeRm` too) — it is the prefix that is gone, not one
+  spelling of it. Three things it does *not* touch: the number→name direction
+  (which never printed a prefix — `kill -l 9` is `KILL` and `kill -l 0` is
+  `EXIT` in both modes), the pseudo signals (none has a `SIG` spelling to lose,
+  so `EXIT`/`DEBUG` answer in both modes and `SIGEXIT` is refused in both), and
+  `trap`, which accepts `trap ':' SIGUSR1` in posix mode.
+
+Implemented as `signal_list_posix` next to `signal_list_columns`, plus bash's
+`DSIG_SIGPREFIX` made explicit as `decode_signal_flags(spec, sig_prefix)` —
+`decode_signal` is now the `sig_prefix = true` wrapper, so `trap` and everything
+else are unchanged and only `kill` passes `false`. `builtin_kill` reads the mode
+once before its option run and `kill_list` once at entry.
+
+Covered by two lib tests, `posix_mode_lists_signals_on_one_line_without_the_sig_prefix`
+and `posix_mode_refuses_a_sig_prefixed_name_to_kill` — lib rather than corpus
+because the signal *set* is the target's, not the host's (see
+TD-OILS-SIGNAL-TABLE-IS-LINUXS-NOT-THE-HOSTS). That entry blocks *differential*
+cases only; the layout and the lookup rule are osh-internal and check fine
+against osh's own table, which is why this was implementable after all.
+
 **Still open:** the rest of bash's posix-mode list. It has now been *surveyed*
 rather than guessed at — the GNU manual's "Bash POSIX Mode" page gives 75 items,
-and a 42-case probe of them against osh leaves these real gaps, roughly in
-increasing order of size:
+and a 42-case probe of them against osh leaves this one real gap:
 
 * `cd` in logical mode validates the resulting path and falls back to physical.
   (Probed and **not reproducible** on the reference bash: with `lnk -> a/b` and
@@ -19519,9 +21162,6 @@ increasing order of size:
   falling back to the physical `a/b/../c`. Either this Cygwin build already
   behaves the posix way, or the fallback needs a trigger the probe missed —
   there is nothing to make match until a case that *does* differ is found.)
-* `kill -l` prints one line with no `SIG` prefixes, and `kill` rejects a
-  `SIG`-prefixed signal name. (Blocked by
-  TD-OILS-SIGNAL-TABLE-IS-LINUXS-NOT-THE-HOSTS.)
 
 ### TD-OILS-PATH-IS-SPLIT-ON-THE-HOSTS-SEPARATOR, so a `:`-separated `$PATH` is one entry — 2026-08-03 — ✅ **FIXED 2026-08-04**
 
@@ -44488,10 +46128,145 @@ boots (128/128 total) keep them closed.  See F6 and F7 in Fixed Bugs.
 The two items discovered 2026-06-10 — quota Test 5 and FS interceptor
 deny — are now fixed; see F8 and F9.)_
 
+### B-FONT-CALIBRI-SHAPES-A-FRACTION-SLASH-DIFFERENTLY-FROM-HARFBUZZ. Three faces disagree by one glyph on `1/2` — 2026-08-14 — ✅ FIXED 2026-08-14 (`gui/font/src/otl.rs`, `gui/font/src/gsub.rs`)
+
+**Where:** `gui/font/src/gsub.rs`, the substitution pass; the disagreement is
+in whichever lookup rewrites `/` (or the digits around it) in Calibri's
+`GSUB`. Not yet narrowed to a lookup type.
+
+**Symptom.** Shaping the string `1/2` through `calibri.ttf`, `calibrib.ttf`
+and `calibril.ttf` gives `[1005, 877, 1006]` where HarfBuzz gives
+`[1005, 876, 1006]` — same glyph count, same outer glyphs, one differing
+glyph in the middle. Glyph 876 vs 877 is almost certainly fraction slash
+(U+2044) versus solidus, or two widths of the same mark.
+
+**How it was found.** Cross-checking our shaper against HarfBuzz over all 556
+installed faces and a 13-string corpus (see design-decisions.md §409):
+6426 agreed, 324 differed, and after the subtable-budget fix and setting
+aside HarfBuzz's own Unicode normalizer, these three faces are the entire
+remaining disagreement.
+
+**Reproduce.** Install `uharfbuzz` (`pip install uharfbuzz`), shape `"1/2"`
+through `C:\Windows\Fonts\calibri.ttf` with features `kern`, `mark`, `mkmk`,
+`curs` and `locl` disabled, and compare against `osfont`'s `substitute`.
+
+**Why it is filed rather than fixed.** It is a single glyph in one family and
+the correct answer is not obvious from the outside: it could be our
+`calt`/`clig` picking a rule HarfBuzz's rule ordering rejects, or a lookup
+type we do not implement (Alternate Substitution, type 3, is not implemented)
+being skipped where HarfBuzz applies it. Deciding needs the actual lookup
+dumped, not a guess.
+
+**What the proper fix looks like.** Dump Calibri's `GSUB` lookups covering
+glyph 876/877, find which lookup HarfBuzz applies that we do not (or which we
+apply that it does not), and either implement the missing type or fix the
+rule ordering. Then add the pair to
+`installed_fonts_reach_lookups_past_the_subtable_budget`'s table of faces
+with known answers.
+
+**What it actually was.** Not a Calibri quirk and not a missing lookup type:
+the shaper was applying another script's rules. Glyph 877 is produced by
+`GSUB` lookup 92, which is reached only by `calt` feature 7 and `rclt` feature
+153, both registered under **`arab`**. No `latn` feature reaches it. The
+FeatureList-first walk matched on the tag `calt` alone and so ran Calibri's
+Arabic contextual alternates over a Latin string, rewriting its slash.
+
+**Fixed by** the script-selection change (design-decisions.md §411): the walk
+now starts at the ScriptList, and a Latin run only sees features the `latn`
+ScriptRecord selects. All three faces now shape `1/2` as `[1005, 876, 1006]`,
+byte-identical to HarfBuzz, and the string has left the sweep report entirely.
+
+**Lesson for the next one.** The entry above guessed at causes inside Calibri
+(alternate substitution, rule ordering, fraction slash versus solidus) and all
+of them were wrong, because the fault was not in the face. When an oracle
+disagreement is concentrated in one *family*, ask which script the offending
+lookup is filed under before asking what the lookup does.
+
+
 ---
 
 ## Fixed Bugs
 
+### B-FONT-SYMBOL-ENCODED-FACES-DRAW-EVERYTHING-AS-BOXES. Wingdings and friends mapped no ASCII at all — 2026-08-14 — FIXED 2026-08-14
+
+**Where:** `Face::glyph_index` in `gui/font/src/sfnt.rs`.
+
+**Symptom.** Every string drawn in Wingdings 2, Wingdings 3, MT Extra,
+Bookshelf Symbol 7 or Reference Specialty came out as a row of empty boxes.
+Nine of the 556 installed faces, and every one of them 100% wrong for every
+string in the corpus — not a subtle disagreement but a total failure to
+render.
+
+**Cause.** A platform-3 encoding-0 `cmap` subtable does not key on Unicode. It
+keys on the byte the character had in the font's own 8-bit encoding, lifted
+into the private-use area at U+F000, so Wingdings stores its `A` at U+F041.
+Looking up U+0041 found nothing. `select_cmap` already recognised these tables
+and ranked them below a real Unicode table — it just discarded the fact after
+choosing, so the lookup had no way to know it needed the other spelling.
+
+**Why nothing caught it.** A face is *allowed* to have no `A`. "No glyph" is a
+legal answer, so no self-consistency check and no round-trip property can tell
+a symbol-encoded face from a genuinely sparse one. 247 unit tests and 13 host
+tests were green throughout. It was found by shaping every installed face
+against HarfBuzz and diffing — the same method that found the `MAX_SUBTABLES`
+truncation, and the second bug in a row that only an independent oracle could
+see. See design-decisions.md §409.
+
+**Fixed** in `d7fe50bb5`: `CmapSub` now carries the symbol flag, and
+`glyph_index` retries at `0xF000 + cp` for `cp <= 0xFF` when the chosen
+subtable is a symbol one. Regression test
+`symbol_encoded_fonts_still_map_ascii` in `gui/font/tests/host_fonts.rs`
+asserts the retry is a re-spelling rather than a guess: for every printable
+ASCII code point, the two spellings must give the same answer, including
+where neither is present. That last clause matters — MT Extra is a maths font
+and genuinely lacks most letters, so the test cannot simply demand that `A`
+exists.
+
+### TD-FONT-SHAPING-HAS-NO-UNICODE-NORMALIZATION-STAGE. `e` + combining acute is not composed before GSUB — 2026-08-14 — FIXED 2026-08-14
+
+**Where:** `gui/font/src/shape.rs`, between mapping characters to glyphs and
+running `gsub::Substitutions::apply`. There is no normalization stage at all.
+
+**Symptom.** Shaping `"e\u{301}"` gives two glyphs — the base letter and a
+combining accent placed by GPOS — where HarfBuzz gives the single
+precomposed glyph for `é`. This affects **288 of the 556 installed faces**,
+which is by far the largest single class of disagreement with HarfBuzz.
+
+**Why it is not a GSUB bug.** HarfBuzz runs its own Unicode normalizer
+(`hb-ot-shape-normalize`) as a distinct stage before applying GSUB. Real
+shapers compose to NFC and then, if the font cannot render the composed
+form, decompose again and place marks. We do neither: we take the string's
+code points as given.
+
+**Consequence today.** The output is not *wrong* — the accent is attached at
+its GPOS anchor and looks right — but it is a different glyph run from every
+other shaper, which means metrics, hit-testing offsets and any future
+comparison against a reference rendering will disagree. It also means a face
+that has a good precomposed `é` glyph but poor anchors renders worse than it
+should.
+
+**What the proper fix looks like.** A normalization stage in `shape.rs` that
+runs before substitution: compose to NFC using a compact Unicode composition
+table (the canonical-composition pairs, not the whole UCD), check the
+composed character has a glyph in the face, and fall back to the decomposed
+form when it does not. The decompose-when-unmappable direction matters as
+much as the compose direction — that is how a face without `é` still shows
+an accented e.
+
+**Fixed** in `4aa237205` by adding `gui/font/src/norm.rs`, a normalization
+stage that runs in `ScaledFont::shape` before any `cmap` lookup. It is two
+layers: `nfc()` is pure Unicode and never sees a font, and `fit_to_face()`
+then takes a character back apart when the face cannot draw it. Tables are
+generated from the UCD by `gui/font/tools/gen_norm_tables.py`.
+
+Splitting is decided by the base — a character comes apart only if the face
+can draw what the decomposition chain bottoms out at, and marks ride along
+either way. Both halves of that rule were measured against HarfBuzz over
+every installed face; see design-decisions.md §410 for why, and for the three
+classes of remaining disagreement that are deliberate rather than defects.
+
+After the fix the corpus sweep over all 556 faces agrees on 9368 of 10008
+runs, and the 288-face class this entry describes is gone.
 ### TD-BENCH-OWNER-AB-BUDGET-WAS-AN-ABSOLUTE-CYCLE-COUNT. Five boots of "ownership tagging costs 8500 cycles" were the emulator, not the code — 2026-08-14 — RESOLVED 2026-08-14
 
 **Where:** `kernel/src/bench.rs` (`run_all`, the `page_alloc_free_owner_ab` and
@@ -49229,7 +51004,7 @@ Options, roughly in order of preference:
 and turns out to be a timeout — or when `BOOT_OK` passes ~600 s, whichever
 comes first.
 
-### TD-POSIX-SLOT-POOLS-ASSUME-A-SINGLE-THREADED-PROCESS. Every fixed-size table in `posix/` claims slots with an unsynchronised check-then-set — LOGGED 2026-08-13
+### TD-POSIX-SLOT-POOLS-ASSUME-A-SINGLE-THREADED-PROCESS. Every fixed-size table in `posix/` claims slots with an unsynchronised check-then-set — LOGGED 2026-08-13 — FIXED 2026-08-13
 
 **Where:** the `process_global!` tables and their `alloc_*` helpers in
 `posix/src/`: `aio.rs` (~line 283), `dirent.rs` (~709, ~869), `epoll.rs` (~173,
@@ -49266,19 +51041,72 @@ existing entry with a matching key and then allocate if absent, so even an atomi
 per-slot claim would not make them correct — two threads could each create a
 segment for the same key.
 
-**Proper fix.** Add one shared primitive rather than 15 hand-rolled ones — a
-small slot-pool type in `perprocess.rs` offering (a) an atomic
-`compare_exchange`-based claim for the simple "first free slot" pools, and (b) a
-guard for the compound find-or-create pools, so the key lookup and the claim
-happen under the same critical section. Then convert all 15 sites and delete the
-per-module `in_use` scanning loops. Follow the `pthread.rs` `ATFORK_LOCK`
-spinlock as the model for the guard.
+**Correction to the survey above.** The original entry counted ten unlocked
+modules. On starting the work, five of them — `mqueue`, `semaphore`,
+`sysv_msg`, `sysv_sem`, `sysv_shm` — turned out to *already* serialise their
+scans, each with its own hand-rolled `AtomicBool` + `lock_acquire` /
+`lock_release` / `struct Guard`. So the real debt was four genuinely-unlocked
+modules (`aio`, `dirent`, `epoll`, `stdio`) plus five near-identical copies of
+the same twenty lines of locking. The copies had already drifted (`AcqRel` vs
+`Acquire` on the exchange, differing guard names), which is the usual argument
+for the shared primitive.
 
-**Why deferred.** It is a 10-module refactor and the current work (the
-`vfs-byte-paths` branch) needs to land first. It is not currently *reachable* as
-a bug: nothing on the target yet runs two threads through these entry points,
-and on the host `process_global!` makes each pool per-thread. Trigger to do it
-properly: before any target-side service is made multithreaded.
+**Fix (2026-08-13).** `perprocess.rs` gained `PoolLock` / `PoolGuard` /
+`lock_pool()`: a spin lock whose guard releases on `Drop`, so the early
+`return` out of the middle of a claim loop — the shape every one of these pools
+is written in — needs no manual unlock. All fifteen sites now run
+scan-and-claim inside one critical section, and the five hand-rolled locks were
+deleted in favour of it. Rationale in **design-decisions.md §301**; the short
+version:
+
+- **One guard over the whole scan, not a per-slot `compare_exchange`.** A CAS
+  on `in_use` fixes the simple pools but cannot express the compound
+  find-or-create ones (`sysv_*::alloc_*(key)`, the getdents cache), where the
+  lookup and the claim must be one indivisible step.
+- **The lock covers scans, not the objects.** Allocate, release and
+  find-by-key take it; `with_instance_mut`, `readdir`, `epoll_ctl` and every
+  other by-index accessor stay unlocked, because POSIX already makes
+  concurrent use of one `DIR *` / `FILE *` the caller's problem. Each such
+  accessor now carries a comment saying so, replacing the stale
+  `// SAFETY: single-threaded` that used to be there.
+- **Releases take the lock too.** Clearing `in_use` outside it is a plain data
+  race against a concurrent claim reading it.
+- **The lock's scope must match its table's scope.** `process_global!` table →
+  `process_global!` lock (declared in the same block); plain `static mut` table
+  → plain `static` lock. `mqueue` and `semaphore` were found with a plain
+  `static` lock over a `process_global!` table — over-broad rather than
+  under-broad, so safe, but on the host it couples every test thread to every
+  other, and a spin lock has no poisoning: a panic inside the critical section
+  would wedge unrelated later tests. Both moved inside the `process_global!`
+  block.
+
+**Two structural changes fell out of it:**
+
+- `dirent`'s getdents cache was split into `claim_getdents_cache()` (takes the
+  slot with `fd = -1`, so no concurrent `find_getdents_cache` can match it) and
+  `publish_getdents_cache(slot, fd)` (called once the `SYS_FS_LIST_DIR`
+  snapshot is filled). That syscall is far too slow to hold a process-wide lock
+  across.
+- `aio`'s finders were split into `_locked` variants, because the spin lock is
+  not reentrant and `store_aio_record` calls the finder from inside its own
+  critical section. Without the split it would have deadlocked against itself
+  on the first concurrent `aio_read`.
+
+**Regression test:** `perprocess.rs`'s
+`a_scan_and_claim_under_the_lock_never_hands_out_a_slot_twice` — 8 threads × 8
+claims over 64 slots. Its first version passed with `lock_pool` removed,
+because the `Mutex<Vec<usize>>` collecting the results was serialising the
+threads all by itself; the version in the tree adds a `std::sync::Barrier`, a
+`yield_now()` between the read of `in_use` and the write, and per-thread
+private `Vec`s merged after `join`. With the lock removed it now fails as
+`left: 20, right: 64`. A companion test checks the guard actually releases on
+an early `return` by reading the flag directly, so a regression fails rather
+than hangs.
+
+**Residual, accepted.** Two threads calling `getdents64` on the *same* fd
+simultaneously can each end up with their own cache slot, each with its own
+position — a consequence of the claim/publish split above. That is concurrent
+use of one fd, already the caller's problem, and it is memory-safe.
 
 ### TD-ARCHIVE-WRITER-NAMES-ARE-STRING-NOT-BYTES. ar/rar/7z member names were still `String` — LOGGED 2026-08-13 — FIXED 2026-08-13
 
@@ -59210,7 +61038,7 @@ stripped pattern would have matched `axb` and does not), the embedded quote that
 puts the bit back, the replacement side, and the `$*`/list rows that show what
 `Q_PATQUOTE` does keep.
 
-### TD-POSIX-CAPS-ARE-NOT-THE-KERNEL'S. libc's Linux capability words start as "all caps held" and are never seeded from the process's real kernel capabilities — 2026-08-12
+### TD-POSIX-CAPS-ARE-NOT-THE-KERNEL'S. libc's Linux capability words start as "all caps held" and are never seeded from the process's real kernel capabilities — 🔷 **Q44 ANSWERED 2026-08-15 → §312; implementation staged, step 1 is Lane A's** — 2026-08-12
 
 **What.** `posix/src/sys_capability.rs` keeps the three Linux capability sets
 (effective/permitted/inheritable) in its own store and initialises them from
@@ -59261,9 +61089,10 @@ of **per-object** authority, not Linux's 41 **ambient** numbered bits, so
 someone has to define which kernel rights imply which `CAP_*` — and
 `CAP_SYS_ADMIN`, which is 20 of the 63 gate sites, has no natural preimage at
 all. That mapping decides what a Linux port is allowed to conclude about our
-capability model, so it is an operator decision: **asked as `open-questions.md`
-Q44** (2026-08-12), with four options and a recommendation. It moves to
-`design-decisions.md` once answered.
+capability model, so it was an operator decision: **asked as
+`open-questions.md` Q44** (2026-08-12) and **answered 2026-08-15 — option A**,
+recorded as `design-decisions.md` **§312**. See "The answer and what is left"
+below.
 
 **CORRECTED 2026-08-12.** An earlier version of this section named
 `SYS_CAP_QUERY` (400) as the syscall to seed the words from. **It cannot serve
@@ -59275,10 +61104,36 @@ entries"), and its only consumer today is `userspace/strace`'s syscall-name
 table. So an **enumerating** query syscall has to be built first, under any
 answer to Q44. Do not start the libc side expecting 400 to hand you the set.
 
-Until Q44 is answered the optimistic answer stays. The honest alternative —
-`capget` failing rather than answering confidently — would break Linux ports
-that call it informationally, which is worse for a compatibility layer than a
-documented-safe wrong answer.
+**The answer, and what is left — 2026-08-15.** Q44 was answered **A —
+conservative projection** (`design-decisions.md` §312). Each `CAP_*` is derived
+from a specific `(ResourceType, Rights)` predicate and reports **not held**
+whenever no rule matches, so the default is *deny*: `CAP_SYS_RAWIO` ⇐ a `PortIo`
+handle with `READ|WRITE`, `CAP_KILL` ⇐ `Process` with `SIGNAL`, `CAP_SYS_PTRACE`
+⇐ `Process` with `DEBUG`, `CAP_SYS_NICE` ⇐ `Thread` with `IO_REALTIME`.
+`CAP_SYS_ADMIN` — 20 of the 63 sites — is deliberately **not** derived: it gets an
+explicit hand-maintained union with a comment per member, because Linux's junk
+drawer has no preimage in a per-object model and any derived rule would be either
+permanently false or broad enough to re-grant everything.
+
+Rejected, and worth not re-litigating: **B** (`ResourceType::PosixCapability`)
+was refused as ambient authority wearing a capability costume — process-wide
+authority tied to no object — even though it is the option that would have made
+`CAP_SYS_ADMIN` easy. **D** (`capget()` failing outright) was refused because
+Linux ports call it informationally, so it trades one silent wrong answer for
+loud breakage everywhere; that argument still stands and is why the optimistic
+answer is allowed to persist through steps 1–2 below rather than being turned off
+first.
+
+**This entry stays open until step 3.** The three steps, in order, from §312:
+
+1. **An enumerating query syscall must exist** (see the CORRECTED note above —
+   400 returns a count). **Lane A's tree**, filed as
+   `requests/b-a-cap-enumerating-query-syscall.md`. Nothing changes behaviourally
+   when it lands.
+2. **libc seeds its three words from that query** instead of `CAPS_DEFAULT`.
+   Still no behavioural flip: the gates remain advisory.
+3. **The gates stop being advisory** — the boot-test-visible step, gated on the
+   fixture grants in the paragraph below.
 
 **Do not make a gate truthful without freeing QEMU first.** Fixtures depend on
 the permissive behaviour: `services/ctest-jobctl` (documented in its own doc
@@ -59575,16 +61430,365 @@ optional; `iconv` treats a NULL `inbuf` as a state reset. `telldir`/`seekdir`
 looked like hits but the EINVAL there is in glibc's *stub*; Linux's versions
 (`sysdeps/unix/sysv/linux/`) have no check.
 
-**What remains.** The ~280 surviving `is_null() -> EFAULT` sites have not been
+**Third pass, 2026-08-13 — `pthread.rs` (47 sites), and it was not a judgement
+call after all.** This cluster was recorded here as the one needing "a decision
+rather than a lookup", because NPTL contains no NULL checks at all and so
+offers no errno to copy. That framing was wrong. The answerable question was
+the *ordering* one this entry's own **Proper fix** paragraph names: NPTL
+validates its **scalar** argument first and dereferences the pointer only
+afterwards, so on Linux a call that is bad in both ways returns the scalar's
+`EINVAL`/`ERANGE`, never `EFAULT`. Our code checked the pointer first
+everywhere. Nine functions fixed, each verified against the glibc (or kernel)
+source and cited in both the code and the test — full reasoning in
+`design-decisions.md` §303:
+
+- `pthread_attr_setstacksize`, `pthread_attr_setstack` — size checked first
+  (`check_stacksize_attr`). **Also** their floor was a hardcoded `4096` while
+  the crate's own `PTHREAD_STACK_MIN` is `16384`; they now use the shared
+  constant, so three stack sizes glibc rejects are no longer accepted.
+- `pthread_attr_setdetachstate`, `pthread_mutexattr_settype`,
+  `pthread_condattr_setclock` — scalar checked first.
+- `pthread_rwlockattr_setpshared` — scalar first, **and** the errno was wrong:
+  any non-`PRIVATE` value used to be `ENOTSUP`, conflating "we don't support
+  cross-process rwlocks" with "that isn't a pshared value". glibc's
+  `futex_supports_pshared` accepts both POSIX values and gives `EINVAL` for
+  anything else; `ENOTSUP` is now `PTHREAD_PROCESS_SHARED` alone.
+- `pthread_barrier_init` — count checked first, **and** `u32::MAX` used to be
+  accepted, which was a latent hang (the arrival counter is an `AtomicI32`, so
+  a count above `i32::MAX` is unreachable and every waiter would block
+  forever). Now capped at glibc's `BARRIER_IN_THRESHOLD` (`UINT_MAX / 2`).
+- `pthread_getname_np` — `len` checked first, **and** the check was against the
+  stored name's length rather than `TASK_COMM_LEN`; glibc compares against the
+  constant unconditionally, so a 4-byte buffer is `ERANGE` even for a
+  2-character name. The second, now-dead length test is gone.
+- `pthread_getaffinity_np` — both length rejections moved above the NULL check,
+  and the missing `len & (sizeof (unsigned long) - 1)` test added.
+  `pthread_setaffinity_np` keeps NULL-first and gained a comment saying why:
+  the asymmetry is Linux's, not ours (`sched_setaffinity`'s `get_user_cpu_mask`
+  does no size rejection and copies first, so `EFAULT` wins there).
+
+**Fourth pass, 2026-08-13 — `xattr.rs` (11 sites).** Every one of these
+pointers *does* reach a syscall, so §300's rule keeps `EFAULT` for all of them
+and not one constant changed. The ordering was wrong throughout, though. Linux
+resolves the path in `path_getxattr`/`path_setxattr`/`path_removexattr`
+(fs/xattr.c) **before** the attribute name is ever read, and for the setters
+`setxattr_copy` (fs/xattr.c:598-602) checks the flags before the name too. Our
+entry points checked `path.is_null() || name.is_null()` as one test and then
+the flags, giving three divergences:
+
+- A nonexistent path with a NULL name was `EFAULT`; Linux gives `ENOENT`,
+  because the name is not read until the path has resolved. (Bare metal only.)
+- A bad flag with a NULL name was `EFAULT` in `setxattr`/`lsetxattr`/
+  `fsetxattr`; Linux gives `EINVAL`.
+- The path and the name were conflated, so neither could outrank the other.
+
+The order is now path → (flags) → name in all nine path/name entry points,
+enforced by two shared helpers, `resolve_xattr_path` and `check_xattr_name`,
+which carry the citation once instead of at eleven call sites.
+
+The same pass found an *invented* check: `setxattr_flags_valid` rejected
+`XATTR_CREATE | XATTR_REPLACE` with `EINVAL`, an errno Linux never returns for
+it. The kernel's only flag test is the mask `flags & ~(XATTR_CREATE |
+XATTR_REPLACE)`, which both bits pass; the filesystem then answers from the
+attribute's state — `EEXIST` if it exists, `ENODATA` if it does not (ext4's
+`ext4_xattr_set_handle`, fs/ext4/xattr.c:2412-2423). Our own kernel already
+agreed with Linux (`xattr_validate_size_flags` in `kernel/src/syscall/linux.rs`
+masks with `0x3` and has no both-flags test), so the libc check was also
+inconsistent with the layer below it. Removed: it is the filesystem's
+judgement, not libc's.
+
+**Fifth pass, 2026-08-13 — `unistd.rs` (13 sites).** Most were already correct
+and several already carried citations (`realpath`, `canonicalize_file_name`
+and `getrandom` were fixed in the earlier passes; `chdir`, `chroot`,
+`getresuid`/`getresgid`, `sysinfo` and the `*at` paths all forward the pointer
+to a syscall, so `EFAULT` stands). Three did not:
+
+- **`getentropy(NULL, 512)` was `EFAULT`; glibc gives `EIO`.** glibc's
+  `getentropy` (sysdeps/unix/sysv/linux/getentropy.c) opens with
+  `if (length > 256) { __set_errno (EIO); return -1; }` before it forms
+  `end = buffer + length` or issues `getrandom`. And `getentropy(NULL, 0)`
+  now *succeeds*: the `while (buffer < end)` loop does not run, so no syscall
+  is issued and the pointer is never touched — the same shape `getrandom`
+  already documented one function above.
+- **`gethostname(NULL, 0)` was `EFAULT`; glibc gives `ENAMETOOLONG`.**
+  `__gethostname` (sysdeps/posix/gethostname.c) never checks the pointer; it
+  `memcpy`s `min (len, node_len)` bytes and *then* tests
+  `node_len > len`. With `len == 0` the copy moves nothing, so a NULL buffer
+  is safe and the length test decides.
+- **`gethostname` did not truncate.** The same `memcpy` runs unconditionally,
+  so glibc fills a too-small buffer with as much of the name as fits —
+  truncated and not null-terminated — before returning `ENAMETOOLONG`. We
+  left the caller's buffer untouched, so a caller that ignored the return
+  value read stale bytes instead of a truncated hostname. Now matched.
+
+`getdomainname` is a **deliberate** divergence, now documented at the function:
+glibc (misc/getdomain.c, the `_UTSNAME_DOMAIN_LENGTH` branch Linux takes) has
+no length rejection at all and returns 0 after truncating, so a short buffer
+silently receives an unterminated string. We keep `EINVAL` — quiet truncation
+is the corruption this codebase forbids, and it is what the Linux man page
+documents. Because the check is ours, it is ours to order, and it now goes
+first, so `getdomainname(NULL, 0)` is `EINVAL` rather than `EFAULT`.
+
+**Sixth pass, 2026-08-14 — `socket.rs` (15 sites).** Every constant was already
+right; every bug was an ordering bug, and the answers this time came almost
+entirely from `net/socket.c` rather than glibc, because the socket calls are
+thin syscall wrappers. The one thing worth carrying forward is that *the
+descriptor lookup is not uniformly first*: Linux splits the socket entry points
+into two families, and the split is deliberate, not accidental.
+
+- **`bind` / `connect` checked the address before the descriptor.**
+  `__sys_bind` (net/socket.c:1835) calls `sockfd_lookup_light` and only then
+  `move_addr_to_kernel`, so `bind(-1, NULL, len)` is `EBADF`; ours said
+  `EFAULT`. `__sys_connect` (:2056) is the same via `fdget`. Fixed, and the
+  existing `test_phase201_bind_null_addr_efault_before_eacces` had to move to a
+  real socket fd — it had been passing `-1` and so was silently asserting the
+  wrong precedence all along.
+- **The two calls disagree about `ENOTSOCK`, and that is upstream's doing.**
+  `bind` uses `sockfd_lookup_light` (:553), which resolves *and* type-checks
+  before the address is read, so `ENOTSOCK` outranks `EFAULT`. `connect` uses a
+  bare `fdget` and calls `sock_from_file` inside `__sys_connect_file`, i.e.
+  *after* `move_addr_to_kernel`, so there `EFAULT` outranks `ENOTSOCK`. Both
+  are now spelled out at the call sites with a cross-reference, because the
+  asymmetry reads like a mistake and would otherwise be "tidied up".
+- **`addrlen == 0` must not fault.** `move_addr_to_kernel` (:247) returns 0 at
+  `ulen == 0` *before* its `copy_from_user`, so `bind(fd, NULL, 0)` never
+  touches the pointer and falls through to the protocol's own length test:
+  `EINVAL`, not `EFAULT`. A short-but-nonzero `addrlen` does reach the copy, so
+  there `EFAULT` wins over that same `EINVAL`. Both directions now have tests.
+- **`socketpair` faulted before it validated the type flags.**
+  `__sys_socketpair` (:1729) tests `flags & ~(SOCK_CLOEXEC | SOCK_NONBLOCK)` at
+  :1737, before it has reserved a descriptor — but reaches
+  `put_user(fd1, &usockvec[0])` at :1758 *before* `sock_create` at :1771. So
+  exactly one check outranks `EFAULT` (the flag `EINVAL`) and the family, type
+  and protocol verdicts all rank below it. The first guess — that all of them
+  outranked `EFAULT` — was wrong, and only reading the function settled it.
+- **`inet_ntop` rejected NULL pointers before looking at the family.** glibc's
+  `inet_ntop` (resolv/inet_ntop.c) is a bare `switch (af)` with no pointer
+  checks at all, so an unrecognised family is `EAFNOSUPPORT` whatever the
+  pointers hold. Within a family, `inet_ntop4` formats into a stack buffer and
+  compares against `size` before its closing `strcpy`, so `ENOSPC` also
+  outranks a NULL `dst`. The `dst` check now lives in both formatters, just
+  after the `ENOSPC` test; the full order is `EAFNOSUPPORT`, `src`, `ENOSPC`,
+  `dst`.
+- **`setsockopt`'s multicast path conflated two errors into one.** It answered
+  `EINVAL` for both a short `optlen` and a NULL `optval`.
+  `do_ip_setsockopt` (net/ipv4/ip_sockglue.c:1222-1233) rejects
+  `optlen < sizeof(struct ip_mreq)` and only then runs `copy_from_sockptr`, so
+  they are distinct verdicts. Folding them told a caller with a correctly-sized
+  buffer at a bad address that its *length* was wrong.
+- **`sendmsg` / `recvmsg` read the header before the descriptor**, and worse,
+  returned 0 for an empty `msg_iov` without ever looking at the fd.
+  `__sys_sendmsg` (:2634) and `__sys_recvmsg` run `sockfd_lookup_light` before
+  `___sys_sendmsg` copies the header in. Note the contrast with `sendto` /
+  `recvfrom`: `__sys_sendto` (:2161) and `__sys_recvfrom` (:2224) import the
+  user buffer *first*, so there `EFAULT` genuinely does outrank `EBADF` and our
+  existing order was right. A new `socket_fd_is_valid()` helper carries the
+  `sockfd_lookup_light` semantics (and the citation) once.
+- **A zero-length `send`/`recv`/`recvfrom` returned 0 on a closed fd.** The
+  POSIX no-op was short-circuiting above the descriptor lookup, but
+  `__sys_sendto`/`__sys_recvfrom` look the descriptor up whatever the length
+  is. A zero-length send is a common idiom for probing a socket's liveness;
+  ours could not distinguish a live socket from a closed one.
+
+**Seventh pass, 2026-08-14 — `spawn.rs` (16 sites).** The prediction going in
+was that `spawn.rs` would be an ordinary §300 lookup with the constants right
+and the ordering wrong. Half true: the ordering was indeed wrong at five call
+sites, but here the *constants* were wrong too, and one check was missing
+outright. `posix_spawn` is a pure-userspace API — no syscall is involved in
+building a file-actions object — so every answer came from glibc, and all five
+`add*`/`setflags` entry points turn out to hinge on a single 4-line helper.
+
+- **`__spawn_valid_fd` is the whole story, and we had reimplemented it wrong.**
+  posix/spawn_valid_fd.c is
+  `fd >= 0 && (maxfd < 0 || fd < maxfd)`, with `maxfd = __sysconf
+  (_SC_OPEN_MAX)`. Ours was `fd < 0` and returned `EINVAL`. Two independent
+  bugs: **the errno is `EBADF`**, and **the upper bound was missing entirely**,
+  so `addclose(acts, 1_000_000)` was accepted and would only fail later, in the
+  child, after the fork. It is now one `spawn_valid_fd()` helper carrying the
+  citation once, used by all four `add*` calls.
+- **The descriptor check comes first, before the object and before the path.**
+  `spawn_faction_addclose.c`, `spawn_faction_adddup2.c:32`,
+  `spawn_faction_addopen.c` and `spawn_faction_addclosefrom.c:31` all open with
+  `if (!__spawn_valid_fd (fd)) return EBADF;` — ahead of any read of
+  `file_actions->__used` and, in `addopen`, ahead of `__strdup (path)`. We
+  checked the pointers first, so `addopen(acts, -1, NULL, …)` reported the
+  *path* when glibc reports the *descriptor*. `adddup2` tests both fds in the
+  same expression, so an out-of-range `newfd` is `EBADF` on the same footing as
+  a bad `fd`.
+- **`addclosefrom_np` already had the right constant and the wrong order** —
+  the one site where a previous pass got `EBADF` right by inspection but still
+  put it below the NULL check.
+- **`posix_spawnattr_setflags` had the order inverted *and a doc comment
+  justifying the inversion*.** `__posix_spawnattr_setflags`
+  (posix/spawnattr_setflags.c) is two statements — the `flags & ~ALL_FLAGS`
+  rejection, then the store — with no NULL check at all; a NULL `attr` faults
+  on the store, so the flag word is decided while the pointer is still
+  untouched. Ours checked `attr` first and explained that this gave the caller
+  "the more informative `EFAULT`". That is the **second** invented
+  justification this audit has found in a doc comment, after `bind`'s in the
+  sixth pass, and it is the more dangerous failure mode of the two: a wrong
+  constant looks like an oversight and invites checking, whereas a wrong
+  constant with a rationale attached reads as deliberate and deflects it. Both
+  are now replaced by the upstream text, and the misnamed test
+  (`test_setflags_null_attr_precedes_flag_check`, which asserted the opposite)
+  is renamed with a note in its body recording what it used to claim.
+
+The habit this pass adds: **when a check is duplicated across sibling
+functions, find the shared helper upstream and port *it*, not the check.** All
+four `add*` bugs were one bug, replicated four times by four separate readings
+of four man pages that each say only "EBADF … the value specified by fildes is
+negative".
+
+**Eighth pass, 2026-08-14 — `file.rs` (28 sites).** The last dense cluster, and
+the one that most rewarded reading. `file.rs` wraps thin syscalls, so — as in
+`socket.rs` — the constants were nearly all right and the *orderings* were
+wrong; but three of the entry points here have a **three- or four-deep** rank,
+and we had several of them almost exactly reversed.
+
+- **`read`/`write` short-circuited a zero-length call above the descriptor
+  lookup.** `ksys_read` (fs/read_write.c:604) is `fdget_pos` first, and there
+  is no zero-length shortcut anywhere upstream; `EFAULT` arises only later from
+  `access_ok` inside `vfs_read` (:458). So `read(closed_fd, buf, 0)` was
+  silently returning 0. This is the *same bug* the sixth pass fixed in
+  `send`/`recv` — and a zero-length read is a common liveness probe, so the
+  silent success is the worst possible answer.
+- **`pread`/`pwrite` ran a four-deep order backwards.** `ksys_pread64` (:652)
+  is `pos < 0` → `EINVAL`, `fdget` → `EBADF`, `!FMODE_PREAD` → `ESPIPE`, then
+  `EFAULT`. We had `EFAULT`, zero-count, `EINVAL`, `EBADF`, `ESPIPE`.
+- **The `pread`/`preadv` tests had been passing `fd 0`** — a console — so once
+  `ESPIPE` was ordered correctly they *all* failed. They had only ever
+  exercised the shortcuts that used to sit above the descriptor checks; none of
+  them had ever reached the code they were named for. Same failure mode as
+  `test_phase201_bind_null_addr_efault_before_eacces` in the sixth pass, at
+  larger scale: **a test that picks a convenient fd rather than the right one
+  silently stops testing anything once the ordering is fixed.**
+- **The vectored calls folded three distinct verdicts into one `EINVAL`.**
+  `iov.is_null() || iovcnt <= 0 || iovcnt > 1024` was a single branch.
+  `iovec_from_user` (lib/iov_iter.c) separates them: `nr_segs == 0` returns an
+  *empty iterator* (success, 0 bytes) before anything else, `nr_segs >
+  UIO_MAXIOV` is `EINVAL`, and `copy_iovec_from_user` is `EFAULT`. The zero
+  case is deliberate and commented upstream — "SuS says the readv() function
+  *may* fail if the iovcnt argument was less than or equal to 0 … Linux has
+  traditionally returned zero for zero segments" — and we were failing it.
+  Note the interaction with the previous point: the zero-segment call is
+  exactly the one a per-segment loop never checks a descriptor for, so it is
+  also the one that must still report `EBADF`.
+- **`truncate` checked the path before the length, and its own sibling ten
+  lines below already had it right.** `do_sys_truncate` (fs/open.c:129) rejects
+  a negative length before `user_path_at`; `do_sys_ftruncate` (:164-170) puts
+  the same `EINVAL` above `fdget`'s `EBADF`, and `ftruncate` implemented that
+  correctly. Adjacent functions, same file, one right and one wrong — the
+  sixth pass's "do not generalise from a sibling" habit cuts both ways: you
+  also cannot assume a sibling's *correctness* transfers.
+- **`open`/`openat` never rejected `O_DIRECTORY|O_CREAT`** (nor `O_TMPFILE`
+  without `O_DIRECTORY`, nor without write access). `build_open_flags`
+  (fs/open.c) returns `EINVAL` for all three and runs ahead of both
+  `getname(filename)` and `do_filp_open`'s use of `dfd`, so they outrank
+  `EFAULT` for the path *and* `EBADF` for the directory. Factored into
+  `validate_open_flags()` so both entry points run it in upstream's position.
+  Our `EOPNOTSUPP` for a well-formed-but-unsupported `O_TMPFILE` correctly
+  ranks below them: it corresponds to `do_tmpfile`, reached only inside
+  `path_openat`.
+- **`name_to_handle_at` — the third invented justification.** It checked
+  `pathname`, `handle` and `mount_id` together, with a doc comment conceding
+  that Linux "defers `handle`/`mount_id` checks until after `user_path_at`, but
+  our model can do the cheap NULL check up front **without observable
+  difference**." The difference is observable and obvious:
+  `name_to_handle_at(bad_fd, "p", NULL, NULL, 0)` is `EBADF` upstream and was
+  `EFAULT` here. After `bind` (sixth pass) and `posix_spawnattr_setflags`
+  (seventh), that is three doc comments that *argued for* an order instead of
+  citing one, and all three arguments were wrong.
+- **`openat2` was already correct**, cited step by step against `sys_openat2`.
+  Worth recording: the pass is not uniformly finding bugs, and the one function
+  that had been written *from* the upstream source rather than from a man page
+  is the one that needed nothing.
+
+**The habit this pass adds — and it is the most useful one so far.** Every
+wrong answer in this file was produced by a comment or a test that reasoned
+about what an errno *ought* to be. Every right answer was produced by someone
+reading the function. So: **a doc comment that argues for an ordering is a
+defect marker.** Three for three. When you find one, do not evaluate the
+argument — go read the upstream function, because the argument exists precisely
+because nobody did.
+
+**Ninth pass, 2026-08-14 — the timed waits (4 sites).** This one started as a
+`pthread.rs` pass and immediately stopped being one: §303 had already walked
+that file, so there was nothing left to classify there. What the re-read *did*
+surface is that none of the blocking primitives validated `tv_nsec` at all.
+glibc has a single shared predicate for it, `valid_nanoseconds`
+(`include/time.h:517`, `0 <= ns && ns < 1000000000`), and calls it from
+`pthread_cond_timedwait`, `pthread_mutex_timedlock`, the rwlock timed
+variants and `sem_timedwait`. We called it from none of them, so a malformed
+deadline silently became a very long — or instantly expired — wait.
+
+The interesting part is that the *same* predicate is invoked from three
+different places in the control flow, and the differences are deliberate:
+
+- `pthread_cond_timedwait` checks **first**, before the mutex is released
+  (`nptl/pthread_cond_wait.c:635` is the function's opening statement). The
+  rejection is side-effect-free and the caller still holds the mutex.
+- `pthread_mutex_timedlock` checks **lazily**, inside the contended branch —
+  `nptl/pthread_mutex_timedlock.c:221` is literally commented "We are about
+  to block; check whether the timeout is invalid." So an *uncontended*
+  `timedlock` with `tv_nsec = 1e9` returns 0 and never reads the timespec.
+  POSIX licenses this: "the validity of the abstime parameter need not be
+  checked if the lock can be immediately acquired."
+- `sem_timedwait` checks **eagerly**, above `__new_sem_wait_fast`
+  (`nptl/sem_timedwait.c:28`), so the same call shape that succeeds for a
+  mutex is `EINVAL` for a semaphore.
+
+That is the sixth pass's "do not generalise from a sibling" rule again, but
+sharper: here the three call sites share a *predicate* and still differ in
+placement, and glibc knows it — `pthread_rwlock_common.c:286-291` carries a
+comment explaining that the rwlocks were **switched from lazy to eager**, with
+POSIX permitting either. So the lesson is not just that siblings differ, it is
+that **a shared helper is not evidence of a shared control flow.** Porting the
+helper (the seventh pass's rule) is necessary and not sufficient; you still
+have to place each call where its own caller places it.
+
+The fourth site is the counterexample that keeps the predicate honest.
+`mq_timedsend`/`mq_timedreceive` are bare syscalls, so their deadline is
+vetted by the *kernel*: `prepare_timeout` (ipc/mqueue.c) → `timespec64_valid`
+(include/linux/time64.h), which additionally rejects `tv_sec < 0` ("Dates
+before 1970 are bogus"). glibc's `valid_nanoseconds` never looks at `tv_sec`,
+so a negative one is a deadline in the past — `ETIMEDOUT`, not `EINVAL`. Our
+`deadline_from_timespec` had the nsec half and was missing the `tv_sec` half.
+Two predicates that look interchangeable, differ in one line, and apply to
+adjacent functions in the same crate: the §300 question ("does the pointer
+reach a syscall") turns out to decide not only the errno but *which validity
+rule applies at all*.
+
+Habit from this pass: **when you find a validation missing, find its
+predicate upstream before you write one** — and then check whether the
+upstream predicate is glibc's or the kernel's, because the two disagree and
+the disagreement is load-bearing.
+
+**What remains.** The surviving `is_null() -> EFAULT` sites have not been
 individually classified. This entry stays open for coverage, not because any
-specific remaining site is known wrong. The densest concentrations are
-`pthread.rs` (47), `file.rs` (28), `spawn.rs` (16), `socket.rs` (15),
-`unistd.rs` (13) and `xattr.rs` (11). `pthread.rs` is the one that still needs
-a decision rather than a lookup: NPTL is pure userspace, so none of its 47
-sites can be justified by "the kernel would say `EFAULT`" — but glibc mostly
-does not check at all there and simply faults, so there is no upstream errno to
-copy and the question is what we *should* return in glibc's place. That is a
-judgement call across 47 functions and wants its own pass.
+specific remaining site is known wrong. **No dense cluster is left.**
+`pthread.rs` looks like the largest concentration in a raw `rg` count (~48
+sites), but it is not open work: design-decisions.md §303 already walked it,
+fixed its nine ordering bugs, and settled the pointer sites wholesale —
+NPTL has no NULL checks at all, so there is no upstream errno to look up and
+`EFAULT` is the adopted substitute. Do not re-open it by grep count. After
+`file.rs`, the largest genuinely-unclassified files are `process.rs` (10) and
+`epoll.rs` (9), and everything below that is a long tail of eight or fewer per
+file — a shape that argues for retiring this entry by sampling rather than by
+another file-at-a-time sweep.
+
+Four habits carry forward, one per pass that produced one. From `socket.rs`:
+**do not generalise a rule from one sibling call to the next** — `bind` and
+`connect` order `ENOTSOCK` oppositely, and `sendmsg` and `sendto` order
+`EBADF` oppositely, in the same file. From `spawn.rs`: **when sibling
+functions share a check, port the upstream helper rather than the check.**
+From `file.rs`: **a doc comment that argues for an ordering is a defect
+marker** — three for three across the last three passes — and **a test that
+picks a convenient fd rather than the correct one silently stops testing
+anything**, which is how eight `pread`/`pwrite` tests spent their whole lives
+never reaching the code they were named for. And across all eight: expect the
+*ordering* to be wrong more often than the constant, and do not assume a
+sibling's correctness transfers — `ftruncate` was right and `truncate` was
+wrong ten lines apart.
 
 **Reproduce.** Not a runtime failure. `rg -A3 'is_null\(\)' posix/src`, filtered
 for `EFAULT` in the following lines, enumerates the candidate sites; each has to
@@ -59603,11 +61807,4373 @@ the same pass.
 **Tooling.** `D:\refsrc\glibc-2.39` (added 2026-08-13; shallow clone of the
 `glibc-2.39` tag from the `bminor/glibc` GitHub mirror — `sourceware.org`
 answers 429) is the reference for this work, alongside the bash checkout in
-`TOOLING-BASH-5.2.37-SOURCE`. Do **not** do this audit from man pages:
+`TOOLING-BASH-5.2.37-SOURCE`.
+
+`D:\refsrc\linux-6.6` (added 2026-08-13; shallow clone of the `v6.6` tag from
+`gitlab.com/linux-kernel/linux`, sparse-checked-out to
+`kernel fs mm ipc include/linux include/uapi`, ~130 MB) is the **other half**
+of this audit and was missing until the pthread pass needed it. §300's rule has
+a kernel side — "does the pointer reach a syscall, and what does the kernel do
+with it" — which cannot be answered from glibc, because for a thin wrapper like
+`pthread_getaffinity_np` glibc is nothing but `INTERNAL_SYSCALL_CALL` and every
+validation lives in `kernel/sched/core.c`. Note for whoever clones it next:
+`git checkout` fails on Windows with `invalid path …/aux.c` — `AUX` is a
+reserved DOS device name and git validates *every* index entry, not just the
+ones inside the sparse cone, so narrowing the cone does not help. Use
+`git -c core.protectNTFS=false checkout v6.6`.
+
+Do **not** do this audit from man pages:
 `ptsname_r`'s documented `EINVAL` has not matched any glibc implementation
 since the TIOCGPTN fast path landed, and trusting the man page is exactly how
 the first attempt at this fix went wrong.
 
+---
+
+## TD-APPS-ESTIMATE-TEXT-WIDTH — apps still guess at text width instead of measuring it
+
+**Status.** **Closed for the original defect** as of 2026-08-14. `gui/**` was
+converted on 2026-08-13 (`fa5135c36`, `f2d74c8a2`), the desktop shell's 18 files
+and `gui/notifications` on 2026-08-14 (`210172279`, `b654d2cd0`), fourteen
+applications after that (`1523f7412`, `353a41211`, `99198808c`, `77bf7bf14`,
+`504c67bc0`, `0c107cce7`, `f5befec99`, `537a9eaa8`, `dba94444d`, `1e5dc7edb`,
+`1b436c341`, `a3669e178`, `50c6b17a5`, `45aa280d1`), and the remaining tail in
+two sweeps — seven surveyed files (`68d477601`) and the last 26 crates
+(`6f4dd870e`). The last non-app site, the About dialog's licence list, went with
+`7948cf8d5`.
+
+Every survivor of `rg 'len\(\) as f32\)? \* [0-9]'` under `apps/` and `gui/` is
+now either a comment, a genuine collection-length calculation, or a grid view
+that legitimately counts characters against a cell derived from the face
+(`textview`'s line-number gutter). Of the two follow-ups this entry used to
+defer, one is done and one is tracked below:
+
+- `apps/editor`'s own `char_width` config field is **gone** — the field was
+  deleted and the doc comment in its place (`apps/editor/src/main.rs`, on
+  `line_height`) now records *why* there is deliberately no horizontal
+  counterpart: a nominal per-character width is only ever right for one font
+  at one size, and wrong by a compounding amount along every line for all the
+  others. There was never a separate `TD-` entry for it despite this sentence
+  once promising one.
+- The wrapping defect is `TD-GUI-TEXT-COMMAND-DOES-NOT-WRAP`, immediately
+  below.
+
+Of ~90 apparent sites in the final survey, ~41 were real; the rest were false
+positives from the naive pattern (`filediff`, `videoplayer`, `devicemanager`,
+`benchmark` and `unitconverter` turned out to have none at all). Refine the
+grep with an identifier-based pattern before trusting a count.
+
+**What it is.** Roughly 322 sites across ~90 files under `apps/` and
+`gui/desktop/` size and position text with a per-app fudge factor —
+`text.len() as f32 * font_size * k`, where `k` is 0.5 in `apps/ebook`, 0.55 in
+`apps/lockscreen` and `apps/launcher`, 0.6 in `apps/editor`, and a bare 8.0
+elsewhere. Every one of these is wrong in the same two ways the toolkit's were:
+
+1. `str::len` counts **bytes**, so any non-ASCII text is measured two to four
+   times too wide. This was invisible while the compositor drew a box for every
+   non-ASCII character; it is visible now that they render.
+2. The constant describes a fixed 8x14 cell that the compositor no longer
+   draws. `font_size` is honoured now, and the built-in face is only monospace
+   until an outline face is loaded — at which point every one of these
+   estimates becomes wrong even for ASCII.
+
+The visible symptoms are the same class the toolkit had: labels overflowing
+their buttons, text cursors landing between characters rather than on them, and
+centred text drifting off-centre in proportion to its length.
+
+**Where it lives.** The tail is now flat: no file has more than four sites.
+Densest remaining: `apps/systemrestore`, `apps/spreadsheet`, `apps/podcast` and
+`apps/dbviewer` (4 each), then `apps/unitconverter`, `apps/sysmonitor`,
+`apps/settings` (three files), `apps/passwordgen`, `apps/notes`,
+`apps/imageviewer` and `apps/fontmanager` (3 each), then 40 files with one or
+two. `apps/editor/src/main.rs` is a special case: it declares its own
+`char_width` config field, mirroring the `SimpleTextViewConfig` design that was
+fixed in `guitk/textview`. `apps/spreadsheet` is likely a second grid case —
+check whether its column widths are a genuine grid before converting.
+
+**Reproduce.** `rg 'len\(\) as f32\)? \* [0-9]|CHAR_WIDTH|char_width' apps/
+gui/desktop/`. Note the earlier version of this command missed two forms that
+turned out to be common: a parenthesised cast (`(label.len() as f32) * 7.0`)
+and a bare numeric factor with no named constant at all. Both are in the
+pattern above. Files that legitimately derive a cell (`fn char_width()`) will
+still match; check before converting.
+
+**Proper fix.** Call `guitk::text` — `measure`, `width`, `fit`, `elide`,
+`char_index_at`, `line_height`, `digit_advance` — which every app already has
+in scope via its `guitk` dependency. There is no new API to design; the module
+exists and the toolkit's own nine modules are already converted to it. Two
+judgement calls recur:
+
+- **Terminal-style views** (`apps/tmux`, `apps/hexeditor`, `apps/logviewer`)
+  genuinely want a character grid. Keep the grid, but derive the cell width
+  from `text::cell_advance(font_size, weight)` and draw the grid inside a
+  `RenderCommand::PushFont { family: FontFamily::Mono }` scope, counting
+  **characters** rather than bytes — this is what
+  `guitk::textview::SimpleTextView` now does, and it is the pattern to copy.
+
+  ⚠️ **This advice used to say `digit_advance`, and that was wrong.** See
+  design-decisions.md §425. `digit_advance` returns a digit's advance *in the
+  proportional UI face* — a cell only digits fit. At 13px a digit is 7.55px
+  while `'W'` is 13.08px, so every non-digit glyph overhung its neighbour's
+  cell, and any code inverting the arithmetic to hit-test resolved to the
+  wrong cell, further wrong the further right. Five grid views were built on
+  that advice before it was caught (`3477cf982`): `hexeditor`'s ASCII column
+  (clicks selected the wrong byte), `filediff`'s inline highlight (slid off
+  the change it marked), `markdowneditor`'s caret and selection band,
+  `snippets`' overlapping code tokens, and `textview`'s own simple view. A
+  cell is only a cell if the face is monospace — hence the scope, not just
+  the arithmetic. `digit_advance` remains correct for its actual purpose:
+  sizing something that really does hold only digits (a line-number gutter,
+  `RichTextView`'s indent unit).
+- **Prose and labels** should measure. Where a widget both measures and draws,
+  the two must go through one call so they cannot drift — see
+  `RichTextView::span_font`/`span_width` for the shape of that.
+
+Best done a few apps at a time, each with a test that a measured label fits the
+box drawn for it. It is mechanical, but it is 90 files, so it is not one commit.
+
+**What the first six conversions turned up.** The estimates were not the whole
+problem — they were a marker for four bugs that recur, and are worth looking
+for deliberately rather than only fixing the multiplication:
+
+- **Hit-test / render drift.** Where a clickable strip is laid out, the click
+  handler and the renderer each computed the item width, and the two had
+  already diverged independently of the fudge factor. In `jsonviewer` the click
+  test sized a tab from `doc.title` while the render sized it from the title
+  *plus* its dirty marker, so clicking a tab after a modified one selected its
+  neighbour. The fix is one shared function, not two corrected copies.
+- **Weight ignored.** An active tab or heading is drawn bold and was measured
+  regular, so the one item the user is looking at is the one that overflows.
+  Measure in the weight the text is actually drawn in — and for a strip of
+  tabs, measure them *all* bold, or the strip reflows every time the selection
+  moves.
+- **Byte offset used as a column.** Text buffers store cursor and selection
+  positions as byte offsets on character boundaries, which is correct; the
+  renderer then multiplied that offset by a cell width. On any line holding an
+  accent the caret sat two or three columns right of its character and the
+  selection band stretched with it (`markdowneditor`), and match highlights
+  slid off the text they mark (`regextester`). Convert with a helper that
+  counts characters in the prefix, and make it survive a mid-character or
+  past-the-end offset — slicing a `str` off a boundary is an abort, not a
+  glitch.
+- **Home-grown truncation.** Several apps carry a local `truncate_display`-style
+  helper comparing `s.len()` (bytes) against a character budget derived from
+  the nominal cell. These cut accented text short when it fitted *and* let wide
+  text overflow. Delete them for `text::elide`, which measures the ellipsis too.
+  Four found so far: `regextester`, `logviewer`, `snippets`, `diskimager`.
+
+**And what the next four turned up.** Two more classes, both worse than a
+mis-sized label:
+
+- **Byte-sliced truncation is a crash, not a glitch.** `diskimager`'s
+  `truncate_path` kept the *tail* of a path with `&path[path.len() - keep..]`.
+  That index lands mid-character on any path holding a non-ASCII byte, and
+  slicing a `str` off a character boundary aborts. Our paths admit every byte
+  but `/` and NUL, so it was reachable. Fixing it properly needed a toolkit
+  addition — `text::elide_start` and its `fit_end` primitive (`1e5dc7edb`) —
+  because eliding a path from the *front* (`/home/user/proje...`) throws away
+  the only part the reader wanted; from the start it reads `...deep/disk.img`.
+  Reach for `elide_start` for paths, `elide` for anything read left-to-right
+  (a hash, a message, a title).
+- **Punctuation drawn but not measured.** A field rendered as `[source]` or
+  `#tag` was repeatedly sized from the bare `source` / `tag`, so whatever came
+  next overlapped the closing bracket, or the last character sat on a pill's
+  rounded edge. Found in `logviewer`, `snippets` and `credmanager`. Measure the
+  string that is actually drawn — ideally by building it once and using it for
+  both.
+
+`credmanager` is the model for the drift fix: `draw_badge` now *returns* the
+width it drew, and the three callers that lay something out beside a badge use
+that instead of each re-deriving it. Three separate estimates for one badge had
+already diverged there (`len*7.0+12` drawn, `len*7.5+16` used for the tag
+strip's wrap test, `len*7.0+20` before the audit list's entry name).
+
+**And what the desktop shell turned up.** The shell is the most *localised*
+surface in the system — its tab labels, month names, key names, snap-zone names
+and application names are all translated or user-supplied — so it is where a
+byte-based width was guaranteed to be wrong rather than merely likely to be.
+Three things came out of converting it:
+
+- **The padded-box shape belongs in the toolkit.** Buttons, tabs, chips, badges
+  and pills are all "text with N px of space on each side", and 30-odd sites had
+  each written that out as `label.len() * 8.0 + 16.0` — which is how the byte
+  count got in. `text::padded_width(text, padding, size, weight)` names the
+  shape (`519ad41e2`). Its sibling `padded_width_any_weight` covers the tab
+  strip: the selected tab is drawn bold and the rest regular, and sizing each
+  tab to the weight it currently has makes the whole strip shuffle sideways
+  every time the selection moves. It takes the wider of the two weights rather
+  than assuming bold is the wider one.
+- **An estimate used for caret positioning is a correctness bug, not a cosmetic
+  one.** `gui/desktop/src/run_dialog.rs` carried an `estimate_text_width` at
+  0.55 em per byte and used it to place the caret *and* the selection highlight
+  in the Run box. Typing anything non-ASCII put the caret somewhere other than
+  where the glyphs were. Grep for estimate helpers used by anything other than a
+  box width.
+- **A pill holding one glyph needs a floor.** The notification centre's unread
+  badge is drawn with a corner radius of half its height; measured honestly, a
+  single digit is narrower than the badge is tall, so it rendered as a squashed
+  oval. `max(BADGE_HEIGHT)` — the old byte estimate had been hiding this by
+  being too wide.
+
+**And what the final sweep turned up.** The tail was mostly mechanical, but it
+surfaced three things worth carrying forward:
+
+- **Three carets, not cosmetics.** `sysmonitor` and `procexplorer` both placed
+  their process-filter caret from a byte count, and `pdfviewer`'s search
+  highlight spread a span's document-supplied width over its *bytes* while
+  indexing it by a byte offset — so on any span holding a two-byte character
+  the highlight was both too narrow and displaced left by one cell per
+  preceding accent. `screenshot` stored a text annotation's bounding box from
+  an estimate, so the box did not contain its own text. This confirms the
+  earlier finding: an estimate feeding anything other than a box width is a
+  correctness bug.
+- **A whole app with no tests.** `apps/procexplorer` had no `#[cfg(test)]`
+  module at all. Worth a sweep for others: an app with no tests is not
+  "untested here", it is untested.
+- **`RenderCommand::Text` does not wrap — it truncates.** See the next entry;
+  this is the successor defect and the reason this one is not simply closed.
+
+## TD-GUI-TEXT-COMMAND-DOES-NOT-WRAP — callers assume `max_width` wraps, but it clips
+
+**Status.** Fixed for every prose caller found. `gui/**` first — the About
+dialog's licence list (`7948cf8d5`), every `AlertDialog` (`46db88142`), the
+notification toast body (`f559ea8b1`) and `InputDialog`'s prompt (`5a3a2e3d9`)
+— then the app tree: `whiteboard` sticky notes (`658743045`), `contacts` notes
+(`e48423a86`), `weather` alert descriptions (`4ca3cc4b1`), `dbviewer` result
+messages (`9ace36e4c`), `reminders` and `podcast` prose fields (`42359f6fc`),
+`vpnmanager` profile notes (`21813b691`), `partmanager` confirmation messages
+and `netmanager` diagnostic details. Reopen it if a new prose caller turns up;
+the survey below says how to find one.
+
+**Re-run 2026-08-15 — the survey was not exhaustive, and found two more.**
+Both had been missed, not introduced since:
+
+- `apps/kanban` card detail (`cac3e2969`) — the card *description* and every
+  comment *body*, both on the pane's one running cursor. The description
+  advanced a flat 30 px and each comment card was filled at a flat 36 px
+  *before* its body was drawn, so a wrapped comment overflowed a box sized
+  without reference to it and the next comment stacked on the overflow.
+- `apps/diskimager`'s write confirmation (`2df6e5b7f`) — the same shape as
+  `partmanager`, and just as sharp: the warning is "All data on <drive> will
+  be permanently destroyed. This operation cannot be undone", and the clip
+  landed mid-sentence, dropping the half that says it is irreversible.
+
+**Why the documented grep missed them.** It looks for a prose-named field
+(`description`/`body`/`message`/`notes`/`content`) in a `Text` command, which
+finds both of these — the problem is that it *also* finds ~30 status-bar and
+table-cell sites where clipping is correct, and the earlier pass evidently
+triaged the list and stopped. The distinguishing question is not the field's
+name but **what happens to the cursor afterwards**: a site that follows its
+`Text` command with a *constant* `cy += k` (or draws a container at a constant
+height around it) is a wrapping bug regardless of what the field is called, and
+a site whose text is the last thing in a fixed row is fine regardless. Grep for
+`max_width: Some(` followed within a few lines by a literal `+= ` and triage
+*that*; it is a much smaller and much higher-yield list.
+
+Intersecting both signals (a prose-named field **and** a constant advance
+within 14 lines) reduces the whole tree to 18 sites, listed here so the next
+pass starts from a triaged list rather than re-deriving one:
+
+~~*Probably real — the text is user- or device-supplied free prose:*
+`apps/systemrestore` snapshot descriptions (`:2891`, `y += 20.0`),
+`apps/sysmonitor` alert messages (`:1708`, `alert_y += 16.0`),
+`apps/renamer` operation detail (`:1173`, `oy += 34.0`),
+`apps/undelete` (`:2931`), `apps/passwordgen` pattern descriptions
+(`:1546`).~~ — **all five done** (`ea8f2b468`, `ff2590275`, `eaadf231a`,
+`8e64f088c`, `3b8bcd668`). Three were the predicted clipping bug and were fixed
+as predicted: systemrestore's description now wraps to two measured lines,
+renamer's operation details elide the *user's* substring inside a
+developer-authored frame (so `"…" → "…"` still shows both halves and the arrow),
+and undelete's metadata column elides from the **front** for `Original Path`,
+because a path's identifying end is its filename.
+
+**Two of the five were false positives for clipping — and both concealed a
+different, real defect of the same family.** `sysmonitor:1708` and
+`passwordgen:1546` draw bounded developer-authored strings into wide boxes, so
+nothing was being cut. What both *were* doing was silently dropping whole items:
+sysmonitor showed `.take(5)` of an unbounded alert list, and passwordgen's
+pattern list had no bound at all (the number of patterns is a property of the
+password — one per run of repeated characters — so an adversarial password draws
+hundreds of rows straight through the bottom of the panel). passwordgen's
+history list had a bound that tested the row's *top*, so the last row could
+start one pixel inside the panel and be drawn 31 px outside it.
+
+Three lessons worth carrying forward:
+
+- **Triage that clears a site of the bug you were looking for is not triage
+  that clears the site.** Both false positives were found by asking "what
+  happens to the cursor afterwards" — the same question that finds the wrap bug
+  finds the overflow bug, because both are a running cursor escaping its
+  container. Finish reading the site.
+- **A bounded surface needs a *counted* overflow, not a silent one.** A panel
+  showing 5 of 12 alerts and saying nothing tells the user there are 5 problems.
+  Every one of these now spends its last fitting row on a `+N more` marker. The
+  trade is right: one fewer item plus an accurate count beats one more item plus
+  a silent lie.
+- **Derive the row count and the container height from one calculation.**
+  sysmonitor's card height and its `.take(5)` were two constants free to drift;
+  passwordgen's pattern list now lives in a function that *returns the cursor it
+  ended at* rather than advancing a caller's `&mut cy`. Same
+  two-calculations-for-one-quantity shape as the notes below. Count rows with a
+  loop (`rows_that_fit`) rather than dividing — no float-to-int cast to get
+  wrong at the boundary, and a negative gap yields 0 instead of a wrapped count.
+
+~~`gui/desktop/src/notification_settings.rs` (`:1137`)~~ — **done** in
+`19ee5234e`. It was the interesting one, and it did count bytes. Chasing it
+turned up two more copies of the same helper in the same shell —
+`window_rules.rs`'s `truncate_string` and `notif_pane.rs`'s `truncate_body` —
+so all three went in one commit. Four notes worth keeping:
+
+- All three compared `s.len()` (**bytes**) against a **character** budget, and
+  all three picked that budget (24/28/60/60) independently of the width the
+  text is drawn in. Both halves have to be wrong together for the bug to stay
+  invisible, which is why they survived so long: on ASCII of average width the
+  two errors roughly cancel.
+- `window_rules.rs` was the one that could actually *mislead* rather than
+  merely look bad: all three of its call sites passed `max_width: None`, so
+  the home-grown elision was the only thing keeping a user-typed rule name out
+  of the adjacent column. **Check `max_width` first when triaging one of
+  these** — a helper backed by a real `max_width` is cosmetic; one without it
+  is a correctness bug.
+- `notif_pane.rs`'s copy also underflowed (`max_chars - 3` panics for a budget
+  under 3, where the other two used `saturating_sub`) — the usual outcome of a
+  utility being copy-pasted between files instead of shared.
+- `window_rules.rs`'s column widths existed *twice* — once in the `headers`
+  array, once as `cx += 70.0/180.0/200.0` in the row loop — and were free to
+  drift. Now one set of constants both sides read. That is the same
+  two-calculations-for-one-quantity shape as the wrap defect above, so other
+  hand-drawn tables are worth grepping for it.
+
+*Probably fine — a fixed-height row whose subtitle is a developer-authored
+enum string, where clipping is the intended behaviour:*
+`gui/desktop/src/{focus_assist,power_settings,privacy_settings,
+backup_settings,default_apps}.rs`, and the `"Description"`/`"Notes"` section
+*headings* in `apps/{podcast,reminders,contacts}` (the headings are one word;
+the bodies beneath them were already converted).
+
+Confirm each against the three questions above before changing it — the point
+of the list is to make the triage cheap, not to pre-judge it.
+
+**Next thread from this one, and it is bigger than the list above:
+`RenderTree::text` cannot bound anything.** The whole triage above searched for
+`max_width: Some(`, i.e. for callers that construct `RenderCommand::Text`
+literally. But most drawing goes through the `RenderTree` helper, and its
+signature is `text(&mut self, x, y, text, color, font_size)` — it hardcodes
+`max_width: None` (`gui/toolkit/src/render.rs:272`). **There are ~249 `.text(`
+call sites across `apps/` and `gui/`, and not one of them can express a
+bound.** Most draw static labels and are fine; the ones that draw
+variable-length content into a column are unbounded text running into whatever
+is drawn next, with no clip and no marker — the `window_rules.rs` failure mode,
+except the callers cannot fix it locally because the API has no width
+parameter.
+
+Confirmed instance: `apps/procexplorer`'s per-process thread table
+(`:1907`) draws `thread.name` — a *process-supplied* string — with
+`tree.text(...)` into a 200 px column, straight over the Status column beside
+it. The fix is structural: `RenderTree` needs a width-taking variant, and the
+dynamic-content call sites move to it. Do not convert all 249 — convert the
+sites whose text is variable-length and has a neighbour.
+
+~~Also queued from the same survey, `apps/torrent`'s three hand-drawn tables
+(peers `:3054`, files `:3212`, trackers `:3301`): every column width is written
+**three** times — in the `headers` array, in the row cell's `max_width`, and
+again as a literal in the row's `cx +=` (300.0 / `Some(300.0)` / `308.0`). They
+agree today and nothing keeps them agreeing. Same
+two-calculations-for-one-quantity shape as `window_rules.rs`, one copy worse.
+The cells are also wire-supplied — peer client names, torrent file paths,
+tracker URLs — so they clip unmarked, and the file path clips from the *end*,
+losing the filename that identifies it (`text::elide_start`, as used for
+`undelete`'s `Original Path`).~~ **Done** (`c6c4e9ba4`): each table is one
+`&[Column]` at module scope that the header and the body both walk, with
+`table_header` returning the x of each column so the body positions cells at
+exactly the offsets the header used. A shared `table_cell` elides with a marked
+cut; a `Fit::{Start,End}` enum picks which end survives, and paths/URLs use
+`End`. Seven tests, each column-fit one guarded by a checked-count and
+rendering its panel *directly*; verified non-vacuous by dropping the elide
+(six of seven fail, overruns of 218–262 px).
+
+Worth generalising from it: the three-copies-of-a-width shape is not merely
+redundant, it is what *hides* the clipping bug. When the width lives in three
+places, no single place is obviously "the column", so nobody asks whether the
+text fits in it — the question has no home. Collapsing the copies to one
+`&[Column]` did not just remove the drift risk; it made "does this cell fit
+its column?" a question a test could ask, which is how the six real overruns
+became visible at all. The remaining hand-drawn tables from the survey
+(~~`apps/filesearch`~~, ~~`apps/logviewer`~~, ~~`apps/renamer`~~,
+~~`apps/systemrestore`~~) should be assumed to be hiding the same thing until a
+counted test says otherwise. That prediction paid out on all four, and every
+time the hidden bug found was worse than the clipping it was predicted from.
+
+**The abstraction now exists: `guitk::table`** (`gui/toolkit/src/table.rs`,
+`528a01aba`…`1311d3e0a`). `Table::new(&[Column], x)` owns the geometry;
+`header` and `cell` both ask it for positions, `cell` elides to the column with
+the cut marked, and `Fit::{Start,End}` picks which end survives.
+`spans()`/`left()`/`right()` exist so a *test* can ask where a column is
+without re-deriving it. Convert a table to this rather than writing a sixth
+private copy — `apps/torrent` was migrated onto it in the same pass that
+proved it out.
+
+- ~~`apps/filesearch`~~ **done** (`1311d3e0a`). Two cells (Size, Type) had no
+  `max_width` at all. The interesting part was not the table: bounding the Type
+  cell meant reading the extension parser, which derived the extension with
+  `name.rsplit('.').next()` — and that yields the **whole name** when there is
+  no dot. `readme` was indexed with extension `readme`, displayed as type
+  "README", counted under `readme` in `extension_stats`, and categorised as
+  though `readme` were a format; `.bashrc` became extension `bashrc`. The
+  nine-character cap on extensions turned out to be a *band-aid for exactly
+  this*, and it rejected genuine long extensions (`.properties`,
+  `.appxbundle`) as collateral. Fixed at the root (`rsplit_once` + non-empty
+  stem), after which the cap could be widened to 24 — safe now precisely
+  because the cell that displays it is bounded.
+- ~~`apps/logviewer`~~ **done**. Not a fixed-column table — a running cursor
+  with conditional cells — but the same shape and the worst instance found so
+  far. The `[source]` cell was clipped to 100 px yet advanced the cursor by the
+  source's **full untruncated width**. So a long source vanished mid-name with
+  no marker *and* pushed the message right by space nothing occupied; past
+  ~1000 px of source the cursor ran off the row, `msg_width` went negative, and
+  `text::elide` of a negative width returns `String::new()`. **The log message
+  disappeared entirely**, leaving a row showing only a clipped source name. The
+  regression test finds it drawn at x=8931 with text `""`.
+- ~~`apps/renamer`~~ **done**. A six-column preview laid out with hand-written
+  `cx += 38.0 / 258.0 / 28.0 / 258.0 / 88.0` increments and no eliding
+  anywhere; a long name overran its 250 px column by 164 px in the regression
+  test, straight through the arrow and into the next name. This is the worst
+  *consequence* of the three even though the mechanism is the mildest, because
+  the list is a **rename preview** — the one screen whose entire job is to let
+  the user check what is about to happen before committing. Both name columns
+  now use `Fit::End`: a name cut the usual way loses the extension and any
+  numeric suffix, which are exactly the parts a rename changes, so a batch of
+  long names would all render identically and the user would be confirming a
+  rename they could not actually see. And, as in filesearch, reading the app to
+  fix the table turned up the same extension-parser bug next door:
+  `rsplit('.').next()` paired with a `len() < name.len()` guard rejects a
+  dotless name but still accepts a **leading** dot, so `.bashrc` was given
+  extension `bashrc` — shown as its type and swept up by a `bashrc` extension
+  filter alongside real `x.bashrc` files. Same root fix.
+- ~~`apps/systemrestore`~~ **done**. The survey entry was stale — the ancestry
+  chain's per-link elide-and-advance had already been fixed in an earlier pass
+  — but that fix was one level too low. **Capping each link said nothing about
+  the chain.** Every link was capped at 150px and the cursor advanced by what
+  was drawn, correctly, once per ancestor, with *no reference to the panel's
+  right edge at all*. Twelve long-named ancestors cost `12x154 + 11x20 =
+  2068px` against a 986px budget; the regression test finds link **5 of 12**
+  already ending at x=1059.8 past the 1038px edge, so seven links — **including
+  the selected snapshot itself, the one the whole panel exists to describe** —
+  were drawn off-window. Fixed with `ancestry_first_visible`, a free function
+  (so a test can ask it directly) that drops links from the *front* and
+  reserves the cost of the leading `...` marker it forces the caller to draw.
+  Front, not back, because the tail is the selected snapshot and its near
+  ancestors say where it came from; the distant root is the least informative
+  part.
+- ~~`apps/habits`~~ **done** (`55372701b`). The statistics table: eight columns,
+  hand-written pushes, and a habit name — the one user-entered value on the row
+  — clipped with no marker, so "Read" and "Read thirty minutes before bed"
+  rendered the same. Converted to `Table::with_gap`. Worth recording what the
+  regression test taught: both long names elided to the *identical* string, so
+  the comment I had written claiming the marker disambiguates a shared prefix
+  was wrong and had to be rewritten. **An ellipsis does not disambiguate; it
+  only says "there is more".** Do not justify eliding on the grounds that it
+  tells two similar values apart — it does not, and where telling them apart
+  matters, the fix is to cut at the *other* end (see partmanager below).
+- ~~`apps/partmanager`~~ **done**. The partition list's `cols: &[(&str, f32)]`
+  array held column *pitch*, so every cell subtracted its own padding
+  (`max_width: Some(col_w - 8.0)` drawn at `col_x + 4.0`) while the **header**
+  was drawn at `+4.0` but bounded by the *full* pitch — a header could overhang
+  the next column by 4px. `Table::with_gap` removes the discrepancy by
+  construction: the width is what a cell may use and the 8px difference is the
+  gap. A long partition label overran its column by 75px in the regression test.
+  The instructive part was the mount-point column. I first wrote it `Fit::Start`
+  with a comment arguing that "a mount point's leading directories distinguish
+  `/mnt/...` from `/media/...`" — while *citing* `/mnt/backup-2026` vs
+  `/mnt/backup-2027` as the motivating failure, which differ at the **tail**.
+  The comment contradicted its own example and I did not notice; the test did,
+  by failing. A mount point is a path and a path's leaf is what names it, so it
+  is now `Fit::End`, and the test asserts the cut mount points are **pairwise
+  distinct** rather than merely marked. That assertion is the one worth copying:
+  "is it marked as cut?" passes on a column that renders every row identically,
+  which is the failure that actually misleads a reader.
+- ~~`apps/procexplorer`~~ **done**. Three `cx +=` sites; two (the process table
+  and the thread table) had already been single-sourced in an earlier pass and
+  were genuinely fine. The third — the **Network tab's connection table** — was
+  the worst instance in the sweep so far, because its cells were not clipped
+  *at all*: `tree.text(cx + 6.0, ry + 4.0, field, color, 11.0)` with **no
+  `max_width` argument**, then `cx += col_w`. Nothing bounded the value, so the
+  regression test finds an IPv6 local address drawn 71px past its column, over
+  the Remote Address beside it.
+  This is the shape to watch for next: the survey looked for `max_width` values
+  that disagree with a cursor advance, but a cell with **no width argument at
+  all** does not appear in that grep. `tree.text(...)` is five arguments and
+  `tree.text_in(...)` is six; the unbounded one is the shorter, more natural
+  call, and it is invisible to a search for a mismatched bound.
+  Addresses use `Fit::End` — the port lives on the tail, and `:443` vs `:22` is
+  the whole difference between two rows to the same peer. Converting also
+  required `Table::header_weighted`, because this app marks headings by colour
+  alone and `Table::header` forces bold; "my headings are the wrong weight" was
+  otherwise a reason to leave a table hand-drawn and unfitted.
+- ~~`apps/defrag`~~ **done**. Found by the new search rather than the `cx +=`
+  one: the fragmented-file list held four column *positions*
+  (`x + w*0.55/0.70/0.85`) restated in the header loop and again in every row,
+  with three of the four cells carrying `max_width: None`. The path cell did
+  have a bound — `Some(w * 0.50)` — but it was a **fifth number agreeing with
+  none of the others**: the path column actually runs to `w*0.55 - PADDING`, so
+  the clip fell ~25px short of its own column *and* had no marker. The
+  regression test finds a path 140px past its column edge.
+  Two things generalise. First, **a proportional layout hides the missing bound
+  better than a fixed one**, because there is no width array to notice is
+  missing an entry — the columns are positions, and a position cannot be
+  overflowed, only passed. `file_list_columns(w)` returns widths precisely so
+  "does the last column end inside the panel?" becomes answerable, and there is
+  now a test asking it at three panel widths. Second, a fractional width minus a
+  constant **goes negative on a narrow panel**, and `text::elide` of a negative
+  width returns the empty string — so the column would silently blank rather
+  than shrink. Clamped with `.max(0.0)` and tested at w = 0, 1, 20, 60.
+  Paths use `Fit::End`: the list is sorted by severity, so its rows are
+  typically siblings under one deep directory, and cut at the end they collapse
+  to one repeated prefix with every filename gone.
+- ~~`apps/undelete`~~ **done**. The widest drift found: the recovered-file list
+  wrote each column width **twice, differently**. The heading row bounded Name
+  at `width * 0.35`, Type at `0.15`, Deleted at `0.18`; the row drew the same
+  three cells at `0.33`, `0.14`, `0.16`. Neither number was the column — the
+  column is the distance to the *next* heading's `x`, which no line of code
+  mentioned — so no cell was ever measured against the space it actually had,
+  and all of them clipped unmarked. A path overran its column by 91px in the
+  regression test. This is the screen whose entire job is choosing which
+  carved-off-a-damaged-disk files to restore.
+  Reading it to fix the table turned up a second, independent bug: the
+  confidence badge was a flat 64px pill at `x + width * 0.83 + 32` — a fixed
+  size at a proportional position. That is inside the panel only while the
+  panel is wide; at width 240 the test finds it spanning 271.2..335.2 against a
+  panel ending at 280, i.e. drawn 55px outside the list entirely. It is now
+  clamped to its column. **A fixed size at a proportional position is the same
+  class of bug as a fractional width minus a constant** (`apps/defrag`): one
+  overflows the container on a narrow panel and the other underflows to
+  negative, but both are a constant mixed with a fraction, and both need a
+  clamp plus a test at small widths. Worth grepping for the shape directly:
+  a literal `+ 32.0` or `= 64.0` in the same expression as a `width * 0.`.
+  Names use `Fit::End`, and here that is not a judgement call but a fact about
+  the app: `RecoverableFile::from_signature` *generates* names as
+  `recovered_{offset:08x}.{ext}` and `from_inode` as `inode_{n}`, so a deep
+  scan's results share a ten-character prefix by construction. Cut the usual
+  way, the whole column reads `recovered_00…`. The test asserts the cut names
+  are pairwise distinct, per the partmanager lesson.
+  Two structural changes came out of it. The fractions now live in one
+  `FILE_COLUMNS: [(SortField, f32); 5]` array and **sum to 1**, which a test
+  asserts — a layout summing to less leaves dead space, one summing to more
+  runs off the panel, and neither of the old two sets of numbers summed to
+  anything meaningful. And each heading's text is taken from
+  `SortField::display_name()` rather than written out again, so the label and
+  the field that clicking it sorts by cannot come to disagree.
+  Needed one new toolkit primitive: `Table::fitted(cmds, x, width, y, …)`,
+  which fits text to an explicit box with the width clamped at zero.
+  `Table::cell` is now defined in terms of it (a test asserts the two produce
+  byte-identical commands). It is the escape hatch for a cell that shares its
+  column with a decoration — undelete needs it twice (the colour swatch before
+  the type name, the badge's interior padding) and `apps/diskanalyzer` will
+  need it for its per-row tree indent. The clamp belongs in the toolkit rather
+  than at each call site precisely because the call site's arithmetic is
+  `column_width - decoration`, which is the expression that already went
+  negative once in `apps/defrag`.
+- ~~`apps/diskanalyzer`~~ **done**. The header loop was literally
+  `for (label, cx, _cw)` — the column width was in scope, bound, and
+  **explicitly discarded**, with the heading then drawn `max_width: None`. Of
+  the four body cells only Name had any bound; Size, % and Type had none. This
+  is the clearest instance of the general point: a width that exists but is
+  not the *thing the cell is measured against* is not a column, and a `_`
+  binding is the shape to grep for.
+  Two bugs fell out that the table itself did not cause. First, the columns
+  ended at x=660 in a 960px window — a third of every row was blank while the
+  one column holding variable-length data, and the only one that ever clipped,
+  was the narrowest it could be. Name now takes the slack and a test asserts
+  the table's right edge mirrors its left inset.
+  Second, and worse: the Name cell's bound was `360.0 - indent - PADDING`
+  where `indent = depth * 20.0`. **Tree depth is data and has no bound.** Past
+  depth 33 that expression is negative, and an elide to a negative width is
+  the empty string — so a deeply nested row would render with *no name at
+  all*, not a short one. The test finds −24px at depth 33 with the cap removed.
+  The indent is now capped so a name always keeps 120px, i.e. deep rows stop
+  indenting rather than stop existing. Generalising: **any layout quantity
+  derived from tree depth, list length or nesting is unbounded input**, and
+  subtracting it from a fixed width needs a floor, not just a `.max(0.0)` —
+  clamping to zero merely converts "negative, blanks" into "zero, blanks".
+  The expand/collapse chevron is now drawn in its own box rather than
+  prepended to the name (`format!("{prefix}{}", row.name)`). Prepended it
+  shares the name's fate, and the name wants a front cut — so the chevron, the
+  only thing on the row saying whether it opens, would be the first thing
+  removed. A decoration that must survive cannot be concatenated onto text
+  that will be cut; give it its own box.
+- ~~`apps/netscan` host table~~ **done**. The clearest case yet of *two
+  independent copies of one layout*: `render_table_header` held a list of
+  `(x, label)` pairs with **no widths at all** and every heading
+  `max_width: None`, while `render_host_row` hand-wrote an `x:` and, several
+  lines away, a `max_width:` that came from nowhere in particular. Nothing
+  connected a cell's bound to the distance to the next column — Ports and
+  Latency simply had no bound, and Hostname had `Some(160.0)`, a bare clip
+  with no marker, on the **one string in the row this program does not
+  choose**: it is reverse DNS. Both are now one `guitk::table` whose seven
+  shares sum to 1.0, so the row ends at the table's right edge.
+
+  Two things worth carrying forward. First, this row cuts in **both**
+  directions, and which end is right is a fact about the data, not a taste:
+  the IP address and the MAC keep their *tails* (a subnet shares its leading
+  octets, a vendor shares its OUI prefix), while the hostname keeps its
+  *head* (`alpha.engineering.example.com` and `bravo.engineering.example.com`
+  differ at the start). A single house style of "always elide the end" would
+  have rendered every host on a /24 as `192.…`.
+
+  Second, and the sharper lesson: **a distinctness test is only as strong as
+  the fixture's shared prefix is long.** The first version of the hostname
+  fixture used `workstation-alpha.engineering.corp.example.com` and friends,
+  and the test *passed with the cut deliberately flipped to the wrong end* —
+  because the shared suffix was a little shorter than the column, so the
+  visible tail still carried one character of the distinguishing label
+  (`…a.engineering…` vs `…o.engineering…`). The assertion was true for both
+  cut directions, i.e. it was measuring nothing. The fixture now uses a shared
+  suffix comfortably longer than the column can show, and the flipped-cut run
+  fails as it should. When a test's premise is "these values are
+  indistinguishable once cut", check that they really are — by breaking the
+  code and watching it fail, not by reading the strings and assuming.
+
+  A related trap in the same tests: a heading shares its column's left edge
+  with the cells beneath it, so gathering "a column" by x picks up the heading
+  as an extra row and a `len() == 4` assertion fails at 5 for a reason that
+  has nothing to do with the layout. Gather rows and headings separately.
+- ~~`apps/jsonviewer` statistics view~~ **done**. Found by the grep the
+  undelete badge suggested — a literal constant in the same expression as a
+  fraction of the width — and it is the worst instance of that shape so far
+  because of the size of the constant:
+
+  ```rust
+  let bar_max_width = width * 0.5 - 250.0;
+  ```
+
+  The panel is the window minus a 320px sidebar, so `width < 500` is an
+  ordinary window, not an extreme. Below it the value is **negative**, and it
+  was used twice: as a `FillRect` width — a negative-width rect, which is not
+  a small bar but an ill-formed drawing command — and as a *position*, in
+  `x: 180.0 + bar_max_width + 8.0` for the percentage label. So the label did
+  not merely sit on a stunted bar; it walked **left** of the bar's own origin
+  and landed on top of the count cell at `x: 120.0`. Two cells rendering the
+  same pixels, with no clipping to hint at it.
+
+  The deeper mistake is that the bar was *anchored* at an absolute `x: 180.0`
+  while being *sized* from `width * 0.5`: its width had no relationship to the
+  space actually left beside it. That is the general form of this bug —
+  **mixing an absolute coordinate system with a proportional one in the same
+  element.** A fraction of the panel is a valid width only if it is measured
+  from a position that is also a fraction of the panel. Grep shape: an
+  absolute `x:` literal in a rect whose `width:` mentions `width *`.
+
+  Both sections are now `guitk::table`s: label/value inside the general-stats
+  card, and label/count/bar/percentage across the type-distribution row, every
+  column a fraction of the room that is really there (`TYPE_FRACTIONS` sums to
+  1.0, asserted). The percentage is a column, so it is right of the bar by
+  construction rather than by arithmetic that can invert.
+
+  Two notes for the next conversion. First, **`Table`'s origin sits before the
+  leading gap** — `left(0)` is `x + gap`, and `total_width` counts a leading
+  *and* a trailing gap. Passing the desired inset straight to `with_gap` shifts
+  every column by one gap, which is invisible in a same-table comparison
+  (all columns move together, header and rows still agree) and shows up only
+  as a wrong margin at the far end. `the_type_rows_fill_the_panel` caught it;
+  a test that only checks cells against their own columns never would.
+  Second, **a percentage/short-numeric column legitimately elides to nothing**
+  on a very narrow panel, so a test that finds those cells by matching a
+  trailing `'%'` finds zero of them and fails for the wrong reason. Find such
+  cells by *position* (`table.left(col)`), which is the property under test
+  anyway, and add a separate assertion that the text survives once the panel is
+  wide enough — otherwise "the percentage is right of its bar" passes vacuously
+  for a column that always renders empty.
+
+The lesson that generalises past the cursor pattern: **a per-element bound is
+not a bound on the row.** Eliding each cell to its own width makes every cell
+individually correct and still lets the row as a whole run off the panel, and
+because each element passes its own local check, nothing in the code reads as
+wrong. Any layout that repeats an element a data-dependent number of times —
+ancestry chains, tag pills, breadcrumbs, filter chips — needs a budget against
+the container's edge as well as a cap per element, and a test that renders a
+deep case rather than one element.
+
+And the one the partmanager mount column added: **"was it marked as cut?" is
+too weak a test for a column of near-identical values.** A cut marker satisfies
+that assertion while every row still renders as the same string. Where the
+values in a column share a long prefix (paths, mount points, versioned names),
+assert the drawn cells are pairwise **distinct**, and let that drive which end
+`Fit` keeps.
+
+The other pattern to take forward: wherever a cursor-laid-out row draws a cell
+clipped to one width and advances by another, the advance is the bug, and its
+blast radius is everything drawn *after* it on that row — not just the cell
+that overflowed. Grep for `cx +=` near a `max_width:` that is not the same
+expression. The fix is always the same: elide first, then advance by what was
+actually drawn.
+
+But do not let that grep define the search, because **the unbounded cell is the
+one it cannot find.** A `max_width` that disagrees with a cursor advance is at
+least *present*; `tree.text(x, y, s, c, size)` and a bare `RenderCommand::Text`
+with `max_width: None` carry no bound to disagree with, and they are the
+shorter, more natural calls. procexplorer's Network tab was written that way
+and drew 71px over its neighbour. Search for the *absence*: `tree.text(` inside
+a loop over a column array, and `max_width: None` on anything whose text is not
+a literal.
+
+**What it is.** `RenderCommand::Text` carries a `max_width`, and the obvious
+reading is that the compositor wraps to it. It does not. `Compositor::draw_text`
+walks the string one glyph at a time and `break`s at the limit:
+
+```rust
+if let Some(mx) = max_x && pen + advance > mx as f32 {
+    break;
+}
+```
+
+So `max_width` is a **clip**, and it produces exactly one line. Any caller that
+hands a paragraph to a single `Text` command is showing only its first line's
+worth of characters — silently, with no marker that anything was dropped.
+
+**What it broke.** Four found so far, all user-visible:
+
+- `gui/desktop/src/about.rs` — each open-source licence went out as one command,
+  so the About dialog's Licences tab showed roughly the first line of each
+  licence and nothing else. It compounded with the byte-count defect above: the
+  item height was reserved as `text.len() / 80` lines, so the list also left
+  gaps or overlapped, depending on the licence.
+- `gui/toolkit/src/modal.rs` — every `AlertDialog` in the system. The message was
+  one command, and `compute_height` reserved a flat `FONT_SIZE * 3.0` for it
+  regardless of length, so a long error message was cut to one line inside a box
+  sized for three.
+- `gui/notifications` — every toast body. `toast_height` did not depend on the
+  body at all, so the fix had to grow the toast as well as wrap the text, or a
+  two-line body would have drawn over the toast stacked beneath it.
+- `modal.rs`'s `InputDialog` — the prompt got a flat one-line allowance
+  (`FONT_SIZE + 12.0`) in both the height and the running `content_y`, so the
+  input field was drawn over the second line of any longer prompt.
+
+**Proper fix.** `guitk::text::wrap(text, max_width, size, weight)` (added in
+`7948cf8d5`) breaks a string into the lines it will actually be drawn as; emit
+one `Text` command per line and derive any reserved height from that same list,
+never from a second calculation. It is a thin wrapper over the `SystemFont::wrap`
+that already existed at the font layer, so it measures with the cache the
+compositor draws with. `menu.rs`'s tooltip wrapper was repointed at it rather
+than left as a second implementation.
+
+Two things the fixes had to get right, and any further one will too:
+
+- **Reserve height from the lines you drew.** The whole defect class is two
+  calculations for one quantity. `about.rs` and `modal.rs` both now call
+  `wrap` once and use its `len()` for the height.
+- **A clamped box still needs a clip.** `AlertDialog`'s height is clamped at
+  `DIALOG_MAX_HEIGHT`, so a message can be longer than any box it can be given.
+  Wrapping alone would then draw the overflow straight through the button row —
+  text on top of the controls that dismiss the dialog. The render loop breaks
+  once a line would reach the buttons.
+- **A bounded surface caps the lines and says so.** A toast is a glance, not a
+  reader, so wrapping it without limit would push the rest of the stack off
+  screen. It takes three lines and elides the last, because a body cut without
+  a mark reads as a complete sentence — the reader cannot tell there was more.
+
+**`text::Paragraph` — the fix the app tree actually uses.** After the same
+wrap-and-advance block had been hand-written at five call sites, the convention
+it rests on stopped being worth trusting to memory, so `guitk::text::Paragraph`
+(added in `42359f6fc`) makes it structural: `Paragraph::draw` emits the
+commands *and returns the height it used, measured from those commands*, so a
+caller that advances its cursor by the return value cannot reserve a height
+that disagrees with what was drawn. `.max_lines(n)` caps a bounded surface and
+elides the last line. Prefer it over calling `wrap` by hand; `wrap` is still
+right when a caller needs the lines themselves rather than a drawing.
+
+It takes `&mut impl Extend<RenderCommand>`, because half the app tree collects
+into a bare `Vec<RenderCommand>` and half into a `RenderTree`; `RenderTree`
+implements `Extend<RenderCommand>` so both work without a caller reaching past
+it into `commands`.
+
+**Each site needs three questions asked before anything changes:** *what is the
+text's box, what reserves that box's height, and does anything downstream of it
+move.* The answers split the app sites into four shapes, and the fix differs:
+
+- **A running cursor** (`contacts` notes, `reminders` description and notes,
+  `podcast` description and show notes) — wrap and advance the cursor by the
+  height drawn. These were the dangerous ones: the field below was drawn on top
+  of the one above the moment either ran past a line.
+- **A card that sizes itself** (`weather` alert descriptions) — wrap, then grow
+  the card to the wrapped height, floored at the old size so the common
+  one-line case looks unchanged.
+- **A fixed box the user drew** (`whiteboard` sticky notes) — wrap in *canvas*
+  units, not screen pixels, so zooming moves and scales the note without
+  reflowing it; drop lines that fall past the bottom rather than spilling onto
+  the canvas.
+- **A pane or dialog with fixed furniture below** (`dbviewer` result messages,
+  `partmanager` confirmation dialogs) — wrap, move what follows down, *and* cap
+  the lines so the prose cannot crowd out the results table or run through the
+  button row. `partmanager` was the sharpest case: its messages are whole
+  sentences about destroying a disk, and the first one in the toolbar
+  ("This will destroy ALL data on the disk. Choose GPT (default) or MBR.")
+  was already losing its second half.
+
+**Where it is *not* a bug.** `max_width` on a single-line label — a title, a
+column cell, a status-bar message — is doing exactly what it should. Clipping is
+the intended behaviour there, and the fix for an over-long one is `text::elide`,
+not wrapping. `netmanager`'s diagnostics rows are the example: a row is a fixed
+two-line cell in a list meant to be scanned, so the detail line is elided to the
+row width rather than wrapped. Only reach for `Paragraph` where the text is
+prose the user is meant to read in full.
+
+**Where to look next.** Prose callers are found by grepping for a `Text` command
+whose body is a `description` / `body` / `message` / `notes` / `content` field
+with `max_width: Some(..)`. The survey turned up no remaining prose sites, but
+it is not a proof — a new app can reintroduce one, and the grep will not catch a
+prose field under an unusual name. Status-bar messages are *not* in scope —
+truncating those to one line is the intended behaviour, and the survey turns up
+many of them (`automator`, `dictionary`, `diskimager`, `battleship`, `reversi`).
+
+**Follow-on debt this exposed:** see `TD-GUI-CLIPPED-TEXT-IS-NOT-MARKED` below.
+
+Each fix has the same three questions: what is the text's box, what reserves
+that box's height, and does anything downstream of it move. Where the answer to
+the third is "yes" — a stacked list, a following field — the height and the
+drawn lines must come from one call, not two.
+
+## TD-GUI-CLIPPED-TEXT-IS-NOT-MARKED — `max_width` cuts mid-glyph and says nothing
+
+**Status.** Open, and deliberately not fixed in the pass that closed
+`TD-GUI-TEXT-COMMAND-DOES-NOT-WRAP`, because the good fix is a change to
+`RenderCommand::Text` itself and wants a decision rather than a sweep.
+
+**What it is.** `max_width` clips: the compositor walks glyphs and stops when
+the next one would cross the limit. It draws no ellipsis. So a label that does
+not fit ends mid-word — and, worse, ends *plausibly*: "Gateway 192.168.1.1 res"
+reads as a complete string to anyone who cannot see the field it was cut from.
+A caller that wants the cut marked has to call `text::elide` first, which
+measures the string a second time to answer a question the compositor is about
+to answer again while drawing. That is the same two-calculations-for-one-quantity
+shape as the wrap bug, one layer down.
+
+**How widespread.** Every single-line label in the app tree that passes
+`max_width: Some(..)` without eliding first — well over a hundred sites. Most
+are fine in practice because the values are short and app-authored; the ones
+that bite are those carrying user or network data (file names, SSIDs, error
+strings, host names). `netmanager`'s diagnostics detail line was fixed by hand;
+the rest were left.
+
+**Proper fix.** Give the command an explicit overflow policy — `Clip` (today's
+behaviour, correct for a progress label that must not jitter) versus `Ellipsis`
+(the right default for a data-bearing label) — and let the compositor draw the
+mark, since it is the only party that knows exactly where the glyphs ran out.
+
+**Why it is not done.** Adding a field to `RenderCommand::Text` touches every
+struct-literal construction of it in `gui/**` and `apps/**` — several hundred —
+because Rust has no default for a struct-variant field. The alternatives are
+each a compromise: a second variant (`TextClipped`) splits the match arms in
+every renderer; a builder function leaves the literal form available and so does
+not actually prevent the mistake; a blanket `text::elide` sweep at the call
+sites fixes the symptom while keeping the double measurement. The mechanical
+churn is cheap to *do* and expensive to *review* against three lanes' in-flight
+work, so it should be scheduled deliberately rather than smuggled into an
+unrelated fix. Recorded for the operator in `open-questions.md`.
+
+---
+
+### TD-FONT-NOT-ACTUALLY-NO-STD. `osfont` documents itself as `no_std` but links `std` — 2026-08-14 — OPEN
+
+**What.** `gui/font` is written entirely in `alloc` terms (`alloc::vec::Vec`,
+`alloc::string::String`, no `std::` paths, `extern crate alloc;` at the top),
+and a comment in `cff.rs` asserted outright that "this crate is `no_std`". It
+is not: `src/lib.rs` carries no `#![no_std]` attribute, so the crate links the
+standard library like any other and the discipline is enforced by nothing but
+habit.
+
+**How it was found.** Adding `#![no_std]` to see whether the claim held. It
+does not — the build fails with 47 errors, in two groups:
+
+- **Float math (35 errors).** `f32::sqrt`, `floor`, `ceil`, `round` and
+  `mul_add` are inherent methods provided by `std`, not by `core`. They are
+  used throughout `raster.rs` and `scaled.rs`, which is unavoidable for a
+  rasterizer.
+- **Prelude items (12 errors).** `String`, `vec!` and `format!` are reached
+  through the `std` prelude at a dozen sites instead of being imported from
+  `alloc`.
+
+**Why it matters.** The compositor and the toolkit both depend on this crate
+and both are meant to run on SlateOS. As long as the attribute is absent, a
+`std::`-only construct added here compiles cleanly on the development host and
+fails only when someone finally builds for the target — at which point the
+offending code is old and its author is a previous session. The false comment
+made this worse than a silent omission, because it told the next reader the
+invariant was already being checked.
+
+**Proper fix.** Add `libm` to the workspace, replace the inherent float
+methods with `libm::{sqrtf, floorf, ceilf, roundf, fmaf}` (or the
+`num-traits`/`libm` float shim), import the prelude items from `alloc` at the
+dozen sites, then add `#![no_std]` and `#[cfg(test)] extern crate std;`. The
+mechanical part is small; what makes it more than mechanical is that `libm`
+would be this workspace's first float-math dependency, and whether SlateOS
+userspace GUI binaries get a `std` port at all is Lane B's call (`posix/**`) —
+if they do, `no_std` here buys much less than it seems to. That question
+should be settled before spending the churn.
+
+**Interim.** The false comment in `cff.rs` was corrected and the crate docs in
+`lib.rs` now state the real position, so nobody is misled into thinking the
+invariant is enforced. Keep writing `alloc::` paths: the point of doing so is
+that closing this stays a small change.
+
+---
+
+## TD-APPEARANCE-SETTINGS-ARE-NEVER-WRITTEN-TO-DISK
+
+**What.** `gui/desktop/src/appearance_settings.rs` presents a full settings
+model — `FontSettings { ui_font, mono_font, ui_size, mono_size, hinting,
+subpixel, smoothing }`, theme, wallpaper — with an apply/revert flow built on
+a pending-vs-saved pair. But `save()` is:
+
+```rust
+pub fn save(&mut self) { self.saved = self.settings.clone(); }
+```
+
+It copies one field into another. Nothing is serialized, nothing is written,
+and nothing is read back at startup, so every setting reverts the moment the
+process exits and no *other* process can ever see it.
+
+**Why it matters now.** It is the reason `ui_font` is inert. The toolkit and
+the compositor pick the UI font by walking a compiled-in fallback list
+(design-decisions.md §400), which is deliberate but is a *fallback*, not a
+setting. Driving the font from configuration is a one-line call to
+`guitk::text::set_font_family` in each process — and would be actively wrong
+today, because the app that changed the setting would be the only process that
+could observe it, so it would measure in the chosen font while the compositor
+kept drawing in the fallback. Font divergence across processes is precisely
+the failure mode §400 exists to avoid.
+
+It is not only the font: theme, wallpaper and text-rendering options have the
+same problem and the same blast radius.
+
+**Proper fix.** Persist to a YAML file under the user's config directory —
+YAML with comment preservation is the project-wide rule (`design.txt`) — and
+load it during desktop startup, before the first frame. Then have the
+compositor read the same file, or (better) have the desktop push the resolved
+family to the compositor over the existing protocol, so there is one writer
+and the compositor never has to guess. `set_font_family` already returns
+`false` and changes nothing on a bad value, so a stale or hand-edited config
+naming an uninstalled family degrades to the fallback rather than to
+un-drawable text.
+
+**Where.** `gui/desktop/src/appearance_settings.rs` (`save`, and the absent
+`load`); `gui/toolkit/src/text.rs::set_font_family` is the ready-made sink.
+
+**Update 2026-08-14 — the persistence half is done; the cross-process half is
+not.** `save()` is no longer a field copy. `gui/desktop/src/config.rs` is new
+and is the shell's one answer to "which file, and how do I write it without
+risking the user's copy": `$XDG_CONFIG_HOME/slateos/<name>.yaml`, falling back
+to `$HOME/.config/slateos/`, written to a `.new` temporary and renamed over the
+target so a crash mid-save cannot truncate the original. With neither variable
+set it reports `NotFound` rather than inventing a system-wide path to put one
+user's preferences in. `AppearanceSettingsUI` gained `load()`, `from_document()`
+and `apply()`; `save()` now returns `io::Result<()>`.
+
+The format layer is `AppearanceSettings::read_from`/`write_into` over the new
+`yamldoc` crate, so a save splices values into the user's own file: comments,
+blank lines, ordering and any key belonging to a different version of the
+desktop all survive, and a second identical save produces no diff. Reading is
+total — a missing key, an unknown enum spelling, or a value out of range leaves
+the field at its default (then `validate()` clamps), so a file from a newer
+desktop degrades instead of failing. Config spellings are deliberately separate
+from `label()`: the UI text is free to change without invalidating every user's
+saved choice.
+
+**A second bug was found and fixed on the way in.** `is_dirty()` compared a
+hand-picked list of "key fields" that omitted `mono_font`, `subpixel`,
+`smoothing` and `custom_accent` — so changing the terminal font left Save greyed
+out and the change was lost on close — and ignored font-size changes under
+0.1 pt, which a slider step can produce. `AppearanceSettings`/`FontSettings` now
+derive `PartialEq` and `is_dirty()` compares the whole struct, which cannot fall
+behind a newly added field the way the hand-written check did.
+
+**Still open (the reason this entry is narrowed, not closed):**
+
+1. ~~**Nothing calls it yet.**~~ **Fixed 2026-08-14 (second pass).** Startup now
+   reads the file: `DesktopShell::load_appearance()` loads `appearance.yaml` and
+   `set_appearance()` re-derives the palette, and `main()` calls it. Everything
+   the shell paints itself — taskbar, title bars, borders, start menu, Alt+Tab —
+   now follows the saved theme mode, accent, accent-on-taskbar/title-bars and
+   transparency. `DesktopTheme` gained `dark()`/`light()` base palettes and
+   `from_settings()`; the light palette is new (the shell had only ever had a
+   dark one). Reading the file is deliberately *not* in `DesktopShell::new()`:
+   a constructor that reads `$HOME` gives every test a machine-dependent result.
+
+   Three latent bugs surfaced while wiring it, all fixed here:
+   - The Alt+Tab overlay hard-coded `rgba(30, 30, 46, 230)` and drew
+     `taskbar_fg` on it. In light mode that is dark text on a dark overlay. The
+     overlay is now its own themed surface (`overlay_bg`/`overlay_fg`/
+     `overlay_selected_bg`).
+   - The start glyph is drawn in the accent colour *on the taskbar*, so turning
+     on "accent on taskbar" made it vanish into its own background. Hence the
+     separate `taskbar_accent`, which becomes the contrasting colour when the
+     taskbar itself is the accent.
+   - One `window_title_fg` served both the focused and the unfocused title bar.
+     That is only safe while the two backgrounds are a shade apart, which stops
+     being true under accented title bars, so there is now an
+     `window_title_inactive_fg`.
+
+   **Catppuccin's Latte accents turned out to be unusable as text** and are the
+   one place this deviates from the upstream palette. Measured against the Latte
+   base, only blue, mauve and red clear 4.5:1; yellow is 2.31:1, pink 2.34:1,
+   rosewater 2.34:1, sky 2.47:1, lavender 2.81:1. The shell draws the accent as
+   text (start glyph, start-menu heading), so `AccentColor::color_light()` uses
+   each Latte hue scaled toward black by the smallest factor reaching 4.6:1.
+   `every_accent_is_readable_as_text_in_both_modes` is the test that rejects the
+   unmodified palette; 14 theme tests in total.
+
+   **Still not wired:** the settings *window* itself. `main.rs` still has no
+   settings-window routing — "Settings" is a start-menu label with no handler —
+   so the only way to change the file is to edit it by hand. `set_appearance()`
+   is the entry point that routing will call once it exists. Also unread by any
+   renderer: `window_corners` (decorations still use square `fill_rect`),
+   `drop_shadows`, `animation_speed`, `icon_size`, `cursor_size`,
+   `cursor_scheme`, and `scaling_percent` — all now reachable on
+   `DesktopShell::appearance`, none consulted.
+2. **The compositor still cannot see the setting**, so driving `ui_font`
+   through `guitk::text::set_font_family` remains wrong for the reason above:
+   the desktop would measure in the chosen family while the compositor drew in
+   the compiled-in fallback (design-decisions.md §400). The fix is unchanged —
+   the desktop pushes the resolved family to the compositor over the existing
+   protocol, one writer, no guessing.
+3. **The other ~20 `*_settings.rs` panels are still `saved = settings.clone()`.**
+   `config.rs` is deliberately general so each can be converted the same way;
+   none have been.
+
+**Where (updated).** `gui/desktop/src/config.rs` (new); the "Configuration
+file" and light-accent sections of `gui/desktop/src/appearance_settings.rs`;
+`DesktopTheme` and `DesktopShell::{set_appearance, load_appearance}` in
+`gui/desktop/src/main.rs`; `yamldoc/src/lib.rs`.
+
+## TD-THREE-INDEPENDENT-APPEARANCE-MODELS
+
+**Fixed 2026-08-14** (steps 1 and 2 of the proper fix below; step 3 was
+"leave the toolkit alone", which stands). `gui/appearance` now owns the model,
+its configuration-file spellings, the file's name and location, and the atomic
+write. Both front ends hold an `AppearanceFile` — the settings together with
+the document they were read from, which is a type rather than two fields
+because a save has to splice into the file the user actually has, comments and
+unknown keys included. `apps/settings` reads that file at startup and writes it
+back whenever an event changed anything; the accent it stores is now a named
+`AccentColor` rather than a position in a local array, and its Personalization
+pages gained the two accents and the two transparency levels its own copy of
+the model could not express. Covered end to end by
+`test_a_click_that_changes_an_accent_reaches_the_file`, which runs against a
+scratch configuration directory via the new `appearance::config::testing`.
+
+Still open, as the end of this entry already noted: a running app has no way to
+learn the file changed, so a live desktop and a live Settings application agree
+only across a restart. That half belongs with the change-notification channel
+design-decisions.md §400 wants.
+
+The original entry follows.
+
+**What.** "What the desktop looks like" is modelled three separate times, in
+three crates, with three incompatible representations and no shared owner:
+
+| Where | Type | Accent model | Persisted? |
+|---|---|---|---|
+| `gui/desktop/src/appearance_settings.rs` | `ThemeMode {Dark, Light, System}` | `AccentColor` — 14 named variants + `Custom(Color)` | yes, `appearance.yaml` via `yamldoc` |
+| `apps/settings/src/main.rs` | `ThemeMode {Light, Dark, System}` | `accent_color_index: usize` into a local array | **no** — nothing is written or read |
+| `gui/toolkit/src/theme.rs` | `ThemeMode {Light, Dark, Custom(String)}` | full `Theme` struct of ~30 colours | n/a (a widget palette, not a preference) |
+
+The first two are the same *user-facing setting* in two processes. They do not
+agree on the type, the variant order, or the file, and only one of them has a
+file at all. `apps/settings` is the application a user actually opens to change
+their theme (the desktop's ~20 `*_settings.rs` panels are all `#[allow(dead_code)]`
+and unconstructed), and it is the one that persists nothing.
+
+**Why it bites.** Concretely, today: changing the accent in the Settings app
+changes nothing on the desktop and is forgotten when the app closes, while the
+desktop reads an `appearance.yaml` that the Settings app never writes. Two
+processes that disagree about a user preference is the same class of bug as
+design-decisions.md §400 (desktop and compositor disagreeing about the font) —
+one setting, one writer, or they diverge.
+
+`accent_color_index: usize` is the sharper half. It is a position in a local
+array, so persisting it directly would create a file format that silently
+remaps every user's accent the moment an accent is inserted or reordered —
+exactly the label-vs-spelling failure that `yaml_enum!` exists to prevent.
+
+**Proper fix.** One shared model, in a crate both sides depend on:
+
+1. Extract the model half of `appearance_settings.rs` — the enums, the two
+   accent palettes, `AppearanceSettings`, `yaml_enum!`, `read_from`/`write_into`
+   — plus `gui/desktop/src/config.rs` into a new `gui/appearance` crate. The
+   config location and the atomic-write protocol have to move with it: two
+   processes writing one file must agree on the path *and* on how it is
+   replaced, not merely on the schema. Leave `AppearanceSettingsUI` and all
+   rendering behind in the desktop.
+2. Rewire `apps/settings`' Personalization pages onto it, deleting its local
+   `ThemeMode` and index-based accent list, and give it load/save.
+3. `gui/toolkit`'s `ThemeMode` stays as it is — a widget palette is a different
+   thing from a stored preference, and collapsing them would make the toolkit
+   depend on a config file. The shared crate should *derive* a `guitk::Theme`,
+   the way `DesktopTheme::from_settings` already derives the shell's palette.
+
+Still open after that: a running app has no way to learn the file changed, so
+a live desktop and a live Settings app still need a change notification (the
+same channel §400 wants for the font). Persisting first at least makes the two
+agree across a restart.
+
+**Where.** `gui/desktop/src/appearance_settings.rs`, `gui/desktop/src/config.rs`,
+`apps/settings/src/main.rs` (`ThemeMode` at :342, `ACCENT_COLORS` at :380,
+`theme_mode`/`accent_color_index` at :685, the Themes/Colors pages at
+:1634/:1709 and their handlers at :3199/:3247), `gui/toolkit/src/theme.rs`.
+
+---
+
+## TD-LANE-C-CRATES-OPT-OUT-OF-THE-WORKSPACE-LINT-POLICY
+
+**Found 2026-08-14.** CLAUDE.md requires every crate to build under
+`clippy::all` deny / `pedantic` warn plus the five defensive lints
+(`unwrap_used`, `expect_used`, `panic`, `indexing_slicing`,
+`arithmetic_side_effects`). The workspace declares exactly that in
+`[workspace.lints.clippy]`, but a crate only receives it by opting in with
+`[lints] workspace = true` in its own `Cargo.toml` — and **131 of lane C's
+crates do not**: all 123 under `apps/`, and `gui/clipboard`, `gui/compositor`,
+`gui/credentials`, `gui/desktop`, `gui/notifications`, `gui/remote`,
+`gui/toolkit`, `gui/window`. The only lane-C crate that opts in is the new
+`gui/appearance`.
+
+So "clippy clean" for those crates means clean under *rustc's defaults* —
+no pedantic lints, and none of the five that exist specifically to catch the
+panic and overflow risks an AI author is prone to. This is not theoretical:
+the very first file to cross into an opted-in crate brought a real one with
+it. `color_from_hex` had `digits.get(i..i + 2)`, an unchecked add that had
+lived in `gui/desktop` without complaint and warned immediately in
+`gui/appearance` (fixed in the same commit, 91f1a15cf).
+
+**Proper fix.** Add `[lints]\nworkspace = true` to each crate and fix what it
+reports. This is not a mechanical sweep: the count above means a large
+backlog of genuine findings, and test modules will need the standard
+`#[allow(...)]` block (panicking on bad data is a test's job) — `gui/desktop`
+already carries an equivalent as a crate-level `cfg_attr(test, allow(...))`.
+Do it crate by crate, smallest first, so each addition is one reviewable
+commit rather than a thousand-warning wall. Prioritise the crates that parse
+untrusted input — `gui/compositor` (protocol messages), `gui/remote`,
+`gui/credentials` — over the games.
+
+**Where.** `Cargo.toml` (`[workspace.lints.clippy]` at :105) and the
+`Cargo.toml` of every crate listed above. Reproduce the list with:
+`for f in gui/*/Cargo.toml apps/*/Cargo.toml; do grep -q "workspace = true" "$f" || echo "$f"; done`
+
+## TD-SHELL-HAS-NOWHERE-TO-SEND-A-LAUNCH
+
+**What.** `DesktopShell::handle_mouse` now answers a click on a start-menu row
+with `ShellAction::Launch("/usr/bin/settings")`, but nothing starts a process
+from it. `main()` prints the path; there is no caller in a real event loop
+because there is no real event loop — the shell has no channel to the process
+server, and `launcher::LauncherAction::Launch` has had the same dangling end
+since it was written.
+
+**Why it bites.** Every application in the start menu and in the search
+launcher is one unimplemented step away from actually running. The routing,
+the hit testing and the app database are all in place and tested; what is
+missing is exactly one edge — shell to process server.
+
+**Proper fix.** When the shell gains its compositor/IPC event loop, that loop
+consumes `ShellAction` and forwards `Launch(path)` to the process server over
+a channel. The intent deliberately stays a value rather than a `Command`
+spawned in the window manager: policy about *how* a program starts (namespace,
+capabilities, cgroup, environment) belongs to the service that owns process
+creation, not to the shell.
+
+**Where.** `gui/desktop/src/main.rs` — `ShellAction` and `handle_mouse`;
+`gui/desktop/src/launcher.rs` — `LauncherAction::Launch`.
+
+## FIXED: TD-START-MENU-POWER-ROW-IS-A-LABEL
+
+**Fixed 2026-08-14.** The footer row is a real button: `power_button_rect()`
+reports `Hit::PowerButton`, which toggles `power_menu_open`, and
+`power_menu_rect()` / `power_menu_row_rect(row)` place a popup that
+`power::render_power_menu` draws and `hit_test` reads — one accessor per
+clickable part, as the `Rect` documentation requires. Its five rows are
+`power_menu_entries()`, exactly the `Category::System` entries that
+`start_menu_entries()` filters out, and clicking one returns the same
+`ShellAction::Launch` an application row does: `/sbin/shutdown` and its
+neighbours are what actually shut the machine down, not the window manager.
+The popup is themed and scaled by the shell (it takes a `PowerMenuStyle`)
+rather than by `power.rs`'s own palette, so it follows the light theme and the
+display scaling like everything else. `close_start_menu()` is now the single
+place the menu closes, which is what keeps the submenu from being stranded over
+an empty desktop. Nine tests in `pointer_tests.rs`, including one that walks
+every scale from 100% to 200% asserting no system action is dropped or drawn
+where it cannot be clicked. No confirmation prompt: Start → Power → Shut down
+is one click on every desktop that has this menu, and an extra "are you sure"
+is not what makes shutdown safe.
+
+The original report follows.
+
+**What.** The foot of the start menu draws the word "Power" in grey. It is
+text, not a control: `hit_test` reports `Hit::StartMenuPanel` there, and the
+five `Category::System` entries of the app database — Shutdown, Restart,
+Sleep, Lock, Logout — are consequently unreachable from the shell. They are
+filtered *out* of `start_menu_entries` on purpose, so that "Shutdown" is not
+one mis-click below "Screenshot"; but nothing yet offers them anywhere else.
+
+**Why it bites.** There is no way to shut the machine down from the desktop.
+
+**Proper fix.** A power submenu opened from that row: a small popup listing the
+`Category::System` entries, which resolves to the same `ShellAction::Launch`
+the application rows produce. `gui/desktop/src/power.rs` already models power
+actions and confirmation prompts and should be the thing that renders it,
+rather than a second list inside `render_start_menu`. Needs the same
+geometry-shared-with-the-hit-test treatment as the rows above it — see the
+`Rect` documentation in `main.rs`.
+
+**Where.** `gui/desktop/src/main.rs` — `render_start_menu`'s footer,
+`DesktopShell::hit_test`; `gui/desktop/src/power.rs`.
+
+## FIXED: FLAKY-GUITK-SCALING-TESTS-SHARED-A-PROCESS-GLOBAL
+
+**What.** Five tests in `gui/toolkit/src/scaling.rs` — `global_scale_default_is_1`,
+`set_and_get_global_scale`, `global_scale_clamped`, `per_monitor_override`,
+`per_monitor_clear_falls_back` — each wrote the process-wide `SCALE_TABLE` and
+then asserted on it. Cargo runs tests on parallel threads, so
+`per_monitor_clear_falls_back` (which sets the global scale to 1.5) failed
+whenever another of the five reset it to 1.0 in between. Observed failing once
+in a full `cargo test -p guitk` run and passing when run alone.
+
+**Fix.** A `SCALE_LOCK` mutex in the test module, taken by a `ScaleGuard` whose
+`Drop` restores the whole table. Restoring on drop rather than at the end of
+each test body means a failing assertion — which unwinds — still leaves clean
+state, so one failure cannot cascade. The lock is taken with
+`unwrap_or_else(|e| e.into_inner())` because a poisoned lock carries no
+information once the guard restores the state anyway.
+
+**Residual gap.** `DesktopShell::set_appearance` now publishes the display
+scaling into that same process-global table, so `guitk` widgets hosted in the
+shell lay out at the scale the chrome is drawn at. That one line has no unit
+test of its own: every desktop test that builds a shell writes the value an
+assertion would read, and `desktop` is a binary crate so the assertion cannot
+be moved to an out-of-process integration test. Rationale is recorded on the
+method.
+
+**Where.** `gui/toolkit/src/scaling.rs` (test module);
+`gui/desktop/src/main.rs` — `DesktopShell::set_appearance`.
+
+## TD-FOUR-APPEARANCE-SETTINGS-THE-SHELL-STILL-IGNORES
+
+**What.** `AppearanceSettings` has fifteen fields. The shell now honours eleven
+of them. Four are read by nobody, and the settings panel offers each as a live
+control, so choosing one changes nothing a user can see:
+
+- `icon_size` (Small/Medium/Large/ExtraLarge) — the shell draws no icons at
+  all. Taskbar buttons show truncated titles, start-menu rows show plain text,
+  and `ManagedWindow::icon_id` indexes a registry nothing renders from.
+  Blocked on the icon registry actually resolving to bitmaps
+  (`gui/desktop/src/icons.rs` models the registry but is `#[allow(dead_code)]`).
+- `cursor_size`, `cursor_scheme` — the pointer is drawn by the compositor, not
+  by the shell. Correct owner, wrong wiring: nothing carries the value across.
+  Needs the same treatment as the appearance channel in design-decisions.md
+  §400 — the compositor has to be told, not asked.
+- `animation_speed` — nothing in `main.rs` animates. Window open/close/minimize
+  are instant state changes. `gui/desktop/src/animations.rs` has the curves and
+  durations and is likewise `#[allow(dead_code)]`; hooking it up means the shell
+  needs a frame clock, which it will get with the compositor event loop.
+
+**Why it bites.** A setting that visibly does nothing is worse than a missing
+one: the user concludes the whole panel is decorative. This was already true of
+scaling, corners and shadows until they were wired up; these four are what is
+left.
+
+**Proper fix.** Each is blocked on a different piece of missing plumbing, so
+they should be done as those arrive rather than in one pass: `icon_size` with
+the icon registry, the two cursor settings with the compositor channel,
+`animation_speed` with the event loop's frame clock. None should be faked in
+the meantime — a shell that pretended to animate by jumping is not closer to
+animating.
+
+**Where.** `gui/appearance/src/lib.rs` — `AppearanceSettings`;
+`gui/desktop/src/main.rs` — `DesktopShell::render_*`;
+`gui/desktop/src/icons.rs`, `gui/desktop/src/animations.rs`.
+
+## TD-GSUB-APPLIES-EVERY-SCRIPTS-FEATURES — ✅ FIXED 2026-08-14
+
+**What.** The `GSUB`/`GPOS` walk in `gui/font/src/otl.rs` starts at the
+FeatureList and takes *every* feature carrying a wanted tag, rather than
+starting at the ScriptList and taking the features that the run's script and
+language actually select. A face that registers the same feature tag under
+several scripts therefore has all of those scripts' lookups applied to every
+run, whatever the run is written in.
+
+**Why it bites now.** This was a documented, mostly-theoretical limitation
+while only `liga`/`rlig` were read: a ligature belonging to another script
+almost never matches Latin glyphs, so the wrong lookups ran but did nothing.
+Reading `ccmp` changes that. `ccmp` is precisely where a script puts its
+normalisation rules, and those rules are meaningless — or wrong — outside it.
+
+**Reproduce.** `cargo test -p osfont --target x86_64-pc-windows-gnu --test
+host_fonts -- --ignored --nocapture installed_fonts_leave_plain_latin_alone`.
+On a stock Windows host, `ebrima.ttf` and `ebrimabd.ttf` substitute the *space*
+glyph in plain English prose: their `ccmp` lookup 15 is an extension-wrapped
+type-1 format-2 subtable mapping glyph 3 (space) to 2220, and it belongs to one
+of the African scripts Ebrima covers, not to Latin. Verified against an
+independent Python parse of the table, so this is our *selection* being wrong,
+not our *parsing*.
+
+The damage is small — 2 faces of the 275 with `GSUB` on this host, and the
+substituted glyph is a space variant — but it is a genuinely wrong glyph, and
+the class of fault grows with every feature added.
+
+**Proper fix.** Script and language selection, in two parts:
+
+1. **The table walk.** Walk the ScriptList, pick the ScriptRecord for the run's
+   script (falling back to `DFLT`), then its LangSys (falling back to the
+   default), and intersect that LangSys's feature indices with the wanted tags.
+   This is contained work in `otl.rs` and affects `kern.rs` and `mark.rs` too,
+   since they share the walk.
+2. **Script itemisation.** Deciding what a run's script *is* needs the Unicode
+   Script property, which this crate does not have — a run must be split into
+   same-script pieces before it can be shaped, which is also the prerequisite
+   for bidi and for complex-script reordering. This is the larger half and is
+   the reason (1) is not enough on its own.
+
+Until both land, `installed_fonts_leave_plain_latin_alone` tolerates a small
+proportion of faces changing plain Latin prose. When script selection works,
+that count should drop from eight to the six Linux Libertine files, whose `Th`
+ligature is correct.
+
+**Where.** `gui/font/src/otl.rs` — `lookup_indices` (the FeatureList walk, and
+the module doc's "What is not here"); `gui/font/src/gsub.rs` — the feature tag
+list in `Substitutions::parse`; `gui/font/tests/host_fonts.rs` —
+`installed_fonts_leave_plain_latin_alone`.
+
+**Fixed 2026-08-14** (commit `6e0746636`), both parts, as designed above and
+recorded in design-decisions.md §411.
+
+1. `ByScript` in `otl.rs` walks the ScriptList, resolves every script the face
+   registers once at parse time, and shares the decoded lookups keyed by
+   LookupList index. `Substitutions::apply` takes the run's script and binary
+   searches for it, falling back `dev2`→`deva`→`DFLT`→`dflt`.
+2. `gui/font/src/script.rs` carries the Unicode Script property (generated
+   into `script_tables.rs` from `fontTools.unicodedata`) and `script::runs`
+   splits a piece list into maximal same-script stretches. The split happens
+   in `ScaledFont::shape` *before* substitution, while glyphs are still one
+   per piece — after anything ligates, a boundary counted in pieces is no
+   longer a boundary counted in glyphs.
+
+Ebrima no longer substitutes the space, and the same change fixed
+`B-FONT-CALIBRI-SHAPES-A-FRACTION-SLASH-DIFFERENTLY-FROM-HARFBUZZ`, whose
+cause turned out to be identical.
+
+**The prediction in this entry was wrong, and the correction is the
+interesting part.** It said the plain-Latin count "should drop from eight to
+the six Linux Libertine files". It is *nine*, and all three non-Libertine
+faces are correct: `segoesc`/`segoescb` have genuine Latin `calt`, and
+`SansSerifCollection` maps `space` through its Latin `locl` — a feature this
+crate had been skipping, and which was only safe to add once features were
+script-scoped. All nine now agree with HarfBuzz glyph for glyph. The test's
+bound is a proportion, not a list, which is why it kept working; a hard-coded
+expected count would have had to be relaxed for a change that made the shaper
+*more* correct.
+
+**Successors.** Four narrower gaps remain and are filed separately:
+`TD-FONT-IGNORES-LANGSYS-OVERRIDES`,
+`TD-GPOS-APPLIES-EVERY-SCRIPTS-FEATURES`,
+`TD-FONT-SCRIPT-RUNS-IGNORE-SCRIPT-EXTENSIONS` and
+`TD-FONT-HAS-NO-JOINING-OR-REORDERING-SHAPER`.
+
+## TD-FONT-IGNORES-LANGSYS-OVERRIDES
+
+**What.** `otl::select` reads each ScriptRecord's DefaultLangSys and ignores
+its LangSysRecords entirely. The per-language overrides — Turkish dotless `i`
+under `TRK `, Serbian Cyrillic italic letterforms under `SRB `, Moldovan
+comma-below under `MOL ` — are never reached, and a face whose *only* route to
+a feature is a language system contributes nothing at all.
+
+**Why it bites.** It is invisible until it is not. A Turkish reader gets the
+wrong dot on `i`/`ı`; a Serbian reader gets Russian italics for бгпт. Both are
+the kind of wrongness a native reader notices immediately and nobody else ever
+does.
+
+**Why it is filed rather than fixed.** There is nothing to select *with*.
+Language is a property of the text's provenance, not of its characters — the
+same Cyrillic codepoints are Serbian or Russian depending on who typed them —
+so it cannot be derived the way script is. It needs a language carried on the
+text down to `ScaledFont::shape`, which means an API change reaching the
+toolkit and the locale system, neither of which has a language to hand yet.
+
+**Proper fix.** Add an optional BCP 47 language to the shaping call, map it to
+an OpenType language system tag (the registry is a fixed table, `tr` → `TRK `,
+`sr` → `SRB `), and have `select` prefer that LangSysRecord over the
+DefaultLangSys. Default stays "no language", which is what every shaper does
+when not told and what this crate does now — so the change is additive and
+cannot regress text that names no language.
+
+**Reproduce.** `gsub::tests::a_feature_only_a_language_system_reaches_is_not_applied`
+pins the current behaviour: a `locl` reachable only through `TRK ` yields no
+`Substitutions` at all.
+
+**Where.** `gui/font/src/otl.rs` — `select`, `LangSys`, and the module doc's
+"What is not here".
+
+## TD-GPOS-APPLIES-EVERY-SCRIPTS-FEATURES
+
+**What.** The `GSUB` half of the table walk now selects features by the run's
+script. The `GPOS` half does not: `otl::feature_subtables` takes the union over
+every script the face registers, which is the behaviour
+`TD-GSUB-APPLIES-EVERY-SCRIPTS-FEATURES` was filed against.
+
+**Why this is a smaller problem than it sounds.** `GPOS` only *moves* glyphs;
+it cannot change what the text says. And every positioning subtable is gated on
+glyph coverage, so a face's Arabic `kern` does not cover Latin glyphs and its
+pairs never fire on a Latin run. The failure mode is therefore a wasted
+coverage lookup, not a wrong glyph — unlike `GSUB`, where the same fault
+rewrote Calibri's slash.
+
+**Why it is filed rather than fixed.** `GPOS` is reached through
+`ScaledFont::kern(left, right)`, a public API handed two glyph ids with no run,
+no string and no script behind them. There is nothing to select with without
+changing that signature, and the signature is what the layout code wants: it
+asks about a pair while walking a shaped run it has already produced.
+
+**How it could actually bite.** A face registering `kern` pairs under two
+scripts whose coverage sets *overlap* — shared punctuation is the realistic
+case — could take the wrong script's value. Not observed on any of the 556
+faces installed here.
+
+**Proper fix.** Give positioning the same treatment as substitution: build a
+`ByScript` for `GPOS` too, and change `kern` to take the script — or replace it
+with a whole-run positioning pass, which is what mark attachment will need
+anyway for GPOS type 5. The second is the better shape and should be done when
+mark-to-ligature lands.
+
+**Where.** `gui/font/src/otl.rs` — `feature_subtables`;
+`gui/font/src/kern.rs`; `gui/font/src/mark.rs`;
+`ScaledFont::kern` in `gui/font/src/scaled.rs`.
+
+## TD-FONT-SCRIPT-RUNS-IGNORE-SCRIPT-EXTENSIONS
+
+**What.** `script::runs` resolves a character's script from the Unicode
+`Script` property alone. UAX #24 defines the real algorithm over
+`Script_Extensions`, which lists *every* script a shared character is used
+with — the danda U+0964 is `Script=Common` but `Script_Extensions` names
+Devanagari, Bengali, Gurmukhi and a dozen more.
+
+**What the difference actually is.** Our rule is the one UAX #24 calls the
+starting point: a scriptless character extends whatever run is open, and a
+scriptless prefix joins the first real script after it. That gives the right
+answer whenever a shared character is adjacent to text of a script it belongs
+to, which is nearly always. The full algorithm differs only for a character
+that is ambiguous *and* sits at a boundary between two scripts that both claim
+it — then it should join the one it is actually adjacent to under the
+extension set, rather than simply continuing the open run.
+
+**Why it is filed rather than fixed.** It needs a second generated table
+(`Script_Extensions` is a set per character, not a scalar) and a resolution
+pass that carries a candidate set forward, and it changes the answer only for
+cases that are already vanishingly rare in the text this OS renders. The
+generator already reads `fontTools.unicodedata`, which exposes
+`script_extension`, so the data side is small; the algorithm side is not.
+
+**Proper fix.** Emit a second table of extension sets, and replace the
+"extends whatever is open" rule with UAX #24's: carry the intersection of the
+open run's script set with each new character's, and close the run when the
+intersection empties.
+
+**Where.** `gui/font/src/script.rs` — `runs` and the module doc;
+`gui/font/tools/gen_script_tables.py`.
+
+## TD-FONT-HAS-NO-JOINING-OR-REORDERING-SHAPER
+
+**What.** Features are chosen by tag from a fixed list — `ccmp`, `locl`,
+`liga`, `rlig`, `clig`, `calt`. The features every complex script actually
+needs are not chosen that way: Arabic's `init`/`medi`/`fina`/`isol` are decided
+by a joining-type state machine over the run, and Indic's
+`rphf`/`half`/`pref`/`blwf`/`abvs`/`psts` by a per-cluster reordering pass. A
+tag list cannot express either.
+
+**Symptom, measured.** In the HarfBuzz sweep
+(`gui/font/tools/harfbuzz_sweep.py`), 44 of 556 faces disagree on
+`العربية` and 5 on `हिन्दी`. On `Amiri-Bold.ttf` we give
+`[55, 84, 73, 65, 56, 90, 57]` — the isolated forms, every letter drawn as if
+standing alone — where HarfBuzz gives the joined ones. Arabic rendered
+unjoined is not "slightly off"; it is close to unreadable to someone who reads
+Arabic. Devanagari is worse: ours is 6 glyphs to HarfBuzz's 4, because the
+`i`-matra has not been reordered before its consonant and the conjunct has not
+formed.
+
+**Why it is filed rather than fixed.** It is a shaper per script family, not a
+fix: HarfBuzz has separate `hb-ot-shaper-arabic`, `-indic`, `-khmer`,
+`-myanmar` and `-use` modules for exactly this reason. Script selection was
+the prerequisite — there is no point running an Arabic state machine over a
+run until the run knows it is Arabic — and is now done.
+
+**Proper fix.** Two shapers, in this order, since they cover the scripts a
+desktop is most likely to meet: an Arabic joining pass (a joining-type table
+plus the four positional features — mechanical and well-specified), then a
+Universal Shaping Engine pass for Indic and South-East Asian, which is
+substantially larger. Both hang off the run boundaries `script::runs` already
+produces.
+
+**Where.** `gui/font/src/gsub.rs` — the feature tag list in
+`Substitutions::parse` and the module doc's "What is deliberately not
+implemented"; `gui/font/src/scaled.rs` — `substitute_runs`, which is where a
+per-script shaper would be dispatched.
+
+**Resolved — the Arabic half (2026-08-14).** `gui/font/src/joining.rs` derives
+each character's positional form from its `Joining_Type` and its nearest
+non-transparent neighbours; `gui/font/src/otl.rs` records, per script, which
+feature tags reached each lookup; `gui/font/src/gsub.rs` intersects that with
+a per-glyph mask so a positional lookup reaches only the glyphs that take that
+form. The tag list gained `isol`/`init`/`medi`/`fina` and `rclt`, and GSUB
+type 3 (`AlternateSubst`) is now read, because Microsoft Uighur and others
+write their positional forms as type 3. Measured on the same sweep: all 44
+Arabic-capable faces now produce glyph-for-glyph identical output to HarfBuzz.
+`Amiri-Bold.ttf` gives `[55, 1700, 1428, 1745, 3113, 2420, 1633]` where it
+gave the isolated `[55, 84, 73, 65, 56, 90, 57]`. That is HarfBuzz's answer
+exactly reversed, because HarfBuzz reverses an RTL buffer for the caller and
+we do not reorder at all — see `TD-FONT-DOES-NOT-REORDER-RIGHT-TO-LEFT-TEXT`.
+The design is recorded in `design-decisions.md` §412.
+
+**Still open — the Indic half.** The 5 faces that disagree on `हिन्दी` are
+untouched: the `i`-matra is still not reordered before its consonant and the
+conjunct still does not form. That needs the Universal Shaping Engine pass,
+which is the substantially larger of the two and is what this entry now
+tracks.
+
+**Resolved — the Indic half (2026-08-14).** Not the USE pass this entry
+proposed, but HarfBuzz's own Indic shaper, which is what HarfBuzz actually runs
+for the nine Indic scripts: `hb-ot-shaper-indic` is a separate module from
+`hb-ot-shaper-use` precisely because the Indic scripts predate the universal
+model and their reordering is specified against Uniscribe rather than against
+USE's cluster grammar. Writing USE and pointing Devanagari at it would have
+matched neither.
+
+* `gui/font/src/indic.rs` — the character categories and positions, and
+  `Syllable`, the cluster kinds.
+* `gui/font/src/indic_machine.rs` — the syllable grammar, transcribed from
+  HarfBuzz's Ragel machine.
+* `gui/font/src/indic_shape.rs` — the shaper: `Plan` (what the face declares,
+  probed once per run), the initial reordering (base finding, position
+  assignment, the sort, the feature masks), the thirteen substitution stages,
+  and the final reordering (matras, reph, pre-base forms).
+* `gui/font/src/gsub.rs` — `apply_stages`, which runs a lookup set per stage
+  and confines the shaper's own features to one syllable.
+
+Measured on the sweep: `हिन्दी` went from 5 disagreeing faces to 0, and the
+whole `misplaced` bucket to **0** across 556 faces × 23 strings, once the face —
+not the character — was allowed to call the shaper off
+(`TD-FONT-GATES-THE-MARK-FALLBACK-ON-THE-CHARACTERS-SCRIPT-NOT-THE-FONTS`).
+The design is recorded in `design-decisions.md` §421, and why the shaper is
+chosen by the *face* rather than by the character in §422.
+
+**Still open — everything that is neither Arabic nor Indic.** Khmer, Myanmar,
+Thai/Lao and the ~90 USE scripts still reach the default shaper: their
+positional and reordering features are never asked for. No string in the sweep
+corpus exercises them, so the cost is unmeasured rather than zero. USE is the
+next shaper to write, and `indic_shape.rs`'s stage driver, syllable stamping
+and `Plan` probing are the reusable parts of it. Filed on as
+`TD-FONT-HAS-NO-UNIVERSAL-SHAPING-ENGINE`.
+
+## TD-FONT-HAS-NO-UNIVERSAL-SHAPING-ENGINE
+
+**What.** Of HarfBuzz's six complex shapers we have two: Arabic (joining) and
+Indic (reordering). The other four — Khmer, Myanmar, Thai/Lao, and the
+Universal Shaping Engine that covers roughly ninety further scripts — are not
+written, so a run in any of those scripts gets the default shaper: `ccmp`,
+`locl`, the ligature features, and nothing positional or reordering.
+
+**Symptom.** Unmeasured. No string in the sweep corpus is Khmer, Myanmar, Thai
+(as *shaped* text — the Thai string in the corpus exercises mark fallback on
+faces that do not cover it), Tibetan, Javanese or any other USE script, so the
+sweep reports zero disagreement for them because it never asks. The expected
+failure is the same shape as Devanagari's was before the Indic shaper: pre-base
+vowels drawn after their consonant, conjuncts not forming, and in Khmer the
+coeng-joined subscripts drawn as full-size letters on the baseline.
+
+**Why it is filed rather than fixed.** It is the largest single piece of
+shaping left and it wants its own measurement first. The sweep's corpus has to
+gain strings for each family before the work can be checked, and the host's 556
+faces have to be surveyed for which of them cover those scripts at all — on a
+Windows development host that is likely to be very few, which is itself an
+argument for doing it after the things the host *can* measure.
+
+**The survey has now been run** (2026-08-15, `gui/font/tools/script_survey.py`,
+579 faces), and it contradicts the guess above. Counting only faces that both
+cover the script *and* register its tag in `GSUB` — the sharper test, since a
+face that declares nothing gives both implementations nothing to do and agrees
+trivially:
+
+| shaper | script | measuring faces |
+|---|---|---|
+| Thai | Thai | **8** |
+| Thai | Lao | **19** |
+| Khmer | Khmer | 3 |
+| Myanmar | Myanmar | 2 |
+| USE | Tifinagh | 6 |
+| USE | Buginese | 4 |
+| USE | Tibetan / Javanese / Balinese / Sinhala / Cham | 1 each |
+| USE | Tai Tham | 0 (covered by one face, declared by none) |
+| *(control)* Indic | Devanagari | 5 |
+| *(control)* Arabic | Arabic | 43 |
+
+The control row is the point: **Devanagari, already written and measured from
+`misplaced 13` to `0`, had only five faces to measure against.** Thai has eight
+and Lao nineteen. So the host is not thin for these scripts at all — it is
+thin for exactly one of the four families, USE, where most scripts have a
+single face and Tai Tham has none.
+
+**Proper fix — order revised by the survey.** ~~USE first, since it subsumes
+the most scripts.~~ USE subsumes the most scripts and is the *least*
+measurable of the four; writing it first means writing the largest piece of
+shaping left with an oracle that can barely disagree with it. Take them in
+order of how well the host can check the work:
+
+1. **Thai/Lao first** — best measured (27 faces between them) and smallest.
+   It is not a reordering shaper at all: it is the PUA fallback for Thai fonts
+   with no `GSUB`, plus a `ccmp`-like normalization of the vowel/tone order.
+2. **Khmer, then Myanmar** — 3 and 2 faces, variants of the Indic model that
+   can reuse `initial_reordering_syllable`'s base-finding.
+3. **USE last** — the cluster grammar from the Unicode Shaping Engine spec,
+   the same stage driver `indic_shape.rs` already has, and `Plan`'s probing of
+   what the face declares. By then the three smaller shapers will have shaken
+   out the stage driver against faces that can actually object.
+
+Each step needs its corpus strings added to `harfbuzz_sweep.py` first, or the
+sweep reports agreement it never tested.
+
+**Where.** `gui/font/src/sfnt.rs` — `Face::substitute`, which dispatches on
+`Script::shaping` and would gain the other families; `gui/font/src/indic.rs`
+and `indic_machine.rs` — the models to copy; `gui/font/tools/harfbuzz_sweep.py`
+— `CORPUS`, which needs a string per family before any of this is measurable.
+
+## TD-FONT-DOES-NOT-REORDER-RIGHT-TO-LEFT-TEXT
+
+**What.** `ScaledFont::shape` returns glyphs in logical order for every
+script. For Arabic and Hebrew the caller therefore gets the glyphs in the
+order the characters were typed, and drawing them left to right puts the
+first letter of the word on the left — the word runs backwards. HarfBuzz
+reverses an RTL buffer before returning it, precisely so that a caller who
+advances the pen left-to-right draws the word correctly.
+
+**Symptom, measured.** In the HarfBuzz sweep the 44 Arabic-capable faces are
+counted under `reversed` rather than `agree`: same glyphs, opposite order.
+The sweep classifies that case separately (`got == expected[::-1]`) so the
+distinction between "we shaped it wrong" and "we did not reorder it" stays
+visible; after the joining work the `differ` count for `العربية` is zero.
+
+**Why it is filed rather than fixed.** Reversing the run is a two-line change
+and would be the wrong fix on its own. The real requirement is UAX #9 bidi:
+a paragraph of mixed Arabic and Latin has to be resolved into directional
+runs by the algorithm — embedding levels, neutral resolution, the whole
+thing — before anyone knows which spans to reverse. Reversing every run whose
+script is RTL gets simple cases right and mixed text subtly wrong, which is
+worse than the current state because the failure stops being obvious. The
+bidi pass belongs above the shaper, next to `script::runs`, and wants to be
+written once for the whole toolkit rather than hidden inside the font crate.
+
+**Proper fix.** A UAX #9 implementation producing embedding levels per
+character; `script::runs` splits on level as well as script; the shaper keeps
+returning logical order and the layout stage reverses the runs whose level is
+odd. Mirroring (`U+0028` ↔ `U+0029` and friends) belongs in the same pass.
+
+**Where.** `gui/font/src/scaled.rs` — `shape`, which builds the glyph vector
+in logical order; `gui/font/src/script.rs` — `runs`, where levels would join
+scripts as a run boundary; `gui/font/tools/harfbuzz_sweep.py` — the
+`reversed_only` counter, which will drop to zero when this is done.
+
+**Resolved (2026-08-14).** `gui/font/src/bidi.rs` is the UAX #9 pass this
+asked for — all 91,707 cases of Unicode's `BidiCharacterTest.txt` pass — and
+`shape` now runs it. The shape of the fix is the one proposed above with one
+correction: the levels are resolved *inside* `shape` rather than above it,
+because three of the five things that depend on them are shaping decisions
+that a layout stage above the shaper cannot make. Rule L4 mirroring has to
+happen before `cmap`, or the wrong glyph is looked up; `script::runs` has to
+split on level parity, or a ligature forms across a direction change; and
+kerning has to be re-charged after the reversal, because a kern is charged to
+the pair's *logically*-first glyph and reversal makes that the right-hand one.
+`ShapedRun` keeps its glyphs in logical order — every existing query, every
+cluster invariant, unchanged — and carries a `visual: Vec<u32>` permutation
+beside them, which `draw_order()` walks and which is left empty when it would
+be the identity, so left-to-right text pays one `is_trivially_ltr` scan and
+nothing else. See `design-decisions.md` §415.
+
+The sweep's `reordered` count is **0** across all 556 host faces × 19 strings:
+every right-to-left string now matches HarfBuzz's glyph order exactly. Two
+things this entry mentioned are *not* resolved and are filed separately:
+`shape` still cannot be told a base direction other than `Base::Auto`
+(`TD-FONT-CANNOT-BE-TOLD-A-PARAGRAPH-DIRECTION`), and the caret queries still
+measure into the text rather than across the line
+(`TD-FONT-CARETS-ARE-NOT-BIDIRECTIONAL`).
+
+## TD-FONT-IGNORES-GSUB-LOOKUP-FLAGS
+
+**What.** Every GSUB lookup carries a `lookupFlag`: `RightToLeft`,
+`IgnoreBaseGlyphs`, `IgnoreLigatures`, `IgnoreMarks`, `UseMarkFilteringSet`
+and a mark-attachment class in the high byte. We parse the field and then
+apply every lookup to every glyph regardless of it.
+
+**Symptom.** The flag that matters in practice is `IgnoreMarks`. A face that
+writes its Arabic ligatures as "these two letters, skipping any marks between
+them" expects the shaper to step over a fatha when matching; we do not, so
+the ligature silently fails to form on vowelled text. The sweep does not
+currently catch this because the Arabic corpus entry has one mark
+(`\u0629` is a letter, `\u064a` a letter) and the faces that would show it
+are the fully-vowelled Quranic ones.
+
+**Why it is filed rather than fixed.** It is not a local change. "Skip this
+glyph" has to be honoured by *every* matcher — single, ligature component
+walk, the backtrack/input/lookahead walks of types 5 and 6 — and each of
+those currently indexes the glyph vector directly. Doing it properly means a
+skipping iterator that all of them go through, which is the same refactor
+HarfBuzz did with `hb_ot_apply_context_t::skipping_iterator_t`. Doing it
+partially — honouring the flag in one matcher and not the others — produces
+inconsistent output that is harder to debug than uniformly ignoring it.
+
+**Proper fix.** A `Skipper` built once per lookup from its flag plus the
+`GDEF` glyph class definitions (which we already parse for mark placement),
+exposing `next(from)` / `prev(from)`; every matcher in `gsub.rs` and `gpos.rs`
+moves through it instead of `i + 1`. `UseMarkFilteringSet` additionally reads
+`GDEF`'s `MarkGlyphSetsDef`.
+
+**Where.** `gui/font/src/otl.rs` — `Lookup`, which holds the flag; every
+`apply_*` in `gui/font/src/gsub.rs`. (An earlier version of this entry said
+"the same in `gui/font/src/gpos.rs`" — there is no such file: positioning
+lives in `kern.rs` and `mark.rs`.) The module doc of `gsub.rs` names this ID
+under "not implemented".
+
+**Resolved for GSUB (2026-08-14).** `gui/font/src/skip.rs` is the skipping
+iterator this asked for. `Skipper::new(data, defs, flag, filter, mask)` is
+built once per lookup from the flag, the `markFilteringSet` index and the
+`GDEF` class definitions; `next` / `prev` / `at_or_after` / `walk_forward` /
+`walk_backward` replace every `i + 1` in `gsub.rs`, so the single, ligature,
+context and chaining matchers all skip the same glyphs. `IgnoreBaseGlyphs`,
+`IgnoreLigatures`, `IgnoreMarks`, `UseMarkFilteringSet` and the
+mark-attachment class are all honoured; `otl.rs` now also reads
+`markFilteringSet`, which sits after the subtable-offset array rather than in
+the Lookup header. Twelve unit tests in `skip.rs` and six end-to-end GSUB
+tests (`ignore_marks_forms_the_ligature_across_the_mark` and its neighbours)
+cover it. The sweep corpus gained the vowelled Arabic string this entry said
+it was missing (`\u0628\u0650\u0633\u0652\u0645\u0650`), and it
+discriminates: against the pre-`Skipper` source 8 faces shape it wrongly
+(949 differ / 36 reversed), against the current one none do (941 / 44).
+
+**Resolved for kerning (2026-08-14).** `otl::feature_lookups` now hands back
+the `Lookup` whole rather than a flat list of subtables, so `kern.rs` keeps
+its lookups grouped and each group carries its own `lookupFlag`. `Face::kern`
+gained a sibling, `kern_across(left, right, between)`, and the shaping loop in
+`scaled.rs` tracks the marks standing between a pair instead of declining to
+kern across them; a group is consulted only if its flag would have skipped
+every glyph in `between`. Checked by five unit tests in `kern.rs` and one host
+test, `a_mark_between_a_kerning_pair_costs_the_kern_only_if_the_flag_says_so`,
+which measures `T` + combining acute + `o` against HarfBuzz's own answer on
+five faces in *both* directions — arial/times/segoeui read across the mark
+(+0 units), DejaVuSans (+348) and verdana (+220) do not, because their
+`PairPos` lookups carry flag 0. All five agree with HarfBuzz to the unit. Of
+the 139 host faces that kern `(T,o)`, 82 now read the pair across a mark.
+
+**Still open — mark attachment and `RightToLeft`.** `mark.rs` still does not
+consult the flag, and `RightToLeft` is still not honoured (it governs cursive
+attachment, which we do not implement). The practical cost of the first is
+nil today — `scaled.rs` picks a mark's base by walking back past marks, which
+is what `IgnoreMarks` would have said anyway — but it will matter for GPOS 5
+(mark-to-ligature), where `IgnoreLigatures` and the mark-attachment class
+change which component a mark lands on.
+
+## TD-FONT-CHECKS-FEATURE-MASKS-ONLY-AT-THE-APPLIED-POSITION
+
+**What.** The per-glyph feature mask added with the joining shaper is tested
+against the lookup's mask at the position the lookup is *applied* to, and
+nowhere else. HarfBuzz tests it at every position a lookup matches — each
+component of a ligature, each glyph of a context's input sequence.
+
+**Symptom.** A face could write "the final form of this letter, when followed
+by that one" as a `fina` ligature; we would form it if the first glyph is
+final-form, without checking the second. In practice the second glyph of such
+a ligature is always in the same joining state as the first — that is what
+makes the ligature meaningful — so this has produced no observed divergence
+in the 556-face sweep. It is a narrowness in the model, not a measured bug.
+
+**Why it is filed rather than fixed.** The check wants to live in the same
+skipping iterator that `TD-FONT-IGNORES-GSUB-LOOKUP-FLAGS` needs, since both
+are "should this matcher consider this glyph". Building two separate
+mechanisms and then merging them is more work than waiting.
+
+**Proper fix.** Fold the mask test into the `Skipper` described above, so
+every matcher gets it for free.
+
+**Where.** `gui/font/src/gsub.rs` — `apply_lookup`, which is the single place
+the mask is consulted today.
+
+**Resolved (2026-08-14).** Folded into `Skipper` as intended: the mask is a
+field of the iterator, and `at_or_after` / `prev` return `None` for a glyph
+whose mask does not intersect the lookup's, so every matched position is
+gated, not just the applied one. One thing the fold had to get right that the
+entry above did not anticipate: the gate applies to the *input* only.
+`Skipper::context()` returns the same iterator with an all-ones mask, and the
+backtrack and lookahead walks use it — a neighbour is a neighbour whatever
+feature reached the rule, and gating context on the mask made every chaining
+`fina` rule fail when its lookahead was a medial letter.
+
+## TD-FONT-CANNOT-BE-TOLD-A-PARAGRAPH-DIRECTION
+
+**What.** `ScaledFont::shape` resolves the bidi base direction with
+`Base::Auto` — UAX #9 rule P2, "the first strong character decides" — and has
+no parameter with which a caller could say otherwise.
+
+**Symptom.** A string with no strong character at all, or one whose first
+strong character is the wrong way round for its context, lays out against its
+container. `"(123)"` in a right-to-left paragraph is the standard example: P2
+finds nothing strong, defaults to left-to-right, and the parentheses come out
+mirrored the wrong way. A Hebrew UI label reading `"OK"` is the same problem
+from the other side. Nothing in the sweep catches this, because HarfBuzz's
+`guess_segment_properties` makes exactly the same guess.
+
+**Why it is filed rather than fixed.** The fix is a signature change, and the
+right signature depends on a caller that does not exist yet. `shape(&str)` is
+called from the toolkit, the compositor and two apps; adding a `Base` argument
+to all of them before anything can *supply* one usefully would be churn that
+has to be redone when the paragraph model above it lands. The layout stage
+that knows the container's direction is the one that should pass it.
+
+**Proper fix.** `shape_with(&self, text: &str, base: Base)` beside the current
+`shape`, which keeps calling it with `Base::Auto`. `bidi::Base` is already the
+public enum with the three cases (`Auto`, `Ltr`, `Rtl`), and `byte_levels` in
+`scaled.rs` already takes the base as a value — it is threaded through, just
+not exposed.
+
+**Where.** `gui/font/src/scaled.rs` — `shape` and the `byte_levels` helper
+below it, whose doc comment names this entry.
+
+## TD-FONT-CARETS-ARE-NOT-BIDIRECTIONAL
+
+**What.** `ShapedRun::x_of` and `ShapedRun::offset_at` convert between a byte
+offset and an x position by summing advances in *logical* order. That is the
+distance **into the text**, not the distance **across the line**, and the two
+are the same number only when the run is not reordered.
+
+**Symptom.** Click and caret placement in right-to-left or mixed text. Given
+`hello שלום world`, clicking between the `ש` and the `ל` — visually the right
+end of the Hebrew word — gets the byte offset of a character near its left
+end. Arrow keys land in the wrong place for the same reason. Nothing renders
+wrongly: `draw_order()` is correct and the text looks right; it is only the
+mapping back from a pixel that is wrong.
+
+**Why it is filed rather than fixed.** It is not a bug in the sum, it is a
+missing concept. In bidirectional text one byte offset has *two* legitimate
+caret positions — at a direction boundary the caret can be at the visual end
+of the left-to-right run or the visual start of the right-to-left one, and
+which is correct depends on which direction the user is typing. Every mature
+implementation models this explicitly (a "strong" and a "weak" caret, or an
+affinity flag on the position). Answering with one x and calling it done just
+moves the wrongness somewhere less visible.
+
+**Proper fix.** `x_of` returns the position in the drawn order: walk
+`draw_order()` accumulating advances and stop at the glyph whose cluster is
+the offset asked for. `offset_at` does the inverse, and both grow an affinity
+so a boundary can be asked about from either side. The existing behaviour
+stays available as a measurement — `width_upto`, which is what the truncation
+code actually wants and what it uses `x_of` for today.
+
+**Where.** `gui/font/src/shape.rs` — `x_of` and `offset_at`, whose doc
+comments both name this entry; `ShapedRun::visual`, which holds everything the
+fix needs.
+
+## TD-FONT-HAS-NO-FALLBACK-MARK-POSITIONING
+
+**What.** A combining mark is placed on its base by the `GPOS` `mark` feature
+(lookup types 4 and 6), which `mark.rs` implements. A face that has no such
+lookups gets nothing: the mark keeps its own advance and is drawn *after* the
+base at the pen, side by side with it, rather than on top of it.
+
+**Symptom, measured.** This is the single largest positional divergence in the
+sweep — 489 of the 559 `misplaced` face×string pairs. `c` + cedilla + acute
+disagrees on 222 faces and fully-vowelled Arabic (`بِسْمِ`) on 233. The first
+example the sweep prints is exact: on `AGENCYB.TTF` we draw the cedilla at
+x=817 with a full advance, HarfBuzz draws it at x=-104, y=1138 with no
+advance. The user-visible effect is `ç` rendering as `c` followed by a
+free-standing cedilla, and vowelled Arabic rendering as letters interleaved
+with their own vowel signs at full width — which is how the text looked before
+the mark table was implemented, for every face that lacks one.
+
+**Why it is filed rather than fixed.** It needs glyph *extents*, which nothing
+in the shaping path currently asks for. HarfBuzz's fallback
+(`hb-ot-shape-fallback.cc`) centres the mark horizontally over the base's ink
+box and stacks it above or below according to the mark's canonical combining
+class — 230 above, 220 below, and a running "how high have we stacked already"
+for a second mark on the same base. All of that is measured from the outline
+bounding boxes of two glyphs. We can compute those (`raster.rs` walks the
+outline already, and `glyf` stores a bbox per glyph outright) but shaping has
+never needed to, so the plumbing is new.
+
+**Proper fix.** A `bbox(gid)` on the face, reading `glyf`'s per-glyph bounding
+box directly where it exists and walking the `CFF` charstring where it does
+not; then a fallback pass in `attach_marks` that runs for a mark no `GPOS`
+lookup positioned: zero the advance, centre on the base's box, and offset
+vertically by the base's top or bottom plus the height already consumed by
+marks of the same class. The combining class is in `norm_tables.rs`.
+
+**Where.** `gui/font/src/scaled.rs` — `attach_marks`, which today does nothing
+for a mark that no lookup matched; `gui/font/src/mark.rs`, which knows which
+marks those are.
+
+**Resolved 2026-08-14.** `gui/font/src/fallback.rs` implements it, as a
+transcription of `hb-ot-shape-fallback.cc` — see `design-decisions.md` §416
+for the three decisions it took. The sketch above was right about the
+mechanism and wrong about the trigger in two ways, both of which cost a round
+of the sweep to find:
+
+* The trigger is **no `GPOS` table at all**, not "no lookup matched this
+  mark". A face that has a `GPOS` and chose not to position this mark has made
+  a statement, and Candara on this host is exactly that face; HarfBuzz leaves
+  its marks alone and so must we. `Face::has_positioning` carries the
+  distinction.
+* It is gated **per script**. Running it on Devanagari zeroed the virama's
+  advance and centred it, which the sweep caught as 33 *new* misplaced runs.
+  `fallback::positions_marks` excludes the 101 tags whose HarfBuzz shaper sets
+  `fallback_position = false`.
+
+Measured: the `misplaced` bucket over 556 faces × 19 strings fell from **559
+to 98**, and both of the failures quoted above — `c` + cedilla + acute, and
+vowelled Arabic — are gone. Two smaller divergences the implementation
+knowingly leaves behind are filed below as
+`TD-FONT-DOES-NOT-RE-SORT-HEBREW-AND-ARABIC-MARKS` and
+`TD-FONT-GATES-THE-MARK-FALLBACK-ON-THE-CHARACTERS-SCRIPT-NOT-THE-FONTS`.
+
+## TD-FONT-IGNORES-GPOS-SINGLE-AND-CURSIVE-ADJUSTMENTS
+
+**What.** Of `GPOS`'s eight lookup types we apply 2 (pair, in `kern.rs`) and
+4/6 (mark-to-base and mark-to-mark, in `mark.rs`). Type 1, single adjustment,
+and type 3, cursive attachment, are parsed past and ignored, as are 5, 7 and
+8.
+
+**Symptom, measured.** Amiri Bold disagrees with HarfBuzz on plain unvowelled
+`العربية` on 6 faces' worth of strings: our glyph 3 sits at x=794, HarfBuzz's
+at x=877. The face has 30 type-1 lookups and one type-3, and the 83-unit
+difference is a single adjustment applying the same value to the glyph's
+placement and its advance — the standard way an Arabic face tunes one letter's
+fit without touching the pair table. Cursive attachment is what makes a
+joining script's letters sit on a common baseline curve rather than on the
+straight one; without it a face like Amiri that relies on `curs` draws a
+visibly broken join.
+
+**Why it is filed rather than fixed.** Type 1 alone is genuinely small — a
+coverage lookup and a `ValueRecord`, both already parsed by `kern.rs` — but
+doing it alone would leave the sweep's Arabic differences barely changed,
+because the same faces need type 3, and type 3 is a different shape of
+problem: it chains, so an attachment moves every glyph after it and the
+`RightToLeft` lookup flag changes which end of the chain is anchored.
+
+**Proper fix.** A positioning pass structured like the substitution one:
+`feature_lookups` collects the `GPOS` lookups a run's features reach, and each
+is applied in order through the same `Skipper` that `GSUB` uses, with types 1,
+2, 3, 4 and 6 dispatched from one place. That subsumes `kern.rs`'s standalone
+pair walk and `mark.rs`'s standalone mark pass, both of which currently pick
+their own lookups out of the table.
+
+**Where.** `gui/font/src/kern.rs` — the pair walk and its `feature_lookups`;
+`gui/font/src/mark.rs`; `gui/font/src/scaled.rs` — `shape`, where the passes
+are sequenced.
+
+**Fixed**, as the proper fix above describes. `gui/font/src/gpos.rs` is the
+unified pass: `Run` in, one `Adjust` per glyph out, lookups walked in table
+order through the same `Skipper` as `GSUB`, with types 1, 2, 3, 4 and 6
+dispatched from `Adjust::apply`. `kern.rs` keeps only the legacy `kern` table
+(the pass cannot see it); `mark.rs` keeps only its anchor/subtable readers,
+which `gpos.rs` calls. `scaled.rs::shape` now cuts the string into `Segment`s
+once — on tabs and script changes — and feeds the same segments to both
+passes, since after ligation nothing left in the glyph run says where a
+stretch began.
+
+Two things fell out of doing it. `Face::mark_on_base`/`mark_on_mark` are gone
+as public API: mark attachment is not a thing a caller can ask for out of
+lookup order any more, so `tests/host_fonts.rs` sweeps it through
+`ScaledFont::shape` instead. And `recharge_kerns` had to be gated on
+`Face::kerns_outside_gpos()` — see §417 in `design-decisions.md`; charging a
+`GPOS` pair's value to the visually-left glyph applies the font author's own
+right-to-left correction a second time.
+
+Measured on the HarfBuzz sweep (556 host faces x 19 strings): agree
+9526 → 9539, misplaced 98 → 85, reordered 0 throughout. The Arabic
+`العربية` disagreement the entry was filed on went from 14 faces to 1
+(Scheherazade-Regular, which needs the contextual positioning tracked in
+TD-GPOS-HAS-NO-CONTEXTUAL-OR-MARK-TO-LIGATURE-POSITIONING).
+
+## TD-GPOS-HAS-NO-CONTEXTUAL-OR-MARK-TO-LIGATURE-POSITIONING
+
+**What.** `gui/font/src/gpos.rs` dispatches `GPOS` lookup types 1, 2, 3, 4 and
+6. Three types are parsed past and ignored: 5 (mark-to-ligature), 7
+(contextual positioning) and 8 (chained contextual positioning). Device tables
+— the per-ppem correction a `ValueRecord` can point at with the
+`X_PLACEMENT_DEVICE`/`Y_PLACEMENT_DEVICE`/`X_ADVANCE_DEVICE`/`Y_ADVANCE_DEVICE`
+formats — are skipped over for their size but never read.
+
+**Symptom, measured.** Scheherazade-Regular is the one face still disagreeing
+with HarfBuzz on `العربية` after the unified pass landed: our glyph 3 sits at
+x=1280, HarfBuzz's at x=1150. It reaches the adjustment through a type-8
+chained rule, so we never apply it. Type 5 shows up wherever a script both
+ligates and takes marks — an Arabic lam-alef with a vowel sign on it, or a
+Devanagari conjunct — because the mark has to attach to a numbered *component*
+of the ligature glyph rather than to the glyph as a whole; without it the mark
+lands on the ligature's single origin. Device tables only bite at small ppem
+on faces that ship hinted corrections, and are the smallest of the three.
+
+**Why it is filed rather than fixed.** Types 7 and 8 are byte-for-byte the
+same three subtable formats as `GSUB`'s types 5 and 6, which
+`gui/font/src/gsub.rs` already reads (`context_match`, `chain_match`,
+`chain_rule`) — but their *action* differs. A `GSUB` contextual rule
+substitutes at a matched position; a `GPOS` one runs a nested *positioning*
+lookup there. So the matching is shareable and the record application is not,
+and the recursion has to re-enter `gpos.rs`'s per-lookup apply carrying both
+the skipper and a depth budget. That is a refactor of two modules' entry
+points, not an addition to a dispatch table.
+
+**Proper fix.** Lift `gsub.rs`'s rule matching out into a module both layout
+tables use, generic over what happens at a matched position, and give
+`gpos.rs` an apply-one-lookup-by-index entry point the recursion can call
+with the same `MAX_NESTING` budget `gsub.rs` already defines. Type 5 is
+independent and much smaller — it is type 4's reader with a component index
+selecting which anchor array to read — so it can land first. Device tables
+are a `ValueRecord` reader change plus a ppem the pass is not currently told.
+
+**Where.** `gui/font/src/gpos.rs` — `Adjust::apply` and its dispatch;
+`gui/font/src/gsub.rs` — `context_match` / `chain_match` / `chain_rule`, the
+matchers to be shared; `gui/font/src/mark.rs` — the anchor reader type 5
+would reuse.
+
+**Type 5 fixed** (2026-08-14). Mark-to-ligature attachment now works; types 7
+and 8 and device tables remain open, so this entry stays.
+
+The estimate above — "type 4's reader with a component index" — was wrong, and
+wrong in the way that mattered: *nothing in our glyph run recorded which
+component a mark belonged to*, so there was no index to pass. HarfBuzz carries
+it in a per-glyph `lig_props` byte written during ligature substitution, and
+the honest fix was to port that bookkeeping rather than to fall back on
+HarfBuzz's degenerate "use the last component" path for every mark.
+
+So `gui/font/src/gsub.rs` gained a `Lig` on every `SubGlyph` — HarfBuzz's
+`lig_props` with the bit-packing undone — and three pieces of `ligate_input`
+transcribed onto it:
+
+* `stamp_components` writes it. It keeps HarfBuzz's three cases: a base joining
+  with nothing but marks stays a *base* (no id) so further marks can still
+  attach to it; a ligature of nothing but marks keeps its existing id so it
+  still belongs to the ligature its components were on; anything else gets a
+  fresh id and every glyph the flag skipped over is numbered with the component
+  it followed. The walk continues past the last component for as long as the
+  glyphs still belong to it, because a component may itself be a ligature whose
+  marks stand after the whole match.
+* `ligation_allowed` enforces HarfBuzz's `match_input` legality rules, so a
+  mark already inside one ligature cannot be pulled out and joined to a
+  stranger — with the `LIGBASE_MAY_SKIP` exception for when the earlier
+  ligature's base is a glyph this lookup's flag hides.
+* `apply_multiple` numbers the pieces of a decomposition, and
+  `Lig::components_in_ligation` makes every piece after the first worth *zero*
+  components to a later ligature — matching how mark-to-base attaches a mark
+  only to the first piece.
+
+`gui/font/src/mark.rs` was split so the mark side of types 4, 5 and 6 is read
+once (`marked`), with `attachment` and the new `lig_attachment` each supplying
+their own way of finding the anchor to attach to. The one place type 5 differs
+from type 4 in more than naming: a `LigatureArray` holds *offsets* to
+per-ligature tables rather than one grid (ligatures differ in component count),
+and the anchor offsets inside those are taken from the `LigatureAttach`, not
+from the array.
+
+**Measured.** The sweep corpus had no string that could show the bug, so one
+was added: `\u0644\u064e\u0627` (LAM, FATHA, ALEF — the lam and alef ligate
+across the fatha, which must then land over the *first* component). Over 556
+faces, 56 of which ship a type-5 lookup: with the dispatch entry removed,
+agree 10055 / misplaced 125; with it, **agree 10081 / misplaced 99** — 26
+face×string cases fixed and none broken.
+
+**Types 7 and 8 fixed** (2026-08-14). Only device tables remain open, so this
+entry still stays.
+
+The plan above held. `gui/font/src/context.rs` now holds the matching both
+tables share — `context_match`, `chain_match` and everything under them, moved
+out of `gsub.rs` unchanged — and `gpos.rs` grew an `at` entry point the
+recursion re-enters through with the same `MAX_NESTING` budget. The asymmetry
+the entry predicted is real and is the whole difference between the two
+`nested` functions: `gsub::apply_nested` has to track where each matched glyph
+moved to and mark the ones a ligature swallowed as absent, because a
+substitution can grow or shrink the run under a later record's feet;
+`gpos::nested` runs each record against the position the match reported,
+because positioning never changes the run's length. `Positioning` also had to
+start keeping the LookupList offset: a contextual rule names its lookups by
+index into that list, and they may be lookups no feature reaches — which is
+how a face hides a helper.
+
+One thing that was *not* predicted: recursion must not re-test the skipper.
+HarfBuzz's `apply_lookup` calls `dispatch` directly and lets the invoked
+subtable's own coverage decide; a nested lookup is named by index, not found
+by scanning, so the feature mask and the ignore flags have already had their
+say. `gsub::apply_at` had quietly worked this way already and `gpos::at`
+matches it.
+
+**Measured.** Finding a string that reaches these lookups took two tries. The
+first — pointed Hebrew — reaches none: `DavidCLM-Medium.otf`'s 24 type-8
+subtables all require a *meteg* (`U+05BD`, glyph 114) in the lookahead, and
+the corpus had none, so 274k subtable attempts across the host font set
+matched zero times and the dispatch looked dead when it was merely unreached.
+The second, `\u05dc\u05dc\u05b8\u05bd` (LAMED, LAMED QAMATS METEG), is the
+case the rules exist for: a meteg shares the space under a letter with
+whatever vowel is already there, so the face shifts the vowel aside with a
+chained rule keyed on "letter, vowel, meteg". Over the 18 Hebrew faces on this
+host: with the two types in `KINDS`, **18/18 agree with HarfBuzz**; with them
+removed, **18/18 misplaced**. On `DavidCLM-Medium.otf` specifically the meteg
+lands at x=77 and the qamats at x=315, both exactly HarfBuzz's, against x=2 and
+x=240 without.
+
+## TD-FONT-DOES-NOT-RE-SORT-HEBREW-AND-ARABIC-MARKS
+
+**What.** Unicode gives Hebrew points the canonical combining classes 10–26
+and Arabic vowel signs 27–36. Those numbers are an *ordering*, not a place on
+the glyph, and the order they impose is not the order the marks are drawn in.
+HarfBuzz deals with this by permuting them into a private set of "modified
+combining classes" (`hb-unicode.hh`) whose numeric order *is* display order,
+so that its normalizer's canonical sort leaves the marks stacked bottom-to-top
+in the right sequence. `gui/font/src/fallback.rs` implements the
+*recategorization* those classes feed — transposed to match on real Unicode
+classes, which is sound because the permutation is injective within each
+block — but not the re-sorting.
+
+**Symptom.** Two Hebrew points, or two Arabic marks, typed in an order that
+canonical ordering does not already fix, stack in the wrong vertical order on
+a face with no `GPOS`. Both marks are on the right letter and on the right
+side of it; only their order relative to each other is wrong. Not currently
+visible in the sweep, whose Hebrew and Arabic strings are all in an order
+where the two agree.
+
+**Why it is filed rather than fixed.** It is a change to `norm.rs`'s canonical
+ordering pass, not to the fallback: the sort has to run on the modified
+classes for the reordering to happen at all, which means `norm::pieces` would
+need a second class function used only for sorting, and its output would then
+differ from NFC for these scripts. That is a real decision about what
+`norm.rs` promises — see `design-decisions.md` §410, which says it normalizes
+to NFC as a layer that knows nothing about the font — and it wants making
+deliberately rather than as a side-effect of the fallback.
+
+**Proper fix.** Add the modified-class table to `norm_tables.rs`, sort with it
+inside the shaper only, and document that `ScaledFont::shape`'s piece order is
+display order rather than NFC order for Hebrew and Arabic. Then the fallback's
+`attach_class` needs no change at all — it already matches on the real
+classes.
+
+**Where.** `gui/font/src/norm.rs` — the canonical ordering pass;
+`gui/font/src/fallback.rs` — `attach_class`, whose doc records the
+transposition.
+
+**Now visible in the sweep.** The corpus gained pointed Hebrew — `U+05E9
+U+05B8 U+05C1 U+05DC U+05D5 U+05B9 U+05DD` — for the `GPOS` 7/8 work, and it
+is in exactly the order that shows this. On `AGENCYB.TTF` (no `GPOS`, no
+Hebrew, so every glyph is notdef) the qamats and the shin dot come out in
+opposite slots from HarfBuzz's, with the right offsets each: ours places the
+shin dot at visual 4 with `y +1761` and the qamats at 5 with `y -1761`,
+HarfBuzz the reverse, because its sort moved the shin dot ahead of the qamats.
+465 of the sweep's `misplaced` cases are this string. The sweep reports it as
+`misplaced` rather than `reordered` only because the glyphs are all notdef and
+so compare equal — on a face that has the glyphs it is a reordering.
+
+**Fixed** (2026-08-14). `norm::sort_marks` now takes the class function as a
+parameter and runs twice: `nfc` sorts with `combining_class`, and
+`norm::pieces` sorts again with the new `display_class` — HarfBuzz's
+`_hb_modified_combining_class`, a permutation of the fixed-position blocks
+whose numeric order is stacking order. Sweep: `agree` 10917 → 11223,
+`misplaced` 841 → 625, `reordered` 32 → 0, `differ` 998 → 940, and this string
+465 → 249.
+
+The decision the entry was waiting on is recorded as `design-decisions.md`
+§419. It went the way that keeps §410 intact: `nfc()` is still exactly NFC, and
+the second sort lives in `pieces`, the shaper's entry point, which has been
+font-dependent since §410 and promises only "the characters a face should
+actually be asked for". Sorting inside `nfc` — which is what HarfBuzz does,
+since its normalizer is private to the shaper — would have made the name a lie.
+
+Two things the tests found that reading HarfBuzz would not have:
+
+- Class 26 (Hebrew point varika) and 34–36 (sukun, superscript alef,
+  superscript alaph) are **fixed points**, not part of the permutation.
+- The Tibetan block is not a bijection onto its own range: 132 maps to 131,
+  which is legal only because Unicode assigns no character class 131. Stating
+  the claim over the range rather than over the assigned classes fails.
+
+**Still open at 249 for this string, and 249 for the meteg one.** Both are now
+a different disagreement — not the order of the marks but where they are put —
+and both want their own entry once diagnosed.
+
+## TD-FONT-GATES-THE-MARK-FALLBACK-ON-THE-CHARACTERS-SCRIPT-NOT-THE-FONTS
+
+**What.** `fallback::positions_marks` decides whether a run may have its marks
+placed by measurement from the OpenType tag the run's *characters* map to. In
+HarfBuzz the same decision is made from the tag the *font* registers its
+features under: `hb_ot_shaper_categorize` takes `gsub_script`, and sends
+Devanagari to its default shaper — which does run the fallback — when the font
+declares only `DFLT` or `latn`, and Myanmar there too when the font declares
+`mymr` rather than `mym2`.
+
+**Symptom.** A face that carries Devanagari glyphs, has no `GPOS`, and has no
+Devanagari script record in its `GSUB` leaves its Devanagari combining marks
+(anusvara, candrabindu, the Vedic accents) unplaced where HarfBuzz would
+centre them. The same for a Myanmar face tagged `mymr`. No face on this host
+shows it — the sweep's Devanagari divergences are all `GPOS`-path ones on
+faces that do have a `GPOS`.
+
+**Why it is filed rather than fixed.** Following HarfBuzz means asking the
+font which scripts it declares before deciding how to place a mark, which
+couples the fallback to the `GSUB` script list for the sake of a rare
+combination. The coupling is not free: `shape` would have to resolve each
+run's tag against the face's `ScriptList` *before* building glyphs, which is
+work every string would pay for.
+
+**Proper fix.** If it ever matters: `otl.rs` already resolves a script tag
+against a table's `ScriptList` for the substitution pass. Hoist that
+resolution to run once per run alongside `script::runs`, hand the resolved tag
+(or the `DFLT` fallback that was used instead) to `positions_marks`, and let
+it apply HarfBuzz's rule.
+
+**Where.** `gui/font/src/fallback.rs` — `positions_marks` and
+`COMPLEX_SCRIPTS`; `gui/font/src/scaled.rs` — `shape`, where the runs are
+split.
+
+**Fixed** (2026-08-14). It did matter, and on the most ordinary face imaginable:
+`Hack` rendering `हिन्दी`. The proper fix above is what was done, with one
+correction to its premise.
+
+`fallback::shaped_as_default(tags, gsub)` transcribes the arms of
+`hb_ot_shaper_categorize` that a *face* can call off — the Indic nine and
+Myanmar's extra `mymr` arm, plus the ~90-script USE list — and
+`ALWAYS_COMPLEX` records the three that it cannot (Thai, Lao, Khmer reach
+their shapers unconditionally; the asymmetry is history, not design, but it is
+observable). `positions_marks` and `zeroes_mark_advances` each gained a
+`simple` parameter, and `scaled.rs` computes it once per run and feeds all
+three call sites, because whether the Indic shaper runs, whether marks are
+placed by measurement, and whether their advances are zeroed are three fields
+of *one* HarfBuzz shaper struct and must not be allowed to disagree.
+
+*The resolution has to be asked of the ScriptList, not of the selections.* The
+entry above says "`otl.rs` already resolves a script tag against a table's
+`ScriptList`", and it does — but `ByScript` only records scripts that reached a
+lookup this crate can apply, and `ByScript::parse` returns `None` outright when
+no requested feature reaches one. Routing through it left the sweep stuck at
+`misplaced 5`: `Hack` has 16 `GSUB` lookups and registers `DFLT` and `latn`,
+yet neither default language system selects a feature we ask for, so
+`Substitutions` is `None` and the face appeared to name no script at all. So
+`Face` now holds `gsub_scripts` — the raw ScriptList tags, sorted — and
+`otl::chosen_from` walks HarfBuzz's `hb_ot_layout_table_select_script` chain
+over *that*. `None` is `HB_TAG_NONE`, which equals neither `DFLT` nor `latn`,
+so a face with no `GSUB` keeps its complex shaper — which is exactly the face
+`NO_ZERO_WIDTH_MARKS` was measured against.
+
+The same tag answers a second question the Indic shaper was already asking
+badly: `Plan::new`'s `old_spec` (Uniscribe spec vs. the revised one) is
+`chosen.is_none_or(|tag| tag.get(3) != Some(&b'2'))`, read from the face's
+registered tag rather than from the run's preferred one.
+
+Sweep: `misplaced 13 → 0`, the first zero that bucket has ever shown. Tests:
+`fallback::tests::a_face_declaring_no_indic_script_calls_the_indic_shaper_off`,
+`only_myanmar_reads_mymr_as_calling_its_shaper_off`,
+`three_scripts_keep_their_shaper_whatever_the_face_says`,
+`a_face_that_names_no_script_calls_nothing_off`,
+`calling_the_shaper_off_restores_both_halves_of_the_mark_handling`;
+`sfnt::tests::a_latin_only_face_calls_off_the_indic_shaper_even_with_no_usable_lookups`,
+`a_face_naming_an_indic_script_keeps_the_indic_shaper`,
+`a_face_with_no_gsub_keeps_the_indic_shaper`.
+
+**Still open, and unflagged elsewhere.** HarfBuzz's Arabic arm demotes on
+`gsub_script != DFLT` — so a *Syriac* run in a face that registers `syrc` takes
+the Arabic shaper, but one in a face that registers only `latn` takes the
+default shaper and loses `init/medi/fina/isol`. We do not model that, because
+both shapers set `fallback_position = true` and `zero_width_marks =
+BY_GDEF_LATE`, so it changes nothing for either mark question; it is a
+divergence in joining only, and joining is not implemented for Syriac yet.
+
+## TD-FONT-DECIDES-MARK-NESS-FROM-THE-COMBINING-CLASS
+
+**What.** On a face with no `GPOS`, `scaled.rs` settles whether a glyph is a
+combining mark with `synthesize && glyph.klass != 0`, and `klass` is
+`fallback::attach_class(ch)` — a *combining class*, and only stored at all
+when the run's script passed `fallback::positions_marks`. Two separate
+questions are being answered by one field, and both answers are wrong in a
+case the sweep now shows.
+
+HarfBuzz keeps them apart. `_hb_glyph_info_is_mark` comes from `GDEF`, or
+from the character's **general category** when there is no `GDEF`; it drives
+`zero_mark_widths_by_gdef`, which zeroes the advance and shifts the mark back
+over its base. `fallback_position` is a *separate* flag that only decides
+whether `_hb_ot_shape_fallback_mark_position` gets to compute an offset. A
+complex-script shaper turns the second off and leaves the first on.
+
+**Symptom, one.** A complex script on a face that does not cover it keeps a
+full advance per mark, so the text measures far too wide. `AGENCYB.TTF` (no
+`GPOS`, no Thai) on `U+0E17 U+0E35 U+0E48 U+0E19 U+0E35 U+0E48`:
+
+    ours       adv 1024 x6
+    harfbuzz   adv 1024, (x -1024, adv 0), (x -1024, adv 0), adv 1024, ...
+
+Six notdef boxes in a row where HarfBuzz draws three. `positions_marks`
+returns false for `thai`, so `klass` is left at `0`, so the marks are not
+marks. 215 of the sweep's `misplaced` cases are this one string.
+
+**Symptom, two.** Even inside a script the fallback *does* place, a mark whose
+combining class is `0` is not treated as a mark. `U+0E35` THAI SARA II is
+general category `Mn` with `ccc = 0`; HarfBuzz zeroes it, we do not. The
+Thai/Lao patch at the top of `attach_class` invents a position class for
+exactly these characters, which is the same information arriving too late and
+by the wrong route.
+
+**Proper fix.** Give `SubGlyph` a `mark: bool` beside `klass`, set from the
+character's general category (`Mn | Me | Mc`), carried through substitution
+the way `klass` already is — untouched by every lookup, a ligature keeping
+its first component's. Then `marks[i]` reads that field and `klass` goes back
+to meaning only "where the fallback should put it", zeroed by `placeable` as
+now. This needs a general-category table in `norm.rs`; there is a combining
+class table there already to model it on, and the M* ranges are the only part
+of the category data anything here wants.
+
+**Where.** `gui/font/src/scaled.rs` — the `marks` vector (~line 556) and the
+`klass:` initialiser in the piece loop (~line 521); `gui/font/src/gsub.rs` —
+`SubGlyph`; `gui/font/src/fallback.rs` — `attach_class`, whose Thai/Lao
+special case the general category subsumes; `gui/font/src/norm.rs` — where
+the table would go.
+
+**How it was found.** `gui/font/tools/harfbuzz_sweep.py`, after the corpus
+gained Thai and pointed Hebrew for the `GPOS` 7/8 work. Run it and look for
+the Thai string in the `same glyphs in different places` list.
+
+**Fixed** (2026-08-14). `SubGlyph` gained `mark: bool` beside `klass`, set in
+the piece loop from the character's general category and carried through
+substitution untouched, and the `marks` vector now reads it. `klass` went back
+to meaning only "where the fallback should put it". Sweep: agree 10731 →
+10917, misplaced 1027 → 841, the Thai string 215 → 29.
+
+Two things the entry above got wrong, both caught by measuring HarfBuzz rather
+than by reading it.
+
+*The category is `Mn`, not `M*`.* Taking all three of `Mn | Mc | Me` made the
+sweep **worse** — agree 10731 → 10496, misplaced 1027 → 1262, Devanagari alone
+13 → 230 — because `Mc`, the *spacing* combining marks, genuinely occupy width;
+zeroing a matra piles the vowel onto its consonant. `hb_synthesize_glyph_classes`
+takes `Mn` only. Probed directly against `AGENCYB.TTF` (no `GSUB`, `GPOS` or
+`GDEF` at all, so nothing but the synthesized classes can be answering): it
+zeroes U+A9B4 JAVANESE VOWEL SIGN TARUNG's `Mn` neighbours and not it.
+
+*Zeroing is gated per script too, by a different list.* Ten scripts — the nine
+Indic `*2` tags and `khmr` — do not zero mark advances at all, because their
+shapers set `zero_width_marks = NONE`; Thai, Myanmar and USE decline the
+*placement* but still zero. So there are three flags, not two, and
+`fallback::zeroes_mark_advances` is the new one. Without it Devanagari
+regressed on its own.
+
+**And the offset shift.** Zeroing an advance stops the pen but not the drawing:
+the mark is still drawn where the pen arrived, which is the far side of the
+letter. HarfBuzz's `adjust_mark_offsets` subtracts the advance from the offset,
+gated on `!has_gpos_mark && HB_DIRECTION_IS_FORWARD`. `scaled.rs` now does the
+same for a zeroed mark the fallback will not place — `klass == 0`, which is the
+same claim — which is what took Thai from 233 to 29 after the mark-ness change
+alone had left it above its own baseline.
+
+Tests: `norm::tests::a_mark_with_no_combining_class_is_still_a_mark`,
+`a_spacing_combining_mark_is_not_a_mark_here`,
+`ordinary_letters_and_the_table_edges_are_not_marks`,
+`fallback::tests::declining_to_place_a_mark_is_not_declining_to_zero_it`,
+`the_scripts_that_keep_their_mark_advances_are_sorted`.
+
+`fallback::attach_class`'s Thai/Lao special case was **kept**, not deleted as
+proposed — but only because deleting it is a different entry's job. It turns
+out to be unreachable rather than wrong: `attach_class` is called only for a
+run whose script passed `positions_marks`, and `thai` and `lao ` are both in
+`COMPLEX_SCRIPTS`. See TD-FONT-FALLBACK-CLASSES-SCRIPTS-IT-NEVER-PLACES.
+
+## TD-FONT-FALLBACK-CLASSES-SCRIPTS-IT-NEVER-PLACES
+
+**What.** `fallback::attach_class` carries position classes for scripts
+`fallback::positions_marks` always refuses, so those arms can never run.
+`scaled.rs` calls `attach_class` only when the run's script is *not* in
+`COMPLEX_SCRIPTS`; `thai`, `lao ` and `tibt` are all in it. That makes dead:
+
+- the whole `if cp & !0xFF == 0x0E00` block (Thai and Lao vowel signs, and the
+  phinthu), and
+- the `103 | 107` (Thai sara u/uu and mai), `118 | 122` (Lao) and `129 | 132`
+  (Tibetan) arms of the `match klass` below it.
+
+**Why it is not simply a bug.** The mappings are *correct*; they are just
+unreachable, and they became unreachable when `COMPLEX_SCRIPTS` grew to the
+full list of scripts with a non-default HarfBuzz shaper. HarfBuzz agrees that
+these marks should not be fallback-placed — its Thai, Lao (via the default
+shaper's Thai path), Myanmar and Tibetan/USE shapers all set
+`fallback_position = false` — so deleting the arms changes no output.
+
+**Proper fix.** Delete them, and say in `attach_class`'s doc that it is only
+ever asked about a script the fallback places, so an arm for one it does not is
+a claim that can never be checked. Not merged into the mark-ness fix because
+that change had to be measurable against the sweep and this one is provably a
+no-op; a commit that mixes the two cannot be bisected.
+
+**Risk of not doing it.** Low, but it is the kind of debt that misleads: the
+next reader of `attach_class` will believe Thai vowels are placed here, and
+will debug the wrong function when they are not.
+
+**Where.** `gui/font/src/fallback.rs`, `attach_class` (~line 244) and
+`COMPLEX_SCRIPTS` (~line 115).
+
+**Fixed** (2026-08-14). Deleted, and the doc comment now says *why* there is no
+Thai arm rather than leaving a reader to notice there isn't one. The sweep is
+byte-for-byte unchanged across 556 faces x 23 strings — 10917 / 32 / 841 / 998
+before and after — which is the whole claim of the entry, measured.
+
+The test that covered the deleted arms was replaced rather than dropped:
+`the_scripts_the_class_map_omits_are_scripts_it_is_never_asked_about` asserts
+`positions_marks` is false for `thai`, `lao ` and `tibt`, so that taking one of
+them out of `COMPLEX_SCRIPTS` fails here instead of silently sending marks the
+map has no classes for through it — U+0E34 SARA I would arrive as class 0 and
+be taken for a base.
+
+## TD-FONT-GATES-THE-MARK-FALLBACK-ON-THE-FACE-NOT-THE-RUN
+
+**What.** `ScaledFont::shape` decides whether marks have to be placed by
+measurement with one boolean for the whole call:
+
+```rust
+let synthesize = !self.face.has_positioning();
+```
+
+That asks a question about the *file* — is there a `GPOS` table — when the
+question that decides the answer is about the *run*: does this run's script
+reach any of that `GPOS`. A face can carry a full `GPOS` for Arabic and Latin
+and nothing at all for Hebrew, and today every Hebrew mark in it is left
+exactly where `hmtx` put it: full width, no displacement, stacked nowhere.
+
+**The evidence.** Amiri-Bold shaping the corpus's pointed-Hebrew string
+`U+05E9 U+05B8 U+05C1 U+05DC U+05D5 U+05B9 U+05DD` (`fontTools` says its `GPOS`
+and `GSUB` ScriptLists are `DFLT`, `arab`, `latn` — no `hebr`; every one of the
+seven characters maps to `.notdef`):
+
+```
+ours      [(364,0,0), (364,0,0), (364,0,0), (364,0,0), (364,0,0), (364,0,0), (364,0,0)]
+harfbuzz  [(364,0,0), (0,-33,728), (364,0,0), (364,0,0), (0,16,-728), (0,66,728), (364,0,0)]
+```
+
+as `advance;dx;dy`. Our glyph order already matches HarfBuzz's exactly — that
+was TD-FONT-DOES-NOT-RE-SORT-HEBREW-AND-ARABIC-MARKS, fixed. What is left is
+that HarfBuzz zeroes and places the three points and we do neither, on a face
+whose `GPOS` cannot possibly have told it where they go.
+
+**Why HarfBuzz does that, exactly.** `hb_ot_shape_plan_t::init0` computes
+
+```c
+bool disable_gpos = plan.shaper->gpos_tag &&
+                    plan.shaper->gpos_tag != plan.map.chosen_script[1];
+```
+
+and only the **Hebrew** shaper sets a `gpos_tag` (`HB_TAG('h','e','b','r')`,
+added for harfbuzz#347). So a Hebrew run in a face whose `GPOS` ScriptList does
+not name `hebr` gets `apply_gpos = false`, hence
+`fallback_mark_positioning = true`, hence `_hb_ot_shape_fallback_mark_position`
+— which classifies marks by Unicode general category and so works even on
+`.notdef`, with no `GDEF` involved.
+
+Measured on this host rather than taken from the source. Shaping one string per
+script through `uharfbuzz` in Consolas — `GPOS` ScriptList `cyrl`, `grek`,
+`latn`, with no `DFLT` — HarfBuzz applies the fallback to **Hebrew alone**:
+
+| script | consola.ttf output | fallback ran |
+|---|---|---|
+| `hebr` | `(0,0,-1435)`, `(0,88,1435)`, `(0,1126,0,0)` | yes |
+| `arab`, `deva`, `mymr`, `khmr`, `mong`, `syrc`, `thaa`, `ethi`, `thai` | every glyph `(1126,0,0)` | no |
+
+The negative half is the load-bearing half: it says the rule is a property of
+the Hebrew *shaper*, not a general "no lookups for this script" rule. (Arabic
+in Consolas reaches `latn` through HarfBuzz's last-ditch fallback and so keeps
+`apply_gpos`.)
+
+**Proper fix.** Make `synthesize` a per-run question and thread it through the
+three places that consume it:
+
+1. a predicate — the face has a `GPOS` *and*, if the run's script demands its
+   own script table, the `GPOS` ScriptList names it;
+2. `position_segments` skips a segment the predicate refuses, so a Hebrew
+   segment in Amiri is not positioned by Arabic's lookups;
+3. `SubGlyph::klass`/`::mark`, the `x_offset -= x_advance` shift, and the
+   `synthesize_marks` call all read the per-run answer instead of the per-face
+   one.
+
+The per-glyph answer after substitution comes from the `Segment`s, not from the
+pieces: a run that ligates is shorter than the pieces it came from.
+
+**Size.** ~498 of the 625 `misplaced` cases the sweep still reports — the two
+Hebrew corpus strings at 249 each.
+
+**Where.** `gui/font/src/scaled.rs:492` (the gate), `:530` and `:541` (the two
+`SubGlyph` fields), `:644` (the shift), `:723` (the `synthesize_marks` call),
+`:867` (the `GPOS` early-out).
+
+**Related, not fixed here.** HarfBuzz also falls back to the legacy `kern`
+table when it disables `GPOS` this way (`plan.apply_kern` when
+`!has_gpos_kern || !plan.apply_gpos`). Our `Face::kerns_outside_gpos` is a
+per-face answer too, so a Hebrew run in a `GPOS`-kerned face that also ships a
+`kern` table stays unkerned where HarfBuzz kerns it. Narrow — it needs a face
+with both tables, `hebr` in neither's ScriptList, and Hebrew kern pairs in the
+legacy one — and left open deliberately rather than overlooked.
+
+**Fixed** (2026-08-14). `ScaledFont::applies_gpos` is the new gate and it takes
+a script, not a face: the face must carry a `GPOS` *and* the run's script must
+accept it, where `fallback::demands_own_gpos_script` is the whole of the second
+condition and Hebrew is the whole of that. `position_segments` skips a segment
+it refuses, so a Hebrew segment in Amiri is no longer offered Arabic's lookups;
+the piece loop gates `SubGlyph::klass` and `::mark` on the per-run answer; and
+the per-glyph answer the offset shift and `synthesize_marks` need is rebuilt
+from the `Segment`s after substitution, since a stretch that ligated is shorter
+than the pieces it came from.
+
+Measured over the host's 556 faces x 23 strings, before and after:
+
+| | agree | reordered | misplaced | differ |
+|---|---|---|---|---|
+| before | 11223 | 0 | 625 | 940 |
+| after | **11709** | 0 | **139** | 940 |
+
+The two pointed-Hebrew strings went 249 -> 6 each; **every other string in the
+report is byte-for-byte identical**, which is the claim that matters — the gate
+was widened for Hebrew and for nothing else, and the baseline was re-measured
+from a stash of this very change rather than quoted from memory.
+
+Three tests, in the three places the claim lives:
+`fallback::only_hebrew_demands_a_gpos_registered_under_its_own_name` (the
+negative half is the load-bearing half: another script here would refuse the
+`DFLT` `GPOS` of most faces on the host),
+`sfnt::a_face_names_the_gpos_scripts_its_script_list_registers` (with the tags
+deliberately unsorted in the file, since the lookup binary-searches), and
+`scaled::a_hebrew_run_refuses_a_gpos_written_for_another_script` together with
+`a_latin_run_takes_whatever_gpos_the_face_offers` — the second exists so the
+first cannot be passed by a gate that simply always falls back. The fixture
+grew `build_test_font_with_gpos_scripts`, a `GPOS` with a real ScriptList and
+an empty FeatureList and LookupList, so a test cannot pass by positioning
+something.
+
+**Residual, not this entry.** Six faces per Hebrew string still disagree, and
+it is a different disagreement: LATINWD.TTF puts our point 68 units to the
+right of HarfBuzz's at the same height (`(682, 1493)` vs `(614, 1493)`), which
+is the fallback's *horizontal* centring rather than whether it ran. Filed
+separately once diagnosed — it was not the centring at all, see
+`TD-FONT-DRAWS-A-GLYPH-AT-ITS-STORED-XMIN-NOT-ITS-STATED-BEARING` below.
+
+## TD-FONT-DRAWS-A-GLYPH-AT-ITS-STORED-XMIN-NOT-ITS-STATED-BEARING
+
+*Filed and fixed 2026-08-14 (lane C).*
+
+`Face::outline` returned a `glyf` glyph's points exactly as stored, and
+`Face::glyph_bbox` returned the glyph header's `xMin`/`xMax` exactly as
+stored. Both are wrong for a glyph whose header disagrees with `hmtx`.
+
+The spec says a glyph's `xMin` and its `hmtx` left side bearing are the same
+number, and in most fonts, for most glyphs, they are — which is why this went
+unnoticed. Where they disagree, every real rasterizer believes `hmtx` and
+moves the outline. FreeType computes `pp1.x = bbox.xMin - left_bearing` and
+then translates the loaded points by `-pp1.x` (`TT_Process_Simple_Glyph`);
+HarfBuzz reports `x_bearing = lsb` with the header's width, under a comment in
+`hb-ot-glyf-table.hh` calling it "undocumented rasterizer behavior". We
+believed the header and so drew such a glyph at the wrong place on the line.
+
+Windows ships one: `LATINWD.TTF` stores `.notdef` at `xMin = 0, xMax = 546`
+with an advance of 682 and a left side bearing of **68** — the box belongs
+centred in its cell, 68 units of air on each side, and we drew it flush
+against the pen.
+
+Found through the mark fallback rather than through rendering, because that is
+what the HarfBuzz sweep exercises: `fallback::place` measures a mark's ink box
+against its base's, so a base and a mark both mis-boxed by 68 units put every
+combining mark on a `.notdef` base 68 units too far right. On
+`שָׁלוֹם` in `LATINWD.TTF` the three
+marks came out at `+136 / +68 / 0` where HarfBuzz has `+68 / 0 / -68` — a
+uniform `+68`, which is what identified the bearing as the culprit rather than
+the centring arithmetic. Substituting `mark.x_bearing = 68` into `place`'s
+three arms reproduces HarfBuzz's three numbers exactly.
+
+**Fixed.** `Face::glyf_shift(gid)` returns `lsb - xMin` in font units — zero
+when the two agree, when the glyph has no outline, and when `hmtx` cannot
+answer, since a face with a damaged `hmtx` should still draw. `Face::outline`
+applies it through the new `Outline::translate_x` after parsing (once, to the
+finished top-level glyph, composites included — the same place FreeType
+applies it), and `Face::glyph_bbox` adds it to `x_min` and `x_max`, which
+leaves the width alone. CFF is untouched: a charstring's points are already
+positioned at the origin and its `hmtx` bearing is derived from them, so
+`glyph_bbox` keeps measuring the path.
+
+Sweep: `agree` 11709 -> 11724, `misplaced` 139 -> 124, `differ` unchanged at
+940. The two Hebrew corpus strings now match HarfBuzz on every face that
+shapes them. Test
+`sfnt::an_outline_lands_on_the_bearing_hmtx_states_not_its_stored_x_min`,
+which needed the fixture to become honest first: glyph 3's trailing `hmtx`
+bearing had been an arbitrary 25 against a stored `xMin` of 600 (it existed
+only to prove the bare-bearing array was read), so it is now `TRUE_LSB_3` =
+600 and `build_test_font_with_trailing_lsb` is how a test disagrees with it
+deliberately.
+
+## TD-FONT-ZEROES-A-MARKS-ADVANCE-ONLY-WHEN-THE-FALLBACK-RUNS
+
+Filed 2026-08-14, lane C. Fixed the same day.
+
+A combining mark takes no room on the line. We zeroed its advance from
+exactly one place -- the measuring fallback in `scaled.rs`, whose gate was
+`synth && zeroed && !tab && norm::is_mark(ch)`, i.e. "we are synthesising
+mark positions ourselves, and this run's script is not one of the ten that
+keep mark advances". A face that has a `GPOS` therefore never reached the
+zeroing at all, and any mark that `GPOS` did not itself move was charged a
+full advance.
+
+HarfBuzz zeroes a mark's advance in **two independent passes**, on two
+different grounds, and a mark only needs to be caught by one of them:
+
+1. `zero_mark_widths_by_gdef` (`hb-ot-shape.cc`), gated on the shaper's
+   `zero_width_marks` enum (`NONE` / `BY_GDEF_EARLY` / `BY_GDEF_LATE`; the
+   default shaper is `BY_GDEF_LATE`). It reads `_hb_glyph_info_is_mark`,
+   i.e. the *glyph props*, which come from `GDEF`'s `GlyphClassDef` -- or,
+   when the face has no glyph classes, from `hb_synthesize_glyph_classes`,
+   which calls a general-category `Mn` that is not default-ignorable a
+   MARK. **This pass runs whether or not `GPOS` applies.**
+2. `_hb_ot_shape_fallback_mark_position` -> `position_cluster` ->
+   `zero_mark_advances`, which reads the *character's* general category
+   (`== HB_UNICODE_GENERAL_CATEGORY_NON_SPACING_MARK`) and runs only when
+   the fallback positioner does, i.e. `!apply_gpos && shaper->fallback_position`.
+
+Ours modelled only the second. The witness is `DejaVuMathTeXGyre.ttf`,
+which has `GSUB` and `GPOS` but no `GDEF` whatsoever: on
+`ที่นี่` HarfBuzz returns advances
+`[364, 0, 0, 364, 0, 0]` -- it synthesises classes, finds the four Thai
+`Mn` characters, and zeroes them even though they all draw as `.notdef` --
+while we returned six full 364-unit boxes. 29 faces on that string.
+
+**Fixed.** `MarkPositioning::classifies()` reports whether the face's
+`GDEF` classifies glyphs at all (`self.class_def.is_some()`), surfaced as
+`Face::classifies_glyphs()`; `scaled.rs` hoists
+`let by_category = !self.face.classifies_glyphs();` out of the piece loop,
+which is HarfBuzz's `fallback_glyph_classes`, exactly
+`!hb_ot_layout_has_glyph_classes(face)`. The `SubGlyph.mark` gate then
+takes the **union** of the two grounds:
+
+```rust
+mark: !tab
+    && norm::is_mark(ch)
+    && ((synth && placeable) || (by_category && zeroed)),
+```
+
+`synth && placeable` is pass 2 -- it runs exactly when the fallback runs.
+`by_category && zeroed` is pass 1 restricted to the faces where we can
+stand in for `GDEF`, and switched off for the ten scripts of
+`fallback::zeroes_mark_advances`. Neither is gated on the combining class,
+which is an ordering, not a width, and leaves plenty of marks at 0.
+
+Taking the union matters: replacing pass 2 with pass 1 rather than unioning
+them passed all 383 unit tests and clippy while regressing the sweep from
+`agree` 11724 to 11240 and `misplaced` 124 to 608 -- 253 faces broke on
+each Hebrew string, because a face *with* a `GDEF` that declines to
+position its marks still needs the fallback's zeroing.
+
+Sweep: `agree` 11724 -> 11777, `misplaced` 124 -> 71, `differ` unchanged at
+940. Test
+`scaled::a_face_that_classifies_its_glyphs_decides_which_of_them_take_room`,
+which needed a fixture that can carry a `GDEF` and a `GPOS` at once:
+`build_test_font_with_layout(scripts, classes)` is now the general form and
+`build_test_font_with_gpos_scripts` / `build_test_font_with_gdef_classes`
+are its two one-sided callers.
+
+**Still open.** `hb_synthesize_glyph_classes` excludes default-ignorables
+from MARK (U+034F CGJ, U+180B-180D, U+FE00-FE0F, U+E0100+); our
+`by_category` arm does not, so a variation selector on a `GDEF`-less face
+is zeroed where HarfBuzz would leave it. It draws nothing either way, so
+the only observable difference is the advance, and no corpus string
+exercises it -- deferred rather than guessed at.
+
+## TD-FONT-DECIDES-LEGACY-KERNING-PER-FACE-NOT-PER-RUN
+
+Filed 2026-08-14, lane C. Fixed the same day. Closes the residual left open
+by `TD-FONT-GATES-THE-MARK-FALLBACK-ON-THE-FACE-NOT-THE-RUN`
+("legacy-`kern` fallback when `GPOS` is disabled per run").
+
+A face may carry kerning in `GPOS`'s `kern` feature, in the legacy `kern`
+table, or in both. When it carries both, `GPOS` wins -- the positioning
+pass has already applied those lookups in order and in the company of every
+other lookup, and charging them a second time would double every kern. We
+made that call **once per face**: `Kerning::parse` kept whichever source won
+and discarded the other, and the shaper asked `Face::kerns_outside_gpos()`,
+which is `true` only when `GPOS` carries no `kern` feature *anywhere in the
+table*.
+
+That is the wrong granularity. `GPOS` files its features under particular
+scripts, so "does `GPOS` kern this text" is a question about the **run**.
+`LEELAWAD.TTF` (Leelawadee) is the witness: its `GPOS` ScriptList is
+`['thai']` and nothing else, its FeatureList is `kern`/`mark`/`mkmk`, and it
+also ships a legacy `kern` table with 1422 pairs. A Latin run in that face
+therefore reaches no `GPOS` feature at all -- the fallback chain tries
+`latn`, `DFLT`, `dflt` and finds none of them -- while our face-wide test
+saw the `thai` `kern` feature, concluded `GPOS` kerns this face, and left
+the legacy table unread. Every Latin pair in Leelawadee went unkerned.
+
+HarfBuzz asks per plan, and the plan has a script (`hb-ot-shape.cc`):
+
+```c
+  if (!apply_kerx && (!has_gpos_kern || !apply_gpos))
+  {
+    if (hb_aat_layout_has_positioning (face)) apply_kerx = true;
+    else if (hb_ot_layout_has_kerning (face)) apply_kern = true;
+  }
+```
+
+`has_gpos_kern` is `map.get_feature_index (1, HB_TAG('k','e','r','n'))`,
+looked up in the **selected** script. On `ete` in Leelawadee it comes out
+false, so `hb_kern_machine_t` runs the legacy table: pair `(t, eacute)` is
+-16, split `kern1 = kern >> 1 = -8` onto the left glyph's advance and
+`kern2 = kern - kern1 = -8` onto both the right glyph's advance and its
+x-offset. Our whole-kern-on-the-left distribution lands every glyph's ink in
+the same place and totals the same width, so the sweep's `places` agree; it
+was the missing -16 that showed.
+
+**Fixed.**
+
+* `Kerning` keeps both sources side by side (`gpos: Vec<Group>`,
+  `legacy: Vec<usize>`) instead of one and a `Kind` discriminant. `pair` --
+  the pair-at-a-time public API, which has no run behind it -- still prefers
+  `GPOS` face-wide, so `Face::kern`/`kern_across` are unchanged.
+  `legacy_pair` is the new run-aware reader.
+* `Positioning::kerns(script)` answers HarfBuzz's `has_gpos_kern`, through
+  the same `ByScript::for_script` fallback chain the lookups themselves use,
+  by testing the `kern` bit of the mask `for_script` already returns.
+* `Face::has_legacy_kern()` and `Face::gpos_kerns(script)` are the two halves
+  the shaper composes; `Face::legacy_kern_across` reads the legacy table.
+* `scaled.rs` fills a per-glyph `legacy_at` from the segments, exactly as it
+  already fills `synth_at`: a segment kerns from the legacy table when the
+  face has one and either the positioning pass skipped the segment outright
+  or the segment's script reaches no `GPOS` `kern`. So the Latin and Thai
+  halves of one mixed line can differ, which is the point.
+
+Sweep: `agree` 11777 -> 11806, `misplaced` 71 -> 42. `probe.py` on
+`LEELAWAD.TTF` with `ete` now reports "no difference". Tests
+`gpos::a_kern_feature_belongs_only_to_the_scripts_that_name_it` (which
+needed `gpos_table_for`, the script/feature-parameterised form of the test
+table builder) and `kern::a_face_with_both_keeps_both`.
+
+**Still open.** HarfBuzz's `hb_kern_machine_t` sets
+`OT::LookupFlag::IgnoreMarks` on its context, so the legacy table kerns `A`
+and `V` across an intervening accent. Ours treats the legacy table as
+flagless and so refuses any pair with anything between it -- which is the
+historically correct reading (the engines that used the table kerned
+strictly adjacent glyphs) but is not what HarfBuzz does. No corpus string
+puts a mark inside a legacy-kerned pair, so it is not currently visible in
+the sweep. Changing it is a separate, separately-measurable step.
+
+## TD-FONT-FALLS-BACK-PAST-A-SCRIPT-THE-FACE-REGISTERS
+
+**Fixed.** Script selection and language-system selection are two separate
+steps in OpenType, and only the first one falls back. We ran them as one: a
+script table whose DefaultLangSys offset was zero was treated as *not found*,
+and the fallback chain read on to `DFLT`, handing the run every feature the
+face filed under the default script.
+
+`NotoSansLisu-Bold.ttf` is the witness. Its `GPOS` ScriptList registers
+`DFLT`, `latn` and `lisu`; `latn` has **no DefaultLangSys at all** — its
+features are filed under the language systems `MOL ` and `ROM ` alone — while
+`DFLT` names `kern`, `mark` and `mkmk`. HarfBuzz picks `latn` for a Latin run
+(`hb_ot_layout_table_select_script` stops at the first *registered* tag,
+whatever that script then contains), then asks it for the default language
+system and gets the null offset, which resolves to `Null(LangSys)` with a
+feature count of zero. So HarfBuzz shapes this face's Latin text with no
+`GPOS` feature whatsoever — and, because `apply_gpos` is a property of the
+*face* rather than of the plan's script, it does not run the mark fallback
+either. `c` + U+0327 + U+0301 comes out as `ccedilla` + `acutecomb` with the
+mark at offset zero. We ran the same face's MarkBasePos lookup 1 and placed
+the accent at x=31 — arithmetically right for the anchors (base 287, mark
+-258, advance 514), and wrong because the font never asked for it.
+
+The fix is in three places in `gui/font/src/otl.rs`:
+
+- `select` returns at the first script tag the ScriptList *has*, with
+  `LangSys::lang_sys` an `Option` that is `None` when the DefaultLangSys
+  offset is zero. `lookup_indices` then reads a feature count of zero.
+- `lookup_indices` no longer collapses an empty result to `None`. `None` now
+  means "no such script", which is the only thing the caller may treat as a
+  reason to keep looking.
+- `ByScript::parse` records a script even when it selects no lookups, and
+  returns `None` on an empty *lookup* list rather than an empty *script*
+  list. The empty entry is what stops `for_script`'s own fallback chain at a
+  registered-but-empty script.
+
+The last of the three matters as much as the first: `for_script` walks the
+same chain a second time at shaping time, so leaving `latn` out of the map
+would have let the run fall through to `DFLT` again after `select` had
+correctly refused it.
+
+Covered by `a_registered_script_with_no_features_does_not_fall_back_to_dflt`
+in `gpos.rs`. The HarfBuzz sweep goes `agree` 11806 -> 11820, `misplaced`
+42 -> 28.
+
+**Still open.** HarfBuzz's script chain has a fourth entry ours does not:
+after `DFLT` and `dflt` it tries `latn`, on the grounds that old fonts filed
+everything there. Reached only by a run whose script the face registers under
+none of the first three, so it is a narrower case than this one, and
+separately measurable.
+
+## TD-GPOS-ASKS-ONLY-FOR-POSITIONING-SOUNDING-FEATURES
+
+**Fixed.** `gpos.rs` asked the face for seven feature tags — `abvm`, `blwm`,
+`curs`, `dist`, `kern`, `mark`, `mkmk` — on the reasoning that those are the
+positioning features. They are the positioning-*sounding* features, which is
+not the same thing. HarfBuzz builds **one** `hb_ot_map_t` from its common and
+horizontal feature lists and compiles it against both `GSUB` and `GPOS`, so
+every tag it turns on may reach a positioning lookup: there is nothing in the
+format that stops a font filing a `PairPos` under `calt` or a `MarkBasePos`
+under `ccmp`, and fonts do exactly that.
+
+`Monoid-Italic.ttf` is the witness. Its `GPOS` has one feature, `calt`,
+reaching one chained-context lookup with 25 subtables that invoke 25 SinglePos
+lookups — the whole italic side-bearing correction, the thing that keeps `ic`
+from colliding in a monospaced italic. Asking only for the seven tags meant we
+read none of it, so `The quick brown fox` put the `c` of `quick` 64 units to
+the right of where HarfBuzz puts it.
+
+`FEATURES` is now HarfBuzz's unconditional set minus the vertical tags:
+`abvm blwm calt ccmp clig curs dist kern liga locl mark mkmk rclt rlig`.
+`KERN_FEATURE` moves from 4 to 7 with the reordering; the existing
+`the_kern_bit_names_the_kern_feature` is what keeps that honest. Masks are
+otherwise unused in `GPOS` — a positioning feature is gated by its own glyph
+coverage, so unlike `GSUB` there is no per-glyph eligibility to enforce.
+
+Covered by `a_substitution_tagged_feature_still_reaches_positioning_lookups`.
+The HarfBuzz sweep goes `agree` 11820 -> 11826, `misplaced` 28 -> 22.
+
+**Still open.** The set is still missing HarfBuzz's `rvrn`, which only matters
+for variable fonts, and the shaper-specific tags (`init`/`medi`/`fina` for
+Arabic, the Indic reordering set) — those need the per-glyph masks `GSUB`
+already has, and no installed face was observed to file a positioning lookup
+under one.
+
+**Mirrored in `GSUB`.** The same argument runs the other way — nothing stops a
+face filing a substitution under `mark` or `kern` — so `gsub.rs`'s `FEATURES`
+gained the same seven tags and the two lists are now the same set. `ALWAYS`
+widens from 7 bits to 14 and the four positional bits move up with it;
+`the_masks_match_the_feature_list` is what checks that. No face in the sweep
+corpus exercises it (`agree` and `misplaced` are unchanged at 11826/22), so
+this half is correctness by symmetry rather than a measured fix.
+
+## TD-FONT-SCRIPT-FALLBACK-STOPS-BEFORE-LATIN
+
+**Fixed.** Our script fallback chain was the run's script, its older OpenType
+spelling, `DFLT`, `dflt`. HarfBuzz's has a fifth entry —
+`hb_ot_layout_table_select_script` tries `latn` last, with the comment "some
+old fonts put their features there even though they're really trying to
+support Thai, for example". A face that registers no default script at all was
+therefore shaped with no features by us and with `latn`'s features by
+HarfBuzz.
+
+`Gabriola.ttf` is the witness: its `GPOS` ScriptList is `cyrl`, `grek`, `latn`
+and no `DFLT`. `123 456` is all digits and a space, so the run has no script
+of its own and starts the chain at `DFLT` — which the face does not have. We
+reached no `kern` feature and left `456` unkerned; HarfBuzz reached `latn`'s
+and pulled the pairs in by 40 and 60 units.
+
+`fallback_chain` in `otl.rs` now ends with `latn`. Both walks that use it —
+`select`, at parse time, and `ByScript::for_script`, at shaping time — pick it
+up together, which is the point of their sharing the function.
+
+`a_script_the_face_does_not_register_gets_nothing` in `gsub.rs` was asserting
+the old behaviour on a face that registers `arab` and `latn`; it is now
+`a_script_the_face_does_not_register_falls_back_to_latin_and_then_nothing` and
+checks both halves — the `latn`-registering face answers a Hebrew run, and an
+`arab`-only face still says nothing. The HarfBuzz sweep goes `agree`
+11826 -> 11828, `misplaced` 22 -> 20.
+
+
+## TD-FONT-BINARY-SEARCH-PROBES-IN-A-DIFFERENT-ORDER-FROM-EVERY-OTHER-ENGINE
+
+**Fixed.** `gui/font/src/otl.rs`'s shared `binary_search` walked a half-open
+interval `[lo, hi)` with `mid = lo + (hi - lo) / 2`. C's `bsearch`, and
+HarfBuzz's `hb_bsearch_impl` after it, walk the closed interval `[lo, hi]`
+with `mid = (lo + hi) / 2`. On a sorted array the two agree on every query, so
+for years the difference was invisible.
+
+Fonts are not always sorted. `ELEPHNT.TTF` ships a legacy `kern` table whose
+624 format-0 pairs are ordered by the *second* glyph alone — the spec requires
+them ordered by the two glyphs taken together as one 32-bit key, and 290 of the
+623 adjacent pairs are inversions under that ordering. A binary search over
+such an array is not wrong so much as arbitrary: it finds whatever its probe
+sequence happens to land on. Both loops find exactly 13 of the 624 pairs, and
+the 13 are disjoint sets, because the first probe is index 311 for the closed
+interval and 312 for the half-open one and the descents never meet again.
+
+The witness was `office fluffy waffle` at 512 units/em: HarfBuzz put the `a` of
+"waffle" 10 units left of where we did, because `(w, a) = -10` sits at index
+301, which the closed descent reaches and the half-open one does not. The
+`(f, f) = -23` pair at index 333 was found by *both*, which is what made the
+bug look like a missing special case rather than a missing pair — the legacy
+kern path was plainly working, just not for that one pair.
+
+`binary_search` now uses the closed interval, and three tests pin it: an
+exhaustive correctness sweep over every size and key up to 64, a test that
+watches where the first probe lands for counts 1/2/3/624/625, and one that
+searches a deliberately half-sorted array and asserts only the single record a
+descent from the midpoint can name is found.
+
+Agreeing with every other engine on a malformed font is worth more than the
+tidier arithmetic. There is no "correct" answer to a binary search over an
+unsorted array, so the only defensible choice is the one that makes our text
+measure the same as the same text in a browser. Sweep: `agree` 11828 -> 11829,
+`misplaced` 20 -> 19.
+
+**Not fixed: detecting the unsortedness and searching linearly.** That would
+apply 611 more of `ELEPHNT`'s pairs than HarfBuzz does and put us alone among
+engines. The font was never tested with those pairs applied, so "the
+designer's intent" is not a thing the table can be asked about.
+
+## TD-FONT-HAS-A-HANGUL-SHAPER-NOTHING-CALLS — ✅ FIXED 2026-08-15
+
+**What.** `gui/font/src/hangul.rs` is a complete, tested transcription of
+HarfBuzz's `preprocess_text_hangul` — 673 lines, 19 tests, all passing — that is
+**not declared in `lib.rs`** and therefore compiles nowhere and changes no
+output. It was parked mid-task on an explicit halt, at the point where it worked
+in isolation but was not yet connected.
+
+**Why it is parked rather than either finished or deleted.** The connection is
+all-or-nothing, and the half of it that was written first is a regression on its
+own. Wiring the shaper means telling `norm::pieces` to stop normalizing Hangul —
+HarfBuzz's Hangul shaper sets `HB_OT_SHAPE_NORMALIZATION_MODE_NONE` precisely
+because composing first destroys the distinction the shaper reads. But `pieces`
+composing `<L,V,T>` to a syllable is currently the *only* thing that makes
+Korean render at all on the ordinary Korean text font, which ships the 11,172
+precomposed syllables and no jamo. Exempt Hangul from normalization without the
+shaper in place and that font draws three missing-glyph boxes where it used to
+draw one correct syllable. So the `norm.rs` half was reverted and the module
+kept: a tested, inert file loses nothing, whereas a half-wired one is worse than
+neither.
+
+**The four edits that connect it**, in the order they have to happen:
+
+1. `norm.rs` — thread a private `enum Hangul { Normalize, LeaveAlone }` through
+   `decompose_once`, `compose_pair`, `decompose_into` and `compose`; split `nfc`
+   into `nfc` (which passes `Normalize`, because NFC is NFC and a question about
+   *text* must get that answer) and a private `normalize(text, hangul)`. `pieces`
+   then calls `normalize(text, Hangul::LeaveAlone)`, and `split_undrawable` calls
+   `decompose_once(ch, Hangul::LeaveAlone)` — the latter because a syllable
+   `hangul::preprocess` declined to split has been declined on grounds
+   `split_undrawable` cannot see, namely that the face has no jamo either. Three
+   call sites in `norm.rs`'s own tests need the new argument.
+2. `gsub.rs` — add `b"ljmo"`, `b"vjmo"`, `b"tjmo"` to `FEATURES` with `LJMO`,
+   `VJMO`, `TJMO` bit constants, and a `SubGlyph::jamo(gid, cluster,
+   Option<Jamo>)` constructor that ORs the one jamo bit and **clears `CALT`**.
+   Clearing `calt` is not an optimization: Noto Sans CJK and Source Han Sans file
+   all of their jamo lookups under `calt`, and HarfBuzz's `setup_masks_hangul`
+   turns it off for every L/V/T so those lookups cannot fire twice.
+   `the_masks_match_the_feature_list` has to keep passing.
+3. `scaled.rs::shape` — call `hangul::preprocess` immediately after
+   `norm::pieces`, with `has_glyph = |ch| self.face.glyph_index(ch).is_some()`
+   and `zero_width = ` has-glyph *and* zero horizontal advance; then choose
+   between `SubGlyph::cursive` and `SubGlyph::jamo` in the piece loop on
+   `hangul::is_jamo(ch)`. Guard the whole thing with `hangul::present` so a run
+   with no Korean in it pays nothing.
+4. `fallback.rs` — add `*b"hang"` to `NO_ZERO_WIDTH_MARKS` (the Hangul shaper's
+   `zero_width_marks` is `NONE`) and **not** to `COMPLEX_SCRIPTS` (its
+   `fallback_position` is `true`). Both lists are `is_sorted`-asserted.
+
+**What it should buy.** 553 of the sweep's 892 remaining `differ` cases are the
+single string `\u1100\u1161\u11a8` — jamo we compose to `각` and HarfBuzz leaves
+as three glyphs. Expect `differ` 892 -> ~339. The residue after that is composed
+Latin diacritics, which is a *different* and unsettled question: HarfBuzz
+decomposes and recomposes against font coverage, which reverses the layering
+`norm.rs`'s module doc deliberately chose (`nfc` pure Unicode, `fit_to_face` pure
+font). That one is an operator question, not a bug.
+
+**Where.** `gui/font/src/hangul.rs` (parked), `gui/font/src/lib.rs` (the missing
+`mod hangul;`), and the three files named above. The reference is HarfBuzz's
+`src/hb-ot-shaper-hangul.cc`.
+
+**Resolution — 2026-08-15.** All four edits landed together with the missing
+`mod hangul;`, and the prediction above held to the case. The HarfBuzz
+differential sweep (556 host faces × 23 strings, 12,739 comparisons):
+
+| bucket | before | after |
+|---|---|---|
+| `agree` | 11,847 | **12,400** |
+| `differ` | 892 | **339** |
+| `reordered` | 0 | 0 |
+| `misplaced` | 0 | 0 |
+
+`\u1100\u1161\u11a8` — all 553 of its cases — left the disagreement list
+entirely, and nothing regressed into `reordered`/`misplaced`. `osfont` goes
+from 482 to **501 passing tests**: the module's own 19 tests had never run
+before, because a module that is not declared does not compile and therefore
+does not test either. That is the sharper lesson here — "19 tests, all
+passing" was a true statement about a file `cargo test` had never once
+looked at.
+
+Two notes on how the edits differ from the plan above. `gsub.rs`'s three new
+feature tags are **appended** to `FEATURES` rather than inserted in tag order,
+so that no existing bit constant shifts; the bits are `1 << 34/35/36`.
+And `norm::nfc` lost its last production caller in the split, so it now
+carries `#[cfg_attr(not(test), allow(dead_code, …))]` — it is kept deliberately
+as the text-question half of the split (NFC is NFC), not as dead weight, and
+the reason is written at its definition.
+
+The residual 339 are exactly the composed-Latin-diacritics cases this entry
+predicted (`\u1e09` 255, `\u212b` 57, `été` 10, …). They are **not** tracked
+here as a bug; they are the layering question in `norm.rs`'s module doc, and
+belong to the operator. See `open-questions.md`.
+### [B] D-POSIX-SOCKET-META-WAS-NOT-SCOPED-TO-ITS-FD-TABLE — ✅ FIXED 2026-08-14
+
+**Found while running the eighth audit pass**, not by looking for it:
+`socket::tests::test_phase201_bind_port443_no_cap_eacces` failed once with
+`ENOTSOCK` where `EACCES` was expected, then passed three runs in a row.
+
+`SOCKET_META` (posix/src/socket.rs) is indexed by fd number, so it must have
+exactly the same scope as the fd table it is keyed by. `fdtable` made its
+storage **per-thread** on host builds (design-decisions.md §110) precisely
+because libtest runs tests on parallel threads. `SOCKET_META` stayed a
+process-global `static mut`, and the mismatch was reachable: two tests on
+different threads each create a socket and, drawing from *separate* per-thread
+fd tables, both get the same fd number `N` — near-certain, not unlikely, since
+each thread's table starts empty. They then shared one `SOCKET_META[N]`, and
+the first to `close()` wiped the entry the other was still using, whose next
+call saw a live fd with no metadata and reported `ENOTSOCK` for a good socket.
+
+Fixed by giving `SOCKET_META` the same `cfg`-split storage as
+`fdtable::fd_store`. Six consecutive full runs clean afterwards.
+
+Two things worth keeping from this. First, the `// SAFETY: Single-threaded
+access.` comments on these accesses were **true on the target and false under
+`cargo test`** — a safety comment that silently changes truth value with
+`cfg` is worse than none, and `fdtable` had already learned this lesson
+without the fix being propagated to the table keyed by its own indices.
+Second, an intermittent failure at roughly one run in four is easy to
+dismiss as noise when it appears in a test unrelated to what you are
+changing; it was worth the ten minutes to chase.
+
+### [B] D-POSIX-TIMED-WAITS-DID-NOT-VALIDATE-TV-NSEC — ✅ FIXED 2026-08-14
+
+`pthread_cond_timedwait`, `pthread_mutex_timedlock` and `sem_timedwait`
+accepted any `timespec` whatsoever. A `tv_nsec` of `1_000_000_000` or `-1` —
+the classic result of adding a nanosecond offset without carrying into
+`tv_sec` — should be `EINVAL` (glibc `valid_nanoseconds`, `include/time.h:517`);
+instead it fell through to the deadline comparison, where a too-large
+`tv_nsec` silently extended the wait by up to a second and a negative one made
+the call return `ETIMEDOUT` immediately. Both are wrong in the direction that
+hides the caller's bug. Separately, `mqueue::deadline_from_timespec` checked
+`tv_nsec` but not `tv_sec < 0`, which the kernel's `timespec64_valid` rejects.
+
+Fixed by adding `time::valid_nanoseconds` (glibc's predicate, verbatim) and
+calling it from each site **at the position its own upstream uses** — eagerly
+in `pthread_cond_timedwait` and `sem_timedwait`, lazily (contended branch
+only) in `pthread_mutex_timedlock` — plus the missing `tv_sec` half in
+`mqueue`. See the ninth-pass write-up under
+`D-POSIX-NULL-POINTER-ERRNO-NEEDS-A-PER-FUNCTION-AUDIT` for why the three
+placements differ and why the mqueue predicate is not the same predicate.
+
+Seven tests pin the distinctions, including the two that would silently pass
+under a naive "check it at the top of every function" fix:
+`test_pthread_mutex_timedlock_uncontended_ignores_a_bad_deadline` and
+`test_sem_timedwait_checks_the_deadline_before_the_fast_path`.
+
+**Not fixed, because we do not have them:** `pthread_cond_clockwait`,
+`sem_clockwait` and the `pthread_rwlock_{timed,clock}{rd,wr}lock` family are
+unimplemented. When they are added they need the same predicate plus
+`futex_abstimed_supported_clockid`, and the rwlocks check **eagerly** — see
+the comment at `pthread_rwlock_common.c:286-291`.
+
+---
+
+### [B] TD-OILS-A-PROCESS-SUBSTITUTION-IN-A-BRACE-BODY-IS-NEVER-PERFORMED. bash runs `${z:-<(echo hi)}` and substitutes `/dev/fd/63`; osh yielded the nine characters `<(echo hi)` — 2026-08-14 — ✅ FIXED 2026-08-14
+
+**Where it was:** `userspace/oils/src/lexer.rs`, [`Lexer::read_word_verbatim`],
+which reads the operand, the pattern and the replacement of a `${ … }` and had
+no `<`/`>` arm at all.
+
+bash splits this construct across two files and osh had only one half of it.
+**Part (A) — the parse** — is `parse_matched_pair` naming `<(`, `>(` and `$(` in
+one breath (parse.y:5028) and sending all three through `parse_comsub`
+(parse.y:5042), so a `${ … }` body's scan parses a process substitution where it
+meets it, its syntax error is the enclosing unit's, and what survives is the
+parse *re-printed*; see
+`userspace/oils/tests/corpus/a-process-substitution-in-a-brace-body-is-parsed-where-it-is-met.sh`
+and [`parser::procsub_reprints`]. **Part (B) — the performance** — is
+`expand_word_internal` *running* it, and was this entry.
+
+**The rule** is bash's quoting flag, not the position. `expand_word_internal`
+reads a process substitution only when `if (string[++sindex] != LPAREN ||
+(quoted & (Q_HERE_DOCUMENT|Q_DOUBLE_QUOTES)) || (word->flags & W_NOPROCSUB))`
+lets it (subst.c:11079), so an **operand** runs one when the expansion is bare
+and keeps the characters when it is double-quoted, a **pattern** and a
+**replacement** run one either way (both are re-entered without
+`Q_DOUBLE_QUOTES`), and a **subscript** or a **substring bound** never does
+(`Q_DOUBLE_QUOTES|Q_ARITH`), so its arithmetic error names the characters.
+
+**The fix.** [`Verbatim`] gained an `Arith` mode beside `Bare`, `Replacement`
+and `Dquote` — identical to `Bare` in every other respect — and
+[`Lexer::read_word_verbatim`] gained a `<`/`>` arm live in `Bare` and
+`Replacement` only. On the parser side [`parser::verbatim_word_at`] picks the
+lexer entry from a new `Frag` (`Word` or `Arith`), which is what a subscript and
+the `' … '` runs inside it now pass. The body the arm reads is already the
+*re-print* part (A) spliced in, which is what bash performs too: the token
+buffer a `${ … }` scan leaves behind holds the re-print and nothing else.
+
+No new expansion machinery was needed. The double-quoted operand was already
+right — the splice puts the re-print into the text and its nested `$( … )` then
+expands normally, so `"${z:-<(echo $(echo q))}"` is `<(echo q)` in both shells —
+so the whole of part (B) was one liveness decision taken at lex time, which is
+where osh decides quoting.
+
+**The pre-existing inconsistency this closed.** The substring bound
+(`${z:<(echo hi)}`, via [`parser::parse_slice_bounds`]) *did* perform the procsub
+while the subscript beside it did not, so osh's two arithmetic contexts — which
+bash expands identically — disagreed. The bound is tokenized rather than read
+verbatim, so it has no `Verbatim` mode to set; [`parser::word_from_source`], its
+only reader, now turns a `Seg::ProcSub` back into the characters it was read
+from. Both contexts are on the same side now.
+
+**Verified:** `a-process-substitution-in-a-brace-body-is-performed-unless-the-expansion-is-quoted.sh`,
+27 cases across the five contexts. None of them prints a substitution's path —
+bash names it `/dev/fd/N` and osh a temporary file — so each asks a question the
+path does not answer: whether the text still begins `<(`, whether it names
+something that exists, or what a `cat` of it reads.
+
+**How it was found:** implementing part (A) — the eager parse and re-print of a
+process substitution met by a `${ … }` body scan.
+
+### [B] TD-OILS-A-PROCESS-SUBSTITUTION-A-SECOND-SCAN-FINDS-IN-A-BRACE-BODY-IS-NOT-PARSED-AGAIN. bash's `brace_gobbler` and its `${x@P}` re-read each meet a `<(` osh's do not — 2026-08-14 — ✅ FIXED 2026-08-14 (both halves, and the arithmetic-fragment residue)
+
+Two residues of TD-OILS-A-PROCESS-SUBSTITUTION-IN-A-BRACE-BODY-IS-NEVER-PERFORMED
+(above), left after both halves of it were done. Each is a *second* scan of the
+same text — one that is not `parse_matched_pair` and not `expand_word_internal` —
+which has a `<(` row of its own that osh's counterpart lacks. The `$(` spelling
+of each already matches bash byte for byte, so in both the machinery is there
+and only the row is missing.
+
+**Where:** `userspace/oils/src/interp.rs`, [`Shell::gobbled_subs`]; and the
+`${x@P}` re-read, `userspace/oils/src/parser.rs`, [`dquote_word_from_source`].
+
+* **✅ FIXED 2026-08-14.** `echo "${z:-"<(fi)"}"` — bash reports
+  `command substitution: line N+1: syntax error near unexpected token 'fi'`
+  plus the tail of the physical line, where osh prints `<(fi)`. The agent is
+  **`brace_gobbler`**, whose command-substitution row names all three spellings
+  (`(c == '$' || c == '<' || c == '>') && text[i+1] == '('`, braces.c:675) and
+  reaches `extract_command_subst` → `xparse_dolparen`, which *parses* the body
+  and throws the result away. Two facts pin it down. The gobbler's `quoted`
+  state does not nest and `${` opens none of its own (it is treated like `\{`),
+  so the **inner** `"` is `c == quoted` and clears the state — which is why the
+  row fires here and not in the plain `"${z:-<(fi)}"`, where parse.y has
+  already answered. And it fires only where brace expansion runs: an argument
+  or command word errors (`: "${z:-"<(fi)"}"`, `f "${z:-"<(fi)"}"`,
+  `echo "${a["<(fi)"]}"`), while an assignment RHS — which is not brace-expanded
+  — does not (`x="${z:-"<(fi)"}"` is silent). bash only ever *parses* it: with a
+  body that does parse, `echo "${z:-"<(echo hi)"}"` prints `<(echo hi)` in both
+  shells, so this is a diagnostic and not a missing expansion.
+
+  What was missing was something to hang the row on. [`Shell::gobbled_subs`]
+  walks the *parse* structurally, and here the tree is right to hold characters
+  — the `<(` sits in a `" … "` run inside a double-quoted operand, where neither
+  bash's expander nor osh's reads one — so no part was ever going to appear for
+  it. The fix is therefore not another lexer mode but a text-level pass beside
+  the structural walk, as `gobbled_backtick_subs` already is for a backquote:
+
+  * `wordscan::gobbler_procsubs(s, dquoted)` — the same flat-state loop as
+    `gobbler_readable`, reporting the index of each `<(`/`>(` met while `quoted`
+    is 0. (`gobbler_readable` could not answer this: it reports the stretches the
+    **`$(`** row fires in, which is `quoted == 0` *and* `quoted == '"'`, and the
+    `<(` row is the first of those alone.) A `$( … )` is skipped whole rather
+    than reported — that is the one spelling a part already stands for.
+  * `Shell::gobbled_procsubs` — for each index, lex `$(` + the rest of the word
+    with `parser::dquote_word_from_source` and take the resulting
+    `CmdSubBody::Unread`. The two spellings reach the same
+    `extract_command_subst`, so the swap is exact, and one lex settles the body,
+    the remainder and whether there was a `)` at all. It is a *lex*, not the
+    paren count `gobbler_readable` skips with, because `xparse_dolparen` is a
+    real parse: a `(` inside a quoted run of the body is not a nesting level to
+    it, and a count would carve `echo <(echo "(")` into a body that fails.
+  * The two are merged by **remainder length**: every tail the gobbler's word
+    carries is measured against the whole word (`unparse::gobbler_word`), so a
+    longer one is an earlier meeting. That is what keeps the interleaving right
+    where a word holds both — measured, `echo "${z:-'$(fi)'"<(for)"}"` reports
+    the `$(fi)` and `echo "${z:-"<(fi)"'$(for)'}"` the `<(fi)`.
+  * `Shell::has_gobbled_sub` — the cheap pre-test — gained a `WordPart::Literal`
+    row, answering wide (any `<(`/`>(` in a literal under quotes) so the word
+    reaches the scan that settles it.
+
+  **Verified:** `userspace/oils/tests/corpus/a-process-substitution-a-brace-scan-meets-is-read-where-the-quoting-is-clear.sh`,
+  29 rows, all matching bash 5.2.37 — including the parity (`"${z:-"a"<(fi)"b"}"`
+  is a *parse* error, `"${z:-"${y:-"<(fi)"}"}"` is silent), the `set +B` gate, the
+  words brace expansion does not reach (assignment RHS, `case` word, here-doc
+  body), the read happening before expansion (`z=Z`, `${z:+…}`), and the `declare
+  -f` re-print.
+* **✅ FIXED 2026-08-14 for the double-quoted operand** (`${z:-…}`, `${z:+…}`,
+  `${z:=…}`, `${z:?…}` and the plain `${z-…}` family) — which is the position
+  the report named, and the only one a `${x@P}`/`PS4` re-read reaches with the
+  quoting bash's own expansion declines a process substitution under. The
+  remaining positions are a residue of their own, logged at the end of this
+  bullet. Original report: `x='${z:-<(fi)}'; echo "${x@P}"` — bash's `extract_dollar_brace_string`
+  (subst.c:1881-1950) has a `<(` row of its own and recurses into it with a real
+  parse, so the `@P` re-read is a `bad substitution` and the text is printed
+  unchanged; osh splices the re-print and prints `<(fi)`.
+
+  **Measured against bash 5.2.37 (2026-08-14).** The row behaves as the `$(`
+  row beside it in every respect: `A${z:-<(fi)}TAIL` and `A${z:-$(fi)}TAIL`
+  give byte-identical output, down to the quoted remainder `` `fi)}TAIL' ``
+  and the `line 2` numbering `xparse_dolparen` gives an unread body. It is the
+  scan's row and not the string's — `x='a<(fi)b'` is silent — and it is reached
+  only where the scan's own quoting allows: `"<(fi)"` (double-quoted),
+  `'<(fi)'` (single-quoted, `skip_single_quoted`) and `\<(fi)` are all silent
+  and print their text. A body that parses is silent too and is *not*
+  performed: `A${z:-<(echo A >&2)}B` prints `A<(echo A >&2)B` and no `A` on
+  stderr.
+
+  osh already matched on six of those shapes. What it got wrong:
+
+  | written (as `x`, then `echo "${x@P}"`) | bash | osh (before) |
+  |---|---|---|
+  | `A${z:-<(fi)}TAIL` | reports, `bad substitution`, text | `A<(fi)TAIL` |
+  | `A${z:-${y:-<(fi)}}B` | reports (nested body too) | `A<(fi)B` |
+  | `A${z:-p<(fi)q$(for)r}B` | reports the **`<(fi)`** | reports the `$(for)` |
+  | `A${z:-<(fi}B` | `unexpected EOF`, `bad substitution`, text | runs `fi}` — `command not found` |
+
+  All but the last now match. The last is a *different* defect that the `$(`
+  spelling has identically — see
+  TD-OILS-AN-UNCLOSED-SUBSTITUTION-IN-AN-UNREAD-BRACE-BODY-IS-RUN-INSTEAD-OF-REFUSED
+  below — so it was left alone here rather than fixed twice.
+
+  **Why it was not a two-line change.** The `<(` span *is* already collected —
+  `Lexer::read_dollar_brace` has the row (lexer.rs:7069) and records a
+  `CmdSubSpan` with `SubOpen::Proc`, its `src`, its `range` and
+  `SubBody::Unread`. What is missing is a [`WordPart`] for
+  [`Shell::brace_scanned_subs`] to walk to: `procsub_reprints`
+  (parser.rs:6288) splices a re-print only for a `SubBody::Eager` span, and the
+  re-lex that carves the operand out of the body (`read_word_verbatim`) leaves
+  a `<(` as characters on purpose. So for an *unread* body the process
+  substitution survives only as text in a `WordPart::Literal`.
+  `arith_unread_subs` is the shape of the answer for the arithmetic scan, and
+  it excludes this spelling deliberately (parser.rs:6233-6240).
+
+  Two things make the obvious fixes wrong, both measured above:
+
+  * **The remainder runs past the `}`.** `` `fi)}TAIL' `` and
+    `` `fi)}B${y:-<(for)}C' `` are the rest of the *whole re-read string*, not
+    of the `${ … }`. So a text scan confined to the brace's own source (the
+    only text [`Shell::brace_extent_scan`] is handed) cannot build the part's
+    `tail`, and the `$( … )` spelling gets its own from
+    `unparse::attach_comsub_tails`, which runs over the assembled word in the
+    parser.
+  * **It must interleave with the `$(` spelling**, in the order the one scan
+    meets them — hence the `p<(fi)q$(for)r` row above.
+
+  Reusing [`CmdSubBody::Unread`] for the synthesized part is safe for the
+  *read* (the diagnostic quotes the body's remnant, never the delimiter, so a
+  `<(` and a `$(` in this position are byte-identical) but not for anything
+  that re-prints or *runs* one — `interp.rs:34302` performs an unread body, and
+  a process substitution here is never performed. So either the part carries
+  its spelling (a new field on `CmdSubBody::Unread`, two construction sites and
+  one printer, plus the run site taught to refuse) or it is synthesized late
+  enough that it can never escape into a print or a run — which is what
+  `Shell::gobbled_procsubs` does for the `brace_gobbler` half above, and the
+  reason that one could be done without touching the AST.
+
+  **What was done.** The first of the two: the part carries its spelling, which
+  makes both blockers vanish rather than needing to be worked around.
+
+  * `ast::SubDelim { Dollar, ProcIn, ProcOut }`, with `bytes()` (the delimiter
+    as written) and `is_performed()` (true only for `Dollar`). Recorded on
+    `CmdSubBody::Unread` and on the lexer's `SubBody::Unread`. Only the unread
+    form needs it: a body a parser *read* is a `CmdSubBody::Parsed` for `$(`
+    and a `WordPart::ProcSub` for the other two, so those two shapes already
+    tell the spellings apart.
+  * `Lexer::read_word_verbatim` gained a `<(`/`>(` row for `Verbatim::Dquote`
+    **when the text is unread** (`self.here_text`), emitting
+    `Seg::CmdSub(body, close, SubBody::Unread { delim })`. The existing
+    `Verbatim::Bare | Verbatim::Replacement` row above it is untouched — those
+    fragments really do *perform* the substitution, measured:
+    `x='A${z/p/<(echo hi)}B'; echo "${x@P}"` prints a `/dev/fd/N` in bash.
+  * `unparse.rs` prints the body back in `delim.bytes()`, and
+    `Shell::command_sub_body` returns that text instead of running anything
+    when `!delim.is_performed()`.
+  * The backslash arm of the same loop takes a `\<(`/`\>(` into the literal
+    run, because the *scan* that produced this text honours a backslash
+    whatever follows it (`extract_dollar_brace_string`'s `case '\\'`,
+    subst.c:1899) while the operand's own dquote read does not. `A${z:-\<(fi)}B`
+    prints `A\<(fi)B` and reports nothing.
+
+  Both blockers then answer themselves: the `tail` is filled by
+  `unparse::attach_comsub_tails` over the whole assembled word (so it runs past
+  the `}`, giving `` `fi)}TAIL' ``), and the interleaving is
+  `Shell::brace_scanned_subs`'s existing left-to-right walk.
+
+  **Verified:** `userspace/oils/tests/corpus/a-process-substitution-a-brace-re-read-meets-is-read-like-the-dollar-spelling.sh`,
+  22 rows, all matching bash 5.2.37 — the byte-identity with the `$(` spelling,
+  both interleavings, the nested body, the not-performed rows (including
+  `>(cat)` and a body writing to stderr, quoted and unquoted), the read
+  happening before the operand is chosen (`z=Z`, `${z:+…}`), the four shields
+  (unbraced text, `" … "`, `' … '`, backslash), the stepped-over subscript, and
+  the `PS4` spelling of the same re-read.
+
+* **✅ FIXED 2026-08-14** (every position but the arithmetic one; that one
+  closed later the same day, at the end of this bullet)**.** The row
+  was wired for the double-quoted **operand** only, and bash's scan reads the
+  whole `${ … }` body — it walks characters and knows nothing of the `#`, `/`
+  or `^^` it has already passed — so every other fragment wanted the same row:
+
+  | written (as `x`, then `echo "${x@P}"`) | bash | osh before |
+  |---|---|---|
+  | `A${z#<(fi)}B` (pattern) | reports ×2, `bad substitution`, text | right text, **no diagnostics** |
+  | `A${z/p/<(fi)}B` (replacement) | reports ×2, `bad substitution`, text | right text, **no diagnostics** |
+  | `A${z^^<(fi)}B` (case pattern) | reports ×2, `bad substitution`, text | right text, **no diagnostics** |
+  | `A${z:0:<(fi)}B` (offset) | reports ×2, `bad substitution`, text | `AB` |
+
+  The `$( … )` spelling was right in all four (measured), so again only the row
+  was missing. It was harder than the operand's, because in these positions the
+  substitution is *both* read for its extent **and** performed — a replacement
+  really does expand to `/dev/fd/N`, measured — so the part could not simply be
+  the non-performed `CmdSubBody::Unread` the operand's is.
+
+  **What was done.** The split `CmdSubBody` already makes between a body a
+  parser read and one only a scan read is now made for the process-substitution
+  part too, so one part answers for both halves:
+
+  * `ast::ProcSubBody` — `Parsed(Program)` or `Unread { src, tail, closed }` —
+    replaces the bare `Program` in `WordPart::ProcSub`.
+  * `lexer::ProcRead` (`Eager` / `Unread { closed }`) rides on `Seg::ProcSub`;
+    the `Verbatim::Bare | Verbatim::Replacement` arm of
+    `Lexer::read_word_verbatim` picks it from `self.here_text`, and now
+    tolerates a missing `)` exactly as the `$(` spelling does.
+  * `parser::seg_to_part` parses only an eager body. An unread one is carried
+    as text, because its read belongs to the scan and happens later, from
+    where a failure is `bad substitution` rather than a script syntax error.
+  * `unparse`: an unread body prints back as written, and joins
+    `attach_comsub_tails` so it gets the same remainder the `$(` spelling does.
+  * `interp`: `Shell::brace_scanned_subs_slice` collects it,
+    `Shell::extent_read_of_subs` reads it through the same
+    `comsub_reparse_read`, and the new `Shell::proc_sub_body` parses-then-
+    performs at expansion — only reachable if that read succeeded.
+
+  **Verified:** corpus case
+  `a-process-substitution-a-brace-re-read-meets-is-read-wherever-in-the-braces-it-sits.sh`,
+  21 rows, IDENTICAL against bash 5.2.37.
+
+  **✅ The arithmetic fragment, 2026-08-14.** Deferred at first, because osh
+  diverged over `<` in a bound before any process substitution was written at
+  all (`${z:1<(2)}` is `bcdef` in bash and was an `operand expected` in osh);
+  that was fixed as
+  TD-OILS-A-LESS-THAN-IN-A-BRACE-ARITHMETIC-FRAGMENT-LOSES-ITS-LEFT-OPERAND,
+  and this row followed.
+
+  It was **not** simply `Verbatim::Arith`'s row, as the deferral assumed. A
+  subscript shares that mode and must *not* get it: bash's scan steps over a
+  subscript whole (`skip_matched_pair` from the `[`), so `${z[<(fi)]}` never
+  offers its body to `extract_command_subst` and is an `operand expected` —
+  which osh already matched. A bound is walked in the open. So the mode split
+  in two: `Verbatim::Bound` / `Frag::Bound`, reached by `lex_bound_verbatim`
+  and `parser::word_bound_from_source_at`, identical to `Arith` in every
+  respect but that it takes `Dquote`'s unread-`<(` arm. That is the whole
+  change — the arm was already written for the operand, and the read/perform
+  split it produces (`SubBody::Unread`) is exactly a bound's: read for its
+  extent by the scan, never performed, because `Q_DOUBLE_QUOTES|Q_ARITH` is
+  what stops `expand_word_internal` (subst.c:11079).
+
+  No interp-side work was needed: `unparse::nested_parts` already classifies
+  `ParamSubstr`/`ArraySlice` bounds as `Nested::Operand`, so
+  `Shell::brace_scanned_subs_slice` was already descending into them.
+
+  **Verified:** 14 further rows in the same corpus case (the bound in offset
+  and length position, `${a[@]:…}` and `${@:…}`, the `@P` and `PS4` spellings,
+  the three quotings that shield it, and the well-formed `${z:<(echo 1)}` that
+  reaches the evaluator as characters), IDENTICAL against bash 5.2.37.
+
+**How it was found:** implementing the entry above.
+
+### [B] TD-OILS-AN-UNCLOSED-SUBSTITUTION-IN-AN-UNREAD-BRACE-BODY-IS-RUN-INSTEAD-OF-REFUSED. `x='A${z:-$(fi}B'; echo "${x@P}"` runs `fi}` where bash reports `bad substitution` — 2026-08-14 — ⚠️ OPEN
+
+A `$( … ` with no `)` inside a `${ … }` written in text no parser read — a
+`${x@P}` re-read, a `PS4`, a here-document body. bash reads the extent with
+`xparse_dolparen`, which fails at end of input; `si` is left past the end of the
+string, so the brace never closes, so `parameter_brace_expand` reports
+`bad substitution` naming the whole text and prints the text unchanged. Nothing
+is run. osh gets the *first* diagnostic right and then runs the body anyway:
+
+```sh
+x='A${z:-$(fi}B'; echo "${x@P}"
+# bash: command substitution: line 3: unexpected EOF while looking for matching `)'
+#       line 1: A${z:-$(fi}B: bad substitution
+#       A${z:-$(fi}B
+# osh:  command substitution: line 3: unexpected EOF while looking for matching `)'
+#       line 1: fi}: command not found
+#       A
+
+x='A${z:-$(echo hi}B'; echo "${x@P}"
+# bash: … unexpected EOF …; … bad substitution; A${z:-$(echo hi}B
+# osh:  … unexpected EOF …; Ahi}
+```
+
+Both spellings are affected identically — `<(fi}` behaves exactly as `$(fi}`,
+which is the point: the delimiter is not what is wrong here.
+
+**Where:** `userspace/oils/src/interp.rs`, [`Shell::extent_read_of_subs`]
+(~29622) and [`Shell::run_abandoned_extent`]. The scan classifies the failed
+read as `ExtentRead::Abandoned { body, rest }` and hands the body on to be run.
+That classification is *right* for an abandoned extent bash really does run on
+— it is `extract_command_subst`'s no-`)` path with the `jump_to_top_level`
+suppressed — but wrong when the caller is the brace scan, because there the
+unclosed read is also what stops the `}` from ever being found, and the
+`bad substitution` that follows pre-empts the run.
+
+**Proper fix:** distinguish the two callers. `extent_read_of_subs` should
+report the abandonment to the brace scan (so `brace_extent_scan` fails the
+whole `${ … }` and takes the `bad substitution` path with the source text)
+rather than letting the body reach `run_abandoned_extent`. The `closed: false`
+flag on `CmdSubBody::Unread` already names exactly this shape, so the test is
+to hand.
+
+**How it was found:** measuring the `<(` row of
+TD-OILS-A-PROCESS-SUBSTITUTION-A-SECOND-SCAN-FINDS-IN-A-BRACE-BODY-IS-NOT-PARSED-AGAIN
+against its `$(` twin, which turned out to be wrong the same way.
+
+### [B] TD-OILS-A-LESS-THAN-IN-A-BRACE-ARITHMETIC-FRAGMENT-LOSES-ITS-LEFT-OPERAND
+
+**Status:** ✅ FIXED 2026-08-14. Found 2026-08-14, measured against bash 5.2.37.
+The cause turned out to be wider than the title: the two bounds were
+**tokenized as a command** rather than read as arithmetic, so `<` was only the
+most visible of the operators being lost. See "The fix" at the end.
+
+A `<` in the offset or length of `${z:o:l}` swallows everything to its left.
+The same expression inside a plain `$(( ... ))` is fine, so this is the brace
+fragment's own reading of the text, not the arithmetic evaluator's:
+
+| written | bash | osh |
+|---|---|---|
+| `z=abcdef; echo "${z:1<(2)}"` | `bcdef` | `z: <(2): syntax error: operand expected` |
+| `z=abcdef; echo "${z:0:1<(2)}"` | `a` | same error |
+| `echo $(( 1<(2) ))` | `1` | `1` |
+
+bash reads `1<(2)` as `1 < (2)`, which is `1`, so the offset is 1. osh
+evaluates `<(2)` alone -- the `1` is gone by the time the evaluator sees the
+expression, which is what the quoted error token shows.
+
+**Where:** `userspace/oils/src/lexer.rs`, the `Verbatim::Arith` path of
+[`Lexer::read_word_verbatim`], and whatever splits a `${z:o:l}` body into its
+two fragments in `userspace/oils/src/parser.rs`. The `<` is being taken for
+something other than a comparison operator -- most likely a fragment boundary.
+
+**Proper fix:** treat `<` in an arithmetic fragment as the comparison operator
+it is, so the whole fragment reaches the evaluator. A `<(` there is *not* a
+process substitution to be performed either -- measured, `${z:0:<(echo 1)}` is
+an `operand expected` in bash with the characters `<(echo 1)` standing as the
+error token, which osh already matches.
+
+**Blocked, and then unblocked (same day):** the arithmetic-fragment row of
+TD-OILS-A-PROCESS-SUBSTITUTION-A-SECOND-SCAN-FINDS-IN-A-BRACE-BODY-IS-NOT-PARSED-AGAIN.
+bash's `${ ... }` scan reads a `<( ... )` in an arithmetic fragment exactly as it
+reads one anywhere else in the body -- `x='A${z:0:<(fi)}B'; echo "${x@P}"`
+reports the parse twice and then `bad substitution`, where osh printed `AB` --
+but a corpus row for it would have been measuring this bug instead, so the
+corpus case
+`a-process-substitution-a-brace-re-read-meets-is-read-wherever-in-the-braces-it-sits.sh`
+left that position out and said so. The fix below removed the obstacle, and the
+rows went in the same day: that case now measures a bound in seven further
+positions.
+
+**How it was found:** measuring where bash's brace scan reads a `<( ... )`,
+while checking whether the `Verbatim::Arith` fragments needed the same row as
+the pattern and replacement ones.
+
+**The fix (2026-08-14).** `parse_slice_bounds`
+(`userspace/oils/src/parser.rs`) read each bound with `word_from_source`, which
+called `tokenize(...)` — a *command* tokenizer — and then joined the surviving
+`Tok::Word`s with a literal space. So every operator character was claimed by
+the tokenizer instead of reaching the evaluator, and whatever it could not make
+a word of was silently dropped. `<` was merely the case that produced an IO
+number and a redirect. The rest, all measured against bash 5.2.37 with
+`z=abcdef`:
+
+| written | bash | osh, tokenized |
+|---|---|---|
+| `${z:1<2}` | `bcdef` | `cdef` — `1<` taken for a redirect |
+| `${z:1>2}` | `abcdef` | `cdef` — likewise |
+| `${z:1<=2}` | `bcdef` | `=2: operand expected` |
+| `${z:1 < (2)}` | `bcdef` | `1 2: syntax error` |
+| `${z:1;2}` | `;2: invalid arithmetic operator` | `1 2: syntax error` |
+| `${z:1&2}` | `abcdef` | `1 2: syntax error` |
+| `${z:3|2}` | `def` | `3 2: syntax error` |
+| `${z:1&&2}` | `bcdef` | `1 2: syntax error` |
+| `${z:1)}` | `1): syntax error in expression` | silently `abcdef` |
+
+Both bounds now go through `word_subscript_from_source_at` — the very reader an
+array subscript uses, which is `verbatim_word_at(..., Frag::Arith)` plus
+`attach_subscript_reads`. The two arithmetic fragments therefore no longer
+disagree with each other, which is what `attach_subscript_reads`'s own doc
+comment had been asking for.
+
+Two further defects of the same splitter were found while measuring it, and are
+fixed in the same change:
+
+* **Which colon cuts.** bash does not `strchr` for the `:`; `skiparith`
+  (subst.c) skips one `:` for every `?` seen, and counts nothing at all inside
+  a `( … )`. `${z:1?2:3}` is `cdef` (the whole text is the offset) while
+  `${z:1?2:3:1}` is `c`; `${z:1?1?2:3:4}` is `cdef`, two `?` swallowing both
+  colons; `${z:(1?2:3):1}` is `c`. osh split on the first `:` unconditionally
+  and so reported `` `:' expected for conditional expression `` for all of
+  these. Now `slice_split_colon` implements the rule.
+* **An empty bounds text.** `${z:}` is `${z:}: bad substitution` in bash, and
+  uniformly so — `${@:}`, `${*:}`, `${a[@]:}`, `${a[1]:}` and an unset
+  parameter all report it. osh printed the whole value. It is the *text* that
+  must be non-empty, not what it expands to: `${z:$e}` with `e=` is `abcdef`.
+  `parse_slice_bounds` now returns `None` for an empty text and each of its
+  three call sites turns that into `WordPart::BadSubst`.
+
+Verified by the corpus case
+`a-slice-cuts-its-bounds-with-skiparith-and-reads-each-as-arithmetic.sh`
+(75 rows, IDENTICAL), the lib suite and a full sweep.
+
+**Unblocked, and then done (same day):** the arithmetic-fragment row named
+under "Blocks" above was the only thing left of
+TD-OILS-A-PROCESS-SUBSTITUTION-A-SECOND-SCAN-FINDS-IN-A-BRACE-BODY-IS-NOT-PARSED-AGAIN,
+and it is now closed there. It was a separate row from this entry's — after
+this fix `${z:1<(2)}` evaluated correctly but `x='A${z:0:<(fi)}B'; echo
+"${x@P}"` still printed `AB`, where bash reads the body for its extent and
+reports `bad substitution`. It turned out **not** to be the `Verbatim::Arith`
+row this entry's title suggested, because the *subscript* shares that mode and
+must not get it: bash's `${ … }` scan steps over a subscript whole
+(`skip_matched_pair`), so `${z[<(fi)]}` never offers its body to the scan and
+is an `operand expected` in bash — which osh already matched. Only a bound is
+walked in the open, so `Frag::Arith` split in two and the new `Frag::Bound`
+took the row. See that entry for the change.
+
+### [B] TD-OILS-AN-UNBALANCED-PAREN-IN-A-SLICES-BOUNDS-IS-AN-ARITHMETIC-ERROR-NOT-A-BAD-SUBSTITUTION
+
+**Status:** ✅ FIXED 2026-08-14. Found 2026-08-14, measured against bash 5.2.37.
+The fix turned up a second rule of the same walk, fixed with it — see "The fix"
+at the end.
+
+`skiparith` (subst.c) balances parens while looking for the colon that cuts
+`${x:off:len}` in two, and an unbalanced `(` makes it run off the end. bash
+then reports that as a **bad substitution** naming the whole bounds text, before
+either bound is evaluated. osh implements the balancing (that is what makes
+`${z:(1?2:3):1}` cut in the right place) but not the complaint, so the text
+reaches the evaluator and produces an arithmetic diagnostic instead:
+
+| written | bash | osh |
+|---|---|---|
+| `${z:(1}` | ``bad substitution: no closing `)' in (1`` | ``z: (1: missing `)' (error token is "1")`` |
+| `${z:(1:2}` | ``… no closing `)' in (1:2`` | ``z: (1: missing `)'`` — and it cut at the colon |
+| `${z:((1:2}` | ``… no closing `)' in ((1:2`` | likewise |
+| `${z:1+(2}` | ``… no closing `)' in 1+(2`` | ``z: 1+(2: missing `)'`` |
+| `${a[@]:(1}` | ``… no closing `)' in (1`` | arithmetic error |
+| `${@:(1}` | ``… no closing `)' in (1`` | arithmetic error |
+
+Both are rc=1, so only the message differs — but the message differs in class,
+not just wording: bash's is the DISCARD-class `bad substitution` family, raised
+by the cut, and it names the bounds text rather than the parameter.
+
+Three things scope it precisely, all measured:
+
+* It is the **whole bounds text** that is checked, once, before the cut — the
+  message quotes `(1:2` entire, the colon never having split it.
+* It is only the text the *cut* walks. Once a colon has been found with the
+  depth back at zero, an unbalanced `(` in the length is an ordinary arithmetic
+  error: `${z:0:(1}` is ``z: (1: missing `)'`` in bash too, and osh matches.
+* A stray `)` at depth zero is not an error at all: `${z:)1}` is
+  `)1: syntax error: operand expected` in both.
+
+**Where:** `userspace/oils/src/parser.rs`, `slice_split_colon` — which already
+tracks the depth and would only need to report a non-zero one at the end — and
+its three call sites in `parse_braced_param_in`, which currently turn the
+`None` that means "empty bounds" into `WordPart::BadSubst(raw)`.
+
+**Proper fix:** `slice_split_colon` reports the unbalanced case distinctly from
+the empty one, and the call sites raise ``bad substitution: no closing `)' in
+<bounds text>``. That message shape already exists in
+`userspace/oils/src/interp.rs` (`b"bad substitution: no closing `)' in "`,
+~35600) but it names the whole *word*, whereas this one names the bounds text
+only, so it needs its own carrier on the word part rather than a reuse of
+`BadSubst`, whose printer names `${…}` entire.
+
+**Blocked:** one row of the corpus case
+`a-slice-cuts-its-bounds-with-skiparith-and-reads-each-as-arithmetic.sh`,
+which said so in its header and left the shape out. Now measured there.
+
+**How it was found:** measuring bash's slice bounds exhaustively while fixing
+TD-OILS-A-LESS-THAN-IN-A-BRACE-ARITHMETIC-FRAGMENT-LOSES-ITS-LEFT-OPERAND. It
+was the last of four divergences that measurement turned up, and the only one
+not fixed there.
+
+**The fix (2026-08-14).** Two things, because measuring the first turned up the
+second.
+
+**(1) The complaint.** `slice_split_colon` now returns the depth it ended at
+beside the split index, `parse_slice_bounds` carries a non-zero one as
+`SliceBounds::unclosed`, and both `WordPart::ParamSubstr` and
+`WordPart::ArraySlice` gained an `unclosed: Option<Str>` field for it. It is a
+field on the operator rather than a `WordPart::BadSubst`, because *where* it is
+raised is the whole of what distinguishes the two: `${z:}` is a bad
+substitution even for an unset parameter, while `${u:(1}` with `u` unset is
+silently empty. So the check sits exactly where the offset would have been
+evaluated — `Shell::slice_bounds_unclosed`, called from `scalar_slice`,
+`assoc_slice` and the indexed path of `slice_elements_resolved`, each after its
+own "nothing to measure" exit. Every ordering measured lines up: an empty
+array, an empty `$@`, `set -u`, and a set-but-empty scalar (which *does* report,
+having one position).
+
+`no_longjmp_on_fatal_error` — `Shell::prompt_expanding` — **suppresses** the
+complaint rather than rewording it, so under `${x@P}` or `PS4` the characters go
+on to the evaluator and the arithmetic error is what comes out. That is the
+`if (no_longjmp_on_fatal_error == 0)` guard the report sits behind, and it is
+why osh's *old* answer was right in those two contexts and only those two.
+
+**(2) The walk is quote-aware.** Measuring (1) showed the walk steps over a
+`' … '` run, a `" … "` run and a backslash-escape whole — all three counters
+included, not just the paren one. `${z:"1:2"}` does not split (the evaluator
+meets `1:2` as one bound and says so), `${z:1"?"2:3}` does split (the quoted `?`
+buys no colon), and `${z:0"("}`, `${z:0'('}`, `${z:0\(}` and `${z:(1"("2)}` are
+all balanced. osh's walk saw none of that, so before this fix it both cut in the
+wrong place and complained where bash did not. Note this is about the *walk*
+only: the quote characters stay in the bound, and the arithmetic reading each
+half is given removes them (or does not — a `' … '` keeps its second reading).
+
+The walk is over the text **as written**, which the same measurement pins down
+from the other side: `p="("; ${z:$p 1}` and `${z:$(echo "(1")}` are ordinary
+arithmetic errors, each being balanced as written however unbalanced its value.
+
+**Verified:** 37 further rows in
+`a-slice-cuts-its-bounds-with-skiparith-and-reads-each-as-arithmetic.sh`, the
+lib suite and a full sweep.
+
+### [B] TD-OILS-THE-WAIT-NO-OPERANDS-CORPUS-CASE-IS-FLAKY-UNDER-A-FULL-SWEEP. The job holding `$!` is not spared, once per many sweeps — 2026-08-14 — OPEN
+
+**Where:** `userspace/oils/tests/corpus/wait-with-no-operands-and-a-job-that-just-ended.sh`,
+the group "only the last one backgrounded is spared", against
+`Shell::builtin_wait`'s operand-less arm and `Shell::drain_jobs`
+(`userspace/oils/src/interp.rs`).
+
+**What — and this time the whole row was captured.** One full
+`scripts/osh-bash-diff.py` sweep came back `654 matched, 0 waived, 1 failed`
+with **one line** of the case different, everything else in it identical:
+
+```sh
+( exit 3 ) & ( exit 4 ) & sleep 0.4; wait; echo "  noargs=$?"
+VAR=stale; wait -n -p VAR; echo "  n=$? $(pvar)"
+```
+
+| | bash 5.2.37 | osh (this sweep) |
+|---|---|---|
+| `noargs=` | 0 | 0 (agreed) |
+| `n=` | `4 a pid` | **`127 unset`** |
+
+So osh had nothing left to report where bash still had the last-backgrounded
+job. Re-run on its own immediately after: `1 matched, 0 waived, 0 failed`.
+Saved report:
+`target/dvscratch/corpus-failures/20260814-145703/wait-with-no-operands-and-a-job-that-just-ended.txt`.
+
+**What a 127 requires, read out of the code rather than guessed.** The spare is
+`builtin_wait`'s operand-less arm: after `drain_jobs`, every job with a status
+is marked `notified` *except* the one whose pid is `last_bg_pid`, and
+`cleanup_dead_jobs` then drops exactly the notified ones. But `drain_jobs`
+itself marks `notified` for every job it *waited for*, and it waits for any job
+not already in its `known` snapshot — `known` being the jobs whose `exit_seen`
+was set **before** the wait was reached. So the spare survives only when the
+`$!` job's `exit_seen` was already set, which the unit-boundary
+`cleanup_dead_jobs` does for a job that is both finished and older than
+`JOB_EXIT_NOTICE_GRACE` (20 ms). A 127 means that did not happen for the `$!`
+job specifically: had it been the *other* job that was late, `drain_jobs` would
+have waited that one and the spare would still stand.
+
+**The margin is not thin, which is what makes this odd.** Both shells were
+measured at four margins (`build/pgS.sh`), and they agree exactly:
+
+| `sleep` before the `wait` | bash | osh |
+|---|---|---|
+| none | `127 unset` | `127 unset` |
+| 0.01 | `4 a pid` | `4 a pid` |
+| 0.05 | `4 a pid` | `4 a pid` |
+| 0.4 | `4 a pid` | `4 a pid` |
+
+The flip is between 0 and 0.01, so the case's `sleep 0.4` is a ~40x margin — not
+the ~1x margin that
+TD-OILS-THE-COMPGEN-JOB-CORPUS-CASE-IS-FLAKY-UNDER-A-FULL-SWEEP turned out to
+be. **Do not assume the same diagnosis and just widen the sleep.**
+
+**Loads that do NOT reproduce it — do not spend the time again.** The job is
+thread-backed, not a process (`( exit 4 ) & echo $!` prints the synthetic
+`900000`, where `sleep 0.4 &` prints a real pid), so both of the obvious
+starvation stories were tried and neither bit:
+
+- 20 serial runs of the group alone: clean.
+- 119 runs of the group at 8-way concurrency: clean.
+- 64 runs of the *whole case* at 8-way concurrency: clean.
+- 36 runs under a process-spawn storm (6 loops spawning `osh -c :` and
+  `bash -c :` back to back, this host's documented ~200-290 ms spike source):
+  clean.
+- 30 runs under CPU saturation (24 busy-loop processes on 12 cores): clean.
+
+Probes are `build/repro-wait.sh` (the group), `build/repro-wait2.sh` (the whole
+case), `build/spawnstorm.sh`, `build/cpuburn.py` — all in the gitignored
+`build/`, so re-create them from this entry if they are gone.
+
+**Proper fix.** Unknown, and deliberately not guessed at. The next sighting
+should establish which of the two conditions failed — whether the `$!` job's
+body was genuinely unfinished at the unit-boundary poll, or whether the poll did
+not run — by instrumenting `poll_jobs` to record, per job, `is_finished` and
+`born_at.elapsed()` at each call, and dumping that when `wait -n` answers 127.
+That distinguishes "the thread really was 400 ms late" from a bookkeeping fault,
+and only the first is a case-margin problem.
+
+**Impact.** An intermittently red sweep, which is the gate on every commit —
+and the sweep takes ~19 minutes, so a re-run to disambiguate is expensive.
+
+**Sighting 2026-08-14, in the *unit* suite, and fixed there.**
+`interp::tests::wait_n_ignores_a_job_whose_status_was_already_reported` failed
+once under `cargo test -p oils --lib` (`wait -n` answered 127 where 3 was due,
+i.e. the operand-less `wait` had *not* spared the job) and passed when re-run
+alone. Same shape as this entry, but with a cause the test owned: it backgrounded
+`( exit 3 ) &` and then slept a constant `0.2` to make the job finish first, and
+no constant is long enough to promise that on a loaded machine. Fixed properly
+rather than by lengthening the sleep — a new `settle_jobs` test helper (the
+whole-table form of the existing `settle_job`) polls `poll_jobs` until every job
+has a status, after the same `JOB_EXIT_NOTICE_GRACE`. That removes this test from
+the flaky family; the *corpus* case above is untouched and stays open.
+
+---
+
+### TD-OILS-AN-ARITHMETIC-SCAN-REPORTS-NONE-OF-THE-READS-IT-MAKES. `$(( … ))` swallows the diagnostics its nested `$( … )` should raise, and loses the text after a read that stopped early — 2026-08-14
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::arith_extent_expand` /
+`arith_extent_frame` and the `$((` route out of `Shell::arith_extent_route`.
+
+**What is wrong.** `param_expand` reaches a `$((` through
+`extract_command_subst` with `SX_COMMAND` (subst.c:10575), so the paren count
+*does* recurse into a nested `$( … )` — a real parse, reported where it is met.
+osh runs the count but never reports, and in one shape stops in the wrong place.
+Measured against bash 5.2.37 (`build/pgX.sh` rows a/c, `build/pgY.sh` d4/d5):
+
+| word (inside `v='…'`, via `"${v@P}"`) | bash | osh |
+|---|---|---|
+| `A$((1+$(echo hi⏎q` | reports EOF, `[A]` | reports EOF, `[Ahi]` |
+| `A$((1+$(for⏎q))B` | reports **twice** (`for`, then `` `(1+$(for' ``), `[AB]` | silent, `[A]` |
+| `A$((1+$(for⏎xB` | reports `for`, `[A]` | reports `for`, **runs `fo`**, `[A⏎xB]` |
+
+Rows 1 and 3 report because the read runs from `Shell::arith_nested_read`,
+which does call `Shell::comsub_reparse_read`; what those two get wrong is the
+*value*, both by performing the abandoned extent the way the string level does
+and the brace level does not. Row 2 is the substantive one: the read stopped
+part way, so bash's count resumed after the `for`'s line and found the `))`,
+leaving `B` to the word. osh consumes to the end and loses it — and so never
+reaches the read at all, which is why it is the one row that is also silent.
+
+**What the proper fix looks like.** The `$((` count needs the same two-outcome
+treatment `${ … }` got on 2026-08-14: `Shell::comsub_reparse_read` for the
+report (which also decides jump vs. no-jump), and
+`Shell::failed_extent_split`'s resume point for where the count carries on.
+`Lexer::unread_comsub_stop` already puts the lexer in the right place; what is
+missing is the interp half — an `arith`-side counterpart of
+`Shell::unclosed_brace_reads`.
+
+**Impact.** Diagnostics only for two of the three rows; a wrong value for the
+third. Needs `@P`/`PS4`/here-doc text to be reachable at all.
+
+---
+
+### TD-OILS-AN-UNDECODED-BRACE-BODY-IS-RE-LEXED-AS-A-DOUBLE-QUOTED-RUN. A `<(`/`>(` in it is never read, though the brace scan names it — 2026-08-14 — ✅ FIXED 2026-08-14
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::extent_read_of_rest` and
+`Shell::unclosed_brace_reads`, both of which lex their text with
+`crate::parser::dquote_word_from_source` → `crate::lexer::lex_dquote_body`.
+
+**What is wrong.** `extract_dollar_brace_string` names `$(`, `<(` and `>(`
+together and hands each to the same `extract_command_subst` (subst.c:1881-1950),
+**whatever the quoting** — that is why `x='A${z#<(fi)}B'` reports the parse
+twice. A double-quoted *run*, by contrast, has no process substitution in it at
+all: at string level bash and osh agree that `v='A<(echo hi⏎q'` is literal
+text. So `lex_dquote_body` is the right lexer for a string-level remainder and
+the wrong one for text the **brace scan** is walking.
+
+Measured (`build/pgY.sh` d6), `A${z:-P1<(echo hi⏎S1}B` under `${…@P}`:
+
+| | bash 5.2.37 | osh |
+|---|---|---|
+| reports | `` unexpected EOF while looking for matching `)' `` **then** `…: bad substitution` | the `bad substitution` only |
+| value | undecoded word | same |
+
+The `$(` spelling of the same row (`build/pgW.sh` row 5) is byte-exact, so this
+is precisely the two openers `lex_dquote_body` cannot see. The dollar spelling
+of d7 — where the read stops early and the brace closes — is also exact,
+because that path re-lexes through `parse_braced_param_in` in
+`Quoting::Unread`, which *does* read them.
+
+**It is not only the two openers — the whole quote model is wrong** (measured
+2026-08-14, `build/pq1.sh` and `build/pq2.sh`). `extract_dollar_brace_string`
+**skips** a quoted run rather than walking it, and the two quotes skip
+differently:
+
+| word (inside `v='…'`, via `"${v@P}"`) | bash 5.2.37 | what it shows |
+|---|---|---|
+| `A${z:-P1<(echo hi⏎S1}B` | reports EOF, `bad substitution` | the bare `<(` row **is** read |
+| `A${z:-P1"<(echo hi⏎S1"}B` | silent, `[AZZB]` | a `<(` inside `" … "` is **not** |
+| `A${z:-P1"$(echo hi⏎S1"}B` | reports EOF, `bad substitution` | a `$(` inside `" … "` **is** |
+| `A${z:-P1'$(echo hi⏎S1'}B` | silent, `[AZZB]` | a `$(` inside `' … '` is **not** |
+| `A${z:-P1'<(echo hi⏎S1'}B` | silent, `[AZZB]` | …nor a `<(` |
+| `A${z:-P1"<(echo hi⏎S1}B` | `bad substitution`, **no** read report | a lone `"` swallows to end of string |
+| `A${z:-P1'<(echo hi⏎S1}B` | `bad substitution`, **no** read report | …and so does a lone `'` |
+| `A${z:-"x"<(echo hi⏎S1}B` | reports EOF, `bad substitution` | a *closed* run does not suppress what follows |
+| `A${z:-P1\<(echo hi⏎S1}B` | silent, `[AZZB]` | a backslash escapes the opener |
+
+So the brace scan delegates a `" … "` run to a double-quote skipper that has
+the `$(` row and **not** the `<(`/`>(` row — bash's ordinary rule that there is
+no process substitution inside double quotes — and skips a `' … '` run whole,
+offering its interior to nothing.
+
+`lex_dquote_body` models neither — it treats both quote characters as ordinary
+literals, which is correct for `Q_DOUBLE_QUOTES`, where the string *is* already
+the quoted run. Measured (`build/pq1.sh`, `build/pq2.sh`, `build/pq3.sh`), osh
+nevertheless agrees with bash on every *quoted* row above, by a different
+mechanism in each case: where the run closes, the brace closes too and the word
+goes through `parse_braced_param_in`, which does model quotes; where the run does
+not close, `lex_dquote_body`'s missing `<(` row happens to suppress the same read
+bash's skip suppresses. Two rows were left where the mechanisms did not coincide;
+the first of them is now fixed:
+
+| word (inside `v='…'`, via `"${v@P}"`) | bash 5.2.37 | osh |
+|---|---|---|
+| `A${z:-P1"$(echo hi⏎S1}B` | reports EOF, `bad substitution`, undecoded | ✅ same since 2026-08-14 |
+| `A${z:-'p$(echo hi'q$(fi⏎S1}B` | reports `fi`, `[AZZB]` | silent, `[AZZB]` |
+
+Row 1 was the serious one — a **spurious command execution**: osh reported the
+EOF, then ran `S1}` and produced `[Ahi]`. A lone `"` opens a run that swallows to
+end of string, leaving the brace nothing to close on, so bash condemns the word;
+osh instead let the failed read out of `read_opaque_span`'s `"`-run `$(` sub-arm,
+where [`Lexer::unclosed_seg`] degraded the whole word into a *string-level*
+`$( … )` and then performed it. Fixed 2026-08-14 by giving that sub-arm
+(`userspace/oils/src/lexer.rs`, `read_opaque_span`'s `'"'` arm) the same
+`Err(e) if self.unread_comsub(&e)` recovery the two `read_dollar_brace_body`
+arms already had: re-emit the `$(` into the raw text, take back what the reader
+consumed with `Lexer::unread_comsub_stop`, and `continue` the quoted-run loop.
+The read is still reported — it happened — and the run then swallows the rest,
+so the brace never closes and the word is condemned, exactly as in bash. The bug
+was **pre-existing**, not a regression: measured identical on the commit before
+the earlier 2026-08-14 brace-scan fix.
+
+Row 2 is a lost diagnostic only; the same row before the brace-scan fix had the
+wrong value *and* ran `f`, so it is much improved.
+
+**A second mechanism loses the same report where the brace *does* close**
+(measured 2026-08-14, `build/pr1.sh` r3). `A${z:-'i"t'<(fi⏎S1}B` reports `fi`
+in bash and expands to `[AZZB]`; osh now gets the value right (it was the
+undecoded word until the unmated-`"` fix of the same day) but still says
+nothing. That path never goes near `extent_read_of_rest`: the brace closed, so
+the reads are replayed off the *parsed operand*, and the operand lexer is
+`read_word_verbatim` in [`Verbatim::Dquote`] — which has a perfectly good `<(`
+row, but never reaches it, because the `"` inside the `' … '` run opens a
+quoted run that swallows `t'<(fi⏎S1` whole.
+
+Both scans are right about their own text and wrong about each other's, which
+is the shape of the whole issue: bash runs **two** passes over these bytes with
+**different quote rules** — `extract_dollar_brace_string`, where a `'` run is
+skipped and a `"` is a quote, and `expand_word_internal`, where a `'` is an
+ordinary character and a `"` is a quote. osh derives the reads from the
+expansion's lex in one path and from a string-level lex in the other, and
+neither is the scan's.
+
+**What the proper fix looks like.** A real lex entry for "text a brace scan is
+walking" — not `lex_dquote_body` with a row bolted on, and not the operand lex
+either. It needs, at its own level: the `<(`/`>(` openers beside `$(`; a `'`
+that consumes to the next `'` or to end of string, offering nothing inside it;
+and a `"` that consumes to the next `"` or to end of string, offering only `$(`
+(and `` ` ``) inside it. A backslash hides the byte after it. Then
+`extent_read_of_rest`, `unclosed_brace_reads` **and `brace_extent_scan`** all
+take their reads from that one pass, `lex_dquote_body` keeps its current
+string-level callers unchanged — the p1/p2 probe above confirms those answers
+are right as they stand — and the operand lex stops being asked a question it
+was never answering.
+
+These rows are the acceptance test the table above does not already cover — the
+ones that pin *which* quote wins when the two are interleaved (measured
+2026-08-14 against bash 5.2.37, `build/pr1.sh`):
+
+| word (inside `v='…'`, via `"${v@P}"`) | bash 5.2.37 | osh today |
+|---|---|---|
+| `A${z:-"it's"$(fi⏎S1}B` | reports `fi`, `[AZZB]` | same |
+| `A${z:-"it's"<(fi⏎S1}B` | reports `fi`, `[AZZB]` | same |
+| `A${z:-'i"t'<(fi⏎S1}B` | reports `fi`, `[AZZB]` | ✅ same since 2026-08-14 |
+| `A${z:-P1\'<(echo hi⏎S1}B` | reports EOF, `bad substitution` | ✅ same since 2026-08-14 |
+| `A${z:->(echo hi⏎S1}B` | reports EOF, `bad substitution` | ✅ same since 2026-08-14 |
+| `A${z:-${y:-<(fi⏎S1}B` | reports `fi`, `bad substitution` | same |
+
+So a `'` inside a closed `" … "` run opens nothing (rows 1-2) and a `"` inside a
+closed `' … '` run opens nothing (row 3) — each quote is invisible inside the
+other's run — and a backslash spends itself on the quote it precedes, leaving
+the `<(` after it live (row 4).
+
+An attempt that added only the `<(`/`>(` row to `lex_dquote_body` was written
+and reverted on 2026-08-14, before being compiled, because these measurements
+showed it would have regressed the three suppressed rows above (they are silent
+in bash today and in osh today, and would have started reporting).
+
+**Fixed 2026-08-14**, along the lines above. Three pieces:
+
+- `Lexer::brace_scan` (`userspace/oils/src/lexer.rs`) — a flag saying "this
+  scan stands in for `extract_dollar_brace_string`, not for the expansion after
+  it". With it set, `read_double_quote_until` grows the scan's other two
+  openers: a `<(`/`>(` becomes a `SubBody::Unread` segment carrying its own
+  `SubDelim`, which the expansion prints straight back
+  (`SubDelim::is_performed` is false for both), so the word's **value** is
+  untouched and only the extent walk gains a construct to read. The new entry
+  `lexer::lex_brace_scan_body` → `parser::brace_scan_word_from_source` is what
+  `Shell::extent_read_of_rest` now lexes its remainder with, which is the
+  unclosed-brace half (rows 4-5 of the interleaving table above).
+- The closed-brace half (row 3) is the same flag turned on from
+  `read_word_verbatim`'s `"` arm, and **only** when that run opened inside a
+  `' … '` one — `in_run && self.here_text`. That is exactly the case where the
+  scan never saw a quote at all, because it stepped over the single quotes
+  whole. Outside a run the `"` is the scan's own, and there `skip_double_quoted`
+  reads the `$(` spelling alone, which is what the reader already did.
+- The quote state itself moved out of the lexer and into the walk, as
+  `ScanQuote` (`interp.rs`): two independent flags, because
+  `skip_single_quoted` hunts for a `'` and `skip_double_quoted` for a `"` and
+  neither knows the other character — so each quote is an ordinary byte inside
+  the other's run. `Shell::brace_scanned_subs_slice` tracks both over the
+  literal runs (a `\` still hides the byte after it) and suppresses the two
+  process-substitution spellings inside a `" … "` while letting `$(` through;
+  `brace_scanned_subs_in` no longer resets the state on entering a
+  `WordPart::DoubleQuoted` whose `"` the scan never saw.
+
+Corpus case:
+`userspace/oils/tests/corpus/the-brace-scan-reads-a-process-substitution-and-the-expansion-after-it-does-not.sh`
+— 14 shapes plus a here-document body, byte-identical to bash 5.2.37 including
+stderr.
+
+**Impact while it stood.** Diagnostics only — the values already agreed. A
+`<(`/`>(` at brace level lost its read report. The worst shape — a lone `"`
+before a `$( … )` making osh run a command bash does not, and yield the wrong
+value — was fixed earlier the same day (see row 1 of the two-row table above).
+Reachable only through `@P`/`PS4`/here-doc text holding a malformed `${ … }`.
+
+**Not fixed by this, and tracked separately:** row 2 of the two-row table,
+`A${z:-'p$(echo hi'q$(fi⏎S1}B`. That one is not about the openers but about
+where a construct *ends*; see
+`TD-OILS-A-SQUOTE-RUN-DOES-NOT-CUT-A-SUBSTITUTION-SHORT-FOR-THE-BRACE-SCAN`.
+
+---
+
+### TD-OILS-AN-UNMATED-DOUBLE-QUOTE-GROWS-A-MATE-WHEN-THE-WORD-IS-PRINTED-BACK — 2026-08-14 — ✅ FIXED 2026-08-14
+
+**Where:** `userspace/oils/src/unparse.rs` — `part_src`'s
+`WordPart::DoubleQuoted` arm, which writes a `"` on both ends unconditionally;
+the run that has no closing `"` is built by `userspace/oils/src/lexer.rs`,
+`Lexer::read_word_verbatim`'s `'"'` arm under `ParseOpts::tolerant`.
+
+**Repro** (bash 5.2.37, `build/pr11.sh` t1):
+
+```sh
+z=ZZ
+v='A${z:-'"'"'i"t'"'"'$(fi)}B'; printf '[%s]\n' "${v@P}"
+```
+
+| | bash 5.2.37 | osh |
+|---|---|---|
+| remainder quoted by the read | `` `fi)}B' `` | `` `fi)"}B' `` |
+| word named by `bad substitution` | `A${z:-'i"t'$(fi)}B` | `A${z:-'i"t'$(fi)"}B` |
+| value | `[A${z:-'i"t'$(fi)}B]` | same |
+
+**What is wrong.** In text no parser read, a `"` with no mate is not an error:
+`string_extract_double_quoted` is handed a *finished word* and its walk ends at
+the end of the string as readily as at a quote (that is
+`ParseOpts::tolerant`, and the corpus case
+`a-double-quote-with-no-mate-in-an-operand-runs-to-the-end-of-the-operand.sh`
+pins the expansion of it). The resulting `WordPart::DoubleQuoted` therefore
+covers a run whose closing quote **was never in the source** — but the part
+does not record that, and `part_src` prints the pair back. Every consumer of
+`crate::unparse::word_src` then sees one byte that was not in the word.
+
+The value is unaffected, because quote removal drops the `"` either way. What is
+affected is everything derived from the *text*: `Shell::bad_sub_word` (the word
+`bad substitution` names), the tail `extract_command_subst` quotes back in its
+own diagnostic, and — in principle, though no divergence has been measured for
+it yet — `crate::wordscan::word_fault`, which re-scans `word_src` for the
+unclosed `${`/`` ` `` verdicts and could be pushed either way by a stray quote.
+
+The single-quote analogue exists in the same shape:
+`Lexer::read_single_quote` has a `None if self.opts.tolerant => return Ok(s)`
+arm, and `part_src`'s `WordPart::SingleQuoted` likewise writes both `'`s. No
+divergence has been measured for it, because the paths that produce an unmated
+`'` do not currently reach a diagnostic that prints the word back — but the
+defect is the same one and a fix should cover both.
+
+**What the proper fix looks like.** Record the missing mate on the part rather
+than guessing at print time: `Seg::Dq(Vec<Seg>)` → `Seg::Dq(Vec<Seg>, bool)`
+and `WordPart::DoubleQuoted(Vec<WordPart>)` → a `closed` field, exactly as
+`Seg::Sq(Str, bool)` already carries its own flag, with `part_src` writing the
+trailing quote only when it was there. About 27 sites mention `DoubleQuoted`
+across `ast.rs`, `parser.rs`, `interp.rs` and `unparse.rs`; most are matches
+that need only a `..`. The single-quote half is the same edit on
+`WordPart::SingleQuoted`.
+
+Not worth reaching for a cheaper trick: an unmated run always extends to the
+end of its text, so "omit the quote when the part is last" would be *nearly*
+right, and nearly-right quoting is how a word stops re-parsing.
+
+**Fixed 2026-08-14**, along the lines above. `read_double_quote_until` now
+reports whether a `"` really ended the run — it has exactly two `Ok` returns,
+one per case, so the flag falls straight out of the existing control flow — and
+that rides on `Seg::Dq(Vec<Seg>, bool)` into
+`WordPart::DoubleQuoted { parts, closed }`. `part_src` writes the trailing quote
+only when `closed`. The single-quote half is the same edit:
+`read_single_quote`'s tolerant arm answers `false`, `Seg::Sq` became a struct
+variant `{ text, escaped, closed }` rather than grow a second unnamed `bool`,
+and an unmated run prints as `'` + text instead of going through
+`sh_single_quote`, whose whole job is to supply the mate.
+
+Two returns needed thought rather than transcription: the pair inside
+`read_double_quote_until` that end the run on an *unclosed construct* absorbed
+into a `Seg::Unclosed` answer `false`, since the run ended on the construct and
+not on a quote; and the backslash spelling of `Seg::Sq` is unconditionally
+`closed: true`, having no quotes to match.
+
+Corpus case:
+`userspace/oils/tests/corpus/a-double-quote-with-no-mate-does-not-grow-one-when-the-word-is-printed-back.sh`
+— 8 shapes including `PS4` and a here-document body, byte-identical to bash
+5.2.37 including stderr.
+
+**Impact while it stood.** Diagnostics only — one spurious `"` in the two lines
+bash prints for a malformed `${ … }` whose operand holds a `"` opened inside a
+`' … '` run. Reachable only through `@P`/`PS4`/here-doc text.
+
+---
+
+### TD-OILS-AN-UNMATED-SQUOTE-IN-A-SUBSCRIPT-LOSES-ITS-QUOTE-BYTES-FROM-THE-WORD-PRINTED-BACK — 2026-08-14 — ✅ FIXED 2026-08-14
+
+**Where:** `attach_subscript_reads` (`userspace/oils/src/parser.rs`), which gives
+each top-level `' … '` of an arithmetic fragment its interior parse.
+
+**Repro** (bash 5.2.37):
+
+```sh
+declare -a arr=(10 20 30)
+declare -A m=([k]=V)
+echo "[${arr['x${m:-']}]"
+```
+
+bash names `` 'x${m:-' `` — the whole fragment, quotes included. osh named
+`x${m:-` — the interior of the run alone.
+
+**Cause, which was not the one first written here.** The first note guessed the
+text came from `crate::unparse::word_src` by way of `crate::wordscan::word_fault`.
+It does not: `word_fault` returns `None` for these words, and the word source osh
+builds is byte-correct. The diagnostic comes from `Shell::expand_unclosed` on an
+`Unclosed::BadSubst` whose `text` the *interior's own lexer* filled in with
+`Lexer::whole_text` — the interior being a string of osh's making. bash has no
+such string: an arithmetic fragment is expanded with `Q_DOUBLE_QUOTES` set, which
+switches the single quote off, so `expand_word_internal` walks straight through
+the pair and the string it was handed is the fragment. Both "no closing"
+reporters echo that string (`report_error (…, string)`, subst.c:1498 for
+`$[ … ]`, subst.c:1972 for `${ … }`).
+
+That also explains the shape the note found puzzling — a name that begins one
+byte late and ends two bytes early is exactly the interior of a `' … '` run.
+There were not two faults there, but there is a second one beside it; see
+`TD-OILS-A-BRACE-WHOSE-NAME-SCAN-RUNS-OFF-A-FRAGMENT-TAKES-THE-OTHER-DIAGNOSTIC`.
+
+**Fix.** `attach_subscript_reads` already re-measures the fragment after parsing
+an interior — that is what `crate::unparse::attach_comsub_tails` does for a
+`$( … )`'s echoed remainder. It now also re-*names*: a new
+`name_unclosed_after_the_fragment` walks the interiors it just attached and gives
+every top-level `WordPart::Unclosed(Unclosed::BadSubst { text, .. })` the
+fragment's source for its `text`. Only the run's own level is renamed; a `" … "`
+inside the interior is carved out by `string_extract_double_quoted` as its own
+string and keeps naming itself, as one written a character to the left of the `'`
+would. `src` is left alone — it is the construct's spelling for a re-print, not a
+diagnostic's `%s`.
+
+Corpus:
+`a-construct-left-open-in-a-quoted-subscript-names-the-fragment-around-it.sh`
+(seven rows: a `${ … }` body scan running off, the same with text after the run,
+a `$[ … ]`, both substring bounds, and a run that closes nothing early).
+
+---
+
+### TD-OILS-A-BRACE-WHOSE-NAME-SCAN-RUNS-OFF-A-FRAGMENT-TAKES-THE-OTHER-DIAGNOSTIC — 2026-08-14 — ✅ FIXED 2026-08-14
+
+**Where:** `Shell::expand_unclosed` (`userspace/oils/src/interp.rs`) and the
+`Unclosed::BadSubst` the lexer raises for it (`userspace/oils/src/lexer.rs`).
+
+**Repro** (bash 5.2.37):
+
+```sh
+declare -a arr=(10 20 30)
+declare -A m=([k]=V)
+echo "[${arr['x${m']}]"
+```
+
+| | |
+|---|---|
+| bash | `` 'x${m': bad substitution `` |
+| osh | ``bad substitution: no closing `}' in 'x${m'`` |
+
+The same string is named — that much was fixed the same day — but it is the
+wrong one of bash's two messages.
+
+**Why bash has two.** A `${ … }` in a string is read in two steps, and only the
+second one is `extract_dollar_brace_string`. First `parameter_brace_expand`
+extracts the *name* with `string_extract (string, &t_index, "#%^,~:-=?+/@}",
+SX_VARNAME)` (subst.c:9550), which stops at one of those operator characters or
+at the end of the string — `SX_VARNAME` stepping over a whole `[ … ]` subscript
+on the way. If it stopped at the end, `c` is `NUL` and the `switch (c)` falls to
+`default: case '\0': bad_substitution:` (subst.c:10018-10024), which is
+`report_error (_("%s: bad substitution"), string)` and no longjmp. Only if it
+stopped at an *operator* does the body go to `extract_dollar_brace_string`, whose
+own running-out is the "no closing" one that longjmps (subst.c:1972).
+
+So the two messages divide on whether the unclosed brace got as far as an
+operator, and the division is visible:
+
+| fragment | bash |
+|---|---|
+| `'x${m'` | `` 'x${m': bad substitution `` |
+| `'x${#m'` | `` 'x${#m': bad substitution `` |
+| `'x${m[0]'` | `` 'x${m[0]': bad substitution `` |
+| `'x${m['` | `` 'x${m[': bad substitution `` |
+| `'x${m:-'` | ``no closing `}' in 'x${m:-'`` |
+
+**Two things the entry got wrong, found while fixing it.**
+
+*It is not only a fragment.* A here-document body takes the same two messages,
+and osh had the same one answer for both — `cat <<E`/`a${m b`/`E` is
+`a${m b⏎: bad substitution` in bash. The `${x@P}` case really does collapse
+(`no_longjmp_on_fatal_error` makes `extract_dollar_brace_string` return `NULL`
+quietly and its caller fall to the same label), which is why the divergence
+looked narrower than it was.
+
+*The name scan is not the whole story.* Two checks between it and
+`extract_dollar_brace_string` also reach `bad_substitution:` with an operator
+already found — `valid_brace_expansion_word` on the name (subst.c:9803) and the
+length branch's `string[sindex-1] != RBRACE` (subst.c:9687). So `'x${m[a:b'`
+(the `:` *is* reached, but `m[a` is no name) and `'x${#q:-'` are both plain bad
+substitutions. A third check, `parameter_brace_expand_indir` (subst.c:9807),
+runs there too and reports in the missing brace's place: `a${!nosuch:-b` is
+`nosuch: invalid indirect expansion`, and a pointer holding `not a name` is
+`not a name: invalid variable name`.
+
+**The fix.** None of this needed new state on `Unclosed::BadSubst`. osh already
+had the whole decision procedure — `Shell::unterminated_brace_kind`, written for
+the arithmetic-string scanner, which answers `BadSub` / `NoClosing` /
+`Indir(name)` from the body text alone and has `Shell::arith_indir_resolves`
+beside it for the third. `Shell::expand_unclosed` now asks it, for `close ==
+'}'`, before anything else it does, and a new `Shell::unclosed_bad_substitution`
+reports the `BadSub` answer naming `text` (bash's `string`) with the
+`ErrexitOrPosix` class the `bad_substitution:` label carries.
+
+Asking it *first* matters, and is bash's own order: a `$( … )` written inside
+the name is walked over by `string_extract` without being parsed, so
+`a${m$(fi) b` names the bad substitution and never mentions the `fi` — where osh
+used to run `Shell::unclosed_brace_reads` first and report the `fi`.
+
+**Fixed by:** `Shell::expand_unclosed` + `Shell::unclosed_bad_substitution`
+(`userspace/oils/src/interp.rs`). Corpus:
+`a-brace-whose-name-scan-runs-off-the-text-is-a-bad-substitution-not-a-missing-brace.sh`
+— sixteen shapes covering the fragment, the here-document, the command
+substitution in each half, all three indirection outcomes and the prompt
+collapse, byte-identical to bash 5.2.37 including stderr.
+
+---
+
+### TD-OILS-AN-UNCLOSED-ARITH-SUBSTITUTION-IN-A-QUOTED-SUBSCRIPT-IS-NOT-CAUGHT-BEFORE-EXPANSION — 2026-08-14
+
+**Where:** `crate::wordscan` (`userspace/oils/src/wordscan.rs`), the word-extent
+pass `Shell::begin_word` runs before a word is expanded.
+
+**Repro** (bash 5.2.37):
+
+```sh
+declare -a arr=(10 20 30)
+echo "$(touch RAN)[${arr['x$(( 1+ ']}]"
+```
+
+bash prints ``bad substitution: no closing `)' in "$(touch RAN)[${arr['x$(( 1+ ']}]"``
+— the **whole word** — and `RAN` is never created. osh prints
+``bad substitution: no closing `)' in 'x$(( 1+ '`` — the fragment — and the
+`touch` runs.
+
+The side effect is the real defect; the name follows from it. bash reaches this
+one on the *extent* pass, before any part of the word expands, so it names the
+string that pass was walking. osh reaches it only when the subscript is expanded,
+by which time the substitution ahead of it has already run.
+
+**Not the same as the two entries above.** Those are about which string a fault
+found *during* the fragment's expansion names. This one is about a fault bash
+finds before expansion starts and osh does not find at all until later.
+
+**What the proper fix looks like.** `wordscan::scan` has rows for `${`,
+`` ` ``, `$(`, `$[` and `<(`/`>(`, and its faults are `WordFault::Brace` and
+`WordFault::Backquote`. An unclosed `$((` inside a `' … '` in a subscript is a
+third: `extract_delimited_string`'s (subst.c:1498), which names the scanned
+string and closes it with `)`. Adding it means teaching `word_fault` a fault that
+carries its own closing delimiter, and teaching the subscript skip that a `'` in
+there does not hide a `$((` from the enclosing scan.
+
+**Impact.** A command substitution written before such a subscript runs when bash
+would not have run it. Narrow, but it is a side effect and not just text.
+
+---
+
+### TD-OILS-A-BACKQUOTE-IN-A-QUOTED-SUBSCRIPT-IS-A-PARSE-ERROR-WHERE-BASH-EXPANDS — 2026-08-14 — ✅ FIXED 2026-08-14 (in-scope half; see the scope note at the end)
+
+**Where:** the `' … '` interior parse of an arithmetic fragment —
+`attach_subscript_reads` (`userspace/oils/src/parser.rs`) and the lexer path
+behind it.
+
+**Repro** (bash 5.2.37):
+
+```sh
+declare -a arr=(10 20 30)
+echo "[${arr['x`fi']}]"
+echo TAIL
+```
+
+| | |
+|---|---|
+| bash | ``bad substitution: no closing "`" in `fi'`` at line 2, then `TAIL` |
+| osh, before | ``unexpected EOF while looking for matching `` ` ``'`` at line 4 — the script never runs |
+| osh, now | identical to bash |
+
+osh turned a runtime diagnostic into a *parse* error, so the whole script was
+rejected. bash's parser stops at the `'` and resumes at its mate, so the
+backquote inside is text as far as any parse is concerned; it is met only by
+`param_expand`'s own `string_extract (…, SX_REQMATCH)` at expansion time
+(subst.c:11269), which names `string + t_index` — the text from the backquote on.
+
+**The fix.** Three parts:
+
+- `Lexer::read_word_verbatim`'s `` ` `` arm used a bare `?`, which let the
+  `LexError` escape as a parse error. It now converts to an `Unclosed::Backquote`
+  segment via `unclosed_seg`, exactly as the `$` arm does for an unmatched `${`.
+  This is the part that stopped the script being rejected.
+- `Unclosed::Backquote` gained a `text` field, because its `%s` is
+  `string + t_index` and not `string`: the report runs from the backquote to the
+  end of the **fragment**, whereas `src` is also what `part_src`/`parts_src`
+  re-print and so cannot be widened in place.
+- `name_unclosed_after_the_fragment` (`parser.rs`) widens that `text` with the
+  fragment tail past the run's interior — the run's own closing quote and
+  whatever follows it — mirroring what it already did for `BadSubst`.
+
+**Verified.** `userspace/oils/tests/corpus/an-unmated-backquote-in-a-quoted-subscript-is-met-at-expansion-and-not-by-a-parse.sh`
+is byte-identical to bash 5.2.37, as are probes `build/pr28.sh` and
+`build/pr29.sh`. Full sweep green.
+
+**SCOPE: one residue is out of frozen scope (§305) and is deliberately left
+unfixed.** Where the unmated backquote sits inside a *nested double quote* within
+the run — `build/pr30.sh` d2, `echo "[${arr['x"`fi"']}]"` — bash reports
+``no closing "`" in `fi"'`` and osh reports ``no closing "`" in `fi"``: osh is one
+trailing `'` short. Everything else matches, including the script surviving, the
+exit status and all other output. The cause is known:
+`name_unclosed_after_the_fragment` visits only the run's own top level and does
+not descend into a nested `DoubleQuoted` part (`crate::unparse::nested_parts_mut`
+would give the descent; note its `SingleQuoted { .. }` arm returns `Vec::new()`,
+so it can only supplement the outer loop, not replace it).
+
+This is **the exact substring an error message echoes**, which design-decisions
+§305 names as out of scope: nothing SlateOS runs will ever depend on it. Fix it only
+if it turns up as part of something that does. The in-scope half of this
+entry — a whole script being rejected where bash runs it — is closed.
+
+**Fixed by:** the corpus case named above, plus `lexer.rs` (`Unclosed::Backquote`
+`text` field, `read_word_verbatim`'s `` ` `` arm), `interp.rs`
+(`Unclosed::Backquote` report) and `parser.rs`
+(`name_unclosed_after_the_fragment`).
+
+### TD-OILS-A-SQUOTE-RUN-DOES-NOT-CUT-A-SUBSTITUTION-SHORT-FOR-THE-BRACE-SCAN. A `$( … )` opened inside one swallows the read that should have followed it — 2026-08-14
+
+**Where:** `userspace/oils/src/lexer.rs` — `Lexer::read_word_verbatim`'s `$`
+arm in [`Verbatim::Dquote`], reached through
+`Shell::brace_extent_scan` → `Shell::brace_scanned_subs`.
+
+**Repro** (bash 5.2.37, `build/pr12.sh`):
+
+```sh
+z=ZZ
+v='A${z:-'"'"'p$(echo hi'"'"'q$(fi
+S1}B'; printf '[%s]\n' "${v@P}"
+```
+
+| | bash 5.2.37 | osh |
+|---|---|---|
+| reports | ``syntax error near unexpected token `fi' `` | **nothing** |
+| value | `[AZZB]` | same |
+
+**What is wrong.** The two passes bash makes over this word carve it into
+*different constructs*, not merely read the same constructs differently.
+
+- `extract_dollar_brace_string` meets the `'` and hands the run to
+  `skip_single_quoted`, which stops at the **mate**. So `'p$(echo hi'` is one
+  skipped run, the `$(` inside it is never seen at all, and the scan resumes at
+  `q` — where it meets `$(fi⏎S1}B`, reads it, and reports `fi`.
+- `expand_word_internal` has no `'` left to speak of, so its
+  `string_extract_double_quoted` meets the **first** `$(`, hands the rest of the
+  word to `extract_command_subst`, and — there being no `)` anywhere — takes
+  everything. One substitution, not two.
+
+osh derives the brace scan's reads from the expansion's lex, so it gets the
+second carving and the second `$(` is inside the first's body, where the walk
+never reaches it. `Shell::brace_scanned_subs_slice`'s single-quote bookkeeping
+then correctly suppresses the one construct it *can* see (it is inside the run),
+and the result is silence.
+
+This is the residue of
+`TD-OILS-AN-UNDECODED-BRACE-BODY-IS-RE-LEXED-AS-A-DOUBLE-QUOTED-RUN`, which
+fixed the part of the same disagreement that was only about *which openers*
+count. Rows where the two passes agree on the extents but not on the openers are
+now handled by `Lexer::brace_scan`; this row is one where they disagree on the
+extents, and no flag on the expansion's lex can express it.
+
+**What the proper fix looks like.** `Shell::brace_extent_scan` has to run over
+the brace's **text**, with the scan's own carve, rather than over the parsed
+part. Concretely: keep the undecoded source of an unread `${ … }` on the part
+(or reach it through `crate::unparse`), and lex it once in
+`Lexer::brace_scan` mode with the single-quote rule the scan really has — a `'`
+consumes to its mate and offers nothing inside, so a `$(` in there can neither
+be read nor run past the mate. `read_word_verbatim` already computes that mate
+(`sq_close`); what it does not do is let it bound a substitution, because for
+the *expansion* it must not.
+
+Note that `Lexer::brace_scan` as it stands is deliberately the narrow version:
+it adds openers and leaves extents alone. Widening it to bound a `$( … )` at
+`sq_close` would be wrong for the same lexer's expansion duty, so the widening
+has to come with the second pass, not instead of it.
+
+**Impact.** Diagnostics only — the value is already right. Reachable only
+through `@P`/`PS4`/here-doc text holding a `${ … }` whose operand has both an
+unterminated `$( … )` inside a `' … '` run and a failing one after it.
+
+---
+
+### TD-OILS-A-DOLLAR-BRACKET-BOUND-DOES-NOT-PERFORM-ITS-COMMAND-SUBSTITUTION. `$[ 1+$(… ]` reads the `$( … )` as an arithmetic operand token — 2026-08-14
+
+**Where:** `userspace/oils/src/interp.rs` — the evaluation of a
+`WordPart::ArithSub { bracket: true, … }` whose expression text holds an
+unclosed `$( … )`.
+
+**What is wrong.** `extract_arithmetic_subst` is
+`extract_delimited_string (string, sindex, "$[", "[", "]", 0)` (subst.c:1299) —
+flags `0`, so **no** `SX_COMMAND` and no nested read. The `$[` therefore closes
+at its `]` by plain delimiter counting, and the unclosed `$( … )` inside is met
+later, by the *arithmetic expansion* of the bounds text, which performs it under
+`Q_DOUBLE_QUOTES|Q_ARITH`: it reports, runs the abandoned extent, and yields
+nothing. osh instead hands the raw characters to its arithmetic tokenizer, which
+calls them a bad operand.
+
+Measured (`build/pgY.sh` d1/d2):
+
+| word (inside `v='…'`, via `"${v@P}"`) | bash | osh |
+|---|---|---|
+| `A$[1+$(for⏎x]B` | reports `for`, runs `fo`, `[A1B]` | silent, `[AA$[1+$(for⏎x]B]` |
+| `A$[1+$(echo hi⏎x]B` | reports EOF, `[A1B]` | silent, `[AA$[1+$(echo hi⏎x]B]` |
+
+Row d3 — the same body with no `]` at all — is byte-exact in both shells
+(silent, undecoded text), because there the `$[` genuinely never closes.
+
+**What the proper fix looks like.** Two things, in order. (1) `$[`'s lex must
+close at its `]` by plain delimiter counting, without the nested read — which
+means `Lexer::read_opaque_span` needs to know its enclosing close character, so
+that the `$((` spelling (SX_COMMAND) and the `$[` one (flags `0`) can part
+company. Routing that arm through `Lexer::unread_comsub_stop` was tried on
+2026-08-14 and reverted: it made the `$[` bounds text match bash on d1/d2, but
+it *regressed* the `$((` spelling in the corpus case
+`an-unterminated-construct-in-text-no-parser-read-is-a-runtime-failure`, whose
+`$((1+$(echo` row must report the read and stop rather than condemn the `$((`.
+A passing case outranks a documented divergence, so that arm keeps its `?`.
+(2) The arithmetic evaluator must perform a `$( … )` in its expression text
+with the unread-text rule rather than tokenizing it — which is what makes both
+rows' values follow.
+
+**Impact.** Wrong value and wrong diagnostic for a deprecated spelling of
+arithmetic expansion, in malformed input, reachable only through `@P`/`PS4`/
+here-doc text.
 ---
 
 ### [A] B-SMP-FAST-CPU-INDEX-PANICS-BEFORE-APIC-INIT. `smp::fast_cpu_index()` reads the APIC before it is mapped — `debug_assert` panic in debug, wild read in release — FIXED 2026-08-14
@@ -63112,3 +69678,1133 @@ Baselines for P21(a) now stand at three idle release runs — `vfs_stat_breakdow
 = 262, 261, 262 ns — putting run-to-run noise on that phase under 0.5% and the
 20% threshold far outside it. `vfs_stat_breakdown_prologue` = 580, 568 ns across
 the two runs that recorded it (noise ~2%).
+---
+
+### [B] B-INIT-READS-A-KERNEL-ERROR-AS-A-CHILD-EXIT-CODE-AND-RESTARTS-ON-IT — ✅ FIXED 2026-08-14
+
+**Reported by lane-a** in
+`requests/a-b-init-conflates-syscall-error-with-exit-code.md`; fixed in
+`services/init/src/main.rs`, which is lane-b's tree.
+
+**Where:** `ServiceRegistry`'s supervisor poll (`services/init/src/main.rs`,
+the `process_try_wait` call in the reap loop) and the `process_try_wait`
+wrapper itself.
+
+**What was wrong.** `SYS_PROCESS_TRY_WAIT` overloads one `i64` with two
+disjoint domains — a child's exit status (`>= 0`) and a kernel error (`< 0`).
+init decoded that `i64` *at the use site*, and only special-cased
+`ERR_WOULD_BLOCK` (`-4`). Every other negative value fell through to the
+"child exited with code N" path, so the supervisor concluded the service had
+died and scheduled a restart.
+
+**How it bit.** Before lane-a's kernel fix, neither `sys_process_spawn` nor
+`sys_process_spawn_ex` set `SpawnOptions::parent`, so every syscall-spawned
+child recorded `parent = 0` and `pcb::try_reap` answered `PermissionDenied`
+(`-400`). init read `-400` as an exit code and restarted `ticker` **nine
+times** — while `ticker` was alive and printing `[ticker] Ready.` throughout.
+The kernel half is fixed, but the misreading is a bug on its own terms and
+would re-fire on the next error the wait path can return (`NoSuchProcess`,
+`PermissionDenied` after a re-parent, anything added later).
+
+**The fix.** Classify once, at the syscall boundary, so the two domains cannot
+be confused downstream:
+
+```rust
+enum WaitStatus { Running, Exited(i64), Failed(i64) }
+fn process_try_wait(pid: u64) -> WaitStatus { … }
+```
+
+- `Running` — as before, and it resets the new consecutive-error counter.
+- `Failed(err)` — logs `[svc] <name> (PID n): wait failed (err=N, K in a row)`
+  and returns **without touching** `pid`, `crash_count`, `backoff_ns` or
+  `restart_after_ns`. No restart can be caused by a wait error any more.
+- `Exited(code)` — the pre-existing path, now reachable only for `code >= 0`.
+
+After `MAX_WAIT_ERRORS = 5` *consecutive* failures on one service init prints
+`giving up supervision of PID n … it is NOT being restarted`, clears `pid` and
+sets `auto_restart = false`. Five rides through a transient (a re-parent
+racing a poll) and stops a permanent one from scrolling the console at the
+supervisor's tick rate. The child is deliberately left running and
+unsupervised: a wait failure is a bug in the kernel or in init, and killing a
+healthy service to tidy up our own bookkeeping is the same category of mistake
+as restarting it.
+
+**The general shape, worth remembering.** An overloaded return value is a fine
+ABI — as long as **exactly one place decodes it**. The bug was not the `i64`;
+it was decoding it inline at the use site, where the error case is easy to
+forget and impossible to see. Nothing downstream of `process_try_wait` can now
+name a raw wait return at all.
+
+**Known residue (not a bug today).** The `Failed` discriminator is `ret < 0`.
+If the status domain is ever widened into negative values — a signal-style
+encoding, say — that test stops being sound and the kernel-side out-param
+variant lane-a offered becomes necessary. Recorded so the assumption is
+written down rather than implied.
+
+**Verified.** `services/init` builds clean for `x86_64-unknown-none`; full
+QEMU boot test green.
+
+### [C] D-DBVIEWER-WRAP-TEST-STOPPED-TESTING-WRAPPING — ✅ FIXED 2026-08-15
+
+**Found by a full `cargo test --workspace`,** not by looking for it:
+`dbviewer::tests::a_long_query_error_is_wrapped_not_cut_mid_word` failed with
+"the error was drawn as 1 command(s)". It was the only failure in the
+workspace, and it is **not** a wrapping bug — the wrapping is fine.
+
+The test renders the results pane at a fixed 1200px, which leaves the message
+1176px, and asserts a 184-character SQL error takes more than one line. That
+held when it was written: the toolkit then measured text with the built-in
+8×16 bitmap font, where 184 characters come to ~1470px and overflow. Later
+`osfont::system::SystemFont` began resolving a real proportional host face,
+the same string measured **988px**, and it fit on one line. So the test
+started reporting a wrapping bug that did not exist, for the sole reason that
+the font got narrower.
+
+**The sharper form of the problem is the one that did not fail.** For as long
+as the measured width sat between "wraps" and "fits", this test passed while
+testing progressively less: a string that only just overflows exercises the
+wrap loop once. There was no signal at all until it crossed the line
+completely. A threshold test whose threshold is a constant and whose input is
+measured by the environment degrades silently before it fails loudly.
+
+**Fixed** by sizing the pane from the message rather than from a constant:
+`results_pane_layout_at(app, width)` is split out of `results_pane_layout`,
+and the test asks for half the message's own measured width, which forces an
+overflow on any face however narrow it draws. `a_wordy_message_does_not_crowd_out_the_results`
+did not need the same treatment — it uses `"word ".repeat(2000)`, which
+overflows anything, which is why it kept working.
+
+**Ruled out first, by A/B rather than by argument:** this is not fallout from
+the Hangul shaper wiring landed the same day. Restoring `gui/font/src/` to the
+pre-Hangul commit and re-running reproduced the failure identically. (It could
+not have been: `norm::needs_work` is false for this string, so `pieces` takes
+the fast path, and `hangul::preprocess` early-outs on `present`.)
+
+**Where.** `apps/dbviewer/src/main.rs` — `results_pane_layout`,
+`results_pane_layout_at`, `TEST_PANE_WIDTH`, and the test itself.
+
+**Worth generalising.** Any other test asserting "this wraps" or "this is
+elided" against a hard-coded width has the same failure mode latent in it. The
+rule that avoids it: derive the box from a measurement of the content, never
+from a literal.
+
+**Follow-up sweep, same day.** Every other `text::wrap` / `text::elide`
+assertion in `apps/**` and `gui/**` was checked for the same shape. One more
+had it: `logviewer::tests::the_raw_line_is_cut_to_the_box_drawn_behind_it`
+asserted `out.ends_with("...")` against a hard-coded `room = 400.0`, and the
+lines it uses measure **450px** — a 12% margin, one font-metric change from
+the failure dbviewer had already hit. Fixed the same way (`room` derived as
+half the line's measured width).
+
+The rest are sound, and the reason is worth naming: they assert a
+*postcondition of the function* rather than a fact about the environment.
+`regextester::elided_text_fits_the_box_it_is_drawn_in` checks `w <= box_w`,
+which holds whether or not elision was needed; `logviewer::a_short_raw_line_is_left_alone`
+and `regextester::text_that_fits_is_not_elided` assert the *non*-action at
+widths (400px, 500px) nothing plausible could overflow; and
+`dbviewer::a_wordy_message_does_not_crowd_out_the_results` uses
+`"word ".repeat(2000)`, which overflows any face. Only an assertion that
+something *must* overflow a literal is fragile, because only that direction
+depends on the font staying at least as wide as it was the day the number was
+written.
+
+---
+
+## FIXED (2026-08-15, lane C) — three workspace test failures from real-glyph measurement, two of them real bugs
+
+`text::measure`/`text::wrap` now measure actual glyph advances instead of
+estimating from byte counts. Three lane-C tests failed as a result. Only one
+was a stale test; the other two were genuine rendering bugs the old estimate
+had been hiding.
+
+**1. `weather::an_alert_card_grows_to_hold_its_description` — stale test.**
+`card_h = (ALERT_BODY_TOP + body_height + 12.0).max(90.0)`, i.e. `52 + 18N`
+floored at 90, so growth is only observable at N≥3 lines. `LONG_ALERT` used to
+wrap to 4 lines and now wraps to 2 at `text_width = 828` (app width 900 minus
+padding), so the test compared 90 against 90. Fixed by building the input by
+construction — `"Secure loose objects outdoors. ".repeat(40)` — and asserting
+first that it actually wraps past the floor (`drawn > 2`) so the growth check
+can never again silently compare the floor to itself.
+
+**2. `wordsearch` — real bug: the strikethrough rule and checkmark overran the
+word they annotate.** A word in the list is drawn with
+`max_width: Some(140.0)`, but the rule's extent and the checkmark's x were
+placed from the *unclipped* `text::measure`. A word longer than the column got
+a rule running out past the clip into the grid beside it. Fixed by naming the
+clamp (`WORD_LIST_MAX_WIDTH`, `WORD_LIST_FONT_SIZE`) and applying it to the
+measurement that positions the marks:
+`text::measure(...).min(WORD_LIST_MAX_WIDTH)`. The old test asserted
+`bold < word.len() as f32 * 8.0 + 1.0` — a byte-count literal, which is both
+fragile and wrong for non-ASCII; replaced with three postcondition tests
+(rule matches the word drawn beneath it; ÉLÉPHANT measures within 10% of
+ELEPHANT, i.e. by character not by byte; a 45-char word's rule never leaves
+the column).
+
+**3. `tmux` — real bug: a terminal grid sized from a proportional face.**
+`char_width()` was `text::digit_advance(...)`, the advance of `'0'` in the UI
+face: 7.55px at 13px, while `'W'` in the same face is 13.08px. Glyphs overhung
+their neighbours' cell backgrounds and the block cursor sat beside the
+character it marks. The root cause was that **the toolkit had no way to ask
+for a monospace face at all.** Fixed by building that dimension end to end —
+`osfont::system::Family { Ui, Mono }` on the cache key, `text::measure_in` /
+`cell_advance` / `line_height_in` / `ascent_in`, `RenderCommand::PushFont` /
+`PopFont`, `guiremote` tags `0x0B`/`0x0C`, a `font_stack` in the compositor —
+and pointing tmux at it. See `design-decisions.md` §413 for why the family is
+scoped render state rather than a field on all 4570 `Text` construction sites.
+
+**The pattern all three share**, and the rule that would have prevented them:
+a threshold test whose threshold is a *literal* and whose input is *measured
+by the environment* degrades silently long before it fails loudly. Assert a
+postcondition of the function (`w <= box_w`; "the rule matches the word drawn
+beneath it") or build the input by construction (`.repeat(40)`) — never encode
+a fact about the host's installed fonts.
+
+**Latent hazard this leaves.** `text::digit_advance` still exists and is still
+the wrong call for any terminal-shaped view; its doc now says so and points at
+`cell_advance`. Any other app that lays out a character grid should be checked
+for it.
+
+---
+
+## FIXED (2026-08-15, lane C) — the `digit_advance`-as-cell sweep: five more grid views
+
+The tmux fix above named a hazard rather than an isolated bug: `digit_advance`
+returns a digit's advance **in the proportional UI face**, which is a cell only
+digits fit. Every caller using it to size a character grid had the same defect
+latent, and `grep` found five more. All are now on `text::cell_advance` and
+draw inside a `PushFont { Mono }` scope.
+
+| Where | What it laid out on the wrong cell |
+|---|---|
+| `gui/toolkit/src/textview.rs` — `SimpleTextView` | Log/terminal output. Spans overran their own selection bands and search highlights; every column after the first drifted. |
+| `apps/hexeditor` | The **ASCII column** — the earlier doc argued the grid was all hex digits and overlooked the column beside it, which draws whatever the bytes spell. `hit_test`'s `(ascii_x / char_w)` is this arithmetic run backwards, so a click resolved to the wrong byte, further wrong the further right it fell. |
+| `apps/filediff` | The inline view's character-level highlight is placed at `columns(span) * char_width()`, so it slid off the very change it was drawn to mark. |
+| `apps/markdowneditor` | The source pane's caret (`col_x`), selection band and find highlights drifted left of their characters, further with every wide glyph on the line. |
+| `apps/snippets` | The token pen advances `columns(token) * char_width()`, so consecutive tokens on a line overlapped and indentation stopped lining up between rows. |
+
+Each now carries two postcondition tests — every glyph of a sample set fits the
+cell, in regular *and* bold (bold marks keywords, changed spans and headings on
+the same grid) — plus a scope-balance test that walks the command list and
+asserts the depth returns to zero, the scope was opened exactly one deep, and
+glyphs were actually drawn **inside** it. That last clause is what stops the
+test passing vacuously on an empty view.
+
+**One caller was deliberately left proportional.** `RichTextView`'s
+`char_width` looked like the same bug but is not: the widget was already
+migrated to measure spans with `text::measure` and draw them proportionally,
+and `char_width` survives only as the width of a gutter digit and the quantum a
+list indents by. Both are UI-face quantities, so it now calls a separate
+`default_indent_unit`, and the misleading "(monospace)" doc on the config field
+is corrected. A test pins it to the UI face so the sweep cannot later "fix" it
+into a regression.
+
+**Remaining debt (not a bug, an enhancement).** `RichTextView` renders
+`RichBlock::CodeBlock` in the proportional UI face like the prose around it.
+That is self-consistent — the spans are measured in the face they are drawn in
+— so nothing misaligns, but a code block *should* be mono now that the toolkit
+can express it. Doing it properly means threading a family through
+`span_width`, `x_of_col`, `col_at_x` and `wrap_spans` so the wrap is computed
+in the same face the block is drawn in. The widget currently has **no callers
+outside its own file**, so this is queued rather than urgent.
+
+## `apps/installer` wrote unescaped strings into a GRUB config that runs at boot (lane C) — FIXED
+
+`grub.rs`'s `generate_entry` interpolated every field of a `GrubEntry` —
+`title`, `kernel_path`, `root_partition`, `uuid`, `initrd_path` and each of
+`kernel_params` — straight into a `menuentry` block with no quoting and no
+validation:
+
+```rust
+out.push_str(&format!("menuentry \"{}\" {{\n", entry.title));
+...
+out.push_str(&format!("    chainloader {}\n", entry.kernel_path));
+```
+
+That block is written to `/etc/grub.d/40_slateos` (mode 0755) and folded into
+`grub.cfg` by `update-grub`. **GRUB executes `grub.cfg` at boot with full
+firmware privilege — before any OS, and therefore before any OS-level security
+boundary exists.** A title containing a `"` closes the string and everything
+after it is parsed as fresh GRUB script; a title containing a newline does not
+even need the quote. `$` expanded as a GRUB variable.
+
+The reachability is the part worth remembering: this looked like a field the
+user types into our own installer, so "who would attack themselves?". But
+`os-prober` — the whole reason this module exists — *scrapes* menu titles out
+of **other partitions'** `/etc/os-release`. On a dual-boot machine that is a
+file the other OS controls, so the title is attacker-influenced input arriving
+through a path that never looks like input.
+
+**Fixed** by emitting every interpolated value inside `"…"` through a new
+`grub_quote`, which escapes exactly the three bytes GRUB's lexer treats
+specially inside a double-quoted string — `\`, `"`, `$` — mirroring
+`grub_quote()` in GRUB's own `util/grub-mkconfig_lib.in`. Control characters
+cannot be escaped that way, so `GrubEntry::validate` rejects them and
+`generate_entry`/`generate_custom_script` now return
+`Result<String, GrubError>`; `install`/`update` validate *before* touching the
+filesystem, so a rejected entry leaves no file behind.
+
+A second, non-security bug fell out of the same rewrite: `kernel_params` were
+`join(" ")`ed into the line, so a parameter containing a space silently became
+two parameters. Each is now quoted individually.
+
+**Lesson, and it generalises past this file: "config file" is not a safe
+output format.** The lossy-path sweep that led here trained the question *is
+this value preserved byte-for-byte?* — but preservation is only half of it.
+The other half is *can this value change the meaning of the document it is
+written into?* A path can round-trip perfectly and still be an injection. Any
+place we `format!` a value into a file that something else later *parses* —
+GRUB config, shell script, YAML, JSON, a desktop entry — needs an escaping
+function chosen for that grammar, not just faithful bytes. Worth auditing the
+other generators in `apps/` on the same question.
+
+Five separate defences, verified non-vacuous by breaking each one alone and
+confirming it failed only its own test: escaping `$`, escaping `"`, escaping
+`\`, the control-character rejection, and the per-parameter quoting.
+
+## `gui/toolkit/src/svg.rs` named a character the author never wrote (lane C) — FIXED
+
+`u8_from_hex_char`'s error did `c as char` on the offending byte. `c` is a
+*byte* of the colour string and the bytes reaching that arm are exactly the
+non-hex ones, which includes the continuation bytes of a multi-byte character:
+`#ÿÿÿ` reported `bad hex char: Ã`, blaming a character absent from the input
+and sending the author hunting for it. Now reports the byte (`bad hex byte:
+0xc3`) for anything outside printable ASCII, and the character itself for
+ASCII.
+
+The other four `c as char` sites in this file were checked and are **correct**:
+each sits in a match arm that has already matched `c` against ASCII byte
+literals (or, for `cmd_char`, behind an `is_ascii_alphabetic()` guard), so the
+cast is provably lossless there. Recorded so the next sweep does not re-open
+them.
+
+## Five copies of two escapers, at three levels of correctness (lane C) — FIXED
+
+Following the GRUB finding above, the same question — *can this value change
+the meaning of the document it is written into?* — was put to every generator
+in `apps/`. It found five near-copies of a JSON escaper and two of an XML one,
+which had drifted apart:
+
+| Copy | JSON escaper | Verdict |
+|---|---|---|
+| `apps/jsonviewer` | `"` `\` `\n` `\r` `\t` `\b` `\f`, `\u00XX` fallback | correct |
+| `apps/kanban` | as above (fixed in an earlier sweep) | correct |
+| `apps/snippets` | `\u00XX` fallback present | correct |
+| `apps/diagram` | five cases only, **no fallback** | emits invalid JSON |
+| `apps/reminders` | five cases only, via `str::replace` | emits invalid JSON **and** corrupts on read |
+
+**`apps/reminders` was the serious one.** Its `unescape_json` was a chain of
+`str::replace` calls in the wrong order — `\n` decoded before `\\`:
+
+```rust
+s.replace("\n", "\n").replace("\r", "\r").replace("\t", "\t")
+ .replace("\\\"", "\"").replace("\\\\", "\\")
+```
+
+So the two-character text `\n` (a literal backslash, then the letter n) was
+escaped to `\n` on save and read back as a **newline**. A Windows path in a
+note, `C:\temp`, came back as `C:\<TAB>emp`. The damage was then re-saved, so
+the note decayed a little further every time the app was opened. The existing
+test `test_json_escape_special_chars` covered this function and passed,
+because its sample text — `"Hello \"world\"\nnew line"` — contains a real
+newline and real quotes but not one literal backslash, the single input that
+tells a correct decoder from a broken one.
+
+**`apps/whiteboard` had an unescaped XML export**: `page.name`, `layer.name`
+and both `TextLabel` and `StickyNote` content went straight into the markup, so
+a sticky note reading `</sticky><rect/>` closed its own element and injected a
+sibling, and any `&` made the export unparseable. Same class as the GRUB bug,
+found by the audit that bug prompted.
+
+**Fixed** by adding `gui/toolkit/src/escape.rs` (`guitk::escape`) with one
+correct implementation of each — `xml`, `json_string`, and a
+`unescape_json_string` that is a single left-to-right pass and so structurally
+cannot make the replace-chain mistake — and routing `reminders`, `whiteboard`,
+`diagram`, `snippets` and `markdowneditor` through it. Non-vacuity verified by
+breaking each of the five defences alone; each failed only its own tests.
+
+**Not converged, deliberately:** `apps/kanban` and `apps/jsonviewer` decode
+inside full tokenising JSON parsers (`parse_string(data, start) -> (String,
+usize)`), a different shape from a standalone `unescape`. Both are already
+correct, so rewriting them onto the shared helper would risk regressing working
+code for no correctness gain. If a third parser of that shape appears, extract
+a shared *parser* rather than bending these two into the wrong signature.
+
+**The generalisation, now twice-confirmed:** a value can be preserved
+byte-for-byte and still be a bug. The lossy-path sweep asked *is this
+preserved?*; this one asks *can this re-punctuate its document?* Every
+`format!` into a file that something else later parses needs an escaper chosen
+for that grammar. Remaining unaudited generators of this kind: the YAML and
+`.desktop`-style writers, if any, and `pkg/`'s manifest output.
+
+## Data exporters: CSV/JSON/SQL injection in `netscan`, `credmanager`, `dbviewer` (FIXED)
+
+Third pass of the "a config file is not a safe output format" audit, covering
+the tabular exporters. Four distinct defects, all the same shape:
+
+**`apps/netscan` did no CSV escaping at all.** This is the worst of the four
+because the inputs are not the user's: a `hostname` comes from reverse DNS and
+a `service`/`banner` from banner grabbing, so both are chosen by the *scanned*
+host — on a scan, precisely the party with no reason to be trusted. A comma in
+a hostname added a column and a newline added a whole row, letting a hostile
+host forge result rows for machines that were never scanned. The hand-written
+`"{}"` around the port/service columns was not a defence either: it never
+doubled an internal quote, so a `"` in a service name closed the field early.
+Its JSON export had the same holes plus a banner escaper handling `"`, CR and
+LF but *not* the backslash — a banner ending in `\` produced `"...\"`, an
+unterminated string that truncates the document.
+
+**`apps/credmanager` left `tags` and `folder` raw** in the CSV (the only two
+of nine columns not escaped), its `escape_csv` omitted `\r` from the trigger
+set (RFC 4180 records are CRLF-terminated, so a bare CR splits the record for
+most readers), and `serialize_backup` escaped *nothing* — vault name, entry
+name, tag and folder names all interpolated bare. For a credential vault that
+is the worst possible failure: a `"` in any name yields a backup file that no
+reader can load, i.e. a silently unrestorable backup.
+
+**`apps/dbviewer` escaped every value in all three exporters and no column
+name in any of them.** The corollary this pass added to the audit question:
+*audit the field names, not just the field values.* Column names are not
+privileged data — `import_csv` takes them straight from the header line of a
+file the user opened. Also `export_json`'s `s.replace('"', "\\\"")` (escaping
+the quote but not the backslash, worse than useless for a value ending in `\`)
+and `export_sql_inserts` interpolating table/column names as bare SQL
+identifiers.
+
+**`apps/dbviewer`'s importer could not read its own exporter's output.**
+Found while fixing the above. `import_csv` split the header with a naive
+`split(',')` and iterated `csv_data.lines()`, so a quoted field containing a
+comma (header) or a newline (any record) was torn apart — even though
+`parse_csv_line` underneath it was correctly RFC 4180-aware for data rows.
+Fixed properly by replacing both with one record-level `split_csv_records`
+that never splits on a line boundary before it knows whether it is inside
+quotes. It also now trims only *unquoted* fields: quoting is how a writer says
+the surrounding whitespace is data. Locked in by a round-trip test.
+
+**Fixed** by adding `guitk::escape::csv_field` (RFC 4180, trigger set
+`, " \n \r`) to the shared module, a local `sql_ident` in `dbviewer` (standard
+double-quote identifier quoting), and routing all of the above through them.
+Non-vacuity verified by breaking each of the nine defences alone; each failed
+only its own tests.
+
+**A testing note worth keeping.** Three of the new tests failed on first run
+*because the tests were wrong, not the code* — each had counted a naive
+substring. Correctly escaped output legitimately *contains* the payload:
+`\", \"admin` contains `"admin`, a quoted CSV field contains a comma and a
+newline, and a quoted SQL identifier contains a `;`. A test for an injection
+defence therefore cannot use `contains`/`split`/`lines` — it has to decode the
+way a conforming reader does. The fix in each case was a small escape-aware
+scanner (`parse_csv`, `json_string_token_count`, `sql_statement_count`) living
+beside the tests. This is the same trap as the GRUB `menuentry ` substring
+count from the first pass; it has now appeared in all three passes, so treat
+"count the tokens a parser would see" as the default shape for these tests.
+
+## `guitk::csv`: a format's writer and reader belong in one module (FIXED)
+
+`apps/spreadsheet` turned out to have the *identical pair* of defects
+`apps/dbviewer` had: an `export_csv` whose quoting trigger set omitted `\r`,
+and an `import_csv` that split records with `csv.lines()` before handing each
+line to a perfectly correct, quote-aware field parser. Both apps could
+therefore produce an export they could not themselves read back — a quoted
+cell containing a newline was torn in half and the rest of its row dropped.
+
+Two independent apps making the same two mistakes is the signal to stop
+patching and restructure, so the CSV format now lives in one module,
+`gui/toolkit/src/csv.rs`, holding **both** directions: `csv::field` (write)
+and `csv::parse_records` (read). Keeping them adjacent is the point — the
+whole bug class is a writer and a reader drifting apart, and it is much harder
+to write a line-splitting reader thirty lines below an escaper that
+deliberately emits newlines inside fields.
+
+`csv_field` moved out of `guitk::escape` in the process. Escaping a CSV field
+is not a standalone escaping problem the way XML or JSON escaping is; it is
+half of a codec, and filing it under "escape" is what made it natural to write
+the other half somewhere else. `escape` keeps a comment pointing at `csv`.
+
+`Field { text, quoted }` reports whether the source spelled a field in quotes,
+because the two apps disagreed on trimming and both were right: `dbviewer`
+wants the lenient "trim a bare field" import convention, `spreadsheet` wants
+cells verbatim. Quoting is exactly the writer's statement that the surrounding
+whitespace is data, so `Field::trimmed_if_bare` lets a caller be lenient
+without corrupting a deliberately-padded value. Locked in by a round-trip test
+in each app plus `anything_written_can_be_read_back` in the module itself.
+
+Both apps' local parsers were deleted rather than left in place; a weaker
+second parser sitting in the file is the thing that gets reached for next
+time.
+
+## `apps/musicplayer`: ID3 tags could forge M3U playlist entries (FIXED)
+
+`export_m3u` interpolated `track.artist` and `track.title` straight into the
+`#EXTINF:` line. Those two fields are not the user's: `Track::update_from_data`
+sets them verbatim from the file's own ID3v2 tags, so for any downloaded file
+they are chosen by whoever produced it. `load_m3u` reads every non-`#` line as
+a **file path**, so a title containing a newline injected arbitrary entries
+into the user's playlist.
+
+M3U is where this audit's usual answer runs out: the format is bare
+line-oriented text with no quoting and no escape syntax, so a line break
+cannot be escaped — only removed or refused. The fix splits on which of those
+is honest for each field:
+
+- `#EXTINF` metadata is advisory display text, so CR/LF become a space
+  (`m3u_field`). Losing a newline out of a song title costs nothing.
+- A **path** containing CR/LF is legal on this OS (all bytes but `/` and NUL)
+  and has no M3U representation at all. Writing it anyway would silently point
+  the entry at a different file, so the track is omitted — and *reported*:
+  `export_m3u` now returns `M3uExport { text, skipped }` instead of a bare
+  `String`, so a caller can tell the user rather than handing them a playlist
+  quietly shorter than the one they exported.
+
+The general point, third variant of it now: when a format cannot represent a
+value, the choice is reject or sanitise, and it must never be "write it
+anyway." GRUB got reject (control characters), M3U metadata gets sanitise, M3U
+paths get reject-and-report.
+
+## `apps/contacts`: a chained-`replace` decoder corrupted every note containing a backslash (FIXED)
+
+**Status: FIXED 2026-08-15** (lane C). Found while auditing the vCard/iCalendar
+family during the output-escaping sweep. This is the same defect previously
+fixed in `apps/reminders`, in its third instance, and this time the *correct*
+implementation was already sitting in the neighbouring app.
+
+`vcard_unescape` decoded with a chain of `str::replace`:
+
+```rust
+s.replace("\n", "\n")     // <-- runs first
+ .replace("\,", ",")
+ .replace("\;", ";")
+ .replace("\\\\", "\\")    // <-- too late
+```
+
+`vcard_escape` correctly writes the two-character text `\n` (a backslash
+followed by the letter n) as `\n`. The decoder then scans that for the
+sequence backslash-n, finds it at offset 1, and emits a real newline. So
+`C:\new` came back as `C:\`, a line break, and `ew`.
+
+The trigger is ordinary content, not a crafted one: a Windows path, a regex, a
+LaTeX fragment, a `\server\share` UNC name — anything a person might
+reasonably paste into a contact's NOTE field.
+
+**The corruption happens once, on the first load, and is then a fixed point** —
+re-saving does not degrade it further. That is worth stating precisely because
+it makes the bug *quieter* rather than milder: the damaged value is what gets
+written back, so after a single load-and-save cycle the original text is gone,
+and there is no accumulating drift to make the loss noticeable. A test that
+looked only for unbounded growth would have passed.
+
+Fixed with a single left-to-right pass that consumes the backslash and the
+character after it together. Such a pass structurally cannot make this mistake,
+because it never re-examines output it has already produced — the ordering
+question that a `.replace()` chain has to answer correctly simply does not
+arise.
+
+Two things came out of the cross-check that are worth recording:
+
+- **`apps/calendar::ics_unescape` was already correct**, single-pass, and
+  carried a comment naming this exact anti-pattern. The same format family held
+  one correct and one broken implementation of the same rules, a few hundred
+  lines apart in a sibling crate — which is the duplication problem the
+  `guitk::csv` extraction was about, showing up in a format that has not been
+  extracted yet.
+- **`vcard_escape` also passed a bare CR through untouched.** vCard has no
+  escape for CR and its lines are CRLF-terminated, so a CR in a value ended the
+  property line early and the remainder was parsed as a new property — a note
+  could forge a `TEL:` line. Fourth instance of "the format cannot represent
+  this value, so reject or sanitise": here it sanitises, because a CR in a text
+  field means a line break, and a CRLF pair now yields one break rather than
+  two.
+
+## `apps/email`: every outgoing header was interpolated raw — header injection (FIXED)
+
+**Status: FIXED 2026-08-15** (lane C). The most serious defect the output-escaping
+audit has turned up, and the one whose consequence is least visible to the user.
+
+`EmailDraft::build_message` wrote every header value straight into the message:
+
+```rust
+msg.push_str(&format!("Subject: {}\r\n", self.subject));
+msg.push_str(&format!("To: {}\r\n", self.to.join(", ")));
+msg.push_str(&format!("In-Reply-To: <{reply_to}>\r\n"));
+msg.push_str(&format!("Content-Type: {}; name=\"{}\"\r\n", att.mime_type, att.filename));
+```
+
+RFC 5322 gives a header field no way to contain a line break. The field *ends*
+at CRLF; folding — a CRLF followed by whitespace — is a continuation the
+serialiser chooses, not something a value can request. So a CR or LF in a value
+is not escaped, it **terminates the header**, and the receiving MTA reads what
+follows as a header of its own.
+
+A subject of `Lunch?\r\nBcc: mallory@evil.test` therefore adds a recipient. The
+reason this is worse than an ordinary injection: **the forged Bcc appears
+nowhere the sender can see it** — not in the compose window, which shows the
+subject field as typed, and not in the Sent copy, which is rendered from the
+same draft object. The mail silently goes somewhere the user cannot discover it
+went.
+
+### What was and was not reachable
+
+Worth stating precisely, because the inbound side turned out to be sound and
+that is a design worth not regressing.
+
+- **Not reachable: anything parsed off the wire.** `Headers::parse` unfolds
+  continuation lines into spaces, so no value read from a received message can
+  carry a CR or LF. That closes what would otherwise be the nastiest path:
+  `EmailDraft::reply` copies the original's `Message-ID` into `In-Reply-To`, so
+  a hostile `Message-ID` would have been injected into the victim's reply with
+  no interaction beyond pressing Reply. The unfolding is what prevents it, not
+  anything at the serialiser, which is why the serialiser now sanitises anyway.
+- **Reachable: everything composed locally** — the subject and recipients the
+  user types or pastes, and attachment filenames. The filenames matter more
+  here than on other systems: `design.txt` allows every byte except `/` and NUL
+  in a path, so **a newline in a filename is legal on SlateOS**. A downloaded
+  file can carry one, and attaching it forged headers.
+
+### Also fixed: the boundary was a constant
+
+The multipart delimiter was the literal `----=_Part_Boundary_001`. RFC 2046
+requires the boundary to appear nowhere inside an encapsulated part, and a fixed
+string cannot promise that. A body containing it — which a user produces just by
+quoting a previous multipart mail — ends the part there, and **every attachment
+below that point silently disappears from the sent message**. The boundary is
+now derived from the body, lengthening on collision; this terminates because a
+finite string contains no arbitrarily long substring, and the first candidate is
+the old constant, so ordinary mail is byte-identical.
+
+### The shape of the fix
+
+Five helpers, chosen per field by what the grammar can express and by whether
+the field is advisory or load-bearing — the reject-or-sanitise rule this audit
+keeps arriving at, now on its fifth format:
+
+| Field | Grammar offers | Treatment |
+|---|---|---|
+| `Subject`, display names | nothing | sanitise: control characters → space |
+| `To`/`Cc`/`Bcc` | nothing | **reject and report** — a recipient decides where the mail goes, so a bad one must not be quietly rewritten into a different address |
+| `Message-ID`, `Content-ID` | nothing | sanitise: drop controls, `<`, `>`, whitespace |
+| attachment `filename` | `\"` and `\` inside a quoted-string | escape quote and backslash; drop controls |
+| attachment `Content-Type` | nothing (it is a token) | **fall back** to `application/octet-stream` — a mangled media type is not a media type, so there is nothing to sanitise it *into* |
+
+`build_message` now returns `BuiltMessage { text, rejected_recipients }` rather
+than a bare `String`, for the same reason `export_m3u` returns skipped paths: a
+dropped recipient is exactly what the sender must be told about, and a function
+returning a `String` has nowhere to say it.
+
+### Two lessons from the break-testing, not the fix
+
+Breaking each defence in turn to check the tests notice found that **two of the
+new tests could never have failed**, which is worth recording because both
+mistakes are easy to repeat:
+
+1. The header-scanning helper stopped at the first blank line — correct for the
+   top-level block, but a **MIME part has its own headers after that blank
+   line**, so the test for a forged header in an attachment filename was
+   inspecting a region the payload never reached.
+2. It split only on `\r\n`. Real receivers are lenient and many end a line at a
+   bare LF, so a test that only recognises CRLF is *stricter than the attacker*
+   and passes on genuinely vulnerable output.
+
+Both fixed by scanning every line terminator across the whole message and
+counting lines that *begin* with the header name. Counting line starts rather
+than substrings is what keeps it honest in the other direction, and is the same
+point the CSV and SQL tests reached: correctly quoted output legitimately
+contains the payload text, so `contains` cannot be the assertion.
+
+The display-name test still fails under no single break, because the value is
+covered by two independent defences; breaking both together does fail it, which
+is how it was confirmed to be defence in depth rather than a vacuous test.
+
+## slides: one HTML export field skipped the escaper (fixed 2026-08-15, lane C)
+
+`apps/slides`'s `export_html` escapes the presentation title, text-box bodies
+and bullet items, and does so correctly. It did not escape the placeholder
+label of an `Image` element, which is user-typed and is written straight into
+the exported document. A label of `<script>…</script>` — or, more cheaply, a
+`"` closing the `style` attribute early — is therefore reproduced as markup by
+any browser opening the export.
+
+### Why this one and not the other three
+
+The three fields that were escaped each sit in a statement of their own:
+
+```rust
+push_html_escaped(&mut html, &slide.title);
+```
+
+The one that was not was a `{}` inside a larger `format!`, in the company of
+five geometry values that genuinely cannot need escaping:
+
+```rust
+html.push_str(&format!(
+    "  <div class=\"img-placeholder\" style=\"left:{x}px;top:{y}px;\
+     width:{width}px;height:{height}px;\">{placeholder_label}</div>\n",
+));
+```
+
+Reading that line, the eye is doing arithmetic, not taxonomy. Every other name
+in the interpolation is an `f32`, and `placeholder_label` inherits their
+apparent harmlessness by proximity. This is the recurring shape of the whole
+audit: the dangerous interpolation is rarely the one on a line by itself — it
+is the one *embedded among values that are obviously safe*, where the reader's
+attention has already been spent. A grep for `format!` finds it; a reading of
+the function does not.
+
+The fix splits the statement so the label goes through `push_html_escaped` like
+its three siblings, which also makes the asymmetry impossible to reintroduce
+without deleting a call.
+
+### Test
+
+`no_text_field_can_inject_a_tag_into_the_export` drives *one* payload through
+all four text fields at once — title, text box, image label, bullet item — and
+counts tags rather than substring-matching, since escaped output legitimately
+contains the payload text. Driving every field from a single payload is what
+makes the test grow with the exporter: a fifth text field added later either
+routes through the escaper or fails this test. A second test checks the
+attribute case specifically, since a bare `"` escapes the `style` value without
+needing a `<` at all.
+
+## clipmanager, flashcards, mindmap: three exporters that could not read themselves (fixed 2026-08-15, lane C)
+
+The same audit, three more apps. All three wrote user text raw into a
+line-oriented format whose structure is made of characters that text can
+contain. Two of them have importers, so both could produce an export they
+themselves misread; the third has no importer, which changes who the victim is
+but not whether the bug is real.
+
+### clipmanager — the worst of the three, because of what the field holds
+
+`export_text` wrote the clip content raw after a bare `content:` line, and
+`import_text` recovered records with `data.split("---ENTRY---")` — a *substring*
+split, not even a line match. So a clip containing that marker split its own
+record in two, and the second half's lines were then parsed as **headers**,
+letting copied text set its own `source:` and `pinned:` and add tags.
+
+What makes this the severe one is not the mechanism but the field. A clipboard
+entry is arbitrary copied text — the one value in the whole desktop guaranteed
+to hold whatever the user last selected in a browser. Every other app in this
+audit needed the user to type the payload into a name or a note; here they only
+have to copy it.
+
+Escaping the body would have worked and would have been wrong. The point of
+this format is that you can open it and see what you copied; an escaped
+multi-line body is unreadable. The fix is a **length prefix**:
+
+```
+content:<byte length>
+<exactly that many bytes>
+```
+
+Bytes inside the body are then never examined, so no sequence in them means
+anything — a stronger guarantee than escaping, and a cheaper one to verify.
+The parser became a single left-to-right pass, necessarily: the body length is
+only known once its header has been read, which `split` could not have
+consulted. Header values (`source:`, tags) are sanitised so they stay on their
+own line, and tags get a line each instead of a comma-joined list. The format
+now needs no escaping anywhere.
+
+A round-trip defect surfaced from the new tests, unrelated to injection:
+export wrote newest-first while import replays through `add`, which prepends,
+so **importing your own export reversed your clipboard history**. The file is a
+log, so it is now written oldest-first. Worth noting that the existing
+round-trip test did not catch this — it checked the count, not the order.
+
+### flashcards — the failure mode is pedagogical, not technical
+
+Every structural signal in the deck format is a character card text can
+contain: the `Q:`/`A:`/`T:` prefixes, the blank line that ends a card, the
+comma between tags, the line break itself. A question written the obvious way —
+
+```
+What is 2+2?
+A: 5
+```
+
+— exported and re-imported as *two* cards, one of them with an answer its
+author never wrote. This is the entry in this audit whose consequence is
+strangest: nothing crashes, nothing is exfiltrated, and the user revises from
+the deck and learns the wrong thing.
+
+Fixed with the backslash escaper and matched single-pass decoder from the vCard
+work. Two decisions differ from that one, both because this format is ours
+rather than a published spec:
+
+- **Commas are escaped in tags only.** Flashcard questions are full of commas;
+  turning `What is 2, 3, and 4?` into `What is 2\, 3\, and 4?` would wreck a
+  format that is meant to be hand-editable for no gain, since a `Q:` line has
+  no comma-separated structure to protect.
+- **CR gets its own escape** rather than being folded into `\n` with the LF
+  beside it. vCard *has* to normalise — its spec says a line break is spelled
+  `\n` and nothing else. Here nothing forces that, so escaping CR separately
+  makes the round trip exact rather than faithful-in-spirit, and leaves no
+  lossy corner to document.
+
+Two further round-trip losses fell out: the importer trimmed each line before
+matching the prefix, so leading and trailing spaces in a value were lost, and
+an empty value (`Q: ` with nothing after it) failed the `strip_prefix("Q: ")`
+and **dropped the card entirely**. It now matches the raw line and falls back
+to the trimmed one, which keeps the leniency for hand-written decks while
+making the app's own output exact.
+
+### mindmap — no importer, so the reader is a person
+
+`export_node_text` wrote node labels raw into an indented outline, where
+structure *is* whitespace: a newline starts a sibling and the leading spaces
+choose its depth. A label containing a line break therefore draws branches in
+the exported map that do not exist in the real one.
+
+There is no importer, which is worth stating precisely rather than using as a
+reason to skip it: the absence of a parser does not make the output correct, it
+only changes who is misled — a human reading the outline, or whatever other
+outliner they open it in. Labels are short prose with nothing to escape *with*,
+so this one is a sanitise: control characters fold to single spaces and runs
+collapse, keeping the label a readable phrase.
+
+### On the break-testing, again
+
+Every defence added here was broken individually to confirm its tests notice —
+twelve breaks across the three apps. Two findings worth carrying forward:
+
+1. **A test can be vacuous by being one character short of the real attack.**
+   The flashcards deck-name test passed against *unescaped* output on its first
+   version, because the payload `"Name\nQ: forged\nA: forged"` has no trailing
+   blank line — and a card is only committed by the blank line that ends it, so
+   the forged pair was silently overwritten by the next one. The defence was
+   real; the test was not exercising it. Only breaking the fix on purpose
+   revealed the difference.
+2. **A defence can be genuinely redundant, and that is fine as long as it is
+   labelled.** In clipmanager, matching the record marker as a whole line
+   rather than a substring is unreachable *inside* a record once the body is
+   length-prefixed. Rather than delete it or write a test that cannot fail, the
+   case that does reach it was found — the scan for the *first* record runs over
+   whatever preamble the file has, such as a covering note that mentions
+   `---ENTRY---` in a sentence — and the test drives that.
+
+## indexer and fileassoc: config files whose values could re-punctuate them (fixed 2026-08-15, lane C)
+
+The same audit again, on the two remaining `key = value` config formats. Both
+bugs are silent-wrong-result rather than crash-or-corruption, and one of them
+defeats a security control.
+
+### indexer — a comma in a path defeated an exclusion
+
+`/etc/indexer.conf` stored `index_paths`, `exclude_paths`,
+`include_extensions` and `exclude_extensions` as **comma-joined** lists. On
+this system a path may contain any byte but `/` and NUL, so a comma is an
+ordinary filename character. Excluding `/home/u/Private, Ltd` wrote one line
+that read back as *two* entries — `/home/u/Private` and `Ltd` — neither of
+which named the directory the user meant. The directory was therefore not
+excluded, and with `index_contents` on, its contents were read into a
+searchable index.
+
+That is the part worth stating plainly: `exclude_paths` is not a preference,
+it is the mechanism by which a user keeps a directory out of a system-wide
+search index. A format that cannot represent the user's answer is a format
+that silently overrides it.
+
+Fixed by giving each entry **its own line** — `index_path = …` repeated —
+rather than escaping the comma. Escaping a comma works; a separator that never
+appears is better than one that is escaped correctly, and it keeps an ordinary
+config readable. The plural keys still parse for hand-written files, and the
+first repeated key clears the built-in defaults so a config can shrink the list
+and not only grow it. A related loss fell out of the tests: an explicitly empty
+list used to reappear as the built-in defaults on the next read.
+
+### fileassoc — the exporter and the importer disagreed, and nothing said so
+
+`from_config_line` trimmed both halves; `export_config` wrote the raw strings.
+An extension registered as `"txt "` is registerable — `register_file_type`
+validates nothing and `set_default_app` only lowercases — so it exported as
+`txt =myapp` and read back as `txt`, **silently reassigning a different
+extension's default application**. No error is reported on any path: the line
+parses, the extension exists, the app exists and supports it, so every
+validation the importer performs passes.
+
+`#` had the same shape in the other direction. A comment line is skipped
+entirely, so an extension of `#txt` exported to a line the importer discards,
+losing the association without a word.
+
+Both are fixed by escaping through `textfmt::kv` with `=` and `#` named as the
+grammar's structure characters, and by having `export_config` call
+`Association::to_config_line` instead of keeping a second copy of it inline.
+That second copy is the real lesson here: the writer and the reader were
+*already* a matched pair on `Association`, and the drift happened because
+`export_config` bypassed the writer and open-coded the format a third time. A
+format with two writers has no invariant, only a coincidence.
+
+### The band-aid, and where the escaper now lives
+
+By fileassoc this was the fourth app in a row needing the same line-value
+escaper, and the third place it had been written inline. Per CLAUDE.md's rule
+about band-aid accumulation, it was extracted rather than copied again.
+
+The extraction was not to `guitk`, where `csv` and `escape` already lived. The
+components with the strongest need for these primitives turn out to be exactly
+the ones that must not depend on a widget library: `apps/backup`,
+`apps/indexer` and `apps/installer` are headless, and are three of the four
+`apps/` crates with no `guitk` dependency. Unable to reach the shared
+escapers, each had grown its own — which is the whole mechanism by which the
+duplication happened. So the modules moved to `textfmt`, a dependency-free
+`no_std` crate alongside `yamldoc` and `tzrules`, and `guitk` re-exports them
+under their original paths so the 137 applications that say `guitk::csv` did
+not have to change.
+
+Two invariants are now documented in one place instead of being rediscovered:
+
+1. **Decode in a single left-to-right pass, never a chain of `str::replace`.**
+   Undoing `\n` before `\\` turns the two-character text `\n` — a legal
+   directory name here — into a real newline. A single pass structurally cannot
+   make that mistake, because it never re-examines what it has produced.
+2. **An escape must not end in whitespace.** These parsers trim the value,
+   which is the right leniency for a hand-edited file, but it means writing a
+   trailing space as `\ ` leaves the file ending `...\`, which decodes to a
+   stray backslash. Hence `\s`.
+
+### Break-testing
+
+Five breaks on fileassoc, each caught by a named test: removing the escape on
+write, the unescape on read, the escape-aware split, `#` from the meta
+character set, and routing `export_config` around `to_config_line`. That last
+one is the break that reproduces the original bug exactly, and it is worth
+keeping precisely because it will fail again the moment someone re-inlines the
+format for convenience.
+## One stray NUL byte made `known-issues.md` unmergeable for every lane (FIXED)
+
+**Status: FIXED 2026-08-15** (lane C, during the routine `lane-c` → `main`
+merge). Not an app bug — a bug in the shared documents themselves, which is
+why it had gone unnoticed while costing every lane a manual conflict
+resolution.
+
+Merging `origin/lane-c` into `main` produced a whole-file conflict on
+`known-issues.md`: one hunk, `1,65791c1,65863`, as if not a single line
+matched. But line 100 of the two sides was byte-identical. The reason is that
+git had classified the 3.8 MB document as **binary**, and a binary file has no
+lines to merge — it can only be taken whole from one side or the other.
+
+The cause was a single byte at offset 2 870 859, inside a quoted bash C
+snippet in one of the oils entries:
+
+```c
+if (newname == 0 || *newname == '<NUL>')
+```
+
+The author meant C's two-character escape `'\0'`. Whatever produced the
+paste turned it into an actual `U+0000`, and `git diff`'s binary heuristic is
+simply "does the first 8 000 bytes contain a NUL" — no, but git also scans
+further for blob attributes, and a NUL anywhere in the content is enough for
+the merge driver to refuse a textual merge.
+
+**The same byte silently caused a second, unrelated-looking symptom.** This
+repo sets `core.autocrlf = input`, which normalises CRLF to LF on commit —
+but only for files git considers *text*. Because the NUL made this file
+binary, that normalisation was skipped, so when one lane's editor rewrote the
+file with CRLF endings it was committed verbatim. `main`'s copy was entirely
+CRLF while `base` and `lane-c` were entirely LF, which is a second reason
+every line differed. Two symptoms, one byte.
+
+Fixed by writing the escape the author meant (`'\0'` as two characters) and
+normalising the file back to LF. With the NUL gone the three-way merge of the
+same three versions succeeded with **zero conflicts** — which is what the
+append-only convention in `roadmap.md` rule 3 is designed to produce, and had
+been quietly failing to deliver.
+
+Worth generalising, because this is the audit's own lesson turned back on us:
+a control character that a format cannot represent does not announce itself.
+It changes how *tooling* reads the document — here, from a mergeable text file
+into an opaque blob — and the damage shows up somewhere far from the paste, as
+a merge conflict nobody could explain. When pasting source into a shared
+markdown document, paste the escape, never the character.
+
+## devicemanager: a USB device could forge a section of the hardware report (fixed 2026-08-15, lane C)
+
+`export_report` interpolated eight device-supplied strings raw — name, vendor,
+type, hardware ID, location, and the driver's name, version and provider — into
+a report whose structure is line breaks, `--- Section ---` headers and
+two-space indentation.
+
+What makes this one worth its own entry is where the strings come from. They
+are not typed by the user; they are read off the hardware. A USB device chooses
+its own product and manufacturer descriptors, and nothing in the descriptor
+format constrains their content or forbids a line break. So a device that calls
+itself
+
+```
+Mouse
+--- Storage ---
+  Fake Disk [OK] (ACME)
+```
+
+writes a whole forged section into the hardware report of any machine it is
+plugged into — a report whose entire purpose is to be trusted when someone is
+diagnosing that machine, and which is typically pasted into a bug report or
+handed to whoever is helping.
+
+There is no importer, which is worth stating precisely rather than using as a
+reason to skip it: the absence of a parser does not make the output correct, it
+only changes who is misled — here a person, or whatever they paste the report
+into.
+
+Fixed with a fold, not an escape. The choice follows from the reader: there is
+nothing to undo an escape, so a literal `\n` in the output would be noise to a
+human where a real newline is a forgery. Every control character becomes at
+most one space, runs collapse, and edge space is dropped so a name padded with
+spaces cannot appear to sit at a different depth in the report's indentation.
+
+### flashcards' last lossy corner is closed
+
+Migrating flashcards onto the shared `guitk::kv` was meant to be deduplication
+— the fourth inline copy of the same escaper — but it also closed the deck
+format's one documented limitation. `split_tags` trims each tag, which is the
+right leniency for a hand-written `T: math, algebra`, but the trim reached the
+*value*, so a tag of `" spaced "` came back as `"spaced"`. `kv` writes an edge
+space as `\s`, which is not a space: the trim cannot find it, and the decode
+happens afterwards. The trim still does its job — absorbing the layout of a
+hand-written list — without being able to reach the data.
+
+Worth noting as a general point: three of the four apps migrated onto the
+shared escaper gained a fix they were not migrated for. Consolidating on one
+correct implementation is not only less code; it retro-actively repairs every
+corner each local copy had quietly given up on.
+
+### A substring count is a `contains` in disguise
+
+The first version of both devicemanager tests failed against the *fixed* code,
+and the tests were what was wrong. They asserted
+`report.matches("--- ").count() == baseline` and
+`!report.contains("--- Forged ---")`.
+
+But a correctly folded name still carries every character of its payload —
+`--- Storage ---` is right there in the output, now harmlessly mid-sentence.
+This is the same lesson already recorded for the escaping work ("count records,
+never `contains`, because correctly escaped output legitimately *contains* the
+payload") arriving in a disguise that got past it: a substring *count* looks
+quantitative and structural, and is neither.
+
+The guarantee a fold actually provides is positional, so the assertion has to
+be too. Every interpolated field is preceded on its line by the report's own
+indentation, therefore no field can begin a line, therefore none can *be* a
+header. The tests now count lines that satisfy `starts_with("--- ") &&
+ends_with(" ---")`, plus the report's total line count. Both survive breaking
+each of the eight fold sites individually.
+
+## sysinfo: an environment variable could write a heading of the system report
+
+`apps/sysinfo/src/main.rs`. Fixed in `dab9fab26`. Two bugs of one cause, and
+the cause is the interesting part.
+
+`export_text` writes a report whose grammar puts headings at column 0 and data
+indented by two spaces. It chose between them like this:
+
+```rust
+} else if prop.value.is_empty() {
+    out.push_str(&format!("{}\n", prop.name));   // column 0
+} else {
+    out.push_str(&format!("  {}: {}\n", ...));   // indented
+}
+```
+
+The empty-value branch exists so the file can emit its own sub-headings —
+`Property::new("--- CPU Features ---", "")`. But `props_env_vars` builds a
+`Property` directly from each environment pair, and `FOO=` is a legal and
+ordinary environment variable. So a variable named `--- Display Outputs ---`
+with an empty value printed itself at column 0, byte-identical to the heading
+the report writes for the display section.
+
+**This one needed no control characters at all.** Every other finding in this
+audit required the payload to smuggle in a newline; folding was therefore a
+complete fix for them. Folding does nothing here — there is nothing in the
+string to fold. That is worth remembering as a class: *a value can forge
+structure without containing any structural character, if the format infers
+structure from something other than the value's text.* Here the inference was
+from the value's **emptiness**.
+
+The detail-pane renderer had the same bug in its own dialect:
+
+```rust
+let is_section = prop.name.starts_with("---");
+```
+
+so a variable named `---x` was drawn bold and in the accent colour.
+
+### The fix, and why it is not "escape the name"
+
+Two consumers were each re-deriving *is this row structure?* from the strings.
+The strings are environment variables, PCI vendor names and process names —
+the one place the answer cannot live. Escaping or folding the name only
+narrows the set of strings that happen to fool the inference; it leaves the
+inference.
+
+So the distinction is now recorded at construction by the code that knows it:
+`PropertyKind::{Heading, Blank, Field}`, with `Property::heading` for the three
+sub-headings this file writes, `Property::blank` for the ten separators, and
+`Property::new` for data. `Field` rows are always indented — including when
+their value is empty, which now means nothing beyond an empty value.
+
+This is the same shape as the fileassoc finding recorded above ("a format with
+two writers has no invariant, only a coincidence"), reflected: there, one
+format had two *writers* that drifted; here, one format had two *readers* both
+inventing an invariant that was never written down.
+
+`Property::new` folding both halves is a second, independent benefit: it closes
+the ordinary newline vector for all fourteen `props_*` functions at once —
+PCI descriptions, driver paths, process names — rather than at each call site.
+
+### Multiplicity is the new position
+
+sysinfo had no unit tests; there are now seven. The headline one did not catch
+its own bug on the first draft, and the reason is the same lesson as
+"a substring count is a `contains` in disguise" wearing yet another disguise.
+
+It forged headings that duplicate ones the clean report already contains —
+deliberately, because a forgery *identical* to a real heading is the strongest
+form of the attack. It then asked, of each column-0 line in the hostile report,
+"is this a line the clean report also produced?" The answer was yes, and it
+passed.
+
+The assertion has to compare column-0 lines as a **multiset**. Set membership
+discards multiplicity exactly as `contains` discards position. Running the
+break — reinstating the emptiness guess — now fails
+`an_empty_environment_variable_is_not_a_section_heading`, which is the test
+named after the bug; before the fix only a bystander test caught it.
+
+Three breaks were run against the final code (reinstate the emptiness guess;
+stop folding in `Property::new`; make `Property::new` return `Heading`). All
+three are caught, each by at least two named tests.
+
+## Two process bugs this round, both about trusting a green result
+
+### `cargo test --workspace` is *not* finished when `rustc.exe` hits zero
+
+Recorded earlier this session as a working rule: once the gate's `rustc`
+process count reaches 0 it is running test binaries, so source edits can no
+longer change its verdict. **That rule is wrong**, and it cost a gate.
+
+Doctests run last, and `rustdoc` compiles them from the **live source** at that
+moment — not from a snapshot taken when the crate was built. Editing
+`gui/toolkit/src/lib.rs` mid-gate to add `pub use textfmt::{..., fold, ...}`
+made the gate fail with `unresolved import textfmt::fold`, against a `textfmt`
+rlib built minutes earlier that genuinely had no `fold`. Neither the committed
+tree nor the final tree has that problem; the failure existed only inside the
+gate's window.
+
+`rustdoc.exe` is also not `rustc.exe`, so polling `ps -W | grep -c rustc.exe`
+reports 0 during the entire doctest phase and looks like "tests are running."
+
+The rule is simply: **do not edit the tree while a gate is running.** If there
+is nothing else to do, do read-only work.
+
+### A trailing `tail` swallows the exit code the notification reports
+
+The gate was launched as:
+
+```
+cmd > /tmp/gate2.log 2>&1; echo "EXIT=$?"; grep -c ...; tail -3 /tmp/gate2.log
+```
+
+The background-task completion notification reported **exit code 0**, and it
+was `tail`'s exit code. The gate itself had failed. The `echo "EXIT=$?"` line
+does capture the real code, but it is buried in the output rather than being
+the thing the harness reports, so the notification actively misleads.
+
+Either make the command under test the **last** command in the chain, or chain
+with `&&` so a failure propagates. Do not put a diagnostic after it and then
+believe the notification.

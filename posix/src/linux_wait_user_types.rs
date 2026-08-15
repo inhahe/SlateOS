@@ -106,7 +106,14 @@ mod tests {
 
     #[test]
     fn test_cld_codes_dense_1_to_6() {
-        let c = [CLD_EXITED, CLD_KILLED, CLD_DUMPED, CLD_TRAPPED, CLD_STOPPED, CLD_CONTINUED];
+        let c = [
+            CLD_EXITED,
+            CLD_KILLED,
+            CLD_DUMPED,
+            CLD_TRAPPED,
+            CLD_STOPPED,
+            CLD_CONTINUED,
+        ];
         for (i, &v) in c.iter().enumerate() {
             assert_eq!(v as usize, i + 1);
         }

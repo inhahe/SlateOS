@@ -93,7 +93,14 @@ mod tests {
 
     #[test]
     fn test_unix98_ioctls_distinct() {
-        let i = [TIOCGPTN, TIOCSPTLCK, TIOCGPKT, TIOCSIG, TIOCPKT, TIOCGPTPEER];
+        let i = [
+            TIOCGPTN,
+            TIOCSPTLCK,
+            TIOCGPKT,
+            TIOCSIG,
+            TIOCPKT,
+            TIOCGPTPEER,
+        ];
         for a in 0..i.len() {
             for b in (a + 1)..i.len() {
                 assert_ne!(i[a], i[b]);

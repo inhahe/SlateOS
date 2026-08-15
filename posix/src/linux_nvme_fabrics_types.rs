@@ -88,8 +88,7 @@ pub const NVME_REG_NSSR: u32 = 0x0020;
 /// Maximum NQN length (NVMe spec — 223 bytes plus NUL terminator).
 pub const NVMF_NQN_FIELD_LEN: u32 = 256;
 /// Standard discovery-service NQN string.
-pub const NVME_DISC_SUBSYS_NAME: &str =
-    "nqn.2014-08.org.nvmexpress.discovery";
+pub const NVME_DISC_SUBSYS_NAME: &str = "nqn.2014-08.org.nvmexpress.discovery";
 
 // ---------------------------------------------------------------------------
 // Connect/disconnect status (low byte of SCT/SC field, type "Generic
@@ -176,8 +175,13 @@ mod tests {
 
     #[test]
     fn test_register_offsets_distinct_aligned() {
-        let regs =
-            [NVME_REG_CAP, NVME_REG_VS, NVME_REG_CC, NVME_REG_CSTS, NVME_REG_NSSR];
+        let regs = [
+            NVME_REG_CAP,
+            NVME_REG_VS,
+            NVME_REG_CC,
+            NVME_REG_CSTS,
+            NVME_REG_NSSR,
+        ];
         for i in 0..regs.len() {
             for j in (i + 1)..regs.len() {
                 assert_ne!(regs[i], regs[j]);

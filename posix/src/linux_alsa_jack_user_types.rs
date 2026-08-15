@@ -79,10 +79,7 @@ mod tests {
 
     #[test]
     fn test_headset_and_avout_composites() {
-        assert_eq!(
-            SND_JACK_HEADSET,
-            SND_JACK_HEADPHONE | SND_JACK_MICROPHONE
-        );
+        assert_eq!(SND_JACK_HEADSET, SND_JACK_HEADPHONE | SND_JACK_MICROPHONE);
         assert_eq!(SND_JACK_AVOUT, SND_JACK_LINEOUT | SND_JACK_VIDEOOUT);
         // Composites are NOT power-of-two — they share bits.
         assert!(!SND_JACK_HEADSET.is_power_of_two());

@@ -123,9 +123,6 @@ mod tests {
     fn test_watchdog_interval_is_half_second() {
         assert_eq!(CLOCKSOURCE_WATCHDOG_INTERVAL_NS, 500_000_000);
         // Half a second.
-        assert_eq!(
-            CLOCKSOURCE_WATCHDOG_INTERVAL_NS * 2,
-            1_000_000_000,
-        );
+        assert_eq!(CLOCKSOURCE_WATCHDOG_INTERVAL_NS * 2, 1_000_000_000,);
     }
 }

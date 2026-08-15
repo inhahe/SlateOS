@@ -459,7 +459,9 @@ impl OsdManager {
 
     /// Check if an existing overlay is the same "category" as the new one.
     fn find_same_category_mut(&mut self, kind: &OsdKind) -> Option<&mut OsdOverlay> {
-        self.overlays.iter_mut().find(|o| same_category(&o.kind, kind))
+        self.overlays
+            .iter_mut()
+            .find(|o| same_category(&o.kind, kind))
     }
 
     /// Height of the OSD panel for the given kind.
@@ -497,7 +499,11 @@ impl OsdManager {
                     osd_w,
                     text_alpha,
                     if *muted { "Muted" } else { "Volume" },
-                    if *muted { volume_muted_icon() } else { volume_icon(*level) },
+                    if *muted {
+                        volume_muted_icon()
+                    } else {
+                        volume_icon(*level)
+                    },
                     *level,
                     if *muted { RED } else { BLUE },
                     commands,
@@ -516,13 +522,19 @@ impl OsdManager {
                     commands,
                 );
             }
-            OsdKind::MediaTrack { title, artist, album } => {
+            OsdKind::MediaTrack {
+                title,
+                artist,
+                album,
+            } => {
                 self.render_media_osd(ox, oy, osd_w, text_alpha, title, artist, album, commands);
             }
             OsdKind::MediaPlayPause { playing } => {
                 let label = if *playing { "Playing" } else { "Paused" };
                 let icon = if *playing { "\u{25B6}" } else { "\u{23F8}" };
-                self.render_icon_text_osd(ox, oy, osd_w, text_alpha, icon, label, LAVENDER, commands);
+                self.render_icon_text_osd(
+                    ox, oy, osd_w, text_alpha, icon, label, LAVENDER, commands,
+                );
             }
             OsdKind::KeyboardLock { lock_type, active } => {
                 let name = match lock_type {
@@ -533,16 +545,30 @@ impl OsdManager {
                 let status = if *active { "ON" } else { "OFF" };
                 let label = format!("{name}: {status}");
                 let color = if *active { GREEN } else { SUBTEXT0 };
-                self.render_icon_text_osd(ox, oy, osd_w, text_alpha, "\u{1F512}", &label, color, commands);
+                self.render_icon_text_osd(
+                    ox,
+                    oy,
+                    osd_w,
+                    text_alpha,
+                    "\u{1F512}",
+                    &label,
+                    color,
+                    commands,
+                );
             }
-            OsdKind::DeviceEvent { device_name, ejected } => {
+            OsdKind::DeviceEvent {
+                device_name,
+                ejected,
+            } => {
                 let label = if *ejected {
                     format!("{device_name} ejected")
                 } else {
                     format!("{device_name} connected")
                 };
                 let color = if *ejected { SUBTEXT0 } else { GREEN };
-                self.render_icon_text_osd(ox, oy, osd_w, text_alpha, "\u{23CF}", &label, color, commands);
+                self.render_icon_text_osd(
+                    ox, oy, osd_w, text_alpha, "\u{23CF}", &label, color, commands,
+                );
             }
             OsdKind::ScreenshotTaken { path } => {
                 // Truncate path for display.
@@ -552,12 +578,30 @@ impl OsdManager {
                     path.clone()
                 };
                 let label = format!("Screenshot: {display_path}");
-                self.render_icon_text_osd(ox, oy, osd_w, text_alpha, "\u{1F4F7}", &label, GREEN, commands);
+                self.render_icon_text_osd(
+                    ox,
+                    oy,
+                    osd_w,
+                    text_alpha,
+                    "\u{1F4F7}",
+                    &label,
+                    GREEN,
+                    commands,
+                );
             }
             OsdKind::Microphone { muted } => {
                 let label = if *muted { "Mic: Muted" } else { "Mic: Active" };
                 let color = if *muted { RED } else { GREEN };
-                self.render_icon_text_osd(ox, oy, osd_w, text_alpha, "\u{1F3A4}", label, color, commands);
+                self.render_icon_text_osd(
+                    ox,
+                    oy,
+                    osd_w,
+                    text_alpha,
+                    "\u{1F3A4}",
+                    label,
+                    color,
+                    commands,
+                );
             }
             OsdKind::NetworkStatus { connected, name } => {
                 let label = if *connected {
@@ -566,15 +610,35 @@ impl OsdManager {
                     format!("Disconnected: {name}")
                 };
                 let color = if *connected { GREEN } else { RED };
-                self.render_icon_text_osd(ox, oy, osd_w, text_alpha, "\u{1F310}", &label, color, commands);
+                self.render_icon_text_osd(
+                    ox,
+                    oy,
+                    osd_w,
+                    text_alpha,
+                    "\u{1F310}",
+                    &label,
+                    color,
+                    commands,
+                );
             }
             OsdKind::BatteryLow { percent } => {
                 let label = format!("Battery Low: {percent}%");
-                self.render_icon_text_osd(ox, oy, osd_w, text_alpha, "\u{1F50B}", &label, RED, commands);
+                self.render_icon_text_osd(
+                    ox,
+                    oy,
+                    osd_w,
+                    text_alpha,
+                    "\u{1F50B}",
+                    &label,
+                    RED,
+                    commands,
+                );
             }
             OsdKind::Custom { icon, message } => {
                 let (icon_str, color) = icon_info(*icon);
-                self.render_icon_text_osd(ox, oy, osd_w, text_alpha, icon_str, message, color, commands);
+                self.render_icon_text_osd(
+                    ox, oy, osd_w, text_alpha, icon_str, message, color, commands,
+                );
             }
         }
     }
@@ -787,7 +851,10 @@ fn same_category(a: &OsdKind, b: &OsdKind) -> bool {
         (OsdKind::Volume { .. }, OsdKind::Volume { .. })
             | (OsdKind::Brightness { .. }, OsdKind::Brightness { .. })
             | (OsdKind::MediaTrack { .. }, OsdKind::MediaTrack { .. })
-            | (OsdKind::MediaPlayPause { .. }, OsdKind::MediaPlayPause { .. })
+            | (
+                OsdKind::MediaPlayPause { .. },
+                OsdKind::MediaPlayPause { .. }
+            )
             | (OsdKind::Microphone { .. }, OsdKind::Microphone { .. })
             | (OsdKind::BatteryLow { .. }, OsdKind::BatteryLow { .. })
     )
@@ -962,7 +1029,11 @@ impl OsdSettingsUI {
                 text: label.to_string(),
                 font_size: 12.0,
                 color: if selected { TEXT } else { SUBTEXT0 },
-                font_weight: if selected { FontWeightHint::Bold } else { FontWeightHint::Regular },
+                font_weight: if selected {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
                 max_width: None,
             });
             cy += 22.0;
@@ -1145,7 +1216,14 @@ mod tests {
 
     #[test]
     fn overlay_new_starts_fading_in() {
-        let o = OsdOverlay::new(OsdKind::Volume { level: 50, muted: false }, 1000, 1);
+        let o = OsdOverlay::new(
+            OsdKind::Volume {
+                level: 50,
+                muted: false,
+            },
+            1000,
+            1,
+        );
         assert_eq!(o.phase, OsdPhase::FadingIn);
         assert_eq!(o.created_at, 1000);
         assert!((o.opacity - 0.0).abs() < 0.01);
@@ -1154,7 +1232,14 @@ mod tests {
     #[test]
     fn overlay_fade_in_progresses() {
         let config = OsdConfig::default();
-        let mut o = OsdOverlay::new(OsdKind::Volume { level: 50, muted: false }, 0, 1);
+        let mut o = OsdOverlay::new(
+            OsdKind::Volume {
+                level: 50,
+                muted: false,
+            },
+            0,
+            1,
+        );
         o.tick(75, &config); // halfway through 150ms fade-in
         assert_eq!(o.phase, OsdPhase::FadingIn);
         assert!((o.opacity - 0.5).abs() < 0.01);
@@ -1163,7 +1248,14 @@ mod tests {
     #[test]
     fn overlay_transitions_to_visible() {
         let config = OsdConfig::default();
-        let mut o = OsdOverlay::new(OsdKind::Volume { level: 50, muted: false }, 0, 1);
+        let mut o = OsdOverlay::new(
+            OsdKind::Volume {
+                level: 50,
+                muted: false,
+            },
+            0,
+            1,
+        );
         o.tick(150, &config);
         assert_eq!(o.phase, OsdPhase::Visible);
         assert!((o.opacity - 1.0).abs() < 0.01);
@@ -1172,7 +1264,14 @@ mod tests {
     #[test]
     fn overlay_visible_stays_until_timeout() {
         let config = OsdConfig::default();
-        let mut o = OsdOverlay::new(OsdKind::Volume { level: 50, muted: false }, 0, 1);
+        let mut o = OsdOverlay::new(
+            OsdKind::Volume {
+                level: 50,
+                muted: false,
+            },
+            0,
+            1,
+        );
         o.tick(150, &config); // now Visible
         o.tick(1000, &config); // still within 2000ms timeout
         assert_eq!(o.phase, OsdPhase::Visible);
@@ -1181,7 +1280,14 @@ mod tests {
     #[test]
     fn overlay_transitions_to_fading_out() {
         let config = OsdConfig::default();
-        let mut o = OsdOverlay::new(OsdKind::Volume { level: 50, muted: false }, 0, 1);
+        let mut o = OsdOverlay::new(
+            OsdKind::Volume {
+                level: 50,
+                muted: false,
+            },
+            0,
+            1,
+        );
         o.tick(150, &config); // Visible
         o.tick(2200, &config); // past timeout
         assert_eq!(o.phase, OsdPhase::FadingOut);
@@ -1190,7 +1296,14 @@ mod tests {
     #[test]
     fn overlay_fading_out_progresses() {
         let config = OsdConfig::default();
-        let mut o = OsdOverlay::new(OsdKind::Volume { level: 50, muted: false }, 0, 1);
+        let mut o = OsdOverlay::new(
+            OsdKind::Volume {
+                level: 50,
+                muted: false,
+            },
+            0,
+            1,
+        );
         o.tick(150, &config); // Visible
         o.tick(2200, &config); // FadingOut starts at ~2200
         o.tick(2350, &config); // 150ms into 300ms fade-out
@@ -1201,7 +1314,14 @@ mod tests {
     #[test]
     fn overlay_dismissed_after_fade_out() {
         let config = OsdConfig::default();
-        let mut o = OsdOverlay::new(OsdKind::Volume { level: 50, muted: false }, 0, 1);
+        let mut o = OsdOverlay::new(
+            OsdKind::Volume {
+                level: 50,
+                muted: false,
+            },
+            0,
+            1,
+        );
         o.tick(150, &config);
         o.tick(2200, &config);
         let alive = o.tick(2600, &config);
@@ -1211,7 +1331,14 @@ mod tests {
 
     #[test]
     fn overlay_dismiss_starts_fade_out() {
-        let mut o = OsdOverlay::new(OsdKind::Volume { level: 50, muted: false }, 0, 1);
+        let mut o = OsdOverlay::new(
+            OsdKind::Volume {
+                level: 50,
+                muted: false,
+            },
+            0,
+            1,
+        );
         o.phase = OsdPhase::Visible;
         o.opacity = 1.0;
         o.dismiss(500);
@@ -1221,7 +1348,14 @@ mod tests {
 
     #[test]
     fn overlay_reset_timer_goes_visible() {
-        let mut o = OsdOverlay::new(OsdKind::Volume { level: 50, muted: false }, 0, 1);
+        let mut o = OsdOverlay::new(
+            OsdKind::Volume {
+                level: 50,
+                muted: false,
+            },
+            0,
+            1,
+        );
         o.phase = OsdPhase::FadingOut;
         o.opacity = 0.3;
         o.reset_timer(1000);
@@ -1257,7 +1391,13 @@ mod tests {
     #[test]
     fn manager_show_adds_overlay() {
         let mut mgr = make_manager();
-        mgr.show(OsdKind::Volume { level: 50, muted: false }, 0);
+        mgr.show(
+            OsdKind::Volume {
+                level: 50,
+                muted: false,
+            },
+            0,
+        );
         assert_eq!(mgr.active_count(), 1);
         assert!(mgr.has_visible());
     }
@@ -1266,7 +1406,13 @@ mod tests {
     fn manager_disabled_ignores_show() {
         let mut mgr = make_manager();
         mgr.config.enabled = false;
-        mgr.show(OsdKind::Volume { level: 50, muted: false }, 0);
+        mgr.show(
+            OsdKind::Volume {
+                level: 50,
+                muted: false,
+            },
+            0,
+        );
         assert_eq!(mgr.active_count(), 0);
     }
 
@@ -1274,7 +1420,13 @@ mod tests {
     fn manager_per_kind_toggle() {
         let mut mgr = make_manager();
         mgr.config.show_volume = false;
-        mgr.show(OsdKind::Volume { level: 50, muted: false }, 0);
+        mgr.show(
+            OsdKind::Volume {
+                level: 50,
+                muted: false,
+            },
+            0,
+        );
         assert_eq!(mgr.active_count(), 0);
 
         mgr.show(OsdKind::Brightness { level: 80 }, 0);
@@ -1284,10 +1436,22 @@ mod tests {
     #[test]
     fn manager_same_category_updates_inplace() {
         let mut mgr = make_manager();
-        mgr.show(OsdKind::Volume { level: 30, muted: false }, 0);
+        mgr.show(
+            OsdKind::Volume {
+                level: 30,
+                muted: false,
+            },
+            0,
+        );
         assert_eq!(mgr.active_count(), 1);
 
-        mgr.show(OsdKind::Volume { level: 60, muted: false }, 100);
+        mgr.show(
+            OsdKind::Volume {
+                level: 60,
+                muted: false,
+            },
+            100,
+        );
         assert_eq!(mgr.active_count(), 1); // still 1, updated in place
         if let OsdKind::Volume { level, .. } = &mgr.overlays[0].kind {
             assert_eq!(*level, 60);
@@ -1299,7 +1463,13 @@ mod tests {
     #[test]
     fn manager_different_categories_stack() {
         let mut mgr = make_manager();
-        mgr.show(OsdKind::Volume { level: 50, muted: false }, 0);
+        mgr.show(
+            OsdKind::Volume {
+                level: 50,
+                muted: false,
+            },
+            0,
+        );
         mgr.show(OsdKind::Brightness { level: 80 }, 0);
         assert_eq!(mgr.active_count(), 2);
     }
@@ -1308,9 +1478,21 @@ mod tests {
     fn manager_max_overlays_enforced() {
         let mut mgr = make_manager();
         mgr.max_overlays = 2;
-        mgr.show(OsdKind::Volume { level: 50, muted: false }, 0);
+        mgr.show(
+            OsdKind::Volume {
+                level: 50,
+                muted: false,
+            },
+            0,
+        );
         mgr.show(OsdKind::Brightness { level: 80 }, 0);
-        mgr.show(OsdKind::KeyboardLock { lock_type: LockType::CapsLock, active: true }, 0);
+        mgr.show(
+            OsdKind::KeyboardLock {
+                lock_type: LockType::CapsLock,
+                active: true,
+            },
+            0,
+        );
         assert!(mgr.active_count() <= 2);
     }
 
@@ -1320,7 +1502,13 @@ mod tests {
         mgr.config.fade_in_ms = 0;
         mgr.config.timeout_ms = 100;
         mgr.config.fade_out_ms = 0;
-        mgr.show(OsdKind::Volume { level: 50, muted: false }, 0);
+        mgr.show(
+            OsdKind::Volume {
+                level: 50,
+                muted: false,
+            },
+            0,
+        );
         assert_eq!(mgr.active_count(), 1);
 
         mgr.tick(0); // goes to Visible
@@ -1331,7 +1519,13 @@ mod tests {
     #[test]
     fn manager_dismiss_all() {
         let mut mgr = make_manager();
-        mgr.show(OsdKind::Volume { level: 50, muted: false }, 0);
+        mgr.show(
+            OsdKind::Volume {
+                level: 50,
+                muted: false,
+            },
+            0,
+        );
         mgr.show(OsdKind::Brightness { level: 80 }, 0);
         mgr.dismiss_all(100);
         for o in &mgr.overlays {
@@ -1343,7 +1537,13 @@ mod tests {
     fn manager_render_returns_commands() {
         let mut mgr = make_manager();
         mgr.config.fade_in_ms = 0;
-        mgr.show(OsdKind::Volume { level: 50, muted: false }, 0);
+        mgr.show(
+            OsdKind::Volume {
+                level: 50,
+                muted: false,
+            },
+            0,
+        );
         mgr.tick(0);
         let cmds = mgr.render();
         assert!(!cmds.is_empty());
@@ -1397,7 +1597,13 @@ mod tests {
     fn manager_render_keyboard_lock() {
         let mut mgr = make_manager();
         mgr.config.fade_in_ms = 0;
-        mgr.show(OsdKind::KeyboardLock { lock_type: LockType::CapsLock, active: true }, 0);
+        mgr.show(
+            OsdKind::KeyboardLock {
+                lock_type: LockType::CapsLock,
+                active: true,
+            },
+            0,
+        );
         mgr.tick(0);
         let cmds = mgr.render();
         assert!(cmds.len() > 3);
@@ -1407,7 +1613,13 @@ mod tests {
     fn manager_render_device_event() {
         let mut mgr = make_manager();
         mgr.config.fade_in_ms = 0;
-        mgr.show(OsdKind::DeviceEvent { device_name: "USB Drive".into(), ejected: false }, 0);
+        mgr.show(
+            OsdKind::DeviceEvent {
+                device_name: "USB Drive".into(),
+                ejected: false,
+            },
+            0,
+        );
         mgr.tick(0);
         let cmds = mgr.render();
         assert!(cmds.len() > 3);
@@ -1417,7 +1629,12 @@ mod tests {
     fn manager_render_screenshot() {
         let mut mgr = make_manager();
         mgr.config.fade_in_ms = 0;
-        mgr.show(OsdKind::ScreenshotTaken { path: "/home/user/screenshot.png".into() }, 0);
+        mgr.show(
+            OsdKind::ScreenshotTaken {
+                path: "/home/user/screenshot.png".into(),
+            },
+            0,
+        );
         mgr.tick(0);
         let cmds = mgr.render();
         assert!(cmds.len() > 3);
@@ -1437,7 +1654,13 @@ mod tests {
     fn manager_render_network_status() {
         let mut mgr = make_manager();
         mgr.config.fade_in_ms = 0;
-        mgr.show(OsdKind::NetworkStatus { connected: true, name: "WiFi".into() }, 0);
+        mgr.show(
+            OsdKind::NetworkStatus {
+                connected: true,
+                name: "WiFi".into(),
+            },
+            0,
+        );
         mgr.tick(0);
         let cmds = mgr.render();
         assert!(cmds.len() > 3);
@@ -1457,7 +1680,13 @@ mod tests {
     fn manager_render_custom() {
         let mut mgr = make_manager();
         mgr.config.fade_in_ms = 0;
-        mgr.show(OsdKind::Custom { icon: OsdIcon::Warning, message: "Disk full".into() }, 0);
+        mgr.show(
+            OsdKind::Custom {
+                icon: OsdIcon::Warning,
+                message: "Disk full".into(),
+            },
+            0,
+        );
         mgr.tick(0);
         let cmds = mgr.render();
         assert!(cmds.len() > 3);
@@ -1468,8 +1697,14 @@ mod tests {
     #[test]
     fn same_category_volume() {
         assert!(same_category(
-            &OsdKind::Volume { level: 30, muted: false },
-            &OsdKind::Volume { level: 60, muted: true },
+            &OsdKind::Volume {
+                level: 30,
+                muted: false
+            },
+            &OsdKind::Volume {
+                level: 60,
+                muted: true
+            },
         ));
     }
 
@@ -1484,7 +1719,10 @@ mod tests {
     #[test]
     fn different_categories() {
         assert!(!same_category(
-            &OsdKind::Volume { level: 50, muted: false },
+            &OsdKind::Volume {
+                level: 50,
+                muted: false
+            },
             &OsdKind::Brightness { level: 50 },
         ));
     }
@@ -1493,8 +1731,14 @@ mod tests {
     fn keyboard_locks_not_same_category() {
         // Lock events don't merge — each lock toggle is independent.
         assert!(!same_category(
-            &OsdKind::KeyboardLock { lock_type: LockType::CapsLock, active: true },
-            &OsdKind::KeyboardLock { lock_type: LockType::NumLock, active: true },
+            &OsdKind::KeyboardLock {
+                lock_type: LockType::CapsLock,
+                active: true
+            },
+            &OsdKind::KeyboardLock {
+                lock_type: LockType::NumLock,
+                active: true
+            },
         ));
     }
 
@@ -1564,7 +1808,14 @@ mod tests {
     #[test]
     fn height_volume() {
         let mgr = make_manager();
-        assert!((mgr.height_for_kind(&OsdKind::Volume { level: 50, muted: false }) - 72.0).abs() < 0.01);
+        assert!(
+            (mgr.height_for_kind(&OsdKind::Volume {
+                level: 50,
+                muted: false
+            }) - 72.0)
+                .abs()
+                < 0.01
+        );
     }
 
     #[test]
@@ -1587,7 +1838,10 @@ mod tests {
     #[test]
     fn height_keyboard_lock() {
         let mgr = make_manager();
-        let h = mgr.height_for_kind(&OsdKind::KeyboardLock { lock_type: LockType::NumLock, active: true });
+        let h = mgr.height_for_kind(&OsdKind::KeyboardLock {
+            lock_type: LockType::NumLock,
+            active: true,
+        });
         assert!((h - 56.0).abs() < 0.01);
     }
 
@@ -1615,8 +1869,20 @@ mod tests {
     fn stacked_overlays_render_multiple_panels() {
         let mut mgr = make_manager();
         mgr.config.fade_in_ms = 0;
-        mgr.show(OsdKind::Volume { level: 50, muted: false }, 0);
-        mgr.show(OsdKind::KeyboardLock { lock_type: LockType::CapsLock, active: true }, 0);
+        mgr.show(
+            OsdKind::Volume {
+                level: 50,
+                muted: false,
+            },
+            0,
+        );
+        mgr.show(
+            OsdKind::KeyboardLock {
+                lock_type: LockType::CapsLock,
+                active: true,
+            },
+            0,
+        );
         mgr.tick(0);
         let cmds = mgr.render();
         // Should have commands for both overlays (at least 6 each: shadow + bg + border + content).
@@ -1629,7 +1895,13 @@ mod tests {
     fn volume_muted_renders() {
         let mut mgr = make_manager();
         mgr.config.fade_in_ms = 0;
-        mgr.show(OsdKind::Volume { level: 0, muted: true }, 0);
+        mgr.show(
+            OsdKind::Volume {
+                level: 0,
+                muted: true,
+            },
+            0,
+        );
         mgr.tick(0);
         let cmds = mgr.render();
         assert!(cmds.len() > 3);
@@ -1641,7 +1913,13 @@ mod tests {
     fn volume_level_clamped_at_100() {
         let mut mgr = make_manager();
         mgr.config.fade_in_ms = 0;
-        mgr.show(OsdKind::Volume { level: 150, muted: false }, 0);
+        mgr.show(
+            OsdKind::Volume {
+                level: 150,
+                muted: false,
+            },
+            0,
+        );
         mgr.tick(0);
         // Should not panic during render.
         let cmds = mgr.render();
@@ -1650,7 +1928,8 @@ mod tests {
 
     #[test]
     fn screenshot_long_path_truncated() {
-        let long_path = "/home/user/very/long/path/to/some/nested/directory/screenshot_2026_05_17_12345.png";
+        let long_path =
+            "/home/user/very/long/path/to/some/nested/directory/screenshot_2026_05_17_12345.png";
         let result = truncate_str(long_path, 30);
         assert!(result.chars().count() <= 30);
         assert!(result.ends_with("..."));
@@ -1677,7 +1956,13 @@ mod tests {
     fn rapid_volume_updates_keep_single_overlay() {
         let mut mgr = make_manager();
         for i in 0..20 {
-            mgr.show(OsdKind::Volume { level: i * 5, muted: false }, i as u64 * 50);
+            mgr.show(
+                OsdKind::Volume {
+                    level: i * 5,
+                    muted: false,
+                },
+                i as u64 * 50,
+            );
         }
         assert_eq!(mgr.active_count(), 1);
     }

@@ -42,6 +42,7 @@ use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
+use guitk::text;
 
 // ============================================================================
 // Catppuccin Mocha palette
@@ -81,6 +82,25 @@ const ITEM_HEIGHT: f32 = 72.0;
 const NOTIFICATION_HEIGHT: f32 = 48.0;
 const CORNER_RADIUS: f32 = 8.0;
 const SMALL_RADIUS: f32 = 4.0;
+
+/// Point size of the prose fields (description, notes) in the detail panel.
+const PROSE_FONT_SIZE: f32 = 12.0;
+/// Line spacing of those fields.
+const PROSE_LINE_HEIGHT: f32 = 18.0;
+/// Space left under a prose field before the next one starts. Sized so that a
+/// one-line field occupies the 24px it always has.
+const PROSE_FIELD_GAP: f32 = 6.0;
+
+/// A prose field of the detail panel — a description or a set of notes.
+///
+/// Shared by the fields rather than written out at each, so that they cannot
+/// drift into laying their text out differently from one another.
+fn detail_prose(text: &str, x: f32, y: f32, width: f32) -> text::Paragraph<'_> {
+    text::Paragraph::new(text, SUBTEXT0)
+        .at(x, y, width)
+        .font(PROSE_FONT_SIZE, FontWeightHint::Regular)
+        .line_height(PROSE_LINE_HEIGHT)
+}
 
 // ============================================================================
 // Date and time types
@@ -877,20 +897,27 @@ impl Task {
     }
 }
 
+/// Escape a string for the body of a JSON string literal.
+///
+/// The previous local version was a chain of `str::replace` calls that left
+/// every control character except `\n`, `\r` and `\t` raw in the output. A raw
+/// control character inside a JSON string is invalid per RFC 8259, so a task
+/// whose notes contained one produced a file this app could not reload.
 fn escape_json(s: &str) -> String {
-    s.replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n")
-        .replace('\r', "\\r")
-        .replace('\t', "\\t")
+    guitk::escape::json_string(s)
 }
 
+/// Decode the body of a JSON string literal, reversing [`escape_json`].
+///
+/// The previous local version was a chain of `str::replace` calls applied in
+/// the wrong order: `\\n` was decoded before `\\\\`, so the two-character text
+/// `\n` — a literal backslash followed by the letter n — was written as `\\n`
+/// and read back as a *newline*. A Windows path in a note (`C:\temp`) came
+/// back as `C:\<TAB>emp`, and the damage was re-saved, compounding on every
+/// open. The shared decoder is a single left-to-right pass, which structurally
+/// cannot re-examine what it has already decoded.
 fn unescape_json(s: &str) -> String {
-    s.replace("\\n", "\n")
-        .replace("\\r", "\r")
-        .replace("\\t", "\t")
-        .replace("\\\"", "\"")
-        .replace("\\\\", "\\")
+    guitk::escape::unescape_json_string(s)
 }
 
 // ============================================================================
@@ -1900,7 +1927,11 @@ impl RemindersApp {
             };
             if badge_count > 0 {
                 let badge_text = format!("{badge_count}");
-                let badge_w = 10.0 + badge_text.len() as f32 * 7.0;
+                // A count pill has a radius of half its height, so a single
+                // digit measured honestly would render as a squashed oval:
+                // floor the width at the height to keep it round.
+                let badge_w =
+                    text::padded_width(&badge_text, 5.0, 10.0, FontWeightHint::Regular).max(18.0);
                 cmds.push(RenderCommand::FillRect {
                     x: x + w - badge_w - 12.0,
                     y: row_y + 6.0,
@@ -1910,7 +1941,12 @@ impl RemindersApp {
                     corner_radii: CornerRadii::all(9.0),
                 });
                 cmds.push(RenderCommand::Text {
-                    x: x + w - badge_w - 7.0,
+                    x: text::center_x(
+                        &badge_text,
+                        x + w - badge_w / 2.0 - 12.0,
+                        10.0,
+                        FontWeightHint::Regular,
+                    ),
                     y: row_y + 9.0,
                     text: badge_text,
                     font_size: 10.0,
@@ -2513,16 +2549,13 @@ impl RemindersApp {
                 max_width: Some(content_w),
             });
             row_y += 14.0;
-            cmds.push(RenderCommand::Text {
-                x: x + pad,
-                y: row_y,
-                text: task.description.clone(),
-                font_size: 12.0,
-                color: SUBTEXT0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(content_w),
-            });
-            row_y += 24.0;
+            // `RenderCommand::Text` clips at `max_width` rather than wrapping,
+            // so a description longer than the panel is wide used to reach the
+            // user as its first line and nothing else. `Paragraph::draw`
+            // reports the height it used, so the cursor advances over what was
+            // actually drawn and the fields below cannot land on top of it.
+            row_y += detail_prose(&task.description, x + pad, row_y, content_w).draw(cmds);
+            row_y += PROSE_FIELD_GAP;
         }
 
         // Notes
@@ -2537,16 +2570,8 @@ impl RemindersApp {
                 max_width: Some(content_w),
             });
             row_y += 14.0;
-            cmds.push(RenderCommand::Text {
-                x: x + pad,
-                y: row_y,
-                text: task.notes.clone(),
-                font_size: 12.0,
-                color: SUBTEXT0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(content_w),
-            });
-            row_y += 24.0;
+            row_y += detail_prose(&task.notes, x + pad, row_y, content_w).draw(cmds);
+            row_y += PROSE_FIELD_GAP;
         }
 
         // Subtasks
@@ -3876,6 +3901,51 @@ mod tests {
         assert_eq!(unescaped, "Hello \"world\"\nnew line");
     }
 
+    /// The test above passes against a broken decoder, because none of its
+    /// sample text contains a *literal* backslash — the only input that
+    /// distinguishes a correct decoder from a `str::replace` chain. These do.
+    #[test]
+    fn a_literal_backslash_in_a_task_survives_a_save_and_reload() {
+        for text in [
+            r"a\nb",         // decoded as a newline by a replace-chain
+            r"C:\temp",      // decoded as a tab by a replace-chain
+            r"C:\new\table", // both, in one path
+            r"a\\b",
+            r"trailing\",
+            r"\u0041 is not an A here",
+        ] {
+            assert_eq!(
+                unescape_json(&escape_json(text)),
+                text,
+                "round trip corrupted {text:?}"
+            );
+        }
+    }
+
+    /// Corruption of this kind compounds: the file is rewritten on every edit,
+    /// so a single round trip can look survivable while five do not.
+    #[test]
+    fn repeated_saves_do_not_let_a_task_decay() {
+        let original = r"C:\new\table and a\nb";
+        let mut text = original.to_string();
+        for pass in 1..=5 {
+            text = unescape_json(&escape_json(&text));
+            assert_eq!(text, original, "task text drifted on save {pass}");
+        }
+    }
+
+    /// A control character has no short escape and must not be emitted raw —
+    /// that produces invalid JSON, so the app could not reload its own file.
+    #[test]
+    fn a_control_character_in_a_note_does_not_produce_invalid_json() {
+        let escaped = escape_json("note with a bell \u{7} in it");
+        assert!(
+            !escaped.chars().any(|c| c < '\u{20}'),
+            "raw control character left in JSON output: {escaped:?}"
+        );
+        assert_eq!(unescape_json(&escaped), "note with a bell \u{7} in it");
+    }
+
     #[test]
     fn test_json_import_empty() {
         let now = make_now();
@@ -4040,6 +4110,82 @@ mod tests {
         app.select_task(first_id);
         let cmds = app.render();
         assert!(!cmds.is_empty());
+    }
+
+    const LONG_NOTES: &str = "Bring the signed copy and the two spare batteries; \
+        the office does not stock them and the courier desk closes at four, so \
+        anything not handed over by then waits until Monday.";
+
+    /// An app with one selected task carrying a long description and notes.
+    fn app_with_prose_task() -> RemindersApp {
+        let now = make_now();
+        let mut app = RemindersApp::new(1100.0, 720.0, now);
+        let mut task = Task::new(0, "Collect the parcel", now);
+        task.description = LONG_NOTES.to_string();
+        task.notes = LONG_NOTES.to_string();
+        let id = app.store.add(task);
+        app.select_task(id);
+        app
+    }
+
+    /// The `(y, text)` of every prose line drawn in the detail panel.
+    fn prose_lines(app: &RemindersApp) -> Vec<(f32, String)> {
+        app.render()
+            .into_iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text {
+                    y,
+                    text,
+                    font_size,
+                    color,
+                    ..
+                } if (font_size - PROSE_FONT_SIZE).abs() < 0.01 && color == SUBTEXT0 => {
+                    Some((y, text))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_long_description_is_wrapped_not_truncated() {
+        // `RenderCommand::Text` clips at `max_width`, so these fields used to
+        // reach the user as their first line and nothing else.
+        let app = app_with_prose_task();
+        let lines = prose_lines(&app);
+        assert!(
+            lines.len() > 2,
+            "two multi-line fields produced only {} line(s)",
+            lines.len()
+        );
+        let drawn: String = lines
+            .iter()
+            .map(|(_, t)| t.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        for word in LONG_NOTES.split_whitespace() {
+            assert!(drawn.contains(word), "the detail panel lost {word:?}");
+        }
+    }
+
+    #[test]
+    fn detail_panel_fields_do_not_overlap_each_other() {
+        // The panel is a running cursor, so a field that wrapped without
+        // advancing it would be drawn over by the one below.
+        let app = app_with_prose_task();
+        let mut lines = prose_lines(&app);
+        lines.sort_by(|a, b| a.0.total_cmp(&b.0));
+        for pair in lines.windows(2) {
+            let (top, bottom) = (&pair[0], &pair[1]);
+            assert!(
+                bottom.0 - top.0 >= PROSE_LINE_HEIGHT - 0.01,
+                "{:?} at {} and {:?} at {} are less than a line apart",
+                top.1,
+                top.0,
+                bottom.1,
+                bottom.0
+            );
+        }
     }
 
     #[test]

@@ -12,3 +12,15 @@ guitk = { path = "../toolkit" }
 # most visible thing on the desktop to disagree with `date`. See
 # tzrules/src/lib.rs's "Why this is a crate and not a module".
 tzrules = { path = "../../tzrules" }
+
+# Format-preserving YAML, for settings that are written back to disk.
+# design.txt requires configuration to be "processed with a library that
+# preserves comments and formatting": a user who annotates their config file
+# and then changes a setting in the UI has to get their annotations back.
+# See yamldoc/src/lib.rs.
+yamldoc = { path = "../../yamldoc" }
+
+# The appearance settings model, shared with the Settings application so the
+# two processes cannot disagree about what the user chose. The shell paints
+# from it (DesktopTheme::from_settings) and hosts the panel that edits it.
+appearance = { path = "../appearance" }

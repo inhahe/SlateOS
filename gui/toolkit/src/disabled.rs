@@ -31,8 +31,7 @@ use crate::widget::WidgetId;
 // ---------------------------------------------------------------------------
 
 /// Per-widget enabled/disabled state.
-#[derive(Clone, Debug, PartialEq)]
-#[derive(Default)]
+#[derive(Clone, Debug, PartialEq, Default)]
 pub enum DisabledState {
     /// Normal interaction allowed.
     #[default]
@@ -89,7 +88,6 @@ impl DisabledState {
         *self = Self::DisabledTemporary { reason, until };
     }
 }
-
 
 // ---------------------------------------------------------------------------
 // DisabledOverlay
@@ -184,7 +182,10 @@ impl DisabledOverlay {
 /// opacity factor (0.0 = fully transparent, 1.0 = no change).
 pub fn render_disabled(commands: &[RenderCommand], opacity: f32) -> Vec<RenderCommand> {
     let opacity = opacity.clamp(0.0, 1.0);
-    commands.iter().map(|cmd| apply_opacity(cmd, opacity)).collect()
+    commands
+        .iter()
+        .map(|cmd| apply_opacity(cmd, opacity))
+        .collect()
 }
 
 /// Apply opacity reduction to a single render command.
@@ -293,9 +294,9 @@ fn reduce_alpha(color: Color, factor: f32) -> Color {
 /// The tooltip is positioned above the control by default. If `above` is false,
 /// it is positioned below.
 pub fn render_reason_tooltip(reason: &str, x: f32, y: f32, above: bool) -> Vec<RenderCommand> {
-    // Estimate text width (rough: 7px per character at 12pt).
-    let char_width = TOOLTIP_FONT_SIZE * 0.58;
-    let text_width = reason.len() as f32 * char_width;
+    // Measured rather than estimated: the tooltip's background is sized from
+    // this, so a wrong answer here is a visible box that does not fit its text.
+    let text_width = crate::text::width(reason, TOOLTIP_FONT_SIZE);
     let box_width = text_width + TOOLTIP_PADDING * 2.0;
     let box_height = TOOLTIP_FONT_SIZE + TOOLTIP_PADDING * 2.0;
 
@@ -492,7 +493,8 @@ impl GroupManager {
     pub fn is_widget_disabled(&self, widget_id: WidgetId) -> bool {
         // Find which group(s) this widget belongs to.
         for group in &self.groups {
-            if group.members().contains(&widget_id) && self.is_group_effectively_disabled(group.id) {
+            if group.members().contains(&widget_id) && self.is_group_effectively_disabled(group.id)
+            {
                 return true;
             }
         }
@@ -522,9 +524,10 @@ impl GroupManager {
     pub fn widget_disabled_reason(&self, widget_id: WidgetId) -> Option<String> {
         for group in &self.groups {
             if group.members().contains(&widget_id)
-                && let Some(reason) = self.group_effective_reason(group.id) {
-                    return Some(reason);
-                }
+                && let Some(reason) = self.group_effective_reason(group.id)
+            {
+                return Some(reason);
+            }
         }
         None
     }
@@ -644,12 +647,8 @@ pub fn evaluate_condition(condition: &EnableWhen, ctx: &EnableContext) -> bool {
         EnableWhen::Always => true,
         EnableWhen::FieldNotEmpty(id) => !ctx.field_value(*id).is_empty(),
         EnableWhen::CheckboxChecked(id) => ctx.checkbox_checked(*id),
-        EnableWhen::AllOf(conditions) => {
-            conditions.iter().all(|c| evaluate_condition(c, ctx))
-        }
-        EnableWhen::AnyOf(conditions) => {
-            conditions.iter().any(|c| evaluate_condition(c, ctx))
-        }
+        EnableWhen::AllOf(conditions) => conditions.iter().all(|c| evaluate_condition(c, ctx)),
+        EnableWhen::AnyOf(conditions) => conditions.iter().any(|c| evaluate_condition(c, ctx)),
         EnableWhen::Custom(f) => f(),
     }
 }
@@ -727,20 +726,14 @@ impl ValidationRule {
             }
             Self::MinLength(min) => {
                 if value.len() < *min {
-                    ValidationResult::invalid(format!(
-                        "Must be at least {} characters",
-                        min
-                    ))
+                    ValidationResult::invalid(format!("Must be at least {} characters", min))
                 } else {
                     ValidationResult::valid()
                 }
             }
             Self::MaxLength(max) => {
                 if value.len() > *max {
-                    ValidationResult::invalid(format!(
-                        "Must be at most {} characters",
-                        max
-                    ))
+                    ValidationResult::invalid(format!("Must be at most {} characters", max))
                 } else {
                     ValidationResult::valid()
                 }
@@ -923,7 +916,12 @@ impl FormValidator {
             if self.states.iter().all(|(id, _)| *id != widget_id) {
                 self.states.push((widget_id, ValidationState::valid()));
             }
-            return &self.states.iter().find(|(id, _)| *id == widget_id).expect("just pushed").1;
+            return &self
+                .states
+                .iter()
+                .find(|(id, _)| *id == widget_id)
+                .expect("just pushed")
+                .1;
         };
 
         let mut result = ValidationState::valid();
@@ -943,7 +941,12 @@ impl FormValidator {
             entry.1 = result;
         }
 
-        &self.states.iter().find(|(id, _)| *id == widget_id).expect("state exists").1
+        &self
+            .states
+            .iter()
+            .find(|(id, _)| *id == widget_id)
+            .expect("state exists")
+            .1
     }
 
     /// Validate all fields with provided values. Returns overall validity.
@@ -969,7 +972,11 @@ impl FormValidator {
                 }
             }
 
-            if let Some(entry) = self.states.iter_mut().find(|(id, _)| *id == field.widget_id) {
+            if let Some(entry) = self
+                .states
+                .iter_mut()
+                .find(|(id, _)| *id == field.widget_id)
+            {
                 entry.1 = state;
             }
         }
@@ -983,7 +990,10 @@ impl FormValidator {
 
     /// Get the validation state of a field.
     pub fn field_state(&self, widget_id: WidgetId) -> Option<&ValidationState> {
-        self.states.iter().find(|(id, _)| *id == widget_id).map(|(_, s)| s)
+        self.states
+            .iter()
+            .find(|(id, _)| *id == widget_id)
+            .map(|(_, s)| s)
     }
 
     /// Get the disabled state for the submit button based on form validity.
@@ -1169,11 +1179,17 @@ mod tests {
 
         // Empty field -> condition false.
         ctx.set_field_value(field_id, "");
-        assert!(!evaluate_condition(&EnableWhen::FieldNotEmpty(field_id), &ctx));
+        assert!(!evaluate_condition(
+            &EnableWhen::FieldNotEmpty(field_id),
+            &ctx
+        ));
 
         // Non-empty -> condition true.
         ctx.set_field_value(field_id, "hello");
-        assert!(evaluate_condition(&EnableWhen::FieldNotEmpty(field_id), &ctx));
+        assert!(evaluate_condition(
+            &EnableWhen::FieldNotEmpty(field_id),
+            &ctx
+        ));
     }
 
     #[test]
@@ -1183,11 +1199,17 @@ mod tests {
 
         // Unchecked -> false.
         ctx.set_checkbox_state(cb_id, false);
-        assert!(!evaluate_condition(&EnableWhen::CheckboxChecked(cb_id), &ctx));
+        assert!(!evaluate_condition(
+            &EnableWhen::CheckboxChecked(cb_id),
+            &ctx
+        ));
 
         // Checked -> true.
         ctx.set_checkbox_state(cb_id, true);
-        assert!(evaluate_condition(&EnableWhen::CheckboxChecked(cb_id), &ctx));
+        assert!(evaluate_condition(
+            &EnableWhen::CheckboxChecked(cb_id),
+            &ctx
+        ));
     }
 
     #[test]
@@ -1494,10 +1516,11 @@ mod tests {
     fn form_validator_single_field() {
         let mut validator = FormValidator::new();
         let field = WidgetId(1);
-        validator.add_field(field, "Username", vec![
-            ValidationRule::Required,
-            ValidationRule::MinLength(3),
-        ]);
+        validator.add_field(
+            field,
+            "Username",
+            vec![ValidationRule::Required, ValidationRule::MinLength(3)],
+        );
 
         let state = validator.validate_field(field, "ab");
         assert!(!state.valid);

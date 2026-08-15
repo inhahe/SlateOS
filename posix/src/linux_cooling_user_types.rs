@@ -111,12 +111,20 @@ mod tests {
         assert_ne!(COOLING_TYPE_PROCESSOR, COOLING_TYPE_FAN);
         assert_ne!(COOLING_TYPE_FAN, COOLING_TYPE_THERMAL_ZONE);
         // "Processor" and "Fan" are capitalized (ACPI convention).
-        assert!(COOLING_TYPE_PROCESSOR
-            .chars()
-            .next()
-            .unwrap()
-            .is_ascii_uppercase());
-        assert!(COOLING_TYPE_FAN.chars().next().unwrap().is_ascii_uppercase());
+        assert!(
+            COOLING_TYPE_PROCESSOR
+                .chars()
+                .next()
+                .unwrap()
+                .is_ascii_uppercase()
+        );
+        assert!(
+            COOLING_TYPE_FAN
+                .chars()
+                .next()
+                .unwrap()
+                .is_ascii_uppercase()
+        );
     }
 
     #[test]

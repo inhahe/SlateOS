@@ -19,8 +19,7 @@ pub const FAN_CLASS_CONTENT: u32 = 0x0000_0004;
 pub const FAN_CLASS_PRE_CONTENT: u32 = 0x0000_0008;
 
 /// Mask covering all notification-class bits.
-pub const FAN_ALL_CLASS_BITS: u32 =
-    FAN_CLASS_NOTIF | FAN_CLASS_CONTENT | FAN_CLASS_PRE_CONTENT;
+pub const FAN_ALL_CLASS_BITS: u32 = FAN_CLASS_NOTIF | FAN_CLASS_CONTENT | FAN_CLASS_PRE_CONTENT;
 
 // ---------------------------------------------------------------------------
 // fanotify_init flags (first arg, OR'd with one class)
@@ -118,10 +117,7 @@ mod tests {
         // The DFID+NAME shortcut must equal exactly the OR of its
         // components, otherwise userspace using the shortcut would
         // miss a feature bit.
-        assert_eq!(
-            FAN_REPORT_DFID_NAME,
-            FAN_REPORT_DIR_FID | FAN_REPORT_NAME
-        );
+        assert_eq!(FAN_REPORT_DFID_NAME, FAN_REPORT_DIR_FID | FAN_REPORT_NAME);
     }
 
     #[test]

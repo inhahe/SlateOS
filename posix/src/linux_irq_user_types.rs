@@ -111,7 +111,10 @@ mod tests {
         // LEVEL bits don't collide with EDGE bits.
         assert_eq!(IRQ_TYPE_EDGE_BOTH & IRQ_TYPE_LEVEL_MASK, 0);
         // MASK covers HIGH and LOW.
-        assert_eq!(IRQ_TYPE_LEVEL_MASK, IRQ_TYPE_LEVEL_HIGH | IRQ_TYPE_LEVEL_LOW);
+        assert_eq!(
+            IRQ_TYPE_LEVEL_MASK,
+            IRQ_TYPE_LEVEL_HIGH | IRQ_TYPE_LEVEL_LOW
+        );
     }
 
     #[test]

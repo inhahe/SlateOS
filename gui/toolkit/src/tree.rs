@@ -157,9 +157,10 @@ impl TreeView {
         self.root_nodes = nodes;
         // Clear focus/selection if nodes changed and old focus no longer exists
         if let Some(fid) = self.focused_id
-            && Self::find_node(&self.root_nodes, fid).is_none() {
-                self.focused_id = None;
-            }
+            && Self::find_node(&self.root_nodes, fid).is_none()
+        {
+            self.focused_id = None;
+        }
     }
 
     /// Get a reference to a node by its ID, searching the entire tree.
@@ -233,9 +234,9 @@ impl TreeView {
         }
 
         let visible = self.visible_nodes_ids();
-        let current_idx = self.focused_id.and_then(|fid| {
-            visible.iter().position(|&vid| vid == fid)
-        });
+        let current_idx = self
+            .focused_id
+            .and_then(|fid| visible.iter().position(|&vid| vid == fid));
 
         match key.key {
             Key::Up if key.modifiers == Modifiers::NONE => {
@@ -288,11 +289,11 @@ impl TreeView {
             }
             Key::Enter | Key::Space if key.modifiers == Modifiers::NONE => {
                 if let Some(fid) = self.focused_id {
-                    let has_children = Self::find_node(&self.root_nodes, fid)
-                        .is_some_and(|n| n.has_children());
+                    let has_children =
+                        Self::find_node(&self.root_nodes, fid).is_some_and(|n| n.has_children());
                     if has_children {
-                        let was_expanded = Self::find_node(&self.root_nodes, fid)
-                            .is_some_and(|n| n.expanded);
+                        let was_expanded =
+                            Self::find_node(&self.root_nodes, fid).is_some_and(|n| n.expanded);
                         self.toggle(fid);
                         return if was_expanded {
                             Some(TreeEvent::Collapsed(fid))
@@ -341,12 +342,12 @@ impl TreeView {
         let indicator_x = node_depth as f32 * self.config.indent_width;
         let indicator_end = indicator_x + 16.0;
 
-        let has_children = Self::find_node(&self.root_nodes, node_id)
-            .is_some_and(|n| n.has_children());
+        let has_children =
+            Self::find_node(&self.root_nodes, node_id).is_some_and(|n| n.has_children());
 
         if has_children && x >= indicator_x && x < indicator_end {
-            let was_expanded = Self::find_node(&self.root_nodes, node_id)
-                .is_some_and(|n| n.expanded);
+            let was_expanded =
+                Self::find_node(&self.root_nodes, node_id).is_some_and(|n| n.expanded);
             self.toggle(node_id);
             self.focused_id = Some(node_id);
             return if was_expanded {
@@ -357,8 +358,7 @@ impl TreeView {
         }
 
         // Regular selection click
-        let prev_selected = Self::find_node(&self.root_nodes, node_id)
-            .is_some_and(|n| n.selected);
+        let prev_selected = Self::find_node(&self.root_nodes, node_id).is_some_and(|n| n.selected);
 
         self.select(node_id);
 
@@ -397,7 +397,12 @@ impl TreeView {
         });
 
         // Clip to viewport
-        commands.push(RenderCommand::PushClip { x, y, width, height });
+        commands.push(RenderCommand::PushClip {
+            x,
+            y,
+            width,
+            height,
+        });
 
         let visible = self.visible_nodes();
         let row_h = self.config.row_height;
@@ -406,7 +411,9 @@ impl TreeView {
         let end_row = (start_row + visible_rows).min(visible.len());
 
         for idx in start_row..end_row {
-            let Some(node) = visible.get(idx) else { continue };
+            let Some(node) = visible.get(idx) else {
+                continue;
+            };
             let row_y = y + (idx as f32 * row_h) - self.scroll_offset;
             let indent = node.depth as f32 * self.config.indent_width;
 
@@ -462,7 +469,11 @@ impl TreeView {
             // Expand/collapse indicator
             let indicator_x = x + indent;
             if node.has_children() {
-                let indicator_text = if node.expanded { "\u{25BC}" } else { "\u{25B6}" };
+                let indicator_text = if node.expanded {
+                    "\u{25BC}"
+                } else {
+                    "\u{25B6}"
+                };
                 commands.push(RenderCommand::Text {
                     x: indicator_x,
                     y: row_y + (row_h - 12.0) / 2.0,
@@ -608,7 +619,6 @@ impl TreeView {
             Self::deselect_all_recursive(&mut node.children);
         }
     }
-
 }
 
 #[cfg(test)]
@@ -617,12 +627,14 @@ mod tests {
 
     fn sample_tree() -> Vec<TreeNode> {
         vec![
-            TreeNode::branch(1, "Root A", vec![
-                TreeNode::leaf(2, "Child A1"),
-                TreeNode::branch(3, "Child A2", vec![
-                    TreeNode::leaf(4, "Grandchild A2a"),
-                ]),
-            ]),
+            TreeNode::branch(
+                1,
+                "Root A",
+                vec![
+                    TreeNode::leaf(2, "Child A1"),
+                    TreeNode::branch(3, "Child A2", vec![TreeNode::leaf(4, "Grandchild A2a")]),
+                ],
+            ),
             TreeNode::leaf(5, "Root B"),
         ]
     }
@@ -699,7 +711,10 @@ mod tests {
 
     #[test]
     fn test_multi_select_preserves_selection() {
-        let config = TreeConfig { multi_select: true, ..TreeConfig::default() };
+        let config = TreeConfig {
+            multi_select: true,
+            ..TreeConfig::default()
+        };
         let mut tree = TreeView::new(config);
         tree.set_nodes(sample_tree());
         tree.expand_all();

@@ -11,385 +11,128 @@ This file is distinct from:
   `Decided by: Operator` entry and delete it from this file.
 - **`known-issues.md`** — bugs and accumulated technical debt.
 - **`todo.txt`** — the working scratchpad / judgment-call log.
+- **`deferred-questions.md`** — questions that will need the operator *eventually*
+  but cannot be answered usefully yet, each with a trigger for promoting it back
+  here. Anything whose own text says "ask again later" belongs there, not here:
+  this file is a queue, and a padded queue gets skimmed.
 
-Format for each entry:
+Format for each entry — **written for a reader who does not know the
+subsystem**, because an entry the operator cannot decide from has failed no
+matter how correct it is:
 
-- **Question** — the decision to be made.
-- **Options** — each with its pros and cons.
+- **`In short:`** — 2–4 sentences, **no jargon**, opening every entry: what is
+  wrong now, what a user would actually see, and what the choice is between. If
+  a term of art seems unavoidable here, the paragraph is wrong — rewrite it.
+- **Question** — the decision to be made, with every term of art glossed in-line
+  on first use in ≤ 10 words, even if it is glossed in another entry. Assume
+  nothing carries over: the operator reads one entry at a time, months apart.
+- **Options** — each with pros, cons, and a one-line **`What changes:`** stated
+  as an observable difference ("the clock reads Eastern instead of UTC"), not an
+  implementation, so the options can be compared without reading the prose.
+- **If never answered** — one line: is today's behaviour safe, is anything
+  blocked, does it get worse with time.
 - **Claude's recommendation** — if there is a defensible default (and what
   Claude is doing in the meantime).
 - **Where it bites** — files/symbols affected, so the resolution can be applied.
 - **Status** — `OPEN` until the operator decides.
 
+Keep entries to what a *decision* needs. Detail that only matters after the
+answer belongs in `known-issues.md` or the `requests/` file. Prefer a short
+table to a paragraph and a concrete example to an abstraction. (The rule is in
+`CLAUDE.md` → "Write `open-questions.md` for a reader who does not know the
+subsystem".)
+
 Earlier deferred operator decisions (Q1–Q38) have been
 resolved — see the "Recently resolved" list below and `design-decisions.md` for
-full rationale. New decisions should be appended as `## Q40 …` just above the
-`---` separator that precedes the "Recently resolved" list.
+full rationale. New decisions are appended just above the `---` separator that
+precedes the "Recently resolved" list, numbered with your lane's prefix
+(`A-Q<n>`, `B-Q<n>`, `C-Q<n>`) — the unprefixed `Q<n>` numbers are pre-split and
+are not to be extended.
 
-## Q39 — Where should the *shipping default* point once a fastpy utility clears both bars? — Status: OPEN
+## Q40 — Should osh reproduce bash's *null array element*, which looks like an upstream defect? — Status: **RESOLVED 2026-08-15 → design-decisions.md §309**
 
-**Question.** §108 settled that fastpy utilities stay additive for now and that
-the trajectory is for them to become real implementations, per command, once
-each has (a) a parity test suite and (b) measured performance that is faster,
-equal, or not significantly slower than the canonical implementation — with the
-user able to opt in. What it deliberately left open is which way the **default**
-points in a stock install: does SlateOS prefer the fastpy implementation
-wherever one has cleared both bars, or prefer the canonical one and make fastpy
-the thing you switch on?
+**Answer: B — do not reproduce it; waive it in the corpus.** osh keeps `Str`
+array elements and the array reads normally. The write-up stays in
+`known-issues.md` →
+`TD-OILS-A-DECLARATION-WITH-NOTHING-TO-DO-BINDS-A-NULL-THROUGH-THE-REFERENCE`
+so the call is reversible if a real script is ever found that depends on it.
 
-This is not the same as "may fastpy ever replace a Rust coreutil" — that is
-answered (yes, per command, gated). This is about what a user who never touches
-the setting gets.
+Decided by the operator; Claude recommended this option.
 
-**Options.**
+**The part that outlives the bug:** byte-fidelity with bash now has an
+**"unless it is a defect" clause**. A measured behaviour may be waived when it
+is unreachable except through a construct built to reach it, inconsistent with
+bash's own observable model, and expensive to reproduce in a way that degrades
+osh's value model — and every future waiver must be argued against those three
+tests in `known-issues.md` rather than taken silently. See §309; this does not
+loosen §305's frozen fidelity scope.
 
-- **A — canonical by default, fastpy opt-in.** *Pro:* a stock install is always
-  the most-exercised code path, so bug reports and performance numbers describe
-  what almost everyone runs; switching is a deliberate act with a deliberate
-  owner. *Con:* the fastpy implementations stay lightly exercised in the field
-  precisely because they are off, which is the same "perpetual demo" trap §108
-  was trying to leave — just one bar higher.
-- **B — fastpy by default wherever it has cleared both bars, canonical opt-out.**
-  *Pro:* the bars are the whole point; if a fastpy utility is genuinely at parity
-  and not slower, defaulting to it is what makes the two bars mean something, and
-  it gets real-world exercise. *Con:* the bars are measured, not proven — a
-  parity suite is not the same as years of field use, and the failure mode is
-  user-visible behaviour changing under people who never asked for it.
-- **C — per-command, decided at promotion time.** Each utility's swap carries its
-  own default, argued on its own evidence. *Pro:* no blanket rule to be wrong
-  about; a `cat` and a package manager are not the same risk. *Con:* no coherent
-  story for a user to hold ("which of my tools are which?"), and it defers the
-  question forever by construction.
+## Q41 — Should bash be cross-compiled instead of osh reimplemented? — Status: **RESOLVED 2026-08-14 → design-decisions.md §305**
 
-**Claude's recommendation.** None yet, on purpose. Answering this before a
-single fastpy utility has cleared both bars would be answering it without
-evidence — the honest input is *how close to parity the first one actually gets
-and what it measures*, and that does not exist yet. Ask again then.
+**Answer: the hybrid, with osh's fidelity scope frozen.** osh remains the shell;
+the cross-compiled GNU bash 5.2 (which boots and runs on SlateOS) ships beside
+it as the escape hatch and future on-device differential oracle; and
+byte-for-byte bash parity stops being an open-ended goal — **§305 carries the
+binding stopping criterion, and every `TD-OILS-*` entry and new corpus case is
+now gated by it.**
 
-**Not blocking.** §108 part 1 (additive-only promotion into the test rootfs) is
-the current behaviour and needs no answer here. This question only becomes live
-at the first real swap.
+Decided by the operator, who also raised the question. Claude recommended this
+option.
 
-**Where it bites.** `scripts/create-ext4-rootfs.sh` (the `PROMOTED` map, and
-whatever assembles the production rootfs `/bin`), `kernel/src/proc/spawn.rs`
-(`resolve_command` / `COMMAND_PATH`), and wherever the opt-in switch ends up
-living — most likely the settings surface rather than a build flag, since §108
-makes it a user choice.
+**Do not re-open this as a feasibility question.** Feasibility was settled by
+measurement on 2026-08-12 (`scripts/bash-spike/`): bash cross-compiles with
+`zig cc`, links against our own `toolchain/sysroot/lib/libc.a` with zero
+undefined symbols and no shims, and runs — `kernel/src/proc/spawn.rs::self_test_bash_on_slateos_libc`
+proves it on every boot. The full spike results, the day-by-day history of how
+§72's expiry condition fired on 2026-07-22 and went unchecked for 25 days, and
+the general rule that failure established, are all in **§305**.
 
-## Q40 — Should osh reproduce bash's *null array element*, which looks like an upstream defect? — Status: OPEN
+## Q42 — Two crates are not rustfmt-clean, which makes `cargo fmt` a trap. Do a one-shot repo-wide reformat, or keep formatting only touched files? — Status: **RESOLVED 2026-08-15 → design-decisions.md §310**
 
-**Question.** osh (`userspace/oils`) is held to byte-fidelity with bash 5.2.37.
-One measured bash behaviour is reachable only through a nameref and appears to
-be a bug rather than a design: a valueless `declare` on a nameref that points at
-an array *element* stores a **null pointer** in that element, and every later
-reader of the array trips over it.
+**Answer: A — one-shot repo-wide reformat, with a `.git-blame-ignore-revs` file
+committed alongside.** Decided by the operator; Claude recommended this option.
 
-```text
-$ n=(a b c); declare -n q='n[1]'; declare q
-$ declare -p n                      # bash: declare -a n
-$ echo "${#n[@]} [${!n[@]}] [${n[@]}]"   # bash: 0 [] []
-$ echo "${n[1]-UNSET}"              # bash: UNSET
-$ n[5]=z; declare -p n              # bash: declare -a n=([0]="a" [1]= [2]="c" [5]="z")
-```
+Three constraints on how it lands, from §310:
 
-The array reads as empty while its elements are demonstrably still there; one
-store past the end makes the readers able to walk it again. The path is
-`bind_variable("q", NULL, ASS_FORCE)` → `bind_variable_internal` →
-`assign_array_element("n[1]", NULL, …)` → `make_array_variable_value` returns
-`NULL` → `array_insert(…, NULL)`. The same happens to an associative base, to a
-scalar base, and — because the bind carries `ASS_FORCE` — to a **readonly** one,
-with no `readonly variable` reported.
+- `cargo fmt --all` **does not run here** (`os error 206`, the Windows
+  command-line length limit, hit by the number of workspace members). Iterate
+  crates one at a time.
+- It is **two commits in two lanes**: `posix/` is Lane B's, `kernel/` is Lane
+  A's (16 911 hunks). A single cross-lane reformat commit is exactly the
+  clobbering the lane split exists to prevent. Both hashes go into
+  `.git-blame-ignore-revs`. Lane A's half is requested in
+  `requests/b-a-rustfmt-repo-wide-reformat.md`.
+- Each reformat commit must contain **nothing but** formatting, so
+  `--ignore-rev` is safe to apply wholesale.
 
-**Options.**
+## Q43 — The compiler-KASAN kernel is ~20× slower to boot, so the B-KNULLJUMP soak it was built for would take over a week. How should the hunt be made viable? — Status: **ANSWERED 2026-08-15 — Lane A to record in `design-decisions.md`**
 
-- **A — reproduce it.** osh's array element type becomes `Option<Str>`, and every
-  reader (`declare -p` listing, `${!a[@]}`, `${#a[@]}`, `${a[@]}`, `${a[i]-D}`,
-  iteration, `unset`, …) learns to stop at the first null. *Pro:* byte-fidelity
-  is the project's stated bar, and this is the only place the bar is knowingly
-  not met for a *measured* behaviour; whatever a real script does that lands here
-  keeps working the same way. *Con:* a large, invasive change to the core value
-  model — every array reader in `interp.rs` — bought entirely to preserve a state
-  no bash-level operation can otherwise produce or explain. It would make the
-  value model permanently harder to reason about for the sake of a defect, and if
-  bash ever fixes it the change becomes dead weight that must be unwound.
-- **B — do not reproduce it; waive it in the corpus.** osh keeps `Str` elements
-  and the array reads normally (`declare -a n=([0]="a" [1]="b" [2]="c")`). *Pro:*
-  no cost, and the divergence is confined to a construct that is hard to reach on
-  purpose. *Con:* a knowing, documented deviation from measured bash — the first
-  of its kind in oils, which so far has treated "the measurement wins" as
-  absolute. Once one exists, "is this one worth reproducing?" becomes a judgement
-  call on every future oddity rather than a settled rule.
-- **C — reproduce only the *visible* half.** Make the element read as unset
-  without a nullable element type (e.g. an out-of-band "poisoned index" marker
-  the readers stop at). *Pro:* much smaller than A. *Con:* it is a second,
-  parallel representation of emptiness that exists for one construct, and it has
-  to be threaded through the same readers anyway — most of A's cost for a less
-  honest model.
-
-**Claude's recommendation.** **B** — do not reproduce it, waive it in the corpus,
-and keep the full write-up in `known-issues.md` so the decision is reversible if
-a real script is ever found that depends on it. The behaviour is not documented,
-not otherwise reachable, and leaves the array in a state bash itself cannot
-describe; paying a core-value-model refactor for it inverts the usual
-cost/benefit. But this is the operator's call precisely because it sets the
-precedent for *whether byte-fidelity has an "unless it's a bug" clause at all* —
-and that is a policy, not a bug fix.
-
-**Meanwhile.** osh does the sane thing (the array keeps its elements). Nothing is
-blocked; the corpus case
-`a-declaration-with-nothing-to-do-evaluates-the-subscript-the-reference-carries.sh`
-covers the *evaluated-subscript* half, which osh does match, and stops short of
-the store.
-
-**Where it bites.** `userspace/oils/src/interp.rs` —
-`Shell::declare_ref_bind_read` (the read with no store), `Shell::arrays` /
-`Shell::assoc` (element type `Str`), and every array reader named under option A.
-Full write-up:
-`known-issues.md` → `TD-OILS-A-DECLARATION-WITH-NOTHING-TO-DO-BINDS-A-NULL-THROUGH-THE-REFERENCE`.
-
-
-## Q41 — §72's blocker expired on day 4 and was never re-checked: should bash be cross-compiled instead of osh reimplemented? — Status: OPEN
-
-**Raised by the operator** (2026-08-12), who asked whether comparing osh against
-bash and patching every difference means we should have cross-compiled bash from
-the start. Auditing the decision showed the concern is better founded than §72
-reads.
-
-**The finding.** §72 rejected cross-compiling on one decisive fact: *"There is no
-C/C++ → `x86_64-slateos` cross-toolchain in this repo."* That was **true when
-written** (oils' first commit: 2026-07-18). It stopped being true almost
-immediately:
-
-| Date | Event |
-|---|---|
-| 2026-07-18 | oils begins; §72 rejects cross-compile as prerequisite-blocked |
-| 2026-07-21 | `x86_64-slateos` C cross-compilation target added (fastpy, initiative F) |
-| 2026-07-22 | `zig cc` wired in as the C cross-compiler; `toolchain/sysroot/lib/libc.a` |
-
-§72 wrote its own reversal condition ("if a C++/slateos toolchain is later
-built…"). The **C half fired within four days and nobody audited it.** Roughly
-1,100 of the 1,181 `userspace/oils` commits landed *after* the stated blocker
-ceased to exist. The original call was sound; the failure is that a decision with
-a written expiry was never re-examined. bash is C, not C++ — so it needs strictly
-less than the `oils-for-unix` cross-compile §72 was actually arguing against.
-
-**What is genuinely still missing** (so this is not a slam dunk): `posix/src/signal.rs:572`
-— *"We have no kernel suspend mechanism; report ENOSYS."* Bash's job control
-(`SIGTSTP`/`SIGCONT`, Ctrl-Z, `fg`/`bg`) is built directly on it. Also unmeasured:
-autotools cross-configure, readline, and how much of `libstubs.a` bash would hit.
-Note this gap constrains **osh identically** — it is a kernel limitation, not an
-argument for the reimplementation.
-
-> **Correction (2026-08-12, later the same day): the job-control gap is closed.**
-> The paragraph above — and the "one real blocker" bullet in the spike results
-> below — was itself stale in exactly the way this question is *about*. The
-> kernel had `TaskState::Suspended`, `JobControlEvent`, `stop_process_for_signal`
-> and `continue_process` all along; what was missing was a way for a process to
-> ask for its *own* stop. That is now `SYS_SIGNAL_STOP_SELF` (1062), and
-> `posix`'s `Stop` default action goes through it. The parent half followed the
-> same day — `waitpid`'s `WUNTRACED`/`WCONTINUED` are honoured through
-> `SYS_PROCESS_WAIT_STATUS` (1063) — and the loop is now proven end to end in
-> ring 3 by `services/ctest-jobctl`: a child stops itself with SIGTSTP, its
-> parent's *blocking* `waitpid` reports `WIFSTOPPED`/`WSTOPSIG == SIGTSTP`, and
-> `kill(child, SIGCONT)` resumes it into a `WIFCONTINUED` report. Process groups
-> (533–536) and a real `killpg` also exist. So job control is no longer an
-> argument for either side, and neither is anything else on the feasibility
-> axis: **Q41 is now purely the scope/ownership call in its closing line.**
+> **Operator's answer (2026-08-15, given to Lane B): "e, then a if necessary."**
 >
-> The **controlling terminal** followed the same day and is now real kernel
-> state: `tcsetpgrp`/`tcgetpgrp` and `ioctl(TIOCSCTTY/TIOCNOTTY)` go through
-> native syscalls 537–540 to a per-session table (`pcb::CTTY_FG_PGRP`), the
-> Linux shim's `TIOCGPGRP`/`TIOCSPGRP` read and write that same state, and the
-> group `^C`/`^\`/`^Z` signal is a derived read of it (see design-decisions
-> §113). That last part matters for *this* question specifically: **a `Ctrl-Z`
-> typed at the keyboard now stops the foreground job end to end** on the
-> Linux-ABI console read path — `tty::feed` generates `SIGTSTP` from `VSUSP`,
-> `deliver_console_signal` sends it to the session's real foreground group, and
-> `SIGTSTP`'s default action stops the process. Combined with
-> `SYS_SIGNAL_STOP_SELF`, that is the whole of what bash's `fg`/`bg`/`^Z` needs
-> from the kernel. (An earlier version of this note claimed `^Z` "still reaches
-> no job"; that was wrong — the generation and delivery were always there, only
-> the *target group* was broken, which is exactly what this change fixed.)
-> ~~What genuinely remains is *enforcement*, not state: nothing raises
-> SIGTTIN/SIGTTOU on a background read/write, though the predicate
-> (`pcb::ctty_is_background`) exists — see `todo.txt`.~~ **Also closed
-> 2026-08-12** (commit `a6e286332`, design-decisions §115): `sys_tty_read`,
-> `sys_console_read_char`, `sys_console_write` (under `TOSTOP`) and the
-> `tcsetattr`/`tcsetpgrp` paths now go through `tty_job_control_decide`, which
-> follows Linux's `__tty_check_change()` including the orphaned-group `EIO`
-> substitution. So the *entire* kernel-side surface bash's job control touches —
-> process groups, self-stop, wait-status reporting, the controlling terminal,
-> and now terminal-access enforcement — exists. Nothing on the feasibility axis
-> is outstanding in either direction; this question is purely the scope call.
-> (One deliberate limitation remains, and it constrains a *native-ABI* shell
-> only, never bash: the kernel cannot see a native process's `SIG_IGN`, so a
-> native job-control shell must **block** `SIGTTOU` around `tcsetpgrp` where
-> bash ignores it. Bash runs under `AbiMode::Linux`, whose dispositions the
-> kernel does own, so it gets exact POSIX behaviour. See `known-issues.md`,
-> `TD-KERNEL-NATIVE-ABI-SIG_IGN-IS-INVISIBLE-TO-THE-KERNEL`.)
+> That is Claude's revised recommendation: run **E** — soak the ordinary,
+> uninstrumented kernel carrying the `B-NO-CLD-ON-INTERRUPT-ENTRY` fix and see
+> whether B-KNULLJUMP stops — and fall back to **A** (build the instrumented
+> kernel `--release` and soak that) only if E fails to settle it. Note what "if
+> necessary" covers: E catching a B-KNULLJUMP is a *falsification* of the DF
+> hypothesis and is exactly the case that hands A a well-motivated job. E coming
+> back clean is suggestive, not proof — it cannot distinguish "fixed" from "got
+> lucky" — so a clean E is a reason to stop, not a reason to escalate.
+>
+> **A still carries the caveat that made it operator-worthy:** no release kernel
+> has ever been booted in this project, so the cheap gate stands — build
+> `--release`, run `kasan-check-preshadow.py`, attempt **one** boot (~30 min)
+> before committing to a soak. And treat a clean release soak as weaker evidence
+> than a debug one, since optimization perturbs the instruction timing a rare
+> race depends on.
+>
+> **This is Lane A's item.** The answer was delivered in a Lane B session, so it
+> is recorded here rather than in `design-decisions.md` §200–299 — Lane A owns
+> that range. See `requests/b-a-operator-answered-q43.md`. Lane A: record it,
+> then delete this section.
 
-**Options.**
-- **A — timeboxed spike, then decide.** Point `zig cc --target=x86_64-slateos` at
-  bash against the existing sysroot; report how far it gets. *Pro:* converts the
-  question from speculation to measurement for ~1–2 h of active work; both
-  outcomes are valuable (bash runs → freeze osh's scope immediately; it walls →
-  we learn exactly which libc/kernel pieces are missing, a far better roadmap item
-  than "keep patching diffs"). *Con:* the spike is wasted if the operator would
-  keep osh regardless.
-- **B — keep osh, close this permanently.** *Pro:* osh is 138k lines, 642/642
-  byte-exact vs bash, and works *today* on an OS with no dynamic linker; a real
-  bash still could not do job control. *Con:* commits to an unbounded fidelity
-  chase — bash has 40 years of edge cases and the corpus can grow forever.
-- **C — switch to cross-compiling bash.** *Pro:* fidelity becomes free and exact.
-  *Con:* discards 1,181 commits; blocked on kernel suspend for job control; osh
-  would still be needed as the fallback shell meanwhile.
+The original analysis follows, unchanged, because it is what E and A have to be
+executed against.
 
-**Claude's recommendation.** **A**, then very likely **B** — but the spike first,
-because the honest answer is that nobody has measured it and §72's factual basis
-is now stale. The deeper question the operator is really raising is not
-strategy but **scope**: byte-for-byte bash fidelity has no stopping criterion.
-One case validated today asserts `OPTIND=4294967297` wraps to the first argument
-because bash stores it in a C `int` — true of bash, and nothing on SlateOS will
-ever depend on it. Worth pairing with Q40, which asks the same "does fidelity
-have limits?" question from the other side.
-
-**Meanwhile.** Nothing is blocked; osh work continues and is green (642/642).
-
-**Spike results (2026-08-12, operator authorised option A).** Scripts live in
-`scripts/bash-spike/` (see its README); artifacts land in the gitignored
-`build/spike/`. Measured, not estimated — and the headline is that **it works**:
-
-> **GNU bash 5.2 now boots and runs on SlateOS**, as a 5,349,720-byte static
-> ELF linked against `toolchain/sysroot/lib/libc.a` — our own POSIX layer, not
-> glibc, with **zero undefined symbols and no shims**. The kernel self-test
-> `self_test_bash_on_slateos_libc` (`kernel/src/proc/spawn.rs`) runs a script
-> using arrays, `${#a[@]}`, `${v,,}`, `$(( ** ))` and brace expansion — none of
-> which dash has, so the result cannot be a `/bin/sh` fallback — with bash
-> doing its own `{ …; } > file` redirection. Exit 0, 55 bytes byte-exact.
-> Boot is green.
-
-The detail:
-
-- **bash 5.2 builds.** A native build succeeded first (4,501,576-byte binary),
-  proving the source tree is sound. A cross-configure/cross-compile with
-  `zig cc --target=x86_64-linux-musl` (`--without-bash-malloc --disable-nls
-  --disable-readline --without-curses`) then compiled every translation unit
-  clean. Note the first cross attempt died with `CROSS_CONFIGURE_EXIT=77`
-  ("C compiler cannot create executables") purely because autotools
-  word-splits `$CC` and this repo lives under `visual studio projects` — fixed
-  with a wrapper script on a spaceless path, not a real toolchain problem.
-- **The symbol surface is nearly covered already.** SlateOS `libc.a` defines
-  2,900 symbols; bash references 2,030; **only 23 are unresolved**, and they
-  decompose as: 9 termcap (`tgetent`/`tputs`/`tgoto`/`tgetflag`/`tgetnum`/
-  `tgetstr`/`BC`/`PC`/`UP`, all dropped by `--disable-readline`), 8 glibc-ism
-  artifacts of the native build (`__isoc23_strtol`, `__longjmp_chk`,
-  `__fdelt_chk`, `__fpurge`, `__mbrlen`, `__mbsrtowcs_chk`, `__wcsrtombs_chk`,
-  `__isoc23_strtoumax` — musl doesn't need these), 1 linker symbol
-  (`_GLOBAL_OFFSET_TABLE_`), and **5 genuinely missing, all trivial**:
-  `arc4random`, `eaccess`, `getservent`, `setservent`, `endservent`.
-- **Stub quality is not the problem either.** Exactly **one** bash symbol was
-  served only by `libstubs.a`: `killpg`. There are 1,299 `ENOSYS` sites in
-  `posix/src`, but they cluster in aio/crypt/dirent/epoll — subsystems bash
-  never calls.
-- **Linking against our own `libc.a` left exactly three real gaps**, since
-  closed for real in `posix/src` (not shimmed): `killpg` (`signal.rs`),
-  `eaccess`/`euidaccess` (`file.rs`), `__fpurge` (`stdio.rs`).
-- ~~**The one real blocker is unchanged and is a kernel gap, not a libc gap:**
-  `posix/src/signal.rs:572`, no kernel suspend ⇒ no `SIGTSTP`/`SIGCONT` ⇒ no
-  Ctrl-Z / `fg` / `bg`; and no process groups, so `killpg` can only return
-  `ENOSYS`. **This constrains osh identically** — it is not an argument for
-  either side.~~ **Closed 2026-08-12** — see the correction note above.
-  Process groups landed as syscalls 533–536 with a real `killpg`, and the
-  self-stop landed as `SYS_SIGNAL_STOP_SELF` (1062). Nothing on the
-  feasibility axis is outstanding.
-
-So §72's prerequisite objection is not merely stale, it is *comprehensively*
-stale: C bash was three small libc functions from running on this OS, and now
-does. **Feasibility is settled and is no longer an input to this decision.**
-
-That does not make the answer C. What the spike changes is *which* arguments
-are live. Still-valid reasons to keep osh (option B): 138k lines already
-written and byte-exact at 642/642; it is ours to debug and extend, whereas bash
-is 40-year-old C we would be maintaining a fork of; and a real bash still
-cannot do job control here. Still-valid reasons to switch (option C): fidelity
-stops being an unbounded chase with no stopping criterion — which is the actual
-concern the operator raised — and every future corpus case is one we no longer
-have to write. **A hybrid is now also on the table and was not before:** ship
-osh as the shell and keep the cross-compiled bash as a differential oracle that
-runs *on SlateOS itself*, which would remove the Linux-reference-bash
-dependency from `scripts/osh-bash-diff.py` entirely.
-
-**Still open, and now purely a scope/ownership call:** B, C, or the hybrid.
-
-**Where it bites.** `design-decisions.md` §72 (its "How to reverse" clause and
-the now-stale prerequisite claim), `userspace/oils/` (all of it),
-`posix/src/signal.rs` (`stop_self`, the former suspend gap — now the
-`SYS_SIGNAL_STOP_SELF` call site), `toolchain/sysroot/lib/libc.a`,
-fastpy's `compiler/toolchain.py` (`SLATEOS_TARGET`, `_find_zig_cc`),
-`scripts/bash-spike/` (the spike, kept reproducible),
-`scripts/create-ext4-rootfs.sh` (stages `/bin/bash`, best-effort) and
-`kernel/src/proc/spawn.rs::self_test_bash_on_slateos_libc`.
-
-
-## Q42 — Two crates are not rustfmt-clean, which makes `cargo fmt` a trap. Do a one-shot repo-wide reformat, or keep formatting only touched files? — Status: OPEN
-
-**Raised by Claude** (2026-08-12) after it cost a revert-and-redo cycle.
-
-**The finding.** CLAUDE.md sets the convention as "`rustfmt` defaults. No manual
-formatting overrides." Two crates comply and two do not (measured with
-`cargo fmt -p <crate> -- --check`):
-
-| Crate | Hunks needing reformat |
-|---|---|
-| `kernel` | 16 911 |
-| `posix` | 389 (244 of 2 299 files, ~11%) |
-| `net` | 0 |
-| `fs` | 0 |
-
-**Why this is more than cosmetic.** `cargo fmt` is package-scoped and has no file
-filter, so in a drifted crate the ordinary act of formatting your own change
-rewrites hundreds of files you never touched. Today, `cargo fmt -p posix` after a
-~150-line edit produced a 1 403-insertion / 1 429-deletion diff across 173 files;
-the two could not be separated afterwards, so the change had to be reverted and
-re-applied by script. It also makes pre-existing oddities look like your own
-damage — I lost time proving a strange `CapGuard` layout predated me. Every fmt
-run in `kernel` or `posix` carries both costs.
-
-**Options.**
-- **A — one-shot repo-wide reformat, then it stays clean.** *Pro:* removes the
-  trap permanently and makes the stated convention true; afterwards `cargo fmt`
-  is safe and any drift is a real diff. Cheap to do (minutes of active work).
-  *Con:* rewrites `git blame` for ~17 000 hunks of kernel code. Blame is the
-  primary tool for "why is this line here?" in a codebase with no human
-  reviewer and a 4 600-commit history — this is the one cost that cannot be
-  undone. (`git blame --ignore-rev` + a `.git-blame-ignore-revs` file mitigates
-  it for anyone who configures it, but not for GitHub's plain view or a casual
-  `git log -S`.)
-- **B — keep the current working rule: format only the files you edited**, via
-  `rustfmt --edition 2024 <file>` rather than `cargo fmt -p`. *Pro:* zero
-  history churn; already adopted and it works. *Con:* the convention stays
-  aspirational; the trap stays armed for anyone who reaches for the obvious
-  command; drift never shrinks except where files happen to be edited.
-- **C — reformat `posix` only, leave `kernel` alone.** *Pro:* clears 11% drift in
-  the crate under active daily work for ~250 files of blame churn, 1.5% of A's
-  cost. *Con:* leaves the worst offender armed, and a half-applied convention is
-  the state that caused this.
-
-**Claude's recommendation.** **A**, with a `.git-blame-ignore-revs` file
-committed alongside — the blame cost is real but one-time and partially
-mitigable, whereas the trap is permanent and recurs on every edit. If the blame
-history is considered untouchable, **C** is a reasonable middle. I have adopted
-**B** in the meantime, so nothing is blocked either way.
-
-**Note:** `cargo fmt --all` does not run in this workspace — it dies with
-`The filename or extension is too long. (os error 206)` (Windows command-line
-limit, hit by the number of workspace members). Any of A/C must iterate crates.
-
-**Where it bites:** everywhere, but the recorded incident is
-`known-issues.md` → `TD-REPO-IS-NOT-RUSTFMT-CLEAN-SO-RUNNING-CARGO-FMT-IS-A-TRAP`.
-
-
-## Q43 — The compiler-KASAN kernel is ~20× slower to boot, so the B-KNULLJUMP soak it was built for would take over a week. How should the hunt be made viable? — Status: OPEN
 
 **Raised by Claude** (2026-08-12), on measuring the profile the operator
 approved in §107.
@@ -526,107 +269,215 @@ Two caveats for whoever reads the result:
   was built on, so budget ~24 h for the full 250.
 
 
-## Q44 — libc reports "all Linux capabilities held" to every process because nothing maps our `(ResourceType, Rights)` handles onto `CAP_*` bits. Which mapping do you want? — Status: OPEN
+## Q44 — libc reports "all Linux capabilities held" to every process because nothing maps our `(ResourceType, Rights)` handles onto `CAP_*` bits. Which mapping do you want? — Status: **RESOLVED 2026-08-15 → design-decisions.md §312**
 
-**Raised by Claude** (2026-08-12), from the survey behind
-`known-issues.md` → `TD-POSIX-CAPS-ARE-NOT-THE-KERNEL'S`.
+**Answer: A — conservative projection.** Decided by the operator; Claude
+recommended this option.
 
-**The situation.** `posix/src/sys_capability.rs` keeps Linux's three capability
-words in libc's own memory and initialises them from `CAPS_DEFAULT` — *every*
-bit set. Nothing ever asks the kernel what the process actually holds, so
-`capget()` reports the full set to a process that was spawned with
-`capabilities: &[]`, and every libc-side gate passes. It is safe today only by
-accident: the kernel re-checks every privileged operation itself, so libc's
-optimistic answer can never *grant* anything. The failure is silent, not loud —
-a port that trusts `capget()` to decide what to attempt, or to drop privileges,
-gets a confidently wrong answer with no error anywhere.
+Each Linux `CAP_*` bit is derived from a specific `(ResourceType, Rights)`
+predicate over the capabilities the process actually holds, and reports **not
+held** whenever no rule matches — the default is *deny*, so an unmapped `CAP_*`
+is false, never true. `CAP_SYS_RAWIO` ⇐ a `PortIo` handle with `READ|WRITE`;
+`CAP_KILL` ⇐ a `Process` handle with `SIGNAL`; `CAP_SYS_PTRACE` ⇐ `Process`
+with `DEBUG`; `CAP_SYS_NICE` ⇐ `Thread` with `IO_REALTIME`.
 
-**Why this needs you rather than me.** The plumbing is easy; the *mapping* is a
-policy decision. The two models are not the same shape and do not have an
-obviously-correct correspondence:
+`CAP_SYS_ADMIN` is the deliberate exception: an **explicit hand-maintained
+union** of what its 20 gate sites actually need, one commented member each. It
+is Linux's junk drawer and has no natural preimage in a per-object model, so a
+derived rule would be either permanently false (breaking 20 sites) or broad
+enough to re-grant everything, which is the bug being fixed.
 
-- **Kernel:** 25 `ResourceType` variants (`Channel`, `Pipe`, `SharedMemory`,
-  `EventFd`, `CompletionPort`, `Process`, `Thread`, `PortIo`, `DeviceIrq`,
-  `File`, `Socket`, `Timer`, `IoScheduler`, `Service`, `Namespace`,
-  `StreamSocket`, `MemFd`, `Epoll`, `SignalFd`, `Timerfd`, `Inotify`,
-  `AlsaPcm`, `Drm`, `NetRaw`, `NetSocket`) × 12 `Rights` bits (`READ`, `WRITE`,
-  `EXECUTE`, `CREATE`, `DELETE`, `METADATA`, `TRANSFER`, `DUPLICATE`, `WAIT`,
-  `SIGNAL`, `IO_REALTIME`, `DEBUG`) — a *per-object* model with no ambient
-  authority, which is the whole point of the design.
-- **Linux:** 41 numbered, *ambient*, process-wide bits. Our libc currently
-  gates on 22 distinct ones across **63 production sites**, all inside
-  `posix/` (0 in `userspace/`, `services/`, `apps/`): `CAP_SYS_ADMIN` (20),
-  `CAP_SYS_NICE` (6), `CAP_SYS_PTRACE` (5), `CAP_SYS_TIME`/`CAP_SYS_MODULE`/
-  `CAP_SETGID`/`CAP_KILL`/`CAP_CHOWN` (3 each), then a long tail of 1–2.
+Rejected: **B** (`ResourceType::PosixCapability`) is ambient authority wearing a
+capability costume — process-wide authority tied to no object, spelled as a
+handle — and it was rejected even though it is the option that would have made
+`CAP_SYS_ADMIN` easy. **C** (stay optimistic, document `capget()` as "the
+ceiling, not the grant") leaves the silent-wrong-answer trap open, which is why
+the entry was logged. **D** (`capget()` fails) trades one silent wrong answer
+for loud breakage in every port that calls it informationally.
 
-Deciding which kernel rights *imply* `CAP_SYS_ADMIN` is deciding what a Linux
-port is permitted to conclude about our capability model — that is a design
-statement about the POSIX layer's honesty, not an implementation detail.
+**How it lands, in order** (from §312):
 
-**A blocker the note did not know about.** The existing "proper fix" pointed at
-`SYS_CAP_QUERY` (400) as the source of truth. It cannot serve: the handler
-(`kernel/src/syscall/handlers.rs`, `sys_cap_query`) returns only a *count* of
-the caller's capabilities, and its own doc comment says "a future extension
-will support filling a user-space buffer with detailed capability entries."
-Its sole consumer today is `userspace/strace`'s syscall name table. So **every**
-option below needs an enumerating query syscall built first; that part is not
-in dispute and I can do it under any answer.
+1. **The enumerating query syscall first.** `SYS_CAP_QUERY` (400) returns only a
+   *count*; nothing can be seeded from it. That handler is **Lane A's tree** —
+   filed as `requests/b-a-cap-enumerating-query-syscall.md`.
+2. libc seeds its three words from that query rather than from `CAPS_DEFAULT`.
+3. **The libc gates stay advisory until the fixtures hold real capabilities.**
+   `services/ctest-jobctl`, `self_test_cctty` and `self_test_cpgroup` all spawn
+   with `capabilities: &[]` and pass today only because every bit is set. The
+   flip from advisory to enforcing is boot-test-visible and lands with QEMU
+   free.
 
-**Options.**
-- **A — conservative projection.** Derive each `CAP_*` from a specific
-  `(ResourceType, Rights)` predicate, and report *not held* whenever no rule
-  matches. E.g. `CAP_SYS_RAWIO` ⇐ any `PortIo` handle with `READ|WRITE`;
-  `CAP_KILL` ⇐ a `Process` handle with `SIGNAL`; `CAP_SYS_PTRACE` ⇐ `Process`
-  with `DEBUG`; `CAP_SYS_NICE` ⇐ `Thread` with `IO_REALTIME`.
-  *Pro:* `capget()` becomes truthful, the gates start meaning something, and
-  the mapping is auditable rule by rule. *Con:* `CAP_SYS_ADMIN` — 20 of the 63
-  sites — has no natural preimage; it is Linux's junk drawer and would have to
-  be either a hand-maintained union or permanently false. And every fixture
-  spawned with `capabilities: &[]` starts failing gates that pass today (see
-  blast radius).
-- **B — capability-per-CAP.** Add `ResourceType::PosixCapability` and grant
-  Linux bits explicitly at spawn, leaving the native model untouched.
-  *Pro:* exact, no lossy projection, and the two models stay cleanly separated.
-  *Con:* imports Linux's ambient-authority model into a design whose stated
-  first principle is that there is none — the thing `design.txt` deliberately
-  rejected.
-- **C — keep libc optimistic, but stop pretending.** Leave the words as they
-  are and make the dishonesty explicit: document `capget()` as "reports the
-  ceiling, not the grant", and treat libc-side gates as advisory only, with the
-  kernel as the sole authority. *Pro:* zero risk, matches how it already
-  behaves, and no fixture breaks. *Con:* the silent-wrong-answer trap for
-  future ports stays open, which is exactly why the entry was logged.
-- **D — make `capget()` fail** (`ENOSYS`/`EOPNOTSUPP`) rather than answer
-  wrongly. *Pro:* the most honest option; no caller can be silently misled.
-  *Con:* Linux software calls `capget()` informationally and often does not
-  expect failure, so this trades a silent wrong answer for loud breakage in
-  ports — probably the worst outcome for a compatibility layer.
+## Q45 — Text clipped by `max_width` is cut mid-glyph with no ellipsis. Should `RenderCommand::Text` carry an overflow policy? — Status: **ANSWERED 2026-08-15 — Lane C to record in `design-decisions.md`**
 
-**Claude's recommendation.** **A**, with `CAP_SYS_ADMIN` as an explicit
-hand-maintained union rather than a derived rule, and staged: build the
-enumerating query syscall, seed the words from it, but keep the libc gates
-advisory until the fixtures are given real capabilities. I lean against **B**
-because it contradicts the no-ambient-authority principle for the benefit of
-compatibility shims only, and against **D** because loud breakage in ports is
-worse than the current documented-safe optimism. **C** is the honest do-nothing
-and is a perfectly reasonable answer if you would rather this wait.
+### ANSWER 2026-08-15 — option **A**: `RenderCommand::Text` gets an `overflow` field
 
-**Blast radius you should know about before answering A or B.** Making any gate
-truthful breaks fixtures that currently rely on the permissive behaviour.
-`services/ctest-jobctl`'s doc comment already says so out loud — "our libc's own
-`CAP_KILL` gate reads the process capability words, which start out with every
-capability held" — which is why it needs no capabilities to make a real
-cross-process signal send. `self_test_cctty` and `self_test_cpgroup` spawn with
-`capabilities: &[]` and would need real grants too. That is a boot-test-visible
-change, so it should land with QEMU free.
+The operator answered in a Lane B session. Verbatim: **"q45: a."** That is
+Claude's own recommendation, so nothing about the plan changes — but it is a
+decision now, not a proposal.
 
-**Where it bites:** `posix/src/sys_capability.rs` (`CAPS_DEFAULT` ~line 251),
-the 63 gate sites led by `posix/src/process.rs` (13) and `posix/src/unistd.rs`
-(10), `kernel/src/cap/mod.rs` + `kernel/src/cap/rights.rs` (the model being
-projected), `kernel/src/syscall/handlers.rs` (`sys_cap_query`), and
-`known-issues.md` → `TD-POSIX-CAPS-ARE-NOT-THE-KERNEL'S`.
+**What was chosen.** Add an `overflow: TextOverflow` field (`Clip` | `Ellipsis`)
+to `RenderCommand::Text`, and let the **compositor** draw the ellipsis, because
+it is the only party that knows exactly where the glyphs ran out. One
+measurement instead of two, and the policy is visible at every call site.
 
-## Q40 — Install the GNAT/SPARK and LLVM toolchains? Two Lane A roadmap items are blocked on them, and nothing else in Lane A is — Status: OPEN
+**The cost that was accepted, so it is on the record.** Rust has no default for
+a struct-variant field, so this edits **every construction of `Text` in the
+tree** — several hundred sites across `gui/**` and `apps/**`. The question said
+so, and the answer is still A. Two consequences follow:
+
+- **Land it as its own commit with nothing else in flight.** A several-hundred-
+  site mechanical diff conflicts with anything else touching rendering, and this
+  is the same trap `§310` (the rustfmt reformat) was about — a wide mechanical
+  change entangled with real work cannot be separated afterwards.
+- **`gui/**` and `apps/**` are Lane C's tree.** Lane B is recording the answer,
+  not implementing it. Filed as
+  `requests/b-c-operator-answered-q45-and-c-q1.md`.
+
+**Recording:** `design-decisions.md` under Lane C's §400–499 range. Lane B has
+deliberately not written it there — inventing a section number from another
+lane's range is how two lanes collide after a merge. Also close
+`known-issues.md` → `TD-GUI-CLIPPED-TEXT-IS-NOT-MARKED` when it lands.
+
+**Raised by Claude** (2026-08-14), falling out of the pass that closed
+`known-issues.md` → `TD-GUI-TEXT-COMMAND-DOES-NOT-WRAP`. Logged there as
+`TD-GUI-CLIPPED-TEXT-IS-NOT-MARKED`.
+
+**The situation.** `max_width` on a `Text` command clips: the compositor walks
+glyphs and stops before the first one that would cross the limit, drawing no
+mark. A label that does not fit therefore ends mid-word and ends *plausibly* —
+"Gateway 192.168.1.1 res" looks like a complete string to a reader who cannot
+see the field it was cut from. A caller that wants the cut marked must call
+`text::elide` first, which measures the string a second time to answer a
+question the compositor is about to answer again while drawing it. Well over a
+hundred single-line labels across `gui/**` and `apps/**` pass `max_width`
+without eliding; most are safe only because their values are short and
+app-authored, and the ones that bite carry user or network data — file names,
+SSIDs, error strings, host names.
+
+**Why this needs you rather than me.** Every option is a different tax on the
+same several-hundred call sites, and the cheapest-to-write one is the one that
+does not actually stop the mistake recurring. That is a taste call about the
+API's shape, and it lands across three lanes' in-flight work.
+
+- **A — add an `overflow: TextOverflow` field to `RenderCommand::Text`**
+  (`Clip` | `Ellipsis`), and let the compositor draw the mark, since it is the
+  only party that knows exactly where the glyphs ran out. *Pro:* one
+  calculation, right by construction, and the policy is visible at every call
+  site. *Con:* Rust has no default for a struct-variant field, so this edits
+  every construction of `Text` in the tree — several hundred, mechanical but
+  wide, and it conflicts with anything else in flight that touches rendering.
+- **B — a second variant** (`TextClipped` / `TextElided`). *Pro:* no churn at
+  existing call sites. *Con:* splits the match arms in every renderer and every
+  test that walks a command list, forever, to encode one boolean.
+- **C — a constructor/builder** (`RenderCommand::text(..).elided()`), leaving
+  the struct literal as it is. *Pro:* no churn; opt in where it matters.
+  *Con:* the literal form stays available and stays wrong, so it prevents
+  nothing — it is documentation with a return type.
+- **D — sweep `text::elide` across the data-bearing call sites** and leave the
+  command alone. *Pro:* smallest diff, fixes the sites that actually bite.
+  *Con:* keeps the double measurement, and the next label someone adds has the
+  bug again.
+
+**Claude's recommendation.** **A**, done as its own commit with nothing else in
+flight, because it is the only option that makes the mistake unrepresentable —
+and the churn is mechanical, which is the cheap kind. **D** is the sensible
+answer if you would rather not spend a wide diff on this now; in that case it
+should be scoped to labels carrying user or network data rather than swept
+blindly.
+
+**Where it bites:** `gui/toolkit/src/render.rs` (`RenderCommand::Text`),
+`gui/compositor/src/main.rs` (`draw_text`, the `break` at the limit),
+`gui/toolkit/src/text.rs` (`elide` / `elide_start`), and every `max_width:
+Some(..)` in `gui/**` and `apps/**`.
+
+## A-Q1 — Install the GNAT/SPARK and LLVM toolchains? — Status: **FULLY ANSWERED 2026-08-15 — Lane A to record in `design-decisions.md`**
+
+**In short:** this entry asked about **two unrelated compiler installs** in one
+question. Both are now answered, separately.
+
+| | What it is | Answer |
+|---|---|---|
+| **A** | **Ada/SPARK** — a second programming language whose toolchain can mathematically *prove* driver code has no buffer overflows and no bad state transitions. `design.txt` wants it for safety-critical drivers. | ✅ **Install it, with the prover (`gnatprove`).** |
+| **B** | **clang + lld** — an alternative C compiler and linker. Installing them is what would let us switch on **CFI** (Control-Flow Integrity: a compiler feature that stops an attacker redirecting a function call to code of their choosing). | ⏸ **"not yet."** Deferred, not refused → `deferred-questions.md` **D-Q2**. |
+
+**On B — "not yet" (operator, 2026-08-15).** The install itself is small and
+uncontroversial; what is missing is a reason. We use C only for *ported* code,
+and the one piece of C we compile today (`scripts/create-ext4-rootfs.sh`) is
+built with gcc — so turning CFI on now would change Lane B's build for a benefit
+that only materialises when the big C ports land, and would pull in LTO
+(whole-program optimization at link time), which slows every build it touches.
+Nothing is blocked by waiting. It moves to `deferred-questions.md` as **D-Q2**
+with an explicit trigger — the first substantial C port entering the build — so
+it comes back when the payoff is real rather than being quietly dropped.
+
+*(Two smaller follow-ups inside A are still unsettled — which GNAT distribution
+to install, and which cut-down Ada runtime to use — but those are Lane A's calls
+to make, not the operator's. They are spelled out at the end of the answer
+below.)*
+
+### ANSWER 2026-08-15 — option **A**, including `gnatprove`. Option **B**: "not yet" (deferred as D-Q2).
+
+The operator answered in a Lane B session. Verbatim:
+
+> q44: a, including gratprove.
+
+The `q44` label is a typo for this question — it arrived in the same message as
+the real Q44 answer, immediately after it, and Q44 has no option "including
+gnatprove". Read as **A-Q1: A**.
+
+**What was decided: install GNAT/SPARK *with the prover*.** The "including
+gnatprove" is the load-bearing half, and it closes the correction in the
+`UPDATE 2026-08-15` block below — the prover is part of the definition of done,
+not an optional extra, because Ada-without-SPARK is just another systems
+language and we already have a memory-safe one.
+
+**Consequences that follow directly from "including gnatprove":**
+
+- **The install route cannot be MSYS2.** `mingw-w64-x86_64-gcc-ada` ships
+  `gnat` and `gprbuild` and no `gnatprove`, and MSYS2 has no such package.
+  Taking the easy route would buy the entire cost of the feature and none of its
+  justification. The route must be **Alire** (`alr toolchain --select`, then the
+  `gnatprove` crate) or **AdaCore's own download**.
+- **The prover stack is a further install:** Why3 + Alt-Ergo, optionally Z3 and
+  CVC5. `gnatprove` without a solver proves nothing.
+- **GPL is not a problem here.** The toolchain is a tool we *run*, not something
+  we link; it does not reach our output.
+
+**Two sub-decisions this answer does not settle.** Both are Lane A's to make or
+to escalate:
+
+- **Which GNAT distribution.** The FSF-via-Alire route now looks clearly
+  preferable to GNAT Pro precisely because it carries `gnatprove`, but nobody
+  has said so as a decision.
+- **The restricted runtime: ZFP vs light.** A freestanding kernel cannot use the
+  full Ada runtime, which wants an OS underneath it. This is configuration work
+  with real content, not part of the install.
+
+**Option B (clang + lld, for LLVM CFI) — the operator's answer was "not yet."**
+It arrived separately, after the A answer, because this question says out loud
+that A and B "are separable, so please answer them independently" and only A had
+come back. **"Not yet" is a deferral, not a refusal**, and the reasoning is the
+one already written into B's cons: cheap and uncontroversial to install, but the
+payoff is currently near zero — C is used only for ports, the one piece of C we
+compile today (`scripts/create-ext4-rootfs.sh`) is built with gcc and is Lane
+B's tree, and CFI wants LTO, which changes build times and link behaviour
+everywhere it reaches.
+
+**Do not silently drop it.** It is carried in `deferred-questions.md` as
+**D-Q2**, whose trigger is *the first substantial C port entering the build*
+(ext4, Mesa, or anything else that makes `clang`'s CFI govern a meaningful
+amount of compilation). Whoever starts such a port promotes D-Q2 back into this
+file. Note the ordering that follows: **install clang/lld and decide CFI at the
+start of that port, not after it**, because retrofitting CFI onto a landed port
+means re-linking and re-testing it rather than building it that way once.
+
+**Recording:** the decision belongs in `design-decisions.md` under Lane A's
+§200–299 range. Lane B has deliberately **not** written it there — inventing a
+§2xx number from another lane is how two lanes end up with the same section
+number after a merge. See `requests/b-a-operator-answered-a-q1.md`.
+
+
+*(Renumbered from `Q40` on 2026-08-15 by Lane B. It collided with the pre-split `Q40` above, and the operator's one-word answer "q40: b" was genuinely ambiguous between the two. Lane-prefixed per `roadmap.md`'s convention, as `B-Q1`/`C-Q1` already are.)*
 
 **Question.** The Lane A roadmap backlog has five items. Three are either
 "Later" (NTFS/Btrfs/ZFS/F2FS), lane-C-driven (TCP/IP stack), or a very large
@@ -713,6 +564,168 @@ and `scripts/create-ext4-rootfs.sh` (Lane B — would need a `requests/` entry).
 Roadmap lines ~297-298 (`roadmap.md` Lane A backlog) and `design.txt` lines
 84-95.
 
+---
+
+### UPDATE 2026-08-15 — the operator asked why we would not install `gnatprove`; the con was overstated
+
+**The operator's question:** *"why wouldn't we install gnatprove?"* Fair — the
+bullet as written implies a reason to skip it, and there isn't one. Corrected:
+
+**`gnatprove` is freely available, including on this machine's platform.** SPARK
+is open source, AdaCore publishes binaries for Windows x86-64 / Linux x86-64 /
+macOS x86-64, there is an Alire crate (`alr with gnatprove`), and the
+alire-project `GNAT-FSF-builds` repository ships FSF builds. No licence blocks
+it and no money is involved.
+
+**So the real content of that bullet is a route warning, not a veto.** The
+obvious way to get Ada on this box — MSYS2's `mingw-w64-x86_64-gcc-ada` — gives
+`gnat` and `gprbuild` and **no** `gnatprove`; MSYS2 has no such package. Stop
+there and we would have paid the whole cost of the feature (a second language
+and toolchain in the build, an FFI bridge, a restricted ZFP/light runtime for a
+freestanding kernel) and collected none of the benefit, because
+**Ada-without-SPARK is just another systems language and we already have a
+memory-safe one.** `design.txt` lines 84-95 justify this on the *proof*
+specifically — no prover, no justification.
+
+**Therefore, if A is chosen, the prover is part of the definition of done**, and
+the install route must be one that can actually deliver it: Alire
+(`alr toolchain --select`, then the `gnatprove` crate) or AdaCore's own
+download, not MSYS2 alone. Two things worth knowing before committing:
+`gnatprove` needs its prover stack (Why3 + Alt-Ergo, optionally Z3/CVC5)
+installed too, and the toolchain is GPL — it is a tool we *run*, not something
+we link, so it does not reach our output.
+
+**What is still open, and still yours.** Nothing above chooses for you. The
+remaining calls are (i) go/no-go on **B** (clang + lld — cheap, uncontroversial,
+I can do it on a one-word yes), (ii) go/no-go on **A**, and (iii) if A, which
+GNAT distribution — the FSF-via-Alire route now looks clearly preferable to
+GNAT Pro given that it carries `gnatprove`, but the restricted-runtime
+(ZFP vs light) configuration is still real work and still a decision. Claude's
+recommendation is unchanged: **B now, A when you want the driver-safety story
+started, sequenced after the IOMMU work it pairs with in `design.txt`.**
+
+*Sources for the availability claim: AdaCore SPARK User's Guide §3
+"Installation of GNATprove"; alire.ada.dev crate `gnatprove`; alire-project
+`GNAT-FSF-builds`.*
+
+## B-Q1 — The zoneinfo reader is done and nothing on disk to read: which tzdata do we ship, from where, and how is it updated? — Status: **RESOLVED 2026-08-15 → design-decisions.md §311**
+
+**Answer: A1 + B1 + C1.** Decided by the operator; Claude recommended this
+combination.
+
+- **A1 — full tzdata**, backward links included (`US/Eastern`,
+  `Asia/Calcutta`). ~450 KiB, ~1 800 files in the base image.
+- **B1 — vendor the prebuilt TZif binaries** from IANA, checked in and
+  version-pinned. No `zic` port, no home-grown TZif generator: the failure mode
+  of getting that subtly wrong is a wrong clock nobody notices for months.
+- **C1 — ship it as a `pkg/` package** and update it there. C3's dedicated fast
+  channel is the escalation if C1 proves too slow, not the starting point.
+
+**Residual risk accepted:** a user who never runs `pkg update` drifts into a
+stale tzdata, silently.
+
+**Execution note:** the reader, the libc paths and osh are Lane B; **`pkg/` is
+Lane C's tree**, so the packaging half goes via `requests/b-c-tzdata-package.md`.
+The two tests asserting the current UTC fallback
+(`test_zoneinfo_names_resolve_to_utc_until_tzdata_is_shipped`,
+`printf_time_falls_back_to_utc_for_a_zone_it_cannot_resolve`) **must start
+failing the day the data lands** — that is the signal it worked, not a
+regression.
+
+## C-Q1 — Should normalization consult font coverage? The last 339 sweep disagreements are all this one question — Status: **ANSWERED 2026-08-15 — Lane C to record in `design-decisions.md`**
+
+### ANSWER 2026-08-15 — option **C**: keep `nfc` pure, let `fit_to_face` decompose what it cannot draw
+
+The operator answered in a Lane B session. Verbatim: **"c-q1: c."** That is
+Lane C's own recommendation, so the plan is unchanged — but it is now a decision
+and needs recording.
+
+**What was chosen.** The layering principle in `norm.rs`'s module doc **stands**:
+`nfc` answers a question about *text* and never looks at a font; `fit_to_face`
+answers a question about the *font*. The narrow fallback goes in the second
+stage — when `fit_to_face` meets a composed character the face cannot draw, and
+the *pieces* are drawable, it decomposes. `split_undrawable` already exists and
+already has this shape, which is why C was the recommendation.
+
+Result for the 339 residual sweep disagreements: they should move to `agree`
+without `nfc` ever taking a face as input.
+
+**The cost that was accepted.** Two mechanisms where HarfBuzz has one — we agree
+with HarfBuzz on output while diverging on structure. The concrete risk the
+question named is **mark reordering after a late decomposition**, which HarfBuzz
+gets right by construction and we would not. Treat that as the thing to test
+rather than assume: the sweep is the instrument, and any ordering case it
+surfaces is this decision's bill, not a surprise.
+
+**Not chosen, and why it matters later:** **B** (adopt HarfBuzz's font-aware
+recomposition) was refused because it makes normalization a function of
+`(text, face)` — no longer hoistable, no longer cacheable per string, not
+reasonable about without a font in hand. If a future case cannot be fixed inside
+`fit_to_face`, that is the argument that has to be beaten, not re-litigated from
+scratch.
+
+**Recording:** `design-decisions.md` under Lane C's §400–499 range — Lane C's own
+question, Lane C's own range, so Lane B has recorded the answer here only. Filed
+as `requests/b-c-operator-answered-q45-and-c-q1.md`.
+
+**Raised by Claude (Lane C)** (2026-08-15), on finishing `known-issues.md` →
+`TD-FONT-HAS-A-HANGUL-SHAPER-NOTHING-CALLS`. That fix took the HarfBuzz
+differential sweep from 892 disagreements to 339, and the 339 that remain are
+**one question asked 339 times**, not a scatter of unrelated bugs: `\u1e09`
+(ḉ — c with cedilla and acute) 255 cases, `\u212b` (Å angstrom sign) 57,
+`été` 10, and a short tail.
+
+**Question.** `norm.rs` is layered on a deliberate principle, written into its
+module doc: **`nfc` answers a question about *text* and knows nothing about
+fonts; `fit_to_face` answers a question about the *font* and does not
+renormalize.** Unicode composition is a property of the string, so it is
+decided before any face is consulted. HarfBuzz does the opposite — it
+decomposes to NFD, then *recomposes only where the face has a glyph*, so the
+same string normalizes differently in two fonts. Which layering do we want?
+
+Concretely, for `\u1e09` in a face that has `c`, the cedilla and the acute but
+no precomposed ḉ: we emit one missing-glyph box, HarfBuzz emits three glyphs
+that stack into the right-looking character.
+
+**Options.**
+
+- **A — keep the current layering** (`nfc` is pure Unicode; font coverage is
+  `fit_to_face`'s problem). *Pro:* each stage has one job and one input, which
+  is why the module reads clearly and why the Hangul work above was four small
+  edits rather than a rewrite; normalization is reproducible without a font in
+  hand, so it can be tested, cached, and shared across faces. *Con:* we draw a
+  box where HarfBuzz draws correct text, on real strings, in real fonts. The
+  user does not care which stage was principled.
+- **B — adopt HarfBuzz's font-aware recomposition.** *Pro:* matches the
+  reference implementation and every other shaper, closes the sweep's residue
+  to near zero, and is strictly better output on faces with partial coverage.
+  *Con:* normalization becomes a function of `(text, face)`, so it can no
+  longer be hoisted, cached per string, or reasoned about without a font;
+  `norm.rs`'s layering claim becomes false and its doc has to be rewritten to
+  say the opposite.
+- **C — a narrow fallback: keep `nfc` pure, but let `fit_to_face` decompose a
+  composed character it cannot draw when the parts *are* drawable.** *Pro:*
+  gets B's user-visible outcome for exactly the failing case while keeping
+  A's layering, because the decomposition happens in the stage that already
+  owns "what can this face draw" — `split_undrawable` is already that
+  function and already takes this shape. *Con:* it is two mechanisms where
+  HarfBuzz has one, so we would agree with HarfBuzz on output while diverging
+  on structure, and the sweep may surface ordering cases (mark reordering
+  after a late decomposition) that HarfBuzz gets right by construction.
+
+**My recommendation: C**, and I have *not* implemented it. It is the only
+option that does not require choosing between correct pixels and a coherent
+module boundary, and `split_undrawable` already exists as the hook. But it is
+a user-visible rendering-policy change on a design principle that was written
+down deliberately, so it is yours rather than mine. Meanwhile the behaviour is
+A (unchanged) and the residue is documented, not silently tolerated.
+
+**Where it bites:** `gui/font/src/norm.rs` (`nfc`, `normalize`,
+`decompose_once`, `split_undrawable`, `fit_to_face`, and the module doc's
+layering paragraph), `gui/font/src/scaled.rs::shape` (call order), and
+`gui/font/tools/harfbuzz_sweep.py` (the 339 would move to `agree`). Reference:
+HarfBuzz `src/hb-ot-shape-normalize.cc`,
+`HB_OT_SHAPE_NORMALIZATION_MODE_COMPOSED_DIACRITICS_NO_SHORT_CIRCUIT`.
 
 ## Q45 — [A] The kshell byte-purity conversion is ~40× larger than its own scoping estimate. Convert the whole shell, or make only the *expanded word* byte-clean? — Status: OPEN
 

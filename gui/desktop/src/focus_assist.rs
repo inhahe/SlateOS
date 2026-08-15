@@ -56,7 +56,7 @@ impl FocusMode {
 
     pub fn icon(&self) -> &str {
         match self {
-            Self::Off => "\u{1F514}",         // bell
+            Self::Off => "\u{1F514}",          // bell
             Self::PriorityOnly => "\u{1F515}", // bell with slash
             Self::AlarmsOnly => "\u{23F0}",    // alarm clock
             Self::TotalSilence => "\u{1F6AB}", // prohibited
@@ -117,19 +117,30 @@ pub enum AutoRule {
     /// Activate when a game is running (detected by capability or heuristic).
     Gaming { mode: FocusMode },
     /// Activate when on battery power below a threshold.
-    BatteryLow { threshold_percent: u8, mode: FocusMode },
+    BatteryLow {
+        threshold_percent: u8,
+        mode: FocusMode,
+    },
 }
 
 impl AutoRule {
     pub fn label(&self) -> String {
         match self {
-            Self::Schedule { start_hour, start_min, end_hour, end_min, .. } => {
+            Self::Schedule {
+                start_hour,
+                start_min,
+                end_hour,
+                end_min,
+                ..
+            } => {
                 format!("Schedule {start_hour:02}:{start_min:02}–{end_hour:02}:{end_min:02}")
             }
             Self::Fullscreen { .. } => "Fullscreen app".to_string(),
             Self::Presentation { .. } => "Presenting".to_string(),
             Self::Gaming { .. } => "Gaming".to_string(),
-            Self::BatteryLow { threshold_percent, .. } => {
+            Self::BatteryLow {
+                threshold_percent, ..
+            } => {
                 format!("Battery below {threshold_percent}%")
             }
         }
@@ -461,7 +472,11 @@ impl FocusAssistManager {
             y: cy,
             text: format!("Current: {}", mode.label()),
             font_size: 14.0,
-            color: if mode == FocusMode::Off { SUBTEXT0 } else { BLUE },
+            color: if mode == FocusMode::Off {
+                SUBTEXT0
+            } else {
+                BLUE
+            },
             font_weight: FontWeightHint::Bold,
             max_width: None,
         });
@@ -729,8 +744,12 @@ mod tests {
     #[test]
     fn set_app_override_replaces() {
         let mut mgr = make_mgr();
-        mgr.set_app_override(AppNotifOverride::new("chat", "Chat").with_priority(NotifPriority::Silent));
-        mgr.set_app_override(AppNotifOverride::new("chat", "Chat").with_priority(NotifPriority::Priority));
+        mgr.set_app_override(
+            AppNotifOverride::new("chat", "Chat").with_priority(NotifPriority::Silent),
+        );
+        mgr.set_app_override(
+            AppNotifOverride::new("chat", "Chat").with_priority(NotifPriority::Priority),
+        );
         assert_eq!(mgr.app_priority("chat"), NotifPriority::Priority);
         assert_eq!(mgr.app_overrides.len(), 1);
     }
@@ -748,8 +767,8 @@ mod tests {
             mode: FocusMode::AlarmsOnly,
         };
         assert!(rule.is_schedule_active(23, 30, 0)); // 11:30 PM
-        assert!(rule.is_schedule_active(3, 0, 0));   // 3:00 AM
-        assert!(!rule.is_schedule_active(12, 0, 0));  // noon
+        assert!(rule.is_schedule_active(3, 0, 0)); // 3:00 AM
+        assert!(!rule.is_schedule_active(12, 0, 0)); // noon
     }
 
     #[test]
@@ -762,7 +781,7 @@ mod tests {
             days: vec![1, 2, 3, 4, 5], // weekdays
             mode: FocusMode::PriorityOnly,
         };
-        assert!(rule.is_schedule_active(10, 0, 1));  // Monday
+        assert!(rule.is_schedule_active(10, 0, 1)); // Monday
         assert!(!rule.is_schedule_active(10, 0, 0)); // Sunday
     }
 
@@ -886,9 +905,18 @@ mod tests {
 
     #[test]
     fn most_restrictive_fn() {
-        assert_eq!(most_restrictive(FocusMode::Off, FocusMode::PriorityOnly), FocusMode::PriorityOnly);
-        assert_eq!(most_restrictive(FocusMode::AlarmsOnly, FocusMode::PriorityOnly), FocusMode::AlarmsOnly);
-        assert_eq!(most_restrictive(FocusMode::TotalSilence, FocusMode::AlarmsOnly), FocusMode::TotalSilence);
+        assert_eq!(
+            most_restrictive(FocusMode::Off, FocusMode::PriorityOnly),
+            FocusMode::PriorityOnly
+        );
+        assert_eq!(
+            most_restrictive(FocusMode::AlarmsOnly, FocusMode::PriorityOnly),
+            FocusMode::AlarmsOnly
+        );
+        assert_eq!(
+            most_restrictive(FocusMode::TotalSilence, FocusMode::AlarmsOnly),
+            FocusMode::TotalSilence
+        );
     }
 
     // ---- Rendering ----
@@ -955,9 +983,27 @@ mod tests {
             mode: FocusMode::AlarmsOnly,
         };
         assert!(r.label().contains("22:00"));
-        assert_eq!(AutoRule::Fullscreen { mode: FocusMode::Off }.label(), "Fullscreen app");
-        assert_eq!(AutoRule::Presentation { mode: FocusMode::Off }.label(), "Presenting");
-        assert_eq!(AutoRule::Gaming { mode: FocusMode::Off }.label(), "Gaming");
+        assert_eq!(
+            AutoRule::Fullscreen {
+                mode: FocusMode::Off
+            }
+            .label(),
+            "Fullscreen app"
+        );
+        assert_eq!(
+            AutoRule::Presentation {
+                mode: FocusMode::Off
+            }
+            .label(),
+            "Presenting"
+        );
+        assert_eq!(
+            AutoRule::Gaming {
+                mode: FocusMode::Off
+            }
+            .label(),
+            "Gaming"
+        );
     }
 
     // ---- NotifPriority ordering ----

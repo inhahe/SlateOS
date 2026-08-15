@@ -162,10 +162,11 @@ impl ContextMenu {
 
         // Check if click is in open submenu first.
         if let Some((_, ref mut submenu)) = self.open_submenu
-            && let Some(id) = submenu.handle_click(mx, my) {
-                self.hide();
-                return Some(id);
-            }
+            && let Some(id) = submenu.handle_click(mx, my)
+        {
+            self.hide();
+            return Some(id);
+        }
 
         // Check if click is within our bounds.
         if !self.point_in_bounds(mx, my) {
@@ -176,12 +177,18 @@ impl ContextMenu {
         let idx = self.index_at_y(my)?;
 
         match self.items.get(idx) {
-            Some(MenuItem::Action { id, enabled: true, .. }) => {
+            Some(MenuItem::Action {
+                id, enabled: true, ..
+            }) => {
                 let id = *id;
                 self.hide();
                 Some(id)
             }
-            Some(MenuItem::Submenu { enabled: true, children, .. }) => {
+            Some(MenuItem::Submenu {
+                enabled: true,
+                children,
+                ..
+            }) => {
                 // Clicking a submenu item opens it (same as hover).
                 let mut sub = ContextMenu::new(children.clone());
                 let sub_x = self.x + self.width;
@@ -202,14 +209,19 @@ impl ContextMenu {
 
         // Delegate to submenu if mouse is within it.
         if let Some((_, ref mut submenu)) = self.open_submenu
-            && submenu.point_in_bounds(mx, my) {
-                submenu.handle_mouse_move(mx, my);
-                return;
-            }
+            && submenu.point_in_bounds(mx, my)
+        {
+            submenu.handle_mouse_move(mx, my);
+            return;
+        }
 
         if !self.point_in_bounds(mx, my) {
             // Don't clear hover if mouse moved to a submenu.
-            if self.open_submenu.as_ref().is_some_and(|(_, sub)| sub.point_in_bounds(mx, my)) {
+            if self
+                .open_submenu
+                .as_ref()
+                .is_some_and(|(_, sub)| sub.point_in_bounds(mx, my))
+            {
                 return;
             }
             self.hover_index = None;
@@ -222,7 +234,11 @@ impl ContextMenu {
         // Open submenu if hovering over a submenu item.
         if let Some(idx) = new_index {
             match self.items.get(idx) {
-                Some(MenuItem::Submenu { enabled: true, children, .. }) => {
+                Some(MenuItem::Submenu {
+                    enabled: true,
+                    children,
+                    ..
+                }) => {
                     // Only open if not already open for this index.
                     let already_open = self.open_submenu.as_ref().is_some_and(|(i, _)| *i == idx);
                     if !already_open {
@@ -249,19 +265,20 @@ impl ContextMenu {
 
         // Delegate to open submenu first.
         if let Some((_, ref mut submenu)) = self.open_submenu
-            && submenu.is_visible() {
-                let result = submenu.handle_key(key);
-                if let Some(MenuAction::Selected(id)) = result {
-                    self.hide();
-                    return Some(MenuAction::Selected(id));
-                }
-                if let Some(MenuAction::Closed) = result {
-                    // Left arrow or Escape in submenu closes it, returns focus to parent.
-                    self.open_submenu = None;
-                    return Some(MenuAction::None);
-                }
-                return result;
+            && submenu.is_visible()
+        {
+            let result = submenu.handle_key(key);
+            if let Some(MenuAction::Selected(id)) = result {
+                self.hide();
+                return Some(MenuAction::Selected(id));
             }
+            if let Some(MenuAction::Closed) = result {
+                // Left arrow or Escape in submenu closes it, returns focus to parent.
+                self.open_submenu = None;
+                return Some(MenuAction::None);
+            }
+            return result;
+        }
 
         match key.key {
             Key::Escape => {
@@ -279,12 +296,18 @@ impl ContextMenu {
             Key::Enter => {
                 if let Some(idx) = self.hover_index {
                     match self.items.get(idx) {
-                        Some(MenuItem::Action { id, enabled: true, .. }) => {
+                        Some(MenuItem::Action {
+                            id, enabled: true, ..
+                        }) => {
                             let id = *id;
                             self.hide();
                             Some(MenuAction::Selected(id))
                         }
-                        Some(MenuItem::Submenu { enabled: true, children, .. }) => {
+                        Some(MenuItem::Submenu {
+                            enabled: true,
+                            children,
+                            ..
+                        }) => {
                             let mut sub = ContextMenu::new(children.clone());
                             let sub_x = self.x + self.width;
                             let sub_y = self.y + self.y_offset_for_index(idx);
@@ -301,13 +324,18 @@ impl ContextMenu {
             Key::Right => {
                 // Open submenu if hover is on a submenu item.
                 if let Some(idx) = self.hover_index
-                    && let Some(MenuItem::Submenu { enabled: true, children, .. }) = self.items.get(idx) {
-                        let mut sub = ContextMenu::new(children.clone());
-                        let sub_x = self.x + self.width;
-                        let sub_y = self.y + self.y_offset_for_index(idx);
-                        sub.show(sub_x, sub_y);
-                        self.open_submenu = Some((idx, Box::new(sub)));
-                    }
+                    && let Some(MenuItem::Submenu {
+                        enabled: true,
+                        children,
+                        ..
+                    }) = self.items.get(idx)
+                {
+                    let mut sub = ContextMenu::new(children.clone());
+                    let sub_x = self.x + self.width;
+                    let sub_y = self.y + self.y_offset_for_index(idx);
+                    sub.show(sub_x, sub_y);
+                    self.open_submenu = Some((idx, Box::new(sub)));
+                }
                 Some(MenuAction::None)
             }
             Key::Left => {
@@ -379,7 +407,13 @@ impl ContextMenu {
                     });
                     current_y += SEPARATOR_HEIGHT;
                 }
-                MenuItem::Action { label, shortcut, enabled, checked, .. } => {
+                MenuItem::Action {
+                    label,
+                    shortcut,
+                    enabled,
+                    checked,
+                    ..
+                } => {
                     // Hover highlight.
                     if self.hover_index == Some(i) && *enabled {
                         cmds.push(RenderCommand::FillRect {
@@ -422,7 +456,9 @@ impl ContextMenu {
                     // Shortcut text (right-aligned).
                     if let Some(shortcut_text) = shortcut {
                         cmds.push(RenderCommand::Text {
-                            x: self.x + self.width - HORIZONTAL_PADDING - Self::estimate_text_width(shortcut_text, FONT_SIZE),
+                            x: self.x + self.width
+                                - HORIZONTAL_PADDING
+                                - Self::estimate_text_width(shortcut_text, FONT_SIZE),
                             y: text_y,
                             text: shortcut_text.clone(),
                             color: DIM_TEXT_COLOR,
@@ -493,7 +529,9 @@ impl ContextMenu {
 
         for item in items {
             match item {
-                MenuItem::Action { label, shortcut, .. } => {
+                MenuItem::Action {
+                    label, shortcut, ..
+                } => {
                     let label_w = Self::estimate_text_width(label, FONT_SIZE);
                     max_label_w = max_label_w.max(label_w);
                     if let Some(sc) = shortcut {
@@ -517,20 +555,33 @@ impl ContextMenu {
             0.0
         };
 
-        let width = HORIZONTAL_PADDING * 2.0 + ICON_COLUMN_WIDTH + max_label_w + shortcut_space + HORIZONTAL_PADDING;
+        let width = HORIZONTAL_PADDING * 2.0
+            + ICON_COLUMN_WIDTH
+            + max_label_w
+            + shortcut_space
+            + HORIZONTAL_PADDING;
         width.max(MIN_MENU_WIDTH)
     }
 
-    /// Rough text width estimation (monospace-ish approximation).
+    /// Width of `text`, as the compositor will actually draw it.
+    ///
+    /// This used to be `text.len() as f32 * font_size * 0.6`, which sized the
+    /// menu for a font nobody draws in: `len` counts bytes, so an accented
+    /// label reserved twice the room it needed, and the 0.6 was one of five
+    /// different fudge factors scattered across the toolkit.
     fn estimate_text_width(text: &str, font_size: f32) -> f32 {
-        text.len() as f32 * font_size * 0.6
+        crate::text::width(text, font_size)
     }
 
     fn total_height(&self) -> f32 {
-        let content: f32 = self.items.iter().map(|item| match item {
-            MenuItem::Separator => SEPARATOR_HEIGHT,
-            _ => ITEM_HEIGHT,
-        }).sum();
+        let content: f32 = self
+            .items
+            .iter()
+            .map(|item| match item {
+                MenuItem::Separator => SEPARATOR_HEIGHT,
+                _ => ITEM_HEIGHT,
+            })
+            .sum();
         content + VERTICAL_PADDING * 2.0
     }
 
@@ -585,7 +636,13 @@ impl ContextMenu {
 
         let start = match self.hover_index {
             Some(idx) => idx as i32 + direction,
-            None => if direction > 0 { 0 } else { count as i32 - 1 },
+            None => {
+                if direction > 0 {
+                    0
+                } else {
+                    count as i32 - 1
+                }
+            }
         };
 
         // Scan in the given direction, wrapping around once.
@@ -701,9 +758,11 @@ impl Tooltip {
     /// Call on each frame/tick to check if the hover delay has elapsed.
     pub fn tick(&mut self, timestamp_ms: u64) {
         if let Some(start) = self.hover_start
-            && !self.visible && timestamp_ms.saturating_sub(start) >= u64::from(self.delay_ms) {
-                self.visible = true;
-            }
+            && !self.visible
+            && timestamp_ms.saturating_sub(start) >= u64::from(self.delay_ms)
+        {
+            self.visible = true;
+        }
     }
 
     /// Whether the tooltip is currently visible.
@@ -780,8 +839,9 @@ impl Tooltip {
 
     fn compute_width(&self) -> f32 {
         let lines = self.wrap_text();
-        let max_line_width: f32 = lines.iter()
-            .map(|l| l.len() as f32 * TOOLTIP_FONT_SIZE * 0.6)
+        let max_line_width: f32 = lines
+            .iter()
+            .map(|l| crate::text::width(l, TOOLTIP_FONT_SIZE))
             .fold(0.0_f32, f32::max);
         (max_line_width + TOOLTIP_PADDING * 2.0).min(self.max_width + TOOLTIP_PADDING * 2.0)
     }
@@ -792,42 +852,19 @@ impl Tooltip {
         line_count as f32 * TOOLTIP_LINE_HEIGHT + TOOLTIP_PADDING * 2.0
     }
 
-    /// Simple word-wrap at max_width.
+    /// Word-wrap at `max_width` pixels.
+    ///
+    /// Deferred to [`crate::text::wrap`] so that the rule deciding where lines
+    /// break is the same one `compute_width` sizes the box with. Wrapping on a
+    /// different rule than the box is sized on is exactly how a tooltip ends up
+    /// with text hanging past its own background.
     fn wrap_text(&self) -> Vec<String> {
-        let max_chars = (self.max_width / (TOOLTIP_FONT_SIZE * 0.6)) as usize;
-        if max_chars == 0 {
-            return vec![self.text.clone()];
-        }
-
-        let mut lines = Vec::new();
-        for paragraph in self.text.split('\n') {
-            let words: Vec<&str> = paragraph.split_whitespace().collect();
-            if words.is_empty() {
-                lines.push(String::new());
-                continue;
-            }
-
-            let mut current_line = String::new();
-            for word in words {
-                if current_line.is_empty() {
-                    current_line = word.to_string();
-                } else if current_line.len() + 1 + word.len() <= max_chars {
-                    current_line.push(' ');
-                    current_line.push_str(word);
-                } else {
-                    lines.push(current_line);
-                    current_line = word.to_string();
-                }
-            }
-            if !current_line.is_empty() {
-                lines.push(current_line);
-            }
-        }
-
-        if lines.is_empty() {
-            lines.push(String::new());
-        }
-        lines
+        crate::text::wrap(
+            &self.text,
+            self.max_width,
+            TOOLTIP_FONT_SIZE,
+            FontWeightHint::Regular,
+        )
     }
 }
 
@@ -986,24 +1023,20 @@ mod tests {
 
     #[test]
     fn submenu_opens_on_hover() {
-        let items = vec![
-            MenuItem::Submenu {
-                id: 10,
-                label: "More".to_string(),
+        let items = vec![MenuItem::Submenu {
+            id: 10,
+            label: "More".to_string(),
+            icon: None,
+            enabled: true,
+            children: vec![MenuItem::Action {
+                id: 11,
+                label: "Sub Item".to_string(),
+                shortcut: None,
                 icon: None,
                 enabled: true,
-                children: vec![
-                    MenuItem::Action {
-                        id: 11,
-                        label: "Sub Item".to_string(),
-                        shortcut: None,
-                        icon: None,
-                        enabled: true,
-                        checked: None,
-                    },
-                ],
-            },
-        ];
+                checked: None,
+            }],
+        }];
 
         let mut menu = ContextMenu::new(items);
         menu.show(0.0, 0.0);
@@ -1020,24 +1053,20 @@ mod tests {
 
     #[test]
     fn submenu_keyboard_right_opens() {
-        let items = vec![
-            MenuItem::Submenu {
-                id: 20,
-                label: "View".to_string(),
+        let items = vec![MenuItem::Submenu {
+            id: 20,
+            label: "View".to_string(),
+            icon: None,
+            enabled: true,
+            children: vec![MenuItem::Action {
+                id: 21,
+                label: "Zoom In".to_string(),
+                shortcut: None,
                 icon: None,
                 enabled: true,
-                children: vec![
-                    MenuItem::Action {
-                        id: 21,
-                        label: "Zoom In".to_string(),
-                        shortcut: None,
-                        icon: None,
-                        enabled: true,
-                        checked: None,
-                    },
-                ],
-            },
-        ];
+                checked: None,
+            }],
+        }];
 
         let mut menu = ContextMenu::new(items);
         menu.show(0.0, 0.0);
@@ -1118,8 +1147,48 @@ mod tests {
     fn tooltip_edge_flip() {
         let mut tooltip = Tooltip::new("Near edge");
         // Start hover near bottom-right — should flip position.
-        tooltip.start_hover(DEFAULT_VIEWPORT_WIDTH - 5.0, DEFAULT_VIEWPORT_HEIGHT - 5.0, 0);
+        tooltip.start_hover(
+            DEFAULT_VIEWPORT_WIDTH - 5.0,
+            DEFAULT_VIEWPORT_HEIGHT - 5.0,
+            0,
+        );
         assert!(tooltip.x < DEFAULT_VIEWPORT_WIDTH - 5.0);
         assert!(tooltip.y < DEFAULT_VIEWPORT_HEIGHT - 5.0);
+    }
+
+    #[test]
+    fn tooltip_wraps_by_measured_width_not_character_count() {
+        // Wrapping and box-sizing have to use the same rule. `W` is far wider
+        // than the old 0.6-of-the-font-size guess and `i` far narrower, so a
+        // count-based wrap produced lines that overflowed the box it sized.
+        for text in [
+            "WWWW WWWW WWWW WWWW WWWW WWWW",
+            "iiii iiii iiii iiii iiii iiii",
+            "ééé ééé ééé ééé ééé ééé ééé ééé",
+        ] {
+            let tooltip = Tooltip::new(text);
+            for line in tooltip.wrap_text() {
+                // A single word may legitimately exceed the limit — it is not
+                // broken mid-word — but a wrapped line never should.
+                if line.split_whitespace().count() < 2 {
+                    continue;
+                }
+                assert!(
+                    crate::text::width(&line, TOOLTIP_FONT_SIZE) <= tooltip.max_width,
+                    "{line:?} is wider than the tooltip that will contain it"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn tooltip_wrapping_never_loses_a_word() {
+        let text = "the quick brown fox jumps over the lazy dog";
+        let tooltip = Tooltip::new(text);
+        let joined = tooltip.wrap_text().join(" ");
+        assert_eq!(
+            joined.split_whitespace().collect::<Vec<_>>(),
+            text.split_whitespace().collect::<Vec<_>>()
+        );
     }
 }

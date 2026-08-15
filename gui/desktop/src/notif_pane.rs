@@ -34,6 +34,7 @@ use guitk::color::Color;
 use guitk::event::{EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::render::{FontWeightHint, RenderCommand};
 use guitk::style::CornerRadii;
+use guitk::text;
 
 // ============================================================================
 // Theme — Catppuccin Mocha palette
@@ -110,6 +111,16 @@ const SLIDER_HEIGHT: f32 = 6.0;
 
 /// Quick-setting row height.
 const QS_ROW_HEIGHT: f32 = 36.0;
+
+/// Horizontal space a notification card's body preview loses to the card's
+/// left and right insets. The body is a one-line preview, so it is elided to
+/// `card_width - BODY_INSET` — the same width handed to the render command's
+/// `max_width`, so the elision and the clip agree by construction.
+const BODY_INSET: f32 = 24.0;
+
+/// Font size of the body preview. Named because the elision has to measure the
+/// text at exactly the size it will be drawn at.
+const BODY_FONT_SIZE: f32 = 12.0;
 
 // ============================================================================
 // Time grouping helpers
@@ -478,7 +489,11 @@ impl NotificationPane {
         notif.id = id;
 
         // Ensure per-app settings exist.
-        if !self.app_settings.iter().any(|s| s.app_name == notif.app_name) {
+        if !self
+            .app_settings
+            .iter()
+            .any(|s| s.app_name == notif.app_name)
+        {
             self.app_settings
                 .push(AppNotifSettings::new(notif.app_name.clone()));
         }
@@ -520,7 +535,12 @@ impl NotificationPane {
     }
 
     /// Handle a mouse event. Coordinates are in screen space.
-    pub fn handle_mouse_event(&mut self, event: &MouseEvent, screen_width: f32, screen_height: f32) -> EventResult {
+    pub fn handle_mouse_event(
+        &mut self,
+        event: &MouseEvent,
+        screen_width: f32,
+        screen_height: f32,
+    ) -> EventResult {
         if !self.state.is_visible() {
             return EventResult::Ignored;
         }
@@ -693,7 +713,10 @@ impl NotificationPane {
             width: PANE_WIDTH,
             height: screen_height,
         });
-        cmds.push(RenderCommand::PushTranslate { dx: pane_x, dy: 0.0 });
+        cmds.push(RenderCommand::PushTranslate {
+            dx: pane_x,
+            dy: 0.0,
+        });
 
         // Render sections.
         let mut y = PANE_PADDING;
@@ -841,13 +864,26 @@ impl NotificationPane {
         y += QS_ROW_HEIGHT;
 
         // Brightness slider.
-        self.render_slider_row(cmds, PANE_PADDING, y, "Brightness", self.quick_settings.brightness);
+        self.render_slider_row(
+            cmds,
+            PANE_PADDING,
+            y,
+            "Brightness",
+            self.quick_settings.brightness,
+        );
         y += QS_ROW_HEIGHT;
 
         y - start_y
     }
 
-    fn render_toggle_row(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, label: &str, enabled: bool) {
+    fn render_toggle_row(
+        &self,
+        cmds: &mut Vec<RenderCommand>,
+        x: f32,
+        y: f32,
+        label: &str,
+        enabled: bool,
+    ) {
         // Label.
         cmds.push(RenderCommand::Text {
             x,
@@ -861,7 +897,11 @@ impl NotificationPane {
 
         // Toggle pill.
         let pill_x = PANE_WIDTH - PANE_PADDING - TOGGLE_WIDTH - PANE_PADDING;
-        let pill_bg = if enabled { theme::BLUE } else { theme::SURFACE2 };
+        let pill_bg = if enabled {
+            theme::BLUE
+        } else {
+            theme::SURFACE2
+        };
         cmds.push(RenderCommand::FillRect {
             x: pill_x,
             y: y + 6.0,
@@ -888,7 +928,14 @@ impl NotificationPane {
         });
     }
 
-    fn render_slider_row(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, label: &str, value: u8) {
+    fn render_slider_row(
+        &self,
+        cmds: &mut Vec<RenderCommand>,
+        x: f32,
+        y: f32,
+        label: &str,
+        value: u8,
+    ) {
         // Label + value.
         cmds.push(RenderCommand::Text {
             x,
@@ -935,7 +982,12 @@ impl NotificationPane {
         });
     }
 
-    fn render_notifications(&self, cmds: &mut Vec<RenderCommand>, start_y: f32, available_height: f32) {
+    fn render_notifications(
+        &self,
+        cmds: &mut Vec<RenderCommand>,
+        start_y: f32,
+        available_height: f32,
+    ) {
         // Clip notifications to available area.
         cmds.push(RenderCommand::PushClip {
             x: 0.0,
@@ -1008,7 +1060,11 @@ impl NotificationPane {
     ) {
         let card_width = PANE_WIDTH - 2.0 * PANE_PADDING;
         let is_hovered = self.hovered_notif == Some(idx);
-        let bg = if is_hovered { theme::HOVER_BG } else { theme::CARD_BG };
+        let bg = if is_hovered {
+            theme::HOVER_BG
+        } else {
+            theme::CARD_BG
+        };
 
         // Card background.
         cmds.push(RenderCommand::FillRect {
@@ -1066,15 +1122,22 @@ impl NotificationPane {
             max_width: Some(card_width - 40.0),
         });
 
-        // Body (truncated).
+        // Body — a one-line preview, elided against the width it is drawn in
+        // rather than a character budget picked independently of the box.
         cmds.push(RenderCommand::Text {
             x: x + 12.0,
             y: y + 46.0,
-            text: Self::truncate_body(&notif.body, 60),
+            text: text::elide(
+                &notif.body,
+                card_width - BODY_INSET,
+                "...",
+                BODY_FONT_SIZE,
+                FontWeightHint::Regular,
+            ),
             color: theme::SUBTEXT1,
-            font_size: 12.0,
+            font_size: BODY_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
-            max_width: Some(card_width - 24.0),
+            max_width: Some(card_width - BODY_INSET),
         });
 
         // Dismiss button (X) — shown on hover.
@@ -1102,7 +1165,12 @@ impl NotificationPane {
         }
     }
 
-    fn render_app_settings(&self, cmds: &mut Vec<RenderCommand>, start_y: f32, available_height: f32) {
+    fn render_app_settings(
+        &self,
+        cmds: &mut Vec<RenderCommand>,
+        start_y: f32,
+        available_height: f32,
+    ) {
         cmds.push(RenderCommand::PushClip {
             x: 0.0,
             y: start_y,
@@ -1173,7 +1241,11 @@ impl NotificationPane {
 
             // Enabled toggle.
             let enabled_x = card_width - TOGGLE_WIDTH;
-            let pill_bg = if app.enabled { theme::GREEN } else { theme::SURFACE2 };
+            let pill_bg = if app.enabled {
+                theme::GREEN
+            } else {
+                theme::SURFACE2
+            };
             cmds.push(RenderCommand::FillRect {
                 x: enabled_x,
                 y: y + 10.0,
@@ -1314,7 +1386,13 @@ impl NotificationPane {
         }
     }
 
-    fn handle_notification_click(&mut self, rx: f32, ry: f32, content_start: f32, _screen_height: f32) {
+    fn handle_notification_click(
+        &mut self,
+        rx: f32,
+        ry: f32,
+        content_start: f32,
+        _screen_height: f32,
+    ) {
         let adjusted_y = ry - content_start + self.scroll_offset;
         let mut y: f32 = 0.0;
         let mut current_group: Option<TimeGroup> = None;
@@ -1330,7 +1408,10 @@ impl NotificationPane {
                 // Check if dismiss button was clicked.
                 let card_width = PANE_WIDTH - 2.0 * PANE_PADDING;
                 let btn_x = PANE_PADDING + card_width - DISMISS_BTN_SIZE - 8.0;
-                if rx >= btn_x && rx <= btn_x + DISMISS_BTN_SIZE && (adjusted_y - y) < DISMISS_BTN_SIZE + 6.0 {
+                if rx >= btn_x
+                    && rx <= btn_x + DISMISS_BTN_SIZE
+                    && (adjusted_y - y) < DISMISS_BTN_SIZE + 6.0
+                {
                     let id = notif.id;
                     self.dismiss_notification(idx);
                     self.events.push(NotifPaneEvent::NotificationDismissed(id));
@@ -1422,9 +1503,10 @@ impl NotificationPane {
             self.notifications.remove(idx);
             // Adjust hover if needed.
             if let Some(h) = self.hovered_notif
-                && h >= self.notifications.len() {
-                    self.hovered_notif = None;
-                }
+                && h >= self.notifications.len()
+            {
+                self.hovered_notif = None;
+            }
         }
     }
 
@@ -1448,15 +1530,14 @@ impl NotificationPane {
         }
     }
 
-    fn truncate_body(body: &str, max_chars: usize) -> String {
-        if body.len() <= max_chars {
-            body.to_string()
-        } else {
-            let mut s: String = body.chars().take(max_chars - 3).collect();
-            s.push_str("...");
-            s
-        }
-    }
+    // Note: there is deliberately no `truncate_body` helper here any more. It
+    // compared `body.len()` (bytes) against a *character* budget of 60 that was
+    // unrelated to the `card_width - BODY_INSET` box the text is drawn in, so a
+    // body of accented text or CJK was cut far shorter than it needed to be
+    // while a run of narrow characters still overflowed. It also underflowed on
+    // `max_chars - 3`. The call site now uses `text::elide`, which measures both
+    // the body and the ellipsis at the real font size against the real width.
+    // See known-issues.md TD-APPS-ESTIMATE-TEXT-WIDTH.
 }
 
 impl Default for NotificationPane {
@@ -1555,7 +1636,10 @@ mod tests {
     fn time_group_this_week() {
         let now = 1_000_000;
         let three_days_ago = now - 3 * SECS_PER_DAY;
-        assert_eq!(TimeGroup::classify(three_days_ago, now), TimeGroup::ThisWeek);
+        assert_eq!(
+            TimeGroup::classify(three_days_ago, now),
+            TimeGroup::ThisWeek
+        );
     }
 
     #[test]
@@ -1850,24 +1934,102 @@ mod tests {
     fn format_relative_time_days() {
         let mut pane = NotificationPane::new();
         pane.current_time = 1_000_000;
-        assert_eq!(pane.format_relative_time(1_000_000 - 3 * SECS_PER_DAY), "3d ago");
+        assert_eq!(
+            pane.format_relative_time(1_000_000 - 3 * SECS_PER_DAY),
+            "3d ago"
+        );
     }
 
     // ========================================================================
-    // Body truncation
+    // Body preview elision
     // ========================================================================
 
-    #[test]
-    fn truncate_short_body_unchanged() {
-        let body = "Short text";
-        assert_eq!(NotificationPane::truncate_body(body, 60), "Short text");
+    /// Build a visible pane holding one notification with the given body, and
+    /// return its render commands.
+    fn pane_showing_body(body: &str) -> Vec<RenderCommand> {
+        let mut pane = NotificationPane::new();
+        let mut notif = make_notif("Mail", "A title", 1_000);
+        notif.body = body.to_string();
+        pane.push_notification(notif);
+        pane.state = PaneState::Visible;
+        pane.render(1920.0, 1080.0)
     }
 
+    /// The body previews drawn by `pane_showing_body`: `(text, max_width)`.
+    fn body_previews(cmds: &[RenderCommand]) -> Vec<(String, f32)> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text {
+                    text,
+                    font_size,
+                    max_width: Some(w),
+                    color,
+                    ..
+                } if (*font_size - BODY_FONT_SIZE).abs() < f32::EPSILON
+                    && *color == theme::SUBTEXT1 =>
+                {
+                    Some((text.clone(), *w))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The elision must be measured, not counted: whatever characters the body
+    /// is made of, what is drawn has to fit the box it is drawn in.
+    ///
+    /// The old `truncate_body` compared `body.len()` (bytes) against a
+    /// character budget of 60 that had nothing to do with `card_width`, so wide
+    /// glyphs overflowed the card and multibyte text was cut far too short.
     #[test]
-    fn truncate_long_body_adds_ellipsis() {
-        let body = "A".repeat(100);
-        let result = NotificationPane::truncate_body(&body, 60);
-        assert_eq!(result.len(), 60);
-        assert!(result.ends_with("..."));
+    fn a_body_preview_fits_the_card_it_is_drawn_in() {
+        let bodies = [
+            "W".repeat(200),
+            "i".repeat(200),
+            "Ünïcödé wíth áccents repeated many times over and over again".repeat(4),
+            "Short.".to_string(),
+        ];
+        let mut checked = 0;
+        for body in &bodies {
+            for (drawn, max_width) in body_previews(&pane_showing_body(body)) {
+                let measured = text::measure(&drawn, BODY_FONT_SIZE, FontWeightHint::Regular);
+                assert!(
+                    measured <= max_width + 0.5,
+                    "body preview {drawn:?} measures {measured} but its box is {max_width}",
+                );
+                checked += 1;
+            }
+        }
+        // Guard against the test passing vacuously on an empty command list.
+        assert!(
+            checked >= 4,
+            "expected a preview per body, checked {checked}"
+        );
+    }
+
+    /// A body that already fits is drawn verbatim — no ellipsis, no truncation.
+    #[test]
+    fn a_short_body_is_not_elided() {
+        let previews = body_previews(&pane_showing_body("Short text"));
+        assert_eq!(previews.len(), 1, "expected exactly one body preview");
+        assert_eq!(previews[0].0, "Short text");
+    }
+
+    /// A body too wide for the card is shortened and marked as shortened, so the
+    /// user can tell the preview is partial.
+    #[test]
+    fn an_overlong_body_is_marked_as_elided() {
+        let body = "W".repeat(200);
+        let previews = body_previews(&pane_showing_body(&body));
+        assert_eq!(previews.len(), 1, "expected exactly one body preview");
+        assert!(
+            previews[0].0.ends_with("..."),
+            "expected an ellipsis, got {:?}",
+            previews[0].0,
+        );
+        assert!(
+            previews[0].0.len() < body.len(),
+            "expected the body to be shortened"
+        );
     }
 }

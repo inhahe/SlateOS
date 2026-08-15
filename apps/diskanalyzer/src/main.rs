@@ -27,6 +27,7 @@ use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
+use guitk::table::{Column, Fit, Table};
 
 use std::collections::BTreeMap;
 
@@ -71,6 +72,83 @@ const INPUT_HEIGHT: f32 = 30.0;
 const BAR_CHART_ROW_HEIGHT: f32 = 24.0;
 const TREEMAP_MIN_RECT: f32 = 4.0;
 const TABLE_HEADER_HEIGHT: f32 = 30.0;
+
+// ============================================================================
+// File-list column geometry
+// ============================================================================
+
+/// The list view's columns, left to right.
+///
+/// Each width is the room the cell's *text* has; [`PADDING`] is the gap to the
+/// next column and is not part of it. Previously the header carried a width
+/// per column and then threw it away — the loop was literally
+/// `for (label, cx, _cw)` with `max_width: None` — so a heading was free to
+/// overrun its column, and of the four body cells only Name had any bound at
+/// all.
+///
+/// Name is 300px wider than it used to be. The old columns ended at x=660 in a
+/// 960px window, so a third of every row was blank while the one column
+/// holding variable-length data — and the only one that ever got clipped —
+/// was the narrowest it could be. The table now ends one [`PADDING`] short of
+/// the window edge, which a test checks.
+const LIST_COLUMNS: &[Column] = &[
+    Column {
+        label: "Name",
+        width: 660.0 - PADDING,
+    },
+    Column {
+        label: "Size",
+        width: 120.0 - PADDING,
+    },
+    Column {
+        label: "%",
+        width: 80.0 - PADDING,
+    },
+    Column {
+        // Two paddings, not one: the last column pays for the right margin as
+        // well as the gap before it, so the table's right edge mirrors the
+        // `PADDING` inset its left edge has.
+        label: "Type",
+        width: 100.0 - 2.0 * PADDING,
+    },
+];
+
+const NAME_COL: usize = 0;
+const SIZE_COL: usize = 1;
+const PERCENT_COL: usize = 2;
+const KIND_COL: usize = 3;
+
+/// Indent added to a Name cell per level of tree depth.
+const DEPTH_INDENT: f32 = 20.0;
+
+/// Room reserved at the head of a Name cell for its expand/collapse chevron.
+///
+/// The chevron is drawn as its own box rather than prepended to the name.
+/// Prepended, it shares the name's fate: a name cut to keep its tail — which
+/// is what a file name needs — would eat the chevron first, and the chevron is
+/// the only thing on the row saying whether it can be opened.
+const CHEVRON_WIDTH: f32 = 14.0;
+
+/// Least room a name keeps, however deep its row is nested.
+///
+/// Tree depth is data and has no bound, so `depth * DEPTH_INDENT` eventually
+/// exceeds the Name column and leaves the name nothing — an elide to zero
+/// width is the empty string, so deep rows would go *blank* rather than
+/// merely narrow, with nothing to say a row was there at all. Past this depth
+/// the indent stops growing instead.
+const MIN_NAME_WIDTH: f32 = 120.0;
+
+/// Column geometry for the file list.
+fn list_table() -> Table<'static> {
+    Table::with_gap(LIST_COLUMNS, 0.0, PADDING)
+}
+
+/// Indent for a row at `depth`, capped so the name always keeps
+/// [`MIN_NAME_WIDTH`].
+fn row_indent(depth: u32, name_width: f32) -> f32 {
+    let room = (name_width - CHEVRON_WIDTH - MIN_NAME_WIDTH).max(0.0);
+    (f32::from(u16::try_from(depth).unwrap_or(u16::MAX)) * DEPTH_INDENT).min(room)
+}
 
 // ============================================================================
 // FileKind
@@ -1292,23 +1370,8 @@ impl DiskAnalyzerUI {
             corner_radii: CornerRadii::ZERO,
         });
 
-        let columns = [
-            ("Name", 0.0, 360.0),
-            ("Size", 360.0, 120.0),
-            ("%", 480.0, 80.0),
-            ("Type", 560.0, 100.0),
-        ];
-        for (label, cx, _cw) in &columns {
-            tree.push(RenderCommand::Text {
-                x: *cx + PADDING,
-                y: content_y + 8.0,
-                text: label.to_string(),
-                color: COLOR_TEXT,
-                font_size: FONT_SIZE,
-                font_weight: FontWeightHint::Bold,
-                max_width: None,
-            });
-        }
+        let table = list_table();
+        table.header(&mut tree.commands, content_y + 8.0, COLOR_TEXT, FONT_SIZE);
 
         // Rows
         let row_area_y = content_y + TABLE_HEADER_HEIGHT;
@@ -1331,63 +1394,77 @@ impl DiskAnalyzerUI {
                 });
             }
 
-            // Indentation for depth
-            let indent = row.depth as f32 * 20.0;
+            let indent = row_indent(row.depth, table.width(NAME_COL));
+            let name_x = table.left(NAME_COL) + indent;
 
-            // Expand/collapse indicator for directories
-            let prefix = if row.has_children {
-                if row.is_expanded { "v " } else { "> " }
+            // Expand/collapse chevron, in its own box ahead of the name.
+            let chevron = if row.has_children {
+                if row.is_expanded { "v" } else { ">" }
             } else {
-                "  "
+                ""
             };
+            Table::fitted(
+                &mut tree.commands,
+                name_x,
+                CHEVRON_WIDTH,
+                ry + 6.0,
+                chevron,
+                COLOR_OVERLAY0,
+                FONT_SIZE,
+                Fit::Start,
+                FontWeightHint::Regular,
+            );
 
-            // Name
-            tree.push(RenderCommand::Text {
-                x: PADDING + indent,
-                y: ry + 6.0,
-                text: format!("{prefix}{}", row.name),
-                color: if row.kind == FileKind::Directory {
+            // Name. Cut at the front, because a listing sorted by size is
+            // mostly siblings of one directory, and siblings are what share a
+            // prefix — `VID_20260812_143022.mp4` beside `VID_20260812_150907.mp4`
+            // are one string cut the usual way. The indent and the chevron come
+            // out of the column rather than being added to it, so a nested row's
+            // name is fitted to the room it actually has.
+            let name_room = table.width(NAME_COL) - indent - CHEVRON_WIDTH;
+            Table::fitted(
+                &mut tree.commands,
+                name_x + CHEVRON_WIDTH,
+                name_room,
+                ry + 6.0,
+                &row.name,
+                if row.kind == FileKind::Directory {
                     COLOR_BLUE
                 } else {
                     COLOR_TEXT
                 },
-                font_size: FONT_SIZE,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(360.0 - indent - PADDING),
-            });
+                FONT_SIZE,
+                Fit::End,
+                FontWeightHint::Regular,
+            );
 
-            // Size
-            tree.push(RenderCommand::Text {
-                x: 360.0 + PADDING,
-                y: ry + 6.0,
-                text: format_size(row.size_bytes),
-                color: COLOR_SUBTEXT0,
-                font_size: FONT_SIZE,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-            });
-
-            // Percentage
-            tree.push(RenderCommand::Text {
-                x: 480.0 + PADDING,
-                y: ry + 6.0,
-                text: format_percent(row.percentage),
-                color: COLOR_SUBTEXT0,
-                font_size: FONT_SIZE,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-            });
-
-            // Type
-            tree.push(RenderCommand::Text {
-                x: 560.0 + PADDING,
-                y: ry + 6.0,
-                text: file_kind_label(row.kind).to_string(),
-                color: COLOR_SUBTEXT0,
-                font_size: FONT_SIZE,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-            });
+            table.cell(
+                &mut tree.commands,
+                SIZE_COL,
+                ry + 6.0,
+                &format_size(row.size_bytes),
+                COLOR_SUBTEXT0,
+                FONT_SIZE,
+                Fit::Start,
+            );
+            table.cell(
+                &mut tree.commands,
+                PERCENT_COL,
+                ry + 6.0,
+                &format_percent(row.percentage),
+                COLOR_SUBTEXT0,
+                FONT_SIZE,
+                Fit::Start,
+            );
+            table.cell(
+                &mut tree.commands,
+                KIND_COL,
+                ry + 6.0,
+                file_kind_label(row.kind),
+                COLOR_SUBTEXT0,
+                FONT_SIZE,
+                Fit::Start,
+            );
         }
     }
 
@@ -2555,5 +2632,200 @@ mod tests {
         let sizes = [100.0];
         let aspect = worst_aspect_in_row(&sizes, 100.0, 100.0, 100.0);
         assert!((aspect - 1.0).abs() < 0.01);
+    }
+
+    // -- File-list column fitting ----------------------------------------------
+
+    fn list_row(name: &str, depth: u32, kind: FileKind, has_children: bool) -> ListRow {
+        ListRow {
+            name: String::from(name),
+            path: format!("/root/{name}"),
+            size_bytes: 4_294_967_296,
+            percentage: 41.25,
+            kind,
+            is_expanded: has_children,
+            depth,
+            has_children,
+        }
+    }
+
+    /// A list holding the long, prefix-sharing names a camera or a backup tool
+    /// produces, at a range of tree depths.
+    fn ui_with_long_names() -> DiskAnalyzerUI {
+        let mut ui = DiskAnalyzerUI::new();
+        ui.view_mode = ViewMode::List;
+        ui.list_rows = vec![
+            list_row("Pictures", 0, FileKind::Directory, true),
+            list_row(
+                "VID_20260812_143022_HDR_stabilised_final.mp4",
+                1,
+                FileKind::RegularFile,
+                false,
+            ),
+            list_row(
+                "VID_20260812_150907_HDR_stabilised_final.mp4",
+                1,
+                FileKind::RegularFile,
+                false,
+            ),
+            list_row(
+                "backup-of-the-entire-home-directory-2026-08-12T04-00-00Z.tar.zst",
+                7,
+                FileKind::RegularFile,
+                false,
+            ),
+            list_row("deeply-nested-thing.bin", 40, FileKind::RegularFile, false),
+        ];
+        ui
+    }
+
+    fn list_view_texts(ui: &DiskAnalyzerUI) -> Vec<(f32, String, f32, FontWeightHint)> {
+        let mut tree = RenderTree::new();
+        ui.render_list_view(&mut tree);
+        tree.commands
+            .iter()
+            .filter_map(|cmd| match cmd {
+                RenderCommand::Text {
+                    x,
+                    text,
+                    font_size,
+                    font_weight,
+                    ..
+                } => Some((*x, text.clone(), *font_size, *font_weight)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_file_list_fills_the_window() {
+        // The old columns stopped at x=660 in a 960px window: a third of every
+        // row blank, while the only column holding variable-length data was
+        // the narrowest it could be.
+        let table = list_table();
+        let end = table.right(KIND_COL);
+        assert!(
+            end <= WINDOW_WIDTH - PADDING + 0.01,
+            "the table ends at {end}, past the window edge {WINDOW_WIDTH}"
+        );
+        assert!(
+            end >= WINDOW_WIDTH - PADDING - 0.01,
+            "the table ends at {end}, leaving {} px of the window unused",
+            WINDOW_WIDTH - PADDING - end
+        );
+    }
+
+    #[test]
+    fn no_file_list_cell_escapes_its_column() {
+        let ui = ui_with_long_names();
+        let table = list_table();
+        let spans = table.spans();
+        let mut checked = 0usize;
+        for (x, drawn, size, weight) in list_view_texts(&ui) {
+            let (_, right) = spans
+                .iter()
+                .copied()
+                .find(|(l, r)| x >= l - 0.01 && x <= r + 0.01)
+                .unwrap_or_else(|| panic!("cell {drawn:?} at {x} is not inside any column"));
+            let ends = x + guitk::text::measure(&drawn, size, weight);
+            assert!(
+                ends <= right + 0.01,
+                "cell {drawn:?} at {x} draws to {ends}, past its column edge {right}"
+            );
+            checked = checked.saturating_add(1);
+        }
+        // Four headings, plus chevron/name/size/percent/type per row.
+        assert!(checked >= 4 + 5 * 5, "only {checked} cells checked");
+    }
+
+    #[test]
+    fn a_deeply_nested_row_still_shows_its_name() {
+        // Depth is data and unbounded. Uncapped, `depth * DEPTH_INDENT` passes
+        // the Name column somewhere around depth 33 and the name elides to the
+        // empty string -- the row would go blank rather than narrow.
+        let table = list_table();
+        let name_width = table.width(NAME_COL);
+        for depth in [0_u32, 5, 33, 100, 10_000, u32::MAX] {
+            let indent = row_indent(depth, name_width);
+            let room = name_width - indent - CHEVRON_WIDTH;
+            assert!(
+                room >= MIN_NAME_WIDTH - 0.01,
+                "at depth {depth} a name gets {room} px, under the {MIN_NAME_WIDTH} floor"
+            );
+        }
+
+        let ui = ui_with_long_names();
+        let deep: Vec<String> = list_view_texts(&ui)
+            .into_iter()
+            .filter(|(_, t, ..)| t.ends_with(".bin"))
+            .map(|(_, t, ..)| t)
+            .collect();
+        assert_eq!(deep.len(), 1, "the depth-40 row's name vanished: {deep:?}");
+    }
+
+    #[test]
+    fn a_cut_name_keeps_what_tells_it_apart_from_its_siblings() {
+        // Two camera clips from the same day differ only past the 17th
+        // character. Cut the usual way they are one string.
+        let mut ui = ui_with_long_names();
+        // Nest them far enough that the widened Name column still has to cut.
+        for row in &mut ui.list_rows {
+            row.depth = 20;
+        }
+        let clips: Vec<String> = list_view_texts(&ui)
+            .into_iter()
+            .filter(|(_, t, ..)| t.ends_with(".mp4"))
+            .map(|(_, t, ..)| t)
+            .collect();
+        assert_eq!(clips.len(), 2, "expected both clips, got {clips:?}");
+        assert!(
+            clips.iter().all(|t| t.starts_with('…')),
+            "the clips were not actually cut: {clips:?}"
+        );
+        assert_ne!(clips[0], clips[1], "cut clips collapsed to one string");
+    }
+
+    #[test]
+    fn a_directory_keeps_its_chevron_however_long_its_name() {
+        // The chevron is the only thing on the row saying it can be opened, so
+        // it is drawn in its own box: prepended to the name it would be the
+        // first thing a front-cut removed.
+        let mut ui = ui_with_long_names();
+        if let Some(row) = ui.list_rows.first_mut() {
+            row.name = String::from(
+                "a directory with an extremely long name that cannot possibly fit its column even now",
+            );
+            row.depth = 20;
+        }
+        let table = list_table();
+        let indent = row_indent(20, table.width(NAME_COL));
+        let chevron_x = table.left(NAME_COL) + indent;
+        let chevrons: Vec<String> = list_view_texts(&ui)
+            .into_iter()
+            .filter(|(x, ..)| (x - chevron_x).abs() < 0.01)
+            .map(|(_, t, ..)| t)
+            .collect();
+        assert!(
+            chevrons.iter().any(|t| t == "v"),
+            "the expanded directory's chevron was lost: {chevrons:?}"
+        );
+    }
+
+    #[test]
+    fn a_short_name_is_drawn_verbatim() {
+        let mut ui = DiskAnalyzerUI::new();
+        ui.view_mode = ViewMode::List;
+        ui.list_rows = vec![list_row("notes.txt", 0, FileKind::RegularFile, false)];
+        let drawn = list_view_texts(&ui);
+        assert!(
+            drawn.iter().any(|(_, t, ..)| t == "notes.txt"),
+            "a name that fits was altered: {drawn:?}"
+        );
+        assert!(
+            drawn
+                .iter()
+                .any(|(_, t, ..)| t == "Directory" || t == "File"),
+            "the Type cell went missing: {drawn:?}"
+        );
     }
 }

@@ -91,10 +91,7 @@ mod tests {
         assert_eq!(BLK_QC_T_HW_QUEUE_MASK, 0xFFFF);
         assert_eq!(BLK_QC_T_HW_QUEUE_SHIFT, 16);
         // Mask must be 2^bits - 1.
-        assert_eq!(
-            BLK_QC_T_HW_QUEUE_MASK,
-            (1u64 << BLK_QC_T_HW_QUEUE_BITS) - 1
-        );
+        assert_eq!(BLK_QC_T_HW_QUEUE_MASK, (1u64 << BLK_QC_T_HW_QUEUE_BITS) - 1);
     }
 
     #[test]

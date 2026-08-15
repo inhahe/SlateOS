@@ -86,7 +86,13 @@ mod tests {
 
     #[test]
     fn test_sxdp_flags_dense_low_5_bits() {
-        let f = [XDP_SHARED_UMEM, XDP_COPY, XDP_ZEROCOPY, XDP_USE_NEED_WAKEUP, XDP_USE_SG];
+        let f = [
+            XDP_SHARED_UMEM,
+            XDP_COPY,
+            XDP_ZEROCOPY,
+            XDP_USE_NEED_WAKEUP,
+            XDP_USE_SG,
+        ];
         for (i, &v) in f.iter().enumerate() {
             assert_eq!(v, 1 << i);
         }

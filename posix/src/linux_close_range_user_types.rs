@@ -89,9 +89,7 @@ mod tests {
         assert_eq!(CLOSE_RANGE_MIN_KERNEL_MAJOR, 5);
         assert_eq!(CLOSE_RANGE_MIN_KERNEL_MINOR, 9);
         // CLOEXEC came two releases later.
-        assert!(
-            CLOSE_RANGE_CLOEXEC_MIN_KERNEL_MINOR > CLOSE_RANGE_MIN_KERNEL_MINOR
-        );
+        assert!(CLOSE_RANGE_CLOEXEC_MIN_KERNEL_MINOR > CLOSE_RANGE_MIN_KERNEL_MINOR);
     }
 
     #[test]

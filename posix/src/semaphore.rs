@@ -5,10 +5,7 @@
 // caller-supplied name buffers validated against `NAME_MAX` before any
 // indexing.  Bounds are established locally but clippy cannot see
 // across the check.
-#![allow(
-    clippy::indexing_slicing,
-    clippy::arithmetic_side_effects,
-)]
+#![allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 
 //! POSIX semaphore implementation.
 //!
@@ -282,6 +279,19 @@ pub extern "C" fn sem_timedwait(sem: *mut SemT, abstime: *const crate::stat::Tim
         return -1;
     }
 
+    // Eagerly, above the fast path: `___sem_timedwait64`
+    // (nptl/sem_timedwait.c:28) rejects the deadline *before*
+    // `__new_sem_wait_fast`, so a malformed `tv_nsec` is `EINVAL` even on a
+    // semaphore whose count is positive and which would not have blocked.
+    // `pthread_mutex_timedlock` makes the opposite choice with the same
+    // POSIX licence; the asymmetry is glibc's, so we copy it rather than
+    // reconcile it.
+    // SAFETY: abstime verified non-null above.
+    if !crate::time::valid_nanoseconds(unsafe { (*abstime).tv_nsec }) {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
     let atomic = unsafe { &(*sem).value };
 
     loop {
@@ -380,11 +390,6 @@ struct NamedSem {
     sem: SemT,
 }
 
-// SAFETY: the table is only mutated under `SEM_LOCK`; readers also hold
-// the lock.  `NamedSem` itself contains `AtomicI32` for the value, so
-// once the lock is dropped concurrent `sem_wait`/`sem_post` are safe.
-static SEM_LOCK: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
-
 process_global! {
     /// This process's named-semaphore pool (`sem_open`/`sem_unlink`).
     ///
@@ -409,30 +414,30 @@ process_global! {
             },
         }
     }; MAX_NAMED_SEMS];
+
+    /// Serialises every scan of [`named_sems_ptr`].
+    ///
+    /// Declared *inside* the `process_global!` block on purpose.  It used to
+    /// be a plain `static AtomicBool` beside it, which is correct on the
+    /// target (where `process_global!` is a `static mut`, so both are
+    /// process-wide) but mismatched on the host: one shared lock over sixteen
+    /// per-thread tables.  That was merely slow — until a test panicked while
+    /// holding it, at which point every *other* test thread wedged on a lock
+    /// it had no logical relationship to.  A lock must have the same scope as
+    /// the table it guards; see [`crate::perprocess::PoolLock`].
+    fn sem_lock() -> crate::perprocess::PoolLock = crate::perprocess::PoolLock::new();
 }
 
-/// RAII guard that releases `SEM_LOCK` on drop.
-struct SemLockGuard;
-
-impl Drop for SemLockGuard {
-    fn drop(&mut self) {
-        SEM_LOCK.store(false, core::sync::atomic::Ordering::Release);
-    }
-}
-
-fn acquire_sem_lock() -> SemLockGuard {
-    while SEM_LOCK
-        .compare_exchange_weak(
-            false,
-            true,
-            core::sync::atomic::Ordering::Acquire,
-            core::sync::atomic::Ordering::Relaxed,
-        )
-        .is_err()
-    {
-        core::hint::spin_loop();
-    }
-    SemLockGuard
+/// Take [`sem_lock`] for the duration of a named-semaphore table scan.
+///
+/// The table is only mutated under this lock, and readers hold it too.
+/// `NamedSem` itself holds its value in an `AtomicI32`, so once the guard is
+/// dropped concurrent `sem_wait`/`sem_post` on the returned `sem_t*` are safe
+/// without it.
+fn acquire_sem_lock() -> crate::perprocess::PoolGuard<'static> {
+    // SAFETY: `sem_lock()` is this context's lock, valid as long as the table
+    // it guards.
+    unsafe { crate::perprocess::lock_pool(sem_lock()) }
 }
 
 /// Validate a POSIX semaphore name: starts with `/`, no further `/`,
@@ -490,7 +495,9 @@ fn find_named_sem(name: *const u8, len: usize) -> Option<usize> {
         }
         // SAFETY: caller-provided name has at least `len` bytes.
         let in_name = unsafe { core::slice::from_raw_parts(name, len) };
-        let Some(stored) = slot.name.get(..len) else { continue };
+        let Some(stored) = slot.name.get(..len) else {
+            continue;
+        };
         if stored == in_name {
             return Some(i);
         }
@@ -1243,6 +1250,51 @@ mod tests {
         let ret = sem_timedwait(&raw mut sem, core::ptr::null());
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    /// `___sem_timedwait64` (nptl/sem_timedwait.c:28) validates the deadline
+    /// *before* `__new_sem_wait_fast`, so a positive count does not excuse a
+    /// malformed `tv_nsec`.  This is the opposite of
+    /// `pthread_mutex_timedlock`, which checks lazily — see
+    /// `pthread::tests::test_pthread_mutex_timedlock_uncontended_ignores_a_bad_deadline`.
+    #[test]
+    fn test_sem_timedwait_checks_the_deadline_before_the_fast_path() {
+        let mut sem = SemT {
+            value: core::sync::atomic::AtomicI32::new(0),
+        };
+        // Count 1: the wait would have succeeded immediately.
+        sem_init(&raw mut sem, 0, 1);
+        for bad in [-1i64, 1_000_000_000] {
+            crate::errno::set_errno(0);
+            let ts = crate::stat::Timespec {
+                tv_sec: 999_999,
+                tv_nsec: bad,
+            };
+            assert_eq!(sem_timedwait(&raw mut sem, &ts), -1, "tv_nsec={bad}");
+            assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        }
+        // And the rejection must not have consumed the count.
+        let mut val: i32 = 0;
+        sem_getvalue(&raw mut sem, &raw mut val);
+        assert_eq!(val, 1, "a rejected timedwait must not decrement");
+    }
+
+    /// A negative `tv_sec` is a deadline in the past, not a malformed
+    /// timespec: `valid_nanoseconds` never looks at `tv_sec`.  With the
+    /// count exhausted this must time out rather than report `EINVAL`.
+    #[test]
+    fn test_sem_timedwait_negative_tv_sec_is_etimedout_not_einval() {
+        crate::errno::set_errno(0);
+        let mut sem = SemT {
+            value: core::sync::atomic::AtomicI32::new(0),
+        };
+        sem_init(&raw mut sem, 0, 0);
+        let ts = crate::stat::Timespec {
+            tv_sec: -1,
+            tv_nsec: 0,
+        };
+        assert_eq!(sem_timedwait(&raw mut sem, &ts), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ETIMEDOUT);
     }
 
     // -- sem_init with pshared (ignored but accepted) --

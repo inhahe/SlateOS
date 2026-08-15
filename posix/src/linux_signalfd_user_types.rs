@@ -98,13 +98,7 @@ mod tests {
     #[test]
     fn test_si_codes_distinct() {
         let c = [
-            SI_USER,
-            SI_KERNEL,
-            SI_QUEUE,
-            SI_TIMER,
-            SI_MESGQ,
-            SI_ASYNCIO,
-            SI_TKILL,
+            SI_USER, SI_KERNEL, SI_QUEUE, SI_TIMER, SI_MESGQ, SI_ASYNCIO, SI_TKILL,
         ];
         for i in 0..c.len() {
             for j in (i + 1)..c.len() {

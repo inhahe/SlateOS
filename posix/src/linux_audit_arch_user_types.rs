@@ -104,10 +104,7 @@ mod tests {
     fn test_arm_pair_distinct_widths() {
         // 32-bit ARM has no 64-bit bit; AArch64 has it.
         assert_eq!(AUDIT_ARCH_ARM & __AUDIT_ARCH_64BIT, 0);
-        assert_eq!(
-            AUDIT_ARCH_AARCH64 & __AUDIT_ARCH_64BIT,
-            __AUDIT_ARCH_64BIT
-        );
+        assert_eq!(AUDIT_ARCH_AARCH64 & __AUDIT_ARCH_64BIT, __AUDIT_ARCH_64BIT);
         assert_ne!(AUDIT_ARCH_ARM, AUDIT_ARCH_AARCH64);
     }
 
@@ -118,10 +115,7 @@ mod tests {
         assert_eq!(AUDIT_ARCH_PPC64LE & __AUDIT_ARCH_LE, __AUDIT_ARCH_LE);
         // Both are 64-bit.
         assert_eq!(AUDIT_ARCH_PPC64 & __AUDIT_ARCH_64BIT, __AUDIT_ARCH_64BIT);
-        assert_eq!(
-            AUDIT_ARCH_PPC64LE & __AUDIT_ARCH_64BIT,
-            __AUDIT_ARCH_64BIT
-        );
+        assert_eq!(AUDIT_ARCH_PPC64LE & __AUDIT_ARCH_64BIT, __AUDIT_ARCH_64BIT);
     }
 
     #[test]
@@ -151,9 +145,6 @@ mod tests {
         assert_eq!(AUDIT_ARCH_RISCV64 & 0xFFFF, EM_RISCV);
         // Both little-endian, but only RV64 has the 64-bit bit.
         assert_eq!(AUDIT_ARCH_RISCV32 & __AUDIT_ARCH_64BIT, 0);
-        assert_eq!(
-            AUDIT_ARCH_RISCV64 & __AUDIT_ARCH_64BIT,
-            __AUDIT_ARCH_64BIT
-        );
+        assert_eq!(AUDIT_ARCH_RISCV64 & __AUDIT_ARCH_64BIT, __AUDIT_ARCH_64BIT);
     }
 }

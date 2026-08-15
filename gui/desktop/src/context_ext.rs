@@ -359,7 +359,14 @@ impl ContextMenuExtensionManager {
         let id = self.next_id;
         self.next_id += 1;
 
-        let ext = ContextMenuExtension::new(id, label, target_kind, app_name, handler_command, capability_token);
+        let ext = ContextMenuExtension::new(
+            id,
+            label,
+            target_kind,
+            app_name,
+            handler_command,
+            capability_token,
+        );
         self.extensions.push(ext);
         Some(id)
     }
@@ -421,7 +428,10 @@ impl ContextMenuExtensionManager {
     pub fn extensions_by_app(&self) -> Vec<(String, usize)> {
         let mut app_counts: Vec<(String, usize)> = Vec::new();
         for ext in &self.extensions {
-            if let Some(entry) = app_counts.iter_mut().find(|(name, _)| name == &ext.app_name) {
+            if let Some(entry) = app_counts
+                .iter_mut()
+                .find(|(name, _)| name == &ext.app_name)
+            {
                 entry.1 += 1;
             } else {
                 app_counts.push((ext.app_name.clone(), 1));
@@ -636,9 +646,10 @@ pub fn build_context_menu(
 
         for ext in &matches {
             if let Some(prev) = prev_position
-                && ext.position != prev {
-                    ext_entries.push(ContextMenuEntry::Separator);
-                }
+                && ext.position != prev
+            {
+                ext_entries.push(ContextMenuEntry::Separator);
+            }
             ext_entries.push(ContextMenuEntry::Extension {
                 id: ext.id,
                 label: ext.label.clone(),
@@ -832,7 +843,13 @@ pub fn render_context_menu(
                     y: cy + 6.0,
                     text: display_label,
                     font_size: 13.0,
-                    color: if *slow { OVERLAY0 } else if hovered { TEXT } else { SUBTEXT1 },
+                    color: if *slow {
+                        OVERLAY0
+                    } else if hovered {
+                        TEXT
+                    } else {
+                        SUBTEXT1
+                    },
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
                 });
@@ -911,9 +928,10 @@ impl ExtensionSettingsUI {
             .iter()
             .filter(|e| {
                 if let Some(app) = &self.app_filter
-                    && e.app_name != *app {
-                        return false;
-                    }
+                    && e.app_name != *app
+                {
+                    return false;
+                }
                 if !self.search_text.is_empty() {
                     let lower = self.search_text.to_lowercase();
                     if !e.label.to_lowercase().contains(&lower)
@@ -964,7 +982,11 @@ impl ExtensionSettingsUI {
             y: cy + 6.0,
             text: search_display,
             font_size: 12.0,
-            color: if self.search_text.is_empty() { OVERLAY0 } else { TEXT },
+            color: if self.search_text.is_empty() {
+                OVERLAY0
+            } else {
+                TEXT
+            },
             font_weight: FontWeightHint::Regular,
             max_width: None,
         });
@@ -1159,7 +1181,14 @@ mod tests {
 
     #[test]
     fn extension_new() {
-        let e = ContextMenuExtension::new(1, "Open in VSCode", TargetKind::AnyFile, "vscode", "code --open", 42);
+        let e = ContextMenuExtension::new(
+            1,
+            "Open in VSCode",
+            TargetKind::AnyFile,
+            "vscode",
+            "code --open",
+            42,
+        );
         assert_eq!(e.id, 1);
         assert_eq!(e.label, "Open in VSCode");
         assert!(e.enabled);
@@ -1281,7 +1310,9 @@ mod tests {
     #[test]
     fn unregister_extension() {
         let mut mgr = make_mgr();
-        let id = mgr.register("Test", TargetKind::Any, "app", "cmd", 1).unwrap();
+        let id = mgr
+            .register("Test", TargetKind::Any, "app", "cmd", 1)
+            .unwrap();
         assert!(mgr.unregister(id));
         assert_eq!(mgr.count(), 0);
     }
@@ -1308,7 +1339,9 @@ mod tests {
     #[test]
     fn set_enabled() {
         let mut mgr = make_mgr();
-        let id = mgr.register("Test", TargetKind::Any, "app", "cmd", 1).unwrap();
+        let id = mgr
+            .register("Test", TargetKind::Any, "app", "cmd", 1)
+            .unwrap();
         mgr.set_enabled(id, false);
         assert!(!mgr.get(id).unwrap().enabled);
         assert_eq!(mgr.enabled_count(), 0);
@@ -1339,8 +1372,12 @@ mod tests {
     #[test]
     fn query_sorted_by_position() {
         let mut mgr = make_mgr();
-        let _id1 = mgr.register("Bottom", TargetKind::Any, "app", "cmd1", 1).unwrap();
-        let id2 = mgr.register("Top", TargetKind::Any, "app2", "cmd2", 1).unwrap();
+        let _id1 = mgr
+            .register("Bottom", TargetKind::Any, "app", "cmd1", 1)
+            .unwrap();
+        let id2 = mgr
+            .register("Top", TargetKind::Any, "app2", "cmd2", 1)
+            .unwrap();
         mgr.get_mut(id2).unwrap().position = MenuPosition::Top;
         let ctx = ContextTarget::file("test.txt", Some("txt"));
         let matches = mgr.query(&ctx);
@@ -1366,7 +1403,9 @@ mod tests {
     #[test]
     fn slow_count() {
         let mut mgr = make_mgr();
-        let id = mgr.register("Slow", TargetKind::Any, "app", "cmd", 1).unwrap();
+        let id = mgr
+            .register("Slow", TargetKind::Any, "app", "cmd", 1)
+            .unwrap();
         for _ in 0..20 {
             mgr.get_mut(id).unwrap().record_invocation(500.0);
         }
@@ -1382,7 +1421,9 @@ mod tests {
         let menu = build_context_menu(&ctx, &mgr);
         assert!(!menu.is_empty());
         // Should contain Open, Copy, etc.
-        let has_open = menu.iter().any(|e| matches!(e, ContextMenuEntry::Builtin(BuiltinMenuItem::Open)));
+        let has_open = menu
+            .iter()
+            .any(|e| matches!(e, ContextMenuEntry::Builtin(BuiltinMenuItem::Open)));
         assert!(has_open);
     }
 
@@ -1391,7 +1432,9 @@ mod tests {
         let mgr = make_mgr();
         let ctx = ContextTarget::desktop();
         let menu = build_context_menu(&ctx, &mgr);
-        let has_refresh = menu.iter().any(|e| matches!(e, ContextMenuEntry::Builtin(BuiltinMenuItem::Refresh)));
+        let has_refresh = menu
+            .iter()
+            .any(|e| matches!(e, ContextMenuEntry::Builtin(BuiltinMenuItem::Refresh)));
         assert!(has_refresh);
     }
 
@@ -1401,7 +1444,9 @@ mod tests {
         mgr.register("Open in Editor", TargetKind::AnyFile, "editor", "edit", 1);
         let ctx = ContextTarget::file("test.txt", Some("txt"));
         let menu = build_context_menu(&ctx, &mgr);
-        let has_ext = menu.iter().any(|e| matches!(e, ContextMenuEntry::Extension { label, .. } if label == "Open in Editor"));
+        let has_ext = menu.iter().any(
+            |e| matches!(e, ContextMenuEntry::Extension { label, .. } if label == "Open in Editor"),
+        );
         assert!(has_ext);
     }
 
@@ -1412,7 +1457,10 @@ mod tests {
         let ctx = ContextTarget::file("test.txt", Some("txt"));
         let menu = build_context_menu(&ctx, &mgr);
         // Should have at least one separator (between builtins and extensions).
-        let sep_count = menu.iter().filter(|e| matches!(e, ContextMenuEntry::Separator)).count();
+        let sep_count = menu
+            .iter()
+            .filter(|e| matches!(e, ContextMenuEntry::Separator))
+            .count();
         assert!(sep_count >= 1);
     }
 
@@ -1488,7 +1536,8 @@ mod tests {
 
     #[test]
     fn settings_ui_filter_by_search() {
-        let ext1 = ContextMenuExtension::new(1, "Open in Editor", TargetKind::Any, "editor", "cmd", 1);
+        let ext1 =
+            ContextMenuExtension::new(1, "Open in Editor", TargetKind::Any, "editor", "cmd", 1);
         let ext2 = ContextMenuExtension::new(2, "Compress", TargetKind::Any, "archiver", "cmd", 1);
         let mut ui = ExtensionSettingsUI::new(&[ext1, ext2]);
         ui.search_text = "editor".to_string();

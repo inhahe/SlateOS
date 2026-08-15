@@ -95,7 +95,13 @@ mod tests {
         // UDP_CORK = 1 (predates the rest).
         assert_eq!(UDP_CORK, 1);
         // UDP_ENCAP family starts at 100 to leave room for new compat sockopts.
-        let e = [UDP_ENCAP, UDP_NO_CHECK6_TX, UDP_NO_CHECK6_RX, UDP_SEGMENT, UDP_GRO];
+        let e = [
+            UDP_ENCAP,
+            UDP_NO_CHECK6_TX,
+            UDP_NO_CHECK6_RX,
+            UDP_SEGMENT,
+            UDP_GRO,
+        ];
         for (i, &v) in e.iter().enumerate() {
             assert_eq!(v, 100 + i as u32);
         }

@@ -142,7 +142,9 @@ mod tests {
         // file types land on an even value because the corresponding S_IF*
         // octal constant has its low octal digit zero — except S_IFIFO
         // (0o010000) which gives DT_FIFO = 1, an odd value.
-        for t in [DT_FIFO, DT_CHR, DT_DIR, DT_BLK, DT_REG, DT_LNK, DT_SOCK, DT_WHT] {
+        for t in [
+            DT_FIFO, DT_CHR, DT_DIR, DT_BLK, DT_REG, DT_LNK, DT_SOCK, DT_WHT,
+        ] {
             assert!(t < 16);
         }
         // Sanity: only DT_FIFO is odd among the populated types.

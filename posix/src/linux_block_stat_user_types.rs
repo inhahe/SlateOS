@@ -51,8 +51,7 @@ pub const BLOCK_STAT_COL_FLUSH_TICKS: usize = 16;
 pub const DISKSTATS_PREFIX_FIELDS: usize = 3;
 
 /// Total /proc/diskstats column count = prefix + 17 stats.
-pub const DISKSTATS_TOTAL_FIELDS: usize =
-    DISKSTATS_PREFIX_FIELDS + BLOCK_STAT_FIELDS_FLUSH;
+pub const DISKSTATS_TOTAL_FIELDS: usize = DISKSTATS_PREFIX_FIELDS + BLOCK_STAT_FIELDS_FLUSH;
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -103,19 +102,10 @@ mod tests {
     #[test]
     fn test_read_write_groups_aligned() {
         // Each {ios,merges,sectors,ticks} group is 4 contiguous fields.
-        assert_eq!(
-            BLOCK_STAT_COL_WRITE_IOS - BLOCK_STAT_COL_READ_IOS,
-            4
-        );
-        assert_eq!(
-            BLOCK_STAT_COL_WRITE_TICKS - BLOCK_STAT_COL_READ_TICKS,
-            4
-        );
+        assert_eq!(BLOCK_STAT_COL_WRITE_IOS - BLOCK_STAT_COL_READ_IOS, 4);
+        assert_eq!(BLOCK_STAT_COL_WRITE_TICKS - BLOCK_STAT_COL_READ_TICKS, 4);
         // Discard group also 4 contiguous (ios..ticks).
-        assert_eq!(
-            BLOCK_STAT_COL_DISCARD_TICKS - BLOCK_STAT_COL_DISCARD_IOS,
-            3
-        );
+        assert_eq!(BLOCK_STAT_COL_DISCARD_TICKS - BLOCK_STAT_COL_DISCARD_IOS, 3);
     }
 
     #[test]
@@ -132,9 +122,6 @@ mod tests {
         // the io_ticks / time_in_queue pair.
         assert!(BLOCK_STAT_COL_WRITE_TICKS < BLOCK_STAT_COL_IN_FLIGHT);
         assert!(BLOCK_STAT_COL_IN_FLIGHT < BLOCK_STAT_COL_IO_TICKS);
-        assert_eq!(
-            BLOCK_STAT_COL_IO_TICKS - BLOCK_STAT_COL_IN_FLIGHT,
-            1
-        );
+        assert_eq!(BLOCK_STAT_COL_IO_TICKS - BLOCK_STAT_COL_IN_FLIGHT, 1);
     }
 }

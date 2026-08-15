@@ -8,13 +8,17 @@
 //! - Power profiles (Balanced, Performance, Power Saver, Custom)
 //! - Lid close / power button actions
 //! - Wake-on-LAN configuration
+//! - The power menu the start menu opens (shutdown, restart, sleep, lock,
+//!   log out)
 //!
 //! Designed to integrate with the taskbar's power/battery indicator
 //! and the settings app's power management page.
 
+use crate::Rect;
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand};
-use guitk::style::CornerRadii;
+use guitk::style::{Border, CornerRadii};
+use guitk::text;
 
 // ============================================================================
 // Catppuccin Mocha theme constants
@@ -181,9 +185,9 @@ impl Default for PowerConfig {
         Self {
             profile: PowerProfile::Balanced,
             dim_timeout_secs: 180,        // 3 minutes
-            screen_off_timeout_secs: 300,  // 5 minutes
-            suspend_timeout_secs: 900,     // 15 minutes
-            screensaver_timeout_secs: 0,   // disabled by default
+            screen_off_timeout_secs: 300, // 5 minutes
+            suspend_timeout_secs: 900,    // 15 minutes
+            screensaver_timeout_secs: 0,  // disabled by default
             screensaver_style: ScreenSaverStyle::Clock,
             lid_close_action: PowerAction::Suspend,
             power_button_action: PowerAction::Shutdown,
@@ -234,18 +238,45 @@ impl PowerConfig {
         out.push_str("# Power Management Configuration\n");
         out.push_str(&format!("profile={}\n", profile_str(self.profile)));
         out.push_str(&format!("dim_timeout={}\n", self.dim_timeout_secs));
-        out.push_str(&format!("screen_off_timeout={}\n", self.screen_off_timeout_secs));
+        out.push_str(&format!(
+            "screen_off_timeout={}\n",
+            self.screen_off_timeout_secs
+        ));
         out.push_str(&format!("suspend_timeout={}\n", self.suspend_timeout_secs));
-        out.push_str(&format!("screensaver_timeout={}\n", self.screensaver_timeout_secs));
-        out.push_str(&format!("screensaver_style={}\n", screensaver_str(self.screensaver_style)));
-        out.push_str(&format!("lid_close_action={}\n", action_str(self.lid_close_action)));
-        out.push_str(&format!("power_button_action={}\n", action_str(self.power_button_action)));
-        out.push_str(&format!("sleep_button_action={}\n", action_str(self.sleep_button_action)));
+        out.push_str(&format!(
+            "screensaver_timeout={}\n",
+            self.screensaver_timeout_secs
+        ));
+        out.push_str(&format!(
+            "screensaver_style={}\n",
+            screensaver_str(self.screensaver_style)
+        ));
+        out.push_str(&format!(
+            "lid_close_action={}\n",
+            action_str(self.lid_close_action)
+        ));
+        out.push_str(&format!(
+            "power_button_action={}\n",
+            action_str(self.power_button_action)
+        ));
+        out.push_str(&format!(
+            "sleep_button_action={}\n",
+            action_str(self.sleep_button_action)
+        ));
         out.push_str(&format!("low_battery_pct={}\n", self.low_battery_pct));
-        out.push_str(&format!("critical_battery_pct={}\n", self.critical_battery_pct));
-        out.push_str(&format!("critical_battery_action={}\n", action_str(self.critical_battery_action)));
+        out.push_str(&format!(
+            "critical_battery_pct={}\n",
+            self.critical_battery_pct
+        ));
+        out.push_str(&format!(
+            "critical_battery_action={}\n",
+            action_str(self.critical_battery_action)
+        ));
         out.push_str(&format!("wake_on_lan={}\n", self.wake_on_lan));
-        out.push_str(&format!("cpu_governor={}\n", governor_str(self.cpu_governor)));
+        out.push_str(&format!(
+            "cpu_governor={}\n",
+            governor_str(self.cpu_governor)
+        ));
         out.push_str(&format!("dim_brightness={}\n", self.dim_brightness_pct));
         out.push_str(&format!("show_battery_pct={}\n", self.show_battery_pct));
         out
@@ -390,13 +421,15 @@ impl BatteryInfo {
 
     /// Whether battery is in a warning state.
     pub fn is_warning(&self, config: &PowerConfig) -> bool {
-        self.present && self.charge_pct <= config.low_battery_pct
+        self.present
+            && self.charge_pct <= config.low_battery_pct
             && self.state == BatteryState::Discharging
     }
 
     /// Whether battery is in a critical state.
     pub fn is_critical(&self, config: &PowerConfig) -> bool {
-        self.present && self.charge_pct <= config.critical_battery_pct
+        self.present
+            && self.charge_pct <= config.critical_battery_pct
             && (self.state == BatteryState::Discharging || self.state == BatteryState::Critical)
     }
 }
@@ -638,12 +671,7 @@ impl PowerManager {
 
     /// Add an inhibitor preventing certain power actions.
     /// Returns the inhibitor ID for later removal.
-    pub fn add_inhibitor(
-        &mut self,
-        app_name: &str,
-        reason: &str,
-        what: InhibitTarget,
-    ) -> u32 {
+    pub fn add_inhibitor(&mut self, app_name: &str, reason: &str, what: InhibitTarget) -> u32 {
         let id = self.next_inhibitor_id;
         self.next_inhibitor_id = self.next_inhibitor_id.saturating_add(1);
         self.inhibitors.push(PowerInhibitor {
@@ -672,7 +700,9 @@ impl PowerManager {
 
     /// Check if a specific action is inhibited.
     pub fn is_inhibited(&self, target: InhibitTarget) -> bool {
-        self.inhibitors.iter().any(|i| i.what == target || i.what == InhibitTarget::All)
+        self.inhibitors
+            .iter()
+            .any(|i| i.what == target || i.what == InhibitTarget::All)
     }
 
     /// Get the transition log.
@@ -725,7 +755,11 @@ impl PowerManager {
             && self.idle_secs >= cfg.screen_off_timeout_secs
             && !self.is_inhibited(InhibitTarget::ScreenOff)
         {
-            self.transition_to(PowerState::ScreenOff, now_secs, TransitionReason::IdleTimeout);
+            self.transition_to(
+                PowerState::ScreenOff,
+                now_secs,
+                TransitionReason::IdleTimeout,
+            );
             return Some(PowerAction::ScreenOff);
         }
 
@@ -740,7 +774,11 @@ impl PowerManager {
             && self.idle_secs >= cfg.screen_off_timeout_secs
             && !self.is_inhibited(InhibitTarget::ScreenOff)
         {
-            self.transition_to(PowerState::ScreenOff, now_secs, TransitionReason::IdleTimeout);
+            self.transition_to(
+                PowerState::ScreenOff,
+                now_secs,
+                TransitionReason::IdleTimeout,
+            );
             return Some(PowerAction::ScreenOff);
         }
 
@@ -749,7 +787,11 @@ impl PowerManager {
             && self.idle_secs >= cfg.suspend_timeout_secs
             && !self.is_inhibited(InhibitTarget::Suspend)
         {
-            self.transition_to(PowerState::Suspended, now_secs, TransitionReason::IdleTimeout);
+            self.transition_to(
+                PowerState::Suspended,
+                now_secs,
+                TransitionReason::IdleTimeout,
+            );
             return Some(PowerAction::Suspend);
         }
 
@@ -807,7 +849,7 @@ impl PowerManager {
 struct Star {
     x: f32,
     y: f32,
-    z: f32,  // depth (1.0 = far, 0.01 = close)
+    z: f32, // depth (1.0 = far, 0.01 = close)
     speed: f32,
 }
 
@@ -1271,11 +1313,7 @@ pub fn render_battery_icon(
 }
 
 /// Render a power profile indicator (for settings or quick settings).
-pub fn render_power_profile_badge(
-    profile: PowerProfile,
-    x: f32,
-    y: f32,
-) -> Vec<RenderCommand> {
+pub fn render_power_profile_badge(profile: PowerProfile, x: f32, y: f32) -> Vec<RenderCommand> {
     let (label, color) = match profile {
         PowerProfile::Balanced => ("Balanced", COL_BLUE),
         PowerProfile::Performance => ("Performance", COL_PEACH),
@@ -1283,8 +1321,7 @@ pub fn render_power_profile_badge(
         PowerProfile::Custom => ("Custom", COL_LAVENDER),
     };
 
-    let text_width = label.len() as f32 * 7.0;
-    let badge_w = text_width + 16.0;
+    let badge_w = text::padded_width(label, 8.0, 12.0, FontWeightHint::Regular);
     let badge_h: f32 = 22.0;
 
     vec![
@@ -1306,6 +1343,94 @@ pub fn render_power_profile_badge(
             max_width: Some(badge_w - 16.0),
         },
     ]
+}
+
+// ============================================================================
+// Power menu
+// ============================================================================
+
+/// One entry of the power menu — "Shutdown", "Restart", …
+///
+/// The rectangle is supplied rather than computed here because the shell's hit
+/// test has to agree with the drawing to the pixel, and the hit test lives with
+/// the rest of the shell's geometry. See the `Rect` documentation in `main.rs`.
+#[derive(Clone, Copy, Debug)]
+pub struct PowerMenuRow<'a> {
+    /// What the user reads.
+    pub label: &'a str,
+    /// Where the row is drawn, and where a click on it is accepted.
+    pub rect: Rect,
+}
+
+/// The colours and sizes a power menu is drawn with.
+///
+/// Passed in whole rather than taken from this module's own palette: the popup
+/// belongs to the start menu it opens from and has to follow the user's theme,
+/// font size and display scaling — all of which the shell owns and this module
+/// has no way to see.
+#[derive(Clone, Copy, Debug)]
+pub struct PowerMenuStyle {
+    /// The popup's panel colour.
+    pub background: Color,
+    /// Label colour.
+    pub foreground: Color,
+    /// The panel's outline.
+    pub border: Border,
+    /// Corner rounding of the panel.
+    pub radii: CornerRadii,
+    /// Label size in physical pixels — already scaled by the caller.
+    pub font_size: f32,
+    /// Distance from a row's left edge to the start of its label.
+    pub text_inset: f32,
+}
+
+/// Draw a power menu: a panel, and one label per row.
+///
+/// The drop shadow is not drawn here. Every floating surface in the shell casts
+/// the same one, and only when the user has shadows switched on — that is one
+/// decision belonging to the shell, not five surfaces each making it again.
+#[must_use]
+pub fn render_power_menu(
+    panel: Rect,
+    rows: &[PowerMenuRow<'_>],
+    style: PowerMenuStyle,
+) -> Vec<RenderCommand> {
+    // Panel, outline, and one label per row.
+    let mut cmds = Vec::with_capacity(2 + rows.len());
+
+    cmds.push(RenderCommand::FillRect {
+        x: panel.x,
+        y: panel.y,
+        width: panel.w,
+        height: panel.h,
+        color: style.background,
+        corner_radii: style.radii,
+    });
+    cmds.push(RenderCommand::StrokeRect {
+        x: panel.x,
+        y: panel.y,
+        width: panel.w,
+        height: panel.h,
+        color: style.border.color,
+        line_width: style.border.width,
+        corner_radii: style.radii,
+    });
+
+    for row in rows {
+        cmds.push(RenderCommand::Text {
+            x: row.rect.x + style.text_inset,
+            // Centred in the row rather than offset by a constant, so a larger
+            // font size does not drift the label towards the row's bottom edge.
+            y: row.rect.y + (row.rect.h - style.font_size).max(0.0) / 2.0,
+            text: row.label.to_string(),
+            color: style.foreground,
+            font_size: style.font_size,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some((row.rect.w - style.text_inset * 2.0).max(0.0)),
+        });
+    }
+
+    cmds
 }
 
 // ============================================================================
@@ -1753,7 +1878,11 @@ mod tests {
         pm.max_log_entries = 3;
         for i in 0..5 {
             pm.transition_to(
-                if i % 2 == 0 { PowerState::Dimmed } else { PowerState::Active },
+                if i % 2 == 0 {
+                    PowerState::Dimmed
+                } else {
+                    PowerState::Active
+                },
                 i as u64,
                 TransitionReason::UserActivity,
             );

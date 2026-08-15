@@ -20,6 +20,7 @@ pub mod hwquery;
 use guitk::color::Color;
 #[allow(unused_imports)]
 use guitk::event::{Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEventKind};
+use guitk::fold;
 #[allow(unused_imports)]
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
 #[allow(unused_imports)]
@@ -253,18 +254,82 @@ const TREE_ROOT_ITEMS: &[SysInfoCategory] = &[
 // Data structures for each category
 // ============================================================================
 
+/// Whether a row is structure the report wrote, or data the report is showing.
+///
+/// Both consumers of a [`Property`] need to know which, and before this
+/// existed both *guessed* -- from the strings, which is the one place the
+/// answer cannot be:
+///
+/// - [`SysInfoApp::export_text`] treated an empty value as "this row is a
+///   heading", and wrote its name at column 0, where the report's own
+///   `--- Display Outputs ---` headings live.
+/// - The detail-pane renderer treated a name beginning `---` as "this row is
+///   a heading", and drew it bold and in the accent colour.
+///
+/// Neither guess is answerable from a string, because the strings are not
+/// ours: they are environment variables, PCI vendor names and process names.
+/// An environment variable set to the empty string -- `FOO=`, which is legal
+/// and ordinary -- was enough to satisfy the first guess and print its own
+/// name as a section header of the system report. A variable named `---x`
+/// satisfied the second.
+///
+/// So the distinction is recorded at construction, by the code that knows the
+/// answer, rather than re-derived by each consumer from data that cannot
+/// carry it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PropertyKind {
+    /// A heading this report wrote for itself. May occupy column 0.
+    Heading,
+    /// Vertical space this report inserted between groups.
+    Blank,
+    /// A name/value pair derived from data. Always indented, never a heading.
+    Field,
+}
+
 /// A name-value property displayed in the detail pane.
 #[derive(Clone, Debug)]
 pub struct Property {
     pub name: String,
     pub value: String,
+    pub kind: PropertyKind,
 }
 
 impl Property {
+    /// A row derived from data.
+    ///
+    /// Both halves are folded to a single line. They may come from a PCI
+    /// descriptor, an environment variable or a process name, and a newline in
+    /// any of them would put that data on a line of its own in the text
+    /// export -- which is exactly where a heading would be. See
+    /// [`guitk::fold`].
     fn new(name: &str, value: &str) -> Self {
         Self {
-            name: name.to_string(),
-            value: value.to_string(),
+            name: fold::line(name),
+            value: fold::line(value),
+            kind: PropertyKind::Field,
+        }
+    }
+
+    /// A heading this report writes for itself.
+    ///
+    /// `text` carries its own `--- ... ---` decoration rather than having it
+    /// added here, because the two consumers decorate differently: the export
+    /// prints it literally and the detail pane draws it bold. Callers pass a
+    /// string literal, so there is nothing to fold.
+    fn heading(text: &str) -> Self {
+        Self {
+            name: text.to_string(),
+            value: String::new(),
+            kind: PropertyKind::Heading,
+        }
+    }
+
+    /// A blank separator row.
+    fn blank() -> Self {
+        Self {
+            name: String::new(),
+            value: String::new(),
+            kind: PropertyKind::Blank,
         }
     }
 }
@@ -853,16 +918,66 @@ impl SysInfoState {
 
     fn populate_processes() -> Vec<ProcessEntry> {
         vec![
-            ProcessEntry { pid: 1, name: "init".to_string(), memory_kb: 2048, cpu_percent: 0.0 },
-            ProcessEntry { pid: 2, name: "compositor".to_string(), memory_kb: 128000, cpu_percent: 3.2 },
-            ProcessEntry { pid: 5, name: "device-manager".to_string(), memory_kb: 45000, cpu_percent: 0.5 },
-            ProcessEntry { pid: 8, name: "network-manager".to_string(), memory_kb: 32000, cpu_percent: 0.1 },
-            ProcessEntry { pid: 12, name: "audio-mixer".to_string(), memory_kb: 24000, cpu_percent: 1.0 },
-            ProcessEntry { pid: 15, name: "window-manager".to_string(), memory_kb: 86000, cpu_percent: 2.4 },
-            ProcessEntry { pid: 20, name: "file-explorer".to_string(), memory_kb: 64000, cpu_percent: 0.8 },
-            ProcessEntry { pid: 25, name: "terminal".to_string(), memory_kb: 18000, cpu_percent: 0.2 },
-            ProcessEntry { pid: 30, name: "ssh-server".to_string(), memory_kb: 8000, cpu_percent: 0.0 },
-            ProcessEntry { pid: 42, name: "sysinfo".to_string(), memory_kb: 52000, cpu_percent: 1.5 },
+            ProcessEntry {
+                pid: 1,
+                name: "init".to_string(),
+                memory_kb: 2048,
+                cpu_percent: 0.0,
+            },
+            ProcessEntry {
+                pid: 2,
+                name: "compositor".to_string(),
+                memory_kb: 128000,
+                cpu_percent: 3.2,
+            },
+            ProcessEntry {
+                pid: 5,
+                name: "device-manager".to_string(),
+                memory_kb: 45000,
+                cpu_percent: 0.5,
+            },
+            ProcessEntry {
+                pid: 8,
+                name: "network-manager".to_string(),
+                memory_kb: 32000,
+                cpu_percent: 0.1,
+            },
+            ProcessEntry {
+                pid: 12,
+                name: "audio-mixer".to_string(),
+                memory_kb: 24000,
+                cpu_percent: 1.0,
+            },
+            ProcessEntry {
+                pid: 15,
+                name: "window-manager".to_string(),
+                memory_kb: 86000,
+                cpu_percent: 2.4,
+            },
+            ProcessEntry {
+                pid: 20,
+                name: "file-explorer".to_string(),
+                memory_kb: 64000,
+                cpu_percent: 0.8,
+            },
+            ProcessEntry {
+                pid: 25,
+                name: "terminal".to_string(),
+                memory_kb: 18000,
+                cpu_percent: 0.2,
+            },
+            ProcessEntry {
+                pid: 30,
+                name: "ssh-server".to_string(),
+                memory_kb: 8000,
+                cpu_percent: 0.0,
+            },
+            ProcessEntry {
+                pid: 42,
+                name: "sysinfo".to_string(),
+                memory_kb: 52000,
+                cpu_percent: 1.5,
+            },
         ]
     }
 
@@ -908,7 +1023,10 @@ impl SysInfoState {
 
     fn populate_env_vars() -> Vec<(String, String)> {
         vec![
-            ("PATH".to_string(), "/bin:/sbin:/usr/bin:/usr/local/bin".to_string()),
+            (
+                "PATH".to_string(),
+                "/bin:/sbin:/usr/bin:/usr/local/bin".to_string(),
+            ),
             ("HOME".to_string(), "/home/user".to_string()),
             ("SHELL".to_string(), "/bin/osh".to_string()),
             ("TERM".to_string(), "slateos-256color".to_string()),
@@ -921,28 +1039,96 @@ impl SysInfoState {
 
     fn populate_irqs() -> Vec<IrqInfo> {
         vec![
-            IrqInfo { irq_number: 0, device: "Timer".to_string(), irq_type: "Edge".to_string() },
-            IrqInfo { irq_number: 1, device: "Keyboard".to_string(), irq_type: "Edge".to_string() },
-            IrqInfo { irq_number: 8, device: "RTC".to_string(), irq_type: "Edge".to_string() },
-            IrqInfo { irq_number: 12, device: "Mouse".to_string(), irq_type: "Edge".to_string() },
-            IrqInfo { irq_number: 14, device: "NVMe SSD".to_string(), irq_type: "MSI-X".to_string() },
-            IrqInfo { irq_number: 16, device: "GPU".to_string(), irq_type: "MSI-X".to_string() },
-            IrqInfo { irq_number: 18, device: "Ethernet".to_string(), irq_type: "MSI".to_string() },
-            IrqInfo { irq_number: 19, device: "USB xHCI".to_string(), irq_type: "MSI".to_string() },
-            IrqInfo { irq_number: 22, device: "HD Audio".to_string(), irq_type: "MSI".to_string() },
+            IrqInfo {
+                irq_number: 0,
+                device: "Timer".to_string(),
+                irq_type: "Edge".to_string(),
+            },
+            IrqInfo {
+                irq_number: 1,
+                device: "Keyboard".to_string(),
+                irq_type: "Edge".to_string(),
+            },
+            IrqInfo {
+                irq_number: 8,
+                device: "RTC".to_string(),
+                irq_type: "Edge".to_string(),
+            },
+            IrqInfo {
+                irq_number: 12,
+                device: "Mouse".to_string(),
+                irq_type: "Edge".to_string(),
+            },
+            IrqInfo {
+                irq_number: 14,
+                device: "NVMe SSD".to_string(),
+                irq_type: "MSI-X".to_string(),
+            },
+            IrqInfo {
+                irq_number: 16,
+                device: "GPU".to_string(),
+                irq_type: "MSI-X".to_string(),
+            },
+            IrqInfo {
+                irq_number: 18,
+                device: "Ethernet".to_string(),
+                irq_type: "MSI".to_string(),
+            },
+            IrqInfo {
+                irq_number: 19,
+                device: "USB xHCI".to_string(),
+                irq_type: "MSI".to_string(),
+            },
+            IrqInfo {
+                irq_number: 22,
+                device: "HD Audio".to_string(),
+                irq_type: "MSI".to_string(),
+            },
         ]
     }
 
     fn populate_io_ports() -> Vec<IoPortInfo> {
         vec![
-            IoPortInfo { start: 0x0000, end: 0x001F, device: "DMA Controller".to_string() },
-            IoPortInfo { start: 0x0020, end: 0x0021, device: "PIC Master".to_string() },
-            IoPortInfo { start: 0x0040, end: 0x0043, device: "PIT Timer".to_string() },
-            IoPortInfo { start: 0x0060, end: 0x0064, device: "Keyboard Controller".to_string() },
-            IoPortInfo { start: 0x0070, end: 0x0071, device: "RTC/CMOS".to_string() },
-            IoPortInfo { start: 0x00A0, end: 0x00A1, device: "PIC Slave".to_string() },
-            IoPortInfo { start: 0x03F8, end: 0x03FF, device: "COM1 (Serial)".to_string() },
-            IoPortInfo { start: 0x0CF8, end: 0x0CFF, device: "PCI Configuration".to_string() },
+            IoPortInfo {
+                start: 0x0000,
+                end: 0x001F,
+                device: "DMA Controller".to_string(),
+            },
+            IoPortInfo {
+                start: 0x0020,
+                end: 0x0021,
+                device: "PIC Master".to_string(),
+            },
+            IoPortInfo {
+                start: 0x0040,
+                end: 0x0043,
+                device: "PIT Timer".to_string(),
+            },
+            IoPortInfo {
+                start: 0x0060,
+                end: 0x0064,
+                device: "Keyboard Controller".to_string(),
+            },
+            IoPortInfo {
+                start: 0x0070,
+                end: 0x0071,
+                device: "RTC/CMOS".to_string(),
+            },
+            IoPortInfo {
+                start: 0x00A0,
+                end: 0x00A1,
+                device: "PIC Slave".to_string(),
+            },
+            IoPortInfo {
+                start: 0x03F8,
+                end: 0x03FF,
+                device: "COM1 (Serial)".to_string(),
+            },
+            IoPortInfo {
+                start: 0x0CF8,
+                end: 0x0CFF,
+                device: "PCI Configuration".to_string(),
+            },
         ]
     }
 
@@ -989,10 +1175,26 @@ impl SysInfoState {
 
     fn populate_dma() -> Vec<DmaInfo> {
         vec![
-            DmaInfo { channel: 0, device: "Available".to_string(), mode: "N/A".to_string() },
-            DmaInfo { channel: 1, device: "Available".to_string(), mode: "N/A".to_string() },
-            DmaInfo { channel: 2, device: "Floppy (legacy)".to_string(), mode: "Single".to_string() },
-            DmaInfo { channel: 4, device: "Cascade".to_string(), mode: "Cascade".to_string() },
+            DmaInfo {
+                channel: 0,
+                device: "Available".to_string(),
+                mode: "N/A".to_string(),
+            },
+            DmaInfo {
+                channel: 1,
+                device: "Available".to_string(),
+                mode: "N/A".to_string(),
+            },
+            DmaInfo {
+                channel: 2,
+                device: "Floppy (legacy)".to_string(),
+                mode: "Single".to_string(),
+            },
+            DmaInfo {
+                channel: 4,
+                device: "Cascade".to_string(),
+                mode: "Cascade".to_string(),
+            },
         ]
     }
 
@@ -1118,10 +1320,27 @@ impl SysInfoState {
             Property::new("Kernel Version", "0.1.0-slateos"),
             Property::new("System Manufacturer", "SMBIOS: To Be Filled By O.E.M."),
             Property::new("Processor", &cpu.brand),
-            Property::new("Cores / Threads", &format!("{} / {}", cpu.physical_cores, cpu.logical_processors)),
+            Property::new(
+                "Cores / Threads",
+                &format!("{} / {}", cpu.physical_cores, cpu.logical_processors),
+            ),
             Property::new("Base Frequency", &format!("{} MHz", cpu.base_clock_mhz)),
-            Property::new("Total Physical Memory", &format!("{} MiB ({:.1} GiB)", mem.total_mb, mem.total_mb as f64 / 1024.0)),
-            Property::new("Available Physical Memory", &format!("{} MiB ({:.1} GiB)", mem.available_mb, mem.available_mb as f64 / 1024.0)),
+            Property::new(
+                "Total Physical Memory",
+                &format!(
+                    "{} MiB ({:.1} GiB)",
+                    mem.total_mb,
+                    mem.total_mb as f64 / 1024.0
+                ),
+            ),
+            Property::new(
+                "Available Physical Memory",
+                &format!(
+                    "{} MiB ({:.1} GiB)",
+                    mem.available_mb,
+                    mem.available_mb as f64 / 1024.0
+                ),
+            ),
             Property::new("Total Virtual Memory", "65536 MiB (64.0 GiB)"),
             Property::new("Page Size", "16 KiB"),
             Property::new("System Uptime", "4h 23m 17s"),
@@ -1142,13 +1361,19 @@ impl SysInfoState {
             Property::new("Logical Processors", &format!("{}", cpu.logical_processors)),
             Property::new("Base Clock", &format!("{} MHz", cpu.base_clock_mhz)),
             Property::new("Max Turbo Clock", &format!("{} MHz", cpu.max_turbo_mhz)),
-            Property::new("L1 Data Cache", &format!("{} KiB (per core)", cpu.l1_data_kb)),
-            Property::new("L1 Instruction Cache", &format!("{} KiB (per core)", cpu.l1_inst_kb)),
+            Property::new(
+                "L1 Data Cache",
+                &format!("{} KiB (per core)", cpu.l1_data_kb),
+            ),
+            Property::new(
+                "L1 Instruction Cache",
+                &format!("{} KiB (per core)", cpu.l1_inst_kb),
+            ),
             Property::new("L2 Cache", &format!("{} KiB (per core)", cpu.l2_kb)),
             Property::new("L3 Cache", &format!("{} KiB (shared)", cpu.l3_kb)),
             Property::new("Architecture", "x86_64"),
-            Property::new("", ""),
-            Property::new("--- CPU Features ---", ""),
+            Property::blank(),
+            Property::heading("--- CPU Features ---"),
         ];
         for (feature, supported) in &cpu.features {
             let mark = if *supported { "\u{2713}" } else { "\u{2717}" };
@@ -1160,16 +1385,33 @@ impl SysInfoState {
     fn props_memory(&self) -> Vec<Property> {
         let mem = &self.memory_info;
         let mut props = vec![
-            Property::new("Total Installed", &format!("{} MiB ({:.1} GiB)", mem.total_mb, mem.total_mb as f64 / 1024.0)),
-            Property::new("Available", &format!("{} MiB ({:.1} GiB)", mem.available_mb, mem.available_mb as f64 / 1024.0)),
+            Property::new(
+                "Total Installed",
+                &format!(
+                    "{} MiB ({:.1} GiB)",
+                    mem.total_mb,
+                    mem.total_mb as f64 / 1024.0
+                ),
+            ),
+            Property::new(
+                "Available",
+                &format!(
+                    "{} MiB ({:.1} GiB)",
+                    mem.available_mb,
+                    mem.available_mb as f64 / 1024.0
+                ),
+            ),
             Property::new("Memory Type", &mem.mem_type),
             Property::new("Speed", &format!("{} MHz", mem.speed_mhz)),
-            Property::new("Slots Used / Total", &format!("{} / {}", mem.slots_used, mem.slots_total)),
-            Property::new("", ""),
-            Property::new("--- Per-Slot Details ---", ""),
+            Property::new(
+                "Slots Used / Total",
+                &format!("{} / {}", mem.slots_used, mem.slots_total),
+            ),
+            Property::blank(),
+            Property::heading("--- Per-Slot Details ---"),
         ];
         for slot in &mem.slots {
-            props.push(Property::new("", ""));
+            props.push(Property::blank());
             props.push(Property::new("Slot", &slot.slot_name));
             props.push(Property::new("  Size", &format!("{} MiB", slot.size_mb)));
             props.push(Property::new("  Type", &slot.mem_type));
@@ -1183,19 +1425,25 @@ impl SysInfoState {
         let mut props = Vec::new();
         for (idx, disk) in self.disks.iter().enumerate() {
             if idx > 0 {
-                props.push(Property::new("", ""));
+                props.push(Property::blank());
             }
             props.push(Property::new(&format!("--- Disk {} ---", idx), ""));
             props.push(Property::new("Model", &disk.model));
-            props.push(Property::new("Capacity", &format!("{:.1} GB", disk.capacity_gb)));
+            props.push(Property::new(
+                "Capacity",
+                &format!("{:.1} GB", disk.capacity_gb),
+            ));
             props.push(Property::new("Interface", &disk.interface));
             props.push(Property::new("Serial", &disk.serial));
             props.push(Property::new("S.M.A.R.T. Status", &disk.smart_status));
             for part in &disk.partitions {
-                props.push(Property::new("", ""));
+                props.push(Property::blank());
                 props.push(Property::new("  Partition", &part.label));
                 props.push(Property::new("  Filesystem", &part.filesystem));
-                props.push(Property::new("  Capacity", &format!("{:.1} GB", part.capacity_gb)));
+                props.push(Property::new(
+                    "  Capacity",
+                    &format!("{:.1} GB", part.capacity_gb),
+                ));
                 props.push(Property::new("  Used", &format!("{:.1} GB", part.used_gb)));
                 props.push(Property::new("  Free", &format!("{:.1} GB", part.free_gb)));
                 props.push(Property::new("  Mount", &part.mount_point));
@@ -1209,15 +1457,22 @@ impl SysInfoState {
         let mut props = vec![
             Property::new("GPU Name", &d.gpu_name),
             Property::new("Vendor", &d.vendor),
-            Property::new("VRAM", &format!("{} MiB ({:.1} GiB)", d.vram_mb, d.vram_mb as f64 / 1024.0)),
+            Property::new(
+                "VRAM",
+                &format!("{} MiB ({:.1} GiB)", d.vram_mb, d.vram_mb as f64 / 1024.0),
+            ),
             Property::new("Resolution", &d.resolution),
             Property::new("Refresh Rate", &format!("{} Hz", d.refresh_rate_hz)),
             Property::new("Driver Version", &d.driver_version),
-            Property::new("", ""),
-            Property::new("--- Display Outputs ---", ""),
+            Property::blank(),
+            Property::heading("--- Display Outputs ---"),
         ];
         for (output, connected) in &d.outputs {
-            let status = if *connected { "Connected" } else { "Disconnected" };
+            let status = if *connected {
+                "Connected"
+            } else {
+                "Disconnected"
+            };
             props.push(Property::new(output, status));
         }
         props
@@ -1227,7 +1482,7 @@ impl SysInfoState {
         let mut props = Vec::new();
         for (idx, snd) in self.sound_devices.iter().enumerate() {
             if idx > 0 {
-                props.push(Property::new("", ""));
+                props.push(Property::blank());
             }
             props.push(Property::new("Name", &snd.name));
             props.push(Property::new("Type", &snd.device_type));
@@ -1241,7 +1496,7 @@ impl SysInfoState {
         let mut props = Vec::new();
         for (idx, adapter) in self.network_adapters.iter().enumerate() {
             if idx > 0 {
-                props.push(Property::new("", ""));
+                props.push(Property::blank());
             }
             props.push(Property::new(&format!("--- Adapter {} ---", idx), ""));
             props.push(Property::new("Name", &adapter.name));
@@ -1252,10 +1507,19 @@ impl SysInfoState {
             props.push(Property::new("Subnet Mask", &adapter.subnet));
             props.push(Property::new("Default Gateway", &adapter.gateway));
             props.push(Property::new("DNS Servers", &adapter.dns));
-            props.push(Property::new("Speed", &format!("{} Mbps", adapter.speed_mbps)));
+            props.push(Property::new(
+                "Speed",
+                &format!("{} Mbps", adapter.speed_mbps),
+            ));
             props.push(Property::new("Duplex", &adapter.duplex));
-            props.push(Property::new("Bytes Sent", &format_bytes(adapter.bytes_sent)));
-            props.push(Property::new("Bytes Received", &format_bytes(adapter.bytes_received)));
+            props.push(Property::new(
+                "Bytes Sent",
+                &format_bytes(adapter.bytes_sent),
+            ));
+            props.push(Property::new(
+                "Bytes Received",
+                &format_bytes(adapter.bytes_received),
+            ));
         }
         props
     }
@@ -1264,11 +1528,14 @@ impl SysInfoState {
         let mut props = Vec::new();
         for (idx, dev) in self.usb_devices.iter().enumerate() {
             if idx > 0 {
-                props.push(Property::new("", ""));
+                props.push(Property::blank());
             }
             props.push(Property::new("Port", &dev.port));
             props.push(Property::new("Description", &dev.description));
-            props.push(Property::new("Vendor:Product", &format!("{:04X}:{:04X}", dev.vendor_id, dev.product_id)));
+            props.push(Property::new(
+                "Vendor:Product",
+                &format!("{:04X}:{:04X}", dev.vendor_id, dev.product_id),
+            ));
             props.push(Property::new("Speed", &dev.speed));
         }
         props
@@ -1278,13 +1545,16 @@ impl SysInfoState {
         let mut props = Vec::new();
         for (idx, dev) in self.pci_devices.iter().enumerate() {
             if idx > 0 {
-                props.push(Property::new("", ""));
+                props.push(Property::blank());
             }
             props.push(Property::new(
                 "BDF",
                 &format!("{:02X}:{:02X}.{}", dev.bus, dev.device, dev.function),
             ));
-            props.push(Property::new("Vendor:Device", &format!("{:04X}:{:04X}", dev.vendor_id, dev.device_id)));
+            props.push(Property::new(
+                "Vendor:Device",
+                &format!("{:04X}:{:04X}", dev.vendor_id, dev.device_id),
+            ));
             props.push(Property::new("Vendor", &dev.vendor_name));
             props.push(Property::new("Class", &dev.class));
             props.push(Property::new("Description", &dev.description));
@@ -1314,7 +1584,10 @@ impl SysInfoState {
         for proc_entry in &self.processes {
             props.push(Property::new(
                 &format!("{:<5} {}", proc_entry.pid, proc_entry.name),
-                &format!("{} KiB / {:.1}%", proc_entry.memory_kb, proc_entry.cpu_percent),
+                &format!(
+                    "{} KiB / {:.1}%",
+                    proc_entry.memory_kb, proc_entry.cpu_percent
+                ),
             ));
         }
         props
@@ -1326,7 +1599,10 @@ impl SysInfoState {
             Property::new("---", "---"),
         ];
         for drv in &self.drivers {
-            props.push(Property::new(&drv.name, &format!("{} [{}]", drv.path, drv.status)));
+            props.push(Property::new(
+                &drv.name,
+                &format!("{} [{}]", drv.path, drv.status),
+            ));
         }
         props
     }
@@ -1341,7 +1617,10 @@ impl SysInfoState {
     fn props_startup(&self) -> Vec<Property> {
         let mut props = Vec::new();
         for entry in &self.startup_programs {
-            props.push(Property::new(&entry.name, &format!("{} ({})", entry.path, entry.source)));
+            props.push(Property::new(
+                &entry.name,
+                &format!("{} ({})", entry.path, entry.source),
+            ));
         }
         props
     }
@@ -1436,10 +1715,11 @@ impl SysInfoState {
         let rows = self.visible_tree_rows();
         if let Some(pos) = rows.iter().position(|c| *c == self.selected_category)
             && pos + 1 < rows.len()
-                && let Some(&next) = rows.get(pos + 1) {
-                    self.selected_category = next;
-                    self.detail_scroll = 0.0;
-                }
+            && let Some(&next) = rows.get(pos + 1)
+        {
+            self.selected_category = next;
+            self.detail_scroll = 0.0;
+        }
     }
 
     /// Select the previous visible tree row.
@@ -1447,10 +1727,11 @@ impl SysInfoState {
         let rows = self.visible_tree_rows();
         if let Some(pos) = rows.iter().position(|c| *c == self.selected_category)
             && pos > 0
-                && let Some(&prev) = rows.get(pos - 1) {
-                    self.selected_category = prev;
-                    self.detail_scroll = 0.0;
-                }
+            && let Some(&prev) = rows.get(pos - 1)
+        {
+            self.selected_category = prev;
+            self.detail_scroll = 0.0;
+        }
     }
 
     /// Expand the selected node (or select first child if already expanded).
@@ -1537,9 +1818,7 @@ impl SysInfoState {
                 _ => Vec::new(),
             };
             for prop in props {
-                if prop.name.to_lowercase().contains(&q)
-                    || prop.value.to_lowercase().contains(&q)
-                {
+                if prop.name.to_lowercase().contains(&q) || prop.value.to_lowercase().contains(&q) {
                     results.push((cat, prop));
                 }
             }
@@ -1597,13 +1876,17 @@ impl SysInfoState {
                 SysInfoCategory::HwDma => self.props_dma(),
                 _ => Vec::new(),
             };
+            // Column 0 belongs to the report. A `Field` is data, so it is
+            // always indented -- including when its value is empty, which is
+            // an ordinary thing for an environment variable to be and no
+            // longer means "this row is a heading".
             for prop in &props {
-                if prop.name.is_empty() && prop.value.is_empty() {
-                    out.push('\n');
-                } else if prop.value.is_empty() {
-                    out.push_str(&format!("{}\n", prop.name));
-                } else {
-                    out.push_str(&format!("  {}: {}\n", prop.name, prop.value));
+                match prop.kind {
+                    PropertyKind::Blank => out.push('\n'),
+                    PropertyKind::Heading => out.push_str(&format!("{}\n", prop.name)),
+                    PropertyKind::Field => {
+                        out.push_str(&format!("  {}: {}\n", prop.name, prop.value));
+                    }
                 }
             }
             out.push('\n');
@@ -1707,9 +1990,10 @@ impl SysInfoState {
                     self.selected_category = *cat;
                     // Expand parent if needed.
                     if let Some(parent) = cat.parent()
-                        && !self.expanded.contains(&parent) {
-                            self.expanded.push(parent);
-                        }
+                        && !self.expanded.contains(&parent)
+                    {
+                        self.expanded.push(parent);
+                    }
                     self.detail_scroll = 0.0;
                     self.status_message = format!("{} results found", results.len());
                 } else {
@@ -1723,9 +2007,10 @@ impl SysInfoState {
             }
             _ => {
                 if let Some(ch) = key.text
-                    && !ch.is_control() {
-                        self.search_text.push(ch);
-                    }
+                    && !ch.is_control()
+                {
+                    self.search_text.push(ch);
+                }
                 EventResult::Consumed
             }
         }
@@ -1797,7 +2082,13 @@ impl SysInfoState {
     }
 
     fn render_title_bar(&self, tree: &mut RenderTree) {
-        tree.fill_rect(0.0, 0.0, self.window_width, TITLE_BAR_HEIGHT, COLOR_TITLE_BG);
+        tree.fill_rect(
+            0.0,
+            0.0,
+            self.window_width,
+            TITLE_BAR_HEIGHT,
+            COLOR_TITLE_BG,
+        );
 
         // Title text.
         tree.push(RenderCommand::Text {
@@ -2089,12 +2380,22 @@ impl SysInfoState {
             }
 
             // Alternating row color.
-            let row_bg = if idx % 2 == 0 { COLOR_ROW_EVEN } else { COLOR_ROW_ODD };
+            let row_bg = if idx % 2 == 0 {
+                COLOR_ROW_EVEN
+            } else {
+                COLOR_ROW_ODD
+            };
             tree.fill_rect(left, row_y, width, PROPERTY_ROW_HEIGHT, row_bg);
 
-            // Section headers get different styling.
-            let is_section = prop.name.starts_with("---");
-            let name_color = if is_section { COLOR_PEACH } else { COLOR_SUBTEXT };
+            // Section headers get different styling. Asked of the row's kind,
+            // not of its text: a name beginning `---` is a heading only if we
+            // wrote it, and an environment variable may be called anything.
+            let is_section = prop.kind == PropertyKind::Heading;
+            let name_color = if is_section {
+                COLOR_PEACH
+            } else {
+                COLOR_SUBTEXT
+            };
             let value_color = if is_section { COLOR_PEACH } else { COLOR_TEXT };
 
             // Name.
@@ -2142,7 +2443,13 @@ impl SysInfoState {
 
     fn render_status_bar(&self, tree: &mut RenderTree) {
         let y = self.window_height - STATUS_BAR_HEIGHT;
-        tree.fill_rect(0.0, y, self.window_width, STATUS_BAR_HEIGHT, COLOR_STATUS_BG);
+        tree.fill_rect(
+            0.0,
+            y,
+            self.window_width,
+            STATUS_BAR_HEIGHT,
+            COLOR_STATUS_BG,
+        );
 
         // Top separator.
         tree.push(RenderCommand::Line {
@@ -2250,4 +2557,140 @@ fn main() {
     println!("\nExport report: {} bytes", report.len());
 
     println!("\nSystem Information Explorer ready.");
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every line of the export that sits at column 0 and is not blank.
+    ///
+    /// This is the set the report claims sole authorship of. The test below
+    /// asserts membership of it, rather than asserting on the *text* of any
+    /// particular line: a folded value may legitimately still contain the
+    /// characters `--- Display Outputs ---` in the middle of its own row, and
+    /// a `contains` assertion would fail against that correct output.
+    fn column_zero_lines(report: &str) -> Vec<&str> {
+        report
+            .lines()
+            .filter(|l| !l.is_empty() && !l.starts_with(' '))
+            .collect()
+    }
+
+    fn app_with_env(vars: &[(&str, &str)]) -> SysInfoState {
+        let mut app = SysInfoState::new();
+        app.env_vars = vars
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect();
+        app
+    }
+
+    #[test]
+    fn an_empty_environment_variable_is_not_a_section_heading() {
+        // The original bug, exactly. `FOO=` is legal and ordinary, and an
+        // empty value used to mean "print this name at column 0" -- so a
+        // variable named `--- Display Outputs ---` printed itself as one of
+        // the report's own headings, with no control characters involved.
+        let clean = SysInfoState::new().export_text();
+        let hostile = app_with_env(&[
+            ("--- Display Outputs ---", ""),
+            ("--- CPU Features ---", ""),
+            ("PATH", "/bin"),
+        ])
+        .export_text();
+
+        // Compared as a multiset, not a set. The forgeries above deliberately
+        // duplicate headings the clean report already contains, because that
+        // is the strongest form of the attack -- a forged heading that is
+        // *identical* to a real one cannot be told apart by its text. An
+        // assertion that merely asked "is this line one the clean report also
+        // produced?" would answer yes and pass, which is how the first draft
+        // of this test let the bug through.
+        let mut got = column_zero_lines(&hostile);
+        let mut want = column_zero_lines(&clean);
+        got.sort_unstable();
+        want.sort_unstable();
+        assert_eq!(
+            got, want,
+            "environment variables changed which lines occupy column 0",
+        );
+    }
+
+    #[test]
+    fn an_empty_environment_variable_is_still_reported() {
+        // Indenting it must not amount to hiding it.
+        let report = app_with_env(&[("EMPTY_VAR", "")]).export_text();
+        assert!(
+            report.contains("  EMPTY_VAR: \n"),
+            "an empty variable vanished from the report: {report:?}",
+        );
+    }
+
+    #[test]
+    fn a_newline_in_an_environment_variable_cannot_add_a_line() {
+        let hostile = app_with_env(&[
+            ("A", "one\n--- CPU Features ---"),
+            ("B\nC", "two"),
+            ("D", "three\r\nfour"),
+        ]);
+        let report = hostile.export_text();
+        let clean = app_with_env(&[("A", "one"), ("B", "two"), ("D", "three")]).export_text();
+        assert_eq!(
+            report.lines().count(),
+            clean.lines().count(),
+            "a hostile environment variable added lines to the report",
+        );
+    }
+
+    #[test]
+    fn a_property_derived_from_data_is_never_a_heading() {
+        for (name, value) in [("--- x ---", ""), ("", ""), ("plain", "v")] {
+            assert_eq!(
+                Property::new(name, value).kind,
+                PropertyKind::Field,
+                "Property::new({name:?}, {value:?}) claimed to be structure",
+            );
+        }
+        assert_eq!(Property::heading("--- x ---").kind, PropertyKind::Heading);
+        assert_eq!(Property::blank().kind, PropertyKind::Blank);
+    }
+
+    #[test]
+    fn a_data_property_is_folded_on_construction() {
+        let p = Property::new("a\nb", "c\r\nd");
+        assert_eq!(p.name, "a b");
+        assert_eq!(p.value, "c d");
+    }
+
+    #[test]
+    fn the_reports_own_headings_survive() {
+        // The fix must not cost the report the structure it legitimately has.
+        let report = SysInfoState::new().export_text();
+        let at_zero = column_zero_lines(&report);
+        assert!(
+            at_zero.contains(&"--- CPU Features ---"),
+            "the report lost its own sub-heading: {at_zero:?}",
+        );
+        assert!(
+            at_zero.contains(&"=== Slate OS System Information Report ==="),
+            "the report lost its title: {at_zero:?}",
+        );
+    }
+
+    #[test]
+    fn every_category_section_is_present_once() {
+        let report = SysInfoState::new().export_text();
+        for heading in ["--- CPU ---", "--- Memory ---", "--- PCI Devices ---"] {
+            assert_eq!(
+                report.lines().filter(|l| *l == heading).count(),
+                1,
+                "expected exactly one {heading}",
+            );
+        }
+    }
 }

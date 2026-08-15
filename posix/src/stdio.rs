@@ -154,12 +154,27 @@ impl FileSlot {
 
 static mut FILE_POOL: [FileSlot; MAX_OPEN_FILES] = [const { FileSlot::EMPTY }; MAX_OPEN_FILES];
 
+/// Serialises the scans of [`FILE_POOL`] in [`alloc_file`] and [`free_file`].
+///
+/// Plain `static` to match `FILE_POOL`'s own scope; see
+/// [`crate::perprocess::PoolLock`].
+static FILE_POOL_LOCK: crate::perprocess::PoolLock = crate::perprocess::PoolLock::new();
+
 /// Allocate a FILE from the static pool.
 ///
 /// Returns a raw pointer to an available FILE slot, or null if the pool
 /// is exhausted.
+///
+/// The scan runs under [`FILE_POOL_LOCK`], so two threads calling `fopen` at
+/// once cannot be handed the same `FILE *`.  Only the *claim* is covered:
+/// reads and writes through a `FILE *` the caller already owns stay
+/// unsynchronised, which is where POSIX's `flockfile`/`funlockfile` contract
+/// puts the obligation anyway.
 fn alloc_file(fd: i32, mode: u8) -> *mut File {
-    // SAFETY: Single-threaded access (no threads yet).
+    // SAFETY: `FILE_POOL_LOCK` is a `static`, so it outlives the guard.
+    let _guard = unsafe { crate::perprocess::lock_pool((&raw const FILE_POOL_LOCK).cast_mut()) };
+    // SAFETY: the guard is held, and every scan of `FILE_POOL` takes it, so
+    // this is the only live view of the table.
     unsafe {
         let pool = core::ptr::addr_of_mut!(FILE_POOL).cast::<FileSlot>();
         let mut i: usize = 0;
@@ -177,8 +192,14 @@ fn alloc_file(fd: i32, mode: u8) -> *mut File {
 }
 
 /// Return a FILE to the static pool.
+///
+/// Under the same lock as [`alloc_file`]: clearing `in_use` outside it would
+/// be a plain data race with a concurrent claim reading the flag, and could
+/// let the slot be reissued before this release became visible.
 fn free_file(file: *mut File) {
-    // SAFETY: Single-threaded access.
+    // SAFETY: `FILE_POOL_LOCK` is a `static`, so it outlives the guard.
+    let _guard = unsafe { crate::perprocess::lock_pool((&raw const FILE_POOL_LOCK).cast_mut()) };
+    // SAFETY: the guard is held, so this is the only live view of the table.
     unsafe {
         let pool = core::ptr::addr_of_mut!(FILE_POOL).cast::<FileSlot>();
         let mut i: usize = 0;
@@ -1677,13 +1698,13 @@ type PopenTable = [Option<PopenEntry>; MAX_POPEN];
 /// any concurrent popen test could free a slot or consume one.  See
 /// design-decisions.md §110.
 mod popen_store {
-    use super::{PopenTable, MAX_POPEN};
+    use super::{MAX_POPEN, PopenTable};
 
     const POPEN_INIT: PopenTable = [const { None }; MAX_POPEN];
 
     #[cfg(target_os = "none")]
     mod imp {
-        use super::{PopenTable, POPEN_INIT};
+        use super::{POPEN_INIT, PopenTable};
         static mut POPEN_TABLE: PopenTable = POPEN_INIT;
         pub(super) fn table() -> *mut PopenTable {
             &raw mut POPEN_TABLE
@@ -1692,7 +1713,7 @@ mod popen_store {
 
     #[cfg(not(target_os = "none"))]
     mod imp {
-        use super::{PopenTable, POPEN_INIT};
+        use super::{POPEN_INIT, PopenTable};
         use core::cell::UnsafeCell;
 
         std::thread_local! {
@@ -1716,12 +1737,28 @@ mod popen_store {
     pub(super) fn table() -> *mut PopenTable {
         imp::table()
     }
+
+    crate::perprocess::process_global! {
+        /// Serialises the scans of [`table`].
+        ///
+        /// Declared with the same `process_global!` shape as the table
+        /// itself, so the lock is exactly as widely shared as what it
+        /// guards on both builds — see [`crate::perprocess::PoolLock`].
+        pub(super) fn lock() -> crate::perprocess::PoolLock =
+            crate::perprocess::PoolLock::new();
+    }
 }
 
 /// Record a popen stream for later pclose.
+///
+/// The find-a-free-slot scan runs under [`popen_store::lock`], so two threads
+/// calling `popen` at once cannot write their entries over each other's.
 fn popen_register(stream: *mut u8, child_pid: i32) -> bool {
-    // SAFETY: non-null and aligned, and reachable only from this thread on
-    // host builds; no other reference to the table is live here.
+    // SAFETY: `popen_store::lock()` returns this process's (host: this
+    // thread's) lock, valid for as long as the storage is.
+    let _guard = unsafe { crate::perprocess::lock_pool(popen_store::lock()) };
+    // SAFETY: non-null and aligned, and the guard excludes every other scan
+    // of the table, so no other reference to it is live here.
     unsafe {
         let table = popen_store::table();
         for slot in &mut (*table) {
@@ -1735,17 +1772,24 @@ fn popen_register(stream: *mut u8, child_pid: i32) -> bool {
 }
 
 /// Look up and remove a popen stream, returning the child PID.
+///
+/// Under the same lock as [`popen_register`]: the search and the removal have
+/// to be one step, or two threads calling `pclose` on the same stream could
+/// both be handed the child pid and both wait for it.
 fn popen_unregister(stream: *mut u8) -> Option<i32> {
+    // SAFETY: as in `popen_register` above.
+    let _guard = unsafe { crate::perprocess::lock_pool(popen_store::lock()) };
     // SAFETY: as in `popen_register` above.
     unsafe {
         let table = popen_store::table();
         for slot in &mut (*table) {
             if let Some(entry) = slot
-                && core::ptr::eq(entry.stream, stream) {
-                    let pid = entry.child_pid;
-                    *slot = None;
-                    return Some(pid);
-                }
+                && core::ptr::eq(entry.stream, stream)
+            {
+                let pid = entry.child_pid;
+                *slot = None;
+                return Some(pid);
+            }
         }
     }
     None
@@ -2309,7 +2353,10 @@ mod tests {
         f.buf_pos = 64;
         __fpurge(core::ptr::addr_of_mut!(f).cast::<u8>());
         assert_eq!(f.fd, 42, "fd must be untouched");
-        assert_eq!(f.buf_mode, BUF_MODE_LINE, "buffering mode must be untouched");
+        assert_eq!(
+            f.buf_mode, BUF_MODE_LINE,
+            "buffering mode must be untouched"
+        );
     }
 
     #[test]

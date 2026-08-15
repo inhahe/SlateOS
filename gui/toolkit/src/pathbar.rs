@@ -54,8 +54,20 @@ const DROPDOWN_MAX_VISIBLE: usize = 8;
 const DROPDOWN_PADDING: f32 = 4.0;
 const CURSOR_WIDTH: f32 = 2.0;
 
-// Rough character width for a 14px monospace/proportional font.
-const CHAR_WIDTH: f32 = 8.0;
+/// Width of the first `bytes` bytes of `text`, in pixels.
+///
+/// A caret and a selection rectangle have to land exactly where the
+/// corresponding characters are drawn, so both are placed by measuring the text
+/// before them. This used to be `chars * 8.0`, which was right only because the
+/// compositor drew a fixed 8px cell and ignored `font_size` — now that it draws
+/// a real proportional face, an estimate puts the caret between letters.
+///
+/// An out-of-range or non-boundary `bytes` measures the whole string rather
+/// than panicking: the caller derives it from a cursor index, and a stale
+/// cursor should misplace the caret, not take down the UI.
+fn width_before(text: &str, bytes: usize) -> f32 {
+    crate::text::width(text.get(..bytes).unwrap_or(text), FONT_SIZE)
+}
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -306,14 +318,15 @@ impl PathBar {
     fn handle_key_breadcrumb(&mut self, event: &KeyEvent) -> EventResult {
         // Any printable character enters edit mode.
         if let Some(ch) = event.text
-            && !ch.is_control() {
-                self.enter_edit_mode();
-                // Insert the typed character.
-                self.edit_text.clear();
-                self.edit_text.push(ch);
-                self.cursor = self.edit_text.len();
-                return EventResult::Consumed;
-            }
+            && !ch.is_control()
+        {
+            self.enter_edit_mode();
+            // Insert the typed character.
+            self.edit_text.clear();
+            self.edit_text.push(ch);
+            self.cursor = self.edit_text.len();
+            return EventResult::Consumed;
+        }
         EventResult::Ignored
     }
 
@@ -384,14 +397,15 @@ impl PathBar {
             _ => {
                 // Insert character.
                 if let Some(ch) = event.text
-                    && !ch.is_control() {
-                        self.delete_selection();
-                        self.edit_text.insert(self.cursor, ch);
-                        self.cursor += ch.len_utf8();
-                        self.selection_anchor = None;
-                        self.on_text_changed();
-                        return EventResult::Consumed;
-                    }
+                    && !ch.is_control()
+                {
+                    self.delete_selection();
+                    self.edit_text.insert(self.cursor, ch);
+                    self.cursor += ch.len_utf8();
+                    self.selection_anchor = None;
+                    self.on_text_changed();
+                    return EventResult::Consumed;
+                }
                 EventResult::Ignored
             }
         }
@@ -639,7 +653,15 @@ impl PathBar {
                 // Click in dropdown?
                 // For now, position cursor based on x.
                 let text_x = BAR_PADDING;
-                let char_offset = ((x - text_x) / CHAR_WIDTH).max(0.0) as usize;
+                // Hit-tested against the drawn glyphs rather than a nominal
+                // cell, so a click lands on the character under the pointer
+                // instead of one several letters away.
+                let char_offset = crate::text::char_index_at(
+                    &self.edit_text,
+                    x - text_x,
+                    FONT_SIZE,
+                    FontWeightHint::Regular,
+                );
                 let new_cursor = char_to_byte_offset(&self.edit_text, char_offset);
                 self.cursor = new_cursor;
                 self.selection_anchor = None;
@@ -660,7 +682,7 @@ impl PathBar {
         let mut total_width = BAR_PADDING;
         let mut seg_widths: Vec<f32> = Vec::new();
         for seg in &self.segments {
-            let text_w = seg.len() as f32 * CHAR_WIDTH;
+            let text_w = crate::text::width(seg, FONT_SIZE);
             let seg_w = text_w + SEGMENT_PADDING_H * 2.0;
             seg_widths.push(seg_w);
             total_width += seg_w + SEGMENT_GAP + SEPARATOR_WIDTH;
@@ -696,7 +718,7 @@ impl PathBar {
         // Render overflow indicator.
         if overflow && first_visible > 0 {
             let ellipsis = "...";
-            let ew = ellipsis.len() as f32 * CHAR_WIDTH;
+            let ew = crate::text::width(ellipsis, FONT_SIZE);
             cmds.push(RenderCommand::FillRect {
                 x,
                 y: y_center - (FONT_SIZE + SEGMENT_PADDING_V * 2.0) / 2.0,
@@ -732,7 +754,7 @@ impl PathBar {
         // Render visible segments.
         for i in first_visible..self.segments.len() {
             let seg = &self.segments[i];
-            let text_w = seg.len() as f32 * CHAR_WIDTH;
+            let text_w = crate::text::width(seg, FONT_SIZE);
             let seg_w = text_w + SEGMENT_PADDING_H * 2.0;
             let seg_h = FONT_SIZE + SEGMENT_PADDING_V * 2.0;
             let seg_y = y_center - seg_h / 2.0;
@@ -802,21 +824,18 @@ impl PathBar {
         if let Some(anchor) = self.selection_anchor {
             let sel_start = self.cursor.min(anchor);
             let sel_end = self.cursor.max(anchor);
-            let start_chars = byte_to_char_offset(&self.edit_text, sel_start);
-            let end_chars = byte_to_char_offset(&self.edit_text, sel_end);
-            let sel_x = text_x + start_chars as f32 * CHAR_WIDTH;
-            let sel_w = (end_chars - start_chars) as f32 * CHAR_WIDTH;
+            // Both edges are measured so the highlight covers exactly the
+            // selected glyphs; a proportional face makes a char count useless
+            // here, since the same count spans a different width every time.
+            let sel_x = text_x + width_before(&self.edit_text, sel_start);
+            let sel_w =
+                width_before(&self.edit_text, sel_end) - width_before(&self.edit_text, sel_start);
             cmds.push(RenderCommand::FillRect {
                 x: sel_x,
                 y: text_y - 2.0,
                 width: sel_w,
                 height: FONT_SIZE + 4.0,
-                color: Color::rgba(
-                    COLOR_LAVENDER.r,
-                    COLOR_LAVENDER.g,
-                    COLOR_LAVENDER.b,
-                    60,
-                ),
+                color: Color::rgba(COLOR_LAVENDER.r, COLOR_LAVENDER.g, COLOR_LAVENDER.b, 60),
                 corner_radii: CornerRadii::all(2.0),
             });
         }
@@ -833,8 +852,7 @@ impl PathBar {
         });
 
         // Cursor.
-        let cursor_chars = byte_to_char_offset(&self.edit_text, self.cursor);
-        let cursor_x = text_x + cursor_chars as f32 * CHAR_WIDTH;
+        let cursor_x = text_x + width_before(&self.edit_text, self.cursor);
         cmds.push(RenderCommand::FillRect {
             x: cursor_x,
             y: text_y - 2.0,
@@ -852,8 +870,7 @@ impl PathBar {
 
     fn render_dropdown(&self, cmds: &mut Vec<RenderCommand>, width: f32, bar_height: f32) {
         let visible_count = self.completions.len().min(DROPDOWN_MAX_VISIBLE);
-        let dropdown_h =
-            visible_count as f32 * DROPDOWN_ITEM_HEIGHT + DROPDOWN_PADDING * 2.0;
+        let dropdown_h = visible_count as f32 * DROPDOWN_ITEM_HEIGHT + DROPDOWN_PADDING * 2.0;
         let dropdown_y = bar_height + 2.0;
         let dropdown_w = width;
 
@@ -1496,8 +1513,7 @@ mod tests {
 
     #[test]
     fn test_overflow_rendering() {
-        let mut bar =
-            PathBar::new("/very/long/path/with/many/segments/that/will/overflow");
+        let mut bar = PathBar::new("/very/long/path/with/many/segments/that/will/overflow");
         // Render at a narrow width to trigger overflow.
         let cmds = bar.render(150, 32);
 

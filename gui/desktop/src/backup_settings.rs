@@ -7,6 +7,7 @@
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand};
 use guitk::style::CornerRadii;
+use guitk::text;
 
 // ============================================================================
 // Catppuccin Mocha palette
@@ -165,7 +166,11 @@ pub enum BackupTarget {
     /// External/removable drive.
     ExternalDrive { label: String, path: String },
     /// Network share.
-    NetworkShare { host: String, share: String, path: String },
+    NetworkShare {
+        host: String,
+        share: String,
+        path: String,
+    },
 }
 
 impl BackupTarget {
@@ -522,9 +527,7 @@ impl BackupSettings {
     pub fn record_backup(&mut self, entry: BackupHistoryEntry) {
         if entry.status == BackupStatus::Success || entry.status == BackupStatus::PartialSuccess {
             self.last_backup_timestamp = Some(entry.timestamp);
-            self.total_backup_size = self
-                .total_backup_size
-                .saturating_add(entry.total_bytes);
+            self.total_backup_size = self.total_backup_size.saturating_add(entry.total_bytes);
         }
         self.history.push(entry);
         self.next_backup_id += 1;
@@ -689,7 +692,7 @@ impl BackupSettingsUI {
         let mut tab_x = x + 16.0;
         for tab in BackupSettingsTab::all() {
             let label = tab.label();
-            let tw = label.len() as f32 * 8.0 + 24.0;
+            let tw = text::padded_width_any_weight(label, 12.0, 13.0);
             let is_active = *tab == self.active_tab;
 
             if is_active {
@@ -752,7 +755,11 @@ impl BackupSettingsUI {
         let mut row_y = y;
 
         // Status card
-        let status_color = if self.settings.enabled { GREEN } else { OVERLAY0 };
+        let status_color = if self.settings.enabled {
+            GREEN
+        } else {
+            OVERLAY0
+        };
         cmds.push(RenderCommand::FillRect {
             x,
             y: row_y,
@@ -969,7 +976,11 @@ impl BackupSettingsUI {
             max_width: None,
         });
 
-        let toggle_bg = if self.settings.enabled { BLUE } else { SURFACE2 };
+        let toggle_bg = if self.settings.enabled {
+            BLUE
+        } else {
+            SURFACE2
+        };
         cmds.push(RenderCommand::FillRect {
             x: x + width - 56.0,
             y: row_y + 8.0,
@@ -1236,7 +1247,11 @@ impl BackupSettingsUI {
 
         // Source list
         for source in &self.settings.sources {
-            let bg = if source.enabled { SURFACE0 } else { Color::rgba(49, 50, 68, 128) };
+            let bg = if source.enabled {
+                SURFACE0
+            } else {
+                Color::rgba(49, 50, 68, 128)
+            };
 
             cmds.push(RenderCommand::FillRect {
                 x,
@@ -1344,7 +1359,11 @@ impl BackupSettingsUI {
         row_y += 28.0;
 
         for rule in &self.settings.exclude_rules {
-            let bg = if rule.enabled { SURFACE0 } else { Color::rgba(49, 50, 68, 128) };
+            let bg = if rule.enabled {
+                SURFACE0
+            } else {
+                Color::rgba(49, 50, 68, 128)
+            };
 
             cmds.push(RenderCommand::FillRect {
                 x,
@@ -1370,7 +1389,7 @@ impl BackupSettingsUI {
             cmds.push(RenderCommand::FillRect {
                 x: x + 56.0,
                 y: row_y + 8.0,
-                width: rule.pattern.len() as f32 * 7.0 + 16.0,
+                width: text::padded_width(&rule.pattern, 8.0, 11.0, FontWeightHint::Bold),
                 height: 20.0,
                 color: SURFACE1,
                 corner_radii: CornerRadii::all(3.0),
@@ -1461,11 +1480,7 @@ impl BackupSettingsUI {
                 cmds.push(RenderCommand::Text {
                     x: x + 24.0,
                     y: row_y + 4.0,
-                    text: format!(
-                        "{} — {}",
-                        entry.backup_type.label(),
-                        entry.status.label()
-                    ),
+                    text: format!("{} — {}", entry.backup_type.label(), entry.status.label()),
                     font_size: 13.0,
                     color: TEXT,
                     font_weight: FontWeightHint::Bold,

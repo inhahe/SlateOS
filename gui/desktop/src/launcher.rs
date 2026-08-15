@@ -32,6 +32,7 @@ use guitk::color::Color;
 use guitk::event::{Key, KeyEvent};
 use guitk::render::{FontWeightHint, RenderCommand};
 use guitk::style::CornerRadii;
+use guitk::text;
 
 // ============================================================================
 // Theme — Catppuccin Mocha palette
@@ -170,9 +171,9 @@ pub fn fuzzy_score(query: &str, target: &str) -> Option<u32> {
             }
 
             let at_boundary = ti == 0
-                || target_lower.get(ti.saturating_sub(1)).is_some_and(|&prev| {
-                    prev == ' ' || prev == '-' || prev == '_'
-                });
+                || target_lower
+                    .get(ti.saturating_sub(1))
+                    .is_some_and(|&prev| prev == ' ' || prev == '-' || prev == '_');
             if at_boundary {
                 score = score.saturating_add(10);
             }
@@ -463,8 +464,14 @@ impl LauncherState {
                 return LauncherAction::None;
             }
 
-            Key::Num1 | Key::Num2 | Key::Num3 | Key::Num4
-            | Key::Num5 | Key::Num6 | Key::Num7 | Key::Num8
+            Key::Num1
+            | Key::Num2
+            | Key::Num3
+            | Key::Num4
+            | Key::Num5
+            | Key::Num6
+            | Key::Num7
+            | Key::Num8
                 if event.modifiers.ctrl =>
             {
                 let idx = match event.key {
@@ -559,7 +566,8 @@ impl LauncherState {
             }
         }
 
-        self.results.sort_by_key(|s| core::cmp::Reverse(s.total_score));
+        self.results
+            .sort_by_key(|s| core::cmp::Reverse(s.total_score));
         self.results.truncate(MAX_RESULTS);
 
         if self.selected_index >= self.results.len() {
@@ -727,7 +735,11 @@ impl LauncherState {
                 x: text_x,
                 y: row_y + 8.0,
                 text: entry.name.clone(),
-                color: if is_selected { theme::TEXT } else { theme::SUBTEXT1 },
+                color: if is_selected {
+                    theme::TEXT
+                } else {
+                    theme::SUBTEXT1
+                },
                 font_size: NAME_FONT_SIZE,
                 font_weight: if is_selected {
                     FontWeightHint::Bold
@@ -750,7 +762,8 @@ impl LauncherState {
 
             // Category badge
             let badge_text = entry.category.label();
-            let badge_width = badge_text.len() as f32 * DESC_FONT_SIZE * 0.6 + 12.0;
+            let badge_width =
+                text::padded_width(badge_text, 6.0, DESC_FONT_SIZE, FontWeightHint::Regular);
             let badge_x = input_width - badge_width - 8.0;
             let badge_y = row_y + (ROW_HEIGHT - 20.0) / 2.0;
 
@@ -803,13 +816,25 @@ impl LauncherState {
 // Built-in app database
 // ============================================================================
 
-fn builtin_app_database() -> Vec<AppEntry> {
+/// The applications this desktop knows how to start.
+///
+/// Public because the launcher is not the only front end onto it: the shell's
+/// start menu offers the same programs, and a second hand-written list there
+/// would be free to drift away from this one — as it had, listing a "System
+/// Monitor" that no entry here has ever provided.
+#[must_use]
+pub fn builtin_app_database() -> Vec<AppEntry> {
     vec![
         AppEntry {
             name: "Terminal".to_string(),
             description: "Command-line terminal emulator".to_string(),
             executable_path: "/usr/bin/terminal".to_string(),
-            keywords: vec!["shell".into(), "console".into(), "bash".into(), "cli".into()],
+            keywords: vec![
+                "shell".into(),
+                "console".into(),
+                "bash".into(),
+                "cli".into(),
+            ],
             category: Category::Application,
             launch_count: 0,
         },
@@ -817,7 +842,12 @@ fn builtin_app_database() -> Vec<AppEntry> {
             name: "Text Editor".to_string(),
             description: "Plain text and code editor".to_string(),
             executable_path: "/usr/bin/editor".to_string(),
-            keywords: vec!["edit".into(), "code".into(), "write".into(), "notepad".into()],
+            keywords: vec![
+                "edit".into(),
+                "code".into(),
+                "write".into(),
+                "notepad".into(),
+            ],
             category: Category::Application,
             launch_count: 0,
         },
@@ -825,7 +855,12 @@ fn builtin_app_database() -> Vec<AppEntry> {
             name: "File Explorer".to_string(),
             description: "Browse and manage files".to_string(),
             executable_path: "/usr/bin/explorer".to_string(),
-            keywords: vec!["files".into(), "browse".into(), "folder".into(), "directory".into()],
+            keywords: vec![
+                "files".into(),
+                "browse".into(),
+                "folder".into(),
+                "directory".into(),
+            ],
             category: Category::Application,
             launch_count: 0,
         },
@@ -849,7 +884,12 @@ fn builtin_app_database() -> Vec<AppEntry> {
             name: "System Info".to_string(),
             description: "Hardware and OS information".to_string(),
             executable_path: "/usr/bin/sysinfo".to_string(),
-            keywords: vec!["hardware".into(), "info".into(), "about".into(), "specs".into()],
+            keywords: vec![
+                "hardware".into(),
+                "info".into(),
+                "about".into(),
+                "specs".into(),
+            ],
             category: Category::Application,
             launch_count: 0,
         },
@@ -857,7 +897,12 @@ fn builtin_app_database() -> Vec<AppEntry> {
             name: "Process Explorer".to_string(),
             description: "View and manage running processes".to_string(),
             executable_path: "/usr/bin/procexplorer".to_string(),
-            keywords: vec!["task".into(), "manager".into(), "processes".into(), "kill".into()],
+            keywords: vec![
+                "task".into(),
+                "manager".into(),
+                "processes".into(),
+                "kill".into(),
+            ],
             category: Category::Application,
             launch_count: 0,
         },
@@ -865,7 +910,13 @@ fn builtin_app_database() -> Vec<AppEntry> {
             name: "Image Viewer".to_string(),
             description: "View images and photos".to_string(),
             executable_path: "/usr/bin/imageviewer".to_string(),
-            keywords: vec!["photo".into(), "picture".into(), "gallery".into(), "png".into(), "jpg".into()],
+            keywords: vec![
+                "photo".into(),
+                "picture".into(),
+                "gallery".into(),
+                "png".into(),
+                "jpg".into(),
+            ],
             category: Category::Application,
             launch_count: 0,
         },
@@ -881,7 +932,12 @@ fn builtin_app_database() -> Vec<AppEntry> {
             name: "Screenshot".to_string(),
             description: "Capture screen area or window".to_string(),
             executable_path: "/usr/bin/screenshot".to_string(),
-            keywords: vec!["capture".into(), "snip".into(), "screen".into(), "grab".into()],
+            keywords: vec![
+                "capture".into(),
+                "snip".into(),
+                "screen".into(),
+                "grab".into(),
+            ],
             category: Category::Application,
             launch_count: 0,
         },
@@ -929,7 +985,12 @@ fn builtin_app_database() -> Vec<AppEntry> {
             name: "Display Settings".to_string(),
             description: "Resolution, scaling, and monitors".to_string(),
             executable_path: "/usr/bin/settings --display".to_string(),
-            keywords: vec!["monitor".into(), "resolution".into(), "screen".into(), "dpi".into()],
+            keywords: vec![
+                "monitor".into(),
+                "resolution".into(),
+                "screen".into(),
+                "dpi".into(),
+            ],
             category: Category::Setting,
             launch_count: 0,
         },
@@ -937,7 +998,12 @@ fn builtin_app_database() -> Vec<AppEntry> {
             name: "Network Settings".to_string(),
             description: "Wi-Fi, Ethernet, and VPN configuration".to_string(),
             executable_path: "/usr/bin/settings --network".to_string(),
-            keywords: vec!["wifi".into(), "ethernet".into(), "vpn".into(), "internet".into()],
+            keywords: vec![
+                "wifi".into(),
+                "ethernet".into(),
+                "vpn".into(),
+                "internet".into(),
+            ],
             category: Category::Setting,
             launch_count: 0,
         },
@@ -945,7 +1011,12 @@ fn builtin_app_database() -> Vec<AppEntry> {
             name: "Sound Settings".to_string(),
             description: "Audio input/output and volume".to_string(),
             executable_path: "/usr/bin/settings --sound".to_string(),
-            keywords: vec!["audio".into(), "volume".into(), "speaker".into(), "microphone".into()],
+            keywords: vec![
+                "audio".into(),
+                "volume".into(),
+                "speaker".into(),
+                "microphone".into(),
+            ],
             category: Category::Setting,
             launch_count: 0,
         },

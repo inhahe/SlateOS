@@ -38,6 +38,7 @@
 use guitk::Color;
 use guitk::render::{FontWeightHint, RenderCommand};
 use guitk::style::CornerRadii;
+use guitk::text;
 
 // ============================================================================
 // Catppuccin Mocha theme
@@ -71,8 +72,9 @@ const SIDEBAR_WIDTH: f32 = 220.0;
 const TOOLBAR_HEIGHT: f32 = 44.0;
 const PADDING: f32 = 10.0;
 const LINE_HEIGHT: f32 = 20.0;
-const CHAR_WIDTH: f32 = 8.0;
 const SMALL_TEXT: f32 = 12.0;
+/// Font size of the category badge on a library row.
+const BADGE_TEXT: f32 = 10.0;
 const NORMAL_TEXT: f32 = 14.0;
 const HEADER_TEXT: f32 = 16.0;
 const TITLE_TEXT: f32 = 18.0;
@@ -1728,8 +1730,15 @@ impl App {
         let mut tab_x = 170.0;
         for tab in &tabs {
             let label = tab.label();
-            let w = (label.len() as f32) * CHAR_WIDTH + 20.0;
             let active = *tab == self.active_tab;
+            // The active tab is drawn bold, so measure it bold — otherwise the
+            // one tab the user is looking at is the one that overflows.
+            let tab_weight = if active {
+                FontWeightHint::Bold
+            } else {
+                FontWeightHint::Regular
+            };
+            let w = text::measure(label, NORMAL_TEXT, tab_weight) + 20.0;
 
             if active {
                 cmds.push(RenderCommand::FillRect {
@@ -1748,11 +1757,7 @@ impl App {
                 text: label.into(),
                 font_size: NORMAL_TEXT,
                 color: if active { BLUE } else { SUBTEXT0 },
-                font_weight: if active {
-                    FontWeightHint::Bold
-                } else {
-                    FontWeightHint::Regular
-                },
+                font_weight: tab_weight,
                 max_width: Some(w),
             });
 
@@ -1950,7 +1955,13 @@ impl App {
         cmds.push(RenderCommand::Text {
             x: input_x + 8.0,
             y: y + 10.0,
-            text: truncate_display(display, ((input_width - 16.0) / CHAR_WIDTH) as usize),
+            text: text::elide(
+                display,
+                input_width - 16.0,
+                "...",
+                NORMAL_TEXT,
+                FontWeightHint::Regular,
+            ),
             font_size: NORMAL_TEXT,
             color: text_color,
             font_weight: FontWeightHint::Regular,
@@ -1959,7 +1970,19 @@ impl App {
 
         // Cursor
         if focused {
-            let cursor_x = input_x + 8.0 + (value.len().min(60) as f32) * CHAR_WIDTH;
+            // The caret belongs at the end of the text as drawn. Capping a
+            // *byte* count at 60 and multiplying by a nominal cell put it
+            // somewhere in the middle of a non-ASCII value, and past the right
+            // edge of the box for anything longer than the box.
+            let drawn = text::elide(
+                value,
+                input_width - 16.0,
+                "...",
+                NORMAL_TEXT,
+                FontWeightHint::Regular,
+            );
+            let cursor_x =
+                input_x + 8.0 + text::measure(&drawn, NORMAL_TEXT, FontWeightHint::Regular);
             cmds.push(RenderCommand::FillRect {
                 x: cursor_x,
                 y: y + 6.0,
@@ -2040,7 +2063,7 @@ impl App {
         let max_visible = ((body_height - 10.0) / LINE_HEIGHT) as usize;
         let scroll = (self.scroll_offset / LINE_HEIGHT) as usize;
 
-        let chars_per_line = ((width - 60.0) / CHAR_WIDTH) as usize;
+        let text_width = width - 50.0;
         let mut char_offset = 0usize;
 
         for (li, line) in lines.iter().enumerate().skip(scroll).take(max_visible) {
@@ -2068,8 +2091,17 @@ impl App {
                 }
                 let hl_start = m.start.max(line_start).saturating_sub(line_start);
                 let hl_end = m.end.min(line_end).saturating_sub(line_start);
-                let hl_x = x + 40.0 + (hl_start as f32) * CHAR_WIDTH;
-                let hl_w = ((hl_end.saturating_sub(hl_start)) as f32) * CHAR_WIDTH;
+                // The highlight has to cover exactly the substring drawn
+                // beneath it, so it is measured from the same text rather
+                // than counted off a nominal cell: `hl_start`/`hl_end` are
+                // byte offsets, and multiplying those by a cell width slid
+                // the band right by one cell per extra byte.
+                let before = line.get(..hl_start).unwrap_or("");
+                let matched = line.get(hl_start..hl_end).unwrap_or("");
+                let hl_x = x
+                    + 40.0
+                    + text::measure(before, NORMAL_TEXT, FontWeightHint::Regular);
+                let hl_w = text::measure(matched, NORMAL_TEXT, FontWeightHint::Regular);
 
                 cmds.push(RenderCommand::FillRect {
                     x: hl_x,
@@ -2082,7 +2114,8 @@ impl App {
             }
 
             // Line text
-            let display_line = truncate_display(line, chars_per_line);
+            let display_line =
+                text::elide(line, text_width, "...", NORMAL_TEXT, FontWeightHint::Regular);
             cmds.push(RenderCommand::Text {
                 x: x + 40.0,
                 y: ly,
@@ -2130,7 +2163,7 @@ impl App {
         let tab_labels = ["Matches", "Groups", "Explain"];
         let mut tx = x + 4.0;
         for (ti, label) in tab_labels.iter().enumerate() {
-            let tw = (label.len() as f32) * CHAR_WIDTH + 16.0;
+            let tw = text::width(label, SMALL_TEXT) + 16.0;
             let selected = ti == 0; // Simplified: always show matches
 
             if selected {
@@ -2341,7 +2374,7 @@ impl App {
         let mut cat_x = PADDING;
         for cat in &categories {
             let label = cat.map_or("All", PatternCategory::label);
-            let w = (label.len() as f32) * CHAR_WIDTH + 16.0;
+            let w = text::width(label, SMALL_TEXT) + 16.0;
             let selected = self.library_category_filter == *cat;
 
             cmds.push(RenderCommand::FillRect {
@@ -2401,7 +2434,7 @@ impl App {
 
             // Category badge
             let cat_label = entry.category.label();
-            let badge_w = (cat_label.len() as f32) * 7.0 + 12.0;
+            let badge_w = text::measure(cat_label, BADGE_TEXT, FontWeightHint::Bold) + 12.0;
             cmds.push(RenderCommand::FillRect {
                 x: PADDING + 8.0,
                 y: row_y + 6.0,
@@ -2414,7 +2447,7 @@ impl App {
                 x: PADDING + 14.0,
                 y: row_y + 9.0,
                 text: cat_label.into(),
-                font_size: 10.0,
+                font_size: BADGE_TEXT,
                 color: CRUST,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(badge_w),
@@ -2435,7 +2468,13 @@ impl App {
             cmds.push(RenderCommand::Text {
                 x: PADDING + 8.0,
                 y: row_y + 30.0,
-                text: truncate_display(&entry.pattern, 80),
+                text: text::elide(
+                    &entry.pattern,
+                    WINDOW_WIDTH - 40.0,
+                    "...",
+                    SMALL_TEXT,
+                    FontWeightHint::Regular,
+                ),
                 font_size: SMALL_TEXT,
                 color: SKY,
                 font_weight: FontWeightHint::Regular,
@@ -2635,15 +2674,6 @@ impl App {
                 max_width: Some(col_width - 28.0),
             });
         }
-    }
-}
-
-fn truncate_display(s: &str, max_chars: usize) -> String {
-    if s.len() <= max_chars {
-        s.into()
-    } else {
-        let truncated: String = s.chars().take(max_chars.saturating_sub(3)).collect();
-        format!("{truncated}...")
     }
 }
 
@@ -3341,16 +3371,57 @@ mod tests {
 
     // --- Utility tests ---
 
+    /// Truncation is by measured width now, not by a character budget derived
+    /// from a nominal cell. The old helper compared `s.len()` — bytes —
+    /// against that budget, so an accented pattern was cut short even when it
+    /// fitted, and a wide one still overflowed.
     #[test]
-    fn test_truncate_display_short() {
-        assert_eq!(truncate_display("hello", 10), "hello");
+    fn elided_text_fits_the_box_it_is_drawn_in() {
+        let box_w = 90.0;
+        for s in [
+            "hello",
+            "hello world this is a long line of text",
+            "éééééééééééé",
+        ] {
+            let out = text::elide(s, box_w, "...", NORMAL_TEXT, FontWeightHint::Regular);
+            let w = text::measure(&out, NORMAL_TEXT, FontWeightHint::Regular);
+            assert!(w <= box_w + 0.01, "{out:?} is {w} px in a {box_w} px box");
+        }
     }
 
+    /// Text that already fits is passed through untouched.
     #[test]
-    fn test_truncate_display_long() {
-        let result = truncate_display("hello world this is long", 10);
-        assert!(result.ends_with("..."));
-        assert!(result.len() <= 10);
+    fn text_that_fits_is_not_elided() {
+        let out = text::elide("hi", 500.0, "...", NORMAL_TEXT, FontWeightHint::Regular);
+        assert_eq!(out, "hi");
+    }
+
+    /// A match highlight has to sit exactly over the substring it marks. The
+    /// offsets are bytes, so an accent before the match used to slide the band
+    /// one cell right per extra byte.
+    #[test]
+    fn match_highlight_lines_up_with_the_match() {
+        let line = "éé needle tail";
+        let start = line.find("needle").expect("literal is present");
+        let end = start + "needle".len();
+        let upto = |b: usize| {
+            text::measure(
+                line.get(..b).expect("byte offset is on a boundary"),
+                NORMAL_TEXT,
+                FontWeightHint::Regular,
+            )
+        };
+        let hl_x = upto(start);
+        let hl_w = upto(end) - hl_x;
+        assert!(hl_w > 0.0, "the band has no width");
+        assert!(
+            hl_x > 0.0,
+            "two accents before the match must push the band right of zero"
+        );
+        assert!(
+            (hl_x + hl_w - upto(end)).abs() < 0.01,
+            "the band does not end where the match does"
+        );
     }
 
     #[test]

@@ -14,11 +14,14 @@
 #[allow(unused_imports)]
 use guitk::color::Color;
 #[allow(unused_imports)]
-use guitk::event::{Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
+use guitk::event::{
+    Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 #[allow(unused_imports)]
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
+use guitk::text;
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -127,7 +130,10 @@ impl CellAddr {
         if row_num == 0 || row_num > MAX_ROWS {
             return None;
         }
-        Some(Self { col, row: row_num - 1 })
+        Some(Self {
+            col,
+            row: row_num - 1,
+        })
     }
 }
 
@@ -136,8 +142,7 @@ impl CellAddr {
 // ============================================================================
 
 /// The type of data stored in a cell.
-#[derive(Clone, Debug, PartialEq)]
-#[derive(Default)]
+#[derive(Clone, Debug, PartialEq, Default)]
 pub enum CellValue {
     /// No data.
     #[default]
@@ -159,7 +164,13 @@ impl CellValue {
             Self::Empty => String::new(),
             Self::Text(s) => s.clone(),
             Self::Number(n) => format.format_number(*n),
-            Self::Boolean(b) => if *b { "TRUE".to_string() } else { "FALSE".to_string() },
+            Self::Boolean(b) => {
+                if *b {
+                    "TRUE".to_string()
+                } else {
+                    "FALSE".to_string()
+                }
+            }
             Self::Error(e) => e.display().to_string(),
         }
     }
@@ -179,7 +190,6 @@ impl CellValue {
         matches!(self, Self::Empty)
     }
 }
-
 
 /// Cell error types.
 #[derive(Clone, Debug, PartialEq)]
@@ -211,8 +221,7 @@ impl CellError {
 // ============================================================================
 
 /// How to format numeric values in a cell.
-#[derive(Clone, Debug, PartialEq)]
-#[derive(Default)]
+#[derive(Clone, Debug, PartialEq, Default)]
 pub enum NumberFormat {
     /// General — display as-is.
     #[default]
@@ -253,7 +262,6 @@ impl NumberFormat {
     }
 }
 
-
 // ============================================================================
 // Text alignment
 // ============================================================================
@@ -283,7 +291,12 @@ pub struct CellBorders {
 impl CellBorders {
     /// Create borders on all sides.
     pub fn all() -> Self {
-        Self { top: true, bottom: true, left: true, right: true }
+        Self {
+            top: true,
+            bottom: true,
+            left: true,
+            right: true,
+        }
     }
 
     /// No borders.
@@ -390,13 +403,18 @@ impl CellRange {
 
     /// Create a single-cell range.
     pub fn single(addr: CellAddr) -> Self {
-        Self { start: addr, end: addr }
+        Self {
+            start: addr,
+            end: addr,
+        }
     }
 
     /// Check if a cell address is within this range.
     pub fn contains(&self, addr: CellAddr) -> bool {
-        addr.col >= self.start.col && addr.col <= self.end.col
-            && addr.row >= self.start.row && addr.row <= self.end.row
+        addr.col >= self.start.col
+            && addr.col <= self.end.col
+            && addr.row >= self.start.row
+            && addr.row <= self.end.row
     }
 
     /// Number of columns in this range.
@@ -498,7 +516,10 @@ impl Selection {
 
     /// Get the primary (first) selected range.
     pub fn primary_range(&self) -> CellRange {
-        self.ranges.first().copied().unwrap_or_else(|| CellRange::single(self.active))
+        self.ranges
+            .first()
+            .copied()
+            .unwrap_or_else(|| CellRange::single(self.active))
     }
 
     /// Collect all numeric values in the selection from a given sheet.
@@ -507,9 +528,10 @@ impl Selection {
         for range in &self.ranges {
             for addr in range.iter() {
                 if let Some(cell) = sheet.cells.get(&addr)
-                    && let Some(n) = cell.value.as_number() {
-                        vals.push(n);
-                    }
+                    && let Some(n) = cell.value.as_number()
+                {
+                    vals.push(n);
+                }
             }
         }
         vals
@@ -732,19 +754,29 @@ impl Sheet {
     pub fn row_y_offset(&self, row: usize) -> f32 {
         let mut y = 0.0;
         for r in 0..row.min(MAX_ROWS) {
-            y += self.row_heights.get(r).copied().unwrap_or(DEFAULT_ROW_HEIGHT);
+            y += self
+                .row_heights
+                .get(r)
+                .copied()
+                .unwrap_or(DEFAULT_ROW_HEIGHT);
         }
         y
     }
 
     /// Get column width.
     pub fn col_width(&self, col: usize) -> f32 {
-        self.col_widths.get(col).copied().unwrap_or(DEFAULT_COL_WIDTH)
+        self.col_widths
+            .get(col)
+            .copied()
+            .unwrap_or(DEFAULT_COL_WIDTH)
     }
 
     /// Get row height.
     pub fn row_height(&self, row: usize) -> f32 {
-        self.row_heights.get(row).copied().unwrap_or(DEFAULT_ROW_HEIGHT)
+        self.row_heights
+            .get(row)
+            .copied()
+            .unwrap_or(DEFAULT_ROW_HEIGHT)
     }
 
     /// Find which column a given X position falls in.
@@ -772,7 +804,13 @@ impl Sheet {
     }
 
     /// Sort rows by a given column within a range.
-    pub fn sort_by_column(&mut self, col: usize, start_row: usize, end_row: usize, ascending: bool) -> Vec<(CellAddr, Cell, Cell)> {
+    pub fn sort_by_column(
+        &mut self,
+        col: usize,
+        start_row: usize,
+        end_row: usize,
+        ascending: bool,
+    ) -> Vec<(CellAddr, Cell, Cell)> {
         if start_row >= end_row || end_row >= MAX_ROWS {
             return Vec::new();
         }
@@ -795,25 +833,37 @@ impl Sheet {
                 (None, Some(_)) => std::cmp::Ordering::Greater,
                 (None, None) => a.2.cmp(&b.2),
             };
-            if ascending { ordering } else { ordering.reverse() }
+            if ascending {
+                ordering
+            } else {
+                ordering.reverse()
+            }
         });
 
         let sorted_indices: Vec<usize> = rows.iter().map(|(r, _, _)| *r).collect();
         let mut changes = Vec::new();
 
         // Collect all row data before making changes
-        let all_row_data: Vec<Vec<(CellAddr, Cell)>> = sorted_indices.iter().map(|&src_row| {
-            (0..MAX_COLS).map(|c| {
-                let addr = CellAddr::new(c, src_row);
-                (addr, self.get_cell(addr))
-            }).collect()
-        }).collect();
+        let all_row_data: Vec<Vec<(CellAddr, Cell)>> = sorted_indices
+            .iter()
+            .map(|&src_row| {
+                (0..MAX_COLS)
+                    .map(|c| {
+                        let addr = CellAddr::new(c, src_row);
+                        (addr, self.get_cell(addr))
+                    })
+                    .collect()
+            })
+            .collect();
 
         // Apply sorted data
         for (dest_offset, row_data) in all_row_data.iter().enumerate() {
             let dest_row = start_row + dest_offset;
             for (_, src_cell) in row_data {
-                let col_idx = row_data.iter().position(|(_, c)| std::ptr::eq(c, src_cell)).unwrap_or(0);
+                let col_idx = row_data
+                    .iter()
+                    .position(|(_, c)| std::ptr::eq(c, src_cell))
+                    .unwrap_or(0);
                 let dest_addr = CellAddr::new(col_idx, dest_row);
                 let old = self.get_cell(dest_addr);
                 if *src_cell != old {
@@ -838,14 +888,10 @@ impl Sheet {
                     result.push(',');
                 }
                 let cell = self.get_cell(CellAddr::new(c, r));
-                let text = cell.display_text();
-                if text.contains(',') || text.contains('"') || text.contains('\n') {
-                    result.push('"');
-                    result.push_str(&text.replace('"', "\"\""));
-                    result.push('"');
-                } else {
-                    result.push_str(&text);
-                }
+                // The hand-rolled trigger set this replaces omitted `\r`.
+                // RFC 4180 records are CRLF-terminated, so a bare CR left in
+                // an unquoted field splits the record for most readers.
+                result.push_str(&guitk::csv::field(&cell.display_text()));
             }
             result.push('\n');
         }
@@ -855,17 +901,20 @@ impl Sheet {
     /// Import CSV data into the sheet, returning batch changes for undo.
     pub fn import_csv(&mut self, csv: &str) -> Vec<(CellAddr, Cell, Cell)> {
         let mut changes = Vec::new();
-        for (row_idx, line) in csv.lines().enumerate() {
+        // Record-oriented, not line-oriented: a quoted cell may contain a
+        // newline, and splitting on `\n` first tore such a cell in half and
+        // dropped the rest of its row -- so the sheet could not read back its
+        // own export.
+        for (row_idx, record) in guitk::csv::parse_records(csv).into_iter().enumerate() {
             if row_idx >= MAX_ROWS {
                 break;
             }
-            let fields = parse_csv_line(line);
-            for (col_idx, field) in fields.into_iter().enumerate() {
+            for (col_idx, field) in record.into_iter().enumerate() {
                 if col_idx >= MAX_COLS {
                     break;
                 }
                 let addr = CellAddr::new(col_idx, row_idx);
-                let old = self.set_cell_input(addr, &field);
+                let old = self.set_cell_input(addr, &field.text);
                 let new_cell = self.get_cell(addr);
                 if old != new_cell {
                     changes.push((addr, old, new_cell));
@@ -874,44 +923,6 @@ impl Sheet {
         }
         changes
     }
-}
-
-/// Parse a single CSV line into fields, respecting quoted fields.
-pub fn parse_csv_line(line: &str) -> Vec<String> {
-    let mut fields = Vec::new();
-    let mut current = String::new();
-    let mut in_quotes = false;
-    let chars: Vec<char> = line.chars().collect();
-    let mut i = 0;
-
-    while i < chars.len() {
-        let ch = chars[i];
-        if in_quotes {
-            if ch == '"' {
-                if i + 1 < chars.len() && chars[i + 1] == '"' {
-                    current.push('"');
-                    i += 2;
-                    continue;
-                } else {
-                    in_quotes = false;
-                    i += 1;
-                    continue;
-                }
-            } else {
-                current.push(ch);
-            }
-        } else if ch == '"' {
-            in_quotes = true;
-        } else if ch == ',' {
-            fields.push(current.clone());
-            current.clear();
-        } else {
-            current.push(ch);
-        }
-        i += 1;
-    }
-    fields.push(current);
-    fields
 }
 
 // ============================================================================
@@ -953,15 +964,41 @@ fn tokenize_formula(input: &str) -> Result<Vec<FormulaToken>, CellError> {
     while pos < length {
         let ch = chars[pos];
         match ch {
-            ' ' | '\t' => { pos += 1; }
-            '+' => { tokens.push(FormulaToken::Plus); pos += 1; }
-            '-' => { tokens.push(FormulaToken::Minus); pos += 1; }
-            '*' => { tokens.push(FormulaToken::Multiply); pos += 1; }
-            '/' => { tokens.push(FormulaToken::Divide); pos += 1; }
-            '(' => { tokens.push(FormulaToken::LeftParen); pos += 1; }
-            ')' => { tokens.push(FormulaToken::RightParen); pos += 1; }
-            ',' => { tokens.push(FormulaToken::Comma); pos += 1; }
-            '&' => { tokens.push(FormulaToken::Ampersand); pos += 1; }
+            ' ' | '\t' => {
+                pos += 1;
+            }
+            '+' => {
+                tokens.push(FormulaToken::Plus);
+                pos += 1;
+            }
+            '-' => {
+                tokens.push(FormulaToken::Minus);
+                pos += 1;
+            }
+            '*' => {
+                tokens.push(FormulaToken::Multiply);
+                pos += 1;
+            }
+            '/' => {
+                tokens.push(FormulaToken::Divide);
+                pos += 1;
+            }
+            '(' => {
+                tokens.push(FormulaToken::LeftParen);
+                pos += 1;
+            }
+            ')' => {
+                tokens.push(FormulaToken::RightParen);
+                pos += 1;
+            }
+            ',' => {
+                tokens.push(FormulaToken::Comma);
+                pos += 1;
+            }
+            '&' => {
+                tokens.push(FormulaToken::Ampersand);
+                pos += 1;
+            }
             '<' => {
                 if pos + 1 < length && chars[pos + 1] == '=' {
                     tokens.push(FormulaToken::LessEq);
@@ -983,7 +1020,10 @@ fn tokenize_formula(input: &str) -> Result<Vec<FormulaToken>, CellError> {
                     pos += 1;
                 }
             }
-            '=' => { tokens.push(FormulaToken::Equals); pos += 1; }
+            '=' => {
+                tokens.push(FormulaToken::Equals);
+                pos += 1;
+            }
             '"' => {
                 pos += 1;
                 let mut s = String::new();
@@ -991,7 +1031,9 @@ fn tokenize_formula(input: &str) -> Result<Vec<FormulaToken>, CellError> {
                     s.push(chars[pos]);
                     pos += 1;
                 }
-                if pos < length { pos += 1; } // skip closing quote
+                if pos < length {
+                    pos += 1;
+                } // skip closing quote
                 tokens.push(FormulaToken::StringLiteral(s));
             }
             _ if ch.is_ascii_digit() || ch == '.' => {
@@ -1275,7 +1317,11 @@ impl<'a> FormulaEvaluator<'a> {
     }
 
     /// Collect numeric values from a range for aggregate functions.
-    fn collect_range_numbers(&mut self, start: CellAddr, end: CellAddr) -> Result<Vec<f64>, CellError> {
+    fn collect_range_numbers(
+        &mut self,
+        start: CellAddr,
+        end: CellAddr,
+    ) -> Result<Vec<f64>, CellError> {
         let range = CellRange::new(start, end);
         let mut values = Vec::new();
         for addr in range.iter() {
@@ -1288,7 +1334,11 @@ impl<'a> FormulaEvaluator<'a> {
     }
 
     /// Collect all values from a range (for COUNT, etc.).
-    fn collect_range_values(&mut self, start: CellAddr, end: CellAddr) -> Result<Vec<CellValue>, CellError> {
+    fn collect_range_values(
+        &mut self,
+        start: CellAddr,
+        end: CellAddr,
+    ) -> Result<Vec<CellValue>, CellError> {
         let range = CellRange::new(start, end);
         let mut values = Vec::new();
         for addr in range.iter() {
@@ -1301,18 +1351,21 @@ impl<'a> FormulaEvaluator<'a> {
     /// Parse and evaluate a function call.
     fn parse_function_call(&mut self, name: &str) -> Result<CellValue, CellError> {
         self.expect_token(&FormulaToken::LeftParen)?;
-        
+
         match name {
             "SUM" => self.eval_aggregate_func(|nums| nums.iter().sum()),
             "AVG" | "AVERAGE" => self.eval_aggregate_func(|nums| {
-                if nums.is_empty() { 0.0 } else { nums.iter().sum::<f64>() / nums.len() as f64 }
+                if nums.is_empty() {
+                    0.0
+                } else {
+                    nums.iter().sum::<f64>() / nums.len() as f64
+                }
             }),
-            "MIN" => self.eval_aggregate_func(|nums| {
-                nums.iter().copied().fold(f64::INFINITY, f64::min)
-            }),
-            "MAX" => self.eval_aggregate_func(|nums| {
-                nums.iter().copied().fold(f64::NEG_INFINITY, f64::max)
-            }),
+            "MIN" => {
+                self.eval_aggregate_func(|nums| nums.iter().copied().fold(f64::INFINITY, f64::min))
+            }
+            "MAX" => self
+                .eval_aggregate_func(|nums| nums.iter().copied().fold(f64::NEG_INFINITY, f64::max)),
             "COUNT" => self.eval_count_func(),
             "IF" => self.eval_if_func(),
             "ABS" => {
@@ -1501,7 +1554,13 @@ pub fn value_to_string(val: &CellValue) -> String {
                 format!("{}", n)
             }
         }
-        CellValue::Boolean(b) => if *b { "TRUE".to_string() } else { "FALSE".to_string() },
+        CellValue::Boolean(b) => {
+            if *b {
+                "TRUE".to_string()
+            } else {
+                "FALSE".to_string()
+            }
+        }
         CellValue::Error(e) => e.display().to_string(),
     }
 }
@@ -1514,9 +1573,7 @@ pub fn require_number(val: &CellValue) -> Result<f64, CellError> {
 /// Compare two cell values for ordering, returning -1, 0, or 1.
 pub fn compare_values(a: &CellValue, b: &CellValue) -> Result<i32, CellError> {
     match (a.as_number(), b.as_number()) {
-        (Some(na), Some(nb)) => {
-            Ok(na.partial_cmp(&nb).map(|o| o as i32).unwrap_or(0))
-        }
+        (Some(na), Some(nb)) => Ok(na.partial_cmp(&nb).map(|o| o as i32).unwrap_or(0)),
         _ => {
             let sa = value_to_string(a);
             let sb = value_to_string(b);
@@ -1556,7 +1613,9 @@ pub fn evaluate_formula(formula: &str, sheet: &Sheet) -> CellValue {
 /// Recalculate all formula cells in a sheet.
 pub fn recalculate_sheet(sheet: &mut Sheet) {
     // Collect all formula addresses first to avoid borrow issues
-    let formula_addrs: Vec<CellAddr> = sheet.cells.iter()
+    let formula_addrs: Vec<CellAddr> = sheet
+        .cells
+        .iter()
         .filter(|(_, c)| c.is_formula())
         .map(|(a, _)| *a)
         .collect();
@@ -1591,7 +1650,8 @@ pub fn auto_fill_next(values: &[CellValue], index: usize) -> CellValue {
         let numbers: Vec<f64> = nums.iter().map(|n| n.unwrap_or(0.0)).collect();
         if numbers.len() >= 2 {
             let diff = numbers[1] - numbers[0];
-            let is_arithmetic = numbers.windows(2)
+            let is_arithmetic = numbers
+                .windows(2)
                 .all(|w| (w[1] - w[0] - diff).abs() < 1e-10);
             if is_arithmetic {
                 let last = numbers[numbers.len() - 1];
@@ -1657,7 +1717,11 @@ impl FindReplace {
 
         for (&addr, cell) in &sheet.cells {
             let text = cell.display_text();
-            let compare = if self.case_sensitive { text.clone() } else { text.to_lowercase() };
+            let compare = if self.case_sensitive {
+                text.clone()
+            } else {
+                text.to_lowercase()
+            };
             if compare.contains(&search) {
                 self.results.push(addr);
             }
@@ -1778,11 +1842,22 @@ pub enum InteractionMode {
     /// User is dragging to select a range.
     RangeSelect { anchor: CellAddr },
     /// User is resizing a column.
-    ColResize { col: usize, start_x: f32, original_width: f32 },
+    ColResize {
+        col: usize,
+        start_x: f32,
+        original_width: f32,
+    },
     /// User is resizing a row.
-    RowResize { row: usize, start_y: f32, original_height: f32 },
+    RowResize {
+        row: usize,
+        start_y: f32,
+        original_height: f32,
+    },
     /// User is dragging the auto-fill handle.
-    AutoFill { anchor_range: CellRange, current_end: CellAddr },
+    AutoFill {
+        anchor_range: CellRange,
+        current_end: CellAddr,
+    },
     /// Find/replace dialog is active.
     FindReplace,
 }
@@ -1817,10 +1892,18 @@ impl ScrollPosition {
 
     /// Clamp scroll to valid bounds given content size and viewport.
     pub fn clamp(&mut self, max_x: f32, max_y: f32) {
-        if self.x < 0.0 { self.x = 0.0; }
-        if self.y < 0.0 { self.y = 0.0; }
-        if self.x > max_x { self.x = max_x; }
-        if self.y > max_y { self.y = max_y; }
+        if self.x < 0.0 {
+            self.x = 0.0;
+        }
+        if self.y < 0.0 {
+            self.y = 0.0;
+        }
+        if self.x > max_x {
+            self.x = max_x;
+        }
+        if self.y > max_y {
+            self.y = max_y;
+        }
     }
 }
 
@@ -1958,10 +2041,8 @@ impl SpreadsheetApp {
             for (addr, _, new_cell) in &changes {
                 self.active_sheet_mut().set_cell(*addr, new_cell.clone());
             }
-            self.undo_manager.push_action(UndoAction::BatchEdit {
-                sheet_idx,
-                changes,
-            });
+            self.undo_manager
+                .push_action(UndoAction::BatchEdit { sheet_idx, changes });
             recalculate_sheet(self.active_sheet_mut());
         }
     }
@@ -2016,10 +2097,8 @@ impl SpreadsheetApp {
         }
 
         if !changes.is_empty() {
-            self.undo_manager.push_action(UndoAction::BatchEdit {
-                sheet_idx,
-                changes,
-            });
+            self.undo_manager
+                .push_action(UndoAction::BatchEdit { sheet_idx, changes });
             recalculate_sheet(self.active_sheet_mut());
         }
     }
@@ -2041,7 +2120,12 @@ impl SpreadsheetApp {
     /// Apply an undo or redo action.
     fn apply_undo_action(&mut self, action: &UndoAction, is_undo: bool) {
         match action {
-            UndoAction::CellEdit { sheet_idx, addr, old_cell, new_cell } => {
+            UndoAction::CellEdit {
+                sheet_idx,
+                addr,
+                old_cell,
+                new_cell,
+            } => {
                 if let Some(sheet) = self.sheets.get_mut(*sheet_idx) {
                     let cell = if is_undo { old_cell } else { new_cell };
                     sheet.set_cell(*addr, cell.clone());
@@ -2057,7 +2141,12 @@ impl SpreadsheetApp {
                     recalculate_sheet(sheet);
                 }
             }
-            UndoAction::ColResize { sheet_idx, col, old_width, new_width } => {
+            UndoAction::ColResize {
+                sheet_idx,
+                col,
+                old_width,
+                new_width,
+            } => {
                 if let Some(sheet) = self.sheets.get_mut(*sheet_idx) {
                     let width = if is_undo { *old_width } else { *new_width };
                     if let Some(w) = sheet.col_widths.get_mut(*col) {
@@ -2065,7 +2154,12 @@ impl SpreadsheetApp {
                     }
                 }
             }
-            UndoAction::RowResize { sheet_idx, row, old_height, new_height } => {
+            UndoAction::RowResize {
+                sheet_idx,
+                row,
+                old_height,
+                new_height,
+            } => {
                 if let Some(sheet) = self.sheets.get_mut(*sheet_idx) {
                     let height = if is_undo { *old_height } else { *new_height };
                     if let Some(h) = sheet.row_heights.get_mut(*row) {
@@ -2097,7 +2191,8 @@ impl SpreadsheetApp {
         let name = format!("Sheet{}", idx + 1);
         self.sheets.push(Sheet::new(&name));
         self.active_sheet = idx;
-        self.undo_manager.push_action(UndoAction::AddSheet { sheet_idx: idx });
+        self.undo_manager
+            .push_action(UndoAction::AddSheet { sheet_idx: idx });
     }
 
     /// Remove the active sheet (if more than one sheet exists).
@@ -2107,7 +2202,10 @@ impl SpreadsheetApp {
         }
         let idx = self.active_sheet;
         let sheet = self.sheets.remove(idx);
-        self.undo_manager.push_action(UndoAction::RemoveSheet { sheet_idx: idx, sheet });
+        self.undo_manager.push_action(UndoAction::RemoveSheet {
+            sheet_idx: idx,
+            sheet,
+        });
         if self.active_sheet >= self.sheets.len() {
             self.active_sheet = self.sheets.len() - 1;
         }
@@ -2122,9 +2220,12 @@ impl SpreadsheetApp {
         let ascending = direction == SortDirection::Ascending;
         let sheet_idx = self.active_sheet;
 
-        let changes = self.active_sheet_mut().sort_by_column(col, start_row, end_row, ascending);
+        let changes = self
+            .active_sheet_mut()
+            .sort_by_column(col, start_row, end_row, ascending);
         if !changes.is_empty() {
-            self.undo_manager.push_action(UndoAction::BatchEdit { sheet_idx, changes });
+            self.undo_manager
+                .push_action(UndoAction::BatchEdit { sheet_idx, changes });
             recalculate_sheet(self.active_sheet_mut());
         }
     }
@@ -2138,7 +2239,12 @@ impl SpreadsheetApp {
         // Collect source values per column
         for col in source.start.col..=source.end.col {
             let source_vals: Vec<CellValue> = (source.start.row..=source.end.row)
-                .map(|r| self.active_sheet().get_cell(CellAddr::new(col, r)).value.clone())
+                .map(|r| {
+                    self.active_sheet()
+                        .get_cell(CellAddr::new(col, r))
+                        .value
+                        .clone()
+                })
                 .collect();
 
             let fill_start = source.end.row + 1;
@@ -2155,7 +2261,8 @@ impl SpreadsheetApp {
         }
 
         if !changes.is_empty() {
-            self.undo_manager.push_action(UndoAction::BatchEdit { sheet_idx, changes });
+            self.undo_manager
+                .push_action(UndoAction::BatchEdit { sheet_idx, changes });
             recalculate_sheet(self.active_sheet_mut());
         }
     }
@@ -2164,7 +2271,11 @@ impl SpreadsheetApp {
     pub fn toggle_bold(&mut self) {
         let sheet_idx = self.active_sheet;
         let mut changes = Vec::new();
-        let current_bold = self.active_sheet().get_cell(self.selection.active).format.bold;
+        let current_bold = self
+            .active_sheet()
+            .get_cell(self.selection.active)
+            .format
+            .bold;
         let new_bold = !current_bold;
 
         let ranges = self.selection.ranges.clone();
@@ -2179,7 +2290,8 @@ impl SpreadsheetApp {
         }
 
         if !changes.is_empty() {
-            self.undo_manager.push_action(UndoAction::BatchEdit { sheet_idx, changes });
+            self.undo_manager
+                .push_action(UndoAction::BatchEdit { sheet_idx, changes });
         }
     }
 
@@ -2187,7 +2299,11 @@ impl SpreadsheetApp {
     pub fn toggle_italic(&mut self) {
         let sheet_idx = self.active_sheet;
         let mut changes = Vec::new();
-        let current_italic = self.active_sheet().get_cell(self.selection.active).format.italic;
+        let current_italic = self
+            .active_sheet()
+            .get_cell(self.selection.active)
+            .format
+            .italic;
         let new_italic = !current_italic;
 
         let ranges = self.selection.ranges.clone();
@@ -2202,7 +2318,8 @@ impl SpreadsheetApp {
         }
 
         if !changes.is_empty() {
-            self.undo_manager.push_action(UndoAction::BatchEdit { sheet_idx, changes });
+            self.undo_manager
+                .push_action(UndoAction::BatchEdit { sheet_idx, changes });
         }
     }
 
@@ -2223,7 +2340,8 @@ impl SpreadsheetApp {
         }
 
         if !changes.is_empty() {
-            self.undo_manager.push_action(UndoAction::BatchEdit { sheet_idx, changes });
+            self.undo_manager
+                .push_action(UndoAction::BatchEdit { sheet_idx, changes });
         }
     }
 
@@ -2244,7 +2362,8 @@ impl SpreadsheetApp {
         }
 
         if !changes.is_empty() {
-            self.undo_manager.push_action(UndoAction::BatchEdit { sheet_idx, changes });
+            self.undo_manager
+                .push_action(UndoAction::BatchEdit { sheet_idx, changes });
         }
     }
 
@@ -2252,8 +2371,17 @@ impl SpreadsheetApp {
     pub fn toggle_borders(&mut self) {
         let sheet_idx = self.active_sheet;
         let mut changes = Vec::new();
-        let current_borders = self.active_sheet().get_cell(self.selection.active).format.borders.has_any();
-        let new_borders = if current_borders { CellBorders::none() } else { CellBorders::all() };
+        let current_borders = self
+            .active_sheet()
+            .get_cell(self.selection.active)
+            .format
+            .borders
+            .has_any();
+        let new_borders = if current_borders {
+            CellBorders::none()
+        } else {
+            CellBorders::all()
+        };
 
         let ranges = self.selection.ranges.clone();
         for range in &ranges {
@@ -2267,7 +2395,8 @@ impl SpreadsheetApp {
         }
 
         if !changes.is_empty() {
-            self.undo_manager.push_action(UndoAction::BatchEdit { sheet_idx, changes });
+            self.undo_manager
+                .push_action(UndoAction::BatchEdit { sheet_idx, changes });
         }
     }
 
@@ -2287,8 +2416,12 @@ impl SpreadsheetApp {
 
     /// Navigate the active cell in a given direction.
     pub fn navigate(&mut self, d_col: i32, d_row: i32) {
-        let new_col = (self.selection.active.col as i32 + d_col).max(0).min(MAX_COLS as i32 - 1) as usize;
-        let new_row = (self.selection.active.row as i32 + d_row).max(0).min(MAX_ROWS as i32 - 1) as usize;
+        let new_col = (self.selection.active.col as i32 + d_col)
+            .max(0)
+            .min(MAX_COLS as i32 - 1) as usize;
+        let new_row = (self.selection.active.row as i32 + d_row)
+            .max(0)
+            .min(MAX_ROWS as i32 - 1) as usize;
         let new_addr = CellAddr::new(new_col, new_row);
         self.selection = Selection::single(new_addr);
         self.ensure_cell_visible(new_addr);
@@ -2330,8 +2463,12 @@ impl SpreadsheetApp {
     /// Calculate where the grid starts (Y coordinate), accounting for toolbar and formula bar.
     pub fn grid_top(&self) -> f32 {
         let mut y = 0.0;
-        if self.show_toolbar { y += TOOLBAR_HEIGHT; }
-        if self.show_formula_bar { y += FORMULA_BAR_HEIGHT; }
+        if self.show_toolbar {
+            y += TOOLBAR_HEIGHT;
+        }
+        if self.show_formula_bar {
+            y += FORMULA_BAR_HEIGHT;
+        }
         y += COL_HEADER_HEIGHT;
         y
     }
@@ -2339,7 +2476,9 @@ impl SpreadsheetApp {
     /// Calculate the grid viewport height.
     pub fn grid_height(&self) -> f32 {
         let mut bottom = self.window_height;
-        if self.show_status_bar { bottom -= STATUS_BAR_HEIGHT; }
+        if self.show_status_bar {
+            bottom -= STATUS_BAR_HEIGHT;
+        }
         bottom -= SHEET_TAB_HEIGHT;
         let top = self.grid_top();
         (bottom - top).max(0.0)
@@ -2374,20 +2513,45 @@ impl SpreadsheetApp {
         }
 
         // Handle editing mode
-        if let InteractionMode::Editing { ref mut text, ref mut cursor_pos } = self.mode {
+        if let InteractionMode::Editing {
+            ref mut text,
+            ref mut cursor_pos,
+        } = self.mode
+        {
             return handle_editing_key(text, cursor_pos, event);
         }
 
         // Ctrl shortcuts
         if event.modifiers.ctrl {
             match event.key {
-                Key::C => { self.copy_selection(); return EventResult::Consumed; }
-                Key::X => { self.cut_selection(); return EventResult::Consumed; }
-                Key::V => { self.paste(); return EventResult::Consumed; }
-                Key::Z => { self.undo(); return EventResult::Consumed; }
-                Key::Y => { self.redo(); return EventResult::Consumed; }
-                Key::B => { self.toggle_bold(); return EventResult::Consumed; }
-                Key::I => { self.toggle_italic(); return EventResult::Consumed; }
+                Key::C => {
+                    self.copy_selection();
+                    return EventResult::Consumed;
+                }
+                Key::X => {
+                    self.cut_selection();
+                    return EventResult::Consumed;
+                }
+                Key::V => {
+                    self.paste();
+                    return EventResult::Consumed;
+                }
+                Key::Z => {
+                    self.undo();
+                    return EventResult::Consumed;
+                }
+                Key::Y => {
+                    self.redo();
+                    return EventResult::Consumed;
+                }
+                Key::B => {
+                    self.toggle_bold();
+                    return EventResult::Consumed;
+                }
+                Key::I => {
+                    self.toggle_italic();
+                    return EventResult::Consumed;
+                }
                 Key::F => {
                     self.mode = InteractionMode::FindReplace;
                     self.find_replace.active = true;
@@ -2404,22 +2568,41 @@ impl SpreadsheetApp {
 
         // Normal mode navigation
         match event.key {
-            Key::Left => { self.navigate(-1, 0); EventResult::Consumed }
-            Key::Right => { self.navigate(1, 0); EventResult::Consumed }
-            Key::Up => { self.navigate(0, -1); EventResult::Consumed }
-            Key::Down => { self.navigate(0, 1); EventResult::Consumed }
+            Key::Left => {
+                self.navigate(-1, 0);
+                EventResult::Consumed
+            }
+            Key::Right => {
+                self.navigate(1, 0);
+                EventResult::Consumed
+            }
+            Key::Up => {
+                self.navigate(0, -1);
+                EventResult::Consumed
+            }
+            Key::Down => {
+                self.navigate(0, 1);
+                EventResult::Consumed
+            }
             Key::Home => {
                 self.selection = Selection::single(CellAddr::new(0, self.selection.active.row));
                 self.ensure_cell_visible(self.selection.active);
                 EventResult::Consumed
             }
             Key::End => {
-                self.selection = Selection::single(CellAddr::new(MAX_COLS - 1, self.selection.active.row));
+                self.selection =
+                    Selection::single(CellAddr::new(MAX_COLS - 1, self.selection.active.row));
                 self.ensure_cell_visible(self.selection.active);
                 EventResult::Consumed
             }
-            Key::PageUp => { self.navigate(0, -20); EventResult::Consumed }
-            Key::PageDown => { self.navigate(0, 20); EventResult::Consumed }
+            Key::PageUp => {
+                self.navigate(0, -20);
+                EventResult::Consumed
+            }
+            Key::PageDown => {
+                self.navigate(0, 20);
+                EventResult::Consumed
+            }
             Key::Tab => {
                 if event.modifiers.shift {
                     self.navigate(-1, 0);
@@ -2452,13 +2635,14 @@ impl SpreadsheetApp {
             _ => {
                 // Start editing if a printable character is typed
                 if let Some(ch) = event.text
-                    && !ch.is_control() {
-                        self.mode = InteractionMode::Editing {
-                            text: String::from(ch),
-                            cursor_pos: 1,
-                        };
-                        return EventResult::Consumed;
-                    }
+                    && !ch.is_control()
+                {
+                    self.mode = InteractionMode::Editing {
+                        text: String::from(ch),
+                        cursor_pos: 1,
+                    };
+                    return EventResult::Consumed;
+                }
                 EventResult::Ignored
             }
         }
@@ -2490,9 +2674,10 @@ impl SpreadsheetApp {
             }
             _ => {
                 if let Some(ch) = event.text
-                    && !ch.is_control() {
-                        self.find_replace.search_text.push(ch);
-                    }
+                    && !ch.is_control()
+                {
+                    self.find_replace.search_text.push(ch);
+                }
                 EventResult::Consumed
             }
         }
@@ -2507,9 +2692,7 @@ impl SpreadsheetApp {
             MouseEventKind::Release(MouseButton::Left) => {
                 self.handle_left_release(event.x, event.y)
             }
-            MouseEventKind::Move => {
-                self.handle_mouse_move(event.x, event.y)
-            }
+            MouseEventKind::Move => self.handle_mouse_move(event.x, event.y),
             MouseEventKind::Scroll { dx: _, dy } => {
                 self.scroll.y -= dy * 40.0;
                 self.scroll.y = self.scroll.y.max(0.0);
@@ -2570,8 +2753,12 @@ impl SpreadsheetApp {
             let mut cy = grid_top - self.scroll.y;
             for row in 0..MAX_ROWS {
                 cy += sheet.row_height(row);
-                if cy < grid_top { continue; }
-                if cy > self.window_height { break; }
+                if cy < grid_top {
+                    continue;
+                }
+                if cy > self.window_height {
+                    break;
+                }
                 if (y - cy).abs() < RESIZE_HANDLE_SIZE {
                     self.mode = InteractionMode::RowResize {
                         row,
@@ -2594,11 +2781,17 @@ impl SpreadsheetApp {
 
         // Check autofill handle
         let active = self.selection.active;
-        let handle_x = ROW_HEADER_WIDTH + self.active_sheet().col_x_offset(active.col)
-            + self.active_sheet().col_width(active.col) - self.scroll.x;
-        let handle_y = self.grid_top() + self.active_sheet().row_y_offset(active.row)
-            + self.active_sheet().row_height(active.row) - self.scroll.y;
-        if (x - handle_x).abs() < AUTOFILL_HANDLE_SIZE && (y - handle_y).abs() < AUTOFILL_HANDLE_SIZE {
+        let handle_x = ROW_HEADER_WIDTH
+            + self.active_sheet().col_x_offset(active.col)
+            + self.active_sheet().col_width(active.col)
+            - self.scroll.x;
+        let handle_y = self.grid_top()
+            + self.active_sheet().row_y_offset(active.row)
+            + self.active_sheet().row_height(active.row)
+            - self.scroll.y;
+        if (x - handle_x).abs() < AUTOFILL_HANDLE_SIZE
+            && (y - handle_y).abs() < AUTOFILL_HANDLE_SIZE
+        {
             self.mode = InteractionMode::AutoFill {
                 anchor_range: self.selection.primary_range(),
                 current_end: active,
@@ -2619,7 +2812,12 @@ impl SpreadsheetApp {
                 self.mode = InteractionMode::Normal;
                 EventResult::Consumed
             }
-            InteractionMode::ColResize { col, original_width, start_x, .. } => {
+            InteractionMode::ColResize {
+                col,
+                original_width,
+                start_x,
+                ..
+            } => {
                 let col = *col;
                 let original_width = *original_width;
                 let _ = *start_x;
@@ -2635,7 +2833,11 @@ impl SpreadsheetApp {
                 self.mode = InteractionMode::Normal;
                 EventResult::Consumed
             }
-            InteractionMode::RowResize { row, original_height, .. } => {
+            InteractionMode::RowResize {
+                row,
+                original_height,
+                ..
+            } => {
                 let row = *row;
                 let original_height = *original_height;
                 let new_height = self.active_sheet().row_height(row);
@@ -2650,7 +2852,10 @@ impl SpreadsheetApp {
                 self.mode = InteractionMode::Normal;
                 EventResult::Consumed
             }
-            InteractionMode::AutoFill { anchor_range, current_end } => {
+            InteractionMode::AutoFill {
+                anchor_range,
+                current_end,
+            } => {
                 let source = *anchor_range;
                 let end = *current_end;
                 self.mode = InteractionMode::Normal;
@@ -2674,7 +2879,11 @@ impl SpreadsheetApp {
                 self.selection.ranges = vec![CellRange::new(anchor, end)];
                 EventResult::Consumed
             }
-            InteractionMode::ColResize { col, start_x, original_width } => {
+            InteractionMode::ColResize {
+                col,
+                start_x,
+                original_width,
+            } => {
                 let delta = x - start_x;
                 let new_width = (original_width + delta).max(MIN_COL_WIDTH);
                 if let Some(w) = self.active_sheet_mut().col_widths.get_mut(col) {
@@ -2682,7 +2891,11 @@ impl SpreadsheetApp {
                 }
                 EventResult::Consumed
             }
-            InteractionMode::RowResize { row, start_y, original_height } => {
+            InteractionMode::RowResize {
+                row,
+                start_y,
+                original_height,
+            } => {
                 let delta = y - start_y;
                 let new_height = (original_height + delta).max(MIN_ROW_HEIGHT);
                 if let Some(h) = self.active_sheet_mut().row_heights.get_mut(row) {
@@ -2692,7 +2905,8 @@ impl SpreadsheetApp {
             }
             InteractionMode::AutoFill { anchor_range, .. } => {
                 let (col, row) = self.cell_at_position(x, y);
-                let end = CellAddr::new(col.max(anchor_range.end.col), row.max(anchor_range.end.row));
+                let end =
+                    CellAddr::new(col.max(anchor_range.end.col), row.max(anchor_range.end.row));
                 self.mode = InteractionMode::AutoFill {
                     anchor_range,
                     current_end: end,
@@ -2785,7 +2999,13 @@ impl SpreadsheetApp {
         self.render_grid(&mut cmds, y_offset);
 
         // Sheet tabs
-        let tab_y = self.window_height - SHEET_TAB_HEIGHT - if self.show_status_bar { STATUS_BAR_HEIGHT } else { 0.0 };
+        let tab_y = self.window_height
+            - SHEET_TAB_HEIGHT
+            - if self.show_status_bar {
+                STATUS_BAR_HEIGHT
+            } else {
+                0.0
+            };
         self.render_sheet_tabs(&mut cmds, tab_y);
 
         // Status bar
@@ -2832,12 +3052,20 @@ impl SpreadsheetApp {
         let mut bx = 8.0;
 
         // Bold button
-        let bold_active = self.active_sheet().get_cell(self.selection.active).format.bold;
+        let bold_active = self
+            .active_sheet()
+            .get_cell(self.selection.active)
+            .format
+            .bold;
         self.render_toolbar_button(cmds, bx, btn_y, btn_w, btn_h, "B", bold_active, true);
         bx += btn_w + 4.0;
 
         // Italic button
-        let italic_active = self.active_sheet().get_cell(self.selection.active).format.italic;
+        let italic_active = self
+            .active_sheet()
+            .get_cell(self.selection.active)
+            .format
+            .italic;
         self.render_toolbar_button(cmds, bx, btn_y, btn_w, btn_h, "I", italic_active, false);
         bx += btn_w + 4.0;
 
@@ -2855,7 +3083,11 @@ impl SpreadsheetApp {
         // Alignment buttons
         let alignment_labels = ["L", "C", "R"];
         let alignments = [Alignment::Left, Alignment::Center, Alignment::Right];
-        let current_align = self.active_sheet().get_cell(self.selection.active).format.alignment;
+        let current_align = self
+            .active_sheet()
+            .get_cell(self.selection.active)
+            .format
+            .alignment;
         for (label, align) in alignment_labels.iter().zip(alignments.iter()) {
             let active = current_align == *align;
             self.render_toolbar_button(cmds, bx, btn_y, btn_w, btn_h, label, active, false);
@@ -2892,13 +3124,36 @@ impl SpreadsheetApp {
         bx += 8.0;
 
         // Border toggle
-        let has_borders = self.active_sheet().get_cell(self.selection.active).format.borders.has_any();
-        self.render_toolbar_button(cmds, bx, btn_y, btn_w + 8.0, btn_h, "Bdr", has_borders, false);
+        let has_borders = self
+            .active_sheet()
+            .get_cell(self.selection.active)
+            .format
+            .borders
+            .has_any();
+        self.render_toolbar_button(
+            cmds,
+            bx,
+            btn_y,
+            btn_w + 8.0,
+            btn_h,
+            "Bdr",
+            has_borders,
+            false,
+        );
         bx += btn_w + 16.0;
 
         // Freeze panes
         let frozen = self.active_sheet().frozen_cols > 0 || self.active_sheet().frozen_rows > 0;
-        self.render_toolbar_button(cmds, bx, btn_y, btn_w + 16.0, btn_h, "Freeze", frozen, false);
+        self.render_toolbar_button(
+            cmds,
+            bx,
+            btn_y,
+            btn_w + 16.0,
+            btn_h,
+            "Freeze",
+            frozen,
+            false,
+        );
         bx += btn_w + 24.0;
 
         // Sort buttons
@@ -2922,7 +3177,11 @@ impl SpreadsheetApp {
         active: bool,
         bold: bool,
     ) {
-        let bg = if active { COLOR_SURFACE1 } else { COLOR_SURFACE0 };
+        let bg = if active {
+            COLOR_SURFACE1
+        } else {
+            COLOR_SURFACE0
+        };
         let fg = if active { COLOR_BLUE } else { COLOR_TEXT };
 
         cmds.push(RenderCommand::FillRect {
@@ -2934,9 +3193,13 @@ impl SpreadsheetApp {
             corner_radii: CornerRadii::all(4.0),
         });
 
-        let font_weight = if bold { FontWeightHint::Bold } else { FontWeightHint::Regular };
+        let font_weight = if bold {
+            FontWeightHint::Bold
+        } else {
+            FontWeightHint::Regular
+        };
         cmds.push(RenderCommand::Text {
-            x: x + w / 2.0 - (label.len() as f32 * 3.5),
+            x: text::center_x(label, x + w / 2.0, SMALL_FONT, font_weight),
             y: y + h / 2.0 - 5.0,
             text: label.to_string(),
             font_size: SMALL_FONT,
@@ -3074,11 +3337,17 @@ impl SpreadsheetApp {
                 break;
             }
 
-            let is_selected = self.selection.ranges.iter().any(|r| {
-                col >= r.start.col && col <= r.end.col
-            });
+            let is_selected = self
+                .selection
+                .ranges
+                .iter()
+                .any(|r| col >= r.start.col && col <= r.end.col);
 
-            let bg = if is_selected { COLOR_SURFACE1 } else { COLOR_MANTLE };
+            let bg = if is_selected {
+                COLOR_SURFACE1
+            } else {
+                COLOR_MANTLE
+            };
             cmds.push(RenderCommand::FillRect {
                 x: header_x,
                 y,
@@ -3089,7 +3358,11 @@ impl SpreadsheetApp {
             });
 
             let label = CellAddr::col_letter(col);
-            let text_color = if is_selected { COLOR_BLUE } else { COLOR_SUBTEXT1 };
+            let text_color = if is_selected {
+                COLOR_BLUE
+            } else {
+                COLOR_SUBTEXT1
+            };
             cmds.push(RenderCommand::Text {
                 x: header_x + w / 2.0 - 4.0,
                 y: y + 5.0,
@@ -3151,7 +3424,11 @@ impl SpreadsheetApp {
         });
 
         // Calculate visible row range
-        let first_visible_row = if frozen_rows > 0 { 0 } else { sheet.row_at_y(self.scroll.y) };
+        let first_visible_row = if frozen_rows > 0 {
+            0
+        } else {
+            sheet.row_at_y(self.scroll.y)
+        };
         let last_visible_row = sheet.row_at_y(self.scroll.y + grid_h).min(MAX_ROWS - 1);
 
         // Render rows
@@ -3171,10 +3448,16 @@ impl SpreadsheetApp {
             }
 
             // Row header
-            let is_row_selected = self.selection.ranges.iter().any(|r| {
-                row >= r.start.row && row <= r.end.row
-            });
-            let header_bg = if is_row_selected { COLOR_SURFACE1 } else { COLOR_MANTLE };
+            let is_row_selected = self
+                .selection
+                .ranges
+                .iter()
+                .any(|r| row >= r.start.row && row <= r.end.row);
+            let header_bg = if is_row_selected {
+                COLOR_SURFACE1
+            } else {
+                COLOR_MANTLE
+            };
             cmds.push(RenderCommand::FillRect {
                 x: 0.0,
                 y: row_y,
@@ -3185,7 +3468,11 @@ impl SpreadsheetApp {
             });
 
             let row_label = (row + 1).to_string();
-            let text_color = if is_row_selected { COLOR_BLUE } else { COLOR_SUBTEXT1 };
+            let text_color = if is_row_selected {
+                COLOR_BLUE
+            } else {
+                COLOR_SUBTEXT1
+            };
             cmds.push(RenderCommand::Text {
                 x: 4.0,
                 y: row_y + row_h / 2.0 - 6.0,
@@ -3274,30 +3561,42 @@ impl SpreadsheetApp {
                     let border_color = COLOR_TEXT;
                     if cell.format.borders.top {
                         cmds.push(RenderCommand::Line {
-                            x1: cell_x, y1: row_y,
-                            x2: cell_x + col_w, y2: row_y,
-                            color: border_color, width: 1.5,
+                            x1: cell_x,
+                            y1: row_y,
+                            x2: cell_x + col_w,
+                            y2: row_y,
+                            color: border_color,
+                            width: 1.5,
                         });
                     }
                     if cell.format.borders.bottom {
                         cmds.push(RenderCommand::Line {
-                            x1: cell_x, y1: row_y + row_h,
-                            x2: cell_x + col_w, y2: row_y + row_h,
-                            color: border_color, width: 1.5,
+                            x1: cell_x,
+                            y1: row_y + row_h,
+                            x2: cell_x + col_w,
+                            y2: row_y + row_h,
+                            color: border_color,
+                            width: 1.5,
                         });
                     }
                     if cell.format.borders.left {
                         cmds.push(RenderCommand::Line {
-                            x1: cell_x, y1: row_y,
-                            x2: cell_x, y2: row_y + row_h,
-                            color: border_color, width: 1.5,
+                            x1: cell_x,
+                            y1: row_y,
+                            x2: cell_x,
+                            y2: row_y + row_h,
+                            color: border_color,
+                            width: 1.5,
                         });
                     }
                     if cell.format.borders.right {
                         cmds.push(RenderCommand::Line {
-                            x1: cell_x + col_w, y1: row_y,
-                            x2: cell_x + col_w, y2: row_y + row_h,
-                            color: border_color, width: 1.5,
+                            x1: cell_x + col_w,
+                            y1: row_y,
+                            x2: cell_x + col_w,
+                            y2: row_y + row_h,
+                            color: border_color,
+                            width: 1.5,
                         });
                     }
                 }
@@ -3327,10 +3626,25 @@ impl SpreadsheetApp {
                         FontWeightHint::Regular
                     };
 
+                    // A spreadsheet's columns are pixel widths, not character
+                    // cells, so alignment is a measurement — and it has to be
+                    // taken in the cell's own weight, since a bold cell drawn
+                    // with a regular-weight offset is the one that drifts out
+                    // of its column.
                     let text_x = match cell.format.alignment {
                         Alignment::Left => cell_x + 4.0,
-                        Alignment::Center => cell_x + col_w / 2.0 - (display_text.len() as f32 * 3.5),
-                        Alignment::Right => cell_x + col_w - (display_text.len() as f32 * 7.0) - 4.0,
+                        Alignment::Center => text::center_x(
+                            &display_text,
+                            cell_x + col_w / 2.0,
+                            FONT_SIZE,
+                            font_weight,
+                        ),
+                        Alignment::Right => text::right_x(
+                            &display_text,
+                            cell_x + col_w - 4.0,
+                            FONT_SIZE,
+                            font_weight,
+                        ),
                     };
 
                     cmds.push(RenderCommand::Text {
@@ -3351,9 +3665,17 @@ impl SpreadsheetApp {
         // Active cell outline
         let active = self.selection.active;
         let active_x = ROW_HEADER_WIDTH + sheet.col_x_offset(active.col)
-            - if active.col >= frozen_cols { self.scroll.x } else { 0.0 };
+            - if active.col >= frozen_cols {
+                self.scroll.x
+            } else {
+                0.0
+            };
         let active_y = y_start + sheet.row_y_offset(active.row)
-            - if active.row >= frozen_rows { self.scroll.y } else { 0.0 };
+            - if active.row >= frozen_rows {
+                self.scroll.y
+            } else {
+                0.0
+            };
         let active_w = sheet.col_width(active.col);
         let active_h = sheet.row_height(active.row);
 
@@ -3382,9 +3704,17 @@ impl SpreadsheetApp {
         for range in &self.selection.ranges {
             if range.cell_count() > 1 {
                 let rx = ROW_HEADER_WIDTH + sheet.col_x_offset(range.start.col)
-                    - if range.start.col >= frozen_cols { self.scroll.x } else { 0.0 };
+                    - if range.start.col >= frozen_cols {
+                        self.scroll.x
+                    } else {
+                        0.0
+                    };
                 let ry = y_start + sheet.row_y_offset(range.start.row)
-                    - if range.start.row >= frozen_rows { self.scroll.y } else { 0.0 };
+                    - if range.start.row >= frozen_rows {
+                        self.scroll.y
+                    } else {
+                        0.0
+                    };
                 let rw: f32 = (range.start.col..=range.end.col)
                     .map(|c| sheet.col_width(c))
                     .sum();
@@ -3405,12 +3735,24 @@ impl SpreadsheetApp {
         }
 
         // Auto-fill preview highlight
-        if let InteractionMode::AutoFill { anchor_range, current_end } = &self.mode {
+        if let InteractionMode::AutoFill {
+            anchor_range,
+            current_end,
+        } = &self.mode
+        {
             let range = CellRange::new(anchor_range.start, *current_end);
             let rx = ROW_HEADER_WIDTH + sheet.col_x_offset(range.start.col)
-                - if range.start.col >= frozen_cols { self.scroll.x } else { 0.0 };
+                - if range.start.col >= frozen_cols {
+                    self.scroll.x
+                } else {
+                    0.0
+                };
             let ry = y_start + sheet.row_y_offset(range.start.row)
-                - if range.start.row >= frozen_rows { self.scroll.y } else { 0.0 };
+                - if range.start.row >= frozen_rows {
+                    self.scroll.y
+                } else {
+                    0.0
+                };
             let rw: f32 = (range.start.col..=range.end.col)
                 .map(|c| sheet.col_width(c))
                 .sum();
@@ -3433,17 +3775,23 @@ impl SpreadsheetApp {
         if frozen_cols > 0 {
             let fx = ROW_HEADER_WIDTH + sheet.col_x_offset(frozen_cols);
             cmds.push(RenderCommand::Line {
-                x1: fx, y1: y_start,
-                x2: fx, y2: y_start + grid_h,
-                color: COLOR_LAVENDER, width: 2.0,
+                x1: fx,
+                y1: y_start,
+                x2: fx,
+                y2: y_start + grid_h,
+                color: COLOR_LAVENDER,
+                width: 2.0,
             });
         }
         if frozen_rows > 0 {
             let fy = y_start + sheet.row_y_offset(frozen_rows);
             cmds.push(RenderCommand::Line {
-                x1: 0.0, y1: fy,
-                x2: self.window_width, y2: fy,
-                color: COLOR_LAVENDER, width: 2.0,
+                x1: 0.0,
+                y1: fy,
+                x2: self.window_width,
+                y2: fy,
+                color: COLOR_LAVENDER,
+                width: 2.0,
             });
         }
 
@@ -3467,7 +3815,11 @@ impl SpreadsheetApp {
         for (idx, sheet) in self.sheets.iter().enumerate() {
             let is_active = idx == self.active_sheet;
             let bg = if is_active { COLOR_BASE } else { COLOR_MANTLE };
-            let fg = if is_active { COLOR_BLUE } else { COLOR_SUBTEXT0 };
+            let fg = if is_active {
+                COLOR_BLUE
+            } else {
+                COLOR_SUBTEXT0
+            };
             let radii = CornerRadii {
                 top_left: 4.0,
                 top_right: 4.0,
@@ -3490,7 +3842,11 @@ impl SpreadsheetApp {
                 text: sheet.name.clone(),
                 font_size: SMALL_FONT,
                 color: fg,
-                font_weight: if is_active { FontWeightHint::Bold } else { FontWeightHint::Regular },
+                font_weight: if is_active {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
                 max_width: Some(SHEET_TAB_WIDTH - 16.0),
             });
 
@@ -3531,9 +3887,12 @@ impl SpreadsheetApp {
 
         // Top separator
         cmds.push(RenderCommand::Line {
-            x1: 0.0, y1: y,
-            x2: self.window_width, y2: y,
-            color: COLOR_SURFACE0, width: 1.0,
+            x1: 0.0,
+            y1: y,
+            x2: self.window_width,
+            y2: y,
+            color: COLOR_SURFACE0,
+            width: 1.0,
         });
 
         // Status text (SUM/AVG/COUNT of selection)
@@ -3780,7 +4139,7 @@ impl SpreadsheetApp {
         let buttons = ["Find Next", "Replace", "Replace All"];
         let mut bx = dlg_x + 12.0;
         for label in &buttons {
-            let bw = label.len() as f32 * 7.0 + 16.0;
+            let bw = text::padded_width(label, 8.0, SMALL_FONT, FontWeightHint::Regular);
             cmds.push(RenderCommand::FillRect {
                 x: bx,
                 y: btn_y,
@@ -3848,15 +4207,17 @@ fn handle_editing_key(text: &mut String, cursor_pos: &mut usize, event: &KeyEven
         }
         _ => {
             if let Some(ch) = event.text
-                && !ch.is_control() {
-                    let byte_pos = text.char_indices()
-                        .nth(*cursor_pos)
-                        .map(|(i, _)| i)
-                        .unwrap_or(text.len());
-                    text.insert(byte_pos, ch);
-                    *cursor_pos += 1;
-                    return EventResult::Consumed;
-                }
+                && !ch.is_control()
+            {
+                let byte_pos = text
+                    .char_indices()
+                    .nth(*cursor_pos)
+                    .map(|(i, _)| i)
+                    .unwrap_or(text.len());
+                text.insert(byte_pos, ch);
+                *cursor_pos += 1;
+                return EventResult::Consumed;
+            }
             EventResult::Ignored
         }
     }
@@ -3914,6 +4275,56 @@ fn main() {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
+
+    // -- text measurement --
+
+    #[test]
+    fn a_centred_cell_is_centred_in_its_column() {
+        // In the cell's own weight: a bold cell placed with a regular-weight
+        // offset is the one that drifts out of its column.
+        let col_w = 90.0;
+        for (value, weight) in [
+            ("1234.50", FontWeightHint::Regular),
+            ("Total", FontWeightHint::Bold),
+            ("Übertrag", FontWeightHint::Bold),
+        ] {
+            let x = text::center_x(value, col_w / 2.0, FONT_SIZE, weight);
+            let w = text::measure(value, FONT_SIZE, weight);
+            assert!(
+                (x + w / 2.0 - col_w / 2.0).abs() < 0.01,
+                "{value:?} is not centred in its column"
+            );
+        }
+    }
+
+    #[test]
+    fn a_right_aligned_cell_ends_at_the_column_edge() {
+        let col_w: f32 = 90.0;
+        for value in ["1", "1234.50", "-99 %"] {
+            let right = col_w - 4.0;
+            let x = text::right_x(value, right, FONT_SIZE, FontWeightHint::Regular);
+            let w = text::measure(value, FONT_SIZE, FontWeightHint::Regular);
+            assert!(
+                (x + w - right).abs() < 0.01,
+                "{value:?} does not end at the column edge"
+            );
+        }
+    }
+
+    #[test]
+    fn a_column_of_numbers_lines_up_on_the_right() {
+        // The point of right alignment in a spreadsheet: the decimal points of
+        // a column of figures have to sit above one another.
+        let right = 86.0;
+        for value in ["1.50", "23.50", "456.50"] {
+            let end = text::right_x(value, right, FONT_SIZE, FontWeightHint::Regular)
+                + text::measure(value, FONT_SIZE, FontWeightHint::Regular);
+            assert!(
+                (end - right).abs() < 0.01,
+                "{value:?} ends at {end}, not {right}"
+            );
+        }
+    }
 
     // -- CellAddr tests --
 
@@ -4029,8 +4440,14 @@ mod tests {
 
     #[test]
     fn test_cell_value_display_boolean() {
-        assert_eq!(CellValue::Boolean(true).display_string(&NumberFormat::General), "TRUE");
-        assert_eq!(CellValue::Boolean(false).display_string(&NumberFormat::General), "FALSE");
+        assert_eq!(
+            CellValue::Boolean(true).display_string(&NumberFormat::General),
+            "TRUE"
+        );
+        assert_eq!(
+            CellValue::Boolean(false).display_string(&NumberFormat::General),
+            "FALSE"
+        );
     }
 
     // -- NumberFormat tests --
@@ -4227,9 +4644,15 @@ mod tests {
     fn test_sheet_set_cell_input_boolean() {
         let mut s = Sheet::new("Test");
         s.set_cell_input(CellAddr::new(0, 0), "TRUE");
-        assert_eq!(s.get_cell(CellAddr::new(0, 0)).value, CellValue::Boolean(true));
+        assert_eq!(
+            s.get_cell(CellAddr::new(0, 0)).value,
+            CellValue::Boolean(true)
+        );
         s.set_cell_input(CellAddr::new(0, 1), "false");
-        assert_eq!(s.get_cell(CellAddr::new(0, 1)).value, CellValue::Boolean(false));
+        assert_eq!(
+            s.get_cell(CellAddr::new(0, 1)).value,
+            CellValue::Boolean(false)
+        );
     }
 
     #[test]
@@ -4305,26 +4728,58 @@ mod tests {
         let mut s = Sheet::new("Test");
         let csv = "Name,Value\nA,42\nB,99";
         s.import_csv(csv);
-        assert_eq!(s.get_cell(CellAddr::new(0, 0)).value, CellValue::Text("Name".to_string()));
-        assert_eq!(s.get_cell(CellAddr::new(1, 1)).value, CellValue::Number(42.0));
+        assert_eq!(
+            s.get_cell(CellAddr::new(0, 0)).value,
+            CellValue::Text("Name".to_string())
+        );
+        assert_eq!(
+            s.get_cell(CellAddr::new(1, 1)).value,
+            CellValue::Number(42.0)
+        );
+    }
+
+    /// A sheet must be able to read back what it wrote. Every value here is
+    /// one the old line-oriented importer mangled or the old exporter failed
+    /// to quote.
+    #[test]
+    fn a_csv_export_can_be_imported_back() {
+        let hostile = [
+            "plain",
+            "has, comma",
+            "has\nnewline",
+            "has \"quotes\"",
+            "has\rcarriage return",
+        ];
+        let mut sheet = Sheet::new("src");
+        for (i, v) in hostile.iter().enumerate() {
+            let _ = sheet.set_cell_input(CellAddr::new(i, 0), v);
+        }
+
+        let csv = sheet.export_csv();
+        let mut back = Sheet::new("dst");
+        let _ = back.import_csv(&csv);
+
+        for (i, want) in hostile.iter().enumerate() {
+            assert_eq!(
+                back.get_cell(CellAddr::new(i, 0)).display_text(),
+                *want,
+                "cell {i} did not survive the round trip; csv was {csv:?}"
+            );
+        }
     }
 
     #[test]
-    fn test_parse_csv_line_simple() {
-        let fields = parse_csv_line("a,b,c");
-        assert_eq!(fields, vec!["a", "b", "c"]);
-    }
+    fn a_newline_in_a_cell_does_not_forge_a_row() {
+        let mut sheet = Sheet::new("src");
+        let _ = sheet.set_cell_input(CellAddr::new(0, 0), "one\ntwo");
+        let _ = sheet.set_cell_input(CellAddr::new(1, 0), "x");
+        let csv = sheet.export_csv();
 
-    #[test]
-    fn test_parse_csv_line_quoted() {
-        let fields = parse_csv_line("\"hello, world\",b");
-        assert_eq!(fields[0], "hello, world");
-    }
-
-    #[test]
-    fn test_parse_csv_line_escaped_quotes() {
-        let fields = parse_csv_line("\"he said \"\"hi\"\"\",b");
-        assert_eq!(fields[0], "he said \"hi\"");
+        let mut back = Sheet::new("dst");
+        let _ = back.import_csv(&csv);
+        // The second cell must still be on row 0, not pushed onto a row the
+        // newline invented.
+        assert_eq!(back.get_cell(CellAddr::new(1, 0)).display_text(), "x");
     }
 
     // -- Formula tokenizer tests --
@@ -4340,7 +4795,9 @@ mod tests {
     fn test_tokenize_cell_ref() {
         let tokens = tokenize_formula("A1").unwrap();
         assert_eq!(tokens.len(), 1);
-        assert!(matches!(&tokens[0], FormulaToken::CellRef(addr) if addr.col == 0 && addr.row == 0));
+        assert!(
+            matches!(&tokens[0], FormulaToken::CellRef(addr) if addr.col == 0 && addr.row == 0)
+        );
     }
 
     #[test]
@@ -4552,13 +5009,19 @@ mod tests {
         // 3.55678 rounds to 3.56 — both literals avoid the clippy::approx_constant
         // PI proximity flag while still exercising ROUND().
         let sheet = Sheet::new("Test");
-        assert_eq!(evaluate_formula("=ROUND(3.55678,2)", &sheet), CellValue::Number(3.56));
+        assert_eq!(
+            evaluate_formula("=ROUND(3.55678,2)", &sheet),
+            CellValue::Number(3.56)
+        );
     }
 
     #[test]
     fn test_eval_round_no_places() {
         let sheet = Sheet::new("Test");
-        assert_eq!(evaluate_formula("=ROUND(3.7)", &sheet), CellValue::Number(4.0));
+        assert_eq!(
+            evaluate_formula("=ROUND(3.7)", &sheet),
+            CellValue::Number(4.0)
+        );
     }
 
     #[test]
@@ -4571,19 +5034,28 @@ mod tests {
     #[test]
     fn test_eval_len() {
         let sheet = Sheet::new("Test");
-        assert_eq!(evaluate_formula("=LEN(\"hello\")", &sheet), CellValue::Number(5.0));
+        assert_eq!(
+            evaluate_formula("=LEN(\"hello\")", &sheet),
+            CellValue::Number(5.0)
+        );
     }
 
     #[test]
     fn test_eval_upper() {
         let sheet = Sheet::new("Test");
-        assert_eq!(evaluate_formula("=UPPER(\"hello\")", &sheet), CellValue::Text("HELLO".to_string()));
+        assert_eq!(
+            evaluate_formula("=UPPER(\"hello\")", &sheet),
+            CellValue::Text("HELLO".to_string())
+        );
     }
 
     #[test]
     fn test_eval_lower() {
         let sheet = Sheet::new("Test");
-        assert_eq!(evaluate_formula("=LOWER(\"HELLO\")", &sheet), CellValue::Text("hello".to_string()));
+        assert_eq!(
+            evaluate_formula("=LOWER(\"HELLO\")", &sheet),
+            CellValue::Text("hello".to_string())
+        );
     }
 
     #[test]
@@ -4642,7 +5114,10 @@ mod tests {
         sheet.set_cell_input(CellAddr::new(0, 0), "10");
         sheet.set_cell_input(CellAddr::new(1, 0), "=A1*2");
         recalculate_sheet(&mut sheet);
-        assert_eq!(sheet.get_cell(CellAddr::new(1, 0)).value, CellValue::Number(20.0));
+        assert_eq!(
+            sheet.get_cell(CellAddr::new(1, 0)).value,
+            CellValue::Number(20.0)
+        );
     }
 
     #[test]
@@ -4652,7 +5127,10 @@ mod tests {
         sheet.set_cell_input(CellAddr::new(1, 0), "=A1+1");
         sheet.set_cell_input(CellAddr::new(2, 0), "=B1+1");
         recalculate_sheet(&mut sheet);
-        assert_eq!(sheet.get_cell(CellAddr::new(2, 0)).value, CellValue::Number(7.0));
+        assert_eq!(
+            sheet.get_cell(CellAddr::new(2, 0)).value,
+            CellValue::Number(7.0)
+        );
     }
 
     // -- Auto-fill tests --
@@ -4665,7 +5143,11 @@ mod tests {
 
     #[test]
     fn test_auto_fill_arithmetic_series() {
-        let vals = vec![CellValue::Number(1.0), CellValue::Number(2.0), CellValue::Number(3.0)];
+        let vals = vec![
+            CellValue::Number(1.0),
+            CellValue::Number(2.0),
+            CellValue::Number(3.0),
+        ];
         assert_eq!(auto_fill_next(&vals, 0), CellValue::Number(4.0));
         assert_eq!(auto_fill_next(&vals, 1), CellValue::Number(5.0));
     }
@@ -4678,7 +5160,10 @@ mod tests {
 
     #[test]
     fn test_auto_fill_text_repeat() {
-        let vals = vec![CellValue::Text("a".to_string()), CellValue::Text("b".to_string())];
+        let vals = vec![
+            CellValue::Text("a".to_string()),
+            CellValue::Text("b".to_string()),
+        ];
         assert_eq!(auto_fill_next(&vals, 0), CellValue::Text("a".to_string()));
         assert_eq!(auto_fill_next(&vals, 1), CellValue::Text("b".to_string()));
     }
@@ -4766,7 +5251,10 @@ mod tests {
 
     #[test]
     fn test_case_insensitive_replace() {
-        assert_eq!(case_insensitive_replace("Hello World", "hello", "hi"), "hi World");
+        assert_eq!(
+            case_insensitive_replace("Hello World", "hello", "hi"),
+            "hi World"
+        );
     }
 
     // -- Selection tests --
@@ -4874,18 +5362,32 @@ mod tests {
     fn test_app_set_cell_input() {
         let mut app = SpreadsheetApp::new(1280.0, 800.0);
         app.set_cell_input(CellAddr::new(0, 0), "42");
-        assert_eq!(app.active_sheet().get_cell(CellAddr::new(0, 0)).value, CellValue::Number(42.0));
+        assert_eq!(
+            app.active_sheet().get_cell(CellAddr::new(0, 0)).value,
+            CellValue::Number(42.0)
+        );
     }
 
     #[test]
     fn test_app_undo_redo() {
         let mut app = SpreadsheetApp::new(1280.0, 800.0);
         app.set_cell_input(CellAddr::new(0, 0), "hello");
-        assert_eq!(app.active_sheet().get_cell(CellAddr::new(0, 0)).value, CellValue::Text("hello".to_string()));
+        assert_eq!(
+            app.active_sheet().get_cell(CellAddr::new(0, 0)).value,
+            CellValue::Text("hello".to_string())
+        );
         app.undo();
-        assert!(app.active_sheet().get_cell(CellAddr::new(0, 0)).value.is_empty());
+        assert!(
+            app.active_sheet()
+                .get_cell(CellAddr::new(0, 0))
+                .value
+                .is_empty()
+        );
         app.redo();
-        assert_eq!(app.active_sheet().get_cell(CellAddr::new(0, 0)).value, CellValue::Text("hello".to_string()));
+        assert_eq!(
+            app.active_sheet().get_cell(CellAddr::new(0, 0)).value,
+            CellValue::Text("hello".to_string())
+        );
     }
 
     #[test]
@@ -4908,7 +5410,12 @@ mod tests {
         app.set_cell_input(CellAddr::new(0, 0), "moveme");
         app.selection = Selection::single(CellAddr::new(0, 0));
         app.cut_selection();
-        assert!(app.active_sheet().get_cell(CellAddr::new(0, 0)).value.is_empty());
+        assert!(
+            app.active_sheet()
+                .get_cell(CellAddr::new(0, 0))
+                .value
+                .is_empty()
+        );
         app.selection = Selection::single(CellAddr::new(2, 2));
         app.paste();
         assert_eq!(
@@ -4923,7 +5430,12 @@ mod tests {
         app.set_cell_input(CellAddr::new(0, 0), "delete me");
         app.selection = Selection::single(CellAddr::new(0, 0));
         app.delete_selection();
-        assert!(app.active_sheet().get_cell(CellAddr::new(0, 0)).value.is_empty());
+        assert!(
+            app.active_sheet()
+                .get_cell(CellAddr::new(0, 0))
+                .value
+                .is_empty()
+        );
     }
 
     #[test]
@@ -4967,7 +5479,12 @@ mod tests {
         app.set_cell_input(CellAddr::new(0, 0), "text");
         app.selection = Selection::single(CellAddr::new(0, 0));
         app.toggle_italic();
-        assert!(app.active_sheet().get_cell(CellAddr::new(0, 0)).format.italic);
+        assert!(
+            app.active_sheet()
+                .get_cell(CellAddr::new(0, 0))
+                .format
+                .italic
+        );
     }
 
     #[test]
@@ -4976,7 +5493,13 @@ mod tests {
         app.set_cell_input(CellAddr::new(0, 0), "text");
         app.selection = Selection::single(CellAddr::new(0, 0));
         app.set_alignment(Alignment::Center);
-        assert_eq!(app.active_sheet().get_cell(CellAddr::new(0, 0)).format.alignment, Alignment::Center);
+        assert_eq!(
+            app.active_sheet()
+                .get_cell(CellAddr::new(0, 0))
+                .format
+                .alignment,
+            Alignment::Center
+        );
     }
 
     #[test]
@@ -4995,9 +5518,21 @@ mod tests {
         app.set_cell_input(CellAddr::new(0, 0), "text");
         app.selection = Selection::single(CellAddr::new(0, 0));
         app.toggle_borders();
-        assert!(app.active_sheet().get_cell(CellAddr::new(0, 0)).format.borders.has_any());
+        assert!(
+            app.active_sheet()
+                .get_cell(CellAddr::new(0, 0))
+                .format
+                .borders
+                .has_any()
+        );
         app.toggle_borders();
-        assert!(!app.active_sheet().get_cell(CellAddr::new(0, 0)).format.borders.has_any());
+        assert!(
+            !app.active_sheet()
+                .get_cell(CellAddr::new(0, 0))
+                .format
+                .borders
+                .has_any()
+        );
     }
 
     #[test]
@@ -5042,17 +5577,26 @@ mod tests {
     #[test]
     fn test_app_confirm_edit() {
         let mut app = SpreadsheetApp::new(1280.0, 800.0);
-        app.mode = InteractionMode::Editing { text: "99".to_string(), cursor_pos: 2 };
+        app.mode = InteractionMode::Editing {
+            text: "99".to_string(),
+            cursor_pos: 2,
+        };
         app.selection = Selection::single(CellAddr::new(0, 0));
         app.confirm_edit();
-        assert_eq!(app.active_sheet().get_cell(CellAddr::new(0, 0)).value, CellValue::Number(99.0));
+        assert_eq!(
+            app.active_sheet().get_cell(CellAddr::new(0, 0)).value,
+            CellValue::Number(99.0)
+        );
         assert!(matches!(app.mode, InteractionMode::Normal));
     }
 
     #[test]
     fn test_app_cancel_edit() {
         let mut app = SpreadsheetApp::new(1280.0, 800.0);
-        app.mode = InteractionMode::Editing { text: "99".to_string(), cursor_pos: 2 };
+        app.mode = InteractionMode::Editing {
+            text: "99".to_string(),
+            cursor_pos: 2,
+        };
         app.cancel_edit();
         assert!(matches!(app.mode, InteractionMode::Normal));
     }
@@ -5124,9 +5668,9 @@ mod tests {
         let mut app = SpreadsheetApp::new(1280.0, 800.0);
         app.set_cell_input(CellAddr::new(0, 0), "Hello");
         let cmds = app.render();
-        let has_text = cmds.iter().any(|c| {
-            matches!(c, RenderCommand::Text { text, .. } if text == "Hello")
-        });
+        let has_text = cmds
+            .iter()
+            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text == "Hello"));
         assert!(has_text);
     }
 
@@ -5134,7 +5678,9 @@ mod tests {
     fn test_render_active_cell_outline() {
         let app = SpreadsheetApp::new(1280.0, 800.0);
         let cmds = app.render();
-        let has_stroke = cmds.iter().any(|c| matches!(c, RenderCommand::StrokeRect { color, .. } if *color == COLOR_BLUE));
+        let has_stroke = cmds
+            .iter()
+            .any(|c| matches!(c, RenderCommand::StrokeRect { color, .. } if *color == COLOR_BLUE));
         assert!(has_stroke);
     }
 
@@ -5143,9 +5689,9 @@ mod tests {
         let mut app = SpreadsheetApp::new(1280.0, 800.0);
         app.find_replace.active = true;
         let cmds = app.render();
-        let has_overlay = cmds.iter().any(|c| {
-            matches!(c, RenderCommand::Text { text, .. } if text == "Find and Replace")
-        });
+        let has_overlay = cmds
+            .iter()
+            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text == "Find and Replace"));
         assert!(has_overlay);
     }
 
@@ -5154,12 +5700,12 @@ mod tests {
         let mut app = SpreadsheetApp::new(1280.0, 800.0);
         app.add_sheet();
         let cmds = app.render();
-        let tab1 = cmds.iter().any(|c| {
-            matches!(c, RenderCommand::Text { text, .. } if text == "Sheet1")
-        });
-        let tab2 = cmds.iter().any(|c| {
-            matches!(c, RenderCommand::Text { text, .. } if text == "Sheet2")
-        });
+        let tab1 = cmds
+            .iter()
+            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text == "Sheet1"));
+        let tab2 = cmds
+            .iter()
+            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text == "Sheet2"));
         assert!(tab1);
         assert!(tab2);
     }
@@ -5168,9 +5714,9 @@ mod tests {
     fn test_render_formula_bar() {
         let app = SpreadsheetApp::new(1280.0, 800.0);
         let cmds = app.render();
-        let has_fx = cmds.iter().any(|c| {
-            matches!(c, RenderCommand::Text { text, .. } if text == "fx")
-        });
+        let has_fx = cmds
+            .iter()
+            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text == "fx"));
         assert!(has_fx);
     }
 
@@ -5178,9 +5724,9 @@ mod tests {
     fn test_render_col_headers() {
         let app = SpreadsheetApp::new(1280.0, 800.0);
         let cmds = app.render();
-        let has_a = cmds.iter().any(|c| {
-            matches!(c, RenderCommand::Text { text, .. } if text == "A")
-        });
+        let has_a = cmds
+            .iter()
+            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text == "A"));
         assert!(has_a);
     }
 
@@ -5188,9 +5734,9 @@ mod tests {
     fn test_render_row_headers() {
         let app = SpreadsheetApp::new(1280.0, 800.0);
         let cmds = app.render();
-        let has_1 = cmds.iter().any(|c| {
-            matches!(c, RenderCommand::Text { text, .. } if text == "1")
-        });
+        let has_1 = cmds
+            .iter()
+            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text == "1"));
         assert!(has_1);
     }
 
@@ -5200,7 +5746,12 @@ mod tests {
     fn test_editing_backspace() {
         let mut text = "abc".to_string();
         let mut cursor = 3;
-        let ev = KeyEvent { key: Key::Backspace, pressed: true, modifiers: Modifiers::NONE, text: None };
+        let ev = KeyEvent {
+            key: Key::Backspace,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: None,
+        };
         handle_editing_key(&mut text, &mut cursor, &ev);
         assert_eq!(text, "ab");
         assert_eq!(cursor, 2);
@@ -5210,7 +5761,12 @@ mod tests {
     fn test_editing_delete() {
         let mut text = "abc".to_string();
         let mut cursor = 0;
-        let ev = KeyEvent { key: Key::Delete, pressed: true, modifiers: Modifiers::NONE, text: None };
+        let ev = KeyEvent {
+            key: Key::Delete,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: None,
+        };
         handle_editing_key(&mut text, &mut cursor, &ev);
         assert_eq!(text, "bc");
         assert_eq!(cursor, 0);
@@ -5220,7 +5776,12 @@ mod tests {
     fn test_editing_type_char() {
         let mut text = "ab".to_string();
         let mut cursor = 2;
-        let ev = KeyEvent { key: Key::C, pressed: true, modifiers: Modifiers::NONE, text: Some('c') };
+        let ev = KeyEvent {
+            key: Key::C,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: Some('c'),
+        };
         handle_editing_key(&mut text, &mut cursor, &ev);
         assert_eq!(text, "abc");
         assert_eq!(cursor, 3);
@@ -5230,7 +5791,12 @@ mod tests {
     fn test_editing_left_arrow() {
         let mut text = "abc".to_string();
         let mut cursor = 2;
-        let ev = KeyEvent { key: Key::Left, pressed: true, modifiers: Modifiers::NONE, text: None };
+        let ev = KeyEvent {
+            key: Key::Left,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: None,
+        };
         handle_editing_key(&mut text, &mut cursor, &ev);
         assert_eq!(cursor, 1);
     }
@@ -5239,7 +5805,12 @@ mod tests {
     fn test_editing_right_arrow() {
         let mut text = "abc".to_string();
         let mut cursor = 1;
-        let ev = KeyEvent { key: Key::Right, pressed: true, modifiers: Modifiers::NONE, text: None };
+        let ev = KeyEvent {
+            key: Key::Right,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: None,
+        };
         handle_editing_key(&mut text, &mut cursor, &ev);
         assert_eq!(cursor, 2);
     }
@@ -5248,7 +5819,12 @@ mod tests {
     fn test_editing_home() {
         let mut text = "abc".to_string();
         let mut cursor = 2;
-        let ev = KeyEvent { key: Key::Home, pressed: true, modifiers: Modifiers::NONE, text: None };
+        let ev = KeyEvent {
+            key: Key::Home,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: None,
+        };
         handle_editing_key(&mut text, &mut cursor, &ev);
         assert_eq!(cursor, 0);
     }
@@ -5257,7 +5833,12 @@ mod tests {
     fn test_editing_end() {
         let mut text = "abc".to_string();
         let mut cursor = 0;
-        let ev = KeyEvent { key: Key::End, pressed: true, modifiers: Modifiers::NONE, text: None };
+        let ev = KeyEvent {
+            key: Key::End,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: None,
+        };
         handle_editing_key(&mut text, &mut cursor, &ev);
         assert_eq!(cursor, 3);
     }
@@ -5266,8 +5847,14 @@ mod tests {
 
     #[test]
     fn test_values_equal_numbers() {
-        assert!(values_equal(&CellValue::Number(1.0), &CellValue::Number(1.0)));
-        assert!(!values_equal(&CellValue::Number(1.0), &CellValue::Number(2.0)));
+        assert!(values_equal(
+            &CellValue::Number(1.0),
+            &CellValue::Number(1.0)
+        ));
+        assert!(!values_equal(
+            &CellValue::Number(1.0),
+            &CellValue::Number(2.0)
+        ));
     }
 
     #[test]
@@ -5285,7 +5872,10 @@ mod tests {
 
     #[test]
     fn test_values_equal_different_types() {
-        assert!(!values_equal(&CellValue::Number(1.0), &CellValue::Text("1".to_string())));
+        assert!(!values_equal(
+            &CellValue::Number(1.0),
+            &CellValue::Text("1".to_string())
+        ));
     }
 
     // -- compare_values tests --
@@ -5328,7 +5918,10 @@ mod tests {
 
     #[test]
     fn test_value_to_string_error() {
-        assert_eq!(value_to_string(&CellValue::Error(CellError::DivisionByZero)), "#DIV/0!");
+        assert_eq!(
+            value_to_string(&CellValue::Error(CellError::DivisionByZero)),
+            "#DIV/0!"
+        );
     }
 
     // -- ScrollPosition tests --
@@ -5400,9 +5993,18 @@ mod tests {
             ranges: vec![CellRange::new(CellAddr::new(0, 0), CellAddr::new(0, 2))],
         };
         app.sort_column(SortDirection::Ascending);
-        assert_eq!(app.active_sheet().get_cell(CellAddr::new(0, 0)).value, CellValue::Number(1.0));
-        assert_eq!(app.active_sheet().get_cell(CellAddr::new(0, 1)).value, CellValue::Number(2.0));
-        assert_eq!(app.active_sheet().get_cell(CellAddr::new(0, 2)).value, CellValue::Number(3.0));
+        assert_eq!(
+            app.active_sheet().get_cell(CellAddr::new(0, 0)).value,
+            CellValue::Number(1.0)
+        );
+        assert_eq!(
+            app.active_sheet().get_cell(CellAddr::new(0, 1)).value,
+            CellValue::Number(2.0)
+        );
+        assert_eq!(
+            app.active_sheet().get_cell(CellAddr::new(0, 2)).value,
+            CellValue::Number(3.0)
+        );
     }
 
     // -- Integration: formula with cell references after recalc --
@@ -5414,7 +6016,10 @@ mod tests {
         app.set_cell_input(CellAddr::new(0, 1), "20");
         app.set_cell_input(CellAddr::new(0, 2), "30");
         app.set_cell_input(CellAddr::new(0, 3), "=SUM(A1:A3)");
-        assert_eq!(app.active_sheet().get_cell(CellAddr::new(0, 3)).value, CellValue::Number(60.0));
+        assert_eq!(
+            app.active_sheet().get_cell(CellAddr::new(0, 3)).value,
+            CellValue::Number(60.0)
+        );
     }
 
     #[test]
@@ -5423,7 +6028,10 @@ mod tests {
         app.set_cell_input(CellAddr::new(0, 0), "5");
         app.set_cell_input(CellAddr::new(1, 0), "10");
         app.set_cell_input(CellAddr::new(2, 0), "=A1*B1");
-        assert_eq!(app.active_sheet().get_cell(CellAddr::new(2, 0)).value, CellValue::Number(50.0));
+        assert_eq!(
+            app.active_sheet().get_cell(CellAddr::new(2, 0)).value,
+            CellValue::Number(50.0)
+        );
     }
 
     #[test]
@@ -5432,7 +6040,10 @@ mod tests {
         app.set_cell_input(CellAddr::new(0, 0), "100");
         app.set_cell_input(CellAddr::new(1, 0), "=A1/2");
         app.set_cell_input(CellAddr::new(2, 0), "=B1+10");
-        assert_eq!(app.active_sheet().get_cell(CellAddr::new(2, 0)).value, CellValue::Number(60.0));
+        assert_eq!(
+            app.active_sheet().get_cell(CellAddr::new(2, 0)).value,
+            CellValue::Number(60.0)
+        );
     }
 
     #[test]
@@ -5469,9 +6080,18 @@ mod tests {
         let source = CellRange::new(CellAddr::new(0, 0), CellAddr::new(0, 2));
         let end = CellAddr::new(0, 5);
         app.auto_fill(source, end);
-        assert_eq!(app.active_sheet().get_cell(CellAddr::new(0, 3)).value, CellValue::Number(4.0));
-        assert_eq!(app.active_sheet().get_cell(CellAddr::new(0, 4)).value, CellValue::Number(5.0));
-        assert_eq!(app.active_sheet().get_cell(CellAddr::new(0, 5)).value, CellValue::Number(6.0));
+        assert_eq!(
+            app.active_sheet().get_cell(CellAddr::new(0, 3)).value,
+            CellValue::Number(4.0)
+        );
+        assert_eq!(
+            app.active_sheet().get_cell(CellAddr::new(0, 4)).value,
+            CellValue::Number(5.0)
+        );
+        assert_eq!(
+            app.active_sheet().get_cell(CellAddr::new(0, 5)).value,
+            CellValue::Number(6.0)
+        );
     }
 
     #[test]

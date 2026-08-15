@@ -94,3 +94,21 @@ __pycache__/
 # Exception: this saved page is intentionally tracked (reference kept in-repo),
 # even though the blanket *.html rule above ignores saved web pages.
 !Aero Desktop (offline).html
+
+# HarfBuzz sources fetched for reference by the Indic shaper work.
+# Not ours, not built, not shipped.
+.hbref/
+# Operator's private instruction queue. Kept on disk, deliberately NOT tracked
+# on the shared branches: it is a scratch inbox of raw notes to the agents, not
+# a project document, and the operator asked for it to stay off GitHub
+# (2026-08-14). `todo.txt` — the shared, agent-maintained one — IS still
+# tracked; only `todo2.txt` is exempt.
+#
+# It IS versioned locally, just not here: the orphan branch `private/todo2`
+# holds its history and is never pushed (./scripts/snapshot-todo2.sh appends to
+# it; `git show private/todo2:todo2.txt` reads it back). It cannot live on a
+# shared branch, because those are pushed constantly by three agents. This rule
+# and the `pre-push` hook are two independent guards on the same thing: the
+# rule stops it being staged by accident, the hook stops any push that carries
+# it regardless of how it got committed. See scripts/hooks/pre-push.
+/todo2.txt

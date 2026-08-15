@@ -132,13 +132,31 @@ mod tests {
         // kernel can dispatch with a single `(cmd & 0xff00) == 0x5300`
         // check.
         let ops = [
-            CDROMPAUSE, CDROMRESUME, CDROMPLAYMSF, CDROMPLAYTRKIND,
-            CDROMREADTOCHDR, CDROMREADTOCENTRY, CDROMSTOP, CDROMSTART,
-            CDROMEJECT, CDROMVOLCTRL, CDROMSUBCHNL, CDROMREADMODE2,
-            CDROMREADMODE1, CDROMREADAUDIO, CDROMEJECT_SW,
-            CDROMMULTISESSION, CDROM_GET_MCN, CDROMRESET, CDROMVOLREAD,
-            CDROMREADRAW, CDROM_DRIVE_STATUS, CDROM_DISC_STATUS,
-            CDROM_CHANGER_NSLOTS, CDROM_LOCKDOOR, CDROM_DEBUG,
+            CDROMPAUSE,
+            CDROMRESUME,
+            CDROMPLAYMSF,
+            CDROMPLAYTRKIND,
+            CDROMREADTOCHDR,
+            CDROMREADTOCENTRY,
+            CDROMSTOP,
+            CDROMSTART,
+            CDROMEJECT,
+            CDROMVOLCTRL,
+            CDROMSUBCHNL,
+            CDROMREADMODE2,
+            CDROMREADMODE1,
+            CDROMREADAUDIO,
+            CDROMEJECT_SW,
+            CDROMMULTISESSION,
+            CDROM_GET_MCN,
+            CDROMRESET,
+            CDROMVOLREAD,
+            CDROMREADRAW,
+            CDROM_DRIVE_STATUS,
+            CDROM_DISC_STATUS,
+            CDROM_CHANGER_NSLOTS,
+            CDROM_LOCKDOOR,
+            CDROM_DEBUG,
             CDROM_GET_CAPABILITY,
         ];
         for i in 0..ops.len() {
@@ -167,8 +185,7 @@ mod tests {
     #[test]
     fn test_disc_status_in_100_range() {
         let d = [
-            CDS_AUDIO, CDS_DATA_1, CDS_DATA_2, CDS_XA_2_1, CDS_XA_2_2,
-            CDS_MIXED,
+            CDS_AUDIO, CDS_DATA_1, CDS_DATA_2, CDS_XA_2_1, CDS_XA_2_2, CDS_MIXED,
         ];
         for &v in &d {
             // Disc status values live in 100.. to avoid collision with

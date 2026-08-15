@@ -22,6 +22,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use textfmt::kv;
 
 // ============================================================================
 // Constants
@@ -31,7 +32,15 @@ const CONFIG_PATH: &str = "/etc/indexer.conf";
 const INDEX_PATH: &str = "/var/indexer/index.db";
 const PID_FILE: &str = "/var/indexer/indexer.pid";
 const INDEX_MAGIC: &[u8; 4] = b"OIDX";
-const INDEX_VERSION: u32 = 1;
+/// Version 2 stores entry paths as their exact bytes. Version 1 wrote them
+/// through `to_string_lossy`, so any path that was not UTF-8 came back with
+/// U+FFFD where its bytes had been and no longer named a real file. The index
+/// is a derived cache, so a version bump needs no migration: `deserialize`
+/// rejects the old file and the caller reindexes.
+const INDEX_VERSION: u32 = 2;
+/// Bytes before the first entry: magic(4) + version(4) + count(8) +
+/// last_indexed(8) + dirs_scanned(8).
+const INDEX_HEADER_LEN: usize = 32;
 const DEFAULT_MAX_FILE_SIZE: u64 = 50 * 1024 * 1024; // 50 MB
 const DEFAULT_SCAN_INTERVAL: u64 = 3600; // 1 hour
 const DEFAULT_RESULT_LIMIT: usize = 50;
@@ -43,6 +52,37 @@ const FUZZY_MAX_DISTANCE: u32 = 2;
 // ============================================================================
 // Configuration
 // ============================================================================
+
+/// Which repeated-key list a config key feeds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ListKey {
+    IndexPath,
+    ExcludePath,
+    IncludeExtension,
+    ExcludeExtension,
+}
+
+/// Write a list as one `key = value` line per entry, or as the empty plural
+/// form when there is nothing to write.
+///
+/// The escaping is [`textfmt::kv`]'s, not this file's: a path here may contain
+/// any byte but `/` and NUL, so it can hold a newline, a tab or an edge space,
+/// and the two ways of getting that wrong (a `replace`-chain decoder; escaping
+/// a trailing space as backslash-space, which the parser's trim then eats) had
+/// each already been written more than once in this tree.
+///
+/// No `extra` separators are passed. The keys here are fixed identifiers, so
+/// the `=` on the key's side is never user data and the first one on a line is
+/// always the real separator.
+fn push_list(out: &mut String, key: &str, plural_key: &str, values: &[String]) {
+    if values.is_empty() {
+        out.push_str(&format!("{plural_key} = \n"));
+        return;
+    }
+    for value in values {
+        out.push_str(&format!("{key} = {}\n", kv::escape(value, &[])));
+    }
+}
 
 #[derive(Debug, Clone)]
 struct Config {
@@ -97,6 +137,10 @@ impl Config {
 
     fn parse(content: &str) -> Self {
         let mut cfg = Self::default();
+        // Which repeated keys have already replaced their default. The first
+        // `index_path` line in a file replaces the built-in list; the rest add
+        // to it. Without this a config could only ever grow the defaults.
+        let mut replaced: Vec<&str> = Vec::new();
 
         for line in content.lines() {
             let line = line.trim();
@@ -106,11 +150,51 @@ impl Config {
             if let Some((key, value)) = line.split_once('=') {
                 let key = key.trim();
                 let value = value.trim();
-                cfg.set_field(key, value);
+                if Self::list_for_key(key).is_some() {
+                    let first = !replaced.contains(&key);
+                    if first {
+                        replaced.push(key);
+                    }
+                    cfg.push_field(key, value, first);
+                } else {
+                    cfg.set_field(key, value);
+                }
             }
         }
 
         cfg
+    }
+
+    /// Whether `key` is one of the repeated single-value keys, and which list
+    /// it feeds. Returning the discriminant rather than a bool keeps the set of
+    /// repeated keys defined in exactly one place.
+    fn list_for_key(key: &str) -> Option<ListKey> {
+        match key {
+            "index_path" => Some(ListKey::IndexPath),
+            "exclude_path" => Some(ListKey::ExcludePath),
+            "include_extension" => Some(ListKey::IncludeExtension),
+            "exclude_extension" => Some(ListKey::ExcludeExtension),
+            _ => None,
+        }
+    }
+
+    /// Append one value to a repeated-key list, clearing the defaults first
+    /// time round.
+    fn push_field(&mut self, key: &str, value: &str, first: bool) {
+        let Some(which) = Self::list_for_key(key) else {
+            return;
+        };
+        let decoded = kv::unescape(value);
+        let list = match which {
+            ListKey::IndexPath => &mut self.index_paths,
+            ListKey::ExcludePath => &mut self.exclude_paths,
+            ListKey::ExcludeExtension => &mut self.exclude_extensions,
+            ListKey::IncludeExtension => self.include_extensions.get_or_insert_with(Vec::new),
+        };
+        if first {
+            list.clear();
+        }
+        list.push(decoded);
     }
 
     fn set_field(&mut self, key: &str, value: &str) {
@@ -148,32 +232,81 @@ impl Config {
         }
     }
 
+    /// Parse a legacy comma-separated list, as hand-written configs still use.
+    ///
+    /// Retained for the plural keys only. It cannot represent a path
+    /// containing a comma, which is why the writer no longer emits this form
+    /// -- see [`Config::serialize`].
     fn parse_list(value: &str) -> Vec<String> {
         value
             .split(',')
-            .map(|s| s.trim().to_string())
+            .map(|s| kv::unescape(s.trim()))
             .filter(|s| !s.is_empty())
             .collect()
     }
 
     /// Serialize configuration to the config file format.
+    ///
+    /// Paths and extensions get **one line each**, escaped, rather than being
+    /// joined with commas. On this system a path may contain any byte except
+    /// `/` and NUL, so the comma that used to separate them is an ordinary
+    /// filename character — and the failure it caused was not cosmetic:
+    ///
+    /// * `exclude_paths` decides what the indexer does *not* read. Excluding
+    ///   `/home/u/Private, Ltd` used to serialise as two entries,
+    ///   `/home/u/Private` and `Ltd`, neither of which matches the directory
+    ///   the user actually named. With `index_contents` on, the contents of a
+    ///   directory the user explicitly excluded then went into the index.
+    /// * `index_paths` decides what it does read, so the same split silently
+    ///   pointed the scanner at directories nobody chose.
+    ///
+    /// A newline in a path would have been worse still — it could write a
+    /// whole config line, including `enabled = false` — so line breaks are
+    /// escaped rather than rejected: every path is representable and nothing
+    /// has to be silently dropped.
+    ///
+    /// An empty list is written in the legacy plural form with no value, which
+    /// is the one thing repeated keys cannot express: no lines at all is
+    /// indistinguishable from "key absent", which means "keep the defaults".
     fn serialize(&self) -> String {
         let mut out = String::new();
-        out.push_str("# Slate OS File Indexer Configuration\n\n");
+        out.push_str("# Slate OS File Indexer Configuration\n");
+        out.push_str("#\n");
+        out.push_str("# Paths and extensions take one line each. Values are escaped:\n");
+        out.push_str("#   \\\\  backslash    \\n  newline    \\r  return\n");
+        out.push_str("#   \\t  tab          \\s  a leading or trailing space\n");
+        out.push_str("# A path may contain any byte but `/` and NUL, commas included,\n");
+        out.push_str("# so the list is not comma-separated.\n\n");
         out.push_str(&format!("enabled = {}\n", self.enabled));
-        out.push_str(&format!("index_paths = {}\n", self.index_paths.join(", ")));
-        out.push_str(&format!("exclude_paths = {}\n", self.exclude_paths.join(", ")));
-        if let Some(ref exts) = self.include_extensions {
-            out.push_str(&format!("include_extensions = {}\n", exts.join(", ")));
-        } else {
-            out.push_str("include_extensions = \n");
+        push_list(&mut out, "index_path", "index_paths", &self.index_paths);
+        push_list(
+            &mut out,
+            "exclude_path",
+            "exclude_paths",
+            &self.exclude_paths,
+        );
+        match self.include_extensions {
+            // Absent entirely means "no filter"; an empty list means the same
+            // after parsing, so both round-trip to `None`.
+            Some(ref exts) => push_list(
+                &mut out,
+                "include_extension",
+                "include_extensions",
+                exts.as_slice(),
+            ),
+            None => out.push_str("include_extensions = \n"),
         }
-        out.push_str(&format!(
-            "exclude_extensions = {}\n",
-            self.exclude_extensions.join(", ")
-        ));
+        push_list(
+            &mut out,
+            "exclude_extension",
+            "exclude_extensions",
+            &self.exclude_extensions,
+        );
         out.push_str(&format!("max_file_size = {}\n", self.max_file_size));
-        out.push_str(&format!("scan_interval_secs = {}\n", self.scan_interval_secs));
+        out.push_str(&format!(
+            "scan_interval_secs = {}\n",
+            self.scan_interval_secs
+        ));
         out.push_str(&format!("index_contents = {}\n", self.index_contents));
         out
     }
@@ -218,9 +351,16 @@ impl fmt::Display for Config {
 /// A single indexed file entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct IndexEntry {
-    /// Full path to the file.
+    /// Full path to the file. Authoritative: this is what identifies the file
+    /// and what a caller opens, so it holds the path's exact bytes.
     path: PathBuf,
-    /// Filename component (cached for fast lookup).
+    /// Filename component, as a **search key only** — never as an identity and
+    /// never displayed.
+    ///
+    /// A query is UTF-8 text the user typed, so matching it against a lossy
+    /// rendering of the name is the only thing that can be meant; the bytes a
+    /// query could never have named become U+FFFD, which no query matches. Use
+    /// [`IndexEntry::path`] for anything that has to name the file.
     filename: String,
     /// File size in bytes.
     size: u64,
@@ -255,6 +395,41 @@ impl FileType {
             2 => Self::Symlink,
             _ => Self::Other,
         }
+    }
+}
+
+/// Derive the search key in [`IndexEntry::filename`] from a path.
+///
+/// One function so the scanner and the index loader cannot disagree about what
+/// a given path's key is — they did not, but nothing stopped them.
+fn filename_key(path: &Path) -> String {
+    path.file_name()
+        .map(|f| f.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+/// Build an `OsString` from the raw bytes of a path.
+///
+/// Split per platform rather than papered over with
+/// `OsStr::from_encoded_bytes_unchecked`, whose contract is that the bytes are
+/// valid for the platform's `OsStr` encoding — true for arbitrary bytes on
+/// Unix, but not on Windows, where `OsStr` is WTF-8. Our target is
+/// `target-family = ["unix"]`, so the safe total conversion is the one that
+/// runs; Windows appears only as a test host.
+#[cfg(unix)]
+fn os_string_from_bytes(bytes: Vec<u8>) -> std::ffi::OsString {
+    use std::os::unix::ffi::OsStringExt;
+    std::ffi::OsString::from_vec(bytes)
+}
+
+/// Test-host fallback: a Windows `OsString` cannot hold a byte string that is
+/// not WTF-8. Only reachable on a non-Unix host reading an index written on
+/// the target.
+#[cfg(not(unix))]
+fn os_string_from_bytes(bytes: Vec<u8>) -> std::ffi::OsString {
+    match String::from_utf8(bytes) {
+        Ok(s) => std::ffi::OsString::from(s),
+        Err(e) => std::ffi::OsString::from(String::from_utf8_lossy(e.as_bytes()).into_owned()),
     }
 }
 
@@ -358,9 +533,12 @@ impl FileIndex {
 
         // Entries
         for entry in &self.entries {
-            let path_bytes = entry.path.to_string_lossy().as_bytes().to_vec();
+            // The exact bytes, not `to_string_lossy`: a path is a byte string
+            // here, and an index entry whose path has been through U+FFFD
+            // substitution no longer names the file it was built from.
+            let path_bytes = entry.path.as_os_str().as_encoded_bytes();
             buf.extend_from_slice(&(path_bytes.len() as u32).to_le_bytes());
-            buf.extend_from_slice(&path_bytes);
+            buf.extend_from_slice(path_bytes);
             buf.extend_from_slice(&entry.size.to_le_bytes());
             buf.extend_from_slice(&entry.mtime.to_le_bytes());
             buf.push(entry.file_type.as_byte());
@@ -371,7 +549,9 @@ impl FileIndex {
 
     /// Deserialize the index from binary data.
     fn deserialize(data: &[u8]) -> Result<Self, IndexError> {
-        if data.len() < 28 {
+        // 32, not 28: `dirs_scanned` is read from bytes 24..32, so a file of
+        // 28..=31 bytes passed this check and then panicked on the read.
+        if data.len() < INDEX_HEADER_LEN {
             return Err(IndexError::CorruptIndex("header too short".into()));
         }
 
@@ -405,17 +585,24 @@ impl FileIndex {
 
         for _ in 0..entry_count {
             if offset + 4 > data.len() {
-                return Err(IndexError::CorruptIndex("truncated entry path length".into()));
+                return Err(IndexError::CorruptIndex(
+                    "truncated entry path length".into(),
+                ));
             }
-            let path_len =
-                u32::from_le_bytes([data[offset], data[offset + 1], data[offset + 2], data[offset + 3]])
-                    as usize;
+            let path_len = u32::from_le_bytes([
+                data[offset],
+                data[offset + 1],
+                data[offset + 2],
+                data[offset + 3],
+            ]) as usize;
             offset += 4;
 
             if offset + path_len > data.len() {
                 return Err(IndexError::CorruptIndex("truncated entry path".into()));
             }
-            let path_str = String::from_utf8_lossy(&data[offset..offset + path_len]).into_owned();
+            let path = PathBuf::from(os_string_from_bytes(
+                data[offset..offset + path_len].to_vec(),
+            ));
             offset += path_len;
 
             if offset + 17 > data.len() {
@@ -448,11 +635,7 @@ impl FileIndex {
             let file_type = FileType::from_byte(data[offset]);
             offset += 1;
 
-            let path = PathBuf::from(&path_str);
-            let filename = path
-                .file_name()
-                .map(|f| f.to_string_lossy().into_owned())
-                .unwrap_or_default();
+            let filename = filename_key(&path);
 
             entries.push(IndexEntry {
                 path,
@@ -522,7 +705,11 @@ fn extract_trigrams(text: &str) -> Vec<[u8; 3]> {
 fn index_file_content(index: &mut FileIndex, entry_idx: usize, content: &str) {
     let trigrams = extract_trigrams(content);
     for trigram in trigrams {
-        index.trigram_index.entry(trigram).or_default().push(entry_idx);
+        index
+            .trigram_index
+            .entry(trigram)
+            .or_default()
+            .push(entry_idx);
     }
 }
 
@@ -587,6 +774,9 @@ fn search(index: &FileIndex, query: &str, limit: usize) -> Vec<SearchResult> {
 
         if is_path_search {
             // Match against full path.
+            // Matching a query against a lossy rendering is a selection
+            // heuristic, not an identity check: the result carries `entry`,
+            // whose path is exact, so what gets opened is still the right file.
             let path_str = entry.path.to_string_lossy().to_ascii_lowercase();
             if is_glob {
                 if glob_match(&query_lower, &path_str) {
@@ -646,9 +836,7 @@ fn search(index: &FileIndex, query: &str, limit: usize) -> Vec<SearchResult> {
     }
 
     // Sort by rank (best first), then by score (lower = better).
-    results.sort_by(|a, b| {
-        a.rank.cmp(&b.rank).then_with(|| a.score.cmp(&b.score))
-    });
+    results.sort_by(|a, b| a.rank.cmp(&b.rank).then_with(|| a.score.cmp(&b.score)));
 
     results.truncate(limit);
     results
@@ -703,10 +891,12 @@ fn search_content(index: &FileIndex, query: &str, limit: usize) -> Vec<SearchRes
 
 /// Simple glob pattern matching supporting *, ?, and character classes [abc].
 fn glob_match(pattern: &str, text: &str) -> bool {
-    glob_match_bytes(pattern.as_bytes(), text.as_bytes())
+    let pat: Vec<char> = pattern.chars().collect();
+    let txt: Vec<char> = text.chars().collect();
+    glob_match_chars(&pat, &txt)
 }
 
-fn glob_match_bytes(pattern: &[u8], text: &[u8]) -> bool {
+fn glob_match_chars(pattern: &[char], text: &[char]) -> bool {
     let mut pi = 0;
     let mut ti = 0;
     let mut star_pi = usize::MAX;
@@ -715,25 +905,26 @@ fn glob_match_bytes(pattern: &[u8], text: &[u8]) -> bool {
     while ti < text.len() {
         if pi < pattern.len() {
             match pattern[pi] {
-                b'*' => {
+                '*' => {
                     star_pi = pi;
                     star_ti = ti;
                     pi += 1;
                     continue;
                 }
-                b'?' => {
+                '?' => {
                     pi += 1;
                     ti += 1;
                     continue;
                 }
-                b'[' => {
+                '[' => {
                     // Character class.
                     if let Some((matched, end)) = match_char_class(&pattern[pi..], text[ti])
-                        && matched {
-                            pi += end;
-                            ti += 1;
-                            continue;
-                        }
+                        && matched
+                    {
+                        pi += end;
+                        ti += 1;
+                        continue;
+                    }
                     // Fall through to star backtrack.
                 }
                 ch => {
@@ -758,21 +949,22 @@ fn glob_match_bytes(pattern: &[u8], text: &[u8]) -> bool {
     }
 
     // Consume remaining stars.
-    while pi < pattern.len() && pattern[pi] == b'*' {
+    while pi < pattern.len() && pattern[pi] == '*' {
         pi += 1;
     }
 
     pi == pattern.len()
 }
 
-/// Match a character class like [abc] or [a-z]. Returns (matched, bytes consumed).
-fn match_char_class(pattern: &[u8], ch: u8) -> Option<(bool, usize)> {
-    if pattern.is_empty() || pattern[0] != b'[' {
+/// Match a character class like [abc] or [a-z]. Returns (matched,
+/// characters consumed).
+fn match_char_class(pattern: &[char], ch: char) -> Option<(bool, usize)> {
+    if pattern.is_empty() || pattern[0] != '[' {
         return None;
     }
 
     let mut i = 1;
-    let negate = if i < pattern.len() && pattern[i] == b'!' {
+    let negate = if i < pattern.len() && pattern[i] == '!' {
         i += 1;
         true
     } else {
@@ -780,8 +972,8 @@ fn match_char_class(pattern: &[u8], ch: u8) -> Option<(bool, usize)> {
     };
 
     let mut matched = false;
-    while i < pattern.len() && pattern[i] != b']' {
-        if i + 2 < pattern.len() && pattern[i + 1] == b'-' {
+    while i < pattern.len() && pattern[i] != ']' {
+        if i + 2 < pattern.len() && pattern[i + 1] == '-' {
             // Range.
             let lo = pattern[i];
             let hi = pattern[i + 2];
@@ -797,7 +989,7 @@ fn match_char_class(pattern: &[u8], ch: u8) -> Option<(bool, usize)> {
         }
     }
 
-    if i < pattern.len() && pattern[i] == b']' {
+    if i < pattern.len() && pattern[i] == ']' {
         let consumed = i + 1; // Include the ']'.
         if negate {
             Some((!matched, consumed))
@@ -816,15 +1008,22 @@ fn match_char_class(pattern: &[u8], ch: u8) -> Option<(bool, usize)> {
 
 /// Compute the Levenshtein edit distance between two strings.
 /// Uses bounded computation: returns early if distance exceeds max_distance.
+///
+/// The distance is counted in *characters*. Counting it in bytes made fuzzy
+/// matching useless for non-ASCII names: one substituted kanji costs up to 3
+/// against a `FUZZY_MAX_DISTANCE` budget the user thinks of as "a couple of
+/// typos", so a near-exact CJK match was rejected while a much worse ASCII one
+/// was accepted. The early-out on `abs_diff` of the lengths had the same
+/// problem, rejecting candidates before the DP ever ran.
 fn levenshtein(a: &str, b: &str) -> u32 {
     levenshtein_bounded(a, b, FUZZY_MAX_DISTANCE + 1)
 }
 
 fn levenshtein_bounded(a: &str, b: &str, max: u32) -> u32 {
-    let a_bytes = a.as_bytes();
-    let b_bytes = b.as_bytes();
-    let m = a_bytes.len();
-    let n = b_bytes.len();
+    let a_chars: Vec<char> = a.chars().collect();
+    let b_chars: Vec<char> = b.chars().collect();
+    let m = a_chars.len();
+    let n = b_chars.len();
 
     // Quick length check.
     let len_diff = m.abs_diff(n);
@@ -848,7 +1047,7 @@ fn levenshtein_bounded(a: &str, b: &str, max: u32) -> u32 {
         let mut row_min = curr_row[0];
 
         for j in 1..=n {
-            let cost = if a_bytes[i - 1] == b_bytes[j - 1] {
+            let cost = if a_chars[i - 1] == b_chars[j - 1] {
                 0
             } else {
                 1
@@ -910,6 +1109,26 @@ fn scan(config: &Config) -> (FileIndex, ScanStats) {
     (index, stats)
 }
 
+/// Whether `dir` is covered by one of the configured exclusions.
+///
+/// One function rather than the copy in each of the two scanners: they were
+/// identical, which is exactly how they stay identical only until one of them
+/// is edited.
+///
+/// The exclusions are UTF-8 text from the config file, so this matches against
+/// a lossy rendering of the directory — a selection heuristic, not an identity
+/// check. A directory whose name is not UTF-8 can still be excluded by naming
+/// one of its ASCII ancestors.
+///
+/// `contains` rather than a component-wise comparison is deliberately loose and
+/// is the documented behaviour: excluding `node_modules` excludes it at any
+/// depth. (The previous `ends_with(excl) || contains(excl)` was the same test
+/// written twice — `contains` is true whenever `ends_with` is.)
+fn is_excluded_dir(dir: &Path, config: &Config) -> bool {
+    let dir_str = dir.to_string_lossy();
+    config.exclude_paths.iter().any(|e| dir_str.contains(e))
+}
+
 /// Recursively scan a directory.
 fn scan_directory(
     dir: &Path,
@@ -917,12 +1136,8 @@ fn scan_directory(
     entries: &mut Vec<IndexEntry>,
     stats: &mut ScanStats,
 ) {
-    // Check if this directory is excluded.
-    let dir_str = dir.to_string_lossy();
-    for excl in &config.exclude_paths {
-        if dir_str.ends_with(excl) || dir_str.contains(excl) {
-            return;
-        }
+    if is_excluded_dir(dir, config) {
+        return;
     }
 
     let read_dir = match fs::read_dir(dir) {
@@ -961,11 +1176,12 @@ fn scan_directory(
             FileType::Regular
         };
 
-        // Get filename.
-        let filename = match path.file_name() {
-            Some(f) => f.to_string_lossy().into_owned(),
-            None => continue,
-        };
+        // Get the filename search key. A path with no final component is not a
+        // file we can index.
+        if path.file_name().is_none() {
+            continue;
+        }
+        let filename = filename_key(&path);
 
         // Check extension filters.
         if file_type == FileType::Regular {
@@ -985,13 +1201,11 @@ fn scan_directory(
 
                 // Check include extensions (if set).
                 if let Some(ref includes) = config.include_extensions
-                    && !includes
-                        .iter()
-                        .any(|e| e.to_ascii_lowercase() == ext_lower)
-                    {
-                        stats.files_skipped += 1;
-                        continue;
-                    }
+                    && !includes.iter().any(|e| e.to_ascii_lowercase() == ext_lower)
+                {
+                    stats.files_skipped += 1;
+                    continue;
+                }
             } else if config.include_extensions.is_some() {
                 // No extension and include filter is set — skip.
                 stats.files_skipped += 1;
@@ -1029,10 +1243,7 @@ fn scan_directory(
 }
 
 /// Incremental scan: only re-scan directories whose mtime has changed.
-fn scan_incremental(
-    config: &Config,
-    existing: &mut FileIndex,
-) -> ScanStats {
+fn scan_incremental(config: &Config, existing: &mut FileIndex) -> ScanStats {
     let mut stats = ScanStats::default();
 
     for root in &config.index_paths {
@@ -1055,11 +1266,8 @@ fn scan_directory_incremental(
     index: &mut FileIndex,
     stats: &mut ScanStats,
 ) {
-    let dir_str = dir.to_string_lossy();
-    for excl in &config.exclude_paths {
-        if dir_str.ends_with(excl) || dir_str.contains(excl) {
-            return;
-        }
+    if is_excluded_dir(dir, config) {
+        return;
     }
 
     let dir_meta = match fs::metadata(dir) {
@@ -1078,18 +1286,20 @@ fn scan_directory_incremental(
         .unwrap_or(0);
 
     // Check if we already have an entry for this directory with same mtime.
-    let needs_rescan = !index.entries.iter().any(|e| {
-        e.path == dir && e.file_type == FileType::Directory && e.mtime == dir_mtime
-    });
+    let needs_rescan = !index
+        .entries
+        .iter()
+        .any(|e| e.path == dir && e.file_type == FileType::Directory && e.mtime == dir_mtime);
 
     if !needs_rescan {
         // Still recurse to check subdirectories.
         if let Ok(rd) = fs::read_dir(dir) {
             for entry in rd.flatten() {
                 if let Ok(m) = entry.metadata()
-                    && m.is_dir() {
-                        scan_directory_incremental(&entry.path(), config, index, stats);
-                    }
+                    && m.is_dir()
+                {
+                    scan_directory_incremental(&entry.path(), config, index, stats);
+                }
             }
         }
         return;
@@ -1118,14 +1328,8 @@ fn cmd_start(config: &Config) {
     }
 
     println!("Starting file indexer service...");
-    println!(
-        "  Indexing paths: {:?}",
-        config.index_paths
-    );
-    println!(
-        "  Scan interval: {} seconds",
-        config.scan_interval_secs
-    );
+    println!("  Indexing paths: {:?}", config.index_paths);
+    println!("  Scan interval: {} seconds", config.scan_interval_secs);
 
     // Write PID file.
     if let Err(e) = write_pid_file() {
@@ -1135,10 +1339,7 @@ fn cmd_start(config: &Config) {
     // Initial full scan.
     println!("Performing initial scan...");
     let (mut index, stats) = scan(config);
-    println!(
-        "Initial scan complete. {}",
-        stats
-    );
+    println!("Initial scan complete. {}", stats);
 
     if let Err(e) = index.save() {
         eprintln!("error: failed to save index: {}", e);
@@ -1186,22 +1387,25 @@ fn cmd_stop() {
 /// Show service status.
 fn cmd_status() {
     let running = Path::new(PID_FILE).exists();
-    println!("Indexer service: {}", if running { "running" } else { "stopped" });
+    println!(
+        "Indexer service: {}",
+        if running { "running" } else { "stopped" }
+    );
 
     match FileIndex::load() {
         Ok(index) => {
             println!("  Files indexed:      {}", index.file_count());
             println!("  Directories scanned: {}", index.dirs_scanned);
-            println!("  Last indexed:       {}", format_timestamp(index.last_indexed));
+            println!(
+                "  Last indexed:       {}",
+                format_timestamp(index.last_indexed)
+            );
             println!(
                 "  Index size (approx): {}",
                 format_size(index.approx_size_bytes() as u64)
             );
             if !index.trigram_index.is_empty() {
-                println!(
-                    "  Content trigrams:   {}",
-                    index.trigram_index.len()
-                );
+                println!("  Content trigrams:   {}", index.trigram_index.len());
             }
         }
         Err(e) => {
@@ -1498,6 +1702,121 @@ exclude_extensions = .o, .tmp
         assert!(cfg.enabled);
     }
 
+    /// Paths that are legal on this system -- any byte but `/` and NUL -- and
+    /// that the comma-joined format could not carry.
+    const HOSTILE_PATHS: &[&str] = &[
+        "/home/u/Private, Ltd",
+        "/home/u/a,b,c",
+        "/home/u/trailing space ",
+        "/home/u/ leading space",
+        "/home/u/tab\there",
+        "/home/u/new\nline",
+        "/home/u/enabled = false",
+        r"/home/u/back\slash",
+        r"/home/u/\n",
+        r"/home/u/\s",
+        "/home/u/# not a comment",
+        "/home/u/has = equals",
+    ];
+
+    #[test]
+    fn a_path_containing_a_comma_stays_one_path() {
+        // The security-relevant case: `exclude_paths` decides what is *not*
+        // read, so a path that splits leaves the directory the user named
+        // unexcluded and its contents indexed.
+        for path in HOSTILE_PATHS {
+            let cfg = Config {
+                index_paths: vec![(*path).to_string()],
+                exclude_paths: vec![(*path).to_string()],
+                ..Config::default()
+            };
+            let parsed = Config::parse(&cfg.serialize());
+            assert_eq!(
+                parsed.exclude_paths,
+                vec![(*path).to_string()],
+                "exclusion was rewritten: {path:?}"
+            );
+            assert_eq!(
+                parsed.index_paths,
+                vec![(*path).to_string()],
+                "index path was rewritten: {path:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_path_cannot_forge_a_config_line() {
+        // A newline in a path could otherwise write any setting it liked --
+        // `enabled = false` silently turns the indexer off.
+        let cfg = Config {
+            enabled: true,
+            index_contents: true,
+            index_paths: vec![
+                "/a\nenabled = false".to_string(),
+                "/b\nindex_contents = false\nmax_file_size = 1".to_string(),
+            ],
+            max_file_size: 999,
+            ..Config::default()
+        };
+        let parsed = Config::parse(&cfg.serialize());
+        assert!(parsed.enabled, "a path turned the indexer off");
+        assert!(parsed.index_contents, "a path changed a setting");
+        assert_eq!(parsed.max_file_size, 999, "a path changed a setting");
+        assert_eq!(parsed.index_paths.len(), 2, "a path forged an entry");
+    }
+
+    #[test]
+    fn every_list_round_trips_exactly() {
+        let cfg = Config {
+            index_paths: HOSTILE_PATHS.iter().map(|s| (*s).to_string()).collect(),
+            exclude_paths: HOSTILE_PATHS.iter().map(|s| (*s).to_string()).collect(),
+            include_extensions: Some(vec![".a,b".to_string(), " .c ".to_string()]),
+            exclude_extensions: vec![".x\ny".to_string()],
+            ..Config::default()
+        };
+        let parsed = Config::parse(&cfg.serialize());
+        assert_eq!(parsed.index_paths, cfg.index_paths);
+        assert_eq!(parsed.exclude_paths, cfg.exclude_paths);
+        assert_eq!(parsed.include_extensions, cfg.include_extensions);
+        assert_eq!(parsed.exclude_extensions, cfg.exclude_extensions);
+        // Serialising the reparsed config must give the same file back, or the
+        // format has a state it cannot express.
+        assert_eq!(parsed.serialize(), cfg.serialize());
+    }
+
+    #[test]
+    fn an_empty_list_stays_empty_rather_than_reverting_to_defaults() {
+        // The one thing repeated keys cannot say: no lines is indistinguishable
+        // from "key absent", which means keep the defaults.
+        let cfg = Config {
+            index_paths: Vec::new(),
+            exclude_paths: Vec::new(),
+            exclude_extensions: Vec::new(),
+            ..Config::default()
+        };
+        let parsed = Config::parse(&cfg.serialize());
+        assert!(parsed.index_paths.is_empty());
+        assert!(parsed.exclude_paths.is_empty());
+        assert!(parsed.exclude_extensions.is_empty());
+    }
+
+    #[test]
+    fn a_repeated_key_replaces_the_defaults_once_then_appends() {
+        let cfg = Config::parse("index_path = /one\nindex_path = /two\nindex_path = /three\n");
+        assert_eq!(cfg.index_paths, vec!["/one", "/two", "/three"]);
+        // The built-in default must be gone, not appended to.
+        assert!(!cfg.index_paths.iter().any(|p| p == "/home"));
+    }
+
+    #[test]
+    fn a_backslash_before_an_n_survives_the_round_trip() {
+        // The replace-chain decoder's signature failure, and `\n` is a legal
+        // directory name here.
+        for text in [r"\n", r"\\n", r"\s", r"\\", "real\nnewline", "  pad  "] {
+            assert_eq!(kv::unescape(&kv::escape(text, &[])), text, "{text:?}");
+        }
+    }
+
     #[test]
     fn test_config_roundtrip() {
         let cfg = Config {
@@ -1654,6 +1973,100 @@ exclude_extensions = .o, .tmp
         data[4..8].copy_from_slice(&99u32.to_le_bytes()); // Bad version
         let result = FileIndex::deserialize(&data);
         assert!(result.is_err());
+    }
+
+    /// A header of 28..=31 bytes passed the old length check (`< 28`) and then
+    /// panicked reading `dirs_scanned` out of bytes 24..32. A corrupt or
+    /// truncated index file must be an error, never a crash.
+    #[test]
+    fn a_header_that_stops_mid_field_is_an_error_not_a_panic() {
+        for len in 0..INDEX_HEADER_LEN {
+            let mut data = vec![0u8; len];
+            if len >= 4 {
+                data[0..4].copy_from_slice(INDEX_MAGIC);
+            }
+            if len >= 8 {
+                data[4..8].copy_from_slice(&INDEX_VERSION.to_le_bytes());
+            }
+            assert!(
+                FileIndex::deserialize(&data).is_err(),
+                "a {len}-byte index is not a valid index"
+            );
+        }
+    }
+
+    /// An entry count in the header that the file does not actually contain
+    /// must not be trusted into an out-of-bounds read.
+    #[test]
+    fn an_entry_count_larger_than_the_file_is_an_error_not_a_panic() {
+        let mut data = vec![0u8; INDEX_HEADER_LEN];
+        data[0..4].copy_from_slice(INDEX_MAGIC);
+        data[4..8].copy_from_slice(&INDEX_VERSION.to_le_bytes());
+        data[8..16].copy_from_slice(&1_000u64.to_le_bytes());
+        assert!(FileIndex::deserialize(&data).is_err());
+    }
+
+    /// The index stores the path it will later hand back to whoever opens the
+    /// file, so it must store bytes. Written through `to_string_lossy`, a name
+    /// that is not UTF-8 came back with U+FFFD in place of its bytes and no
+    /// longer named anything.
+    ///
+    /// Unix-only: a Windows `OsString` cannot hold such a path at all, and our
+    /// target is `target-family = ["unix"]`.
+    #[cfg(unix)]
+    #[test]
+    fn a_non_utf8_path_survives_the_index_file() {
+        use std::os::unix::ffi::{OsStrExt, OsStringExt};
+        let raw = b"/home/u/caf\xE9.txt".to_vec();
+        let path = PathBuf::from(std::ffi::OsString::from_vec(raw.clone()));
+        let entries = vec![IndexEntry {
+            filename: filename_key(&path),
+            path,
+            size: 3,
+            mtime: 7,
+            file_type: FileType::Regular,
+        }];
+        let data = FileIndex::build_from_entries(entries).serialize();
+        let loaded = FileIndex::deserialize(&data).expect("round trip");
+        assert_eq!(
+            loaded.entries[0].path.as_os_str().as_bytes(),
+            raw.as_slice(),
+            "the 0xE9 must come back as 0xE9, not as U+FFFD"
+        );
+    }
+
+    /// Paths that *are* UTF-8 must survive byte-for-byte too — including the
+    /// multi-byte ones, which is the case a lossy round trip happens to pass.
+    #[test]
+    fn a_multibyte_path_survives_the_index_file() {
+        let path = PathBuf::from("/home/u/写真/Ωμέγα.txt");
+        let entries = vec![IndexEntry {
+            filename: filename_key(&path),
+            path: path.clone(),
+            size: 3,
+            mtime: 7,
+            file_type: FileType::Regular,
+        }];
+        let data = FileIndex::build_from_entries(entries).serialize();
+        let loaded = FileIndex::deserialize(&data).expect("round trip");
+        assert_eq!(loaded.entries[0].path, path);
+        assert_eq!(loaded.entries[0].filename, "Ωμέγα.txt");
+    }
+
+    /// The two scanners each carried a copy of this test; they must agree, and
+    /// the `contains` match is deliberately depth-independent.
+    #[test]
+    fn an_exclusion_matches_at_any_depth() {
+        let config = Config {
+            exclude_paths: vec!["node_modules".to_string()],
+            ..Config::default()
+        };
+        assert!(is_excluded_dir(Path::new("/srv/app/node_modules"), &config));
+        assert!(is_excluded_dir(
+            Path::new("/srv/app/node_modules/pkg/dist"),
+            &config
+        ));
+        assert!(!is_excluded_dir(Path::new("/srv/app/src"), &config));
     }
 
     // ---- Search Tests ----
@@ -1896,6 +2309,75 @@ exclude_extensions = .o, .tmp
     #[test]
     fn test_levenshtein_substitution() {
         assert_eq!(levenshtein("hello", "hallo"), 1);
+    }
+
+    // ---- Byte/character confusion ----
+    //
+    // The glob matcher and the edit distance both used to walk bytes.
+
+    #[test]
+    fn a_glob_question_mark_matches_one_character_not_one_byte() {
+        let mut checked = 0;
+        for (ch, width) in [("é", 2), ("日", 3), ("😀", 4)] {
+            let name = format!("{ch}.txt");
+            assert!(glob_match("?.txt", &name), "`?` should match {name:?}");
+            let many = "?".repeat(width);
+            assert!(
+                !glob_match(&format!("{many}.txt"), &name),
+                "{width} `?`s must no longer match the {width} bytes of {name:?}"
+            );
+            checked += 1;
+        }
+        assert!(checked >= 3, "only {checked} checked");
+        assert!(glob_match("??.txt", "日本.txt"));
+    }
+
+    #[test]
+    fn a_glob_class_compares_whole_characters() {
+        // é and è share a lead byte, so a byte-wise class confused them.
+        assert!(glob_match("[é]", "é"));
+        assert!(!glob_match("[é]*", "èb"));
+        // A non-ASCII range compares scalar values now, not encoding bytes.
+        assert!(glob_match("[а-я]", "р"));
+        assert!(!glob_match("[а-я]", "z"));
+    }
+
+    #[test]
+    fn edit_distance_counts_characters_not_bytes() {
+        // One substituted kanji is one edit, not three.
+        assert_eq!(levenshtein("日本", "日水"), 1);
+        // One inserted kanji is one edit, not three.
+        assert_eq!(levenshtein("日", "日本"), 1);
+        assert_eq!(levenshtein("café", "cafe"), 1);
+        // Identical non-ASCII strings are distance 0 either way; the point is
+        // that a near miss stays inside the fuzzy budget.
+        assert!(levenshtein("日本語", "日本誤") <= FUZZY_MAX_DISTANCE);
+    }
+
+    #[test]
+    fn an_ascii_pattern_and_distance_are_unchanged() {
+        let mut checked = 0;
+        for (pat, text, want) in [
+            ("*.rs", "main.rs", true),
+            ("*.rs", "main.py", false),
+            ("?.txt", "a.txt", true),
+            ("?.txt", "ab.txt", false),
+            ("[abc]*", "batch", true),
+            ("[!abc]*", "batch", false),
+            ("src/*/mod.rs", "src/net/mod.rs", true),
+        ] {
+            assert_eq!(glob_match(pat, text), want, "{pat:?} vs {text:?}");
+            checked += 1;
+        }
+        for (a, b, want) in [
+            ("hello", "hello", 0),
+            ("helo", "hello", 1),
+            ("hello", "hallo", 1),
+        ] {
+            assert_eq!(levenshtein(a, b), want, "{a:?} vs {b:?}");
+            checked += 1;
+        }
+        assert!(checked >= 10, "only {checked} checked");
     }
 
     #[test]

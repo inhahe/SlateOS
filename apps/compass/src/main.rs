@@ -26,6 +26,7 @@ use guitk::color::Color;
 use guitk::event::{Event, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::render::{FontWeightHint, RenderCommand};
 use guitk::style::CornerRadii;
+use guitk::text;
 
 // ── Catppuccin Mocha palette ────────────────────────────────────────
 const BASE: Color = Color::from_hex(0x1E1E2E);
@@ -712,9 +713,12 @@ impl CompassApp {
         for &(deg, label, color, size) in labels {
             let angle = deg as f32 - heading_f32;
             let label_r = r - 64.0;
-            // Center text roughly by offsetting
-            let offset_x = label.len() as f32 * size * 0.25;
-            let lx = cx + sin_deg(angle) * label_r - offset_x;
+            let weight = if size > 14.0 {
+                FontWeightHint::Bold
+            } else {
+                FontWeightHint::Regular
+            };
+            let lx = text::center_x(label, cx + sin_deg(angle) * label_r, size, weight);
             let ly = cy - cos_deg(angle) * label_r - size * 0.5;
 
             cmds.push(RenderCommand::Text {
@@ -723,11 +727,7 @@ impl CompassApp {
                 text: String::from(label),
                 color,
                 font_size: size,
-                font_weight: if size > 14.0 {
-                    FontWeightHint::Bold
-                } else {
-                    FontWeightHint::Regular
-                },
+                font_weight: weight,
                 max_width: None,
             });
         }

@@ -19,7 +19,9 @@
 //! the `DragDropManager`.
 
 use crate::color::Color;
-use crate::event::{Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
+use crate::event::{
+    Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 use crate::render::{FontWeightHint, RenderCommand, RenderTree};
 use crate::style::CornerRadii;
 
@@ -330,9 +332,7 @@ enum DragState {
         item_index: usize,
     },
     /// Drag is active (threshold exceeded).
-    Dragging {
-        item_index: usize,
-    },
+    Dragging { item_index: usize },
 }
 
 // =============================================================================
@@ -414,12 +414,20 @@ struct LayoutCache {
 }
 
 impl LayoutCache {
-    fn compute(config: &GridConfig, container_width: f32, container_height: f32, item_count: usize) -> Self {
+    fn compute(
+        config: &GridConfig,
+        container_width: f32,
+        container_height: f32,
+        item_count: usize,
+    ) -> Self {
         let usable_width = (container_width - config.padding * 2.0).max(0.0);
 
         let (cell_width, cell_height) = match config.cell_sizing {
             CellSizing::Fixed { width, height } => (width, height),
-            CellSizing::Auto { min_width, aspect_ratio } => {
+            CellSizing::Auto {
+                min_width,
+                aspect_ratio,
+            } => {
                 // Fit as many columns as possible with at least min_width per cell.
                 let cols = ((usable_width + config.gap_x) / (min_width + config.gap_x))
                     .floor()
@@ -497,7 +505,15 @@ impl LayoutCache {
     }
 
     /// Hit-test: given a point in content coordinates, returns the item index (if any).
-    fn hit_test(&self, x: f32, y: f32, padding: f32, gap_x: f32, gap_y: f32, item_count: usize) -> Option<usize> {
+    fn hit_test(
+        &self,
+        x: f32,
+        y: f32,
+        padding: f32,
+        gap_x: f32,
+        gap_y: f32,
+        item_count: usize,
+    ) -> Option<usize> {
         let content_x = x - padding;
         let content_y = y - padding;
 
@@ -562,7 +578,8 @@ impl LayoutCache {
 
         // Determine the range of rows and columns the rectangle could overlap.
         let start_col = ((rx - padding).max(0.0) / col_stride).floor() as usize;
-        let end_col = (((rx + rw - padding).max(0.0) / col_stride).floor() as usize).min(self.columns.saturating_sub(1));
+        let end_col = (((rx + rw - padding).max(0.0) / col_stride).floor() as usize)
+            .min(self.columns.saturating_sub(1));
         let start_row = ((ry - padding).max(0.0) / row_stride).floor() as usize;
         let end_row = ((ry + rh - padding).max(0.0) / row_stride).floor() as usize;
 
@@ -832,9 +849,13 @@ impl GridView {
     fn handle_mouse(&mut self, mouse: &MouseEvent) -> EventResult {
         match &mouse.kind {
             MouseEventKind::Press(MouseButton::Left) => self.handle_left_press(mouse.x, mouse.y),
-            MouseEventKind::Release(MouseButton::Left) => self.handle_left_release(mouse.x, mouse.y),
+            MouseEventKind::Release(MouseButton::Left) => {
+                self.handle_left_release(mouse.x, mouse.y)
+            }
             MouseEventKind::Move => self.handle_mouse_move(mouse.x, mouse.y),
-            MouseEventKind::DoubleClick(MouseButton::Left) => self.handle_double_click(mouse.x, mouse.y),
+            MouseEventKind::DoubleClick(MouseButton::Left) => {
+                self.handle_double_click(mouse.x, mouse.y)
+            }
             MouseEventKind::Press(MouseButton::Right) => self.handle_right_click(mouse.x, mouse.y),
             MouseEventKind::Scroll { dx: _, dy } => self.handle_scroll(*dy),
             _ => EventResult::Ignored,
@@ -846,8 +867,11 @@ impl GridView {
         let content_y = y + self.scroll_y;
         let layout = self.layout();
         let hit = layout.hit_test(
-            x, content_y,
-            self.config.padding, self.config.gap_x, self.config.gap_y,
+            x,
+            content_y,
+            self.config.padding,
+            self.config.gap_x,
+            self.config.gap_y,
             self.items.len(),
         );
 
@@ -917,8 +941,13 @@ impl GridView {
             self.ensure_layout();
             let layout = self.layout();
             let intersected = layout.items_in_rect(
-                rx, ry, rw, rh,
-                self.config.padding, self.config.gap_x, self.config.gap_y,
+                rx,
+                ry,
+                rw,
+                rh,
+                self.config.padding,
+                self.config.gap_x,
+                self.config.gap_y,
                 self.items.len(),
             );
 
@@ -935,7 +964,12 @@ impl GridView {
         }
 
         // Check drag threshold.
-        if let DragState::Pending { start_x, start_y, item_index } = self.drag {
+        if let DragState::Pending {
+            start_x,
+            start_y,
+            item_index,
+        } = self.drag
+        {
             let dx = x - start_x;
             let dy = y - start_y;
             let dist = (dx * dx + dy * dy).sqrt();
@@ -959,8 +993,11 @@ impl GridView {
         let content_y = y + self.scroll_y;
         let layout = self.layout();
         let hit = layout.hit_test(
-            x, content_y,
-            self.config.padding, self.config.gap_x, self.config.gap_y,
+            x,
+            content_y,
+            self.config.padding,
+            self.config.gap_x,
+            self.config.gap_y,
             self.items.len(),
         );
 
@@ -978,8 +1015,11 @@ impl GridView {
         let content_y = y + self.scroll_y;
         let layout = self.layout();
         let hit = layout.hit_test(
-            x, content_y,
-            self.config.padding, self.config.gap_x, self.config.gap_y,
+            x,
+            content_y,
+            self.config.padding,
+            self.config.gap_x,
+            self.config.gap_y,
             self.items.len(),
         );
 
@@ -989,11 +1029,8 @@ impl GridView {
             self.emit_selection_changed();
         }
 
-        self.pending_events.push(GridEvent::ContextMenu {
-            index: hit,
-            x,
-            y,
-        });
+        self.pending_events
+            .push(GridEvent::ContextMenu { index: hit, x, y });
 
         EventResult::Consumed
     }
@@ -1050,7 +1087,9 @@ impl GridView {
             }
             _ => {
                 // Type-ahead search: printable characters.
-                if let Some(ch) = key.text.filter(|c| c.is_alphanumeric() || *c == ' ' || *c == '.' || *c == '_' || *c == '-') {
+                if let Some(ch) = key.text.filter(|c| {
+                    c.is_alphanumeric() || *c == ' ' || *c == '.' || *c == '_' || *c == '-'
+                }) {
                     return self.type_ahead_search(ch);
                 }
                 EventResult::Ignored
@@ -1071,7 +1110,8 @@ impl GridView {
 
         let new_col = (col as i32 + col_delta).clamp(0, layout.columns as i32 - 1) as usize;
         let new_row = (row as i32 + row_delta).clamp(0, layout.total_rows as i32 - 1) as usize;
-        let new_index = (new_row * layout.columns + new_col).min(self.items.len().saturating_sub(1));
+        let new_index =
+            (new_row * layout.columns + new_col).min(self.items.len().saturating_sub(1));
 
         if modifiers.shift && self.config.multi_select {
             self.selection.select_range(new_index);
@@ -1122,7 +1162,8 @@ impl GridView {
 
         let current = self.selection.focused().unwrap_or(0);
         let (col, row) = layout.item_position(current);
-        let new_row = (row as i32 + direction * rows_per_page).clamp(0, layout.total_rows as i32 - 1) as usize;
+        let new_row = (row as i32 + direction * rows_per_page)
+            .clamp(0, layout.total_rows as i32 - 1) as usize;
         let new_index = (new_row * layout.columns + col).min(self.items.len().saturating_sub(1));
 
         self.selection.select_single(new_index);
@@ -1159,7 +1200,8 @@ impl GridView {
 
     fn emit_selection_changed(&mut self) {
         let indices = self.selection.selected_indices().to_vec();
-        self.pending_events.push(GridEvent::SelectionChanged(indices));
+        self.pending_events
+            .push(GridEvent::SelectionChanged(indices));
     }
 
     // -------------------------------------------------------------------------
@@ -1173,8 +1215,10 @@ impl GridView {
 
         // Background.
         tree.fill_rect(
-            0.0, 0.0,
-            self.container_width, self.container_height,
+            0.0,
+            0.0,
+            self.container_width,
+            self.container_height,
             catppuccin::BASE,
         );
 
@@ -1235,7 +1279,12 @@ impl GridView {
     /// Render a single grid cell.
     fn render_cell(&self, tree: &mut RenderTree, layout: &LayoutCache, index: usize) {
         let item = &self.items[index];
-        let (cx, cy) = layout.cell_origin(index, self.config.padding, self.config.gap_x, self.config.gap_y);
+        let (cx, cy) = layout.cell_origin(
+            index,
+            self.config.padding,
+            self.config.gap_x,
+            self.config.gap_y,
+        );
         let cw = layout.cell_width;
         let ch = layout.cell_height;
 
@@ -1313,7 +1362,10 @@ impl GridView {
                 BadgePosition::TopLeft => (cx + 4.0, cy + 4.0),
                 BadgePosition::TopRight => (cx + cw - badge_size - 4.0, cy + 4.0),
                 BadgePosition::BottomLeft => (cx + 4.0, cy + icon_height - badge_size - 4.0),
-                BadgePosition::BottomRight => (cx + cw - badge_size - 4.0, cy + icon_height - badge_size - 4.0),
+                BadgePosition::BottomRight => (
+                    cx + cw - badge_size - 4.0,
+                    cy + icon_height - badge_size - 4.0,
+                ),
             };
             tree.push(RenderCommand::Image {
                 x: bx,
@@ -1379,7 +1431,10 @@ mod tests {
         // 400px container, 12px padding each side = 376px usable.
         // 100px cells + 8px gap: floor((376 + 8) / (100 + 8)) = floor(384/108) = 3 columns.
         let config = GridConfig {
-            cell_sizing: CellSizing::Fixed { width: 100.0, height: 120.0 },
+            cell_sizing: CellSizing::Fixed {
+                width: 100.0,
+                height: 120.0,
+            },
             gap_x: 8.0,
             gap_y: 8.0,
             padding: 12.0,
@@ -1410,7 +1465,10 @@ mod tests {
     #[test]
     fn test_layout_single_item() {
         let config = GridConfig {
-            cell_sizing: CellSizing::Fixed { width: 100.0, height: 120.0 },
+            cell_sizing: CellSizing::Fixed {
+                width: 100.0,
+                height: 120.0,
+            },
             padding: 10.0,
             ..GridConfig::default()
         };
@@ -1423,7 +1481,10 @@ mod tests {
     #[test]
     fn test_layout_auto_sizing() {
         let config = GridConfig {
-            cell_sizing: CellSizing::Auto { min_width: 80.0, aspect_ratio: 1.2 },
+            cell_sizing: CellSizing::Auto {
+                min_width: 80.0,
+                aspect_ratio: 1.2,
+            },
             gap_x: 10.0,
             gap_y: 10.0,
             padding: 10.0,
@@ -1442,7 +1503,10 @@ mod tests {
     #[test]
     fn test_visible_rows() {
         let config = GridConfig {
-            cell_sizing: CellSizing::Fixed { width: 100.0, height: 100.0 },
+            cell_sizing: CellSizing::Fixed {
+                width: 100.0,
+                height: 100.0,
+            },
             gap_x: 0.0,
             gap_y: 10.0,
             padding: 0.0,
@@ -1465,7 +1529,10 @@ mod tests {
     #[test]
     fn test_hit_test_basic() {
         let config = GridConfig {
-            cell_sizing: CellSizing::Fixed { width: 100.0, height: 100.0 },
+            cell_sizing: CellSizing::Fixed {
+                width: 100.0,
+                height: 100.0,
+            },
             gap_x: 10.0,
             gap_y: 10.0,
             padding: 5.0,
@@ -1490,7 +1557,10 @@ mod tests {
     #[test]
     fn test_hit_test_out_of_bounds() {
         let config = GridConfig {
-            cell_sizing: CellSizing::Fixed { width: 100.0, height: 100.0 },
+            cell_sizing: CellSizing::Fixed {
+                width: 100.0,
+                height: 100.0,
+            },
             gap_x: 10.0,
             gap_y: 10.0,
             padding: 5.0,
@@ -1718,7 +1788,10 @@ mod tests {
     #[test]
     fn test_scroll_to_item_scrolls_down() {
         let mut grid = GridView::with_config(GridConfig {
-            cell_sizing: CellSizing::Fixed { width: 100.0, height: 100.0 },
+            cell_sizing: CellSizing::Fixed {
+                width: 100.0,
+                height: 100.0,
+            },
             gap_x: 0.0,
             gap_y: 0.0,
             padding: 0.0,
@@ -1739,7 +1812,10 @@ mod tests {
     #[test]
     fn test_page_navigation_moves_by_visible_rows() {
         let mut grid = GridView::with_config(GridConfig {
-            cell_sizing: CellSizing::Fixed { width: 100.0, height: 100.0 },
+            cell_sizing: CellSizing::Fixed {
+                width: 100.0,
+                height: 100.0,
+            },
             gap_x: 0.0,
             gap_y: 10.0,
             padding: 0.0,
@@ -1846,7 +1922,10 @@ mod tests {
     #[test]
     fn test_items_in_rect() {
         let config = GridConfig {
-            cell_sizing: CellSizing::Fixed { width: 50.0, height: 50.0 },
+            cell_sizing: CellSizing::Fixed {
+                width: 50.0,
+                height: 50.0,
+            },
             gap_x: 10.0,
             gap_y: 10.0,
             padding: 0.0,
@@ -1906,7 +1985,11 @@ mod tests {
         assert_eq!(result, EventResult::Consumed);
 
         let events = grid.drain_events();
-        assert!(events.iter().any(|e| matches!(e, GridEvent::ContextMenu { index: Some(0), .. })));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, GridEvent::ContextMenu { index: Some(0), .. }))
+        );
     }
 
     #[test]

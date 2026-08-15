@@ -79,6 +79,27 @@ pub struct Timeval {
 // Functions
 // ---------------------------------------------------------------------------
 
+/// Is `ns` a well-formed `timespec.tv_nsec`?
+///
+/// This is glibc's `valid_nanoseconds` (`include/time.h:517`) verbatim:
+/// `0 <= ns && ns < 1000000000`.  It deliberately says nothing about
+/// `tv_sec` — a negative `tv_sec` is a *deadline in the past*, not a
+/// malformed timespec, so the blocking primitives that use this predicate
+/// (`pthread_cond_timedwait`, `pthread_mutex_timedlock`, `sem_timedwait`)
+/// return `ETIMEDOUT` for it rather than `EINVAL`.
+///
+/// Do not confuse it with the kernel's `timespec64_valid`
+/// (`include/linux/time64.h`), which *does* reject `tv_sec < 0` ("Dates
+/// before 1970 are bogus") and is the predicate behind the `EINVAL` from
+/// `mq_timedsend`/`mq_timedreceive`.  The two rules genuinely differ, and
+/// which one applies depends on whether the deadline is interpreted by
+/// glibc or handed to a syscall.
+#[must_use]
+#[inline]
+pub(crate) fn valid_nanoseconds(ns: i64) -> bool {
+    (0..1_000_000_000).contains(&ns)
+}
+
 /// Sleep for a specified number of seconds.
 ///
 /// Returns 0 on success, or the remaining seconds if interrupted.
@@ -726,8 +747,7 @@ unsafe impl Sync for TzPtr {}
 /// changes — a zone that never updates its own name is exactly the bug this
 /// module used to have.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub static mut tzname: [TzPtr; 2] =
-    [TzPtr(core::ptr::null()), TzPtr(core::ptr::null())];
+pub static mut tzname: [TzPtr; 2] = [TzPtr(core::ptr::null()), TzPtr(core::ptr::null())];
 
 /// Seconds **west** of UTC for standard time.
 ///
@@ -770,7 +790,7 @@ fn publish_tz_globals() {
         (*core::ptr::addr_of_mut!(tzname)) =
             [TzPtr(crate::tz::name_ptr(0)), TzPtr(crate::tz::name_ptr(1))];
         // POSIX's sign is west-positive; ours is east-positive.
-        (*core::ptr::addr_of_mut!(timezone)) = i64::from(tz.std_gmtoff).saturating_neg();
+        (*core::ptr::addr_of_mut!(timezone)) = i64::from(tz.standard().gmtoff).saturating_neg();
         (*core::ptr::addr_of_mut!(daylight)) = i32::from(tz.has_dst());
     }
 }
@@ -1309,7 +1329,11 @@ pub unsafe extern "C" fn strftime(
                 // renders its zone. Reading the current zone here instead
                 // would misreport any `tm` the caller built by hand.
                 let off = t.tm_gmtoff;
-                let (sign, mag) = if off < 0 { (b'-', off.unsigned_abs()) } else { (b'+', off.unsigned_abs()) };
+                let (sign, mag) = if off < 0 {
+                    (b'-', off.unsigned_abs())
+                } else {
+                    (b'+', off.unsigned_abs())
+                };
                 pos = write_char(buf, limit, pos, sign);
                 // `tm_gmtoff` is bounded by the ±24 h a TZ offset can express,
                 // so these casts cannot truncate.
@@ -2434,7 +2458,7 @@ type ItimerState = [Itimerval; ITIMER_COUNT];
 /// the call sites mutate the table in place; the pointer is valid for the
 /// calling thread and must not be shared with another one.
 mod timer_store {
-    use super::{ItimerState, Itimerval, TimerTable, Timeval, ITIMER_COUNT, MAX_TIMERS};
+    use super::{ITIMER_COUNT, ItimerState, Itimerval, MAX_TIMERS, TimerTable, Timeval};
 
     /// Cold-start state of the timer table, stated once for both builds.
     const TIMERS_INIT: TimerTable = [None; MAX_TIMERS];
@@ -2452,7 +2476,7 @@ mod timer_store {
 
     #[cfg(target_os = "none")]
     mod imp {
-        use super::{ItimerState, TimerTable, ITIMERS_INIT, TIMERS_INIT};
+        use super::{ITIMERS_INIT, ItimerState, TIMERS_INIT, TimerTable};
         static mut TIMER_TABLE: TimerTable = TIMERS_INIT;
         static mut ITIMER_STATE: ItimerState = ITIMERS_INIT;
         pub(super) fn timers() -> *mut TimerTable {
@@ -2465,7 +2489,7 @@ mod timer_store {
 
     #[cfg(not(target_os = "none"))]
     mod imp {
-        use super::{ItimerState, TimerTable, ITIMERS_INIT, TIMERS_INIT};
+        use super::{ITIMERS_INIT, ItimerState, TIMERS_INIT, TimerTable};
         use core::cell::UnsafeCell;
 
         std::thread_local! {
@@ -3047,10 +3071,7 @@ mod tests {
             let guard = crate::environ::lock_env_for_test();
             let saved = crate::environ::getenv_bytes(b"TZ").map(<[u8]>::to_vec);
             Self::put(tz);
-            Self {
-                _env: guard,
-                saved,
-            }
+            Self { _env: guard, saved }
         }
 
         /// Install UTC — the zone the timezone-agnostic tests assume.
@@ -4832,9 +4853,9 @@ mod tests {
     fn test_tzset_installs_the_zone_named_by_tz() {
         let _tz = TzGuard::set(b"EST5EDT,M3.2.0,M11.1.0");
         let zone = crate::tz::current();
-        assert_eq!(zone.std_name.as_bytes(), b"EST");
-        assert_eq!(zone.std_gmtoff, -5 * 3600);
-        let dst = zone.dst.as_ref().expect("EST5EDT has a daylight zone");
+        assert_eq!(zone.standard().name.as_bytes(), b"EST");
+        assert_eq!(zone.standard().gmtoff, -5 * 3600);
+        let dst = zone.daylight().expect("EST5EDT has a daylight zone");
         assert_eq!(dst.name.as_bytes(), b"EDT");
         assert_eq!(dst.gmtoff, -4 * 3600);
     }
@@ -5097,12 +5118,15 @@ mod tests {
         assert_eq!(tm.tm_gmtoff, 0);
     }
 
-    /// A zoneinfo name (`America/New_York`) needs tzdata we do not ship,
-    /// so it resolves to UTC.  Documented here so the day we do ship
-    /// tzdata this test fails loudly instead of the behaviour changing
+    /// A zoneinfo name (`America/New_York`) is now *looked up* — the libc
+    /// reads and honours a TZif file when one is there (see
+    /// [`crate::tz::Zone`]) — but SlateOS ships no tzdata yet, so the open
+    /// fails and the zone degrades to UTC.  Shipping tzdata is a packaging
+    /// decision tracked separately; this test pins the fallback so the day
+    /// the files appear it fails loudly rather than the behaviour changing
     /// silently.
     #[test]
-    fn test_zoneinfo_names_currently_resolve_to_utc() {
+    fn test_zoneinfo_names_resolve_to_utc_until_tzdata_is_shipped() {
         let _tz = TzGuard::set(b"America/New_York");
         let tm = local_tm(1_626_350_400);
         assert_eq!(

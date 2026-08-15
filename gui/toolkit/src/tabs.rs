@@ -104,6 +104,12 @@ const TAB_BAR_HEIGHT: f32 = 36.0;
 const TAB_PADDING_H: f32 = 12.0;
 /// Size of the close button hit area.
 const CLOSE_BUTTON_SIZE: f32 = 16.0;
+/// Font size of a tab's label.
+///
+/// Named because it is used twice — once to measure the tab's width and once to
+/// draw the label — and the two must agree or every tab is sized for a font it
+/// is not drawn in.
+const LABEL_FONT_SIZE: f32 = 13.0;
 
 /// Tab bar state and logic.
 ///
@@ -283,11 +289,7 @@ impl TabView {
         let bar_height = TAB_BAR_HEIGHT;
         let (bar_y, content_y, content_height) = match self.position {
             TabPosition::Top => (y, y + bar_height, total_height - bar_height),
-            TabPosition::Bottom => (
-                y + total_height - bar_height,
-                y,
-                total_height - bar_height,
-            ),
+            TabPosition::Bottom => (y + total_height - bar_height, y, total_height - bar_height),
         };
 
         let mut commands = Vec::new();
@@ -381,17 +383,26 @@ impl TabView {
             }
 
             // Tab label
-            let text_color = if is_active { ACTIVE_TEXT } else { INACTIVE_TEXT };
-            let max_label_width = tw - TAB_PADDING_H * 2.0
-                - if tab.closeable { CLOSE_BUTTON_SIZE + 4.0 } else { 0.0 }
+            let text_color = if is_active {
+                ACTIVE_TEXT
+            } else {
+                INACTIVE_TEXT
+            };
+            let max_label_width = tw
+                - TAB_PADDING_H * 2.0
+                - if tab.closeable {
+                    CLOSE_BUTTON_SIZE + 4.0
+                } else {
+                    0.0
+                }
                 - if tab.dirty { 10.0 } else { 0.0 };
 
             commands.push(RenderCommand::Text {
                 x: label_x,
-                y: bar_y + (bar_height - 13.0) / 2.0,
+                y: bar_y + (bar_height - LABEL_FONT_SIZE) / 2.0,
                 text: tab.label.clone(),
                 color: text_color,
-                font_size: 13.0,
+                font_size: LABEL_FONT_SIZE,
                 font_weight: if is_active {
                     FontWeightHint::Bold
                 } else {
@@ -476,9 +487,10 @@ impl TabView {
             return None;
         }
 
-        let current_idx = self.active_id.and_then(|aid| {
-            self.tabs.iter().position(|t| t.id == aid)
-        }).unwrap_or(0);
+        let current_idx = self
+            .active_id
+            .and_then(|aid| self.tabs.iter().position(|t| t.id == aid))
+            .unwrap_or(0);
 
         let count = self.tabs.len() as i32;
         let new_idx = ((current_idx as i32 + direction).rem_euclid(count)) as usize;
@@ -496,10 +508,15 @@ impl TabView {
         match self.tab_width {
             TabWidth::Fixed(w) => w,
             TabWidth::Flexible { min, max } => {
-                // Estimate width based on label length
+                // Measured in the same size the label is drawn in, so a tab is
+                // never too narrow for its own text.
                 let estimated = TAB_PADDING_H * 2.0
-                    + tab.label.len() as f32 * 7.5 // approximate char width
-                    + if tab.closeable { CLOSE_BUTTON_SIZE + 4.0 } else { 0.0 }
+                    + crate::text::width(&tab.label, LABEL_FONT_SIZE)
+                    + if tab.closeable {
+                        CLOSE_BUTTON_SIZE + 4.0
+                    } else {
+                        0.0
+                    }
                     + if tab.dirty { 10.0 } else { 0.0 };
                 estimated.clamp(min, max)
             }
@@ -599,7 +616,12 @@ mod tests {
         let key = KeyEvent {
             key: Key::Tab,
             pressed: true,
-            modifiers: Modifiers { ctrl: true, shift: false, alt: false, super_key: false },
+            modifiers: Modifiers {
+                ctrl: true,
+                shift: false,
+                alt: false,
+                super_key: false,
+            },
             text: None,
         };
         let event = tv.handle_key(&key);
@@ -618,7 +640,12 @@ mod tests {
         let key = KeyEvent {
             key: Key::Tab,
             pressed: true,
-            modifiers: Modifiers { ctrl: true, shift: true, alt: false, super_key: false },
+            modifiers: Modifiers {
+                ctrl: true,
+                shift: true,
+                alt: false,
+                super_key: false,
+            },
             text: None,
         };
         let event = tv.handle_key(&key);

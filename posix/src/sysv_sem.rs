@@ -12,10 +12,7 @@
 // Bounds are established locally but clippy cannot see across the
 // check.  These lints would only be useful here if we accepted
 // attacker-controlled integer indices, which we do not.
-#![allow(
-    clippy::indexing_slicing,
-    clippy::arithmetic_side_effects,
-)]
+#![allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 
 //! System V semaphores — `<sys/sem.h>`.
 //!
@@ -84,7 +81,6 @@
 
 use crate::errno;
 use crate::stat::Timespec;
-use core::sync::atomic::{AtomicBool, Ordering};
 
 // ---------------------------------------------------------------------------
 // Constants (shared with sysv_msg)
@@ -193,33 +189,18 @@ impl SemSet {
 // Static state
 // ---------------------------------------------------------------------------
 
-static SEM_LOCK: AtomicBool = AtomicBool::new(false);
+/// Serialises every scan of `SEM_SETS`.
+///
+/// A plain `static`, matching `SEM_SETS`'s plain `static mut`: the lock must
+/// have the same scope as the table it guards.  See
+/// [`crate::perprocess::PoolLock`].
+static SEM_LOCK: crate::perprocess::PoolLock = crate::perprocess::PoolLock::new();
 static mut SEM_SETS: [SemSet; MAX_SETS] = [const { SemSet::EMPTY }; MAX_SETS];
 
-fn lock_acquire() {
-    while SEM_LOCK
-        .compare_exchange_weak(false, true, Ordering::AcqRel, Ordering::Relaxed)
-        .is_err()
-    {
-        core::hint::spin_loop();
-    }
-}
-
-fn lock_release() {
-    SEM_LOCK.store(false, Ordering::Release);
-}
-
-/// RAII guard that releases the global lock on drop.
-struct Guard;
-impl Drop for Guard {
-    fn drop(&mut self) {
-        lock_release();
-    }
-}
-
-fn lock() -> Guard {
-    lock_acquire();
-    Guard
+/// Take `SEM_LOCK` for the duration of a semaphore-set-table scan.
+fn lock() -> crate::perprocess::PoolGuard<'static> {
+    // SAFETY: `SEM_LOCK` is a `static`, so it outlives the guard.
+    unsafe { crate::perprocess::lock_pool((&raw const SEM_LOCK).cast_mut()) }
 }
 
 // ---------------------------------------------------------------------------

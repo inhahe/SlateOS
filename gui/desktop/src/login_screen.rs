@@ -233,10 +233,7 @@ pub struct LoginScreen {
 impl LoginScreen {
     pub fn new(screen_width: f32, screen_height: f32, users: Vec<LoginUser>) -> Self {
         // Default select last-login user or first.
-        let selected = users
-            .iter()
-            .position(|u| u.last_login)
-            .unwrap_or(0);
+        let selected = users.iter().position(|u| u.last_login).unwrap_or(0);
 
         Self {
             users,
@@ -535,7 +532,11 @@ impl LoginScreen {
                 y: uy,
                 width: row_w,
                 height: 64.0,
-                color: if selected { SURFACE0 } else { Color::rgba(BASE.r, BASE.g, BASE.b, 180) },
+                color: if selected {
+                    SURFACE0
+                } else {
+                    Color::rgba(BASE.r, BASE.g, BASE.b, 180)
+                },
                 corner_radii: CornerRadii::all(12.0),
             });
 
@@ -607,7 +608,11 @@ impl LoginScreen {
             let field_x = cx - field_w / 2.0;
             let field_y = cy + 20.0;
 
-            let border_color = if self.error_message.is_some() { RED } else { SURFACE1 };
+            let border_color = if self.error_message.is_some() {
+                RED
+            } else {
+                SURFACE1
+            };
             commands.push(RenderCommand::FillRect {
                 x: field_x,
                 y: field_y,
@@ -637,7 +642,11 @@ impl LoginScreen {
                 y: field_y + 9.0,
                 text: display,
                 font_size: 14.0,
-                color: if self.password_input.is_empty() { OVERLAY0 } else { TEXT },
+                color: if self.password_input.is_empty() {
+                    OVERLAY0
+                } else {
+                    TEXT
+                },
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(field_w - 24.0),
             });
@@ -646,7 +655,12 @@ impl LoginScreen {
             commands.push(RenderCommand::Text {
                 x: field_x + field_w - 28.0,
                 y: field_y + 8.0,
-                text: if self.show_password { "\u{1F441}" } else { "\u{1F576}" }.to_string(),
+                text: if self.show_password {
+                    "\u{1F441}"
+                } else {
+                    "\u{1F576}"
+                }
+                .to_string(),
                 font_size: 14.0,
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
@@ -691,7 +705,10 @@ impl LoginScreen {
                 commands.push(RenderCommand::Text {
                     x: cx - 120.0,
                     y: btn_y + 70.0,
-                    text: format!("Too many attempts. Try again in {}s.", self.config.lockout_seconds),
+                    text: format!(
+                        "Too many attempts. Try again in {}s.",
+                        self.config.lockout_seconds
+                    ),
                     font_size: 12.0,
                     color: YELLOW,
                     font_weight: FontWeightHint::Regular,

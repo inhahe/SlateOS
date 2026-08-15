@@ -1,533 +1,21 @@
-//! Appearance and personalization settings panel for the desktop shell.
+//! The appearance settings panel — the UI over the shared model.
 //!
-//! Provides configuration for visual themes, accent colors, font settings,
-//! transparency effects, animation preferences, icon size, and cursor
-//! appearance — all aspects of the desktop's visual presentation.
+//! The values this edits, their configuration-file spellings and the file
+//! itself all live in the `appearance` crate, because the Settings application
+//! edits the same preferences and two copies of that model would let the two
+//! processes disagree about what a user chose. What is left here is the panel:
+//! tabs, rows, hit-testing, and the pending-vs-saved pair that decides whether
+//! Save is live.
 
+use appearance::{AccentColor, AppearanceFile, AppearanceSettings, ThemeMode, WindowCorners};
+use appearance::{
+    BASE, BLUE, CRUST, GREEN, LAVENDER, SUBTEXT0, SURFACE0, SURFACE1, SURFACE2, TEXT, YELLOW,
+};
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand};
 use guitk::style::CornerRadii;
-
-// ============================================================================
-// Catppuccin Mocha palette
-// ============================================================================
-
-const BASE: Color = Color::from_hex(0x1E1E2E);
-const MANTLE: Color = Color::from_hex(0x181825);
-const CRUST: Color = Color::from_hex(0x11111B);
-const SURFACE0: Color = Color::from_hex(0x313244);
-const SURFACE1: Color = Color::from_hex(0x45475A);
-const SURFACE2: Color = Color::from_hex(0x585B70);
-const TEXT: Color = Color::from_hex(0xCDD6F4);
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const SUBTEXT1: Color = Color::from_hex(0xBAC2DE);
-const BLUE: Color = Color::from_hex(0x89B4FA);
-const GREEN: Color = Color::from_hex(0xA6E3A1);
-const RED: Color = Color::from_hex(0xF38BA8);
-const YELLOW: Color = Color::from_hex(0xF9E2AF);
-const PEACH: Color = Color::from_hex(0xFAB387);
-const LAVENDER: Color = Color::from_hex(0xB4BEFE);
-const OVERLAY0: Color = Color::from_hex(0x6C7086);
-const TEAL: Color = Color::from_hex(0x94E2D5);
-const PINK: Color = Color::from_hex(0xF5C2E7);
-const MAUVE: Color = Color::from_hex(0xCBA6F7);
-const ROSEWATER: Color = Color::from_hex(0xF5E0DC);
-const FLAMINGO: Color = Color::from_hex(0xF2CDCD);
-const MAROON: Color = Color::from_hex(0xEBA0AC);
-const SKY: Color = Color::from_hex(0x89DCFE);
-const SAPPHIRE: Color = Color::from_hex(0x74C7EC);
-
-// ============================================================================
-// Theme mode
-// ============================================================================
-
-/// Overall theme brightness mode.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ThemeMode {
-    /// Dark theme (Catppuccin Mocha-based).
-    Dark,
-    /// Light theme.
-    Light,
-    /// Follow system schedule (auto-switch between light and dark).
-    System,
-}
-
-impl ThemeMode {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Dark => "Dark",
-            Self::Light => "Light",
-            Self::System => "System (Auto)",
-        }
-    }
-}
-
-// ============================================================================
-// Accent colors
-// ============================================================================
-
-/// Named accent color options.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AccentColor {
-    Blue,
-    Lavender,
-    Teal,
-    Green,
-    Yellow,
-    Peach,
-    Pink,
-    Mauve,
-    Red,
-    Rosewater,
-    Flamingo,
-    Maroon,
-    Sky,
-    Sapphire,
-    Custom,
-}
-
-impl AccentColor {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Blue => "Blue",
-            Self::Lavender => "Lavender",
-            Self::Teal => "Teal",
-            Self::Green => "Green",
-            Self::Yellow => "Yellow",
-            Self::Peach => "Peach",
-            Self::Pink => "Pink",
-            Self::Mauve => "Mauve",
-            Self::Red => "Red",
-            Self::Rosewater => "Rosewater",
-            Self::Flamingo => "Flamingo",
-            Self::Maroon => "Maroon",
-            Self::Sky => "Sky",
-            Self::Sapphire => "Sapphire",
-            Self::Custom => "Custom",
-        }
-    }
-
-    /// Get the actual Color for this accent.
-    pub fn color(self) -> Color {
-        match self {
-            Self::Blue => BLUE,
-            Self::Lavender => LAVENDER,
-            Self::Teal => TEAL,
-            Self::Green => GREEN,
-            Self::Yellow => YELLOW,
-            Self::Peach => PEACH,
-            Self::Pink => PINK,
-            Self::Mauve => MAUVE,
-            Self::Red => RED,
-            Self::Rosewater => ROSEWATER,
-            Self::Flamingo => FLAMINGO,
-            Self::Maroon => MAROON,
-            Self::Sky => SKY,
-            Self::Sapphire => SAPPHIRE,
-            Self::Custom => BLUE, // fallback
-        }
-    }
-
-    /// All preset (non-custom) accent colors.
-    pub fn presets() -> &'static [AccentColor] {
-        &[
-            Self::Blue, Self::Lavender, Self::Teal, Self::Green,
-            Self::Yellow, Self::Peach, Self::Pink, Self::Mauve,
-            Self::Red, Self::Rosewater, Self::Flamingo, Self::Maroon,
-            Self::Sky, Self::Sapphire,
-        ]
-    }
-}
-
-// ============================================================================
-// Transparency / blur effects
-// ============================================================================
-
-/// Transparency effect level.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TransparencyLevel {
-    /// No transparency effects — fully opaque surfaces.
-    Off,
-    /// Subtle transparency on overlays and popups only.
-    Subtle,
-    /// Moderate transparency on taskbar, menus, and overlays.
-    Moderate,
-    /// Full transparency with blur effects everywhere.
-    Full,
-}
-
-impl TransparencyLevel {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Off => "Off",
-            Self::Subtle => "Subtle",
-            Self::Moderate => "Moderate",
-            Self::Full => "Full",
-        }
-    }
-
-    /// Alpha value (0-255) for panels at this level.
-    pub fn panel_alpha(self) -> u8 {
-        match self {
-            Self::Off => 255,
-            Self::Subtle => 230,
-            Self::Moderate => 200,
-            Self::Full => 160,
-        }
-    }
-}
-
-// ============================================================================
-// Animation speed
-// ============================================================================
-
-/// Animation speed setting.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AnimationSpeed {
-    /// No animations — instant transitions.
-    Off,
-    /// Faster than default (75% duration).
-    Fast,
-    /// Normal animation speed.
-    Normal,
-    /// Slower than default (150% duration).
-    Slow,
-}
-
-impl AnimationSpeed {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Off => "Off",
-            Self::Fast => "Fast",
-            Self::Normal => "Normal",
-            Self::Slow => "Slow",
-        }
-    }
-
-    /// Multiplier applied to animation durations.
-    pub fn multiplier(self) -> f32 {
-        match self {
-            Self::Off => 0.0,
-            Self::Fast => 0.75,
-            Self::Normal => 1.0,
-            Self::Slow => 1.5,
-        }
-    }
-}
-
-// ============================================================================
-// Font settings
-// ============================================================================
-
-/// System font configuration.
-#[derive(Clone, Debug)]
-pub struct FontSettings {
-    /// UI font family name.
-    pub ui_font: String,
-    /// Monospace font family name.
-    pub mono_font: String,
-    /// Base UI font size in points.
-    pub ui_size: f32,
-    /// Monospace font size in points.
-    pub mono_size: f32,
-    /// Whether to use font hinting.
-    pub hinting: bool,
-    /// Subpixel rendering mode.
-    pub subpixel: SubpixelMode,
-    /// Font smoothing (antialiasing).
-    pub smoothing: bool,
-}
-
-impl Default for FontSettings {
-    fn default() -> Self {
-        Self {
-            ui_font: "Inter".to_string(),
-            mono_font: "JetBrains Mono".to_string(),
-            ui_size: 13.0,
-            mono_size: 12.0,
-            hinting: true,
-            subpixel: SubpixelMode::Rgb,
-            smoothing: true,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SubpixelMode {
-    /// No subpixel rendering.
-    None,
-    /// RGB subpixel order (most common LCD).
-    Rgb,
-    /// BGR subpixel order.
-    Bgr,
-    /// Vertical RGB.
-    VRgb,
-    /// Vertical BGR.
-    VBgr,
-}
-
-impl SubpixelMode {
-    fn label(self) -> &'static str {
-        match self {
-            Self::None => "None",
-            Self::Rgb => "RGB",
-            Self::Bgr => "BGR",
-            Self::VRgb => "V-RGB",
-            Self::VBgr => "V-BGR",
-        }
-    }
-}
-
-// ============================================================================
-// Icon settings
-// ============================================================================
-
-/// Desktop icon size preset.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum IconSize {
-    Small,
-    Medium,
-    Large,
-    ExtraLarge,
-}
-
-impl IconSize {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Small => "Small (32px)",
-            Self::Medium => "Medium (48px)",
-            Self::Large => "Large (64px)",
-            Self::ExtraLarge => "Extra Large (96px)",
-        }
-    }
-
-    /// Pixel size for this setting.
-    pub fn pixels(self) -> u32 {
-        match self {
-            Self::Small => 32,
-            Self::Medium => 48,
-            Self::Large => 64,
-            Self::ExtraLarge => 96,
-        }
-    }
-}
-
-// ============================================================================
-// Cursor settings
-// ============================================================================
-
-/// Cursor size preset.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CursorSize {
-    Small,
-    Normal,
-    Large,
-    ExtraLarge,
-}
-
-impl CursorSize {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Small => "Small (16px)",
-            Self::Normal => "Normal (24px)",
-            Self::Large => "Large (32px)",
-            Self::ExtraLarge => "Extra Large (48px)",
-        }
-    }
-
-    pub fn pixels(self) -> u32 {
-        match self {
-            Self::Small => 16,
-            Self::Normal => 24,
-            Self::Large => 32,
-            Self::ExtraLarge => 48,
-        }
-    }
-}
-
-/// Cursor color scheme.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CursorScheme {
-    /// Default system cursor (white with black outline).
-    Default,
-    /// Inverted cursor (black with white outline).
-    Inverted,
-    /// Accent-colored cursor.
-    AccentColored,
-}
-
-impl CursorScheme {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Default => "Default",
-            Self::Inverted => "Inverted",
-            Self::AccentColored => "Accent Color",
-        }
-    }
-}
-
-// ============================================================================
-// Window corner style
-// ============================================================================
-
-/// Window corner rounding style.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum WindowCorners {
-    /// No rounding — square corners.
-    Square,
-    /// Subtle rounding (4px radius).
-    Subtle,
-    /// Standard rounding (8px radius).
-    Rounded,
-    /// Extra rounding (16px radius).
-    ExtraRounded,
-}
-
-impl WindowCorners {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Square => "Square",
-            Self::Subtle => "Subtle",
-            Self::Rounded => "Rounded",
-            Self::ExtraRounded => "Extra Rounded",
-        }
-    }
-
-    /// Corner radius in pixels.
-    pub fn radius(self) -> f32 {
-        match self {
-            Self::Square => 0.0,
-            Self::Subtle => 4.0,
-            Self::Rounded => 8.0,
-            Self::ExtraRounded => 16.0,
-        }
-    }
-}
-
-// ============================================================================
-// Taskbar style
-// ============================================================================
-
-/// Taskbar visual style.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TaskbarStyle {
-    /// Solid background.
-    Solid,
-    /// Semi-transparent with blur.
-    Translucent,
-    /// Fully transparent (floating buttons).
-    Transparent,
-}
-
-impl TaskbarStyle {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Solid => "Solid",
-            Self::Translucent => "Translucent",
-            Self::Transparent => "Transparent",
-        }
-    }
-}
-
-// ============================================================================
-// Appearance settings aggregate
-// ============================================================================
-
-/// All appearance/personalization settings.
-#[derive(Clone, Debug)]
-pub struct AppearanceSettings {
-    /// Light/dark/system theme mode.
-    pub theme_mode: ThemeMode,
-    /// Accent color selection.
-    pub accent_color: AccentColor,
-    /// Custom accent color (used when accent_color is Custom).
-    pub custom_accent: Color,
-    /// Transparency/blur effect level.
-    pub transparency: TransparencyLevel,
-    /// Animation speed.
-    pub animation_speed: AnimationSpeed,
-    /// Font settings.
-    pub fonts: FontSettings,
-    /// Desktop icon size.
-    pub icon_size: IconSize,
-    /// Cursor size.
-    pub cursor_size: CursorSize,
-    /// Cursor color scheme.
-    pub cursor_scheme: CursorScheme,
-    /// Window corner style.
-    pub window_corners: WindowCorners,
-    /// Taskbar visual style.
-    pub taskbar_style: TaskbarStyle,
-    /// Whether to show accent color on the taskbar.
-    pub accent_taskbar: bool,
-    /// Whether to show accent color on window title bars.
-    pub accent_titlebars: bool,
-    /// Whether to show window drop shadows.
-    pub drop_shadows: bool,
-    /// DPI scaling factor (100 = 100%, 125 = 125%, etc.).
-    pub scaling_percent: u16,
-}
-
-impl Default for AppearanceSettings {
-    fn default() -> Self {
-        Self {
-            theme_mode: ThemeMode::Dark,
-            accent_color: AccentColor::Blue,
-            custom_accent: BLUE,
-            transparency: TransparencyLevel::Moderate,
-            animation_speed: AnimationSpeed::Normal,
-            fonts: FontSettings::default(),
-            icon_size: IconSize::Medium,
-            cursor_size: CursorSize::Normal,
-            cursor_scheme: CursorScheme::Default,
-            window_corners: WindowCorners::Rounded,
-            taskbar_style: TaskbarStyle::Translucent,
-            accent_taskbar: false,
-            accent_titlebars: false,
-            drop_shadows: true,
-            scaling_percent: 100,
-        }
-    }
-}
-
-impl AppearanceSettings {
-    /// Get the effective accent Color, resolving Custom if needed.
-    pub fn effective_accent(&self) -> Color {
-        if self.accent_color == AccentColor::Custom {
-            self.custom_accent
-        } else {
-            self.accent_color.color()
-        }
-    }
-
-    /// Get DPI scale factor as a float (e.g. 1.0, 1.25, 1.5).
-    pub fn scale_factor(&self) -> f32 {
-        self.scaling_percent as f32 / 100.0
-    }
-
-    /// Whether any animations are enabled.
-    pub fn animations_enabled(&self) -> bool {
-        self.animation_speed != AnimationSpeed::Off
-    }
-
-    /// Whether transparency effects are enabled.
-    pub fn transparency_enabled(&self) -> bool {
-        self.transparency != TransparencyLevel::Off
-    }
-
-    /// Get the effective window corner radius.
-    pub fn corner_radius(&self) -> f32 {
-        self.window_corners.radius()
-    }
-
-    /// Validate and clamp settings to sane ranges.
-    pub fn validate(&mut self) {
-        // Clamp font sizes (NaN-safe: settings are read from YAML, never NaN).
-        self.fonts.ui_size = self.fonts.ui_size.clamp(8.0, 32.0);
-        self.fonts.mono_size = self.fonts.mono_size.clamp(6.0, 32.0);
-        self.scaling_percent = self.scaling_percent.clamp(100, 300);
-    }
-}
+use guitk::text;
+use yamldoc::Document;
 
 // ============================================================================
 // UI: Appearance settings panel
@@ -557,56 +45,111 @@ impl AppearanceTab {
     }
 }
 
+/// The settings group this panel persists — `appearance.yaml` in the user's
+/// configuration directory.
+///
+/// Re-exported from the shared model, where the file's name belongs alongside
+/// its schema.
+pub use appearance::CONFIG_NAME;
+
 /// Appearance settings UI state.
 pub struct AppearanceSettingsUI {
     /// Active tab.
     pub active_tab: AppearanceTab,
-    /// The settings being edited.
-    pub settings: AppearanceSettings,
+    /// The settings being edited, together with the file they came from.
+    file: AppearanceFile,
     /// Saved settings for revert/dirty detection.
     saved: AppearanceSettings,
 }
 
 impl AppearanceSettingsUI {
     pub fn new() -> Self {
-        let settings = AppearanceSettings::default();
+        let file = AppearanceFile::new();
         Self {
             active_tab: AppearanceTab::Theme,
-            saved: settings.clone(),
-            settings,
+            saved: file.settings.clone(),
+            file,
         }
     }
 
-    /// Whether settings have been changed from the saved state.
-    pub fn is_dirty(&self) -> bool {
-        // Compare key fields — full eq is tedious, so check the important ones
-        self.settings.theme_mode != self.saved.theme_mode
-            || self.settings.accent_color != self.saved.accent_color
-            || self.settings.transparency != self.saved.transparency
-            || self.settings.animation_speed != self.saved.animation_speed
-            || self.settings.icon_size != self.saved.icon_size
-            || self.settings.cursor_size != self.saved.cursor_size
-            || self.settings.window_corners != self.saved.window_corners
-            || self.settings.taskbar_style != self.saved.taskbar_style
-            || self.settings.accent_taskbar != self.saved.accent_taskbar
-            || self.settings.accent_titlebars != self.saved.accent_titlebars
-            || self.settings.drop_shadows != self.saved.drop_shadows
-            || self.settings.scaling_percent != self.saved.scaling_percent
-            || (self.settings.fonts.ui_size - self.saved.fonts.ui_size).abs() > 0.1
-            || (self.settings.fonts.mono_size - self.saved.fonts.mono_size).abs() > 0.1
-            || self.settings.fonts.ui_font != self.saved.fonts.ui_font
-            || self.settings.fonts.hinting != self.saved.fonts.hinting
-            || self.settings.cursor_scheme != self.saved.cursor_scheme
+    /// Open the panel on the user's saved settings, reading
+    /// `appearance.yaml`.
+    ///
+    /// A missing or unreadable file yields the defaults — the ordinary state
+    /// on a fresh install, not an error to report to someone who has simply
+    /// never changed a setting.
+    #[must_use]
+    pub fn load() -> Self {
+        let file = AppearanceFile::load();
+        Self {
+            active_tab: AppearanceTab::Theme,
+            saved: file.settings.clone(),
+            file,
+        }
     }
 
-    /// Save current settings (marks as clean).
-    pub fn save(&mut self) {
-        self.saved = self.settings.clone();
+    /// Open the panel on an already-read configuration document. Split out
+    /// from [`load`](Self::load) so the format can be tested without a
+    /// filesystem.
+    #[must_use]
+    pub fn from_document(doc: Document) -> Self {
+        let file = AppearanceFile::from_document(doc);
+        Self {
+            active_tab: AppearanceTab::Theme,
+            saved: file.settings.clone(),
+            file,
+        }
+    }
+
+    /// The settings being edited.
+    pub fn settings(&self) -> &AppearanceSettings {
+        &self.file.settings
+    }
+
+    /// The settings being edited, for a control to change.
+    pub fn settings_mut(&mut self) -> &mut AppearanceSettings {
+        &mut self.file.settings
+    }
+
+    /// Whether settings have been changed from the saved state.
+    ///
+    /// A whole-struct comparison, not a hand-picked list of fields: the list
+    /// this replaced omitted `mono_font`, `subpixel`, `smoothing` and
+    /// `custom_accent`, so changing the terminal font left the Save button
+    /// greyed out and the change was lost on close. A derived `PartialEq`
+    /// cannot fall behind a new field the way a hand-written check does.
+    pub fn is_dirty(&self) -> bool {
+        self.file.settings != self.saved
+    }
+
+    /// Fold the current settings into the configuration document and mark
+    /// them clean, without touching the filesystem.
+    ///
+    /// [`save`](Self::save) is the usual entry point; this exists so a caller
+    /// that manages its own storage — or a test — can get the document.
+    pub fn apply(&mut self) -> &Document {
+        self.saved = self.file.settings.clone();
+        self.file.apply()
+    }
+
+    /// Save the current settings to `appearance.yaml`.
+    ///
+    /// The settings are marked clean whether or not the write succeeds: the
+    /// user's choices are in memory and in effect either way, and leaving the
+    /// panel permanently dirty would only invite them to press Save again to
+    /// the same result. The error is returned so the caller can say so.
+    ///
+    /// # Errors
+    ///
+    /// If there is no configuration directory, or the file cannot be written.
+    pub fn save(&mut self) -> std::io::Result<()> {
+        self.saved = self.file.settings.clone();
+        self.file.save()
     }
 
     /// Revert to saved settings.
     pub fn revert(&mut self) {
-        self.settings = self.saved.clone();
+        self.file.settings = self.saved.clone();
     }
 
     /// Switch tabs.
@@ -672,7 +215,7 @@ impl AppearanceSettingsUI {
         let mut tx = 24.0;
         for &tab in &tabs {
             let active = tab == self.active_tab;
-            let tab_w = tab.label().len() as f32 * 8.0 + 20.0;
+            let tab_w = text::padded_width_any_weight(tab.label(), 10.0, 13.0);
 
             cmds.push(RenderCommand::FillRect {
                 x: tx,
@@ -689,7 +232,11 @@ impl AppearanceSettingsUI {
                 text: tab.label().into(),
                 font_size: 13.0,
                 color: if active { CRUST } else { SUBTEXT0 },
-                font_weight: if active { FontWeightHint::Bold } else { FontWeightHint::Regular },
+                font_weight: if active {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
                 max_width: Some(tab_w - 20.0),
             });
 
@@ -724,9 +271,8 @@ impl AppearanceSettingsUI {
         });
         cy += 26.0;
 
-        let modes = [ThemeMode::Dark, ThemeMode::Light, ThemeMode::System];
-        for mode in &modes {
-            let selected = *mode == self.settings.theme_mode;
+        for mode in ThemeMode::ALL {
+            let selected = *mode == self.file.settings.theme_mode;
             cmds.push(RenderCommand::FillRect {
                 x,
                 y: cy,
@@ -791,7 +337,7 @@ impl AppearanceSettingsUI {
                 corner_radii: CornerRadii::all(swatch_size / 2.0),
             });
 
-            if *accent == self.settings.accent_color {
+            if *accent == self.file.settings.accent_color {
                 cmds.push(RenderCommand::StrokeRect {
                     x: sx - 3.0,
                     y: sy - 3.0,
@@ -808,13 +354,16 @@ impl AppearanceSettingsUI {
         cy += (rows as f32) * (swatch_size + swatch_gap) + 16.0;
 
         // Current accent display
-        let accent = self.settings.effective_accent();
+        let accent = self.file.settings.effective_accent();
         cmds.push(RenderCommand::Text {
             x,
             y: cy,
             text: format!(
                 "Current: {} (#{:02X}{:02X}{:02X})",
-                self.settings.accent_color.label(), accent.r, accent.g, accent.b,
+                self.file.settings.accent_color.label(),
+                accent.r,
+                accent.g,
+                accent.b,
             ),
             font_size: 12.0,
             color: SUBTEXT0,
@@ -835,11 +384,18 @@ impl AppearanceSettingsUI {
         });
         cy += 26.0;
 
-        self.render_label_value(cmds, x, cy, width, "Level", self.settings.transparency.label());
+        self.render_label_value(
+            cmds,
+            x,
+            cy,
+            width,
+            "Level",
+            self.file.settings.transparency.label(),
+        );
         cy += 28.0;
 
         // Transparency preview bar
-        let alpha = self.settings.transparency.panel_alpha();
+        let alpha = self.file.settings.transparency.panel_alpha();
         cmds.push(RenderCommand::FillRect {
             x,
             y: cy,
@@ -872,16 +428,19 @@ impl AppearanceSettingsUI {
         cy += 26.0;
 
         self.render_label_value(
-            cmds, x, cy, width,
+            cmds,
+            x,
+            cy,
+            width,
             "Scale",
-            &format!("{}%", self.settings.scaling_percent),
+            &format!("{}%", self.file.settings.scaling_percent),
         );
         let _ = cy;
     }
 
     fn render_fonts_tab(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, width: f32) {
         let mut cy = y;
-        let fonts = &self.settings.fonts;
+        let fonts = &self.file.settings.fonts;
 
         cmds.push(RenderCommand::Text {
             x,
@@ -896,7 +455,14 @@ impl AppearanceSettingsUI {
 
         self.render_label_value(cmds, x, cy, width, "Family", &fonts.ui_font);
         cy += 28.0;
-        self.render_label_value(cmds, x, cy, width, "Size", &format!("{:.0}pt", fonts.ui_size));
+        self.render_label_value(
+            cmds,
+            x,
+            cy,
+            width,
+            "Size",
+            &format!("{:.0}pt", fonts.ui_size),
+        );
         cy += 36.0;
 
         // Font preview
@@ -941,7 +507,14 @@ impl AppearanceSettingsUI {
 
         self.render_label_value(cmds, x, cy, width, "Family", &fonts.mono_font);
         cy += 28.0;
-        self.render_label_value(cmds, x, cy, width, "Size", &format!("{:.0}pt", fonts.mono_size));
+        self.render_label_value(
+            cmds,
+            x,
+            cy,
+            width,
+            "Size",
+            &format!("{:.0}pt", fonts.mono_size),
+        );
         cy += 36.0;
 
         // Mono preview
@@ -999,12 +572,22 @@ impl AppearanceSettingsUI {
         });
         cy += 26.0;
 
-        self.render_label_value(cmds, x, cy, width, "Speed", self.settings.animation_speed.label());
+        self.render_label_value(
+            cmds,
+            x,
+            cy,
+            width,
+            "Speed",
+            self.file.settings.animation_speed.label(),
+        );
         cy += 28.0;
         self.render_label_value(
-            cmds, x, cy, width,
+            cmds,
+            x,
+            cy,
+            width,
             "Multiplier",
-            &format!("{:.2}x", self.settings.animation_speed.multiplier()),
+            &format!("{:.2}x", self.file.settings.animation_speed.multiplier()),
         );
         cy += 36.0;
 
@@ -1027,7 +610,7 @@ impl AppearanceSettingsUI {
             WindowCorners::ExtraRounded,
         ];
         for style in &corner_styles {
-            let selected = *style == self.settings.window_corners;
+            let selected = *style == self.file.settings.window_corners;
             let preview_w = 50.0;
             cmds.push(RenderCommand::FillRect {
                 x,
@@ -1074,15 +657,43 @@ impl AppearanceSettingsUI {
         });
         cy += 26.0;
 
-        self.render_label_value(cmds, x, cy, width, "Style", self.settings.taskbar_style.label());
+        self.render_label_value(
+            cmds,
+            x,
+            cy,
+            width,
+            "Style",
+            self.file.settings.taskbar_style.label(),
+        );
         cy += 36.0;
 
         // Toggle switches
-        self.render_toggle_row(cmds, x, cy, width, "Accent on Taskbar", self.settings.accent_taskbar);
+        self.render_toggle_row(
+            cmds,
+            x,
+            cy,
+            width,
+            "Accent on Taskbar",
+            self.file.settings.accent_taskbar,
+        );
         cy += 32.0;
-        self.render_toggle_row(cmds, x, cy, width, "Accent on Title Bars", self.settings.accent_titlebars);
+        self.render_toggle_row(
+            cmds,
+            x,
+            cy,
+            width,
+            "Accent on Title Bars",
+            self.file.settings.accent_titlebars,
+        );
         cy += 32.0;
-        self.render_toggle_row(cmds, x, cy, width, "Drop Shadows", self.settings.drop_shadows);
+        self.render_toggle_row(
+            cmds,
+            x,
+            cy,
+            width,
+            "Drop Shadows",
+            self.file.settings.drop_shadows,
+        );
         let _ = cy;
     }
 
@@ -1101,13 +712,27 @@ impl AppearanceSettingsUI {
         });
         cy += 26.0;
 
-        self.render_label_value(cmds, x, cy, width, "Size", self.settings.cursor_size.label());
+        self.render_label_value(
+            cmds,
+            x,
+            cy,
+            width,
+            "Size",
+            self.file.settings.cursor_size.label(),
+        );
         cy += 28.0;
-        self.render_label_value(cmds, x, cy, width, "Scheme", self.settings.cursor_scheme.label());
+        self.render_label_value(
+            cmds,
+            x,
+            cy,
+            width,
+            "Scheme",
+            self.file.settings.cursor_scheme.label(),
+        );
         cy += 36.0;
 
         // Cursor preview
-        let cursor_px = self.settings.cursor_size.pixels() as f32;
+        let cursor_px = self.file.settings.cursor_size.pixels() as f32;
         cmds.push(RenderCommand::FillRect {
             x,
             y: cy,
@@ -1139,11 +764,18 @@ impl AppearanceSettingsUI {
         });
         cy += 26.0;
 
-        self.render_label_value(cmds, x, cy, width, "Size", self.settings.icon_size.label());
+        self.render_label_value(
+            cmds,
+            x,
+            cy,
+            width,
+            "Size",
+            self.file.settings.icon_size.label(),
+        );
         cy += 28.0;
 
         // Icon size preview
-        let icon_px = self.settings.icon_size.pixels() as f32;
+        let icon_px = self.file.settings.icon_size.pixels() as f32;
         let preview_items = ["Documents", "Downloads", "Pictures"];
         for (i, name) in preview_items.iter().enumerate() {
             let ix = x + (i as f32) * (icon_px + 24.0);
@@ -1246,210 +878,9 @@ impl AppearanceSettingsUI {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // ---- ThemeMode ----
-
-    #[test]
-    fn test_theme_mode_labels() {
-        assert_eq!(ThemeMode::Dark.label(), "Dark");
-        assert_eq!(ThemeMode::Light.label(), "Light");
-        assert_eq!(ThemeMode::System.label(), "System (Auto)");
-    }
-
-    // ---- AccentColor ----
-
-    #[test]
-    fn test_accent_color_count() {
-        assert_eq!(AccentColor::presets().len(), 14);
-    }
-
-    #[test]
-    fn test_accent_color_labels() {
-        assert_eq!(AccentColor::Blue.label(), "Blue");
-        assert_eq!(AccentColor::Custom.label(), "Custom");
-    }
-
-    #[test]
-    fn test_accent_color_values() {
-        let c = AccentColor::Blue.color();
-        assert_eq!(c.r, BLUE.r);
-        assert_eq!(c.g, BLUE.g);
-        assert_eq!(c.b, BLUE.b);
-    }
-
-    #[test]
-    fn test_accent_custom_fallback() {
-        let c = AccentColor::Custom.color();
-        assert_eq!(c.r, BLUE.r);
-    }
-
-    // ---- TransparencyLevel ----
-
-    #[test]
-    fn test_transparency_labels() {
-        assert_eq!(TransparencyLevel::Off.label(), "Off");
-        assert_eq!(TransparencyLevel::Full.label(), "Full");
-    }
-
-    #[test]
-    fn test_transparency_alpha() {
-        assert_eq!(TransparencyLevel::Off.panel_alpha(), 255);
-        assert_eq!(TransparencyLevel::Full.panel_alpha(), 160);
-        assert!(TransparencyLevel::Moderate.panel_alpha() > TransparencyLevel::Full.panel_alpha());
-    }
-
-    // ---- AnimationSpeed ----
-
-    #[test]
-    fn test_animation_speed_multipliers() {
-        assert_eq!(AnimationSpeed::Off.multiplier(), 0.0);
-        assert_eq!(AnimationSpeed::Normal.multiplier(), 1.0);
-        assert!(AnimationSpeed::Fast.multiplier() < AnimationSpeed::Normal.multiplier());
-        assert!(AnimationSpeed::Slow.multiplier() > AnimationSpeed::Normal.multiplier());
-    }
-
-    // ---- FontSettings ----
-
-    #[test]
-    fn test_font_settings_default() {
-        let f = FontSettings::default();
-        assert_eq!(f.ui_font, "Inter");
-        assert_eq!(f.mono_font, "JetBrains Mono");
-        assert!(f.hinting);
-        assert!(f.smoothing);
-    }
-
-    // ---- SubpixelMode ----
-
-    #[test]
-    fn test_subpixel_labels() {
-        assert_eq!(SubpixelMode::Rgb.label(), "RGB");
-        assert_eq!(SubpixelMode::None.label(), "None");
-    }
-
-    // ---- IconSize ----
-
-    #[test]
-    fn test_icon_size_pixels() {
-        assert_eq!(IconSize::Small.pixels(), 32);
-        assert_eq!(IconSize::Medium.pixels(), 48);
-        assert_eq!(IconSize::Large.pixels(), 64);
-        assert_eq!(IconSize::ExtraLarge.pixels(), 96);
-    }
-
-    // ---- CursorSize ----
-
-    #[test]
-    fn test_cursor_size_pixels() {
-        assert_eq!(CursorSize::Small.pixels(), 16);
-        assert_eq!(CursorSize::Normal.pixels(), 24);
-        assert_eq!(CursorSize::Large.pixels(), 32);
-    }
-
-    #[test]
-    fn test_cursor_scheme_labels() {
-        assert_eq!(CursorScheme::Default.label(), "Default");
-        assert_eq!(CursorScheme::AccentColored.label(), "Accent Color");
-    }
-
-    // ---- WindowCorners ----
-
-    #[test]
-    fn test_window_corners_radius() {
-        assert_eq!(WindowCorners::Square.radius(), 0.0);
-        assert_eq!(WindowCorners::Subtle.radius(), 4.0);
-        assert_eq!(WindowCorners::Rounded.radius(), 8.0);
-        assert_eq!(WindowCorners::ExtraRounded.radius(), 16.0);
-    }
-
-    // ---- TaskbarStyle ----
-
-    #[test]
-    fn test_taskbar_style_labels() {
-        assert_eq!(TaskbarStyle::Solid.label(), "Solid");
-        assert_eq!(TaskbarStyle::Translucent.label(), "Translucent");
-        assert_eq!(TaskbarStyle::Transparent.label(), "Transparent");
-    }
-
-    // ---- AppearanceSettings ----
-
-    #[test]
-    fn test_settings_default() {
-        let s = AppearanceSettings::default();
-        assert_eq!(s.theme_mode, ThemeMode::Dark);
-        assert_eq!(s.accent_color, AccentColor::Blue);
-        assert_eq!(s.transparency, TransparencyLevel::Moderate);
-        assert_eq!(s.animation_speed, AnimationSpeed::Normal);
-        assert_eq!(s.scaling_percent, 100);
-        assert!(s.drop_shadows);
-    }
-
-    #[test]
-    fn test_effective_accent_preset() {
-        let s = AppearanceSettings::default();
-        let c = s.effective_accent();
-        assert_eq!(c.r, BLUE.r);
-    }
-
-    #[test]
-    fn test_effective_accent_custom() {
-        let mut s = AppearanceSettings::default();
-        s.accent_color = AccentColor::Custom;
-        s.custom_accent = Color::rgb(255, 0, 0);
-        let c = s.effective_accent();
-        assert_eq!(c.r, 255);
-        assert_eq!(c.g, 0);
-    }
-
-    #[test]
-    fn test_scale_factor() {
-        let mut s = AppearanceSettings::default();
-        assert!((s.scale_factor() - 1.0).abs() < 0.01);
-        s.scaling_percent = 150;
-        assert!((s.scale_factor() - 1.5).abs() < 0.01);
-    }
-
-    #[test]
-    fn test_animations_enabled() {
-        let mut s = AppearanceSettings::default();
-        assert!(s.animations_enabled());
-        s.animation_speed = AnimationSpeed::Off;
-        assert!(!s.animations_enabled());
-    }
-
-    #[test]
-    fn test_transparency_enabled() {
-        let mut s = AppearanceSettings::default();
-        assert!(s.transparency_enabled());
-        s.transparency = TransparencyLevel::Off;
-        assert!(!s.transparency_enabled());
-    }
-
-    #[test]
-    fn test_corner_radius() {
-        let s = AppearanceSettings::default();
-        assert_eq!(s.corner_radius(), 8.0);
-    }
-
-    #[test]
-    fn test_validate_clamp_font_sizes() {
-        let mut s = AppearanceSettings::default();
-        s.fonts.ui_size = 2.0;
-        s.fonts.mono_size = 50.0;
-        s.scaling_percent = 50;
-        s.validate();
-        assert_eq!(s.fonts.ui_size, 8.0);
-        assert_eq!(s.fonts.mono_size, 32.0);
-        assert_eq!(s.scaling_percent, 100);
-    }
-
-    #[test]
-    fn test_validate_clamp_scaling_high() {
-        let mut s = AppearanceSettings::default();
-        s.scaling_percent = 500;
-        s.validate();
-        assert_eq!(s.scaling_percent, 300);
-    }
+    // Edited through the panel but named only by the tests, which set a
+    // non-default value to check that the Save button notices.
+    use appearance::{CursorScheme, SubpixelMode};
 
     // ---- AppearanceSettingsUI ----
 
@@ -1464,29 +895,31 @@ mod tests {
     fn test_ui_dirty_detection() {
         let mut ui = AppearanceSettingsUI::new();
         assert!(!ui.is_dirty());
-        ui.settings.theme_mode = ThemeMode::Light;
+        ui.file.settings.theme_mode = ThemeMode::Light;
         assert!(ui.is_dirty());
     }
 
     #[test]
     fn test_ui_save() {
         let mut ui = AppearanceSettingsUI::new();
-        ui.settings.accent_color = AccentColor::Red;
+        ui.file.settings.accent_color = AccentColor::Red;
         assert!(ui.is_dirty());
-        ui.save();
+        // `apply`, not `save`: the test is about the clean/dirty transition,
+        // and `save` would write to the developer's own config directory.
+        ui.apply();
         assert!(!ui.is_dirty());
     }
 
     #[test]
     fn test_ui_revert() {
         let mut ui = AppearanceSettingsUI::new();
-        ui.settings.theme_mode = ThemeMode::Light;
-        ui.settings.accent_color = AccentColor::Green;
+        ui.file.settings.theme_mode = ThemeMode::Light;
+        ui.file.settings.accent_color = AccentColor::Green;
         assert!(ui.is_dirty());
         ui.revert();
         assert!(!ui.is_dirty());
-        assert_eq!(ui.settings.theme_mode, ThemeMode::Dark);
-        assert_eq!(ui.settings.accent_color, AccentColor::Blue);
+        assert_eq!(ui.file.settings.theme_mode, ThemeMode::Dark);
+        assert_eq!(ui.file.settings.accent_color, AccentColor::Blue);
     }
 
     #[test]
@@ -1530,7 +963,7 @@ mod tests {
     #[test]
     fn test_ui_render_with_dirty() {
         let mut ui = AppearanceSettingsUI::new();
-        ui.settings.theme_mode = ThemeMode::Light;
+        ui.file.settings.theme_mode = ThemeMode::Light;
         let cmds = ui.render(600.0, 800.0);
         assert!(!cmds.is_empty());
     }
@@ -1538,14 +971,14 @@ mod tests {
     #[test]
     fn test_ui_dirty_font_change() {
         let mut ui = AppearanceSettingsUI::new();
-        ui.settings.fonts.ui_size = 16.0;
+        ui.file.settings.fonts.ui_size = 16.0;
         assert!(ui.is_dirty());
     }
 
     #[test]
     fn test_ui_dirty_cursor_change() {
         let mut ui = AppearanceSettingsUI::new();
-        ui.settings.cursor_scheme = CursorScheme::Inverted;
+        ui.file.settings.cursor_scheme = CursorScheme::Inverted;
         assert!(ui.is_dirty());
     }
 
@@ -1557,5 +990,96 @@ mod tests {
         assert_eq!(AppearanceTab::Fonts.label(), "Fonts");
         assert_eq!(AppearanceTab::Effects.label(), "Effects");
         assert_eq!(AppearanceTab::CursorsIcons.label(), "Cursors & Icons");
+    }
+
+    #[test]
+    fn test_config_save_preserves_the_users_comments_and_keys() {
+        // The whole point of yamldoc: a user annotates their file, changes one
+        // setting in the UI, and gets their annotations back.
+        let original = "\
+# My desktop. Do not let the settings app eat these notes.
+theme:
+  mode: dark      # I like it dark
+  accent: teal
+
+# Something a future version of the desktop writes.
+experimental:
+  wobbly_windows: true
+";
+        let mut ui = AppearanceSettingsUI::from_document(Document::parse(original));
+        assert_eq!(ui.file.settings.theme_mode, ThemeMode::Dark);
+        assert_eq!(ui.file.settings.accent_color, AccentColor::Teal);
+
+        ui.file.settings.accent_color = AccentColor::Mauve;
+        let text = ui.apply().to_text();
+
+        assert!(text.contains("# My desktop. Do not let the settings app eat these notes."));
+        assert!(text.contains("# I like it dark"));
+        assert!(
+            text.contains("wobbly_windows: true"),
+            "a key this version does not model was deleted:\n{text}"
+        );
+        assert!(
+            text.contains("accent: mauve"),
+            "the edit did not land:\n{text}"
+        );
+        assert!(!text.contains("accent: teal"));
+        assert_eq!(
+            AppearanceSettings::read_from(&Document::parse(&text)).accent_color,
+            AccentColor::Mauve
+        );
+    }
+
+    #[test]
+    fn test_config_saving_twice_produces_no_second_diff() {
+        // Otherwise every visit to the settings panel dirties the user's file.
+        let mut ui =
+            AppearanceSettingsUI::from_document(Document::parse("# notes\ntheme:\n  mode: dark\n"));
+        ui.file.settings.fonts.ui_size = 14.0;
+        let once = ui.apply().to_text();
+        let twice = ui.apply().to_text();
+        assert_eq!(once, twice);
+        // And a save that changes nothing does not rewrite the file either.
+        let mut again = AppearanceSettingsUI::from_document(Document::parse(&once));
+        assert_eq!(again.apply().to_text(), once);
+    }
+
+    #[test]
+    fn test_ui_dirty_detects_the_fields_the_old_check_missed() {
+        // Each of these left Save greyed out before `is_dirty` compared the
+        // whole struct, so the change was silently lost on close.
+        let mut ui = AppearanceSettingsUI::new();
+        ui.file.settings.fonts.mono_font = "Iosevka".to_string();
+        assert!(ui.is_dirty(), "mono_font change not detected");
+
+        let mut ui = AppearanceSettingsUI::new();
+        ui.file.settings.fonts.subpixel = SubpixelMode::Bgr;
+        assert!(ui.is_dirty(), "subpixel change not detected");
+
+        let mut ui = AppearanceSettingsUI::new();
+        ui.file.settings.fonts.smoothing = !ui.file.settings.fonts.smoothing;
+        assert!(ui.is_dirty(), "smoothing change not detected");
+
+        let mut ui = AppearanceSettingsUI::new();
+        ui.file.settings.custom_accent = Color::rgb(1, 2, 3);
+        assert!(ui.is_dirty(), "custom_accent change not detected");
+    }
+
+    #[test]
+    fn test_ui_dirty_detects_a_font_size_nudge() {
+        // The old check ignored size changes under 0.1pt, which meant a slider
+        // step could be a change the user could see but not save.
+        let mut ui = AppearanceSettingsUI::new();
+        ui.file.settings.fonts.ui_size += 0.05;
+        assert!(ui.is_dirty());
+        ui.apply();
+        assert!(!ui.is_dirty());
+    }
+
+    #[test]
+    fn test_ui_load_defaults_from_an_empty_document() {
+        let ui = AppearanceSettingsUI::from_document(Document::new());
+        assert_eq!(ui.file.settings, AppearanceSettings::default());
+        assert!(!ui.is_dirty());
     }
 }

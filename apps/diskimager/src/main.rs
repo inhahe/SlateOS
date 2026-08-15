@@ -29,6 +29,7 @@ use guitk::layout::{FlexAlign, FlexDirection, FlexItem, FlexJustify, SizeConstra
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
 #[allow(unused_imports)]
 use guitk::style::{Borders, CornerRadii, Edges, FontWeight, Style, TextAlign};
+use guitk::text;
 #[allow(unused_imports)]
 use guitk::widget::{Widget, WidgetId, WidgetTree};
 
@@ -76,8 +77,28 @@ const BUTTON_HEIGHT: f32 = 32.0;
 const ROW_HEIGHT: f32 = 28.0;
 const PROGRESS_BAR_HEIGHT: f32 = 20.0;
 const MAX_RECENT_IMAGES: usize = 20;
+
+// Destructive-confirmation dialog. Its two prose fields wrap, so the dialog
+// grows to hold them; these bound and floor that growth.
+/// Room between the dialog's title baseline and its message.
+const CONFIRM_TITLE_BLOCK: f32 = 28.0;
+/// Vertical room the message keeps even when it is one short line, so a
+/// typical confirmation looks exactly as it did before the fields wrapped.
+const CONFIRM_MESSAGE_MIN_HEIGHT: f32 = 24.0;
+/// Room below the warning for the Cancel/Write row and the padding under it.
+const CONFIRM_BUTTON_BLOCK: f32 = 62.0;
+/// The dialog never shrinks below the size it had when both fields were
+/// clipped to one line.
+const CONFIRM_MIN_HEIGHT: f32 = 200.0;
+/// A drive name is attacker-shaped input in the sense that matters here -- it
+/// comes from the device, not from us -- so neither field may grow the dialog
+/// without bound.
+const CONFIRM_MESSAGE_MAX_LINES: usize = 4;
+/// The warning is a fixed two-sentence form; four lines is generous for it at
+/// this width, and the cap keeps a pathological drive name from pushing the
+/// buttons off screen.
+const CONFIRM_DETAIL_MAX_LINES: usize = 4;
 const DEFAULT_BLOCK_SIZE: u64 = 4096;
-const CHAR_WIDTH: f32 = 0.6;
 
 // ============================================================================
 // Image format types
@@ -2072,19 +2093,24 @@ impl DiskImagerApp {
                 if idx >= max_show {
                     break;
                 }
+                // The format and size are the fixed part of the line, so the
+                // path gets whatever room is left after them rather than a
+                // flat character budget that ignored the rest of the string.
+                let room = width - PANEL_PADDING * 2.0 - 16.0;
+                let suffix =
+                    format!(" ({} - {})", recent.format.name(), format_bytes(recent.size_bytes));
+                let suffix_w = text::measure(&suffix, SMALL_FONT_SIZE, FontWeightHint::Regular);
                 rt.push(RenderCommand::Text {
                     x: px + 8.0,
                     y: cy,
                     text: format!(
-                        "{} ({} - {})",
-                        truncate_path(&recent.path, 40),
-                        recent.format.name(),
-                        format_bytes(recent.size_bytes),
+                        "{}{suffix}",
+                        truncate_path(&recent.path, room - suffix_w, SMALL_FONT_SIZE),
                     ),
                     color: colors::SUBTEXT0,
                     font_size: SMALL_FONT_SIZE,
                     font_weight: FontWeightHint::Regular,
-                    max_width: Some(width - PANEL_PADDING * 2.0 - 16.0),
+                    max_width: Some(room),
                 });
                 cy += 18.0;
             }
@@ -2378,9 +2404,14 @@ impl DiskImagerApp {
                 // Size (for files)
                 if !entry.is_directory {
                     let size_text = format_bytes(entry.size_bytes);
-                    let size_w = size_text.len() as f32 * CHAR_WIDTH * SMALL_FONT_SIZE;
+                    let size_x = text::right_x(
+                        &size_text,
+                        px + width - PANEL_PADDING * 2.0 - 8.0,
+                        SMALL_FONT_SIZE,
+                        FontWeightHint::Regular,
+                    );
                     rt.push(RenderCommand::Text {
-                        x: px + width - PANEL_PADDING * 2.0 - size_w - 8.0,
+                        x: size_x,
                         y: ey + 2.0,
                         text: size_text,
                         color: colors::OVERLAY0,
@@ -2487,17 +2518,21 @@ impl DiskImagerApp {
             };
 
             rt.fill_rounded_rect(bx, cy, alg_btn_w, BUTTON_HEIGHT, bg, CornerRadii::all(4.0));
+            // The selected algorithm is drawn bold, so it is centred bold —
+            // centring a bold label on its regular-weight width is how the one
+            // chip the user just clicked becomes the one that looks crooked.
+            let alg_weight = if is_selected {
+                FontWeightHint::Bold
+            } else {
+                FontWeightHint::Regular
+            };
             rt.push(RenderCommand::Text {
-                x: bx + (alg_btn_w - (alg.name().len() as f32 * CHAR_WIDTH * UI_FONT_SIZE)) / 2.0,
+                x: text::center_x(alg.name(), bx + alg_btn_w / 2.0, UI_FONT_SIZE, alg_weight),
                 y: cy + (BUTTON_HEIGHT - UI_FONT_SIZE) / 2.0,
                 text: alg.name().to_string(),
                 color: fg,
                 font_size: UI_FONT_SIZE,
-                font_weight: if is_selected {
-                    FontWeightHint::Bold
-                } else {
-                    FontWeightHint::Regular
-                },
+                font_weight: alg_weight,
                 max_width: None,
             });
         }
@@ -2656,23 +2691,35 @@ impl DiskImagerApp {
                         font_weight: FontWeightHint::Bold,
                         max_width: Some(input_w - 24.0),
                     });
+                    // A hash is read from its front, so these elide from the
+                    // end — unlike a path, where the tail is the useful part.
+                    let hash_room = input_w - 24.0;
+                    let elide_hash = |label: &str, hash: &str| {
+                        text::elide(
+                            &format!("{label}: {hash}"),
+                            hash_room,
+                            "...",
+                            SMALL_FONT_SIZE,
+                            FontWeightHint::Regular,
+                        )
+                    };
                     rt.push(RenderCommand::Text {
                         x: px + 12.0,
                         y: cy + 24.0,
-                        text: format!("Expected: {}", truncate_path(expected, 50)),
+                        text: elide_hash("Expected", expected),
                         color: colors::RED,
                         font_size: SMALL_FONT_SIZE,
                         font_weight: FontWeightHint::Regular,
-                        max_width: Some(input_w - 24.0),
+                        max_width: Some(hash_room),
                     });
                     rt.push(RenderCommand::Text {
                         x: px + 12.0,
                         y: cy + 38.0,
-                        text: format!("Computed: {}", truncate_path(computed, 50)),
+                        text: elide_hash("Computed", computed),
                         color: colors::RED,
                         font_size: SMALL_FONT_SIZE,
                         font_weight: FontWeightHint::Regular,
-                        max_width: Some(input_w - 24.0),
+                        max_width: Some(hash_room),
                     });
                 }
                 _ => {}
@@ -2961,9 +3008,13 @@ impl DiskImagerApp {
         // Right side: operation status
         if self.operation.is_active() {
             let op_text = self.operation.label();
-            let tw = op_text.len() as f32 * CHAR_WIDTH * SMALL_FONT_SIZE;
             rt.push(RenderCommand::Text {
-                x: self.window_width - tw - PANEL_PADDING,
+                x: text::right_x(
+                    op_text,
+                    self.window_width - PANEL_PADDING,
+                    SMALL_FONT_SIZE,
+                    FontWeightHint::Bold,
+                ),
                 y: sy + (STATUS_BAR_HEIGHT - SMALL_FONT_SIZE) / 2.0,
                 text: op_text.to_string(),
                 color: colors::YELLOW,
@@ -2974,9 +3025,13 @@ impl DiskImagerApp {
         } else {
             // Drive count
             let info = format!("{} drives detected", self.drives.len());
-            let iw = info.len() as f32 * CHAR_WIDTH * SMALL_FONT_SIZE;
             rt.push(RenderCommand::Text {
-                x: self.window_width - iw - PANEL_PADDING,
+                x: text::right_x(
+                    &info,
+                    self.window_width - PANEL_PADDING,
+                    SMALL_FONT_SIZE,
+                    FontWeightHint::Regular,
+                ),
                 y: sy + (STATUS_BAR_HEIGHT - SMALL_FONT_SIZE) / 2.0,
                 text: info,
                 color: colors::OVERLAY0,
@@ -3045,7 +3100,12 @@ impl DiskImagerApp {
         // Percentage text on bar
         let pct_text = format!("{:.1}%", self.progress.percent());
         rt.push(RenderCommand::Text {
-            x: bar_x + (bar_w - pct_text.len() as f32 * CHAR_WIDTH * SMALL_FONT_SIZE) / 2.0,
+            x: text::center_x(
+                &pct_text,
+                bar_x + bar_w / 2.0,
+                SMALL_FONT_SIZE,
+                FontWeightHint::Bold,
+            ),
             y: bar_y + (PROGRESS_BAR_HEIGHT - SMALL_FONT_SIZE) / 2.0,
             text: pct_text,
             color: colors::TEXT,
@@ -3088,7 +3148,37 @@ impl DiskImagerApp {
         );
 
         let dialog_w = 420.0_f32;
-        let dialog_h = 200.0_f32;
+
+        // The message and the warning are prose, and `max_width` on a Text
+        // command clips to one line rather than wrapping -- so the detail
+        // ("... will be permanently destroyed. This operation cannot be
+        // undone.") was being cut mid-sentence, dropping the half that says
+        // the action is irreversible. Both wrap now, and the dialog is sized
+        // from the lines they actually produce. The dialog is centred, so its
+        // height has to be known before anything can be positioned.
+        let text_w = dialog_w - PANEL_PADDING * 2.0;
+        let message = |x: f32, y: f32| {
+            text::Paragraph::new(&self.confirm_dialog.message, colors::TEXT)
+                .at(x, y, text_w)
+                .font(UI_FONT_SIZE, FontWeightHint::Regular)
+                .max_lines(CONFIRM_MESSAGE_MAX_LINES)
+        };
+        let detail = |x: f32, y: f32| {
+            text::Paragraph::new(&self.confirm_dialog.detail, colors::YELLOW)
+                .at(x, y, text_w)
+                .font(SMALL_FONT_SIZE, FontWeightHint::Regular)
+                .max_lines(CONFIRM_DETAIL_MAX_LINES)
+        };
+        // Keep the original single-line allowance as a floor so a short
+        // message leaves the dialog looking exactly as it did.
+        let message_block = message(0.0, 0.0).height().max(CONFIRM_MESSAGE_MIN_HEIGHT);
+        let detail_h = detail(0.0, 0.0).height();
+        let dialog_h = (PANEL_PADDING
+            + CONFIRM_TITLE_BLOCK
+            + message_block
+            + detail_h
+            + CONFIRM_BUTTON_BLOCK)
+            .max(CONFIRM_MIN_HEIGHT);
         let dialog_x = (self.window_width - dialog_w) / 2.0;
         let dialog_y = (self.window_height - dialog_h) / 2.0;
 
@@ -3136,27 +3226,11 @@ impl DiskImagerApp {
             max_width: Some(dialog_w - PANEL_PADDING * 2.0),
         });
 
-        // Message
-        rt.push(RenderCommand::Text {
-            x: dialog_x + PANEL_PADDING,
-            y: dialog_y + PANEL_PADDING + 28.0,
-            text: self.confirm_dialog.message.clone(),
-            color: colors::TEXT,
-            font_size: UI_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(dialog_w - PANEL_PADDING * 2.0),
-        });
-
-        // Detail/warning
-        rt.push(RenderCommand::Text {
-            x: dialog_x + PANEL_PADDING,
-            y: dialog_y + PANEL_PADDING + 52.0,
-            text: self.confirm_dialog.detail.clone(),
-            color: colors::YELLOW,
-            font_size: SMALL_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(dialog_w - PANEL_PADDING * 2.0),
-        });
+        // Message, then the warning beneath whatever the message actually
+        // occupied -- not beneath a fixed one-line allowance for it.
+        let message_y = dialog_y + PANEL_PADDING + CONFIRM_TITLE_BLOCK;
+        message(dialog_x + PANEL_PADDING, message_y).draw(rt);
+        detail(dialog_x + PANEL_PADDING, message_y + message_block).draw(rt);
 
         // Buttons
         let btn_y = dialog_y + dialog_h - 50.0;
@@ -3228,14 +3302,15 @@ pub fn format_bytes(bytes: u64) -> String {
     }
 }
 
-/// Truncate a path string with ellipsis if too long.
-pub fn truncate_path(path: &str, max_len: usize) -> String {
-    if path.len() <= max_len {
-        return path.to_string();
-    }
-    let keep = max_len.saturating_sub(3);
-    let start = path.len().saturating_sub(keep);
-    format!("...{}", &path[start..])
+/// `path` cut from its start to fit `max_width` pixels, keeping the filename.
+///
+/// Replaces a helper that sliced `&path[path.len() - keep..]` — a byte index
+/// that lands mid-character on any path containing a non-ASCII byte, which is
+/// an abort, not a layout glitch, and our paths admit every byte but `/` and
+/// NUL. It also compared `path.len()` (bytes) against a budget of "characters",
+/// so it cut accented paths that already fitted.
+pub fn truncate_path(path: &str, max_width: f32, size: f32) -> String {
+    text::elide_start(path, max_width, "...", size, FontWeightHint::Regular)
 }
 
 /// Extract a trimmed ASCII string from ISO data at a given offset and length.
@@ -3973,16 +4048,35 @@ mod tests {
     }
 
     #[test]
-    fn test_truncate_path_short() {
-        assert_eq!(truncate_path("short", 20), "short");
+    fn a_path_that_fits_is_left_alone() {
+        assert_eq!(truncate_path("/tmp/a.img", 400.0, SMALL_FONT_SIZE), "/tmp/a.img");
     }
 
+    /// A cut path keeps its filename — that is the whole point of cutting it
+    /// from the start — and fits the room it was given, ellipsis included.
     #[test]
-    fn test_truncate_path_long() {
-        let long = "a".repeat(50);
-        let trunc = truncate_path(&long, 10);
-        assert!(trunc.starts_with("..."));
-        assert!(trunc.len() <= 13); // 3 dots + 7 chars
+    fn a_cut_path_keeps_its_filename_and_fits() {
+        let long = "/home/user/projects/some/rather/deep/tree/disk.img";
+        let room = 120.0;
+        let out = truncate_path(long, room, SMALL_FONT_SIZE);
+        assert!(out.starts_with("..."), "{out:?} should be marked as cut");
+        assert!(out.ends_with("disk.img"), "{out:?} lost the filename");
+        let w = text::measure(&out, SMALL_FONT_SIZE, FontWeightHint::Regular);
+        assert!(w <= room + 0.01, "{out:?} is {w} px in {room} px of room");
+    }
+
+    /// The old helper sliced at `path.len() - keep`, a byte index that lands
+    /// mid-character on any path holding a non-ASCII byte — an abort, not a
+    /// glitch, and our paths admit every byte but `/` and NUL. This walks the
+    /// cut across a multi-byte sequence to prove it can't happen again.
+    #[test]
+    fn cutting_a_path_never_splits_a_character() {
+        let path = "/home/user/projets/déjà-vu/résumé-final.img";
+        for room in [8.0, 17.0, 33.0, 65.0, 129.0, 257.0] {
+            let out = truncate_path(path, room, SMALL_FONT_SIZE);
+            let w = text::measure(&out, SMALL_FONT_SIZE, FontWeightHint::Regular);
+            assert!(w <= room + 0.01, "{out:?} is {w} px in {room} px of room");
+        }
     }
 
     // ----------------------------------------------------------------
@@ -4338,6 +4432,94 @@ mod tests {
         let mut rt = RenderTree::new();
         app.render(&mut rt);
         assert!(!rt.is_empty());
+    }
+
+    /// Every `Text` command drawn by the confirm dialog, joined in order.
+    fn confirm_dialog_text(drive_name: &str) -> (Vec<(f32, String)>, f32, f32) {
+        let mut app = DiskImagerApp::new();
+        app.confirm_dialog
+            .show_write_confirm("test.img", drive_name, 32_000_000_000);
+        let mut rt = RenderTree::new();
+        // Just the dialog, not the whole app: rendering the app also draws the
+        // window chrome, and "Disk Imager" in the title bar is not prose that
+        // belongs to this dialog.
+        app.render_confirm_dialog(&mut rt);
+        let rows: Vec<(f32, String)> = rt
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { y, text, .. } => Some((*y, text.clone())),
+                _ => None,
+            })
+            .collect();
+        // The dialog is the red-stroked rect; there is exactly one.
+        let (dialog_y, dialog_h) = rt
+            .commands
+            .iter()
+            .find_map(|c| match c {
+                RenderCommand::StrokeRect {
+                    y, height, color, ..
+                } if *color == colors::RED => Some((*y, *height)),
+                _ => None,
+            })
+            .expect("the confirm dialog draws a red border");
+        (rows, dialog_y, dialog_h)
+    }
+
+    #[test]
+    fn the_destructive_warning_is_shown_in_full() {
+        // `max_width` clips rather than wraps, so this warning used to be cut
+        // mid-sentence -- and the half that got dropped was the half saying
+        // the write cannot be undone.
+        let (rows, _, _) = confirm_dialog_text("USB Drive");
+        let drawn: String = rows
+            .iter()
+            .map(|(_, t)| t.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        for phrase in [
+            "permanently destroyed",
+            "cannot be undone",
+            "USB Drive",
+        ] {
+            assert!(
+                drawn.contains(phrase),
+                "the confirmation must show {phrase:?}; it drew: {drawn}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_warning_never_runs_through_the_button_row() {
+        // A dialog that grows its prose but not itself puts text on top of the
+        // controls that dismiss it -- here, on top of the destructive button.
+        let (rows, dialog_y, dialog_h) = confirm_dialog_text(&"Very Long Drive Name ".repeat(8));
+        let button_top = dialog_y + dialog_h - 50.0;
+        let prose: Vec<&(f32, String)> = rows
+            .iter()
+            .filter(|(_, t)| t != "Cancel" && t != "Write")
+            .collect();
+        assert!(!prose.is_empty(), "the dialog drew no prose at all");
+        for (y, t) in prose {
+            assert!(
+                *y < button_top,
+                "prose line {t:?} at y={y} reaches the button row at {button_top}"
+            );
+            assert!(
+                *y >= dialog_y,
+                "prose line {t:?} at y={y} is above the dialog at {dialog_y}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_short_confirmation_keeps_the_original_dialog_size() {
+        // Wrapping must not resize the dialog for the common case.
+        let (_, _, dialog_h) = confirm_dialog_text("USB");
+        assert!(
+            (dialog_h - 200.0).abs() < 0.01,
+            "a short confirmation should still be 200 px tall, got {dialog_h}"
+        );
     }
 
     #[test]

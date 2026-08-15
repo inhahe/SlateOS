@@ -2711,8 +2711,8 @@ mod tests {
         }
         impl CapGuard {
             fn snapshot() -> Self {
-            let (lo, hi) = crate::sys_capability::current_caps_effective();
-            Self { lo, hi }
+                let (lo, hi) = crate::sys_capability::current_caps_effective();
+                Self { lo, hi }
             }
         }
         impl Drop for CapGuard {
@@ -3107,8 +3107,8 @@ mod tests {
         }
         impl CapGuard {
             fn snapshot() -> Self {
-            let (lo, hi) = crate::sys_capability::current_caps_effective();
-            Self { lo, hi }
+                let (lo, hi) = crate::sys_capability::current_caps_effective();
+                Self { lo, hi }
             }
         }
         impl Drop for CapGuard {

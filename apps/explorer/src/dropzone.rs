@@ -18,6 +18,7 @@
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand};
 use guitk::style::CornerRadii;
+use guitk::text;
 
 use std::path::{Path, PathBuf};
 
@@ -37,15 +38,17 @@ pub struct Rect {
 impl Rect {
     /// Create a new rectangle.
     pub const fn new(x: f32, y: f32, width: f32, height: f32) -> Self {
-        Self { x, y, width, height }
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
     }
 
     /// Returns `true` if the point `(px, py)` lies inside this rectangle.
     pub fn contains(&self, px: f32, py: f32) -> bool {
-        px >= self.x
-            && px < self.x + self.width
-            && py >= self.y
-            && py < self.y + self.height
+        px >= self.x && px < self.x + self.width && py >= self.y && py < self.y + self.height
     }
 }
 
@@ -59,15 +62,9 @@ pub enum DropZone {
     /// Over empty space in the file list -- drop into the current directory.
     CurrentDirectory,
     /// Over a folder row in the file list.
-    Folder {
-        path: String,
-        rect: Rect,
-    },
+    Folder { path: String, rect: Rect },
     /// Over a sidebar entry.
-    Sidebar {
-        path: String,
-        rect: Rect,
-    },
+    Sidebar { path: String, rect: Rect },
     /// Not over any valid drop zone.
     None,
 }
@@ -288,9 +285,10 @@ impl DropZoneManager {
 
         // Empty space inside the list area counts as current directory.
         if let Some(ref list) = self.list_area
-            && list.contains(x, y) {
-                return DropZone::CurrentDirectory;
-            }
+            && list.contains(x, y)
+        {
+            return DropZone::CurrentDirectory;
+        }
 
         DropZone::None
     }
@@ -310,8 +308,6 @@ impl DropZoneManager {
     ) -> Option<DropZoneEvent> {
         let new_zone = self.find_zone(x, y);
         let operation = self.determine_operation(sources, &new_zone, modifiers);
-
-        
 
         if new_zone != self.current_hover {
             if new_zone == DropZone::None {
@@ -413,9 +409,7 @@ impl DropZoneManager {
 
         let target_dir = match &zone {
             DropZone::CurrentDirectory => self.current_dir.clone(),
-            DropZone::Folder { path, .. } | DropZone::Sidebar { path, .. } => {
-                PathBuf::from(path)
-            }
+            DropZone::Folder { path, .. } | DropZone::Sidebar { path, .. } => PathBuf::from(path),
             DropZone::None => {
                 return DropResult {
                     operation: DropOperation::None,
@@ -478,10 +472,7 @@ fn check_nested_drop(sources: &[PathBuf], target_dir: &Path) -> Option<String> {
     for src in sources {
         // Exact self-drop: can't drop /foo into /foo.
         if src == target_dir {
-            return Some(format!(
-                "Cannot drop '{}' into itself",
-                src.display()
-            ));
+            return Some(format!("Cannot drop '{}' into itself", src.display()));
         }
 
         // Ancestor check: can't drop /foo into /foo/bar/baz.
@@ -647,14 +638,14 @@ pub fn render_drop_feedback(
     if !label.is_empty() {
         let label_x = drag_x + 16.0;
         let label_y = drag_y + 16.0;
-        let estimated_width = label.len() as f32 * 7.0 + 16.0;
+        let pill_width = text::padded_width(&label, 8.0, 12.0, FontWeightHint::Regular);
         let label_height = 22.0;
 
         // Background pill.
         cmds.push(RenderCommand::FillRect {
             x: label_x,
             y: label_y,
-            width: estimated_width,
+            width: pill_width,
             height: label_height,
             color: FeedbackColors::LABEL_BG,
             corner_radii: CornerRadii::all(4.0),
@@ -728,7 +719,9 @@ mod tests {
         );
 
         let zone = mgr.find_zone(400.0, 90.0);
-        assert!(matches!(zone, DropZone::Folder { ref path, .. } if path == "/home/user/Documents"));
+        assert!(
+            matches!(zone, DropZone::Folder { ref path, .. } if path == "/home/user/Documents")
+        );
     }
 
     #[test]
@@ -795,7 +788,10 @@ mod tests {
         let op = mgr.determine_operation(
             &["/home/user/file.txt".to_string()],
             &DropZone::CurrentDirectory,
-            DragModifiers { ctrl: true, ..Default::default() },
+            DragModifiers {
+                ctrl: true,
+                ..Default::default()
+            },
         );
         assert_eq!(op, DropOperation::Copy);
     }
@@ -807,7 +803,10 @@ mod tests {
         let op = mgr.determine_operation(
             &["/home/user/file.txt".to_string()],
             &DropZone::CurrentDirectory,
-            DragModifiers { shift: true, ..Default::default() },
+            DragModifiers {
+                shift: true,
+                ..Default::default()
+            },
         );
         assert_eq!(op, DropOperation::Move);
     }
@@ -818,7 +817,10 @@ mod tests {
         let op = mgr.determine_operation(
             &["/home/user/file.txt".to_string()],
             &DropZone::CurrentDirectory,
-            DragModifiers { alt: true, ..Default::default() },
+            DragModifiers {
+                alt: true,
+                ..Default::default()
+            },
         );
         assert_eq!(op, DropOperation::Link);
     }
@@ -837,11 +839,8 @@ mod tests {
     #[test]
     fn operation_no_sources_returns_none() {
         let mgr = DropZoneManager::new(PathBuf::from("/home/user"));
-        let op = mgr.determine_operation(
-            &[],
-            &DropZone::CurrentDirectory,
-            DragModifiers::default(),
-        );
+        let op =
+            mgr.determine_operation(&[], &DropZone::CurrentDirectory, DragModifiers::default());
         assert_eq!(op, DropOperation::None);
     }
 
@@ -870,9 +869,7 @@ mod tests {
         let target = Path::new("/home/user/Documents");
         let result = check_nested_drop(&sources, target);
         assert!(result.is_some());
-        assert!(result
-            .as_ref()
-            .is_some_and(|r| r.contains("into itself")));
+        assert!(result.as_ref().is_some_and(|r| r.contains("into itself")));
     }
 
     #[test]
@@ -881,9 +878,7 @@ mod tests {
         let target = Path::new("/home/user/Documents/sub");
         let result = check_nested_drop(&sources, target);
         assert!(result.is_some());
-        assert!(result
-            .as_ref()
-            .is_some_and(|r| r.contains("subdirectory")));
+        assert!(result.as_ref().is_some_and(|r| r.contains("subdirectory")));
     }
 
     #[test]
@@ -927,14 +922,28 @@ mod tests {
 
         // Frame 1.
         mgr.set_list_area(Rect::new(200.0, 64.0, 700.0, 500.0));
-        mgr.register_file_row(0, "/home/user/old", Rect::new(200.0, 86.0, 700.0, 22.0), true);
-        assert!(matches!(mgr.find_zone(400.0, 90.0), DropZone::Folder { ref path, .. } if path == "/home/user/old"));
+        mgr.register_file_row(
+            0,
+            "/home/user/old",
+            Rect::new(200.0, 86.0, 700.0, 22.0),
+            true,
+        );
+        assert!(
+            matches!(mgr.find_zone(400.0, 90.0), DropZone::Folder { ref path, .. } if path == "/home/user/old")
+        );
 
         // Frame 2 -- clear and register different zones.
         mgr.clear_zones();
         mgr.set_list_area(Rect::new(200.0, 64.0, 700.0, 500.0));
-        mgr.register_file_row(0, "/home/user/new", Rect::new(200.0, 86.0, 700.0, 22.0), true);
-        assert!(matches!(mgr.find_zone(400.0, 90.0), DropZone::Folder { ref path, .. } if path == "/home/user/new"));
+        mgr.register_file_row(
+            0,
+            "/home/user/new",
+            Rect::new(200.0, 86.0, 700.0, 22.0),
+            true,
+        );
+        assert!(
+            matches!(mgr.find_zone(400.0, 90.0), DropZone::Folder { ref path, .. } if path == "/home/user/new")
+        );
     }
 
     // ------------------------------------------------------------------
@@ -1056,12 +1065,14 @@ mod tests {
         // Should have: list area overlay + label background + label text.
         assert_eq!(cmds.len(), 3);
         // First command is a FillRect covering the list area.
-        assert!(matches!(&cmds[0], RenderCommand::FillRect { x, y, width, height, .. }
-            if (*x - 200.0).abs() < f32::EPSILON
-            && (*y - 64.0).abs() < f32::EPSILON
-            && (*width - 700.0).abs() < f32::EPSILON
-            && (*height - 500.0).abs() < f32::EPSILON
-        ));
+        assert!(
+            matches!(&cmds[0], RenderCommand::FillRect { x, y, width, height, .. }
+                if (*x - 200.0).abs() < f32::EPSILON
+                && (*y - 64.0).abs() < f32::EPSILON
+                && (*width - 700.0).abs() < f32::EPSILON
+                && (*height - 500.0).abs() < f32::EPSILON
+            )
+        );
     }
 
     #[test]
@@ -1108,14 +1119,7 @@ mod tests {
 
     #[test]
     fn render_feedback_none_zone_empty() {
-        let cmds = render_drop_feedback(
-            &DropZone::None,
-            DropOperation::None,
-            0.0,
-            0.0,
-            None,
-            true,
-        );
+        let cmds = render_drop_feedback(&DropZone::None, DropOperation::None, 0.0, 0.0, None, true);
         assert!(cmds.is_empty());
     }
 

@@ -409,9 +409,10 @@ impl TaskbarState {
     pub fn handle_mouse_event(&mut self, event: &MouseEvent) -> EventResult {
         // If context menu is visible, handle it first.
         if let Some(ref menu) = self.context_menu.clone()
-            && menu.visible {
-                return self.handle_context_menu_event(event);
-            }
+            && menu.visible
+        {
+            return self.handle_context_menu_event(event);
+        }
 
         match &event.kind {
             MouseEventKind::Press(MouseButton::Left) => self.handle_left_press(event.x, event.y),
@@ -516,17 +517,18 @@ impl TaskbarState {
 
             // If this button is being dragged and the drag is active,
             // render a ghost at the drag position instead.
-            let is_dragged =
-                self.drag.as_ref().is_some_and(|d| d.active && d.source_index == i);
+            let is_dragged = self
+                .drag
+                .as_ref()
+                .is_some_and(|d| d.active && d.source_index == i);
 
             if is_dragged {
                 // Render insertion indicator at the drop position.
                 if let Some(ref drag) = self.drag {
                     let drop_idx = self.drop_target_index(drag.current_x);
-                    let indicator_x = self.config.start_button_width
-                        + gap
-                        + drop_idx as f32 * (btn_width + gap)
-                        - gap / 2.0;
+                    let indicator_x =
+                        self.config.start_button_width + gap + drop_idx as f32 * (btn_width + gap)
+                            - gap / 2.0;
                     cmds.push(RenderCommand::FillRect {
                         x: indicator_x - 1.0,
                         y: btn_y + 4.0,
@@ -631,9 +633,10 @@ impl TaskbarState {
 
         // Context menu rendering.
         if let Some(ref menu) = self.context_menu
-            && menu.visible {
-                self.render_context_menu(&mut cmds, menu.button_index, menu.x, menu.y);
-            }
+            && menu.visible
+        {
+            self.render_context_menu(&mut cmds, menu.button_index, menu.x, menu.y);
+        }
 
         cmds
     }
@@ -694,10 +697,7 @@ impl TaskbarState {
 
         for app_id in &running_app_ids {
             let windows = running_groups.get(app_id).cloned().unwrap_or_default();
-            let name = running_names
-                .get(app_id)
-                .cloned()
-                .unwrap_or_default();
+            let name = running_names.get(app_id).cloned().unwrap_or_default();
             let state = self.compute_button_state(&windows);
 
             self.buttons.push(TaskbarButton {
@@ -720,9 +720,10 @@ impl TaskbarState {
             return ButtonState::Idle;
         }
         if let Some(focused) = self.focused_window
-            && windows.contains(&focused) {
-                return ButtonState::Focused;
-            }
+            && windows.contains(&focused)
+        {
+            return ButtonState::Focused;
+        }
         ButtonState::Running
     }
 
@@ -851,10 +852,8 @@ impl TaskbarState {
                             exec_path: String::new(),
                             position,
                         });
-                        self.events.push(TaskbarEvent::AppPinned {
-                            app_id,
-                            position,
-                        });
+                        self.events
+                            .push(TaskbarEvent::AppPinned { app_id, position });
                     }
                 }
                 EventResult::Consumed
@@ -917,12 +916,14 @@ impl TaskbarState {
             if button.state == ButtonState::Focused {
                 // Already focused — minimize.
                 if let Some(&wid) = button.window_ids.first() {
-                    self.events.push(TaskbarEvent::MinimizeWindow { window_id: wid });
+                    self.events
+                        .push(TaskbarEvent::MinimizeWindow { window_id: wid });
                 }
             } else {
                 // Bring to front.
                 if let Some(&wid) = button.window_ids.first() {
-                    self.events.push(TaskbarEvent::ActivateWindow { window_id: wid });
+                    self.events
+                        .push(TaskbarEvent::ActivateWindow { window_id: wid });
                 }
             }
         } else if button.pinned {
@@ -1028,10 +1029,8 @@ impl TaskbarState {
                     exec_path: String::new(),
                     position,
                 });
-                self.events.push(TaskbarEvent::AppPinned {
-                    app_id,
-                    position,
-                });
+                self.events
+                    .push(TaskbarEvent::AppPinned { app_id, position });
             }
             ContextMenuItem::Unpin => {
                 let app_id = button.app_id.clone();
@@ -1040,12 +1039,14 @@ impl TaskbarState {
             }
             ContextMenuItem::Close => {
                 if let Some(&wid) = button.window_ids.first() {
-                    self.events.push(TaskbarEvent::CloseWindow { window_id: wid });
+                    self.events
+                        .push(TaskbarEvent::CloseWindow { window_id: wid });
                 }
             }
             ContextMenuItem::CloseAll => {
                 for &wid in &button.window_ids {
-                    self.events.push(TaskbarEvent::CloseWindow { window_id: wid });
+                    self.events
+                        .push(TaskbarEvent::CloseWindow { window_id: wid });
                 }
             }
         }
@@ -1098,8 +1099,7 @@ impl TaskbarState {
             let label_y = y + (height - 12.0) / 2.0;
             let max_chars = ((width - 40.0) / 7.0) as usize;
             let label: String = if button.display_name.len() > max_chars && max_chars > 3 {
-                let truncated: String =
-                    button.display_name.chars().take(max_chars - 1).collect();
+                let truncated: String = button.display_name.chars().take(max_chars - 1).collect();
                 format!("{truncated}\u{2026}")
             } else {
                 button.display_name.clone()
@@ -1555,7 +1555,10 @@ mod tests {
         // First command is the background fill.
         match &cmds[0] {
             RenderCommand::FillRect {
-                width, height, color, ..
+                width,
+                height,
+                color,
+                ..
             } => {
                 assert_eq!(*width, 1920.0);
                 assert_eq!(*height, 48.0);
@@ -1592,7 +1595,10 @@ mod tests {
             }
             _ => false,
         });
-        assert!(has_indicator, "Expected an underline indicator for running app");
+        assert!(
+            has_indicator,
+            "Expected an underline indicator for running app"
+        );
     }
 
     #[test]
@@ -1606,9 +1612,12 @@ mod tests {
 
         // Should have a badge circle (FillRect with MOCHA_RED) and text "3".
         let has_badge_bg = cmds.iter().any(|cmd| match cmd {
-            RenderCommand::FillRect { color, width, height, .. } => {
-                *color == MOCHA_RED && *width == 12.0 && *height == 12.0
-            }
+            RenderCommand::FillRect {
+                color,
+                width,
+                height,
+                ..
+            } => *color == MOCHA_RED && *width == 12.0 && *height == 12.0,
             _ => false,
         });
         let has_badge_text = cmds.iter().any(|cmd| match cmd {

@@ -48,6 +48,8 @@
 use guitk::Color;
 use guitk::render::{FontWeightHint, RenderCommand};
 use guitk::style::CornerRadii;
+use guitk::table::{Column, Fit, Table};
+use guitk::text;
 
 // ============================================================================
 // Catppuccin Mocha theme
@@ -84,13 +86,41 @@ const SIDEBAR_WIDTH: f32 = 320.0;
 const STATUS_BAR_HEIGHT: f32 = 28.0;
 const PADDING: f32 = 10.0;
 const LINE_HEIGHT: f32 = 20.0;
-const CHAR_WIDTH: f32 = 8.4;
 const SMALL_TEXT: f32 = 12.0;
 const NORMAL_TEXT: f32 = 14.0;
 const HEADER_TEXT: f32 = 16.0;
 const TITLE_TEXT: f32 = 18.0;
 const TREE_INDENT: f32 = 20.0;
 const TREE_ICON_SIZE: f32 = 14.0;
+
+/// The text drawn on `doc`'s tab, dirty marker included.
+fn tab_label(doc: &Document) -> String {
+    if doc.dirty {
+        format!("{} *", doc.title)
+    } else {
+        doc.title.clone()
+    }
+}
+
+/// Width of the tab drawn for `doc`.
+///
+/// Hit-testing and rendering share this, because when each computed its own
+/// the two drifted: the click test sized the tab from `doc.title` while the
+/// render sized it from the title *plus* its dirty marker, so a modified
+/// document's tab was drawn wider than the region that would select it.
+///
+/// Measured bold whatever the tab's state, since the active tab is drawn
+/// bold — sizing each tab to its current weight would reflow the whole strip
+/// every time the user switched tabs.
+fn tab_width(doc: &Document) -> f32 {
+    text::measure(&tab_label(doc), SMALL_TEXT, FontWeightHint::Bold) + 40.0
+}
+
+/// Width of the view-mode chip for `mode`, likewise shared with its hit test
+/// and measured bold so the strip does not reflow on selection.
+fn mode_width(mode: ViewMode) -> f32 {
+    text::measure(mode.label(), SMALL_TEXT, FontWeightHint::Bold) + 20.0
+}
 
 // Limits
 const MAX_INPUT_LEN: usize = 1_048_576;
@@ -277,7 +307,13 @@ impl<'a> Parser<'a> {
         if byte == b'\n' {
             self.line += 1;
             self.col = 1;
-        } else {
+        } else if byte & 0xC0 != 0x80 {
+            // `col` is shown to the user as "Ln 3, Col 17" and is meant to be a
+            // character position. A UTF-8 continuation byte (0b10xx_xxxx) is
+            // the tail of a character whose leading byte already counted, so
+            // only leading bytes advance the column — otherwise an error after
+            // a run of CJK is reported up to three columns per character too
+            // far right, pointing at text that isn't there.
             self.col += 1;
         }
         Some(byte)
@@ -1919,6 +1955,94 @@ struct App {
     height: f32,
 }
 
+// ============================================================================
+// Statistics-view geometry
+// ============================================================================
+//
+// Every column here is a fraction of the room actually available. The panel is
+// the window minus the sidebar, and the user can make the window narrow, so a
+// literal constant subtracted from a fraction of it is a bug waiting for a
+// small window: the type-distribution bar used to be sized
+// `width * 0.5 - 250.0`, which is negative for any panel under 500 px. That
+// produced a negative-width `FillRect`, and the percentage label — positioned
+// at `bar_x + bar_width + 8.0` — walked *left* of its own bar and landed on
+// top of the count cell. Deriving each column from the width that is really
+// there, and clamping at zero, makes both impossible by construction.
+
+/// Gap between statistics columns.
+const STATS_GAP: f32 = 8.0;
+/// Left edge of a statistics row: the panel padding plus the card's own inset.
+const STATS_INSET: f32 = PADDING + 8.0;
+/// Interior padding a general-statistics card spends on each side.
+const STATS_CARD_PAD: f32 = 8.0;
+
+/// Column indices for a general-statistics row.
+const STATS_LABEL: usize = 0;
+const STATS_VALUE: usize = 1;
+
+/// Column indices for a type-distribution row.
+const TYPE_LABEL: usize = 0;
+const TYPE_COUNT: usize = 1;
+const TYPE_BAR: usize = 2;
+const TYPE_PCT: usize = 3;
+
+/// Share of a type-distribution row taken by each column. Fractions, not
+/// pixels, so the row scales with the panel instead of overflowing it; they
+/// sum to 1.0 so the row exactly fills the space between the inset and the
+/// right margin (see `the_type_rows_fill_the_panel`).
+const TYPE_FRACTIONS: [f32; 4] = [0.20, 0.10, 0.55, 0.15];
+
+/// Width of a general-statistics card.
+///
+/// Clamped at zero: this is a rect width, and a negative one is not a small
+/// rect but an ill-formed drawing command.
+fn stats_card_width(panel_width: f32) -> f32 {
+    (panel_width * 0.5 - PADDING * 2.0).max(0.0)
+}
+
+/// The label/value columns inside a general-statistics card.
+fn stats_columns(panel_width: f32) -> [Column; 2] {
+    let interior = (stats_card_width(panel_width) - STATS_CARD_PAD * 2.0 - STATS_GAP).max(0.0);
+    [
+        Column {
+            label: "",
+            width: interior * 0.5,
+        },
+        Column {
+            label: "",
+            width: interior * 0.5,
+        },
+    ]
+}
+
+/// The label/count/bar/percentage columns of a type-distribution row.
+fn type_columns(panel_width: f32) -> [Column; 4] {
+    // The row runs from the inset to the panel's right margin; the gaps come
+    // out of it before the fractions are applied, so the fractions describe
+    // drawable width rather than width-plus-gaps.
+    let row = (panel_width - STATS_INSET - PADDING).max(0.0);
+    let usable = (row - STATS_GAP * 3.0).max(0.0);
+    let mut columns = [Column {
+        label: "",
+        width: 0.0,
+    }; 4];
+    for (column, fraction) in columns.iter_mut().zip(TYPE_FRACTIONS) {
+        column.width = usable * fraction;
+    }
+    columns
+}
+
+/// A statistics table whose first column starts at the shared left inset.
+///
+/// [`Table`]'s origin sits *before* the leading gap — `left(0)` is `x + gap` —
+/// so the inset has to be handed over less one gap. Both tables go through
+/// here rather than each writing that adjustment out, because getting it wrong
+/// is silent: every column shifts by the same 8 px, so the columns still line
+/// up with each other and only the margin at the far end is wrong.
+fn stats_table(columns: &[Column]) -> Table<'_> {
+    Table::with_gap(columns, STATS_INSET - STATS_GAP, STATS_GAP)
+}
+
 impl App {
     fn new() -> Self {
         let mut doc = Document::new(1, String::from("Untitled"));
@@ -2407,7 +2531,7 @@ impl App {
     fn handle_tab_click(&mut self, x: f32) {
         let mut tab_x = PADDING;
         for (i, doc) in self.documents.iter().enumerate() {
-            let tab_width = doc.title.len() as f32 * CHAR_WIDTH + 40.0;
+            let tab_width = tab_width(doc);
             if x >= tab_x && x < tab_x + tab_width {
                 self.active_tab = i;
                 return;
@@ -2423,7 +2547,7 @@ impl App {
     fn handle_mode_click(&mut self, x: f32) {
         let mut mode_x = PADDING;
         for mode in &VIEW_MODES {
-            let mode_width = mode.label().len() as f32 * CHAR_WIDTH + 20.0;
+            let mode_width = mode_width(*mode);
             if x >= mode_x && x < mode_x + mode_width {
                 if let Some(doc) = self.documents.get_mut(self.active_tab) {
                     doc.view_mode = *mode;
@@ -2511,7 +2635,7 @@ impl App {
         ];
         let mut bx = 200.0;
         for (label, color) in &buttons {
-            let bw = label.len() as f32 * CHAR_WIDTH + 16.0;
+            let bw = text::width(label, SMALL_TEXT) + 16.0;
             cmds.push(RenderCommand::FillRect {
                 x: bx,
                 y: 8.0,
@@ -2559,7 +2683,7 @@ impl App {
         let mut tab_x = PADDING;
         for (i, doc) in self.documents.iter().enumerate() {
             let is_active = i == self.active_tab;
-            let tab_width = doc.title.len() as f32 * CHAR_WIDTH + 40.0;
+            let tab_width = tab_width(doc);
 
             // Tab background
             cmds.push(RenderCommand::FillRect {
@@ -2576,14 +2700,8 @@ impl App {
                 },
             });
 
-            // Dirty indicator
-            let label = if doc.dirty {
-                format!("{} *", doc.title)
-            } else {
-                doc.title.clone()
-            };
-
-            // Tab label
+            // Tab label (dirty marker included)
+            let label = tab_label(doc);
             cmds.push(RenderCommand::Text {
                 x: tab_x + 10.0,
                 y: y + 16.0,
@@ -2660,7 +2778,7 @@ impl App {
         let mut mode_x = PADDING;
         for mode in &VIEW_MODES {
             let is_active = *mode == active_mode;
-            let mode_width = mode.label().len() as f32 * CHAR_WIDTH + 20.0;
+            let mode_width = mode_width(*mode);
 
             if is_active {
                 cmds.push(RenderCommand::FillRect {
@@ -2828,7 +2946,7 @@ impl App {
                 }
 
                 // Label (key name or index)
-                let label_width = node.label.len() as f32 * CHAR_WIDTH;
+                let label_width = text::measure(&node.label, NORMAL_TEXT, FontWeightHint::Bold);
                 cmds.push(RenderCommand::Text {
                     x: indent_x,
                     y: row_y + 14.0,
@@ -2852,7 +2970,7 @@ impl App {
                 });
 
                 // Value
-                let value_x = colon_x + CHAR_WIDTH + 4.0;
+                let value_x = colon_x + text::width(":", NORMAL_TEXT) + 4.0;
                 cmds.push(RenderCommand::Text {
                     x: value_x,
                     y: row_y + 14.0,
@@ -2938,20 +3056,25 @@ impl App {
             if let Some(line_spans) = highlighted.get(i) {
                 let mut span_x = gutter_width + 4.0;
                 for span in line_spans {
+                    let span_weight = if span.bold {
+                        FontWeightHint::Bold
+                    } else {
+                        FontWeightHint::Regular
+                    };
                     cmds.push(RenderCommand::Text {
                         x: span_x,
                         y: row_y + 14.0,
                         text: span.text.clone(),
                         color: span.color,
                         font_size: NORMAL_TEXT,
-                        font_weight: if span.bold {
-                            FontWeightHint::Bold
-                        } else {
-                            FontWeightHint::Regular
-                        },
+                        font_weight: span_weight,
                         max_width: Some(width - span_x - PADDING),
                     });
-                    span_x += span.text.len() as f32 * CHAR_WIDTH;
+                    // A key is drawn bold and its value is not, so each run
+                    // has to advance the pen by its own width in its own
+                    // weight; one nominal cell per byte put the value halfway
+                    // through the key on any line with non-ASCII text.
+                    span_x += text::measure(&span.text, NORMAL_TEXT, span_weight);
                 }
             }
         }
@@ -3070,15 +3193,17 @@ impl App {
         let section_gap = 30.0;
 
         // Header
-        cmds.push(RenderCommand::Text {
-            x: PADDING,
-            y: row_y,
-            text: String::from("Document Statistics"),
-            color: LAVENDER,
-            font_size: HEADER_TEXT,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-        });
+        Table::fitted(
+            cmds,
+            PADDING,
+            width - PADDING * 2.0,
+            row_y,
+            "Document Statistics",
+            LAVENDER,
+            HEADER_TEXT,
+            Fit::Start,
+            FontWeightHint::Bold,
+        );
         row_y += section_gap;
 
         // General stats
@@ -3089,48 +3214,56 @@ impl App {
             ("Root Type", value.type_name().to_string(), BLUE),
         ];
 
+        let stats_cols = stats_columns(width);
+        let general = stats_table(&stats_cols);
+
         for (label, val, color) in &stats {
             cmds.push(RenderCommand::FillRect {
                 x: PADDING,
                 y: row_y - 10.0,
-                width: width * 0.5 - PADDING * 2.0,
+                width: stats_card_width(width),
                 height: 28.0,
                 color: SURFACE0,
                 corner_radii: CornerRadii::all(4.0),
             });
-            cmds.push(RenderCommand::Text {
-                x: PADDING + 8.0,
-                y: row_y + 4.0,
-                text: (*label).to_string(),
-                color: TEXT_COLOR,
-                font_size: NORMAL_TEXT,
-                font_weight: FontWeightHint::Bold,
-                max_width: None,
-            });
-            cmds.push(RenderCommand::Text {
-                x: 200.0,
-                y: row_y + 4.0,
-                text: val.clone(),
-                color: *color,
-                font_size: NORMAL_TEXT,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-            });
+            general.cell_weighted(
+                cmds,
+                STATS_LABEL,
+                row_y + 4.0,
+                label,
+                TEXT_COLOR,
+                NORMAL_TEXT,
+                Fit::Start,
+                FontWeightHint::Bold,
+            );
+            // The value is a formatted number, a size or a type name — read
+            // left-to-right, so a cut belongs at the end.
+            general.cell(
+                cmds,
+                STATS_VALUE,
+                row_y + 4.0,
+                val,
+                *color,
+                NORMAL_TEXT,
+                Fit::Start,
+            );
             row_y += 32.0;
         }
 
         row_y += 10.0;
 
         // Type distribution
-        cmds.push(RenderCommand::Text {
-            x: PADDING,
-            y: row_y,
-            text: String::from("Type Distribution"),
-            color: LAVENDER,
-            font_size: HEADER_TEXT,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-        });
+        Table::fitted(
+            cmds,
+            PADDING,
+            width - PADDING * 2.0,
+            row_y,
+            "Type Distribution",
+            LAVENDER,
+            HEADER_TEXT,
+            Fit::Start,
+            FontWeightHint::Bold,
+        );
         row_y += section_gap;
 
         let total = counts.total().max(1) as f32;
@@ -3143,35 +3276,41 @@ impl App {
             ("Nulls", counts.nulls, OVERLAY0),
         ];
 
-        let bar_max_width = width * 0.5 - 250.0;
+        let type_cols = type_columns(width);
+        let type_table = stats_table(&type_cols);
+        let bar_max_width = type_table.width(TYPE_BAR);
+        let bar_x = type_table.left(TYPE_BAR);
 
         for (label, count, color) in &type_rows {
             let pct = *count as f32 / total;
             let bar_width = pct * bar_max_width;
 
-            cmds.push(RenderCommand::Text {
-                x: PADDING + 8.0,
-                y: row_y + 4.0,
-                text: (*label).to_string(),
-                color: TEXT_COLOR,
-                font_size: NORMAL_TEXT,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-            });
+            type_table.cell(
+                cmds,
+                TYPE_LABEL,
+                row_y + 4.0,
+                label,
+                TEXT_COLOR,
+                NORMAL_TEXT,
+                Fit::Start,
+            );
 
-            cmds.push(RenderCommand::Text {
-                x: 120.0,
-                y: row_y + 4.0,
-                text: count.to_string(),
-                color: *color,
-                font_size: NORMAL_TEXT,
-                font_weight: FontWeightHint::Bold,
-                max_width: None,
-            });
+            type_table.cell_weighted(
+                cmds,
+                TYPE_COUNT,
+                row_y + 4.0,
+                &count.to_string(),
+                *color,
+                NORMAL_TEXT,
+                Fit::Start,
+                FontWeightHint::Bold,
+            );
 
-            // Bar background
+            // Bar background. `bar_max_width` is a column width, so it is
+            // already clamped at zero — a narrow panel shrinks the bar rather
+            // than inverting it.
             cmds.push(RenderCommand::FillRect {
-                x: 180.0,
+                x: bar_x,
                 y: row_y - 4.0,
                 width: bar_max_width,
                 height: 16.0,
@@ -3182,7 +3321,7 @@ impl App {
             // Bar fill
             if bar_width > 1.0 {
                 cmds.push(RenderCommand::FillRect {
-                    x: 180.0,
+                    x: bar_x,
                     y: row_y - 4.0,
                     width: bar_width,
                     height: 16.0,
@@ -3191,16 +3330,18 @@ impl App {
                 });
             }
 
-            // Percentage
-            cmds.push(RenderCommand::Text {
-                x: 180.0 + bar_max_width + 8.0,
-                y: row_y + 4.0,
-                text: format!("{:.1}%", pct * 100.0),
-                color: SUBTEXT0,
-                font_size: SMALL_TEXT,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-            });
+            // Percentage. Its own column, so it sits right of the bar whatever
+            // the panel width — it used to be positioned at `bar_x + bar_width`
+            // and so followed a negative bar back across the count cell.
+            type_table.cell(
+                cmds,
+                TYPE_PCT,
+                row_y + 4.0,
+                &format!("{:.1}%", pct * 100.0),
+                SUBTEXT0,
+                SMALL_TEXT,
+                Fit::Start,
+            );
 
             row_y += 28.0;
         }
@@ -4198,6 +4339,35 @@ mod tests {
         assert!(err.line >= 2);
     }
 
+    /// The reported column is shown to the user as "Ln n, Col m" and is meant
+    /// to be a character position. Counting UTF-8 bytes would push the column
+    /// two or three places right for every non-ASCII character before it.
+    #[test]
+    fn error_column_counts_characters_not_bytes() {
+        // Same document three times: the string value differs only in the
+        // width of its characters, so the reported column must not differ.
+        let ascii = parse_json("{\"a\": \"xxx\" }}").unwrap_err();
+        for value in ["\"日本語\"", "\"ΩΩΩ\"", "\"😀😀😀\""] {
+            let doc = format!("{{\"a\": {value} }}}}");
+            let err = parse_json(&doc).unwrap_err();
+            assert_eq!(
+                err.column, ascii.column,
+                "column shifted for {value}: got {} want {}",
+                err.column, ascii.column
+            );
+        }
+    }
+
+    /// Control: an all-ASCII document reports exactly the column it always did.
+    #[test]
+    fn error_column_on_ascii_is_unchanged() {
+        let err = parse_json("{\"a\": \"xxx\" }}").unwrap_err();
+        assert_eq!(err.line, 1);
+        // `}}` — the first `}` closes the object, the second is trailing junk
+        // at 1-based character 14.
+        assert_eq!(err.column, 14);
+    }
+
     #[test]
     fn parse_error_lone_low_surrogate() {
         assert!(parse_json("\"\\uDC00\"").is_err());
@@ -4786,5 +4956,282 @@ mod tests {
         let diffs = diff_json(&a, &b);
         assert_eq!(diffs.len(), 1);
         assert!(diffs[0].path.contains("c"));
+    }
+    // --- Tab and chip geometry ---
+
+    /// Clicking a tab has to select the tab the user sees. Hit-testing and
+    /// rendering used to size the tab separately, and the two disagreed: the
+    /// click test measured `doc.title` while the render measured the title
+    /// plus its dirty marker, so a modified document's tab was drawn wider
+    /// than the region that selected it and the strip drifted out of step
+    /// from that tab onwards.
+    #[test]
+    fn a_dirty_tab_is_as_wide_as_it_looks() {
+        let mut doc = Document::new(1, "notes.json".to_string());
+        let clean = tab_width(&doc);
+        doc.dirty = true;
+        let dirty = tab_width(&doc);
+        assert!(
+            dirty > clean,
+            "the dirty marker takes room, so the tab has to grow for it"
+        );
+        assert!(
+            text::measure(&tab_label(&doc), SMALL_TEXT, FontWeightHint::Bold) <= dirty - 20.0,
+            "the label does not fit inside the tab drawn for it"
+        );
+    }
+
+    /// The active tab is drawn bold. If each tab were measured in its own
+    /// current weight the whole strip would reflow every time the user
+    /// switched tabs, so every tab is measured bold.
+    #[test]
+    fn the_tab_strip_does_not_reflow_on_selection() {
+        let doc = Document::new(1, "a-reasonably-long-name.json".to_string());
+        let w = tab_width(&doc);
+        let bold = text::measure(&tab_label(&doc), SMALL_TEXT, FontWeightHint::Bold);
+        let regular = text::measure(&tab_label(&doc), SMALL_TEXT, FontWeightHint::Regular);
+        assert!(bold >= regular);
+        assert!(w >= bold + 20.0, "no room for the close button");
+    }
+
+    /// Same rule for the view-mode chips, and every mode's label must fit.
+    #[test]
+    fn every_view_mode_chip_fits_its_label() {
+        for mode in &VIEW_MODES {
+            let w = mode_width(*mode);
+            let label = text::measure(mode.label(), SMALL_TEXT, FontWeightHint::Bold);
+            assert!(
+                label <= w - 20.0 + 0.01,
+                "{:?} does not fit its chip",
+                mode.label()
+            );
+        }
+    }
+
+    // --- Statistics-view layout ---
+    //
+    // The statistics panel is the window minus the sidebar, so its width is
+    // whatever the user leaves it. Its geometry used to be written as
+    // constants subtracted from fractions of that width, which is only correct
+    // for a wide window; these tests pin the behaviour at narrow ones.
+
+    const STATS_TOP: f32 = 110.0;
+
+    /// A statistics text cell: where it starts, what it says, and how it is
+    /// drawn — the weight is part of the geometry, because it decides how wide
+    /// the glyphs are and therefore where the text must be cut.
+    type StatCell = (f32, String, f32, FontWeightHint);
+
+    fn stats_commands(width: f32) -> Vec<RenderCommand> {
+        let app = App::new();
+        let mut cmds = Vec::new();
+        app.render_stats_view(&mut cmds, STATS_TOP, width, 600.0);
+        cmds
+    }
+
+    /// The panel's text cells, split into the general-statistics rows and the
+    /// type-distribution rows.
+    ///
+    /// The split is by the section header between them rather than by x or y:
+    /// the two tables deliberately share a left inset, so x cannot tell a
+    /// general label from a type label, and keying off row heights would
+    /// re-derive the layout the test is supposed to be checking.
+    fn stats_cells(width: f32) -> (Vec<StatCell>, Vec<StatCell>) {
+        let (mut general, mut types) = (Vec::new(), Vec::new());
+        let mut in_types = false;
+        for cmd in stats_commands(width) {
+            if let RenderCommand::Text {
+                x,
+                ref text,
+                font_size,
+                font_weight,
+                ..
+            } = cmd
+            {
+                if text == "Type Distribution" {
+                    in_types = true;
+                    continue;
+                }
+                if text == "Document Statistics" {
+                    continue;
+                }
+                let cell = (x, text.clone(), font_size, font_weight);
+                if in_types {
+                    types.push(cell);
+                } else {
+                    general.push(cell);
+                }
+            }
+        }
+        assert!(
+            in_types,
+            "the type-distribution header was not drawn at width {width}"
+        );
+        (general, types)
+    }
+
+    /// Assert every cell fits the column it starts in; returns how many were
+    /// actually checked, so the caller can prove the test was not vacuous.
+    fn cells_fit_columns(cells: &[StatCell], columns: &[Column], what: &str) -> usize {
+        let table = stats_table(columns);
+        let spans = table.spans();
+        let mut checked = 0;
+        for (x, text, size, weight) in cells {
+            let Some(&(left, right)) = spans.iter().find(|(l, _)| (l - x).abs() < 0.01) else {
+                panic!("{what} cell {text:?} starts at {x}, which is no column's left edge");
+            };
+            let drawn = x + text::measure(text, *size, *weight);
+            assert!(
+                drawn <= right + 0.01,
+                "{what} cell {text:?} at {left} draws to {drawn}, past its column edge {right}"
+            );
+            checked += 1;
+        }
+        checked
+    }
+
+    /// The row's columns are shares of the room there is, so they add up to
+    /// exactly it. Fractions that did not sum to one would leave a ragged
+    /// right edge visible only at one particular window width.
+    #[test]
+    fn the_type_rows_fill_the_panel() {
+        let sum: f32 = TYPE_FRACTIONS.iter().sum();
+        assert!((sum - 1.0).abs() < 0.001, "fractions sum to {sum}, not 1");
+
+        for width in [240.0_f32, 320.0, 480.0, 880.0, 1600.0] {
+            let columns = type_columns(width);
+            let table = stats_table(&columns);
+            let right = table.right(TYPE_PCT);
+            assert!(
+                (right - (width - PADDING)).abs() < 0.01,
+                "at width {width} the type rows end at {right}, not at the margin {}",
+                width - PADDING
+            );
+        }
+    }
+
+    /// The general-statistics cells live inside the card drawn behind them.
+    #[test]
+    fn the_general_stats_stay_inside_their_card() {
+        for width in [240.0_f32, 320.0, 480.0, 880.0, 1600.0] {
+            let columns = stats_columns(width);
+            let table = stats_table(&columns);
+            let card_right = PADDING + stats_card_width(width);
+            let right = table.right(STATS_VALUE);
+            assert!(
+                right <= card_right + 0.01,
+                "at width {width} the value column ends at {right}, past the card edge {card_right}"
+            );
+        }
+    }
+
+    /// No cell may draw past the column it starts in, at any window width.
+    #[test]
+    fn no_statistics_cell_escapes_its_column() {
+        let mut checked = 0;
+        for width in [240.0_f32, 320.0, 480.0, 880.0, 1600.0] {
+            let (general, types) = stats_cells(width);
+            checked += cells_fit_columns(&general, &stats_columns(width), "general");
+            checked += cells_fit_columns(&types, &type_columns(width), "type");
+        }
+        // Four general rows of two cells and six type rows of three, per width.
+        assert!(
+            checked >= 5 * (4 * 2 + 6 * 3),
+            "only {checked} cells checked"
+        );
+    }
+
+    /// The regression test for the original bug: the bar was sized
+    /// `width * 0.5 - 250.0`, negative for any panel under 500 px, and the
+    /// percentage label was placed at `bar_x + bar_width + 8.0` — so on a
+    /// narrow panel it walked left of its own bar and onto the count cell.
+    #[test]
+    fn the_percentage_is_drawn_right_of_its_bar() {
+        for width in [120.0_f32, 240.0, 320.0, 480.0, 499.0, 880.0] {
+            let cmds = stats_commands(width);
+            let bars: Vec<(f32, f32)> = cmds
+                .iter()
+                .filter_map(|c| match *c {
+                    RenderCommand::FillRect {
+                        x,
+                        width: w,
+                        height,
+                        color,
+                        ..
+                    } if (height - 16.0).abs() < 0.01 && color == SURFACE0 => Some((x, w)),
+                    _ => None,
+                })
+                .collect();
+            // Found by position, not by a trailing '%': on a very narrow panel
+            // the percentage column is too small for "12.5%" and the text is
+            // legitimately cut away to nothing. Where it lands is the property
+            // under test, and that is true of the cut cell too.
+            let columns = type_columns(width);
+            let pct_x = stats_table(&columns).left(TYPE_PCT);
+            let percentages: Vec<&str> = cmds
+                .iter()
+                .filter_map(|c| match *c {
+                    RenderCommand::Text { x, ref text, .. } if (x - pct_x).abs() < 0.01 => {
+                        Some(text.as_str())
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(bars.len(), 6, "at width {width}: one bar per JSON type");
+            assert_eq!(percentages.len(), 6, "at width {width}");
+
+            for (&(bar_x, bar_w), text) in bars.iter().zip(&percentages) {
+                assert!(
+                    bar_w >= 0.0,
+                    "at width {width} a bar has negative width {bar_w}"
+                );
+                assert!(
+                    pct_x >= bar_x + bar_w - 0.01,
+                    "at width {width} the percentage at {pct_x} is left of its bar's right edge {}",
+                    bar_x + bar_w
+                );
+                // Once there is room for it, the number itself must survive —
+                // a percentage column that always elides to nothing would
+                // satisfy the placement check vacuously.
+                assert!(
+                    width < 320.0 || text.ends_with('%'),
+                    "at width {width} the percentage reads {text:?}"
+                );
+            }
+        }
+    }
+
+    /// Nothing in the panel may ask for a negative-width rect — not the bars,
+    /// not the cards — however narrow, or absent, the panel is.
+    #[test]
+    fn no_statistics_rect_has_a_negative_width() {
+        let mut checked = 0;
+        for width in [0.0_f32, 1.0, 20.0, 60.0, 120.0, 240.0, 499.0, 880.0] {
+            for cmd in stats_commands(width) {
+                if let RenderCommand::FillRect { x, width: w, .. } = cmd {
+                    assert!(w >= 0.0, "at width {width} a rect at {x} is {w} wide");
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked >= 8 * (4 + 6), "only {checked} rects checked");
+    }
+
+    /// A statistic that fits is shown whole — the fitting must not leave a cut
+    /// marker on text that was never cut.
+    #[test]
+    fn a_short_statistic_is_drawn_verbatim() {
+        let (general, types) = stats_cells(880.0);
+        for (_, text, _, _) in general.iter().chain(&types) {
+            assert!(!text.contains('…'), "{text:?} was cut but had room");
+        }
+        assert!(
+            general.iter().any(|(_, t, _, _)| t == "Total Nodes"),
+            "the general statistics were not drawn"
+        );
+        assert!(
+            types.iter().any(|(_, t, _, _)| t == "Objects"),
+            "the type distribution was not drawn"
+        );
     }
 }

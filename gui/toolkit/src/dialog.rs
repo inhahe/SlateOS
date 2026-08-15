@@ -251,9 +251,10 @@ impl FileDialog {
             // In save mode, clicking a file fills the filename input.
             if self.mode == DialogMode::Save
                 && let Some(entry) = self.entries.get(index)
-                    && !entry.is_dir {
-                        self.filename_input = entry.name.clone();
-                    }
+                && !entry.is_dir
+            {
+                self.filename_input = entry.name.clone();
+            }
         }
     }
 
@@ -332,9 +333,10 @@ impl FileDialog {
                 // or the highlighted directory entry.
                 if let Some(idx) = self.selected_index
                     && let Some(entry) = self.entries.get(idx)
-                        && entry.is_dir {
-                            return Some(join_path(&self.current_path, &entry.name));
-                        }
+                    && entry.is_dir
+                {
+                    return Some(join_path(&self.current_path, &entry.name));
+                }
                 // Fall back to current directory itself.
                 Some(self.current_path.clone())
             }
@@ -360,11 +362,7 @@ impl FileDialog {
             Key::Enter => {
                 // If an entry is selected, activate it; otherwise confirm.
                 if let Some(idx) = self.selected_index {
-                    let entry_is_dir = self
-                        .entries
-                        .get(idx)
-                        .map(|e| e.is_dir)
-                        .unwrap_or(false);
+                    let entry_is_dir = self.entries.get(idx).map(|e| e.is_dir).unwrap_or(false);
                     if entry_is_dir || self.mode == DialogMode::Open {
                         return self.activate_entry(idx);
                     }
@@ -418,9 +416,10 @@ impl FileDialog {
                 // Text input for save-mode filename.
                 if self.mode == DialogMode::Save
                     && let Some(ch) = event.text
-                        && !ch.is_control() {
-                            self.filename_input.push(ch);
-                        }
+                    && !ch.is_control()
+                {
+                    self.filename_input.push(ch);
+                }
                 DialogAction::None
             }
         }
@@ -503,8 +502,7 @@ impl FileDialog {
             if let Some(filter) = filters.get(self.active_filter_index) {
                 let dominated_by_all = filter.patterns.iter().any(|p| p == "*" || p == "*.*");
                 if !dominated_by_all {
-                    let patterns: Vec<&str> =
-                        filter.patterns.iter().map(|s| s.as_str()).collect();
+                    let patterns: Vec<&str> = filter.patterns.iter().map(|s| s.as_str()).collect();
                     entries.retain(|e| e.is_dir || matches_any_pattern(&e.name, &patterns));
                 }
             }
@@ -602,16 +600,18 @@ impl FileDialog {
         // Check if the filename already has a matching extension.
         for pattern in &filter.patterns {
             if let Some(ext) = pattern.strip_prefix("*.")
-                && name.ends_with(&format!(".{ext}")) {
-                    return name.clone();
-                }
+                && name.ends_with(&format!(".{ext}"))
+            {
+                return name.clone();
+            }
         }
 
         // Append the first pattern's extension.
         if let Some(first) = filter.patterns.first()
-            && let Some(ext) = first.strip_prefix("*.") {
-                return format!("{name}.{ext}");
-            }
+            && let Some(ext) = first.strip_prefix("*.")
+        {
+            return format!("{name}.{ext}");
+        }
 
         name.clone()
     }
@@ -1112,9 +1112,10 @@ fn matches_any_pattern(filename: &str, patterns: &[&str]) -> bool {
             return true;
         }
         if let Some(ext) = pattern.strip_prefix("*.")
-            && filename.ends_with(&format!(".{ext}")) {
-                return true;
-            }
+            && filename.ends_with(&format!(".{ext}"))
+        {
+            return true;
+        }
         // Exact match fallback
         if *pattern == filename {
             return true;
@@ -1311,15 +1312,13 @@ mod tests {
     #[test]
     fn test_confirm_open_requires_file_selection() {
         let mut dialog = FileDialog::open();
-        dialog.set_entries(vec![
-            DirEntry {
-                name: String::from("file.txt"),
-                is_dir: false,
-                size: 100,
-                modified_timestamp: 1000,
-                extension: String::from("txt"),
-            },
-        ]);
+        dialog.set_entries(vec![DirEntry {
+            name: String::from("file.txt"),
+            is_dir: false,
+            size: 100,
+            modified_timestamp: 1000,
+            extension: String::from("txt"),
+        }]);
 
         // No selection yet.
         assert_eq!(dialog.confirm(), None);
@@ -1393,7 +1392,10 @@ mod tests {
         }]);
 
         let action = dialog.activate_entry(0);
-        assert_eq!(action, DialogAction::Selected(String::from("/docs/notes.txt")));
+        assert_eq!(
+            action,
+            DialogAction::Selected(String::from("/docs/notes.txt"))
+        );
     }
 
     #[test]

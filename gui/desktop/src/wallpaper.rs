@@ -181,10 +181,10 @@ impl Default for DynamicTheme {
     fn default() -> Self {
         Self {
             dawn: Color::from_hex(0x2E1A47),      // deep purple-blue
-            morning: Color::from_hex(0x1A3A5C),    // cool blue
-            afternoon: Color::from_hex(0x1E4D6E),  // warm teal-blue
-            evening: Color::from_hex(0x4A2040),     // warm purple-red
-            night: Color::from_hex(0x0D0D1A),       // near-black blue
+            morning: Color::from_hex(0x1A3A5C),   // cool blue
+            afternoon: Color::from_hex(0x1E4D6E), // warm teal-blue
+            evening: Color::from_hex(0x4A2040),   // warm purple-red
+            night: Color::from_hex(0x0D0D1A),     // near-black blue
         }
     }
 }
@@ -219,7 +219,13 @@ impl DynamicTheme {
         let secs_in_day = (time_secs % 86400) as f32;
         let hour = secs_in_day / 3600.0;
 
-        let phases = [self.dawn, self.morning, self.afternoon, self.evening, self.night];
+        let phases = [
+            self.dawn,
+            self.morning,
+            self.afternoon,
+            self.evening,
+            self.night,
+        ];
         let starts = Self::PHASE_HOURS;
 
         // Determine which phase we are in or transitioning between.
@@ -358,7 +364,9 @@ impl SlideshowState {
         // Simple LCG: state = (a * state + c) mod m.
         let mut rng_state = seed.wrapping_add(1);
         for i in (1..n).rev() {
-            rng_state = rng_state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            rng_state = rng_state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             let j = (rng_state >> 33) as usize % (i + 1);
             self.shuffle_order.swap(i, j);
         }
@@ -782,7 +790,8 @@ impl WallpaperManager {
         });
 
         if self.current_image_id != 0 {
-            let (ix, iy, iw, ih) = compute_image_rect(width, height, width, height, self.config.fit);
+            let (ix, iy, iw, ih) =
+                compute_image_rect(width, height, width, height, self.config.fit);
             cmds.push(RenderCommand::Image {
                 x: ix,
                 y: iy,
@@ -1016,9 +1025,7 @@ impl WallpaperManager {
                     Some(&self.config.image_path)
                 }
             }
-            WallpaperMode::Slideshow => {
-                self.slideshow.as_ref().and_then(|s| s.current_path())
-            }
+            WallpaperMode::Slideshow => self.slideshow.as_ref().and_then(|s| s.current_path()),
             _ => None,
         }
     }
@@ -1053,10 +1060,12 @@ impl Default for WallpaperManager {
 fn parse_hex_color(s: &str) -> Result<Color, ConfigError> {
     let s = s.trim().trim_start_matches('#');
     if s.len() != 6 {
-        return Err(ConfigError::InvalidValue(format!("color: {s} (expected 6 hex digits)")));
+        return Err(ConfigError::InvalidValue(format!(
+            "color: {s} (expected 6 hex digits)"
+        )));
     }
-    let val = u32::from_str_radix(s, 16)
-        .map_err(|_| ConfigError::InvalidValue(format!("color: {s}")))?;
+    let val =
+        u32::from_str_radix(s, 16).map_err(|_| ConfigError::InvalidValue(format!("color: {s}")))?;
     Ok(Color::from_hex(val))
 }
 
@@ -1144,8 +1153,7 @@ mod tests {
             WallpaperMode::Slideshow,
             WallpaperMode::Dynamic,
         ] {
-            let parsed =
-                WallpaperMode::from_str_config(mode.as_str()).expect("should parse");
+            let parsed = WallpaperMode::from_str_config(mode.as_str()).expect("should parse");
             assert_eq!(parsed, mode);
         }
     }
@@ -1170,8 +1178,7 @@ mod tests {
             ImageFit::Center,
             ImageFit::Span,
         ] {
-            let parsed =
-                ImageFit::from_str_config(fit.as_str()).expect("should parse");
+            let parsed = ImageFit::from_str_config(fit.as_str()).expect("should parse");
             assert_eq!(parsed, fit);
         }
     }
@@ -1433,7 +1440,13 @@ mod tests {
     #[test]
     fn manager_set_dynamic() {
         let mut mgr = WallpaperManager::new();
-        let colors = [Color::RED, Color::GREEN, Color::BLUE, Color::WHITE, Color::BLACK];
+        let colors = [
+            Color::RED,
+            Color::GREEN,
+            Color::BLUE,
+            Color::WHITE,
+            Color::BLACK,
+        ];
         mgr.set_dynamic_theme(colors);
         assert_eq!(*mgr.mode(), WallpaperMode::Dynamic);
         assert_eq!(mgr.config.dynamic_theme.dawn, Color::RED);
@@ -1447,10 +1460,7 @@ mod tests {
     fn tick_slideshow_advances_on_interval() {
         let mut mgr = WallpaperManager::new();
         mgr.set_slideshow("/wp", 10, false);
-        mgr.populate_slideshow_paths(
-            vec!["a.png".into(), "b.png".into(), "c.png".into()],
-            0,
-        );
+        mgr.populate_slideshow_paths(vec!["a.png".into(), "b.png".into(), "c.png".into()], 0);
 
         // First tick initialises the timestamp.
         assert!(!mgr.tick(100));
@@ -1474,10 +1484,7 @@ mod tests {
     fn next_previous_wallpaper() {
         let mut mgr = WallpaperManager::new();
         mgr.set_slideshow("/wp", 300, false);
-        mgr.populate_slideshow_paths(
-            vec!["a.png".into(), "b.png".into(), "c.png".into()],
-            0,
-        );
+        mgr.populate_slideshow_paths(vec!["a.png".into(), "b.png".into(), "c.png".into()], 0);
 
         assert_eq!(mgr.current_image_path(), Some("a.png"));
 
@@ -1523,7 +1530,12 @@ mod tests {
         let cmds = mgr.get_render_commands(1920.0, 1080.0, 0);
         assert_eq!(cmds.len(), 1);
         match &cmds[0] {
-            RenderCommand::FillRect { width, height, color, .. } => {
+            RenderCommand::FillRect {
+                width,
+                height,
+                color,
+                ..
+            } => {
                 assert!((width - 1920.0).abs() < f32::EPSILON);
                 assert!((height - 1080.0).abs() < f32::EPSILON);
                 assert_eq!(*color, Color::from_hex(0x1E1E2E));
@@ -1545,7 +1557,13 @@ mod tests {
     #[test]
     fn render_dynamic_produces_gradient_strips() {
         let mut mgr = WallpaperManager::new();
-        mgr.set_dynamic_theme([Color::RED, Color::GREEN, Color::BLUE, Color::WHITE, Color::BLACK]);
+        mgr.set_dynamic_theme([
+            Color::RED,
+            Color::GREEN,
+            Color::BLUE,
+            Color::WHITE,
+            Color::BLACK,
+        ]);
         let cmds = mgr.get_render_commands(1920.0, 1080.0, 0);
         // Should produce 16 gradient strips.
         assert_eq!(cmds.len(), 16);

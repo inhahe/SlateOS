@@ -13,7 +13,9 @@
 
 use crate::color::Color;
 #[allow(unused_imports)]
-use crate::event::{Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
+use crate::event::{
+    Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 use crate::render::{FontWeightHint, RenderCommand, RenderTree};
 use crate::style::CornerRadii;
 
@@ -43,6 +45,8 @@ const COLOR_SCRIM: Color = Color::rgba(0, 0, 0, 160);
 
 const DIALOG_MIN_WIDTH: f32 = 320.0;
 const DIALOG_MAX_WIDTH: f32 = 600.0;
+/// Fixed outer width of an [`InputDialog`], which does not auto-size.
+const INPUT_DIALOG_WIDTH: f32 = DIALOG_MIN_WIDTH + 80.0;
 const DIALOG_MIN_HEIGHT: f32 = 160.0;
 const DIALOG_MAX_HEIGHT: f32 = 500.0;
 const DIALOG_CORNER_RADIUS: f32 = 12.0;
@@ -62,6 +66,11 @@ const PROGRESS_BAR_RADIUS: f32 = 4.0;
 const FONT_SIZE: f32 = 14.0;
 const FONT_SIZE_TITLE: f32 = 16.0;
 const FONT_SIZE_SMALL: f32 = 12.0;
+/// Baseline-to-baseline spacing of a wrapped dialog message, in pixels.
+///
+/// Named because the height calculation and the per-line draw both depend on
+/// it; as two separate literals they could disagree and clip the last line.
+const MESSAGE_LINE_HEIGHT: f32 = 20.0;
 const SHADOW_BLUR: f32 = 24.0;
 const SHADOW_OFFSET_Y: f32 = 8.0;
 const SHADOW_COLOR: Color = Color::rgba(0, 0, 0, 100);
@@ -133,22 +142,30 @@ pub struct ButtonSet {
 impl ButtonSet {
     /// Single OK button.
     pub fn ok() -> Self {
-        Self { buttons: vec![DialogButton::Ok] }
+        Self {
+            buttons: vec![DialogButton::Ok],
+        }
     }
 
     /// OK and Cancel buttons.
     pub fn ok_cancel() -> Self {
-        Self { buttons: vec![DialogButton::Ok, DialogButton::Cancel] }
+        Self {
+            buttons: vec![DialogButton::Ok, DialogButton::Cancel],
+        }
     }
 
     /// Yes and No buttons.
     pub fn yes_no() -> Self {
-        Self { buttons: vec![DialogButton::Yes, DialogButton::No] }
+        Self {
+            buttons: vec![DialogButton::Yes, DialogButton::No],
+        }
     }
 
     /// Yes, No, and Cancel buttons.
     pub fn yes_no_cancel() -> Self {
-        Self { buttons: vec![DialogButton::Yes, DialogButton::No, DialogButton::Cancel] }
+        Self {
+            buttons: vec![DialogButton::Yes, DialogButton::No, DialogButton::Cancel],
+        }
     }
 
     /// Custom button set.
@@ -302,9 +319,11 @@ impl ModalOverlay {
         }
 
         if let MouseEventKind::Press(MouseButton::Left) = event.kind
-            && self.dismiss_on_click_outside && !self.point_in_content(event.x, event.y) {
-                return Some(DialogResult::Dismissed);
-            }
+            && self.dismiss_on_click_outside
+            && !self.point_in_content(event.x, event.y)
+        {
+            return Some(DialogResult::Dismissed);
+        }
         None
     }
 
@@ -542,12 +561,14 @@ impl AlertDialog {
         if let MouseEventKind::Press(MouseButton::Left) = event.kind {
             let layout = self.compute_layout(800.0, 600.0);
             for (i, btn_rect) in layout.button_rects.iter().enumerate() {
-                if point_in_rect(event.x, event.y, btn_rect.0, btn_rect.1, btn_rect.2, btn_rect.3)
-                    && let Some(btn) = self.buttons.buttons.get(i) {
-                        self.result = Some(btn.to_result());
-                        self.overlay.hide();
-                        return EventResult::Consumed;
-                    }
+                if point_in_rect(
+                    event.x, event.y, btn_rect.0, btn_rect.1, btn_rect.2, btn_rect.3,
+                ) && let Some(btn) = self.buttons.buttons.get(i)
+                {
+                    self.result = Some(btn.to_result());
+                    self.overlay.hide();
+                    return EventResult::Consumed;
+                }
             }
         }
 
@@ -648,26 +669,48 @@ impl AlertDialog {
             text_x = icon_x + ICON_SIZE + ICON_PADDING;
         }
 
-        // Message text.
-        let text_max_width = layout.x + layout.width - text_x - CONTENT_PADDING;
-        tree.push(RenderCommand::Text {
-            x: text_x,
-            y: content_y + (ICON_SIZE - FONT_SIZE) / 2.0,
-            text: self.message.clone(),
-            color: COLOR_SUBTEXT1,
-            font_size: FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(text_max_width),
-        });
+        let buttons_y = layout.y + layout.height - BUTTON_HEIGHT - CONTENT_PADDING;
+
+        // Message text, one command per wrapped line.
+        let text_max_width = self.message_max_width();
+        let lines = self.message_lines();
+        // Centred against the icon while the message is the shorter of the
+        // two, then top-aligned once it is taller — so a one-line message
+        // still sits level with its icon.
+        let block_height = lines.len() as f32 * MESSAGE_LINE_HEIGHT;
+        let first_line_y = content_y + (ICON_SIZE - block_height).max(0.0) / 2.0;
+        for (n, line) in lines.iter().enumerate() {
+            let line_y = first_line_y + n as f32 * MESSAGE_LINE_HEIGHT;
+            // The dialog height is clamped at `DIALOG_MAX_HEIGHT`, so a message
+            // can be longer than the box it is given. Lines that do not fit are
+            // dropped rather than drawn over the button row: text on top of the
+            // controls that dismiss the dialog is worse than text not shown.
+            if line_y + MESSAGE_LINE_HEIGHT > buttons_y {
+                break;
+            }
+            tree.push(RenderCommand::Text {
+                x: text_x,
+                y: line_y,
+                text: line.clone(),
+                color: COLOR_SUBTEXT1,
+                font_size: FONT_SIZE,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(text_max_width),
+            });
+        }
 
         // Buttons (bottom-right aligned).
-        let buttons_y = layout.y + layout.height - BUTTON_HEIGHT - CONTENT_PADDING;
         self.render_buttons(tree, &layout, buttons_y);
     }
 
     /// Render the button row.
     fn render_buttons(&self, tree: &mut RenderTree, layout: &DialogLayout, y: f32) {
-        let total_width: f32 = self.buttons.buttons.iter().map(|_| BUTTON_MIN_WIDTH).sum::<f32>()
+        let total_width: f32 = self
+            .buttons
+            .buttons
+            .iter()
+            .map(|_| BUTTON_MIN_WIDTH)
+            .sum::<f32>()
             + (self.buttons.len().saturating_sub(1) as f32) * BUTTON_SPACING;
         let start_x = layout.x + layout.width - CONTENT_PADDING - total_width;
 
@@ -705,9 +748,19 @@ impl AlertDialog {
 
             // Button label.
             let label = btn.label();
-            let text_color = if btn.is_primary() { COLOR_CRUST } else { COLOR_TEXT };
+            let text_color = if btn.is_primary() {
+                COLOR_CRUST
+            } else {
+                COLOR_TEXT
+            };
             tree.push(RenderCommand::Text {
-                x: btn_x + (BUTTON_MIN_WIDTH - (label.len() as f32 * 7.0)) / 2.0,
+                // Centred on the label's measured width. The flat 7px-per-byte
+                // guess this replaces drifted further off-centre the longer the
+                // label was, and mis-centred non-ASCII labels badly.
+                x: btn_x
+                    + (BUTTON_MIN_WIDTH
+                        - crate::text::measure(label, FONT_SIZE, FontWeightHint::Bold))
+                        / 2.0,
                 y: y + (BUTTON_HEIGHT - FONT_SIZE) / 2.0,
                 text: label.to_string(),
                 color: text_color,
@@ -718,16 +771,53 @@ impl AlertDialog {
         }
     }
 
+    /// The dialog's outer width.
+    fn dialog_width(&self) -> f32 {
+        self.width
+            .unwrap_or(DIALOG_MIN_WIDTH)
+            .clamp(DIALOG_MIN_WIDTH, DIALOG_MAX_WIDTH)
+    }
+
+    /// Horizontal room the message has, after the padding and any icon.
+    fn message_max_width(&self) -> f32 {
+        let text_offset = if self.icon.glyph().is_some() {
+            CONTENT_PADDING + ICON_SIZE + ICON_PADDING
+        } else {
+            CONTENT_PADDING
+        };
+        self.dialog_width() - text_offset - CONTENT_PADDING
+    }
+
+    /// The message, broken into the lines it will be drawn as.
+    ///
+    /// `RenderCommand::Text` does not wrap — the compositor truncates at
+    /// `max_width` — so a message longer than one line has to be broken up
+    /// here and drawn a line at a time. `compute_height` sizes the dialog from
+    /// this same list, so the box is always as tall as the text it holds.
+    fn message_lines(&self) -> Vec<String> {
+        crate::text::wrap(
+            &self.message,
+            self.message_max_width(),
+            FONT_SIZE,
+            FontWeightHint::Regular,
+        )
+    }
+
     /// Compute dialog layout (position and size, centered in parent).
     fn compute_layout(&self, parent_width: f32, parent_height: f32) -> DialogLayout {
-        let width = self.width.unwrap_or(DIALOG_MIN_WIDTH).clamp(DIALOG_MIN_WIDTH, DIALOG_MAX_WIDTH);
+        let width = self.dialog_width();
         let height = self.compute_height();
         let x = (parent_width - width) / 2.0;
         let y = (parent_height - height) / 2.0;
 
         // Compute button rects for hit testing.
         let buttons_y = y + height - BUTTON_HEIGHT - CONTENT_PADDING;
-        let total_btn_width: f32 = self.buttons.buttons.iter().map(|_| BUTTON_MIN_WIDTH).sum::<f32>()
+        let total_btn_width: f32 = self
+            .buttons
+            .buttons
+            .iter()
+            .map(|_| BUTTON_MIN_WIDTH)
+            .sum::<f32>()
             + (self.buttons.len().saturating_sub(1) as f32) * BUTTON_SPACING;
         let start_x = x + width - CONTENT_PADDING - total_btn_width;
 
@@ -738,14 +828,30 @@ impl AlertDialog {
             })
             .collect();
 
-        DialogLayout { x, y, width, height, button_rects }
+        DialogLayout {
+            x,
+            y,
+            width,
+            height,
+            button_rects,
+        }
     }
 
     /// Compute the height needed for the dialog content.
     fn compute_height(&self) -> f32 {
         // Title bar + content padding + icon/message area + padding + buttons + padding
-        let content_height = ICON_SIZE.max(FONT_SIZE * 3.0); // Estimate message height
-        (TITLE_BAR_HEIGHT + CONTENT_PADDING + content_height + CONTENT_PADDING + BUTTON_HEIGHT + CONTENT_PADDING)
+        //
+        // The message area is as tall as the message's own wrapped lines. It
+        // used to be a flat three-line guess, which left a band of empty space
+        // under a one-line message and clipped anything longer than three.
+        let message_height = self.message_lines().len() as f32 * MESSAGE_LINE_HEIGHT;
+        let content_height = ICON_SIZE.max(message_height);
+        (TITLE_BAR_HEIGHT
+            + CONTENT_PADDING
+            + content_height
+            + CONTENT_PADDING
+            + BUTTON_HEIGHT
+            + CONTENT_PADDING)
             .clamp(DIALOG_MIN_HEIGHT, DIALOG_MAX_HEIGHT)
     }
 
@@ -922,23 +1028,23 @@ impl InputDialog {
         }
 
         match self.focused_element {
-            InputFocus::TextField => { self.handle_text_input(event); },
-            InputFocus::OkButton | InputFocus::CancelButton => {
-                match event.key {
-                    Key::Enter | Key::Space => {
-                        if self.focused_element == InputFocus::OkButton {
-                            self.try_accept();
-                        } else {
-                            self.result = Some(DialogResult::Cancel);
-                            self.overlay.hide();
-                        }
-                    }
-                    Key::Tab => {
-                        self.cycle_focus(event.modifiers.shift);
-                    }
-                    _ => {}
-                }
+            InputFocus::TextField => {
+                self.handle_text_input(event);
             }
+            InputFocus::OkButton | InputFocus::CancelButton => match event.key {
+                Key::Enter | Key::Space => {
+                    if self.focused_element == InputFocus::OkButton {
+                        self.try_accept();
+                    } else {
+                        self.result = Some(DialogResult::Cancel);
+                        self.overlay.hide();
+                    }
+                }
+                Key::Tab => {
+                    self.cycle_focus(event.modifiers.shift);
+                }
+                _ => {}
+            },
         }
 
         EventResult::Consumed
@@ -984,11 +1090,12 @@ impl InputDialog {
             }
             _ => {
                 if let Some(ch) = event.text
-                    && !ch.is_control() {
-                        self.input_text.insert(self.cursor_pos, ch);
-                        self.cursor_pos += 1;
-                        self.validation_error = None;
-                    }
+                    && !ch.is_control()
+                {
+                    self.input_text.insert(self.cursor_pos, ch);
+                    self.cursor_pos += 1;
+                    self.validation_error = None;
+                }
             }
         }
         EventResult::Consumed
@@ -1029,6 +1136,21 @@ impl InputDialog {
         }
     }
 
+    /// The prompt, broken into the lines it will be drawn as.
+    ///
+    /// `RenderCommand::Text` clips at `max_width` rather than wrapping, so a
+    /// prompt longer than one line has to be broken up here. `render` derives
+    /// both the dialog height and the input field's position from this list, so
+    /// the field cannot land on top of the prompt above it.
+    fn message_lines(&self) -> Vec<String> {
+        crate::text::wrap(
+            &self.message,
+            INPUT_DIALOG_WIDTH - CONTENT_PADDING * 2.0,
+            FONT_SIZE,
+            FontWeightHint::Regular,
+        )
+    }
+
     /// Render the input dialog.
     pub fn render(&self, parent_width: f32, parent_height: f32, tree: &mut RenderTree) {
         if !self.overlay.active && self.overlay.opacity <= 0.0 {
@@ -1037,11 +1159,26 @@ impl InputDialog {
 
         self.overlay.render(parent_width, parent_height, tree);
 
-        let width = DIALOG_MIN_WIDTH + 80.0;
+        let width = INPUT_DIALOG_WIDTH;
         let has_error = self.validation_error.is_some();
-        let height = TITLE_BAR_HEIGHT + CONTENT_PADDING + FONT_SIZE + 12.0
-            + INPUT_HEIGHT + (if has_error { FONT_SIZE_SMALL + 8.0 } else { 0.0 })
-            + CONTENT_PADDING + BUTTON_HEIGHT + CONTENT_PADDING;
+        // The prompt is wrapped rather than clipped, so the room reserved for
+        // it is the height of its own lines. A flat one-line allowance used to
+        // push the input field up over the second line of any longer prompt.
+        let message_lines = self.message_lines();
+        let message_height = message_lines.len() as f32 * MESSAGE_LINE_HEIGHT;
+        let height = TITLE_BAR_HEIGHT
+            + CONTENT_PADDING
+            + message_height
+            + 12.0
+            + INPUT_HEIGHT
+            + (if has_error {
+                FONT_SIZE_SMALL + 8.0
+            } else {
+                0.0
+            })
+            + CONTENT_PADDING
+            + BUTTON_HEIGHT
+            + CONTENT_PADDING;
         let x = (parent_width - width) / 2.0;
         let y = (parent_height - height) / 2.0;
 
@@ -1095,18 +1232,20 @@ impl InputDialog {
             max_width: Some(width - CONTENT_PADDING * 2.0),
         });
 
-        // Message.
+        // Message, one command per wrapped line.
         let mut content_y = y + TITLE_BAR_HEIGHT + CONTENT_PADDING;
-        tree.push(RenderCommand::Text {
-            x: x + CONTENT_PADDING,
-            y: content_y,
-            text: self.message.clone(),
-            color: COLOR_SUBTEXT1,
-            font_size: FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(width - CONTENT_PADDING * 2.0),
-        });
-        content_y += FONT_SIZE + 12.0;
+        for (n, line) in message_lines.iter().enumerate() {
+            tree.push(RenderCommand::Text {
+                x: x + CONTENT_PADDING,
+                y: content_y + n as f32 * MESSAGE_LINE_HEIGHT,
+                text: line.clone(),
+                color: COLOR_SUBTEXT1,
+                font_size: FONT_SIZE,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(width - CONTENT_PADDING * 2.0),
+            });
+        }
+        content_y += message_height + 12.0;
 
         // Input field.
         let input_width = width - CONTENT_PADDING * 2.0;
@@ -1420,7 +1559,11 @@ impl ProgressDialog {
         } else {
             0.0
         };
-        let cancel_height = if self.cancelable { BUTTON_HEIGHT + CONTENT_PADDING } else { 0.0 };
+        let cancel_height = if self.cancelable {
+            BUTTON_HEIGHT + CONTENT_PADDING
+        } else {
+            0.0
+        };
         let height = TITLE_BAR_HEIGHT + CONTENT_PADDING
             + FONT_SIZE + 12.0 // status text
             + PROGRESS_BAR_HEIGHT + 12.0 // progress bar
@@ -1556,17 +1699,18 @@ impl ProgressDialog {
 
         // Detail text.
         if self.show_detail
-            && let Some(ref detail) = self.detail_text {
-                tree.push(RenderCommand::Text {
-                    x: x + CONTENT_PADDING,
-                    y: content_y,
-                    text: detail.clone(),
-                    color: COLOR_OVERLAY0,
-                    font_size: FONT_SIZE_SMALL,
-                    font_weight: FontWeightHint::Regular,
-                    max_width: Some(bar_width),
-                });
-            }
+            && let Some(ref detail) = self.detail_text
+        {
+            tree.push(RenderCommand::Text {
+                x: x + CONTENT_PADDING,
+                y: content_y,
+                text: detail.clone(),
+                color: COLOR_OVERLAY0,
+                font_size: FONT_SIZE_SMALL,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(bar_width),
+            });
+        }
 
         // Cancel button.
         if self.cancelable {
@@ -1756,13 +1900,27 @@ impl NonModalDialog {
                 // Check close button hit.
                 let close_x = self.x + self.width - CONTENT_PADDING - CLOSE_BUTTON_SIZE;
                 let close_y = self.y + (TITLE_BAR_HEIGHT - CLOSE_BUTTON_SIZE) / 2.0;
-                if point_in_rect(event.x, event.y, close_x, close_y, CLOSE_BUTTON_SIZE, CLOSE_BUTTON_SIZE) {
+                if point_in_rect(
+                    event.x,
+                    event.y,
+                    close_x,
+                    close_y,
+                    CLOSE_BUTTON_SIZE,
+                    CLOSE_BUTTON_SIZE,
+                ) {
                     self.hide();
                     return EventResult::Consumed;
                 }
 
                 // Check title bar drag.
-                if point_in_rect(event.x, event.y, self.x, self.y, self.width, TITLE_BAR_HEIGHT) {
+                if point_in_rect(
+                    event.x,
+                    event.y,
+                    self.x,
+                    self.y,
+                    self.width,
+                    TITLE_BAR_HEIGHT,
+                ) {
                     self.dragging = true;
                     self.drag_offset = (event.x - self.x, event.y - self.y);
                     return EventResult::Consumed;
@@ -1812,7 +1970,12 @@ impl NonModalDialog {
                 let close_x = self.x + self.width - CONTENT_PADDING - CLOSE_BUTTON_SIZE;
                 let close_y = self.y + (TITLE_BAR_HEIGHT - CLOSE_BUTTON_SIZE) / 2.0;
                 self.close_hovered = point_in_rect(
-                    event.x, event.y, close_x, close_y, CLOSE_BUTTON_SIZE, CLOSE_BUTTON_SIZE,
+                    event.x,
+                    event.y,
+                    close_x,
+                    close_y,
+                    CLOSE_BUTTON_SIZE,
+                    CLOSE_BUTTON_SIZE,
                 );
 
                 if point_in_rect(event.x, event.y, self.x, self.y, self.width, self.height) {
@@ -1892,7 +2055,11 @@ impl NonModalDialog {
         // Close button (X).
         let close_x = self.x + self.width - CONTENT_PADDING - CLOSE_BUTTON_SIZE;
         let close_y = self.y + (TITLE_BAR_HEIGHT - CLOSE_BUTTON_SIZE) / 2.0;
-        let close_bg = if self.close_hovered { COLOR_SURFACE2 } else { COLOR_SURFACE0 };
+        let close_bg = if self.close_hovered {
+            COLOR_SURFACE2
+        } else {
+            COLOR_SURFACE0
+        };
         tree.push(RenderCommand::FillRect {
             x: close_x,
             y: close_y,
@@ -1905,7 +2072,11 @@ impl NonModalDialog {
             x: close_x + (CLOSE_BUTTON_SIZE - 8.0) / 2.0,
             y: close_y + (CLOSE_BUTTON_SIZE - FONT_SIZE) / 2.0,
             text: String::from("X"),
-            color: if self.close_hovered { COLOR_RED } else { COLOR_OVERLAY1 },
+            color: if self.close_hovered {
+                COLOR_RED
+            } else {
+                COLOR_OVERLAY1
+            },
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -1987,8 +2158,14 @@ mod tests {
     fn test_dialog_result_variants() {
         assert_eq!(DialogResult::Ok, DialogResult::Ok);
         assert_ne!(DialogResult::Ok, DialogResult::Cancel);
-        assert_eq!(DialogResult::Text(String::from("hello")), DialogResult::Text(String::from("hello")));
-        assert_ne!(DialogResult::Text(String::from("a")), DialogResult::Text(String::from("b")));
+        assert_eq!(
+            DialogResult::Text(String::from("hello")),
+            DialogResult::Text(String::from("hello"))
+        );
+        assert_ne!(
+            DialogResult::Text(String::from("a")),
+            DialogResult::Text(String::from("b"))
+        );
     }
 
     // --- ButtonSet tests ---
@@ -2176,7 +2353,10 @@ mod tests {
 
         assert!(!tree.is_empty());
         // Should contain a FillRect for the scrim.
-        let has_fill = tree.commands.iter().any(|cmd| matches!(cmd, RenderCommand::FillRect { .. }));
+        let has_fill = tree
+            .commands
+            .iter()
+            .any(|cmd| matches!(cmd, RenderCommand::FillRect { .. }));
         assert!(has_fill);
     }
 
@@ -2330,6 +2510,173 @@ mod tests {
         assert!(tree.len() > 5);
     }
 
+    /// Every message line an alert drew, as (y, text), in draw order.
+    fn alert_message_lines(dialog: &AlertDialog) -> Vec<(f32, String)> {
+        let mut tree = RenderTree::new();
+        dialog.render(800.0, 600.0, &mut tree);
+        tree.commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text {
+                    y,
+                    text,
+                    font_size,
+                    color,
+                    ..
+                } if (*font_size - FONT_SIZE).abs() < 0.01 && *color == COLOR_SUBTEXT1 => {
+                    Some((*y, text.clone()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_long_alert_message_is_wrapped_not_truncated() {
+        // The compositor truncates at `max_width` instead of wrapping, so a
+        // message sent as one command lost everything past its first line.
+        let message = "The file could not be saved because the destination \
+                       volume is read-only. Choose another location and try \
+                       again, or unlock the volume first.";
+        let mut dialog = AlertDialog::error("Save failed", message);
+        dialog.show();
+        dialog.overlay.opacity = 1.0;
+
+        let lines = alert_message_lines(&dialog);
+        assert!(
+            lines.len() > 1,
+            "a {} character message was drawn as {} line(s)",
+            message.len(),
+            lines.len()
+        );
+        assert_eq!(
+            lines
+                .iter()
+                .flat_map(|(_, l)| l.split_whitespace())
+                .collect::<Vec<_>>(),
+            message.split_whitespace().collect::<Vec<_>>(),
+            "the drawn lines are not the message"
+        );
+    }
+
+    #[test]
+    fn an_alert_message_stays_inside_its_dialog() {
+        // Both directions: every line fits the width it was wrapped for, and
+        // the block of lines fits between the title bar and the buttons.
+        let message = "Deleting this project removes every file it contains, \
+                       including any work that has not been backed up, and this \
+                       cannot be undone afterwards.";
+        let mut dialog = AlertDialog::warning("Delete project?", message);
+        dialog.show();
+        dialog.overlay.opacity = 1.0;
+        let layout = dialog.compute_layout(800.0, 600.0);
+
+        let lines = alert_message_lines(&dialog);
+        for (_, line) in &lines {
+            if line.split_whitespace().count() < 2 {
+                continue;
+            }
+            assert!(
+                crate::text::width(line, FONT_SIZE) <= dialog.message_max_width(),
+                "{line:?} is wider than the dialog that contains it"
+            );
+        }
+        let last_y = lines.iter().map(|&(y, _)| y).fold(f32::MIN, f32::max);
+        let buttons_y = layout.y + layout.height - BUTTON_HEIGHT - CONTENT_PADDING;
+        assert!(
+            last_y + MESSAGE_LINE_HEIGHT <= buttons_y,
+            "the last message line at {last_y} runs into the buttons at {buttons_y}"
+        );
+    }
+
+    #[test]
+    fn an_input_dialog_field_clears_a_wrapped_prompt() {
+        // The prompt used to get a flat one-line allowance, so the input field
+        // was drawn over the second line of anything longer.
+        let prompt = "Enter the full path of the directory to index, including \
+                      any network share you want covered by the search.";
+        let mut dialog = InputDialog::prompt("Index", prompt, "");
+        dialog.show();
+        dialog.overlay.opacity = 1.0;
+
+        let mut tree = RenderTree::new();
+        dialog.render(800.0, 600.0, &mut tree);
+
+        let lines: Vec<f32> = tree
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text {
+                    y,
+                    font_size,
+                    color,
+                    ..
+                } if (*font_size - FONT_SIZE).abs() < 0.01 && *color == COLOR_SUBTEXT1 => Some(*y),
+                _ => None,
+            })
+            .collect();
+        assert!(lines.len() > 1, "the prompt was drawn as one line");
+
+        // The input field is the first surface-coloured box of INPUT_HEIGHT.
+        let field_y = tree
+            .commands
+            .iter()
+            .find_map(|c| match c {
+                RenderCommand::FillRect { y, height, .. }
+                    if (*height - INPUT_HEIGHT).abs() < 0.01 =>
+                {
+                    Some(*y)
+                }
+                _ => None,
+            })
+            .expect("the input dialog drew no input field");
+        let prompt_bottom = lines.iter().fold(f32::MIN, |a, &b| a.max(b)) + MESSAGE_LINE_HEIGHT;
+        assert!(
+            prompt_bottom <= field_y,
+            "the prompt ends at {prompt_bottom}, below the input field at {field_y}"
+        );
+    }
+
+    #[test]
+    fn an_oversized_message_is_not_drawn_over_the_buttons() {
+        // The dialog height is clamped, so a message can be longer than any box
+        // it can be given. It must lose its tail rather than cover the controls
+        // that dismiss it.
+        let message = "word ".repeat(600);
+        let mut dialog = AlertDialog::error("Failed", &message);
+        dialog.show();
+        dialog.overlay.opacity = 1.0;
+        let layout = dialog.compute_layout(800.0, 600.0);
+        let buttons_y = layout.y + layout.height - BUTTON_HEIGHT - CONTENT_PADDING;
+
+        let lines = alert_message_lines(&dialog);
+        assert!(!lines.is_empty(), "the message vanished entirely");
+        for (y, line) in &lines {
+            assert!(
+                y + MESSAGE_LINE_HEIGHT <= buttons_y,
+                "{line:?} at {y} is drawn into the button row at {buttons_y}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_alert_grows_for_a_longer_message() {
+        // The height used to be a flat three-line guess, so these were equal.
+        let short = AlertDialog::info("T", "Done.");
+        let long = AlertDialog::info(
+            "T",
+            "The operation finished, but several items were skipped because \
+             they were already present at the destination and the overwrite \
+             option was not enabled for this run.",
+        );
+        assert!(
+            long.compute_height() > short.compute_height(),
+            "a long message ({}) got no more room than a short one ({})",
+            long.compute_height(),
+            short.compute_height()
+        );
+    }
+
     #[test]
     fn test_alert_builder_custom_buttons() {
         let dialog = AlertDialog::info("Test", "Test")
@@ -2340,8 +2687,7 @@ mod tests {
 
     #[test]
     fn test_alert_builder_custom_icon() {
-        let dialog = AlertDialog::info("Test", "Test")
-            .with_icon(DialogIcon::Error);
+        let dialog = AlertDialog::info("Test", "Test").with_icon(DialogIcon::Error);
         assert_eq!(dialog.icon, DialogIcon::Error);
     }
 
@@ -2359,15 +2705,13 @@ mod tests {
 
     #[test]
     fn test_input_dialog_password_mode() {
-        let dialog = InputDialog::prompt("Password", "Enter:", "")
-            .with_password_mode(true);
+        let dialog = InputDialog::prompt("Password", "Enter:", "").with_password_mode(true);
         assert!(dialog.password_mode);
     }
 
     #[test]
     fn test_input_dialog_initial_text() {
-        let dialog = InputDialog::prompt("Edit", "Edit value:", "")
-            .with_initial_text("hello");
+        let dialog = InputDialog::prompt("Edit", "Edit value:", "").with_initial_text("hello");
         assert_eq!(dialog.input_text(), "hello");
         assert_eq!(dialog.cursor_pos, 5);
     }
@@ -2400,8 +2744,7 @@ mod tests {
 
     #[test]
     fn test_input_dialog_backspace() {
-        let mut dialog = InputDialog::prompt("Test", "Type:", "")
-            .with_initial_text("hello");
+        let mut dialog = InputDialog::prompt("Test", "Type:", "").with_initial_text("hello");
         dialog.show();
 
         let bs = Event::Key(KeyEvent {
@@ -2416,8 +2759,7 @@ mod tests {
 
     #[test]
     fn test_input_dialog_delete() {
-        let mut dialog = InputDialog::prompt("Test", "Type:", "")
-            .with_initial_text("hello");
+        let mut dialog = InputDialog::prompt("Test", "Type:", "").with_initial_text("hello");
         dialog.show();
         dialog.cursor_pos = 0;
 
@@ -2433,8 +2775,7 @@ mod tests {
 
     #[test]
     fn test_input_dialog_cursor_movement() {
-        let mut dialog = InputDialog::prompt("Test", "Type:", "")
-            .with_initial_text("hello");
+        let mut dialog = InputDialog::prompt("Test", "Type:", "").with_initial_text("hello");
         dialog.show();
         assert_eq!(dialog.cursor_pos, 5);
 
@@ -2471,8 +2812,7 @@ mod tests {
 
     #[test]
     fn test_input_dialog_enter_accepts() {
-        let mut dialog = InputDialog::prompt("Test", "Type:", "")
-            .with_initial_text("result");
+        let mut dialog = InputDialog::prompt("Test", "Type:", "").with_initial_text("result");
         dialog.show();
 
         let enter = Event::Key(KeyEvent {
@@ -2482,7 +2822,10 @@ mod tests {
             text: None,
         });
         dialog.handle_event(&enter);
-        assert_eq!(dialog.result(), Some(&DialogResult::Text(String::from("result"))));
+        assert_eq!(
+            dialog.result(),
+            Some(&DialogResult::Text(String::from("result")))
+        );
     }
 
     #[test]
@@ -2609,8 +2952,7 @@ mod tests {
 
     #[test]
     fn test_progress_set_detail() {
-        let mut dialog = ProgressDialog::indeterminate("Test", "Status")
-            .with_detail("Detail line");
+        let mut dialog = ProgressDialog::indeterminate("Test", "Status").with_detail("Detail line");
         assert_eq!(dialog.detail_text, Some(String::from("Detail line")));
         assert!(dialog.show_detail);
 
@@ -2623,8 +2965,7 @@ mod tests {
 
     #[test]
     fn test_progress_cancelable() {
-        let mut dialog = ProgressDialog::indeterminate("Test", "Status")
-            .with_cancel();
+        let mut dialog = ProgressDialog::indeterminate("Test", "Status").with_cancel();
         assert!(dialog.cancelable);
         dialog.show();
 
@@ -2664,8 +3005,7 @@ mod tests {
 
     #[test]
     fn test_progress_toggle_detail() {
-        let mut dialog = ProgressDialog::indeterminate("Test", "Status")
-            .with_detail("Detail");
+        let mut dialog = ProgressDialog::indeterminate("Test", "Status").with_detail("Detail");
         assert!(dialog.show_detail);
         dialog.toggle_detail();
         assert!(!dialog.show_detail);
@@ -2723,8 +3063,7 @@ mod tests {
 
     #[test]
     fn test_nonmodal_center_in() {
-        let mut dialog = NonModalDialog::new("Test")
-            .with_size(200.0, 150.0);
+        let mut dialog = NonModalDialog::new("Test").with_size(200.0, 150.0);
         dialog.center_in(800.0, 600.0);
         assert_eq!(dialog.position(), (300.0, 225.0));
     }
@@ -2843,16 +3182,14 @@ mod tests {
     #[test]
     fn test_nonmodal_set_content() {
         let mut dialog = NonModalDialog::new("Test");
-        let content = vec![
-            RenderCommand::FillRect {
-                x: 0.0,
-                y: 0.0,
-                width: 100.0,
-                height: 50.0,
-                color: COLOR_BLUE,
-                corner_radii: CornerRadii::ZERO,
-            },
-        ];
+        let content = vec![RenderCommand::FillRect {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 50.0,
+            color: COLOR_BLUE,
+            corner_radii: CornerRadii::ZERO,
+        }];
         dialog.set_content(content);
         assert_eq!(dialog.content_commands.len(), 1);
     }

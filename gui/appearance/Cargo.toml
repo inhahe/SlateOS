@@ -1,0 +1,19 @@
+[package]
+name = "appearance"
+version = "0.1.0"
+edition = "2024"
+description = "SlateOS appearance settings — the shared model behind the desktop's look"
+
+[dependencies]
+# For `Color`. Both consumers (the shell and the Settings app) already depend
+# on the toolkit, so this adds no weight; the alternative — a local colour type
+# converted at every boundary — would put a second definition of a colour in
+# the one crate whose job is to stop there being two definitions of anything.
+guitk = { path = "../toolkit" }
+
+# Format-preserving YAML. A settings file a user has commented has to come back
+# with the comments intact. See yamldoc/src/lib.rs.
+yamldoc = { path = "../../yamldoc" }
+
+[lints]
+workspace = true

@@ -7,6 +7,11 @@
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand};
 use guitk::style::CornerRadii;
+use guitk::text;
+
+/// Horizontal room a history row's text gives up to its icon and right margin,
+/// so the body preview is elided to the width it is actually drawn in.
+const BODY_INSET: f32 = 48.0;
 
 // ============================================================================
 // Catppuccin Mocha palette
@@ -396,7 +401,8 @@ impl NotificationSettings {
     pub fn register_app(&mut self, app_id: impl Into<String>, display_name: impl Into<String>) {
         let app_id = app_id.into();
         if !self.app_prefs.iter().any(|p| p.app_id == app_id) {
-            self.app_prefs.push(AppNotificationPrefs::new(app_id, display_name));
+            self.app_prefs
+                .push(AppNotificationPrefs::new(app_id, display_name));
         }
     }
 
@@ -548,9 +554,8 @@ impl NotificationSettings {
     /// Expire old notifications based on the retention policy.
     pub fn expire_old(&mut self, current_time: u64) {
         if let Some(retention_secs) = self.config.history_retention.seconds() {
-            self.history.retain(|e| {
-                current_time.saturating_sub(e.received_at) < retention_secs
-            });
+            self.history
+                .retain(|e| current_time.saturating_sub(e.received_at) < retention_secs);
         }
     }
 
@@ -561,7 +566,10 @@ impl NotificationSettings {
 
     /// Count of unread notifications for a specific app.
     pub fn unread_count_for_app(&self, app_id: &str) -> usize {
-        self.history.iter().filter(|e| e.app_id == app_id && !e.read).count()
+        self.history
+            .iter()
+            .filter(|e| e.app_id == app_id && !e.read)
+            .count()
     }
 
     /// History entries for a specific app.
@@ -687,7 +695,10 @@ impl NotificationSettingsUI {
     /// Get filtered apps list based on current search filter.
     fn filtered_apps(&self) -> Vec<(usize, &AppNotificationPrefs)> {
         let filter_lower = self.app_filter.to_lowercase();
-        self.settings.app_prefs.iter().enumerate()
+        self.settings
+            .app_prefs
+            .iter()
+            .enumerate()
             .filter(|(_, p)| {
                 if filter_lower.is_empty() {
                     return true;
@@ -751,7 +762,11 @@ impl NotificationSettingsUI {
                 text: tab.label().into(),
                 font_size: 13.0,
                 color: if active { CRUST } else { SUBTEXT0 },
-                font_weight: if active { FontWeightHint::Bold } else { FontWeightHint::Regular },
+                font_weight: if active {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
                 max_width: Some(tab_width - 16.0),
             });
         }
@@ -790,19 +805,47 @@ impl NotificationSettingsUI {
         cy += 44.0;
 
         // Banner position
-        self.render_label_value(cmds, x, cy, width, "Banner Position", cfg.banner_position.label());
+        self.render_label_value(
+            cmds,
+            x,
+            cy,
+            width,
+            "Banner Position",
+            cfg.banner_position.label(),
+        );
         cy += 36.0;
 
         // Default banner style
-        self.render_label_value(cmds, x, cy, width, "Default Style", cfg.default_banner_style.label());
+        self.render_label_value(
+            cmds,
+            x,
+            cy,
+            width,
+            "Default Style",
+            cfg.default_banner_style.label(),
+        );
         cy += 36.0;
 
         // Auto-dismiss delay
-        self.render_label_value(cmds, x, cy, width, "Auto-dismiss", cfg.auto_dismiss_delay.label());
+        self.render_label_value(
+            cmds,
+            x,
+            cy,
+            width,
+            "Auto-dismiss",
+            cfg.auto_dismiss_delay.label(),
+        );
         cy += 36.0;
 
         // Max simultaneous
-        self.render_label_value(cmds, x, cy, width, "Max Banners", &cfg.max_simultaneous.to_string());
+        self.render_label_value(
+            cmds,
+            x,
+            cy,
+            width,
+            "Max Banners",
+            &cfg.max_simultaneous.to_string(),
+        );
         cy += 36.0;
 
         // Grouping
@@ -821,11 +864,25 @@ impl NotificationSettingsUI {
         });
         cy += 28.0;
 
-        self.render_toggle_row(cmds, x, cy, width, "Notification Sounds", cfg.sounds_enabled);
+        self.render_toggle_row(
+            cmds,
+            x,
+            cy,
+            width,
+            "Notification Sounds",
+            cfg.sounds_enabled,
+        );
         cy += 36.0;
 
         // Volume bar
-        self.render_label_value(cmds, x, cy, width, "Volume", &format!("{}%", cfg.sound_volume));
+        self.render_label_value(
+            cmds,
+            x,
+            cy,
+            width,
+            "Volume",
+            &format!("{}%", cfg.sound_volume),
+        );
         let bar_x = x + 160.0;
         let bar_w = width - 220.0;
         cmds.push(RenderCommand::FillRect {
@@ -861,7 +918,14 @@ impl NotificationSettingsUI {
         });
         cy += 28.0;
 
-        self.render_toggle_row(cmds, x, cy, width, "Show on Lock Screen", cfg.lock_screen_notifications);
+        self.render_toggle_row(
+            cmds,
+            x,
+            cy,
+            width,
+            "Show on Lock Screen",
+            cfg.lock_screen_notifications,
+        );
         cy += 36.0;
 
         self.render_toggle_row(cmds, x, cy, width, "Show Preview", cfg.lock_screen_preview);
@@ -879,10 +943,24 @@ impl NotificationSettingsUI {
         });
         cy += 28.0;
 
-        self.render_label_value(cmds, x, cy, width, "Retention", cfg.history_retention.label());
+        self.render_label_value(
+            cmds,
+            x,
+            cy,
+            width,
+            "Retention",
+            cfg.history_retention.label(),
+        );
         cy += 36.0;
 
-        self.render_label_value(cmds, x, cy, width, "Max Stored", &cfg.max_history.to_string());
+        self.render_label_value(
+            cmds,
+            x,
+            cy,
+            width,
+            "Max Stored",
+            &cfg.max_history.to_string(),
+        );
         cy += 36.0;
 
         // Other toggles
@@ -922,7 +1000,11 @@ impl NotificationSettingsUI {
             y: cy + 7.0,
             text: search_text,
             font_size: 13.0,
-            color: if self.app_filter.is_empty() { OVERLAY0 } else { TEXT },
+            color: if self.app_filter.is_empty() {
+                OVERLAY0
+            } else {
+                TEXT
+            },
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - 20.0),
         });
@@ -944,7 +1026,11 @@ impl NotificationSettingsUI {
 
         for (orig_idx, prefs) in &filtered {
             let is_selected = self.selected_app_index == Some(*orig_idx);
-            let row_h = if is_selected && self.app_detail_expanded { 160.0 } else { 48.0 };
+            let row_h = if is_selected && self.app_detail_expanded {
+                160.0
+            } else {
+                48.0
+            };
 
             // Row background
             cmds.push(RenderCommand::FillRect {
@@ -1006,11 +1092,50 @@ impl NotificationSettingsUI {
             // Detail panel if expanded
             if is_selected && self.app_detail_expanded {
                 let dy = cy + 52.0;
-                self.render_label_value(cmds, x + 12.0, dy, width - 24.0, "Banner", prefs.banner_style.label());
-                self.render_label_value(cmds, x + 12.0, dy + 24.0, width - 24.0, "Sound", if prefs.play_sound { "On" } else { "Off" });
-                self.render_label_value(cmds, x + 12.0, dy + 48.0, width - 24.0, "Badge", if prefs.show_badge { "On" } else { "Off" });
-                self.render_label_value(cmds, x + 12.0, dy + 72.0, width - 24.0, "Lock Screen", if prefs.show_on_lock_screen { "On" } else { "Off" });
-                self.render_label_value(cmds, x + 12.0, dy + 96.0, width - 24.0, "Min Priority", prefs.min_priority.label());
+                self.render_label_value(
+                    cmds,
+                    x + 12.0,
+                    dy,
+                    width - 24.0,
+                    "Banner",
+                    prefs.banner_style.label(),
+                );
+                self.render_label_value(
+                    cmds,
+                    x + 12.0,
+                    dy + 24.0,
+                    width - 24.0,
+                    "Sound",
+                    if prefs.play_sound { "On" } else { "Off" },
+                );
+                self.render_label_value(
+                    cmds,
+                    x + 12.0,
+                    dy + 48.0,
+                    width - 24.0,
+                    "Badge",
+                    if prefs.show_badge { "On" } else { "Off" },
+                );
+                self.render_label_value(
+                    cmds,
+                    x + 12.0,
+                    dy + 72.0,
+                    width - 24.0,
+                    "Lock Screen",
+                    if prefs.show_on_lock_screen {
+                        "On"
+                    } else {
+                        "Off"
+                    },
+                );
+                self.render_label_value(
+                    cmds,
+                    x + 12.0,
+                    dy + 96.0,
+                    width - 24.0,
+                    "Min Priority",
+                    prefs.min_priority.label(),
+                );
             }
 
             cy += row_h + 6.0;
@@ -1065,7 +1190,11 @@ impl NotificationSettingsUI {
 
         // History items
         let entries: Vec<_> = if let Some(ref filter_app) = self.history_app_filter {
-            self.settings.history.iter().filter(|e| e.app_id == *filter_app).collect()
+            self.settings
+                .history
+                .iter()
+                .filter(|e| e.app_id == *filter_app)
+                .collect()
         } else {
             self.settings.history.iter().collect()
         };
@@ -1134,11 +1263,20 @@ impl NotificationSettingsUI {
             cmds.push(RenderCommand::Text {
                 x: x + 28.0,
                 y: cy + 38.0,
-                text: truncate_text(&entry.body, 60),
+                // A preview in a scannable list, so cutting it is right -- but
+                // cut it to the box it is actually drawn in, measured, rather
+                // than to a character budget chosen independently of that box.
+                text: text::elide(
+                    &entry.body,
+                    width - BODY_INSET,
+                    "...",
+                    11.0,
+                    FontWeightHint::Regular,
+                ),
                 font_size: 11.0,
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
-                max_width: Some(width - 48.0),
+                max_width: Some(width - BODY_INSET),
             });
 
             cy += 58.0;
@@ -1235,18 +1373,11 @@ impl NotificationSettingsUI {
     }
 }
 
-/// Truncate text to a maximum number of characters with ellipsis.
-fn truncate_text(text: &str, max_len: usize) -> String {
-    if text.len() <= max_len {
-        text.to_string()
-    } else {
-        let end = text.char_indices()
-            .nth(max_len.saturating_sub(3))
-            .map(|(i, _)| i)
-            .unwrap_or(text.len());
-        format!("{}...", &text[..end])
-    }
-}
+// `truncate_text` lived here: a local ellipsis helper that compared
+// `text.len()` (bytes) against a character budget, and whose budget was
+// chosen independently of the box the text was drawn in. Replaced by
+// `text::elide`, which measures both the text and the ellipsis against the
+// actual width. See known-issues.md TD-APPS-ESTIMATE-TEXT-WIDTH.
 
 // ============================================================================
 // Tests
@@ -1494,7 +1625,13 @@ mod tests {
         let mut s = NotificationSettings::new();
         s.config.max_history = 3;
         for i in 0..5 {
-            s.record_notification("app", &format!("Title {}", i), "Body", NotificationPriority::Normal, i);
+            s.record_notification(
+                "app",
+                &format!("Title {}", i),
+                "Body",
+                NotificationPriority::Normal,
+                i,
+            );
         }
         assert_eq!(s.history_count(), 3);
         // Most recent should be first
@@ -1716,7 +1853,13 @@ mod tests {
     fn test_ui_render_history_produces_commands() {
         let mut ui = NotificationSettingsUI::new();
         ui.set_tab(NotificationSettingsTab::History);
-        ui.settings.record_notification("app1", "Hello", "World", NotificationPriority::Normal, 1000);
+        ui.settings.record_notification(
+            "app1",
+            "Hello",
+            "World",
+            NotificationPriority::Normal,
+            1000,
+        );
         let cmds = ui.render(600.0, 800.0);
         assert!(!cmds.is_empty());
     }
@@ -1737,25 +1880,89 @@ mod tests {
     fn test_ui_render_history_with_filter() {
         let mut ui = NotificationSettingsUI::new();
         ui.set_tab(NotificationSettingsTab::History);
-        ui.settings.record_notification("a", "T1", "B", NotificationPriority::Normal, 1);
-        ui.settings.record_notification("b", "T2", "B", NotificationPriority::Normal, 2);
+        ui.settings
+            .record_notification("a", "T1", "B", NotificationPriority::Normal, 1);
+        ui.settings
+            .record_notification("b", "T2", "B", NotificationPriority::Normal, 2);
         ui.history_app_filter = Some("a".to_string());
         let cmds = ui.render(600.0, 800.0);
         assert!(!cmds.is_empty());
     }
 
-    // ---- truncate_text ----
+    // ---- Body preview elision ----
 
     #[test]
-    fn test_truncate_short() {
-        assert_eq!(truncate_text("hello", 10), "hello");
+    fn a_body_preview_fits_the_row_it_is_drawn_in() {
+        // The preview used to be cut to a 60-*character* budget unrelated to
+        // the box, so a wide-glyph body overflowed and a narrow one was cut
+        // short of the room it had. Assert the postcondition instead: whatever
+        // is drawn fits.
+        let mut ui = NotificationSettingsUI::new();
+        ui.set_tab(NotificationSettingsTab::History);
+        for (i, body) in [
+            "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW",
+            "iiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiii",
+            "a body with accents: ééééééééééééééééééééééééééééééééééé",
+            "short",
+        ]
+        .iter()
+        .enumerate()
+        {
+            ui.settings.record_notification(
+                "app",
+                "title",
+                *body,
+                NotificationPriority::Normal,
+                i as u64,
+            );
+        }
+        let width = 600.0_f32;
+        let cmds = ui.render(width, 800.0);
+        let mut checked = 0;
+        for cmd in &cmds {
+            if let RenderCommand::Text {
+                text,
+                font_size,
+                font_weight,
+                max_width: Some(mw),
+                ..
+            } = cmd
+                && (*font_size - 11.0).abs() < 0.01
+            {
+                let w = guitk::text::measure(text, *font_size, *font_weight);
+                assert!(
+                    w <= *mw + 0.01,
+                    "preview {text:?} measures {w} in a {mw} box"
+                );
+                checked += 1;
+            }
+        }
+        // Without this the test passes on a render that drew no previews.
+        assert!(
+            checked >= 4,
+            "expected four body previews, checked {checked}"
+        );
     }
 
     #[test]
-    fn test_truncate_long() {
-        let result = truncate_text("this is a very long notification body text", 20);
-        assert!(result.ends_with("..."));
-        assert!(result.len() <= 23); // 20-3+3
+    fn a_short_body_is_not_elided() {
+        let mut ui = NotificationSettingsUI::new();
+        ui.set_tab(NotificationSettingsTab::History);
+        ui.settings.record_notification(
+            "app",
+            "title",
+            "short body",
+            NotificationPriority::Normal,
+            1,
+        );
+        let cmds = ui.render(600.0, 800.0);
+        assert!(
+            cmds.iter().any(|c| matches!(
+                c,
+                RenderCommand::Text { text, .. } if text == "short body"
+            )),
+            "a body that fits should be drawn whole, with no ellipsis"
+        );
     }
 
     // ---- Tab labels ----

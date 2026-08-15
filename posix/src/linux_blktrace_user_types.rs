@@ -22,8 +22,7 @@ pub const BLK_IO_TRACE_HEADER_SIZE: usize = 48;
 pub const BLK_IO_TRACE_PDU_MAX: usize = 64;
 
 /// Total worst-case event size.
-pub const BLK_IO_TRACE_RECORD_MAX: usize =
-    BLK_IO_TRACE_HEADER_SIZE + BLK_IO_TRACE_PDU_MAX;
+pub const BLK_IO_TRACE_RECORD_MAX: usize = BLK_IO_TRACE_HEADER_SIZE + BLK_IO_TRACE_PDU_MAX;
 
 // ---------------------------------------------------------------------------
 // Packed-`action` word geometry

@@ -58,10 +58,7 @@ mod tests {
 
     #[test]
     fn test_sysctl_path_under_kernel_yama() {
-        assert_eq!(
-            SYSCTL_PTRACE_SCOPE,
-            "/proc/sys/kernel/yama/ptrace_scope"
-        );
+        assert_eq!(SYSCTL_PTRACE_SCOPE, "/proc/sys/kernel/yama/ptrace_scope");
         assert!(SYSCTL_PTRACE_SCOPE.starts_with("/proc/sys/kernel/yama/"));
     }
 

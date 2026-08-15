@@ -55,7 +55,7 @@
 )]
 
 use guitk::color::Color;
-use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
+use guitk::render::{FontFamily, FontWeightHint, RenderCommand, RenderTree};
 use guitk::style::CornerRadii;
 
 pub mod scene;
@@ -105,6 +105,8 @@ enum Tag {
     PushTranslate = 0x08,
     PopTranslate = 0x09,
     BoxShadow = 0x0A,
+    PushFont = 0x0B,
+    PopFont = 0x0C,
 }
 
 impl Tag {
@@ -120,7 +122,49 @@ impl Tag {
             0x08 => Some(Self::PushTranslate),
             0x09 => Some(Self::PopTranslate),
             0x0A => Some(Self::BoxShadow),
+            0x0B => Some(Self::PushFont),
+            0x0C => Some(Self::PopFont),
             _ => None,
+        }
+    }
+}
+
+/// Wire encoding of [`FontFamily`].
+///
+/// Added after `PROTOCOL_VERSION` was set to 1, without bumping it: the two
+/// tags it belongs to are *new* tag bytes, so every frame a version-1 encoder
+/// could produce still decodes identically. A newer encoder talking to an
+/// older decoder is the only mismatch, and that one already fails cleanly with
+/// [`DecodeError::BadTag`] naming the byte it did not know. Bumping the
+/// version instead would additionally reject old encoders whose frames are
+/// perfectly decodable, which trades a clear error for a broader outage.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FontFamilyTag {
+    Ui = 0x00,
+    Mono = 0x01,
+}
+
+impl FontFamilyTag {
+    fn from_byte(b: u8) -> Option<Self> {
+        match b {
+            0x00 => Some(Self::Ui),
+            0x01 => Some(Self::Mono),
+            _ => None,
+        }
+    }
+
+    fn to_family(self) -> FontFamily {
+        match self {
+            Self::Ui => FontFamily::Ui,
+            Self::Mono => FontFamily::Mono,
+        }
+    }
+
+    fn from_family(f: FontFamily) -> Self {
+        match f {
+            FontFamily::Ui => Self::Ui,
+            FontFamily::Mono => Self::Mono,
         }
     }
 }
@@ -183,6 +227,8 @@ pub enum DecodeError {
     BadTag(u8),
     /// A `FontWeightHint` tag byte was unknown.
     BadFontWeight(u8),
+    /// A `FontFamily` tag byte was unknown.
+    BadFontFamily(u8),
     /// A string field was not valid UTF-8.
     BadUtf8,
     /// A scene frame's window or removed-id count exceeds [`scene::MAX_WINDOWS_PER_FRAME`].
@@ -204,6 +250,7 @@ impl core::fmt::Display for DecodeError {
             }
             Self::BadTag(b) => write!(f, "unknown command tag {b:#04x}"),
             Self::BadFontWeight(b) => write!(f, "unknown font-weight tag {b:#04x}"),
+            Self::BadFontFamily(b) => write!(f, "unknown font-family tag {b:#04x}"),
             Self::BadUtf8 => write!(f, "string field was not valid UTF-8"),
             Self::TooManyWindows(n) => {
                 write!(
@@ -323,6 +370,13 @@ fn encode_command(cmd: &RenderCommand, out: &mut Vec<u8>) {
         }
         RenderCommand::PopTranslate => {
             out.push(Tag::PopTranslate as u8);
+        }
+        RenderCommand::PushFont { family } => {
+            out.push(Tag::PushFont as u8);
+            out.push(FontFamilyTag::from_family(*family) as u8);
+        }
+        RenderCommand::PopFont => {
+            out.push(Tag::PopFont as u8);
         }
         RenderCommand::BoxShadow {
             x,
@@ -637,6 +691,15 @@ fn decode_command(r: &mut Reader<'_>) -> Result<RenderCommand, DecodeError> {
             dy: r.read_f32()?,
         },
         Tag::PopTranslate => RenderCommand::PopTranslate,
+        Tag::PushFont => {
+            let byte = r.read_u8()?;
+            RenderCommand::PushFont {
+                family: FontFamilyTag::from_byte(byte)
+                    .ok_or(DecodeError::BadFontFamily(byte))?
+                    .to_family(),
+            }
+        }
+        Tag::PopFont => RenderCommand::PopFont,
         Tag::BoxShadow => RenderCommand::BoxShadow {
             x: r.read_f32()?,
             y: r.read_f32()?,
@@ -747,6 +810,18 @@ mod tests {
         });
         t.commands.push(RenderCommand::PushTranslate { dx: 10.0, dy: -5.0 });
         t.commands.push(RenderCommand::PopTranslate);
+        // Both families, so `each_command_kind_roundtrips_individually` covers
+        // the payload byte and not merely the tag. `Ui` is the default, which
+        // is exactly the value a dropped byte could lose while still looking
+        // plausible on the far side.
+        t.commands.push(RenderCommand::PushFont {
+            family: FontFamily::Mono,
+        });
+        t.commands.push(RenderCommand::PopFont);
+        t.commands.push(RenderCommand::PushFont {
+            family: FontFamily::Ui,
+        });
+        t.commands.push(RenderCommand::PopFont);
         t.commands.push(RenderCommand::PopClip);
         t.commands.push(RenderCommand::BoxShadow {
             x: 0.0,
@@ -888,6 +963,35 @@ mod tests {
         // Header is 10 bytes; the next byte is the tag. Flip it to invalid.
         bytes[HEADER_LEN] = 0xFE;
         assert!(matches!(decode_frame(&bytes), Err(DecodeError::BadTag(0xFE))));
+    }
+
+    /// An unknown family byte must be rejected, not silently read as `Ui`.
+    /// Defaulting would render a terminal in a proportional face and look like
+    /// a layout bug rather than the protocol mismatch it is.
+    #[test]
+    fn unknown_font_family_is_rejected() {
+        let mut t = RenderTree::new();
+        t.commands.push(RenderCommand::PushFont {
+            family: FontFamily::Mono,
+        });
+        let mut bytes = encode_frame_to_vec(&t);
+        // Header, then the tag, then the one-byte family.
+        bytes[HEADER_LEN + 1] = 0x7F;
+        assert!(matches!(
+            decode_frame(&bytes),
+            Err(DecodeError::BadFontFamily(0x7F))
+        ));
+    }
+
+    /// The family tags are wire constants: changing one silently reinterprets
+    /// every frame an older peer already sent. Pinned so a reorder of the enum
+    /// cannot do it by accident.
+    #[test]
+    fn font_family_wire_values_are_fixed() {
+        assert_eq!(FontFamilyTag::Ui as u8, 0x00);
+        assert_eq!(FontFamilyTag::Mono as u8, 0x01);
+        assert_eq!(Tag::PushFont as u8, 0x0B);
+        assert_eq!(Tag::PopFont as u8, 0x0C);
     }
 
     #[test]

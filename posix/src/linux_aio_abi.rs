@@ -5,10 +5,7 @@
 // count arithmetic is taken modulo the ring size on every write.
 // Bounds are established locally but clippy cannot see across the
 // check.
-#![allow(
-    clippy::indexing_slicing,
-    clippy::arithmetic_side_effects,
-)]
+#![allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 
 //! `<linux/aio_abi.h>` — kernel asynchronous I/O (AIO) interface.
 //!

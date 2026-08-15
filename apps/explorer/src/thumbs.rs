@@ -63,7 +63,13 @@ pub struct Thumbnail {
     /// Raw pixel data in ARGB format (4 bytes per pixel, row-major).
     pub pixels: Vec<u8>,
     /// Absolute path of the source file or directory.
-    pub source_path: String,
+    ///
+    /// A `PathBuf`, not a `String`: this is the disk cache's key, hashed by
+    /// [`simple_hash`]. Held as a lossy string, two files whose names differ
+    /// only in bytes that are not UTF-8 collapsed to the same key and hashed
+    /// to the same cache filename — so one file was shown the other's
+    /// thumbnail.
+    pub source_path: PathBuf,
     /// Modification time of the source (seconds since epoch) for invalidation.
     pub source_mtime: u64,
 }
@@ -233,30 +239,26 @@ struct ImageDimensions {
 /// Read a little-endian u32 from a byte slice at `offset`.
 /// Returns `None` if out of bounds.
 fn read_le_u32(data: &[u8], offset: usize) -> Option<u32> {
-    data.get(offset..offset + 4).map(|b| {
-        u32::from_le_bytes([b[0], b[1], b[2], b[3]])
-    })
+    data.get(offset..offset + 4)
+        .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
 }
 
 /// Read a big-endian u32 from a byte slice at `offset`.
 fn read_be_u32(data: &[u8], offset: usize) -> Option<u32> {
-    data.get(offset..offset + 4).map(|b| {
-        u32::from_be_bytes([b[0], b[1], b[2], b[3]])
-    })
+    data.get(offset..offset + 4)
+        .map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
 }
 
 /// Read a big-endian u16 from a byte slice at `offset`.
 fn read_be_u16(data: &[u8], offset: usize) -> Option<u16> {
-    data.get(offset..offset + 2).map(|b| {
-        u16::from_be_bytes([b[0], b[1]])
-    })
+    data.get(offset..offset + 2)
+        .map(|b| u16::from_be_bytes([b[0], b[1]]))
 }
 
 /// Read a little-endian u16 from a byte slice at `offset`.
 fn read_le_u16(data: &[u8], offset: usize) -> Option<u16> {
-    data.get(offset..offset + 2).map(|b| {
-        u16::from_le_bytes([b[0], b[1]])
-    })
+    data.get(offset..offset + 2)
+        .map(|b| u16::from_le_bytes([b[0], b[1]]))
 }
 
 /// Parse BMP header to extract dimensions.
@@ -421,7 +423,11 @@ fn box_filter_downscale(
     let expected_len = (src_w as usize) * (src_h as usize) * 4;
     if src.len() < expected_len {
         // Incomplete pixel data — return a blank thumbnail.
-        return (vec![0u8; (dst_w as usize) * (dst_h as usize) * 4], dst_w, dst_h);
+        return (
+            vec![0u8; (dst_w as usize) * (dst_h as usize) * 4],
+            dst_w,
+            dst_h,
+        );
     }
 
     let mut dst = vec![0u8; (dst_w as usize) * (dst_h as usize) * 4];
@@ -431,9 +437,11 @@ fn box_filter_downscale(
             // Source region that maps to this destination pixel.
             let sx0 = (dx as u64 * src_w as u64 / dst_w as u64) as u32;
             let sy0 = (dy as u64 * src_h as u64 / dst_h as u64) as u32;
-            let sx1 = ((dx as u64 + 1) * src_w as u64).div_ceil(dst_w as u64)
+            let sx1 = ((dx as u64 + 1) * src_w as u64)
+                .div_ceil(dst_w as u64)
                 .min(src_w as u64) as u32;
-            let sy1 = ((dy as u64 + 1) * src_h as u64).div_ceil(dst_h as u64)
+            let sy1 = ((dy as u64 + 1) * src_h as u64)
+                .div_ceil(dst_h as u64)
                 .min(src_h as u64) as u32;
 
             let mut r_acc: u64 = 0;
@@ -534,8 +542,8 @@ impl ThumbCategory {
         match ext.to_lowercase().as_str() {
             "bmp" | "png" | "jpg" | "jpeg" | "gif" | "svg" | "webp" | "ico" => Self::Image,
             "txt" | "log" | "md" | "rst" | "rs" | "py" | "c" | "h" | "cpp" | "js" | "ts"
-            | "html" | "css" | "java" | "go" | "toml" | "yaml" | "json" | "xml" | "sh"
-            | "cfg" | "ini" | "conf" => Self::Text,
+            | "html" | "css" | "java" | "go" | "toml" | "yaml" | "json" | "xml" | "sh" | "cfg"
+            | "ini" | "conf" => Self::Text,
             "pdf" => Self::Pdf,
             "mp3" | "wav" | "ogg" | "flac" | "aac" | "m4a" => Self::Audio,
             "mp4" | "avi" | "mkv" | "webm" | "mov" | "flv" => Self::Video,
@@ -549,9 +557,9 @@ impl ThumbCategory {
     /// placeholder thumbnails rendered as text).
     fn icon_label(self) -> &'static str {
         match self {
-            Self::Image => "\u{1F5BC}",     // framed picture
-            Self::Text => "\u{1F4C4}",      // page
-            Self::Folder => "\u{1F4C1}",    // folder
+            Self::Image => "\u{1F5BC}",  // framed picture
+            Self::Text => "\u{1F4C4}",   // page
+            Self::Folder => "\u{1F4C1}", // folder
             Self::Pdf => "PDF",
             Self::Audio => "\u{1F3B5}",     // musical note
             Self::Video => "\u{1F3AC}",     // clapper board
@@ -564,15 +572,15 @@ impl ThumbCategory {
     /// Accent color for the placeholder icon background.
     fn accent_color(self) -> Color {
         match self {
-            Self::Image => Color::rgb(76, 175, 80),      // green
-            Self::Text => Color::rgb(158, 158, 158),     // gray
-            Self::Folder => Color::rgb(255, 193, 7),     // amber
-            Self::Pdf => Color::rgb(211, 47, 47),        // red
-            Self::Audio => Color::rgb(156, 39, 176),     // purple
-            Self::Video => Color::rgb(33, 150, 243),     // blue
-            Self::Archive => Color::rgb(121, 85, 72),    // brown
-            Self::Executable => Color::rgb(96, 125, 139),// blue-gray
-            Self::Unknown => Color::rgb(189, 189, 189),  // light gray
+            Self::Image => Color::rgb(76, 175, 80),       // green
+            Self::Text => Color::rgb(158, 158, 158),      // gray
+            Self::Folder => Color::rgb(255, 193, 7),      // amber
+            Self::Pdf => Color::rgb(211, 47, 47),         // red
+            Self::Audio => Color::rgb(156, 39, 176),      // purple
+            Self::Video => Color::rgb(33, 150, 243),      // blue
+            Self::Archive => Color::rgb(121, 85, 72),     // brown
+            Self::Executable => Color::rgb(96, 125, 139), // blue-gray
+            Self::Unknown => Color::rgb(189, 189, 189),   // light gray
         }
     }
 }
@@ -623,10 +631,13 @@ fn generate_image_thumbnail(path: &Path, config: &ThumbConfig, mtime: u64) -> Th
     };
 
     // For BMP we can attempt to read raw pixel data (uncompressed 32-bit).
-    if header.len() >= 2 && header[0] == b'B' && header[1] == b'M'
-        && let Some(thumb) = try_bmp_thumbnail(path, dims, config, mtime) {
-            return thumb;
-        }
+    if header.len() >= 2
+        && header[0] == b'B'
+        && header[1] == b'M'
+        && let Some(thumb) = try_bmp_thumbnail(path, dims, config, mtime)
+    {
+        return thumb;
+    }
 
     // For other formats: create an aspect-ratio-correct color swatch since we
     // don't have a full decoder.  The swatch color is derived from the format.
@@ -653,7 +664,7 @@ fn generate_image_thumbnail(path: &Path, config: &ThumbConfig, mtime: u64) -> Th
         width: size,
         height: size,
         pixels,
-        source_path: path.to_string_lossy().to_string(),
+        source_path: path.to_path_buf(),
         source_mtime: mtime,
     }
 }
@@ -724,7 +735,7 @@ fn try_bmp_thumbnail(
         width: sw,
         height: sh,
         pixels: scaled,
-        source_path: path.to_string_lossy().to_string(),
+        source_path: path.to_path_buf(),
         source_mtime: mtime,
     })
 }
@@ -787,7 +798,7 @@ fn generate_text_thumbnail(path: &Path, config: &ThumbConfig, mtime: u64) -> Thu
         width: size,
         height: size,
         pixels,
-        source_path: path.to_string_lossy().to_string(),
+        source_path: path.to_path_buf(),
         source_mtime: mtime,
     }
 }
@@ -882,7 +893,7 @@ fn generate_folder_thumbnail(path: &Path, config: &ThumbConfig, mtime: u64) -> T
         width: size,
         height: size,
         pixels,
-        source_path: path.to_string_lossy().to_string(),
+        source_path: path.to_path_buf(),
         source_mtime: mtime,
     }
 }
@@ -941,7 +952,7 @@ fn generate_pdf_placeholder(path: &Path, config: &ThumbConfig, mtime: u64) -> Th
         width: size,
         height: size,
         pixels,
-        source_path: path.to_string_lossy().to_string(),
+        source_path: path.to_path_buf(),
         source_mtime: mtime,
     }
 }
@@ -992,7 +1003,7 @@ fn generate_default_thumbnail(
         width: size,
         height: size,
         pixels,
-        source_path: path.to_string_lossy().to_string(),
+        source_path: path.to_path_buf(),
         source_mtime: mtime,
     }
 }
@@ -1008,20 +1019,48 @@ fn generate_default_thumbnail(
 /// included; unknown chars render as a blank space.
 fn glyph_bitmap(ch: char) -> [u8; 7] {
     match ch {
-        'P' => [0b11110, 0b10001, 0b10001, 0b11110, 0b10000, 0b10000, 0b10000],
-        'D' => [0b11100, 0b10010, 0b10001, 0b10001, 0b10001, 0b10010, 0b11100],
-        'F' => [0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b10000],
-        '0' => [0b01110, 0b10001, 0b10011, 0b10101, 0b11001, 0b10001, 0b01110],
-        '1' => [0b00100, 0b01100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110],
-        '2' => [0b01110, 0b10001, 0b00001, 0b00010, 0b00100, 0b01000, 0b11111],
-        '3' => [0b01110, 0b10001, 0b00001, 0b00110, 0b00001, 0b10001, 0b01110],
-        '4' => [0b00010, 0b00110, 0b01010, 0b10010, 0b11111, 0b00010, 0b00010],
-        '5' => [0b11111, 0b10000, 0b11110, 0b00001, 0b00001, 0b10001, 0b01110],
-        '6' => [0b01110, 0b10000, 0b11110, 0b10001, 0b10001, 0b10001, 0b01110],
-        '7' => [0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b01000, 0b01000],
-        '8' => [0b01110, 0b10001, 0b10001, 0b01110, 0b10001, 0b10001, 0b01110],
-        '9' => [0b01110, 0b10001, 0b10001, 0b01111, 0b00001, 0b00010, 0b01100],
-        _   => [0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00000],
+        'P' => [
+            0b11110, 0b10001, 0b10001, 0b11110, 0b10000, 0b10000, 0b10000,
+        ],
+        'D' => [
+            0b11100, 0b10010, 0b10001, 0b10001, 0b10001, 0b10010, 0b11100,
+        ],
+        'F' => [
+            0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b10000,
+        ],
+        '0' => [
+            0b01110, 0b10001, 0b10011, 0b10101, 0b11001, 0b10001, 0b01110,
+        ],
+        '1' => [
+            0b00100, 0b01100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110,
+        ],
+        '2' => [
+            0b01110, 0b10001, 0b00001, 0b00010, 0b00100, 0b01000, 0b11111,
+        ],
+        '3' => [
+            0b01110, 0b10001, 0b00001, 0b00110, 0b00001, 0b10001, 0b01110,
+        ],
+        '4' => [
+            0b00010, 0b00110, 0b01010, 0b10010, 0b11111, 0b00010, 0b00010,
+        ],
+        '5' => [
+            0b11111, 0b10000, 0b11110, 0b00001, 0b00001, 0b10001, 0b01110,
+        ],
+        '6' => [
+            0b01110, 0b10000, 0b11110, 0b10001, 0b10001, 0b10001, 0b01110,
+        ],
+        '7' => [
+            0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b01000, 0b01000,
+        ],
+        '8' => [
+            0b01110, 0b10001, 0b10001, 0b01110, 0b10001, 0b10001, 0b01110,
+        ],
+        '9' => [
+            0b01110, 0b10001, 0b10001, 0b01111, 0b00001, 0b00010, 0b01100,
+        ],
+        _ => [
+            0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00000,
+        ],
     }
 }
 
@@ -1189,13 +1228,13 @@ impl DiskCache {
     }
 
     /// Compute the cache filename for a given path and mtime.
-    fn cache_filename(&self, path: &str, mtime: u64) -> PathBuf {
+    fn cache_filename(&self, path: &Path, mtime: u64) -> PathBuf {
         let hash = simple_hash(path, mtime);
         self.cache_dir.join(format!("{hash:016x}.thumb"))
     }
 
     /// Try to load a cached thumbnail from disk.
-    pub fn load(&self, path: &str, mtime: u64) -> Option<Thumbnail> {
+    pub fn load(&self, path: &Path, mtime: u64) -> Option<Thumbnail> {
         let file_path = self.cache_filename(path, mtime);
         let data = fs::read(&file_path).ok()?;
 
@@ -1215,7 +1254,7 @@ impl DiskCache {
             width,
             height,
             pixels: pixel_data.to_vec(),
-            source_path: path.to_owned(),
+            source_path: path.to_path_buf(),
             source_mtime: mtime,
         })
     }
@@ -1233,7 +1272,7 @@ impl DiskCache {
     }
 
     /// Remove the cached thumbnail for a specific path/mtime.
-    pub fn remove(&self, path: &str, mtime: u64) {
+    pub fn remove(&self, path: &Path, mtime: u64) {
         let file_path = self.cache_filename(path, mtime);
         let _ = fs::remove_file(file_path); // Intentionally ignoring error: file may not exist.
     }
@@ -1258,7 +1297,7 @@ impl DiskCache {
     /// requires scanning the in-memory cache for paths.  Pass the set of
     /// known-valid source paths; anything in the cache directory that doesn't
     /// correspond to a valid entry is removed.
-    pub fn purge_stale(&self, valid_entries: &HashMap<String, u64>) -> std::io::Result<()> {
+    pub fn purge_stale(&self, valid_entries: &HashMap<PathBuf, u64>) -> std::io::Result<()> {
         if !self.cache_dir.is_dir() {
             return Ok(());
         }
@@ -1270,8 +1309,14 @@ impl DiskCache {
 
         for entry in fs::read_dir(&self.cache_dir)? {
             let entry = entry?;
-            let name = entry.file_name().to_string_lossy().to_string();
-            if name.ends_with(".thumb") && !valid_filenames.contains(&name) {
+            // Compared as bytes. Every name we write is `{hash:016x}.thumb`, so
+            // a name that is not UTF-8 is not one of ours; rendering it lossily
+            // first could make it *look* like one of ours and get it deleted.
+            let raw = entry.file_name();
+            let name = raw.as_encoded_bytes();
+            if name.ends_with(b".thumb")
+                && !valid_filenames.iter().any(|valid| valid.as_bytes() == name)
+            {
                 let _ = fs::remove_file(entry.path()); // Best-effort removal.
             }
         }
@@ -1393,7 +1438,12 @@ pub fn render_placeholder(
     let text = label.unwrap_or(category.icon_label());
     let font_size = display_size / 3.0;
     cmds.push(RenderCommand::Text {
-        x: x + display_size / 2.0 - font_size * text.len() as f32 / 4.0,
+        x: guitk::text::center_x(
+            text,
+            x + display_size / 2.0,
+            font_size,
+            FontWeightHint::Bold,
+        ),
         y: y + display_size / 2.0 - font_size / 2.0,
         text: text.to_owned(),
         color: Color::WHITE,
@@ -1449,9 +1499,12 @@ fn file_mtime(path: &Path) -> Option<u64> {
 /// Uses FNV-1a-style hashing on the path string concatenated with the mtime.
 /// This is not meant to be collision-resistant — just a fast, deterministic
 /// mapping to a 64-bit filename.
-fn simple_hash(path: &str, mtime: u64) -> u64 {
+fn simple_hash(path: &Path, mtime: u64) -> u64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325; // FNV offset basis
-    for byte in path.as_bytes() {
+    // The path's own bytes, not a lossy rendering: two names that differ only
+    // in undecodable bytes are different files and must not share a cache
+    // entry.
+    for byte in path.as_os_str().as_encoded_bytes() {
         hash ^= *byte as u64;
         hash = hash.wrapping_mul(0x0100_0000_01b3); // FNV prime
     }
@@ -1483,7 +1536,7 @@ mod tests {
         assert_eq!(cache.len(), 1);
         let got = cache.get("test.png", 12345, 1000);
         assert!(got.is_some());
-        assert_eq!(got.unwrap().source_path, "test.png");
+        assert_eq!(got.unwrap().source_path, Path::new("test.png"));
     }
 
     #[test]
@@ -1598,7 +1651,10 @@ mod tests {
         assert_eq!(ThumbCategory::from_extension("mp3"), ThumbCategory::Audio);
         assert_eq!(ThumbCategory::from_extension("mkv"), ThumbCategory::Video);
         assert_eq!(ThumbCategory::from_extension("zip"), ThumbCategory::Archive);
-        assert_eq!(ThumbCategory::from_extension("exe"), ThumbCategory::Executable);
+        assert_eq!(
+            ThumbCategory::from_extension("exe"),
+            ThumbCategory::Executable
+        );
         assert_eq!(ThumbCategory::from_extension("???"), ThumbCategory::Unknown);
     }
 
@@ -1616,7 +1672,11 @@ mod tests {
             ThumbCategory::Unknown,
         ];
         for cat in categories {
-            assert!(!cat.icon_label().is_empty(), "icon label empty for {:?}", cat);
+            assert!(
+                !cat.icon_label().is_empty(),
+                "icon label empty for {:?}",
+                cat
+            );
         }
     }
 
@@ -1684,10 +1744,10 @@ mod tests {
         let h = 4u32;
         let mut src = vec![0u8; (w * h * 4) as usize];
         for i in 0..(w * h) as usize {
-            src[i * 4] = 255;     // A
+            src[i * 4] = 255; // A
             src[i * 4 + 1] = 255; // R
-            src[i * 4 + 2] = 0;   // G
-            src[i * 4 + 3] = 0;   // B
+            src[i * 4 + 2] = 0; // G
+            src[i * 4 + 3] = 0; // B
         }
 
         let (dst, dw, dh) = box_filter_downscale(&src, w, h, 2);
@@ -1836,7 +1896,7 @@ mod tests {
             width: 0,
             height: 0,
             pixels: Vec::new(),
-            source_path: String::new(),
+            source_path: PathBuf::new(),
             source_mtime: 0,
         };
         let cmds = render_thumbnail(&thumb, 0.0, 0.0, 64.0);
@@ -1853,23 +1913,67 @@ mod tests {
 
     #[test]
     fn simple_hash_deterministic() {
-        let h1 = simple_hash("/foo/bar.png", 12345);
-        let h2 = simple_hash("/foo/bar.png", 12345);
+        let h1 = simple_hash(Path::new("/foo/bar.png"), 12345);
+        let h2 = simple_hash(Path::new("/foo/bar.png"), 12345);
         assert_eq!(h1, h2);
     }
 
     #[test]
     fn simple_hash_varies_with_mtime() {
-        let h1 = simple_hash("/foo/bar.png", 100);
-        let h2 = simple_hash("/foo/bar.png", 200);
+        let h1 = simple_hash(Path::new("/foo/bar.png"), 100);
+        let h2 = simple_hash(Path::new("/foo/bar.png"), 200);
         assert_ne!(h1, h2);
     }
 
     #[test]
     fn simple_hash_varies_with_path() {
-        let h1 = simple_hash("/foo/bar.png", 100);
-        let h2 = simple_hash("/foo/baz.png", 100);
+        let h1 = simple_hash(Path::new("/foo/bar.png"), 100);
+        let h2 = simple_hash(Path::new("/foo/baz.png"), 100);
         assert_ne!(h1, h2);
+    }
+
+    /// The cache key must separate files the *filesystem* separates. Held as a
+    /// lossy string, every undecodable byte became the same U+FFFD, so these
+    /// two distinct files hashed to one cache filename and the explorer showed
+    /// one of them the other's thumbnail.
+    ///
+    /// Unix-only: a Windows `OsString` cannot hold either of these paths, and
+    /// our target is `target-family = ["unix"]`.
+    #[cfg(unix)]
+    #[test]
+    fn two_names_differing_only_in_undecodable_bytes_do_not_share_a_cache_entry() {
+        use std::os::unix::ffi::OsStrExt;
+        let a = Path::new(std::ffi::OsStr::from_bytes(b"/foo/x\xE9.png"));
+        let b = Path::new(std::ffi::OsStr::from_bytes(b"/foo/x\xFF.png"));
+        assert_ne!(a, b, "the two paths are genuinely different files");
+        assert_ne!(
+            simple_hash(a, 100),
+            simple_hash(b, 100),
+            "and must not share a cache filename"
+        );
+    }
+
+    /// The same property, expressed in the one form the Windows test host can
+    /// represent: an unpaired surrogate is a legal `OsString` that
+    /// `to_string_lossy` maps to U+FFFD. Without this the regression above is
+    /// asserted only on a target we cannot execute here.
+    #[cfg(windows)]
+    #[test]
+    fn two_names_differing_only_in_undecodable_units_do_not_share_a_cache_entry() {
+        use std::os::windows::ffi::OsStringExt;
+        let a = PathBuf::from(std::ffi::OsString::from_wide(&[0x2F, 0xD800]));
+        let b = PathBuf::from(std::ffi::OsString::from_wide(&[0x2F, 0xD801]));
+        assert_ne!(a, b, "the two paths are genuinely different files");
+        assert_eq!(
+            a.to_string_lossy(),
+            b.to_string_lossy(),
+            "precondition: a lossy rendering cannot tell them apart"
+        );
+        assert_ne!(
+            simple_hash(&a, 100),
+            simple_hash(&b, 100),
+            "and must not share a cache filename"
+        );
     }
 
     // -- Thumbnail generator queue ------------------------------------------
@@ -1950,7 +2054,7 @@ mod tests {
             width: 4,
             height: 4,
             pixels: vec![0u8; 10], // wrong length
-            source_path: String::new(),
+            source_path: PathBuf::new(),
             source_mtime: 0,
         };
         assert!(!bad.is_valid());
@@ -1967,7 +2071,9 @@ mod tests {
         let thumb = make_test_thumb("test_disk.png", 4);
         cache.save(&thumb).unwrap();
 
-        let loaded = cache.load("test_disk.png", thumb.source_mtime).unwrap();
+        let loaded = cache
+            .load(Path::new("test_disk.png"), thumb.source_mtime)
+            .unwrap();
         assert_eq!(loaded.width, thumb.width);
         assert_eq!(loaded.height, thumb.height);
         assert_eq!(loaded.pixels.len(), thumb.pixels.len());
@@ -1987,7 +2093,11 @@ mod tests {
         cache.save(&thumb).unwrap();
 
         // Different mtime => cache miss.
-        assert!(cache.load("miss.png", thumb.source_mtime + 1).is_none());
+        assert!(
+            cache
+                .load(Path::new("miss.png"), thumb.source_mtime + 1)
+                .is_none()
+        );
 
         let _ = cache.clear();
         let _ = fs::remove_dir_all(&dir);
@@ -2001,7 +2111,7 @@ mod tests {
             width: size,
             height: size,
             pixels: vec![128u8; (size * size * 4) as usize],
-            source_path: name.to_owned(),
+            source_path: PathBuf::from(name),
             source_mtime: 42,
         }
     }

@@ -34,6 +34,7 @@
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand};
 use guitk::style::CornerRadii;
+use guitk::text;
 // The same zone engine the libc's `localtime` and osh's `printf '%(…)T'` use.
 use tzrules::Tz;
 
@@ -115,14 +116,12 @@ const SECS_PER_DAY: u64 = 86400;
 // ============================================================================
 
 /// Which day starts the week.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum FirstDayOfWeek {
     #[default]
     Sunday,
     Monday,
 }
-
 
 /// Calendar user preferences.
 #[derive(Clone, Debug)]
@@ -208,7 +207,11 @@ fn iso_week_number(year: i32, month: u32, day: u32) -> (i32, u32) {
     if thursday_doy < 1 {
         // Belongs to the last week of the previous year.
         let prev_dec31_dow = day_of_week(year - 1, 12, 31);
-        let prev_iso = if prev_dec31_dow == 0 { 7 } else { prev_dec31_dow };
+        let prev_iso = if prev_dec31_dow == 0 {
+            7
+        } else {
+            prev_dec31_dow
+        };
         let prev_doy = 365 + if is_leap_year(year - 1) { 1 } else { 0 };
         let prev_thursday = prev_doy + (4 - prev_iso as i32);
         let week = ((prev_thursday - 1) / 7 + 1) as u32;
@@ -262,7 +265,14 @@ fn timestamp_to_date(ts: u64) -> (i32, u32, u32, u32, u32, u32) {
 
 /// Convert (year, month, day, hour, min, sec) to Unix timestamp.
 /// Returns `None` for dates before 1970-01-01.
-fn date_to_timestamp(year: i32, month: u32, day: u32, hour: u32, min: u32, sec: u32) -> Option<u64> {
+fn date_to_timestamp(
+    year: i32,
+    month: u32,
+    day: u32,
+    hour: u32,
+    min: u32,
+    sec: u32,
+) -> Option<u64> {
     if year < 1970 {
         return None;
     }
@@ -654,10 +664,11 @@ fn expand_recurrence(
 
     for _ in 0..max_iterations {
         let clamped_day = day.min(days_in_month(year, month));
-        let occ_start = match date_to_timestamp(year, month, clamped_day, orig_hour, orig_min, orig_sec) {
-            Some(ts) => ts,
-            None => break,
-        };
+        let occ_start =
+            match date_to_timestamp(year, month, clamped_day, orig_hour, orig_min, orig_sec) {
+                Some(ts) => ts,
+                None => break,
+            };
 
         // Stop if we've passed the range.
         if occ_start >= range_end {
@@ -774,7 +785,13 @@ impl ReminderManager {
     }
 
     /// Set a reminder N minutes before an event.
-    pub fn set_reminder(&mut self, event_id: u64, event_title: &str, event_start: u64, lead_minutes: u32) {
+    pub fn set_reminder(
+        &mut self,
+        event_id: u64,
+        event_title: &str,
+        event_start: u64,
+        lead_minutes: u32,
+    ) {
         let fire_at = event_start.saturating_sub(lead_minutes as u64 * SECS_PER_MIN);
         self.reminders.push(Reminder {
             event_id,
@@ -1166,7 +1183,11 @@ impl CalendarView {
         let offset = match self.config.first_day_of_week {
             FirstDayOfWeek::Sunday => first_dow,
             FirstDayOfWeek::Monday => {
-                if first_dow == 0 { 6 } else { first_dow - 1 }
+                if first_dow == 0 {
+                    6
+                } else {
+                    first_dow - 1
+                }
             }
         };
 
@@ -1253,10 +1274,15 @@ impl CalendarView {
 
     fn render_month_view(&self, x: f32, y: f32, store: &EventStore) -> Vec<RenderCommand> {
         let mut cmds = Vec::new();
-        let wn_extra = if self.config.show_week_numbers { WEEK_NUM_WIDTH } else { 0.0 };
+        let wn_extra = if self.config.show_week_numbers {
+            WEEK_NUM_WIDTH
+        } else {
+            0.0
+        };
         let total_width = POPUP_WIDTH + wn_extra;
         let grid_rows = 6;
-        let total_height = PADDING * 2.0 + NAV_HEIGHT + DOW_HEADER_HEIGHT + (grid_rows as f32 * CELL_SIZE);
+        let total_height =
+            PADDING * 2.0 + NAV_HEIGHT + DOW_HEADER_HEIGHT + (grid_rows as f32 * CELL_SIZE);
 
         // Popup background with shadow.
         cmds.push(RenderCommand::BoxShadow {
@@ -1365,10 +1391,10 @@ impl CalendarView {
             max_width: None,
         });
 
-        // Centered month/year label.
-        // Approximate centering: assume ~8px per character.
-        let label_width = label.len() as f32 * 8.0;
-        let label_x = x + (grid_width - label_width) / 2.0;
+        // Centered month/year label. Month names are localised, so an
+        // eight-pixels-per-byte guess put "Februar" and "Fevereiro" visibly
+        // off-centre and pushed the longest ones under the > arrow.
+        let label_x = text::center_x(&label, x + grid_width / 2.0, 15.0, FontWeightHint::Bold);
         cmds.push(RenderCommand::Text {
             x: label_x,
             y: y + 10.0,
@@ -1383,8 +1409,12 @@ impl CalendarView {
         let is_viewing_today = self.view_year == self.today.0 && self.view_month == self.today.1;
         if !is_viewing_today {
             let today_label = "Today";
-            let tw = today_label.len() as f32 * 7.0;
-            let tx = x + (grid_width - tw) / 2.0;
+            let tx = text::center_x(
+                today_label,
+                x + grid_width / 2.0,
+                11.0,
+                FontWeightHint::Regular,
+            );
             cmds.push(RenderCommand::Text {
                 x: tx,
                 y: y + 30.0,
@@ -1421,9 +1451,8 @@ impl CalendarView {
         cell: &GridCell,
         store: &EventStore,
     ) {
-        let is_today = cell.year == self.today.0
-            && cell.month == self.today.1
-            && cell.day == self.today.2;
+        let is_today =
+            cell.year == self.today.0 && cell.month == self.today.1 && cell.day == self.today.2;
         let is_selected = self.selected_date == Some((cell.year, cell.month, cell.day));
 
         // Today highlight circle.
@@ -1470,16 +1499,26 @@ impl CalendarView {
             text: day_str,
             color: text_color,
             font_size: 13.0,
-            font_weight: if is_today { FontWeightHint::Bold } else { FontWeightHint::Regular },
+            font_weight: if is_today {
+                FontWeightHint::Bold
+            } else {
+                FontWeightHint::Regular
+            },
             max_width: Some(CELL_SIZE),
         });
 
         // Event dot indicator.
-        let has_events = !store.events_for_date(cell.year, cell.month, cell.day).is_empty();
+        let has_events = !store
+            .events_for_date(cell.year, cell.month, cell.day)
+            .is_empty();
         if has_events {
             let dot_x = x + (CELL_SIZE - DOT_RADIUS * 2.0) / 2.0;
             let dot_y = y + CELL_SIZE - DOT_RADIUS * 2.0 - 4.0;
-            let dot_color = if is_today { theme::BASE } else { theme::LAVENDER };
+            let dot_color = if is_today {
+                theme::BASE
+            } else {
+                theme::LAVENDER
+            };
             cmds.push(RenderCommand::FillRect {
                 x: dot_x,
                 y: dot_y,
@@ -1626,8 +1665,12 @@ impl CalendarView {
 
         // Year navigation header.
         let year_label = format!("{}", self.view_year);
-        let label_w = year_label.len() as f32 * 10.0;
-        let center_x = x + (total_width - label_w) / 2.0;
+        let center_x = text::center_x(
+            &year_label,
+            x + total_width / 2.0,
+            16.0,
+            FontWeightHint::Bold,
+        );
 
         cmds.push(RenderCommand::Text {
             x: x + PADDING,
@@ -1698,7 +1741,11 @@ impl CalendarView {
         let offset = match self.config.first_day_of_week {
             FirstDayOfWeek::Sunday => first_dow,
             FirstDayOfWeek::Monday => {
-                if first_dow == 0 { 6 } else { first_dow - 1 }
+                if first_dow == 0 {
+                    6
+                } else {
+                    first_dow - 1
+                }
             }
         };
         let total_days = days_in_month(year, month);
@@ -1723,7 +1770,11 @@ impl CalendarView {
                 });
             }
 
-            let text_color = if is_today { theme::BASE } else { theme::SUBTEXT };
+            let text_color = if is_today {
+                theme::BASE
+            } else {
+                theme::SUBTEXT
+            };
             cmds.push(RenderCommand::Text {
                 x: cx + 1.0,
                 y: cell_y + 1.0,
@@ -1759,6 +1810,24 @@ impl CalendarView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- header centring ---
+
+    #[test]
+    fn the_month_label_is_centred_in_the_grid() {
+        // Month names are localised and vary a lot in length; the old estimate
+        // of eight pixels a byte put the long ones under the ">" arrow.
+        let grid_width = 280.0;
+        for label in ["January 2026", "May 2026", "Fevereiro 2026", "十二月 2026"] {
+            let x = guitk::text::center_x(label, grid_width / 2.0, 15.0, FontWeightHint::Bold);
+            let w = guitk::text::measure(label, 15.0, FontWeightHint::Bold);
+            assert!(
+                (x + w / 2.0 - grid_width / 2.0).abs() < 0.01,
+                "{label:?} is not centred"
+            );
+            assert!(x >= 0.0, "{label:?} starts left of the grid");
+        }
+    }
 
     // ========================================================================
     // Date arithmetic tests
@@ -1896,7 +1965,11 @@ mod tests {
             cal.view_year = 2024;
             cal.view_month = month;
             let grid = cal.generate_grid();
-            assert_eq!(grid.len(), 42, "Grid for month {month} should have 42 cells");
+            assert_eq!(
+                grid.len(),
+                42,
+                "Grid for month {month} should have 42 cells"
+            );
         }
     }
 
@@ -2521,7 +2594,10 @@ mod tests {
             clock.format_date(ts, &tz("EST5EDT,M3.2.0,M11.1.0")),
             "Sunday, December 31, 2023"
         );
-        assert_eq!(clock.format_time(ts, &tz("EST5EDT,M3.2.0,M11.1.0")), "19:00");
+        assert_eq!(
+            clock.format_time(ts, &tz("EST5EDT,M3.2.0,M11.1.0")),
+            "19:00"
+        );
     }
 
     #[test]
@@ -2652,7 +2728,10 @@ description: Just a test";
         });
 
         let text = store.export_text();
-        assert!(text.contains("color: F38BA8"), "Expected hex color in export, got: {text}");
+        assert!(
+            text.contains("color: F38BA8"),
+            "Expected hex color in export, got: {text}"
+        );
     }
 
     // ========================================================================
@@ -2676,7 +2755,11 @@ description: Just a test";
         let store = EventStore::new();
         let cmds = cal.render(100.0, 100.0, &store);
         // Should have popup bg, border, nav header, dow headers, and 42 day cells minimum.
-        assert!(cmds.len() > 50, "Expected many render commands, got {}", cmds.len());
+        assert!(
+            cmds.len() > 50,
+            "Expected many render commands, got {}",
+            cmds.len()
+        );
     }
 
     #[test]
@@ -2704,9 +2787,16 @@ description: Just a test";
         let store = EventStore::new();
         let cmds = cal.render(0.0, 0.0, &store);
         // Should have extra text commands for week numbers.
-        let text_cmds: Vec<_> = cmds.iter().filter(|c| matches!(c, RenderCommand::Text { .. })).collect();
+        let text_cmds: Vec<_> = cmds
+            .iter()
+            .filter(|c| matches!(c, RenderCommand::Text { .. }))
+            .collect();
         // At least 6 week number texts + 7 dow headers + 42 day numbers + nav.
-        assert!(text_cmds.len() >= 55, "Expected 55+ text commands, got {}", text_cmds.len());
+        assert!(
+            text_cmds.len() >= 55,
+            "Expected 55+ text commands, got {}",
+            text_cmds.len()
+        );
     }
 
     #[test]
@@ -2723,7 +2813,8 @@ description: Just a test";
         // Should contain at least one small dot-sized FillRect.
         let has_dot = cmds.iter().any(|c| match c {
             RenderCommand::FillRect { width, height, .. } => {
-                (*width - DOT_RADIUS * 2.0).abs() < 0.01 && (*height - DOT_RADIUS * 2.0).abs() < 0.01
+                (*width - DOT_RADIUS * 2.0).abs() < 0.01
+                    && (*height - DOT_RADIUS * 2.0).abs() < 0.01
             }
             _ => false,
         });

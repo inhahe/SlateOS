@@ -192,9 +192,14 @@ fn key_to_lower_char(key: &Key) -> Option<char> {
     }
 }
 
-/// Rough monospace-ish text width estimation (same heuristic as `menu.rs`).
+/// Width of `text`, as the compositor will actually draw it.
+///
+/// The menu bar places mnemonic underlines by measuring the text before the
+/// underlined character, so this has to agree with the drawn glyphs exactly —
+/// the old byte-count heuristic put the underline under the wrong letter as
+/// soon as a label contained anything non-ASCII.
 fn estimate_text_width(text: &str, font_size: f32) -> f32 {
-    text.len() as f32 * font_size * 0.6
+    crate::text::width(text, font_size)
 }
 
 // ─── Open-submenu state (for nested dropdown submenus) ─────────────────────
@@ -319,14 +324,15 @@ impl MenuBar {
     fn on_mouse_press(&mut self, mx: f32, my: f32) -> EventResult {
         // --- Click on a top-level label? ---
         if (0.0..BAR_HEIGHT).contains(&my)
-            && let Some(idx) = self.label_index_at_x(mx) {
-                if self.open_index == Some(idx) {
-                    self.close();
-                } else {
-                    self.open_menu(idx);
-                }
-                return EventResult::Consumed;
+            && let Some(idx) = self.label_index_at_x(mx)
+        {
+            if self.open_index == Some(idx) {
+                self.close();
+            } else {
+                self.open_menu(idx);
             }
+            return EventResult::Consumed;
+        }
 
         // --- Click inside an open dropdown? ---
         if let Some(top_idx) = self.open_index {
@@ -392,12 +398,13 @@ impl MenuBar {
         // --- Hot-tracking across top-level labels. ---
         if (0.0..BAR_HEIGHT).contains(&my) {
             if self.is_open()
-                && let Some(idx) = self.label_index_at_x(mx) {
-                    if self.open_index != Some(idx) {
-                        self.open_menu(idx);
-                    }
-                    return EventResult::Consumed;
+                && let Some(idx) = self.label_index_at_x(mx)
+            {
+                if self.open_index != Some(idx) {
+                    self.open_menu(idx);
                 }
+                return EventResult::Consumed;
+            }
             return EventResult::Ignored;
         }
 
@@ -469,15 +476,18 @@ impl MenuBar {
         }
 
         // Alt+mnemonic opens the corresponding top-level menu.
-        if event.modifiers.alt && !event.modifiers.ctrl && !event.modifiers.shift
-            && let Some(ch) = key_to_lower_char(&event.key) {
-                for (i, item) in self.items.iter().enumerate() {
-                    if mnemonic_char(&item.label) == Some(ch) {
-                        self.open_menu(i);
-                        return EventResult::Consumed;
-                    }
+        if event.modifiers.alt
+            && !event.modifiers.ctrl
+            && !event.modifiers.shift
+            && let Some(ch) = key_to_lower_char(&event.key)
+        {
+            for (i, item) in self.items.iter().enumerate() {
+                if mnemonic_char(&item.label) == Some(ch) {
+                    self.open_menu(i);
+                    return EventResult::Consumed;
                 }
             }
+        }
 
         if !self.is_open() {
             return EventResult::Ignored;
@@ -516,25 +526,25 @@ impl MenuBar {
                 // If hover is on a submenu entry in the primary dropdown, open it.
                 if self.open_submenu.is_none()
                     && let Some(hi) = self.dropdown_hover
-                        && let Some(MenuBarEntry::SubMenu { children, .. }) =
-                            self.items[top_idx].children.get(hi)
-                        {
-                            let dd = self.dropdown_rect(top_idx);
-                            let sub_x = dd.0 + dd.2;
-                            let sub_y = dd.1
-                                + DROPDOWN_VPAD
-                                + y_offset_for_index(&self.items[top_idx].children, hi);
-                            let sub_w = calculate_dropdown_width(children);
-                            self.open_submenu = Some(Box::new(OpenSubmenu {
-                                parent_index: hi,
-                                x: sub_x,
-                                y: sub_y,
-                                width: sub_w,
-                                hover_index: None,
-                                child: None,
-                            }));
-                            return EventResult::Consumed;
-                        }
+                    && let Some(MenuBarEntry::SubMenu { children, .. }) =
+                        self.items[top_idx].children.get(hi)
+                {
+                    let dd = self.dropdown_rect(top_idx);
+                    let sub_x = dd.0 + dd.2;
+                    let sub_y = dd.1
+                        + DROPDOWN_VPAD
+                        + y_offset_for_index(&self.items[top_idx].children, hi);
+                    let sub_w = calculate_dropdown_width(children);
+                    self.open_submenu = Some(Box::new(OpenSubmenu {
+                        parent_index: hi,
+                        x: sub_x,
+                        y: sub_y,
+                        width: sub_w,
+                        hover_index: None,
+                        child: None,
+                    }));
+                    return EventResult::Consumed;
+                }
 
                 // Otherwise move to the next top-level menu.
                 let new = if top_idx + 1 >= self.items.len() {
@@ -549,8 +559,7 @@ impl MenuBar {
             Key::Up => {
                 if let Some(ref mut sub) = self.open_submenu {
                     let deepest = deepest_submenu_mut(sub);
-                    let entries =
-                        resolve_submenu_entries(&self.items[top_idx].children, deepest);
+                    let entries = resolve_submenu_entries(&self.items[top_idx].children, deepest);
                     deepest.hover_index = next_selectable(&entries, deepest.hover_index, -1);
                 } else {
                     self.move_dropdown_hover(-1, top_idx);
@@ -561,8 +570,7 @@ impl MenuBar {
             Key::Down => {
                 if let Some(ref mut sub) = self.open_submenu {
                     let deepest = deepest_submenu_mut(sub);
-                    let entries =
-                        resolve_submenu_entries(&self.items[top_idx].children, deepest);
+                    let entries = resolve_submenu_entries(&self.items[top_idx].children, deepest);
                     deepest.hover_index = next_selectable(&entries, deepest.hover_index, 1);
                 } else {
                     self.move_dropdown_hover(1, top_idx);
@@ -883,10 +891,11 @@ fn hover_in_submenu_chain(
 ) -> bool {
     // Recurse into child first.
     if let Some(ref mut child) = sub.child
-        && hover_in_submenu_chain(root_children, child, mx, my) {
-            sub.hover_index = None;
-            return true;
-        }
+        && hover_in_submenu_chain(root_children, child, mx, my)
+    {
+        sub.hover_index = None;
+        return true;
+    }
 
     let entries = resolve_submenu_entries(root_children, sub);
     let total_h = dropdown_content_height(&entries) + DROPDOWN_VPAD * 2.0;
@@ -1142,9 +1151,10 @@ fn jump_to_letter(entries: &[MenuBarEntry], ch: char) -> Option<usize> {
             _ => None,
         };
         if let Some(l) = label
-            && l.chars().next().map(|c| c.to_ascii_lowercase()) == Some(ch) {
-                return Some(i);
-            }
+            && l.chars().next().map(|c| c.to_ascii_lowercase()) == Some(ch)
+        {
+            return Some(i);
+        }
     }
     None
 }
@@ -1243,8 +1253,7 @@ fn render_entries(
 
                 if let Some(sc) = shortcut {
                     cmds.push(RenderCommand::Text {
-                        x: panel_x + panel_w - DROPDOWN_HPAD
-                            - estimate_text_width(sc, FONT_SIZE),
+                        x: panel_x + panel_w - DROPDOWN_HPAD - estimate_text_width(sc, FONT_SIZE),
                         y: text_y,
                         text: sc.clone(),
                         color: DIM_TEXT_COLOR,
@@ -1257,9 +1266,7 @@ fn render_entries(
                 cur_y += ITEM_HEIGHT;
             }
 
-            MenuBarEntry::Check {
-                label, checked, ..
-            } => {
+            MenuBarEntry::Check { label, checked, .. } => {
                 if hover == Some(i) {
                     cmds.push(RenderCommand::FillRect {
                         x: panel_x + 4.0,
@@ -1722,9 +1729,11 @@ mod tests {
         let cmds = bar.render(800);
         assert!(!cmds.is_empty());
         // No BoxShadow when closed (that only appears for dropdowns).
-        assert!(!cmds
-            .iter()
-            .any(|c| matches!(c, RenderCommand::BoxShadow { .. })));
+        assert!(
+            !cmds
+                .iter()
+                .any(|c| matches!(c, RenderCommand::BoxShadow { .. }))
+        );
     }
 
     #[test]
@@ -1732,9 +1741,10 @@ mod tests {
         let mut bar = make_bar();
         bar.handle_key_event(&alt_press(Key::F));
         let cmds = bar.render(800);
-        assert!(cmds
-            .iter()
-            .any(|c| matches!(c, RenderCommand::BoxShadow { .. })));
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, RenderCommand::BoxShadow { .. }))
+        );
     }
 
     // ── set_items replaces structure ────────────────────────────────────

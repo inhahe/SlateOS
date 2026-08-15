@@ -31,6 +31,9 @@ use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
+use guitk::table::{Column, Fit, Table};
+#[allow(unused_imports)]
+use guitk::text;
 
 #[allow(unused_imports)]
 use std::collections::BTreeMap;
@@ -71,6 +74,48 @@ const FONT_SIZE_SMALL: f32 = 11.0;
 const FONT_SIZE_HEADING: f32 = 16.0;
 const FONT_SIZE_TITLE: f32 = 18.0;
 const ROW_HEIGHT: f32 = 26.0;
+
+/// Index of each column in [`file_list_columns`].
+const FILE_PATH: usize = 0;
+const FILE_SIZE: usize = 1;
+const FILE_FRAGMENTS: usize = 2;
+const FILE_SEVERITY: usize = 3;
+
+/// The fragmented-file list's columns, for a panel `w` pixels wide.
+///
+/// The panel is resizable, so the columns are fractions of it rather than
+/// constants — which is why this is a function and not a `&[Column]`. It used
+/// to be four *positions* (`x + w*0.55`, `x + w*0.70`, `x + w*0.85`) restated in
+/// the header loop and again in each row, with the path's clip written as a
+/// fifth, unrelated number (`max_width: Some(w * 0.50)`) that matched none of
+/// them: the path column actually runs to `w*0.55 - PADDING`, so the clip fell
+/// short of its own column and still had no marker. Every other cell had
+/// `max_width: None` and no bound at all.
+///
+/// Returning widths rather than positions is what makes the arithmetic
+/// checkable: `Table` derives the positions, and a test can ask whether the
+/// last column ends inside the panel.
+fn file_list_columns(w: f32) -> [Column; 4] {
+    [
+        Column {
+            label: "File Path",
+            width: (w * 0.55 - PADDING * 2.0).max(0.0),
+        },
+        Column {
+            label: "Size",
+            width: (w * 0.15 - PADDING).max(0.0),
+        },
+        Column {
+            label: "Fragments",
+            width: (w * 0.15 - PADDING).max(0.0),
+        },
+        Column {
+            label: "Severity",
+            width: (w * 0.15 - PADDING).max(0.0),
+        },
+    ]
+}
+
 const BUTTON_WIDTH: f32 = 100.0;
 const BUTTON_HEIGHT: f32 = 30.0;
 const CORNER_RADIUS: f32 = 6.0;
@@ -79,6 +124,29 @@ const BLOCK_GAP: f32 = 1.0;
 const LEGEND_HEIGHT: f32 = 32.0;
 const TAB_HEIGHT: f32 = 34.0;
 const PROGRESS_BAR_HEIGHT: f32 = 20.0;
+
+// ============================================================================
+// Text measurement
+// ============================================================================
+
+/// Width of a toolbar mode button sized to fit `label`.
+fn mode_button_width(label: &str) -> f32 {
+    text::measure(label, FONT_SIZE_SMALL, FontWeightHint::Regular) + 16.0
+}
+
+/// Width of the Analyze/Start/Pause/Resume button sized to fit `label`.
+fn action_button_width(label: &str) -> f32 {
+    text::measure(label, FONT_SIZE, FontWeightHint::Bold) + 20.0
+}
+
+/// Width of a view tab sized to fit `label`.
+///
+/// Measured bold whatever the tab's state, because the active tab is drawn
+/// bold: sizing each tab to its current weight would shuffle the whole strip
+/// sideways every time the selection moved.
+fn tab_width(label: &str) -> f32 {
+    text::measure(label, FONT_SIZE, FontWeightHint::Bold) + 24.0
+}
 
 // ============================================================================
 // Block state
@@ -406,20 +474,19 @@ pub struct AnalysisResult {
 }
 
 /// Analyze a drive given its block map and file information.
-pub fn analyze_drive(
-    block_map: &BlockMap,
-    files: &[FileFragInfo],
-) -> AnalysisResult {
+pub fn analyze_drive(block_map: &BlockMap, files: &[FileFragInfo]) -> AnalysisResult {
     let fragmentation_percent = block_map.fragmentation_percent();
     let total_fragments = block_map.fragment_count();
     let fragmented_file_count = files.iter().filter(|f| f.is_fragmented()).count() as u64;
     let total_file_count = files.len() as u64;
     let largest_free_region_blocks = block_map.largest_free_region();
-    let largest_free_region_bytes = largest_free_region_blocks
+    let largest_free_region_bytes =
+        largest_free_region_blocks.saturating_mul(block_map.block_size_bytes);
+    let free_space_bytes = block_map
+        .free_blocks()
         .saturating_mul(block_map.block_size_bytes);
-    let free_space_bytes = block_map.free_blocks()
-        .saturating_mul(block_map.block_size_bytes);
-    let used_space_bytes = block_map.used_blocks()
+    let used_space_bytes = block_map
+        .used_blocks()
         .saturating_mul(block_map.block_size_bytes);
 
     let mut file_details = files.to_vec();
@@ -669,9 +736,10 @@ impl ExcludePattern {
         // Extension wildcard `*.ext`.
         if let Some(ext) = pattern.strip_prefix("*.")
             && let Some(file_ext) = path.rsplit_once('.')
-                && file_ext.1 == ext {
-                    return true;
-                }
+            && file_ext.1 == ext
+        {
+            return true;
+        }
 
         // Simple prefix match (directory prefix).
         if pattern.ends_with('/') && path.starts_with(pattern.as_str()) {
@@ -846,10 +914,7 @@ impl DefragEngine {
 
     /// Whether defrag can be started or resumed.
     pub fn can_run(&self) -> bool {
-        matches!(
-            self.progress.state,
-            DefragState::Idle | DefragState::Paused
-        )
+        matches!(self.progress.state, DefragState::Idle | DefragState::Paused)
     }
 
     /// Whether defrag is currently active (running or paused).
@@ -870,7 +935,11 @@ impl DefragEngine {
         }
 
         // Find the first fragmented block.
-        let frag_idx = self.block_map.blocks.iter().position(|&b| b == BlockState::Fragmented);
+        let frag_idx = self
+            .block_map
+            .blocks
+            .iter()
+            .position(|&b| b == BlockState::Fragmented);
         let Some(frag_idx) = frag_idx else {
             // No more fragmented blocks: done.
             self.progress.state = DefragState::Completed;
@@ -879,7 +948,11 @@ impl DefragEngine {
         };
 
         // Find the first free block.
-        let free_idx = self.block_map.blocks.iter().position(|&b| b == BlockState::Free);
+        let free_idx = self
+            .block_map
+            .blocks
+            .iter()
+            .position(|&b| b == BlockState::Free);
         let Some(free_idx) = free_idx else {
             // No free space to work with: error.
             self.progress.state = DefragState::Error;
@@ -1123,7 +1196,12 @@ impl ViewTab {
     }
 
     pub fn all() -> &'static [Self] {
-        &[Self::DiskMap, Self::FileList, Self::Statistics, Self::Schedule]
+        &[
+            Self::DiskMap,
+            Self::FileList,
+            Self::Statistics,
+            Self::Schedule,
+        ]
     }
 }
 
@@ -1292,10 +1370,11 @@ impl DefragUI {
         if let Some(analysis) = &self.analysis {
             // Check for SSD.
             if let Some(drive) = self.current_drive()
-                && drive.is_ssd() {
-                    self.show_ssd_warning = true;
-                    return;
-                }
+                && drive.is_ssd()
+            {
+                self.show_ssd_warning = true;
+                return;
+            }
 
             let mut engine = DefragEngine::new(
                 analysis.block_map.clone(),
@@ -1345,10 +1424,9 @@ impl DefragUI {
         } else {
             false
         };
-        if completed
-            && let Some(engine) = &self.engine {
-                self.stats = Some(DefragStats::from_engine(engine));
-            }
+        if completed && let Some(engine) = &self.engine {
+            self.stats = Some(DefragStats::from_engine(engine));
+        }
     }
 
     /// Run a batch of defrag steps.
@@ -1359,10 +1437,9 @@ impl DefragUI {
         } else {
             false
         };
-        if completed
-            && let Some(engine) = &self.engine {
-                self.stats = Some(DefragStats::from_engine(engine));
-            }
+        if completed && let Some(engine) = &self.engine {
+            self.stats = Some(DefragStats::from_engine(engine));
+        }
     }
 
     /// Set file sort column, toggling direction if same column.
@@ -1429,8 +1506,7 @@ impl DefragUI {
         let content_x = SIDEBAR_WIDTH;
         let content_y = TOOLBAR_HEIGHT + TAB_HEIGHT;
         let content_w = WINDOW_WIDTH - SIDEBAR_WIDTH;
-        let content_h =
-            WINDOW_HEIGHT - TOOLBAR_HEIGHT - TAB_HEIGHT - STATUS_BAR_HEIGHT;
+        let content_h = WINDOW_HEIGHT - TOOLBAR_HEIGHT - TAB_HEIGHT - STATUS_BAR_HEIGHT;
 
         match self.view_tab {
             ViewTab::DiskMap => {
@@ -1486,7 +1562,7 @@ impl DefragUI {
         // Optimization mode selector
         for mode in OptimizationMode::all().iter().rev() {
             let label = mode.label();
-            let btn_w = (label.len() as f32) * 8.0 + 16.0;
+            let btn_w = mode_button_width(label);
             btn_x -= btn_w + 4.0;
             let bg_color = if self.optimization_mode == *mode {
                 COLOR_BLUE
@@ -1544,7 +1620,7 @@ impl DefragUI {
             }
         }
 
-        let action_w = (action_label.len() as f32) * 8.0 + 20.0;
+        let action_w = action_button_width(action_label);
         let action_x = SIDEBAR_WIDTH + PADDING;
         tree.push(RenderCommand::FillRect {
             x: action_x,
@@ -1618,7 +1694,11 @@ impl DefragUI {
                 x: PADDING + 4.0,
                 y: dy + 6.0,
                 text: drive.label.clone(),
-                color: if is_selected { COLOR_TEXT } else { COLOR_SUBTEXT0 },
+                color: if is_selected {
+                    COLOR_TEXT
+                } else {
+                    COLOR_SUBTEXT0
+                },
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(SIDEBAR_WIDTH - 2.0 * PADDING - 8.0),
@@ -1693,26 +1773,27 @@ impl DefragUI {
 
         // SSD indicator for selected drive
         if let Some(drive) = self.current_drive()
-            && drive.is_ssd() {
-                dy += 8.0;
-                tree.push(RenderCommand::FillRect {
-                    x: 4.0,
-                    y: dy,
-                    width: SIDEBAR_WIDTH - 8.0,
-                    height: 28.0,
-                    color: Color::rgba(COLOR_YELLOW.r, COLOR_YELLOW.g, COLOR_YELLOW.b, 40),
-                    corner_radii: CornerRadii::all(4.0),
-                });
-                tree.push(RenderCommand::Text {
-                    x: PADDING + 4.0,
-                    y: dy + 7.0,
-                    text: "SSD - TRIM recommended".to_string(),
-                    color: COLOR_YELLOW,
-                    font_size: FONT_SIZE_SMALL,
-                    font_weight: FontWeightHint::Bold,
-                    max_width: Some(SIDEBAR_WIDTH - 2.0 * PADDING - 8.0),
-                });
-            }
+            && drive.is_ssd()
+        {
+            dy += 8.0;
+            tree.push(RenderCommand::FillRect {
+                x: 4.0,
+                y: dy,
+                width: SIDEBAR_WIDTH - 8.0,
+                height: 28.0,
+                color: Color::rgba(COLOR_YELLOW.r, COLOR_YELLOW.g, COLOR_YELLOW.b, 40),
+                corner_radii: CornerRadii::all(4.0),
+            });
+            tree.push(RenderCommand::Text {
+                x: PADDING + 4.0,
+                y: dy + 7.0,
+                text: "SSD - TRIM recommended".to_string(),
+                color: COLOR_YELLOW,
+                font_size: FONT_SIZE_SMALL,
+                font_weight: FontWeightHint::Bold,
+                max_width: Some(SIDEBAR_WIDTH - 2.0 * PADDING - 8.0),
+            });
+        }
     }
 
     // -- tabs ------------------------------------------------------------------
@@ -1736,7 +1817,7 @@ impl DefragUI {
         for tab in ViewTab::all() {
             let label = tab.label();
             let is_active = self.view_tab == *tab;
-            let tab_w = (label.len() as f32) * 8.0 + 24.0;
+            let tab_w = tab_width(label);
 
             if is_active {
                 // Active tab highlight
@@ -1763,7 +1844,11 @@ impl DefragUI {
                 x: tx + 12.0,
                 y: tabs_y + 10.0,
                 text: label.to_string(),
-                color: if is_active { COLOR_TEXT } else { COLOR_OVERLAY0 },
+                color: if is_active {
+                    COLOR_TEXT
+                } else {
+                    COLOR_OVERLAY0
+                },
                 font_size: FONT_SIZE,
                 font_weight: if is_active {
                     FontWeightHint::Bold
@@ -1779,14 +1864,7 @@ impl DefragUI {
 
     // -- disk map view ---------------------------------------------------------
 
-    fn render_disk_map(
-        &self,
-        tree: &mut RenderTree,
-        x: f32,
-        y: f32,
-        w: f32,
-        h: f32,
-    ) {
+    fn render_disk_map(&self, tree: &mut RenderTree, x: f32, y: f32, w: f32, h: f32) {
         // Progress bar (if defrag is active)
         let mut map_y = y + PADDING;
 
@@ -1884,12 +1962,20 @@ impl DefragUI {
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
                 });
-                lx += (label.len() as f32) * 7.0 + 30.0;
+                // 16 px from the swatch to the label, then 14 px of gap to
+                // the next swatch. The label's own width is measured, not
+                // guessed at seven pixels a byte.
+                lx += 16.0 + text::measure(label, FONT_SIZE_SMALL, FontWeightHint::Regular) + 14.0;
             }
         } else {
             // No analysis yet
             tree.push(RenderCommand::Text {
-                x: x + w / 2.0 - 120.0,
+                x: text::center_x(
+                    "Click Analyze to scan the drive",
+                    x + w / 2.0,
+                    FONT_SIZE_HEADING,
+                    FontWeightHint::Regular,
+                ),
                 y: y + h / 2.0,
                 text: "Click Analyze to scan the drive".to_string(),
                 color: COLOR_SUBTEXT0,
@@ -2011,10 +2097,11 @@ impl DefragUI {
         }
 
         // Percentage text
+        let percent = format_percent(progress.percent());
         tree.push(RenderCommand::Text {
-            x: x + w / 2.0 - 20.0,
+            x: text::center_x(&percent, x + w / 2.0, FONT_SIZE_SMALL, FontWeightHint::Bold),
             y: y + 3.0,
-            text: format_percent(progress.percent()),
+            text: percent,
             color: COLOR_TEXT,
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Bold,
@@ -2054,20 +2141,18 @@ impl DefragUI {
 
     // -- file list view --------------------------------------------------------
 
-    fn render_file_list(
-        &self,
-        tree: &mut RenderTree,
-        x: f32,
-        y: f32,
-        w: f32,
-        h: f32,
-    ) {
+    fn render_file_list(&self, tree: &mut RenderTree, x: f32, y: f32, w: f32, h: f32) {
         let files = if let Some(analysis) = &self.analysis {
             &analysis.file_details
         } else {
             // No analysis: show placeholder
             tree.push(RenderCommand::Text {
-                x: x + w / 2.0 - 140.0,
+                x: text::center_x(
+                    "Analyze a drive to see file details",
+                    x + w / 2.0,
+                    FONT_SIZE_HEADING,
+                    FontWeightHint::Regular,
+                ),
                 y: y + h / 2.0,
                 text: "Analyze a drive to see file details".to_string(),
                 color: COLOR_SUBTEXT0,
@@ -2089,23 +2174,9 @@ impl DefragUI {
             corner_radii: CornerRadii::ZERO,
         });
 
-        let col_defs: &[(&str, f32)] = &[
-            ("File Path", x + PADDING),
-            ("Size", x + w * 0.55),
-            ("Fragments", x + w * 0.70),
-            ("Severity", x + w * 0.85),
-        ];
-        for (label, cx) in col_defs {
-            tree.push(RenderCommand::Text {
-                x: *cx,
-                y: header_y + 6.0,
-                text: label.to_string(),
-                color: COLOR_TEXT,
-                font_size: FONT_SIZE,
-                font_weight: FontWeightHint::Bold,
-                max_width: None,
-            });
-        }
+        let columns = file_list_columns(w);
+        let table = Table::with_gap(&columns, x, PADDING);
+        table.header(&mut tree.commands, header_y + 6.0, COLOR_TEXT, FONT_SIZE);
 
         // File rows
         let row_area_y = header_y + ROW_HEIGHT;
@@ -2145,27 +2216,30 @@ impl DefragUI {
                 COLOR_TEXT
             };
 
-            // Path
-            tree.push(RenderCommand::Text {
-                x: x + PADDING,
-                y: ry + 6.0,
-                text: file.path.clone(),
-                color: path_color,
-                font_size: FONT_SIZE,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(w * 0.50),
-            });
+            // A path is cut at the *front*. This list is sorted by
+            // fragmentation, so its rows are whatever files happen to be worst
+            // — in practice a run of siblings under one deep directory. Cut at
+            // the end they collapse to one repeated prefix with every filename
+            // gone, which is precisely the column the user is reading.
+            table.cell(
+                &mut tree.commands,
+                FILE_PATH,
+                ry + 6.0,
+                &file.path,
+                path_color,
+                FONT_SIZE,
+                Fit::End,
+            );
 
-            // Size
-            tree.push(RenderCommand::Text {
-                x: x + w * 0.55,
-                y: ry + 6.0,
-                text: format_size(file.size_bytes),
-                color: COLOR_SUBTEXT0,
-                font_size: FONT_SIZE,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-            });
+            table.cell(
+                &mut tree.commands,
+                FILE_SIZE,
+                ry + 6.0,
+                &format_size(file.size_bytes),
+                COLOR_SUBTEXT0,
+                FONT_SIZE,
+                Fit::Start,
+            );
 
             // Fragment count
             let frag_color = if file.fragment_count > 10 {
@@ -2175,15 +2249,15 @@ impl DefragUI {
             } else {
                 COLOR_SUBTEXT0
             };
-            tree.push(RenderCommand::Text {
-                x: x + w * 0.70,
-                y: ry + 6.0,
-                text: format!("{}", file.fragment_count),
-                color: frag_color,
-                font_size: FONT_SIZE,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-            });
+            table.cell(
+                &mut tree.commands,
+                FILE_FRAGMENTS,
+                ry + 6.0,
+                &format!("{}", file.fragment_count),
+                frag_color,
+                FONT_SIZE,
+                Fit::Start,
+            );
 
             // Severity
             let severity = file.severity();
@@ -2194,28 +2268,21 @@ impl DefragUI {
             } else {
                 COLOR_GREEN
             };
-            tree.push(RenderCommand::Text {
-                x: x + w * 0.85,
-                y: ry + 6.0,
-                text: format!("{severity:.1}"),
-                color: sev_color,
-                font_size: FONT_SIZE,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-            });
+            table.cell(
+                &mut tree.commands,
+                FILE_SEVERITY,
+                ry + 6.0,
+                &format!("{severity:.1}"),
+                sev_color,
+                FONT_SIZE,
+                Fit::Start,
+            );
         }
     }
 
     // -- statistics view -------------------------------------------------------
 
-    fn render_statistics(
-        &self,
-        tree: &mut RenderTree,
-        x: f32,
-        y: f32,
-        w: f32,
-        h: f32,
-    ) {
+    fn render_statistics(&self, tree: &mut RenderTree, x: f32, y: f32, w: f32, h: f32) {
         let stats = if let Some(s) = &self.stats {
             s
         } else if let Some(engine) = &self.engine {
@@ -2286,7 +2353,12 @@ impl DefragUI {
         } else {
             // No stats at all
             tree.push(RenderCommand::Text {
-                x: x + w / 2.0 - 120.0,
+                x: text::center_x(
+                    "No statistics yet",
+                    x + w / 2.0,
+                    FONT_SIZE_HEADING,
+                    FontWeightHint::Regular,
+                ),
                 y: y + h / 2.0,
                 text: "No statistics yet".to_string(),
                 color: COLOR_SUBTEXT0,
@@ -2408,10 +2480,7 @@ impl DefragUI {
 
         // Detail lines
         let detail_lines: &[(&str, String)] = &[
-            (
-                "Improvement:",
-                format_percent(stats.improvement_percent),
-            ),
+            ("Improvement:", format_percent(stats.improvement_percent)),
             ("Blocks moved:", format!("{}", stats.blocks_moved)),
             ("Time elapsed:", format_duration(stats.elapsed_secs)),
             (
@@ -2449,14 +2518,7 @@ impl DefragUI {
 
     // -- schedule view ---------------------------------------------------------
 
-    fn render_schedule(
-        &self,
-        tree: &mut RenderTree,
-        x: f32,
-        y: f32,
-        w: f32,
-        _h: f32,
-    ) {
+    fn render_schedule(&self, tree: &mut RenderTree, x: f32, y: f32, w: f32, _h: f32) {
         let card_x = x + PADDING;
         let card_y = y + PADDING;
         let card_w = w - 2.0 * PADDING;
@@ -2778,7 +2840,10 @@ impl DefragUI {
             DefragState::Analyzing => "Analyzing...".to_string(),
             DefragState::Running => {
                 if let Some(engine) = &self.engine {
-                    format!("Defragmenting: {}", format_percent(engine.progress.percent()))
+                    format!(
+                        "Defragmenting: {}",
+                        format_percent(engine.progress.percent())
+                    )
                 } else {
                     "Defragmenting...".to_string()
                 }
@@ -2813,6 +2878,250 @@ fn main() {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -- text measurement ------------------------------------------------------
+
+    #[test]
+    fn mode_buttons_fit_their_labels() {
+        for mode in OptimizationMode::all() {
+            let label = mode.label();
+            let drawn = text::measure(label, FONT_SIZE_SMALL, FontWeightHint::Regular);
+            // 8 px of padding each side, which is where the label is drawn.
+            assert!(
+                drawn + 16.0 <= mode_button_width(label) + 0.01,
+                "{label:?} overflows its mode button"
+            );
+        }
+    }
+
+    #[test]
+    fn the_action_button_fits_every_label_it_takes() {
+        // The button relabels itself as the run progresses, and each label has
+        // to fit the box drawn for it.
+        for label in ["Analyze", "Start", "Pause", "Resume"] {
+            let drawn = text::measure(label, FONT_SIZE, FontWeightHint::Bold);
+            assert!(
+                drawn + 20.0 <= action_button_width(label) + 0.01,
+                "{label:?} overflows the action button"
+            );
+        }
+    }
+
+    #[test]
+    fn tab_labels_fit_and_the_strip_does_not_reflow() {
+        for tab in ViewTab::all() {
+            let label = tab.label();
+            let w = tab_width(label);
+            // Drawn bold when active, regular when not. Both have to fit, and
+            // both have to get the *same* width or the strip would shuffle
+            // sideways as the selection moved.
+            for weight in [FontWeightHint::Bold, FontWeightHint::Regular] {
+                let drawn = text::measure(label, FONT_SIZE, weight);
+                assert!(
+                    drawn + 24.0 <= w + 0.01,
+                    "{label:?} overflows its tab at {weight:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn measuring_is_not_driven_by_byte_length() {
+        // Same character count, three times the bytes. The old estimate was
+        // eight pixels a byte, which made this label's button three times too
+        // wide; measuring keeps it in the same neighbourhood as the ASCII one.
+        let ascii = tab_width("aaaa");
+        let wide = tab_width("ええええ");
+        assert!(
+            wide < ascii * 3.0,
+            "tab width is tracking bytes, not glyphs ({ascii} vs {wide})"
+        );
+    }
+
+    #[test]
+    fn a_centred_placeholder_is_actually_centred() {
+        // These were centred by subtracting a guessed half-width — 120.0 for
+        // "No statistics yet", which is nearly twice that string's actual half
+        // width, so it sat well left of the panel it was meant to be centred in.
+        let centre = 500.0;
+        for label in [
+            "Click Analyze to scan the drive",
+            "Analyze a drive to see file details",
+            "No statistics yet",
+        ] {
+            let x = text::center_x(label, centre, FONT_SIZE_HEADING, FontWeightHint::Regular);
+            let w = text::measure(label, FONT_SIZE_HEADING, FontWeightHint::Regular);
+            assert!(
+                (x + w / 2.0 - centre).abs() < 0.01,
+                "{label:?} is not centred: spans {x}..{}",
+                x + w
+            );
+        }
+    }
+
+    // -- file list columns -----------------------------------------------------
+
+    /// Width the file-list panel is rendered at in these tests.
+    const LIST_W: f32 = 700.0;
+
+    /// A file list of the shape this panel actually shows: siblings under one
+    /// deep directory, because the list is sorted by severity and the worst
+    /// offenders are usually one program's data files.
+    ///
+    /// These paths agree for their first 60 characters. That is what makes an
+    /// unmarked cut a *misreading* rather than an omission — every row renders
+    /// as the same string, and the column the user came here to read tells them
+    /// nothing.
+    fn app_with_deep_paths() -> DefragUI {
+        let files = vec![
+            FileFragInfo {
+                path: String::from(
+                    "/home/user/Library/Application Support/SomeProgram/cache/videos/holiday-2026.mkv",
+                ),
+                size_bytes: 4 * 1024 * 1024 * 1024,
+                fragment_count: 240,
+                block_count: 1_048_576,
+                excluded: false,
+            },
+            FileFragInfo {
+                path: String::from(
+                    "/home/user/Library/Application Support/SomeProgram/cache/videos/holiday-2027.mkv",
+                ),
+                size_bytes: 3 * 1024 * 1024 * 1024,
+                fragment_count: 180,
+                block_count: 786_432,
+                excluded: false,
+            },
+            FileFragInfo {
+                path: String::from("/tmp/a.log"),
+                size_bytes: 1024,
+                fragment_count: 1,
+                block_count: 1,
+                excluded: false,
+            },
+        ];
+        let mut app = DefragUI::new();
+        app.analysis = Some(analyze_drive(&sample_block_map(), &files));
+        app
+    }
+
+    /// Every text the file list draws, as `(x, text, font_size, weight)`.
+    fn file_list_texts(app: &DefragUI) -> Vec<(f32, String, f32, FontWeightHint)> {
+        let mut tree = RenderTree::new();
+        app.render_file_list(&mut tree, 0.0, 0.0, LIST_W, 400.0);
+        tree.commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text {
+                    x,
+                    text,
+                    font_size,
+                    font_weight,
+                    ..
+                } => Some((*x, text.clone(), *font_size, *font_weight)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn no_file_list_cell_escapes_its_column() {
+        let app = app_with_deep_paths();
+        let columns = file_list_columns(LIST_W);
+        let table = Table::with_gap(&columns, 0.0, PADDING);
+        let spans = table.spans();
+        let mut checked = 0usize;
+        for (x, text, size, weight) in file_list_texts(&app) {
+            let Some((_, right)) = spans.iter().copied().find(|(l, _)| (l - x).abs() < 0.01) else {
+                continue;
+            };
+            let drawn = x + text::measure(&text, size, weight);
+            assert!(
+                drawn <= right + 0.01,
+                "cell {text:?} at {x} draws to {drawn}, past its column edge {right}"
+            );
+            checked = checked.saturating_add(1);
+        }
+        assert!(
+            checked >= 16,
+            "expected a header and three rows, checked {checked}"
+        );
+    }
+
+    #[test]
+    fn the_file_list_ends_inside_its_panel() {
+        // The old layout put the last column at `x + w * 0.85` and gave it no
+        // width at all, so nothing said where it was supposed to stop. With
+        // widths rather than positions, that is a question with an answer.
+        for w in [320.0f32, 700.0, 1400.0] {
+            let columns = file_list_columns(w);
+            let table = Table::with_gap(&columns, 0.0, PADDING);
+            let last = columns.len() - 1;
+            assert!(
+                table.right(last) <= w - PADDING + 0.01,
+                "at width {w} the table runs to {}, past the panel edge {}",
+                table.right(last),
+                w - PADDING
+            );
+        }
+    }
+
+    #[test]
+    fn an_overlong_path_keeps_the_filename() {
+        let app = app_with_deep_paths();
+        let columns = file_list_columns(LIST_W);
+        let table = Table::with_gap(&columns, 0.0, PADDING);
+        let path_x = table.left(FILE_PATH);
+        let cut: Vec<String> = file_list_texts(&app)
+            .into_iter()
+            .filter(|(x, t, ..)| (x - path_x).abs() < 0.01 && t.starts_with('…'))
+            .map(|(_, t, ..)| t)
+            .collect();
+        assert_eq!(
+            cut.len(),
+            2,
+            "expected the two deep paths to be cut: {cut:?}"
+        );
+        for path in &cut {
+            assert!(
+                path.ends_with(".mkv"),
+                "a cut path lost the filename that names it: {path:?}"
+            );
+        }
+        assert_ne!(cut[0], cut[1], "two paths rendered identically: {cut:?}");
+    }
+
+    #[test]
+    fn a_short_path_is_drawn_verbatim() {
+        let app = app_with_deep_paths();
+        let columns = file_list_columns(LIST_W);
+        let table = Table::with_gap(&columns, 0.0, PADDING);
+        let path_x = table.left(FILE_PATH);
+        assert!(
+            file_list_texts(&app)
+                .iter()
+                .any(|(x, t, ..)| (x - path_x).abs() < 0.01 && t == "/tmp/a.log"),
+            "a path that fits must be drawn as-is"
+        );
+    }
+
+    #[test]
+    fn a_narrow_panel_does_not_give_a_column_negative_width() {
+        // The panel is resizable and the widths are fractions of it minus a
+        // constant, so a small enough `w` makes the subtraction go negative —
+        // and a negative width elides to the empty string, silently blanking
+        // the column instead of showing what room there is.
+        for w in [0.0f32, 1.0, 20.0, 60.0] {
+            for col in file_list_columns(w) {
+                assert!(
+                    col.width >= 0.0,
+                    "column {:?} has width {} at panel width {w}",
+                    col.label,
+                    col.width
+                );
+            }
+        }
+    }
 
     // -- test helpers ----------------------------------------------------------
 
@@ -3259,10 +3568,7 @@ mod tests {
 
         // file_details should be sorted by severity descending
         for i in 1..result.file_details.len() {
-            assert!(
-                result.file_details[i - 1].severity()
-                    >= result.file_details[i].severity()
-            );
+            assert!(result.file_details[i - 1].severity() >= result.file_details[i].severity());
         }
     }
 
@@ -3308,10 +3614,7 @@ mod tests {
 
     #[test]
     fn test_is_excluded() {
-        let patterns = vec![
-            ExcludePattern::new("/tmp/*"),
-            ExcludePattern::new("*.log"),
-        ];
+        let patterns = vec![ExcludePattern::new("/tmp/*"), ExcludePattern::new("*.log")];
         assert!(is_excluded("/tmp/file.txt", &patterns));
         assert!(is_excluded("/var/system.log", &patterns));
         assert!(!is_excluded("/home/user/data.txt", &patterns));
@@ -3418,12 +3721,7 @@ mod tests {
     fn test_defrag_engine_new() {
         let bmap = sample_block_map();
         let files = sample_files();
-        let engine = DefragEngine::new(
-            bmap,
-            files,
-            OptimizationMode::Full,
-            Vec::new(),
-        );
+        let engine = DefragEngine::new(bmap, files, OptimizationMode::Full, Vec::new());
         assert_eq!(engine.progress.state, DefragState::Idle);
         assert_eq!(engine.progress.total_blocks_to_move, 15);
         assert!(engine.progress.initial_fragmentation > 0.0);
@@ -3433,12 +3731,7 @@ mod tests {
     fn test_defrag_engine_start_pause_resume() {
         let bmap = sample_block_map();
         let files = sample_files();
-        let mut engine = DefragEngine::new(
-            bmap,
-            files,
-            OptimizationMode::Full,
-            Vec::new(),
-        );
+        let mut engine = DefragEngine::new(bmap, files, OptimizationMode::Full, Vec::new());
 
         assert!(engine.can_run());
         engine.start();
@@ -3457,12 +3750,7 @@ mod tests {
     fn test_defrag_engine_step() {
         let bmap = sample_block_map();
         let files = sample_files();
-        let mut engine = DefragEngine::new(
-            bmap,
-            files,
-            OptimizationMode::Full,
-            Vec::new(),
-        );
+        let mut engine = DefragEngine::new(bmap, files, OptimizationMode::Full, Vec::new());
         engine.start();
 
         assert!(engine.step());
@@ -3473,12 +3761,7 @@ mod tests {
     fn test_defrag_engine_step_not_running() {
         let bmap = sample_block_map();
         let files = sample_files();
-        let mut engine = DefragEngine::new(
-            bmap,
-            files,
-            OptimizationMode::Full,
-            Vec::new(),
-        );
+        let mut engine = DefragEngine::new(bmap, files, OptimizationMode::Full, Vec::new());
         // Not started
         assert!(!engine.step());
         assert_eq!(engine.progress.blocks_moved, 0);
@@ -3488,12 +3771,7 @@ mod tests {
     fn test_defrag_engine_step_batch() {
         let bmap = sample_block_map();
         let files = sample_files();
-        let mut engine = DefragEngine::new(
-            bmap,
-            files,
-            OptimizationMode::Full,
-            Vec::new(),
-        );
+        let mut engine = DefragEngine::new(bmap, files, OptimizationMode::Full, Vec::new());
         engine.start();
 
         let done = engine.step_batch(5);
@@ -3505,12 +3783,7 @@ mod tests {
     fn test_defrag_engine_complete() {
         let bmap = sample_block_map();
         let files = sample_files();
-        let mut engine = DefragEngine::new(
-            bmap,
-            files,
-            OptimizationMode::Full,
-            Vec::new(),
-        );
+        let mut engine = DefragEngine::new(bmap, files, OptimizationMode::Full, Vec::new());
         engine.start();
 
         // Run all steps until complete (15 fragmented blocks)
@@ -3535,12 +3808,7 @@ mod tests {
             excluded: false,
         }];
 
-        let mut engine = DefragEngine::new(
-            bmap,
-            files,
-            OptimizationMode::Full,
-            Vec::new(),
-        );
+        let mut engine = DefragEngine::new(bmap, files, OptimizationMode::Full, Vec::new());
         engine.start();
         engine.step();
         assert_eq!(engine.progress.state, DefragState::Error);
@@ -3549,12 +3817,7 @@ mod tests {
     #[test]
     fn test_defrag_engine_is_active() {
         let bmap = BlockMap::new(10, 4096);
-        let mut engine = DefragEngine::new(
-            bmap,
-            Vec::new(),
-            OptimizationMode::Full,
-            Vec::new(),
-        );
+        let mut engine = DefragEngine::new(bmap, Vec::new(), OptimizationMode::Full, Vec::new());
         assert!(!engine.is_active());
 
         engine.start();
@@ -3591,12 +3854,7 @@ mod tests {
     fn test_files_to_process_quick() {
         let bmap = sample_block_map();
         let files = sample_files();
-        let engine = DefragEngine::new(
-            bmap,
-            files,
-            OptimizationMode::Quick,
-            Vec::new(),
-        );
+        let engine = DefragEngine::new(bmap, files, OptimizationMode::Quick, Vec::new());
         let to_process = engine.files_to_process();
         // Quick mode: top 20% of fragmented files
         // 5 fragmented files, 20% = 1 (max of 1 and len/5)
@@ -3608,12 +3866,7 @@ mod tests {
     fn test_files_to_process_full() {
         let bmap = sample_block_map();
         let files = sample_files();
-        let engine = DefragEngine::new(
-            bmap,
-            files,
-            OptimizationMode::Full,
-            Vec::new(),
-        );
+        let engine = DefragEngine::new(bmap, files, OptimizationMode::Full, Vec::new());
         let to_process = engine.files_to_process();
         assert_eq!(to_process.len(), 5); // 5 fragmented files
     }
@@ -3622,12 +3875,7 @@ mod tests {
     fn test_files_to_process_freespace() {
         let bmap = sample_block_map();
         let files = sample_files();
-        let engine = DefragEngine::new(
-            bmap,
-            files,
-            OptimizationMode::FreeSpace,
-            Vec::new(),
-        );
+        let engine = DefragEngine::new(bmap, files, OptimizationMode::FreeSpace, Vec::new());
         let to_process = engine.files_to_process();
         assert!(to_process.is_empty()); // FreeSpace mode doesn't target files
     }
@@ -3636,12 +3884,7 @@ mod tests {
     fn test_files_to_process_boot_optimize() {
         let bmap = sample_block_map();
         let files = sample_files();
-        let engine = DefragEngine::new(
-            bmap,
-            files,
-            OptimizationMode::BootOptimize,
-            Vec::new(),
-        );
+        let engine = DefragEngine::new(bmap, files, OptimizationMode::BootOptimize, Vec::new());
         let to_process = engine.files_to_process();
         // Boot files should be prioritized (first in list)
         if !to_process.is_empty() {
@@ -3654,12 +3897,7 @@ mod tests {
         let bmap = sample_block_map();
         let files = sample_files();
         let excludes = vec![ExcludePattern::new("/tmp/*")];
-        let engine = DefragEngine::new(
-            bmap,
-            files,
-            OptimizationMode::Full,
-            excludes,
-        );
+        let engine = DefragEngine::new(bmap, files, OptimizationMode::Full, excludes);
         let to_process = engine.files_to_process();
         // /tmp/temp_data.bin should be excluded
         assert!(to_process.iter().all(|f| !f.path.starts_with("/tmp/")));
@@ -3711,12 +3949,7 @@ mod tests {
     fn test_defrag_stats_from_engine() {
         let bmap = sample_block_map();
         let files = sample_files();
-        let mut engine = DefragEngine::new(
-            bmap,
-            files,
-            OptimizationMode::Full,
-            Vec::new(),
-        );
+        let mut engine = DefragEngine::new(bmap, files, OptimizationMode::Full, Vec::new());
         engine.start();
         engine.step_batch(100);
 
@@ -3732,7 +3965,11 @@ mod tests {
     #[test]
     fn test_sort_file_list_by_fragments() {
         let mut files = sample_files();
-        sort_file_list(&mut files, FileSortColumn::Fragments, SortDirection::Descending);
+        sort_file_list(
+            &mut files,
+            FileSortColumn::Fragments,
+            SortDirection::Descending,
+        );
         for i in 1..files.len() {
             assert!(files[i - 1].fragment_count >= files[i].fragment_count);
         }
@@ -3759,7 +3996,11 @@ mod tests {
     #[test]
     fn test_sort_file_list_by_severity() {
         let mut files = sample_files();
-        sort_file_list(&mut files, FileSortColumn::Severity, SortDirection::Descending);
+        sort_file_list(
+            &mut files,
+            FileSortColumn::Severity,
+            SortDirection::Descending,
+        );
         for i in 1..files.len() {
             assert!(files[i - 1].severity() >= files[i].severity());
         }

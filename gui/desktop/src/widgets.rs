@@ -81,7 +81,14 @@ impl GridPos {
     }
 
     /// Pixel position given cell size, gap, and origin.
-    pub fn pixels(&self, origin_x: f32, origin_y: f32, cell_w: f32, cell_h: f32, gap: f32) -> (f32, f32) {
+    pub fn pixels(
+        &self,
+        origin_x: f32,
+        origin_y: f32,
+        cell_w: f32,
+        cell_h: f32,
+        gap: f32,
+    ) -> (f32, f32) {
         let x = origin_x + self.col as f32 * (cell_w + gap);
         let y = origin_y + self.row as f32 * (cell_h + gap);
         (x, y)
@@ -260,7 +267,9 @@ impl WidgetInstance {
 
     /// Display title.
     pub fn title(&self) -> &str {
-        self.title_override.as_deref().unwrap_or_else(|| self.kind.label())
+        self.title_override
+            .as_deref()
+            .unwrap_or_else(|| self.kind.label())
     }
 
     /// Whether the widget needs an update tick.
@@ -362,8 +371,7 @@ impl DesktopWidgetManager {
         let size = kind.default_size();
 
         // Check bounds.
-        if position.col + size.cols > self.grid.columns
-            || position.row + size.rows > self.grid.rows
+        if position.col + size.cols > self.grid.columns || position.row + size.rows > self.grid.rows
         {
             return None;
         }
@@ -398,9 +406,7 @@ impl DesktopWidgetManager {
         };
 
         // Check bounds.
-        if new_pos.col + size.cols > self.grid.columns
-            || new_pos.row + size.rows > self.grid.rows
-        {
+        if new_pos.col + size.cols > self.grid.columns || new_pos.row + size.rows > self.grid.rows {
             return false;
         }
 
@@ -490,7 +496,9 @@ impl DesktopWidgetManager {
                 self.grid.cell_height,
                 self.grid.gap,
             );
-            let (ww, wh) = w.size.pixels(self.grid.cell_width, self.grid.cell_height, self.grid.gap);
+            let (ww, wh) =
+                w.size
+                    .pixels(self.grid.cell_width, self.grid.cell_height, self.grid.gap);
             if px >= wx && px < wx + ww && py >= wy && py < wy + wh {
                 return Some(w.id);
             }
@@ -574,7 +582,12 @@ impl DesktopWidgetManager {
     // Private
     // ========================================================================
 
-    fn overlaps_any(&self, pos: GridPos, size: WidgetSize, exclude: Option<WidgetInstanceId>) -> bool {
+    fn overlaps_any(
+        &self,
+        pos: GridPos,
+        size: WidgetSize,
+        exclude: Option<WidgetInstanceId>,
+    ) -> bool {
         for w in &self.widgets {
             if exclude == Some(w.id) {
                 continue;
@@ -628,7 +641,9 @@ impl DesktopWidgetManager {
             self.grid.cell_height,
             self.grid.gap,
         );
-        let (width, height) = w.size.pixels(self.grid.cell_width, self.grid.cell_height, self.grid.gap);
+        let (width, height) =
+            w.size
+                .pixels(self.grid.cell_width, self.grid.cell_height, self.grid.gap);
         let cr = self.grid.corner_radius;
 
         // Shadow.
@@ -690,7 +705,12 @@ impl DesktopWidgetManager {
             y: y + 4.0,
             text: w.kind.icon().to_string(),
             font_size: 12.0,
-            color: Color::rgba(SUBTEXT0.r, SUBTEXT0.g, SUBTEXT0.b, (w.bg_opacity as f32 * 1.2) as u8),
+            color: Color::rgba(
+                SUBTEXT0.r,
+                SUBTEXT0.g,
+                SUBTEXT0.b,
+                (w.bg_opacity as f32 * 1.2) as u8,
+            ),
             font_weight: FontWeightHint::Regular,
             max_width: None,
         });
@@ -699,7 +719,12 @@ impl DesktopWidgetManager {
             y: y + 5.0,
             text: w.title().to_string(),
             font_size: 11.0,
-            color: Color::rgba(SUBTEXT0.r, SUBTEXT0.g, SUBTEXT0.b, (w.bg_opacity as f32 * 1.2) as u8),
+            color: Color::rgba(
+                SUBTEXT0.r,
+                SUBTEXT0.g,
+                SUBTEXT0.b,
+                (w.bg_opacity as f32 * 1.2) as u8,
+            ),
             font_weight: FontWeightHint::Bold,
             max_width: Some(width - 32.0),
         });
@@ -707,7 +732,15 @@ impl DesktopWidgetManager {
         // Content area.
         let content_y = y + title_h + 4.0;
         let content_h = height - title_h - 8.0;
-        self.render_widget_content(w, x + 8.0, content_y, width - 16.0, content_h, w.bg_opacity, commands);
+        self.render_widget_content(
+            w,
+            x + 8.0,
+            content_y,
+            width - 16.0,
+            content_h,
+            w.bg_opacity,
+            commands,
+        );
     }
 
     fn render_widget_content(
@@ -835,9 +868,21 @@ impl DesktopWidgetManager {
                     text: display.to_string(),
                     font_size: 12.0,
                     color: Color::rgba(
-                        if w.state_text.is_empty() { OVERLAY0.r } else { TEXT.r },
-                        if w.state_text.is_empty() { OVERLAY0.g } else { TEXT.g },
-                        if w.state_text.is_empty() { OVERLAY0.b } else { TEXT.b },
+                        if w.state_text.is_empty() {
+                            OVERLAY0.r
+                        } else {
+                            TEXT.r
+                        },
+                        if w.state_text.is_empty() {
+                            OVERLAY0.g
+                        } else {
+                            TEXT.g
+                        },
+                        if w.state_text.is_empty() {
+                            OVERLAY0.b
+                        } else {
+                            TEXT.b
+                        },
                         alpha,
                     ),
                     font_weight: FontWeightHint::Regular,
@@ -1150,7 +1195,9 @@ mod tests {
     #[test]
     fn remove_widget() {
         let mut mgr = make_mgr();
-        let id = mgr.add_widget(WidgetKind::Clock, GridPos::new(0, 0)).unwrap();
+        let id = mgr
+            .add_widget(WidgetKind::Clock, GridPos::new(0, 0))
+            .unwrap();
         assert!(mgr.remove_widget(id));
         assert_eq!(mgr.count(), 0);
     }
@@ -1164,7 +1211,9 @@ mod tests {
     #[test]
     fn move_widget() {
         let mut mgr = make_mgr();
-        let id = mgr.add_widget(WidgetKind::Clock, GridPos::new(0, 0)).unwrap();
+        let id = mgr
+            .add_widget(WidgetKind::Clock, GridPos::new(0, 0))
+            .unwrap();
         assert!(mgr.move_widget(id, GridPos::new(3, 3)));
         assert_eq!(mgr.get(id).unwrap().position, GridPos::new(3, 3));
     }
@@ -1172,7 +1221,9 @@ mod tests {
     #[test]
     fn move_widget_out_of_bounds() {
         let mut mgr = make_mgr();
-        let id = mgr.add_widget(WidgetKind::Clock, GridPos::new(0, 0)).unwrap();
+        let id = mgr
+            .add_widget(WidgetKind::Clock, GridPos::new(0, 0))
+            .unwrap();
         assert!(!mgr.move_widget(id, GridPos::new(8, 0)));
     }
 
@@ -1180,14 +1231,18 @@ mod tests {
     fn move_widget_overlap() {
         let mut mgr = make_mgr();
         mgr.add_widget(WidgetKind::Clock, GridPos::new(2, 2));
-        let id = mgr.add_widget(WidgetKind::Clock, GridPos::new(0, 0)).unwrap();
+        let id = mgr
+            .add_widget(WidgetKind::Clock, GridPos::new(0, 0))
+            .unwrap();
         assert!(!mgr.move_widget(id, GridPos::new(2, 2))); // occupied
     }
 
     #[test]
     fn resize_widget() {
         let mut mgr = make_mgr();
-        let id = mgr.add_widget(WidgetKind::Clock, GridPos::new(0, 0)).unwrap();
+        let id = mgr
+            .add_widget(WidgetKind::Clock, GridPos::new(0, 0))
+            .unwrap();
         assert!(mgr.resize_widget(id, WidgetSize::MEDIUM));
         assert_eq!(mgr.get(id).unwrap().size, WidgetSize::MEDIUM);
     }
@@ -1195,7 +1250,9 @@ mod tests {
     #[test]
     fn resize_widget_blocked_by_overlap() {
         let mut mgr = make_mgr();
-        let id = mgr.add_widget(WidgetKind::Clock, GridPos::new(0, 0)).unwrap();
+        let id = mgr
+            .add_widget(WidgetKind::Clock, GridPos::new(0, 0))
+            .unwrap();
         mgr.add_widget(WidgetKind::Clock, GridPos::new(1, 0));
         assert!(!mgr.resize_widget(id, WidgetSize::MEDIUM)); // would overlap
     }
@@ -1203,7 +1260,9 @@ mod tests {
     #[test]
     fn toggle_visibility() {
         let mut mgr = make_mgr();
-        let id = mgr.add_widget(WidgetKind::Clock, GridPos::new(0, 0)).unwrap();
+        let id = mgr
+            .add_widget(WidgetKind::Clock, GridPos::new(0, 0))
+            .unwrap();
         assert!(mgr.get(id).unwrap().visible);
         mgr.toggle_visibility(id);
         assert!(!mgr.get(id).unwrap().visible);
@@ -1213,7 +1272,9 @@ mod tests {
     #[test]
     fn hit_test() {
         let mut mgr = make_mgr();
-        let id = mgr.add_widget(WidgetKind::Clock, GridPos::new(0, 0)).unwrap();
+        let id = mgr
+            .add_widget(WidgetKind::Clock, GridPos::new(0, 0))
+            .unwrap();
         // Clock is 1x1 at (40,40) with 180x150 cell.
         assert_eq!(mgr.hit_test(50.0, 50.0), Some(id));
         assert_eq!(mgr.hit_test(300.0, 300.0), None);
@@ -1259,7 +1320,9 @@ mod tests {
     #[test]
     fn tick_updates_timestamps() {
         let mut mgr = make_mgr();
-        let id = mgr.add_widget(WidgetKind::Clock, GridPos::new(0, 0)).unwrap();
+        let id = mgr
+            .add_widget(WidgetKind::Clock, GridPos::new(0, 0))
+            .unwrap();
         mgr.tick(5000);
         assert_eq!(mgr.get(id).unwrap().last_updated, 5000);
     }
@@ -1326,7 +1389,9 @@ mod tests {
     #[test]
     fn render_notes_with_text() {
         let mut mgr = make_mgr();
-        let id = mgr.add_widget(WidgetKind::Notes, GridPos::new(0, 0)).unwrap();
+        let id = mgr
+            .add_widget(WidgetKind::Notes, GridPos::new(0, 0))
+            .unwrap();
         mgr.get_mut(id).unwrap().state_text = "Hello world".to_string();
         let cmds = mgr.render();
         assert!(!cmds.is_empty());

@@ -36,6 +36,7 @@
 use guitk::Color;
 use guitk::render::{FontWeightHint, RenderCommand};
 use guitk::style::CornerRadii;
+use guitk::text;
 
 // ============================================================================
 // Catppuccin Mocha theme
@@ -70,11 +71,18 @@ const FILTER_BAR_HEIGHT: f32 = 36.0;
 const STATUS_BAR_HEIGHT: f32 = 24.0;
 const PADDING: f32 = 8.0;
 const LINE_HEIGHT: f32 = 20.0;
-const CHAR_WIDTH: f32 = 8.0;
+/// Font size of the level badge on a log row.
+const BADGE_TEXT: f32 = 10.0;
 const SMALL_TEXT: f32 = 12.0;
 const NORMAL_TEXT: f32 = 14.0;
 const HEADER_TEXT: f32 = 16.0;
 const TITLE_TEXT: f32 = 18.0;
+
+/// Width of the `[source]` cell on a log row.
+///
+/// The cell is elided to this and the row cursor advances by what was drawn,
+/// so the two cannot disagree — see `render_log_list`.
+const SOURCE_WIDTH: f32 = 100.0;
 
 const MAX_LOG_ENTRIES: usize = 100_000;
 const MAX_BOOKMARKS: usize = 500;
@@ -358,9 +366,10 @@ fn parse_json_string(chars: &[char], i: &mut usize) -> Option<String> {
                             }
                         }
                         if let Ok(code) = u32::from_str_radix(&hex, 16)
-                            && let Some(ch) = char::from_u32(code) {
-                                s.push(ch);
-                            }
+                            && let Some(ch) = char::from_u32(code)
+                        {
+                            s.push(ch);
+                        }
                         continue;
                     }
                     Some(&c) => s.push(c),
@@ -621,19 +630,22 @@ impl FilterState {
 
         // Source filter
         if let Some(src) = &self.source_filter
-            && !entry.source.eq_ignore_ascii_case(src) {
-                return false;
-            }
+            && !entry.source.eq_ignore_ascii_case(src)
+        {
+            return false;
+        }
 
         // Time range
         if let Some(start) = self.time_start
-            && entry.timestamp < start {
-                return false;
-            }
+            && entry.timestamp < start
+        {
+            return false;
+        }
         if let Some(end) = self.time_end
-            && entry.timestamp > end {
-                return false;
-            }
+            && entry.timestamp > end
+        {
+            return false;
+        }
 
         // Bookmarked only
         if self.show_bookmarked_only && !entry.bookmarked {
@@ -775,9 +787,10 @@ impl App {
 
     fn toggle_bookmark(&mut self, entry_idx: usize) {
         if let Some(log) = self.files.get_mut(self.active_file)
-            && let Some(entry) = log.entries.get_mut(entry_idx) {
-                entry.bookmarked = !entry.bookmarked;
-            }
+            && let Some(entry) = log.entries.get_mut(entry_idx)
+        {
+            entry.bookmarked = !entry.bookmarked;
+        }
     }
 
     fn update_search(&mut self) {
@@ -874,7 +887,10 @@ impl App {
         // File tabs
         let mut tab_x = 140.0;
         for (fi, file) in self.files.iter().enumerate() {
-            let w = (file.name.len() as f32) * CHAR_WIDTH + 20.0;
+            // Measured bold whatever the tab's state: the active tab is drawn
+            // bold, and sizing each tab to its own weight would reflow the
+            // whole strip every time the user switched files.
+            let w = text::measure(&file.name, SMALL_TEXT, FontWeightHint::Bold) + 20.0;
             let active = fi == self.active_file;
 
             cmds.push(RenderCommand::FillRect {
@@ -906,7 +922,7 @@ impl App {
         let mut mx = WINDOW_WIDTH - 300.0;
         for mode in &modes {
             let label = mode.label();
-            let w = (label.len() as f32) * CHAR_WIDTH + 16.0;
+            let w = text::measure(label, SMALL_TEXT, FontWeightHint::Bold) + 16.0;
             let active = *mode == self.view_mode;
 
             cmds.push(RenderCommand::FillRect {
@@ -962,7 +978,7 @@ impl App {
         let mut lx = PADDING;
         for level in LogLevel::all() {
             let label = level.short_label();
-            let w = (label.len() as f32) * CHAR_WIDTH + 12.0;
+            let w = text::measure(label, BADGE_TEXT, FontWeightHint::Bold) + 12.0;
             let active = level.severity() >= self.filter.min_level.severity();
 
             cmds.push(RenderCommand::FillRect {
@@ -977,7 +993,7 @@ impl App {
                 x: lx + 6.0,
                 y: y + 11.0,
                 text: label.into(),
-                font_size: 10.0,
+                font_size: BADGE_TEXT,
                 color: if active { CRUST } else { OVERLAY0 },
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(w),
@@ -1148,7 +1164,7 @@ impl App {
 
             // Level badge
             let level_label = entry.level.short_label();
-            let level_w = (level_label.len() as f32) * 7.0 + 8.0;
+            let level_w = text::measure(level_label, BADGE_TEXT, FontWeightHint::Bold) + 8.0;
             cmds.push(RenderCommand::FillRect {
                 x: cx,
                 y: ey + 2.0,
@@ -1161,7 +1177,7 @@ impl App {
                 x: cx + 4.0,
                 y: ey + 4.0,
                 text: level_label.into(),
-                font_size: 10.0,
+                font_size: BADGE_TEXT,
                 color: CRUST,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(level_w),
@@ -1170,25 +1186,50 @@ impl App {
 
             // Source
             if self.show_source && !entry.source.is_empty() {
+                // The brackets are drawn, so they have to be measured: the
+                // old estimate advanced by the bare source name and left the
+                // message overlapping the `]`.
+                //
+                // The source is elided rather than left to the compositor's
+                // clip, and the cursor then advances by what was *drawn*. The
+                // two used to disagree: the cell was clipped at SOURCE_WIDTH
+                // but `cx` advanced by the source's full untruncated width, so
+                // a long source both vanished mid-name with no marker and
+                // pushed the message right by space nothing occupied. Past
+                // roughly 1000 px of source it drove `msg_width` negative,
+                // and `elide` of a negative width is the empty string — the
+                // log message disappeared altogether. A source name comes out
+                // of the log file, so its length is not ours to assume.
+                let source_text = format!("[{}]", entry.source);
+                let fitted = text::elide(
+                    &source_text,
+                    SOURCE_WIDTH,
+                    "…",
+                    SMALL_TEXT,
+                    FontWeightHint::Bold,
+                );
+                let drawn_w = text::measure(&fitted, SMALL_TEXT, FontWeightHint::Bold);
                 cmds.push(RenderCommand::Text {
                     x: cx,
                     y: ey + 3.0,
-                    text: format!("[{}]", entry.source),
+                    text: fitted,
                     font_size: SMALL_TEXT,
                     color: SKY,
                     font_weight: FontWeightHint::Bold,
-                    max_width: Some(100.0),
+                    max_width: Some(SOURCE_WIDTH),
                 });
-                cx += (entry.source.len() as f32) * 7.0 + 20.0;
+                cx += drawn_w + 8.0;
             }
 
             // Message
-            let msg_width = WINDOW_WIDTH - cx - PADDING;
-            let display_msg: String = entry
-                .message
-                .chars()
-                .take((msg_width / CHAR_WIDTH) as usize)
-                .collect();
+            let msg_width = (WINDOW_WIDTH - cx - PADDING).max(0.0);
+            let display_msg = text::elide(
+                &entry.message,
+                msg_width,
+                "...",
+                NORMAL_TEXT,
+                FontWeightHint::Regular,
+            );
             cmds.push(RenderCommand::Text {
                 x: cx,
                 y: ey + 3.0,
@@ -1201,10 +1242,16 @@ impl App {
         }
 
         if entries.is_empty() {
+            let empty = "No log entries match filters";
             cmds.push(RenderCommand::Text {
-                x: WINDOW_WIDTH / 2.0 - 80.0,
+                x: text::center_x(
+                    empty,
+                    WINDOW_WIDTH / 2.0,
+                    NORMAL_TEXT,
+                    FontWeightHint::Regular,
+                ),
                 y: y + height / 2.0,
-                text: "No log entries match filters".into(),
+                text: empty.into(),
                 font_size: NORMAL_TEXT,
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
@@ -1383,174 +1430,188 @@ impl App {
     fn render_detail(&self, cmds: &mut Vec<RenderCommand>, y: f32, height: f32) {
         if let Some(idx) = self.selected_entry
             && let Some(log) = self.active_log()
-                && let Some(entry) = log.entries.get(idx) {
-                    let panel_w = WINDOW_WIDTH - 2.0 * PADDING;
+            && let Some(entry) = log.entries.get(idx)
+        {
+            let panel_w = WINDOW_WIDTH - 2.0 * PADDING;
 
-                    // Header
-                    cmds.push(RenderCommand::FillRect {
-                        x: PADDING,
-                        y: y + PADDING,
-                        width: panel_w,
-                        height: 50.0,
-                        color: MANTLE,
-                        corner_radii: CornerRadii {
-                            top_left: 8.0,
-                            top_right: 8.0,
-                            bottom_left: 0.0,
-                            bottom_right: 0.0,
-                        },
-                    });
+            // Header
+            cmds.push(RenderCommand::FillRect {
+                x: PADDING,
+                y: y + PADDING,
+                width: panel_w,
+                height: 50.0,
+                color: MANTLE,
+                corner_radii: CornerRadii {
+                    top_left: 8.0,
+                    top_right: 8.0,
+                    bottom_left: 0.0,
+                    bottom_right: 0.0,
+                },
+            });
 
-                    // Level badge
-                    let level_w = (entry.level.label().len() as f32) * 8.0 + 16.0;
-                    cmds.push(RenderCommand::FillRect {
-                        x: PADDING + 12.0,
-                        y: y + PADDING + 10.0,
-                        width: level_w,
-                        height: 24.0,
-                        color: entry.level.color(),
-                        corner_radii: CornerRadii::all(4.0),
-                    });
-                    cmds.push(RenderCommand::Text {
-                        x: PADDING + 20.0,
-                        y: y + PADDING + 14.0,
-                        text: entry.level.label().into(),
-                        font_size: NORMAL_TEXT,
-                        color: CRUST,
-                        font_weight: FontWeightHint::Bold,
-                        max_width: Some(level_w),
-                    });
+            // Level badge
+            let level_w =
+                text::measure(entry.level.label(), NORMAL_TEXT, FontWeightHint::Bold) + 16.0;
+            cmds.push(RenderCommand::FillRect {
+                x: PADDING + 12.0,
+                y: y + PADDING + 10.0,
+                width: level_w,
+                height: 24.0,
+                color: entry.level.color(),
+                corner_radii: CornerRadii::all(4.0),
+            });
+            cmds.push(RenderCommand::Text {
+                x: PADDING + 20.0,
+                y: y + PADDING + 14.0,
+                text: entry.level.label().into(),
+                font_size: NORMAL_TEXT,
+                color: CRUST,
+                font_weight: FontWeightHint::Bold,
+                max_width: Some(level_w),
+            });
 
-                    // Source and time
-                    cmds.push(RenderCommand::Text {
-                        x: PADDING + level_w + 20.0,
-                        y: y + PADDING + 14.0,
-                        text: format!("[{}] at {}", entry.source, entry.timestamp_display()),
-                        font_size: NORMAL_TEXT,
-                        color: SUBTEXT1,
-                        font_weight: FontWeightHint::Regular,
-                        max_width: Some(400.0),
-                    });
+            // Source and time
+            cmds.push(RenderCommand::Text {
+                x: PADDING + level_w + 20.0,
+                y: y + PADDING + 14.0,
+                text: format!("[{}] at {}", entry.source, entry.timestamp_display()),
+                font_size: NORMAL_TEXT,
+                color: SUBTEXT1,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(400.0),
+            });
 
-                    cmds.push(RenderCommand::Text {
-                        x: PADDING + 12.0,
-                        y: y + PADDING + 38.0,
-                        text: format!("Line {}", entry.line_number),
-                        font_size: SMALL_TEXT,
-                        color: OVERLAY0,
-                        font_weight: FontWeightHint::Regular,
-                        max_width: Some(100.0),
-                    });
+            cmds.push(RenderCommand::Text {
+                x: PADDING + 12.0,
+                y: y + PADDING + 38.0,
+                text: format!("Line {}", entry.line_number),
+                font_size: SMALL_TEXT,
+                color: OVERLAY0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(100.0),
+            });
 
-                    // Message body
-                    let body_y = y + PADDING + 54.0;
-                    cmds.push(RenderCommand::FillRect {
-                        x: PADDING,
-                        y: body_y,
-                        width: panel_w,
-                        height: height - 80.0,
-                        color: CRUST,
-                        corner_radii: CornerRadii {
-                            top_left: 0.0,
-                            top_right: 0.0,
-                            bottom_left: 8.0,
-                            bottom_right: 8.0,
-                        },
-                    });
+            // Message body
+            let body_y = y + PADDING + 54.0;
+            cmds.push(RenderCommand::FillRect {
+                x: PADDING,
+                y: body_y,
+                width: panel_w,
+                height: height - 80.0,
+                color: CRUST,
+                corner_radii: CornerRadii {
+                    top_left: 0.0,
+                    top_right: 0.0,
+                    bottom_left: 8.0,
+                    bottom_right: 8.0,
+                },
+            });
 
-                    // Message
-                    cmds.push(RenderCommand::Text {
-                        x: PADDING + 16.0,
-                        y: body_y + 12.0,
-                        text: "Message:".into(),
-                        font_size: SMALL_TEXT,
-                        color: SUBTEXT0,
-                        font_weight: FontWeightHint::Bold,
-                        max_width: Some(100.0),
-                    });
-                    cmds.push(RenderCommand::Text {
-                        x: PADDING + 16.0,
-                        y: body_y + 30.0,
-                        text: entry.message.clone(),
-                        font_size: NORMAL_TEXT,
-                        color: TEXT,
-                        font_weight: FontWeightHint::Regular,
-                        max_width: Some(panel_w - 32.0),
-                    });
+            // Message
+            cmds.push(RenderCommand::Text {
+                x: PADDING + 16.0,
+                y: body_y + 12.0,
+                text: "Message:".into(),
+                font_size: SMALL_TEXT,
+                color: SUBTEXT0,
+                font_weight: FontWeightHint::Bold,
+                max_width: Some(100.0),
+            });
+            cmds.push(RenderCommand::Text {
+                x: PADDING + 16.0,
+                y: body_y + 30.0,
+                text: entry.message.clone(),
+                font_size: NORMAL_TEXT,
+                color: TEXT,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(panel_w - 32.0),
+            });
 
-                    // Extra fields
-                    if !entry.fields.is_empty() {
-                        let fields_y = body_y + 60.0;
-                        cmds.push(RenderCommand::Text {
-                            x: PADDING + 16.0,
-                            y: fields_y,
-                            text: "Fields:".into(),
-                            font_size: SMALL_TEXT,
-                            color: SUBTEXT0,
-                            font_weight: FontWeightHint::Bold,
-                            max_width: Some(100.0),
-                        });
+            // Extra fields
+            if !entry.fields.is_empty() {
+                let fields_y = body_y + 60.0;
+                cmds.push(RenderCommand::Text {
+                    x: PADDING + 16.0,
+                    y: fields_y,
+                    text: "Fields:".into(),
+                    font_size: SMALL_TEXT,
+                    color: SUBTEXT0,
+                    font_weight: FontWeightHint::Bold,
+                    max_width: Some(100.0),
+                });
 
-                        for (fi, (key, value)) in entry.fields.iter().enumerate() {
-                            let fy = fields_y + 20.0 + (fi as f32) * LINE_HEIGHT;
-                            cmds.push(RenderCommand::Text {
-                                x: PADDING + 24.0,
-                                y: fy,
-                                text: format!("{key}:"),
-                                font_size: SMALL_TEXT,
-                                color: TEAL,
-                                font_weight: FontWeightHint::Bold,
-                                max_width: Some(150.0),
-                            });
-                            cmds.push(RenderCommand::Text {
-                                x: PADDING + 180.0,
-                                y: fy,
-                                text: value.clone(),
-                                font_size: SMALL_TEXT,
-                                color: TEXT,
-                                font_weight: FontWeightHint::Regular,
-                                max_width: Some(panel_w - 200.0),
-                            });
-                        }
-                    }
-
-                    // Raw JSON
-                    let raw_y = body_y + 120.0 + (entry.fields.len() as f32) * LINE_HEIGHT;
-                    cmds.push(RenderCommand::Text {
-                        x: PADDING + 16.0,
-                        y: raw_y,
-                        text: "Raw:".into(),
-                        font_size: SMALL_TEXT,
-                        color: SUBTEXT0,
-                        font_weight: FontWeightHint::Bold,
-                        max_width: Some(100.0),
-                    });
-                    cmds.push(RenderCommand::FillRect {
-                        x: PADDING + 16.0,
-                        y: raw_y + 18.0,
-                        width: panel_w - 32.0,
-                        height: LINE_HEIGHT + 8.0,
-                        color: SURFACE0,
-                        corner_radii: CornerRadii::all(4.0),
-                    });
+                for (fi, (key, value)) in entry.fields.iter().enumerate() {
+                    let fy = fields_y + 20.0 + (fi as f32) * LINE_HEIGHT;
                     cmds.push(RenderCommand::Text {
                         x: PADDING + 24.0,
-                        y: raw_y + 22.0,
-                        text: truncate_str(&entry.raw, 120),
+                        y: fy,
+                        text: format!("{key}:"),
                         font_size: SMALL_TEXT,
-                        color: OVERLAY0,
-                        font_weight: FontWeightHint::Regular,
-                        max_width: Some(panel_w - 48.0),
+                        color: TEAL,
+                        font_weight: FontWeightHint::Bold,
+                        max_width: Some(150.0),
                     });
-
-                    return;
+                    cmds.push(RenderCommand::Text {
+                        x: PADDING + 180.0,
+                        y: fy,
+                        text: value.clone(),
+                        font_size: SMALL_TEXT,
+                        color: TEXT,
+                        font_weight: FontWeightHint::Regular,
+                        max_width: Some(panel_w - 200.0),
+                    });
                 }
+            }
+
+            // Raw JSON
+            let raw_y = body_y + 120.0 + (entry.fields.len() as f32) * LINE_HEIGHT;
+            cmds.push(RenderCommand::Text {
+                x: PADDING + 16.0,
+                y: raw_y,
+                text: "Raw:".into(),
+                font_size: SMALL_TEXT,
+                color: SUBTEXT0,
+                font_weight: FontWeightHint::Bold,
+                max_width: Some(100.0),
+            });
+            cmds.push(RenderCommand::FillRect {
+                x: PADDING + 16.0,
+                y: raw_y + 18.0,
+                width: panel_w - 32.0,
+                height: LINE_HEIGHT + 8.0,
+                color: SURFACE0,
+                corner_radii: CornerRadii::all(4.0),
+            });
+            cmds.push(RenderCommand::Text {
+                x: PADDING + 24.0,
+                y: raw_y + 22.0,
+                text: text::elide(
+                    &entry.raw,
+                    panel_w - 48.0,
+                    "...",
+                    SMALL_TEXT,
+                    FontWeightHint::Regular,
+                ),
+                font_size: SMALL_TEXT,
+                color: OVERLAY0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(panel_w - 48.0),
+            });
+
+            return;
+        }
 
         // No selection
+        let empty = "Select a log entry to view details";
         cmds.push(RenderCommand::Text {
-            x: WINDOW_WIDTH / 2.0 - 100.0,
+            x: text::center_x(
+                empty,
+                WINDOW_WIDTH / 2.0,
+                NORMAL_TEXT,
+                FontWeightHint::Regular,
+            ),
             y: y + height / 2.0,
-            text: "Select a log entry to view details".into(),
+            text: empty.into(),
             font_size: NORMAL_TEXT,
             color: OVERLAY0,
             font_weight: FontWeightHint::Regular,
@@ -1612,15 +1673,6 @@ impl App {
                 max_width: Some(100.0),
             });
         }
-    }
-}
-
-fn truncate_str(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.into()
-    } else {
-        let t: String = s.chars().take(max.saturating_sub(3)).collect();
-        format!("{t}...")
     }
 }
 
@@ -2034,15 +2086,42 @@ mod tests {
 
     // --- Utility tests ---
 
+    /// The raw line at the foot of the detail panel is cut to the width of the
+    /// box drawn behind it. The old helper compared `s.len()` — bytes — against
+    /// a fixed budget of 120 "characters", so an accented line was cut short
+    /// while it still fitted, and a line of wide glyphs ran past the box.
     #[test]
-    fn test_truncate_short() {
-        assert_eq!(truncate_str("hello", 10), "hello");
+    fn the_raw_line_is_cut_to_the_box_drawn_behind_it() {
+        for raw in [
+            "2026-08-14T10:00:00Z INFO kernel: a raw log line long enough to need cutting down",
+            "2026-08-14T10:00:00Z INFO kernel: une ligne brute avec des caractères accentués \
+             suffisamment longue",
+        ] {
+            // Half of what the line actually measures, rather than a literal.
+            // The `ends_with("...")` assertion below only means anything if
+            // the line really does overflow `room`, and with a literal that is
+            // a race between the constant and however wide the host's font
+            // draws. These lines measure 450px against the 400px that used to
+            // be hard-coded here — a 12% margin — and the same shape of test
+            // in dbviewer had already lost that race and begun failing when
+            // `SystemFont` started resolving a narrower face. Half the
+            // measured width cannot lose it, on any face.
+            let room = text::measure(raw, SMALL_TEXT, FontWeightHint::Regular) / 2.0;
+            let out = text::elide(raw, room, "...", SMALL_TEXT, FontWeightHint::Regular);
+            let w = text::measure(&out, SMALL_TEXT, FontWeightHint::Regular);
+            assert!(w <= room + 0.01, "{out:?} is {w} px in {room} px of room");
+            assert!(out.ends_with("..."), "a cut raw line should say so");
+        }
     }
 
+    /// A raw line that fits is left exactly as it is — no ellipsis, no loss.
     #[test]
-    fn test_truncate_long() {
-        let result = truncate_str("a very long string indeed", 10);
-        assert!(result.ends_with("..."));
+    fn a_short_raw_line_is_left_alone() {
+        let raw = "INFO ready";
+        assert_eq!(
+            text::elide(raw, 400.0, "...", SMALL_TEXT, FontWeightHint::Regular),
+            raw
+        );
     }
 
     // --- Helper ---
@@ -2058,5 +2137,181 @@ mod tests {
             raw: String::new(),
             bookmarked: false,
         }
+    }
+    // --- Text measurement ---
+
+    /// Every level badge has to fit the pill drawn behind it. The labels are
+    /// short and ASCII, so the old byte-count estimate happened to work — but
+    /// it worked for the wrong reason, and would stop the moment the face
+    /// changed or a label gained a non-ASCII character.
+    #[test]
+    fn level_badges_fit_their_pills() {
+        for level in LogLevel::all() {
+            let label = level.short_label();
+            let pill = text::measure(label, BADGE_TEXT, FontWeightHint::Bold) + 12.0;
+            assert!(
+                text::measure(label, BADGE_TEXT, FontWeightHint::Bold) <= pill - 12.0 + 0.01,
+                "{label:?} does not fit its pill"
+            );
+            assert!(pill > 12.0, "{label:?} produced an empty pill");
+        }
+    }
+
+    /// The source field is drawn with brackets around it, so it has to be
+    /// measured with them. The old estimate advanced the pen by the bare
+    /// source name, leaving the message overlapping the closing bracket.
+    #[test]
+    fn the_source_field_advances_past_its_brackets() {
+        let bare = text::measure("kernel", SMALL_TEXT, FontWeightHint::Bold);
+        let bracketed = text::measure("[kernel]", SMALL_TEXT, FontWeightHint::Bold);
+        assert!(
+            bracketed > bare,
+            "brackets are drawn, so they take room: {bare} vs {bracketed}"
+        );
+    }
+
+    /// A long message is cut to the room left on the row, by measured width.
+    #[test]
+    fn a_long_message_is_elided_to_the_room_left() {
+        let msg = "a log line that is far longer than the space left for it on the row";
+        let room = 120.0;
+        let out = text::elide(msg, room, "...", NORMAL_TEXT, FontWeightHint::Regular);
+        let w = text::measure(&out, NORMAL_TEXT, FontWeightHint::Regular);
+        assert!(w <= room + 0.01, "{out:?} is {w} px in {room} px of room");
+        assert!(out.ends_with("..."), "a cut message should say so");
+    }
+
+    /// The file-tab strip must not reflow when the selection moves, so every
+    /// tab is measured in the bold weight the active one is drawn in.
+    #[test]
+    fn the_file_tab_strip_does_not_reflow_on_selection() {
+        for name in ["app.log", "very-long-service-name.log"] {
+            let w = text::measure(name, SMALL_TEXT, FontWeightHint::Bold) + 20.0;
+            let regular = text::measure(name, SMALL_TEXT, FontWeightHint::Regular);
+            assert!(w >= regular + 20.0, "{name:?} tab is too narrow when bold");
+        }
+    }
+
+    // --- Log row layout ---
+    //
+    // A row's cursor and the cells it draws are two calculations of one
+    // quantity. The source cell is where they used to disagree: it was clipped
+    // to SOURCE_WIDTH but advanced the cursor by its full untruncated width.
+
+    /// An app whose one and only log entry has the given source.
+    fn app_with_source(source: &str) -> App {
+        let mut app = App::new();
+        app.files.truncate(1);
+        app.active_file = 0;
+        if let Some(file) = app.files.first_mut() {
+            file.entries.clear();
+            file.entries.push(LogEntry {
+                line_number: 1,
+                timestamp: 1_000,
+                level: LogLevel::Info,
+                source: source.to_string(),
+                message: "the message that must survive".to_string(),
+                fields: Vec::new(),
+                raw: String::new(),
+                bookmarked: false,
+            });
+        }
+        // Every optional cell on, so the row cursor has crossed all of them by
+        // the time it reaches the source — the layout most likely to overflow.
+        app.show_source = true;
+        app.show_timestamps = true;
+        app.show_line_numbers = true;
+        app
+    }
+
+    /// Every text command drawn by the log list, in order.
+    fn row_texts(app: &App) -> Vec<(f32, String, f32, FontWeightHint)> {
+        let mut cmds = Vec::new();
+        app.render_log_list(&mut cmds, 0.0, 200.0);
+        cmds.iter()
+            .filter_map(|cmd| match cmd {
+                RenderCommand::Text {
+                    x,
+                    text,
+                    font_size,
+                    font_weight,
+                    ..
+                } => Some((*x, text.clone(), *font_size, *font_weight)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn an_overlong_source_is_marked_as_cut_and_stays_in_its_cell() {
+        let app = app_with_source("com.example.platform.services.database.connection.pool");
+        let texts = row_texts(&app);
+        let (x, drawn, size, weight) = texts
+            .iter()
+            .find(|(_, t, _, _)| t.starts_with('['))
+            .cloned()
+            .expect("the source cell should be drawn");
+        assert!(
+            drawn.ends_with('…'),
+            "a source too long for its cell must be visibly cut, got {drawn:?}"
+        );
+        let w = text::measure(&drawn, size, weight);
+        assert!(
+            w <= SOURCE_WIDTH + 0.01,
+            "source {drawn:?} is {w} px in a {SOURCE_WIDTH} px cell"
+        );
+        assert!(x >= 0.0);
+    }
+
+    #[test]
+    fn a_short_source_is_left_verbatim() {
+        let app = app_with_source("db");
+        let texts = row_texts(&app);
+        assert!(
+            texts.iter().any(|(_, t, _, _)| t == "[db]"),
+            "a source that fits must be drawn verbatim: {texts:?}"
+        );
+    }
+
+    #[test]
+    fn an_absurd_source_does_not_swallow_the_message() {
+        // The failure this guards: `cx` advanced by the source's *full* width,
+        // so a source wide enough drove msg_width negative, and elide() of a
+        // negative width is the empty string. The log line vanished, leaving a
+        // row that showed only a truncated source name.
+        let app = app_with_source(&"averylongsourcesegment.".repeat(60));
+        let texts = row_texts(&app);
+        assert!(
+            texts
+                .iter()
+                .any(|(_, t, _, _)| t.starts_with("the message")),
+            "the message must still be drawn however long the source is: {texts:?}"
+        );
+    }
+
+    #[test]
+    fn the_message_starts_where_the_source_ends() {
+        // The cursor must advance by what was drawn, not by what it was given:
+        // otherwise a clipped source leaves a gap of blank row before the
+        // message, in space nothing occupies.
+        let app = app_with_source("com.example.platform.services.database.connection.pool");
+        let texts = row_texts(&app);
+        let (sx, source, ssize, sweight) = texts
+            .iter()
+            .find(|(_, t, _, _)| t.starts_with('['))
+            .cloned()
+            .expect("the source cell should be drawn");
+        let (mx, _, _, _) = texts
+            .iter()
+            .find(|(_, t, _, _)| t.starts_with("the message"))
+            .cloned()
+            .expect("the message should be drawn");
+        let source_end = sx + text::measure(&source, ssize, sweight);
+        let gap = mx - source_end;
+        assert!(
+            (0.0..=16.0).contains(&gap),
+            "message starts {gap} px after the source ends; \
+             a gap that large is space the clipped source was charged for"
+        );
     }
 }

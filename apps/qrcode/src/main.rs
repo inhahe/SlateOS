@@ -41,6 +41,7 @@
 use guitk::Color;
 use guitk::render::{FontWeightHint, RenderCommand};
 use guitk::style::CornerRadii;
+use guitk::text;
 
 // ============================================================================
 // Catppuccin Mocha theme
@@ -1662,7 +1663,7 @@ impl QrApp {
         let mut tx = 200.0;
         for ct in &types {
             let is_active = *ct == self.code_type;
-            let btn_w = ct.label().len() as f32 * 8.0 + 20.0;
+            let btn_w = text::padded_width(ct.label(), 10.0, 11.0, FontWeightHint::Regular);
             cmds.push(RenderCommand::FillRect {
                 x: tx,
                 y: 8.0,
@@ -1808,7 +1809,7 @@ impl QrApp {
         let mut mx = lx;
         for mode in InputMode::all() {
             let is_active = *mode == self.input_mode;
-            let btn_w = mode.label().len() as f32 * 7.5 + 16.0;
+            let btn_w = text::padded_width(mode.label(), 8.0, 11.0, FontWeightHint::Regular);
             if mx + btn_w > LEFT_PANEL_WIDTH - 12.0 {
                 mx = lx;
                 cy += 26.0;

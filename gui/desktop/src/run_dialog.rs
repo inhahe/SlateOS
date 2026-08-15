@@ -33,6 +33,7 @@
 use guitk::event::{EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::render::{FontWeightHint, RenderCommand};
 use guitk::style::CornerRadii;
+use guitk::text;
 
 // ============================================================================
 // Theme — Catppuccin Mocha palette
@@ -520,9 +521,10 @@ impl RunDialog {
                 if self.show_autocomplete && self.suggestion_index.is_some() {
                     // Navigate autocomplete up
                     if let Some(idx) = self.suggestion_index
-                        && idx > 0 {
-                            self.suggestion_index = Some(idx - 1);
-                        }
+                        && idx > 0
+                    {
+                        self.suggestion_index = Some(idx - 1);
+                    }
                 } else {
                     self.history_prev();
                 }
@@ -532,9 +534,10 @@ impl RunDialog {
                 if self.show_autocomplete && self.suggestion_index.is_some() {
                     // Navigate autocomplete down
                     if let Some(idx) = self.suggestion_index
-                        && idx + 1 < self.suggestions.len() {
-                            self.suggestion_index = Some(idx + 1);
-                        }
+                        && idx + 1 < self.suggestions.len()
+                    {
+                        self.suggestion_index = Some(idx + 1);
+                    }
                 } else {
                     self.history_next();
                 }
@@ -596,11 +599,7 @@ impl RunDialog {
         let local_y = event.y - self.dialog_y;
 
         // Check if click is outside dialog bounds — dismiss.
-        if local_x < 0.0
-            || local_y < 0.0
-            || local_x > DIALOG_WIDTH
-            || local_y > DIALOG_HEIGHT
-        {
+        if local_x < 0.0 || local_y < 0.0 || local_x > DIALOG_WIDTH || local_y > DIALOG_HEIGHT {
             if matches!(event.kind, MouseEventKind::Press(MouseButton::Left)) {
                 self.events.push(RunDialogEvent::Cancel);
                 self.hide();
@@ -778,8 +777,8 @@ impl RunDialog {
             let (start, end) = self.input.selection_range();
             let text_before_start = &self.input.text[..start];
             let text_selection = &self.input.text[start..end];
-            let start_px = estimate_text_width(text_before_start, INPUT_FONT_SIZE);
-            let sel_width = estimate_text_width(text_selection, INPUT_FONT_SIZE);
+            let start_px = text::width(text_before_start, INPUT_FONT_SIZE);
+            let sel_width = text::width(text_selection, INPUT_FONT_SIZE);
             cmds.push(RenderCommand::FillRect {
                 x: input_x + 4.0 + start_px,
                 y: y + INPUT_Y_OFFSET + 3.0,
@@ -803,7 +802,7 @@ impl RunDialog {
 
         // Cursor.
         let cursor_text = &self.input.text[..self.input.cursor];
-        let cursor_px = estimate_text_width(cursor_text, INPUT_FONT_SIZE);
+        let cursor_px = text::width(cursor_text, INPUT_FONT_SIZE);
         cmds.push(RenderCommand::Line {
             x1: input_x + 4.0 + cursor_px,
             y1: y + INPUT_Y_OFFSET + 4.0,
@@ -870,7 +869,11 @@ impl RunDialog {
                     x: dropdown_x + 8.0,
                     y: row_y + 6.0,
                     text: suggestion.text.clone(),
-                    color: if is_selected { theme::BLUE } else { theme::TEXT },
+                    color: if is_selected {
+                        theme::BLUE
+                    } else {
+                        theme::TEXT
+                    },
                     font_size: INPUT_FONT_SIZE,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(input_w - 16.0),
@@ -899,10 +902,7 @@ impl RunDialog {
         self.render_button(
             &mut cmds,
             "Browse...",
-            x + DIALOG_WIDTH
-                - PADDING
-                - BUTTON_WIDTH * 3.0
-                - BUTTON_SPACING * 2.0,
+            x + DIALOG_WIDTH - PADDING - BUTTON_WIDTH * 3.0 - BUTTON_SPACING * 2.0,
             button_y,
             ButtonId::Browse,
             false,
@@ -948,7 +948,12 @@ impl RunDialog {
         });
 
         cmds.push(RenderCommand::Text {
-            x: bx + BUTTON_WIDTH / 2.0 - estimate_text_width(label, BODY_FONT_SIZE) / 2.0,
+            x: text::center_x(
+                label,
+                bx + BUTTON_WIDTH / 2.0,
+                BODY_FONT_SIZE,
+                FontWeightHint::Regular,
+            ),
             y: by + 7.0,
             text: label.to_string(),
             color: fg,
@@ -1005,7 +1010,10 @@ impl RunDialog {
             for _dir in &self.path_dirs {
                 // In a real implementation, we would check if dir/program exists.
                 // For now, accept anything that looks like a valid command name.
-                if program.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.') {
+                if program
+                    .chars()
+                    .all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.')
+                {
                     return true;
                 }
             }
@@ -1172,9 +1180,10 @@ fn fuzzy_score(query: &str, target: &str) -> Option<u32> {
 
             // Bonus for consecutive matches.
             if let Some(prev) = prev_match_idx
-                && ti == prev + 1 {
-                    score = score.saturating_add(5);
-                }
+                && ti == prev + 1
+            {
+                score = score.saturating_add(5);
+            }
 
             prev_match_idx = Some(ti);
             qi += 1;
@@ -1203,17 +1212,6 @@ fn fuzzy_score(query: &str, target: &str) -> Option<u32> {
     score = score.saturating_add(length_bonus);
 
     Some(score)
-}
-
-// ============================================================================
-// Text width estimation
-// ============================================================================
-
-/// Rough text width estimation for cursor/selection positioning.
-/// In a real system this would query the font rasterizer metrics.
-fn estimate_text_width(text: &str, font_size: f32) -> f32 {
-    // Approximate: average char width ~0.55 of font size for a monospace-ish font.
-    text.len() as f32 * font_size * 0.55
 }
 
 // ============================================================================

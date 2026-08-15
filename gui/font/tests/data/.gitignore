@@ -1,0 +1,6 @@
+# Unicode's whole bidi conformance suite: 6.8 MB, fetched on demand by
+# `gui/font/tools/gen_bidi_conformance.py` and run by `tests/bidi.rs` under
+# `--ignored`. Too big for a tree that is cloned on every machine; the
+# stratified sample beside it (bidi_conformance.txt) is checked in instead
+# and is what every `cargo test` runs.
+BidiCharacterTest.txt

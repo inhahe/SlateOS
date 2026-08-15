@@ -152,9 +152,18 @@ mod tests {
 
     #[test]
     fn test_event_subops_consecutive() {
-        assert_eq!(CXL_MBOX_OP_CLEAR_EVENT_RECORDS, CXL_MBOX_OP_GET_EVENT_RECORDS + 1);
-        assert_eq!(CXL_MBOX_OP_GET_EVT_INT_POLICY, CXL_MBOX_OP_GET_EVENT_RECORDS + 2);
-        assert_eq!(CXL_MBOX_OP_SET_EVT_INT_POLICY, CXL_MBOX_OP_GET_EVENT_RECORDS + 3);
+        assert_eq!(
+            CXL_MBOX_OP_CLEAR_EVENT_RECORDS,
+            CXL_MBOX_OP_GET_EVENT_RECORDS + 1
+        );
+        assert_eq!(
+            CXL_MBOX_OP_GET_EVT_INT_POLICY,
+            CXL_MBOX_OP_GET_EVENT_RECORDS + 2
+        );
+        assert_eq!(
+            CXL_MBOX_OP_SET_EVT_INT_POLICY,
+            CXL_MBOX_OP_GET_EVENT_RECORDS + 3
+        );
     }
 
     #[test]
@@ -166,10 +175,19 @@ mod tests {
     #[test]
     fn test_get_set_pairs() {
         assert_eq!(CXL_MBOX_OP_SET_TIMESTAMP, CXL_MBOX_OP_GET_TIMESTAMP + 1);
-        assert_eq!(CXL_MBOX_OP_SET_PARTITION_INFO, CXL_MBOX_OP_GET_PARTITION_INFO + 1);
+        assert_eq!(
+            CXL_MBOX_OP_SET_PARTITION_INFO,
+            CXL_MBOX_OP_GET_PARTITION_INFO + 1
+        );
         assert_eq!(CXL_MBOX_OP_SET_LSA, CXL_MBOX_OP_GET_LSA + 1);
-        assert_eq!(CXL_MBOX_OP_SET_ALERT_CONFIG, CXL_MBOX_OP_GET_ALERT_CONFIG + 1);
-        assert_eq!(CXL_MBOX_OP_SET_SHUTDOWN_STATE, CXL_MBOX_OP_GET_SHUTDOWN_STATE + 1);
+        assert_eq!(
+            CXL_MBOX_OP_SET_ALERT_CONFIG,
+            CXL_MBOX_OP_GET_ALERT_CONFIG + 1
+        );
+        assert_eq!(
+            CXL_MBOX_OP_SET_SHUTDOWN_STATE,
+            CXL_MBOX_OP_GET_SHUTDOWN_STATE + 1
+        );
     }
 
     #[test]

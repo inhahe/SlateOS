@@ -709,7 +709,7 @@ impl Word {
         fn parts_ok(parts: &[WordPart]) -> bool {
             parts.iter().all(|p| match p {
                 WordPart::Literal(_) | WordPart::SingleQuoted { .. } => true,
-                WordPart::DoubleQuoted(inner) => parts_ok(inner),
+                WordPart::DoubleQuoted { parts: inner, .. } => parts_ok(inner),
                 _ => false,
             })
         }
@@ -744,13 +744,35 @@ pub enum WordPart {
     /// have to be carried. `text` is the quote's reading, `parts` the
     /// arithmetic one, `None` everywhere a run cannot reach arithmetic. See
     /// [`crate::parser::word_subscript_from_source_at`].
+    ///
+    /// One reader more wants the same field, and fills it for itself rather
+    /// than at parse time: `brace_gobbler` inside `" … "`, where a `'` is not a
+    /// quote either. It is the only reader with that view of an ordinary
+    /// pattern or operand, so the fill is made in the copy it scans and nowhere
+    /// else — [`crate::unparse::fill_quoted_runs`].
     SingleQuoted {
         text: Str,
         escaped: bool,
+        /// Whether the closing `'` was in the source — see
+        /// [`WordPart::DoubleQuoted`]'s field of the same name. Always `true`
+        /// for the backslash spelling, which has no quotes to match.
+        closed: bool,
         parts: Option<Vec<WordPart>>,
     },
     /// Double-quoted run of parts (expansion, but no splitting/globbing).
-    DoubleQuoted(Vec<WordPart>),
+    ///
+    /// `closed` is whether the source really wrote the mate. It normally did:
+    /// a word whose `"` never closes is a parse error. But
+    /// `string_extract_double_quoted` walks a *finished word* rather than a
+    /// stream — the text of an `${x@P}`, a `PS4`, a here-document body — and
+    /// there an unmated `"` is not an error at all; the run simply ends where
+    /// the text does. Only this field tells the two apart afterwards, and
+    /// without it [`crate::unparse::part_src`] prints back a byte the source
+    /// never held, which every diagnostic naming the word then repeats.
+    DoubleQuoted {
+        parts: Vec<WordPart>,
+        closed: bool,
+    },
     /// An array subscript that an **arithmetic** word expansion met in the word
     /// itself and expands *in place*, ahead of any second reading — bash's
     /// `expand_array_subscript` (subst.c:10836-10894), reached from
@@ -825,6 +847,10 @@ pub enum WordPart {
         index: Option<Box<Word>>,
         offset: Box<Word>,
         length: Option<Box<Word>>,
+        /// The whole bounds text, when an unbalanced `(` in it ran `skiparith`
+        /// off the end. See [`WordPart::ArraySlice`]'s field of the same name,
+        /// which documents the rule; the two operators share it.
+        unclosed: Option<Str>,
     },
     /// `${name/pat/repl}` (first) / `${name//pat/repl}` (all) /
     /// `${name/#pat/repl}` (anchored at start) / `${name/%pat/repl}` (anchored at
@@ -1003,6 +1029,22 @@ pub enum WordPart {
         star: bool,
         offset: Box<Word>,
         length: Option<Box<Word>>,
+        /// The whole bounds text, when an unbalanced `(` in it ran `skiparith`
+        /// (subst.c) off the end looking for the colon — which bash answers with
+        /// ``bad substitution: no closing `)' in <text>``, *instead of* either
+        /// bound, and before it evaluates either. It is the same `depth` counter
+        /// that hides a colon inside a `( … )`, so the two are one walk:
+        /// `${z:(0):(1}` splits normally and the length is an ordinary
+        /// arithmetic error, while `${z:(1:2}` is this. Being unbalanced also
+        /// means the walk consumed the whole text, so there is never a `length`
+        /// beside a `Some` here — `offset` holds the same characters this does.
+        ///
+        /// It is *not* a [`WordPart::BadSubst`], though it prints the same two
+        /// words: an unset parameter is answered before it (`unset u;
+        /// "${u:(1}"` is silently empty, where `"${u:}"` is a bad substitution),
+        /// so it belongs where the bounds are measured rather than where the
+        /// operator is parsed.
+        unclosed: Option<Str>,
     },
     /// A pattern/case/substitution operator applied to *every* element of an
     /// array (`${a[@]#pat}`, `${a[@]/x/y}`, `${a[@]^^}`, `${a[@]@Q}`) or to every
@@ -1093,7 +1135,53 @@ pub enum WordPart {
         /// `true` for `<(cmd)` (the command's output is read); `false` for
         /// `>(cmd)` (data written to the file is sent to the command).
         input: bool,
-        body: Program,
+        body: ProcSubBody,
+    },
+}
+
+/// How a [`WordPart::ProcSub`] body reached the shell — the same split
+/// [`CmdSubBody`] makes for the `$(` spelling, and for the same reason.
+///
+/// bash reads a `<( … )` twice when it is written where a parser was reading:
+/// `parse_comsub` (parse.y:5028's comment names all three spellings) parses it
+/// for its extent, and the re-print it keeps is read again when the word is
+/// expanded. Written in text no parser read — the body of a `${ … }` that
+/// reached the shell as a *value*, which `${x@P}` and `PS4` re-read — only the
+/// second read happens, and the *scan* that finds it
+/// (`extract_dollar_brace_string`, subst.c:1881-1950) is the one that parses it
+/// for its extent.
+///
+/// The two are not interchangeable. A body a parser read has already raised its
+/// syntax error, as the enclosing script's; one only the scan read raises it
+/// from the scan, where a failure does not end the script but leaves the brace
+/// unclosed — `bad substitution`, and the text printed as written. Measured
+/// against bash 5.2.37, `x='A${z#<(fi)}B'; echo "${x@P}"` reports the parse
+/// twice and then `bad substitution`, byte for byte as the `$(` spelling does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProcSubBody {
+    /// A body a parser read, held as the tree that parse produced. Its syntax
+    /// errors were the enclosing parse's, and `declare -f` re-prints it.
+    Parsed(Program),
+    /// A body only a `${ … }` scan read, held as text.
+    ///
+    /// Kept as text and not as a tree because the scan's read can *fail*, and a
+    /// failure here is not the parse error the [`ProcSubBody::Parsed`] spelling
+    /// raises — it is the brace never closing. The read is made by
+    /// [`crate::interp::Shell::extent_read_of_subs`], which reaches this body
+    /// through [`crate::interp::Shell::brace_scanned_subs_slice`]; only if it
+    /// succeeds is the expansion reached at all, and the body parsed and
+    /// performed there.
+    Unread {
+        /// The body text, between the `(` and its `)`.
+        src: Str,
+        /// Everything after the closing `)` in the string this body sits in —
+        /// what the extent read echoes as its remainder. Filled by
+        /// [`crate::unparse::attach_comsub_tails`] once the word is assembled,
+        /// exactly as [`CmdSubBody::Unread::tail`] is.
+        tail: Str,
+        /// Whether a `)` was found at all. A body with none takes the rest of
+        /// the string, as `extract_command_subst` does.
+        closed: bool,
     },
 }
 
@@ -1169,7 +1257,7 @@ impl WordPart {
             }
 
             // Reached, and carrying sub-words.
-            WordPart::DoubleQuoted(parts) => {
+            WordPart::DoubleQuoted { parts, .. } => {
                 parts.iter().find_map(|p| p.first_scanned_arith(hides_closer))
             }
             WordPart::ParamOp { index, arg, .. } => {
@@ -1383,6 +1471,45 @@ impl LineMap {
 /// wherever the two differ in *length*: a compound command re-prints over
 /// several lines, so `$LINENO` after one inside the same body sits that much
 /// lower.
+/// Which delimiter opened an *unread* substitution — see
+/// [`CmdSubBody::Unread`].
+///
+/// Only the unread spelling needs to record this. A body a parser read is a
+/// [`CmdSubBody::Parsed`] for the `$(` spelling and a [`WordPart::ProcSub`] for
+/// the other two, so the two shapes already tell them apart; a body no parser
+/// read has one shape for all three, because bash's
+/// `extract_dollar_brace_string` reads all three the same way
+/// (subst.c:1881-1950) and only the *expansion* after it tells them apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubDelim {
+    /// `$( … )` — performed where the expansion meets it.
+    Dollar,
+    /// `<( … )` — read by the scan, never performed by it.
+    ProcIn,
+    /// `>( … )` — likewise.
+    ProcOut,
+}
+
+impl SubDelim {
+    /// The opening delimiter as written — the bytes the body prints back in.
+    #[must_use]
+    pub fn bytes(self) -> &'static [u8] {
+        match self {
+            SubDelim::Dollar => b"$(",
+            SubDelim::ProcIn => b"<(",
+            SubDelim::ProcOut => b">(",
+        }
+    }
+
+    /// Whether the expansion that meets this body *performs* it. Only the `$(`
+    /// spelling is a command substitution; the other two are read for their
+    /// extent alone and then stand as the text they were written as.
+    #[must_use]
+    pub fn is_performed(self) -> bool {
+        matches!(self, SubDelim::Dollar)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CmdSubBody {
     /// `$( … )` — parsed with the enclosing source, then re-read at expansion
@@ -1450,6 +1577,20 @@ pub enum CmdSubBody {
     /// in a here-document body reports one line further down than a
     /// `` ` … ` `` in the same body does.
     Unread {
+        /// Which of the three spellings wrote it.
+        ///
+        /// The *read* is the same for all three — `extract_dollar_brace_string`
+        /// names `$(`, `<(` and `>(` in one row and hands each to
+        /// `extract_command_subst` (subst.c:1881-1950), so a body that will not
+        /// parse fails identically whichever opened it, down to the remainder
+        /// the diagnostic quotes (which starts at the body, never at the
+        /// delimiter). Measured against bash 5.2.37, `A${z:-<(fi)}TAIL` and
+        /// `A${z:-$(fi)}TAIL` under `${x@P}` are byte for byte the same.
+        ///
+        /// What differs is everything *after* the read: only a `$(` is
+        /// performed ([`SubDelim::is_performed`]), and each prints back in the
+        /// delimiter it was written with ([`SubDelim::bytes`]).
+        delim: SubDelim,
         /// The body exactly as written — there is no re-print to stand in for it.
         src: Str,
         /// The rest of the enclosing word, as [`CmdSubBody::Parsed::tail`], and
@@ -1483,6 +1624,20 @@ pub enum CmdSubBody {
         /// merely untidy — a nested `` \` `` would lose its backslash and the
         /// result would no longer parse.
         verbatim: Str,
+        /// What follows the closing `` ` `` in the word `brace_gobbler` walks —
+        /// filled only by [`crate::unparse::gobbler_word`], empty everywhere
+        /// else.
+        ///
+        /// No *parser* wants this: a backquote body is `string_extract`'s byte
+        /// hunt for the closer (subst.c:1886), which stops there and never looks
+        /// past it. The gobbler does look past it, because inside `" … "` a
+        /// backquote is only a character to it and the scan reads straight on
+        /// into the body — so a `$( … )` in there is handed
+        /// `extract_command_subst` over the **word's** string, and a diagnostic
+        /// from it quotes the rest of the word. See
+        /// [`crate::interp::Shell::gobbled_subs`], which glues this onto the
+        /// body-scoped tail of each substitution it finds inside.
+        tail: Str,
     },
     /// `$(( … )` — a `$((` whose body did not read as an arithmetic expression,
     /// so bash ran it as a command substitution instead.
@@ -1771,6 +1926,7 @@ pub fn dup_move_source(target: &Word) -> Option<Word> {
         } => Some(WordPart::SingleQuoted {
             text: text.strip_suffix(b"-")?.to_vec(),
             escaped: true,
+            closed: true,
             parts: None,
         }),
         _ => return None,
@@ -1932,6 +2088,7 @@ mod tests {
                 WordPart::SingleQuoted {
                     text: Vec::new(),
                     escaped: true,
+                    closed: true,
                     parts: None
                 },
             ]
@@ -1943,6 +2100,7 @@ mod tests {
             vec![WordPart::SingleQuoted {
                 text: Vec::new(),
                 escaped: true,
+                closed: true,
                 parts: None
             }]
         );

@@ -28,6 +28,7 @@ use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
+use guitk::text;
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -72,6 +73,33 @@ const FONT_SIZE_TITLE: f32 = 20.0;
 const BUTTON_WIDTH: f32 = 100.0;
 const BUTTON_HEIGHT: f32 = 30.0;
 const CORNER_RADIUS: f32 = 6.0;
+/// Room the details panel reserves for a snapshot's description row.
+///
+/// A one-line description is shorter than this; the rest of the panel was laid
+/// out against this figure, so a short description keeps the original spacing.
+const DESCRIPTION_ROW_HEIGHT: f32 = 20.0;
+
+/// How far a snapshot description may wrap in the details panel.
+///
+/// The panel is a fixed [`DETAILS_PANEL_HEIGHT`] box with the ancestry chain
+/// anchored to its *bottom*, so the running cursor above cannot grow without
+/// bound. Measured from `panel_y`: name 24, description 20, metadata 20,
+/// components 20, tags 18 — 102px of 160, with the chain row starting at 138.
+/// That leaves 36px of slack, i.e. room for two extra 17px lines; two total is
+/// the cap that still clears the chain with a line to spare. A description
+/// longer than that is ellipsised, which `Paragraph::max_lines` marks so it
+/// does not read as a complete sentence.
+const DESCRIPTION_MAX_LINES: usize = 2;
+
+/// How wide one link of the ancestry chain may be drawn.
+const CHAIN_LINK_WIDTH: f32 = 150.0;
+/// The `" > "` between two links, and the space it advances the cursor by.
+const CHAIN_SEPARATOR_WIDTH: f32 = 20.0;
+/// The gap after each link, so two links never touch.
+const CHAIN_LINK_GAP: f32 = 4.0;
+/// Marks a link that was cut, and the head of a chain that did not all fit.
+const CHAIN_ELLIPSIS: &str = "...";
+
 const TREE_INDENT: f32 = 24.0;
 const TREE_ROW_HEIGHT: f32 = 36.0;
 const TIMELINE_ENTRY_HEIGHT: f32 = 48.0;
@@ -2132,7 +2160,16 @@ impl SystemRestoreUI {
                 corner_radii: CornerRadii::all(4.0),
             });
             rt.push(RenderCommand::Text {
-                x: tab_x + tab_width / 2.0 - 20.0,
+                x: text::center_x(
+                    mode.label(),
+                    tab_x + tab_width / 2.0,
+                    FONT_SIZE,
+                    if is_active {
+                        FontWeightHint::Bold
+                    } else {
+                        FontWeightHint::Regular
+                    },
+                ),
                 y: toolbar_y + TOOLBAR_HEIGHT / 2.0 - FONT_SIZE / 2.0,
                 text: mode.label().to_string(),
                 color: text_color,
@@ -2165,7 +2202,12 @@ impl SystemRestoreUI {
                 corner_radii: CornerRadii::all(4.0),
             });
             rt.push(RenderCommand::Text {
-                x: btn_x + BUTTON_WIDTH / 2.0 - 20.0,
+                x: text::center_x(
+                    label,
+                    btn_x + BUTTON_WIDTH / 2.0,
+                    FONT_SIZE,
+                    FontWeightHint::Bold,
+                ),
                 y: toolbar_y + TOOLBAR_HEIGHT / 2.0 - FONT_SIZE / 2.0,
                 text: label.to_string(),
                 color: COLOR_BASE,
@@ -2868,18 +2910,20 @@ impl SystemRestoreUI {
 
         y += 24.0;
 
-        // Description.
-        if !snap.description.is_empty() {
-            rt.push(RenderCommand::Text {
-                x: col1_x,
-                y,
-                text: snap.description.clone(),
-                color: COLOR_SUBTEXT0,
-                font_size: FONT_SIZE,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(WINDOW_WIDTH - 2.0 * PADDING),
-            });
-            y += 20.0;
+        // Description. User-supplied free prose, so it wraps rather than being
+        // clipped to its first line — but the panel is a fixed
+        // DETAILS_PANEL_HEIGHT box with the ancestry chain anchored to its
+        // bottom, so the wrap is capped (see DESCRIPTION_MAX_LINES) and the
+        // cursor advances by the height actually drawn.
+        let description_used = text::Paragraph::new(&snap.description, COLOR_SUBTEXT0)
+            .at(col1_x, y, WINDOW_WIDTH - 2.0 * PADDING)
+            .font(FONT_SIZE, FontWeightHint::Regular)
+            .max_lines(DESCRIPTION_MAX_LINES)
+            .draw(rt);
+        if description_used > 0.0 {
+            // An absent description takes no room at all; a present one takes
+            // at least the row height the rest of the panel was laid out for.
+            y += description_used.max(DESCRIPTION_ROW_HEIGHT);
         }
 
         // Metadata row.
@@ -2945,7 +2989,8 @@ impl SystemRestoreUI {
         if !snap.tags.is_empty() {
             let mut tag_x = col1_x;
             for tag in &snap.tags {
-                let tag_width = tag.len() as f32 * 7.0 + 16.0;
+                let tag_width =
+                    text::padded_width(tag, 8.0, FONT_SIZE_SMALL, FontWeightHint::Regular);
                 rt.push(RenderCommand::FillRect {
                     x: tag_x,
                     y,
@@ -2982,36 +3027,89 @@ impl SystemRestoreUI {
                 max_width: Some(40.0),
             });
             cx += 40.0;
-            for (i, &ancestor_id) in chain.iter().enumerate() {
-                if let Some(ancestor) = self.manager.tree.get_snapshot(ancestor_id) {
-                    if i > 0 {
-                        rt.push(RenderCommand::Text {
-                            x: cx,
-                            y: chain_y,
-                            text: " > ".to_string(),
-                            color: COLOR_OVERLAY0,
-                            font_size: FONT_SIZE_SMALL,
-                            font_weight: FontWeightHint::Regular,
-                            max_width: Some(20.0),
-                        });
-                        cx += 20.0;
-                    }
-                    let name_color = if ancestor_id == snap.id {
-                        COLOR_BLUE
-                    } else {
-                        COLOR_SUBTEXT0
-                    };
+
+            // Each name is capped at CHAIN_LINK_WIDTH, so the chain advances by
+            // what was *drawn*, not by the full name: a long name used to push
+            // the next link off past the clip and a short accented one used to
+            // collide with it. Elide rather than clip, so the reader can see it
+            // was cut.
+            let links: Vec<(u64, String, f32)> = chain
+                .iter()
+                .filter_map(|&id| self.manager.tree.get_snapshot(id).map(|a| (id, &a.name)))
+                .map(|(id, name)| {
+                    let shown = text::elide(
+                        name,
+                        CHAIN_LINK_WIDTH,
+                        CHAIN_ELLIPSIS,
+                        FONT_SIZE_SMALL,
+                        FontWeightHint::Regular,
+                    );
+                    let w = text::measure(&shown, FONT_SIZE_SMALL, FontWeightHint::Regular);
+                    (id, shown, w)
+                })
+                .collect();
+
+            // Capping each link said nothing about the chain: the cursor
+            // advanced once per ancestor with no reference to the panel's right
+            // edge, so a deep history ran off the side of the window. Keep the
+            // links nearest the selected snapshot and mark the dropped head.
+            let widths: Vec<f32> = links.iter().map(|&(_, _, w)| w).collect();
+            let budget = WINDOW_WIDTH - PADDING - cx;
+            let first = ancestry_first_visible(&widths, budget);
+
+            if first > 0 {
+                let marker_w =
+                    text::measure(CHAIN_ELLIPSIS, FONT_SIZE_SMALL, FontWeightHint::Regular);
+                rt.push(RenderCommand::Text {
+                    x: cx,
+                    y: chain_y,
+                    text: CHAIN_ELLIPSIS.to_string(),
+                    color: COLOR_OVERLAY0,
+                    font_size: FONT_SIZE_SMALL,
+                    font_weight: FontWeightHint::Regular,
+                    max_width: Some(marker_w),
+                });
+                cx += marker_w + CHAIN_LINK_GAP;
+                rt.push(RenderCommand::Text {
+                    x: cx,
+                    y: chain_y,
+                    text: " > ".to_string(),
+                    color: COLOR_OVERLAY0,
+                    font_size: FONT_SIZE_SMALL,
+                    font_weight: FontWeightHint::Regular,
+                    max_width: Some(CHAIN_SEPARATOR_WIDTH),
+                });
+                cx += CHAIN_SEPARATOR_WIDTH;
+            }
+
+            for (i, (ancestor_id, shown, shown_w)) in links.iter().enumerate().skip(first) {
+                if i > first {
                     rt.push(RenderCommand::Text {
                         x: cx,
                         y: chain_y,
-                        text: ancestor.name.clone(),
-                        color: name_color,
+                        text: " > ".to_string(),
+                        color: COLOR_OVERLAY0,
                         font_size: FONT_SIZE_SMALL,
                         font_weight: FontWeightHint::Regular,
-                        max_width: Some(150.0),
+                        max_width: Some(CHAIN_SEPARATOR_WIDTH),
                     });
-                    cx += ancestor.name.len() as f32 * 6.5 + 4.0;
+                    cx += CHAIN_SEPARATOR_WIDTH;
                 }
+                let name_color = if *ancestor_id == snap.id {
+                    COLOR_BLUE
+                } else {
+                    COLOR_SUBTEXT0
+                };
+                rt.push(RenderCommand::Text {
+                    x: cx,
+                    y: chain_y,
+                    text: shown.clone(),
+                    color: name_color,
+                    font_size: FONT_SIZE_SMALL,
+                    font_weight: FontWeightHint::Regular,
+                    max_width: Some(CHAIN_LINK_WIDTH),
+                });
+                cx += shown_w + CHAIN_LINK_GAP;
             }
         }
     }
@@ -3019,7 +3117,12 @@ impl SystemRestoreUI {
     /// Render placeholder when no snapshot is selected.
     fn render_no_selection(&self, rt: &mut RenderTree, panel_y: f32) {
         rt.push(RenderCommand::Text {
-            x: WINDOW_WIDTH / 2.0 - 100.0,
+            x: text::center_x(
+                "Select a snapshot to view details",
+                WINDOW_WIDTH / 2.0,
+                FONT_SIZE,
+                FontWeightHint::Regular,
+            ),
             y: panel_y + DETAILS_PANEL_HEIGHT / 2.0 - FONT_SIZE / 2.0,
             text: "Select a snapshot to view details".to_string(),
             color: COLOR_OVERLAY0,
@@ -3066,7 +3169,12 @@ impl SystemRestoreUI {
             stats.total_display(),
         );
         rt.push(RenderCommand::Text {
-            x: WINDOW_WIDTH / 2.0 - 80.0,
+            x: text::center_x(
+                &storage_text,
+                WINDOW_WIDTH / 2.0,
+                FONT_SIZE_SMALL,
+                FontWeightHint::Regular,
+            ),
             y: bar_y + STATUS_BAR_HEIGHT / 2.0 - FONT_SIZE_SMALL / 2.0,
             text: storage_text,
             color: COLOR_SUBTEXT0,
@@ -3848,10 +3956,16 @@ impl SystemRestoreUI {
             }
 
             // Percentage.
+            let percent = format!("{}%", progress.percentage());
             rt.push(RenderCommand::Text {
-                x: ox + overlay_w / 2.0 - 15.0,
+                x: text::center_x(
+                    &percent,
+                    ox + overlay_w / 2.0,
+                    FONT_SIZE_SMALL,
+                    FontWeightHint::Bold,
+                ),
                 y: bar_y + 3.0,
-                text: format!("{}%", progress.percentage()),
+                text: percent,
                 color: COLOR_TEXT,
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Bold,
@@ -3960,6 +4074,65 @@ fn format_timestamp_short(ts: u64) -> String {
     format!("D{}", day)
 }
 
+/// The width one ancestry link occupies, given the width of its drawn name and
+/// whether a `" > "` separator precedes it.
+fn chain_link_cost(name_width: f32, preceded: bool) -> f32 {
+    let sep = if preceded { CHAIN_SEPARATOR_WIDTH } else { 0.0 };
+    name_width + CHAIN_LINK_GAP + sep
+}
+
+/// Choose the first ancestry link to draw so the whole chain fits in `budget`.
+///
+/// Each link was individually capped at [`CHAIN_LINK_WIDTH`], but nothing
+/// capped the *chain*: the cursor advanced once per ancestor with no reference
+/// to the panel's right edge, so a deep enough history simply ran off the side
+/// of the window. Twelve long-named ancestors cost 2068px against a 986px
+/// budget.
+///
+/// Links are dropped from the **front**. The tail of the chain is the selected
+/// snapshot — the one the whole panel is describing — and the links nearest it
+/// are the ones that say where it came from; the distant root is the least
+/// informative part. When anything is dropped the caller draws a leading
+/// [`CHAIN_ELLIPSIS`], and its cost is reserved here so the marker cannot
+/// itself push the chain over the edge.
+///
+/// The last link is always kept even if it alone exceeds the budget: it is
+/// already capped at [`CHAIN_LINK_WIDTH`], and a panel that silently drew no
+/// path at all would be worse than one that is a few pixels tight.
+fn ancestry_first_visible(name_widths: &[f32], budget: f32) -> usize {
+    let Some(last) = name_widths.len().checked_sub(1) else {
+        return 0;
+    };
+
+    let total: f32 = name_widths
+        .iter()
+        .enumerate()
+        .map(|(i, w)| chain_link_cost(*w, i > 0))
+        .sum();
+    if total <= budget {
+        return 0;
+    }
+
+    // The chain will be cut, so the leading marker is going to be drawn and
+    // has to be paid for out of the same budget.
+    let marker = chain_link_cost(
+        text::measure(CHAIN_ELLIPSIS, FONT_SIZE_SMALL, FontWeightHint::Regular),
+        false,
+    ) + CHAIN_SEPARATOR_WIDTH;
+
+    let mut used = marker;
+    let mut first = last;
+    for i in (0..=last).rev() {
+        let cost = chain_link_cost(*name_widths.get(i).unwrap_or(&0.0), i < last);
+        if i < last && used + cost > budget {
+            break;
+        }
+        used += cost;
+        first = i;
+    }
+    first
+}
+
 // ============================================================================
 // main
 // ============================================================================
@@ -3979,6 +4152,72 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- text measurement ---
+
+    #[test]
+    fn tag_pills_fit_their_tags() {
+        // Snapshot tags are user-entered, so they are arbitrary text.
+        for tag in ["auto", "before-upgrade", "manuell", "リリース前"] {
+            let w = text::padded_width(tag, 8.0, FONT_SIZE_SMALL, FontWeightHint::Regular);
+            let drawn = text::measure(tag, FONT_SIZE_SMALL, FontWeightHint::Regular);
+            assert!(drawn + 16.0 <= w + 0.01, "{tag:?} overflows its pill");
+        }
+    }
+
+    #[test]
+    fn an_ancestry_link_advances_by_what_was_drawn() {
+        // Each link is capped at 150 px. Advancing by the *full* name pushed
+        // the next link past the clip; advancing by a byte estimate made a
+        // short accented name collide with it. Elide, then advance by the
+        // elided width.
+        let long = "a-very-long-snapshot-name-that-will-not-fit-in-one-hundred-and-fifty-pixels";
+        let shown = text::elide(long, 150.0, "...", FONT_SIZE_SMALL, FontWeightHint::Regular);
+        let w = text::measure(&shown, FONT_SIZE_SMALL, FontWeightHint::Regular);
+        assert!(w <= 150.0 + 0.01, "the elided link is {w} wide");
+        assert!(shown.ends_with("..."), "a cut link does not say it was cut");
+
+        // A name that fits is left alone and advances by its own width.
+        let short = "base";
+        let shown = text::elide(
+            short,
+            150.0,
+            "...",
+            FONT_SIZE_SMALL,
+            FontWeightHint::Regular,
+        );
+        assert_eq!(shown, short);
+    }
+
+    #[test]
+    fn an_ancestry_chain_that_fits_is_drawn_whole() {
+        assert_eq!(ancestry_first_visible(&[50.0, 50.0, 50.0], 986.0), 0);
+    }
+
+    #[test]
+    fn an_ancestry_chain_that_does_not_fit_is_cut_from_the_front() {
+        // Three 150px links cost 150+4 + 3x2 separators; only the last two fit
+        // in 400px once the leading marker is paid for.
+        let first = ancestry_first_visible(&[150.0, 150.0, 150.0], 400.0);
+        assert!(first > 0, "a chain over budget was not cut at all");
+        assert!(
+            first < 3,
+            "the chain was cut past its end, leaving nothing to draw"
+        );
+    }
+
+    #[test]
+    fn the_last_ancestry_link_is_kept_even_when_it_alone_overflows() {
+        // The selected snapshot is what the panel is describing. Drawing no
+        // path at all would be worse than one tight link, which is itself
+        // already capped at CHAIN_LINK_WIDTH.
+        assert_eq!(ancestry_first_visible(&[150.0, 150.0], 10.0), 1);
+    }
+
+    #[test]
+    fn an_empty_ancestry_chain_has_no_first_link() {
+        assert_eq!(ancestry_first_visible(&[], 100.0), 0);
+    }
 
     // --- SnapshotType tests ---
 
@@ -5323,6 +5562,257 @@ mod tests {
         ui.dialog = DialogKind::ImportDialog;
         let rt = ui.render();
         assert!(!rt.is_empty());
+    }
+
+    // --- Details-panel description layout ---
+
+    /// The details panel alone, for a selected snapshot carrying `description`.
+    ///
+    /// Renders the panel directly rather than the whole window: `render()` also
+    /// emits the status bar, which sits *below* the panel and so would trip the
+    /// "nothing may be pushed past the panel's anchored bottom row" assertion
+    /// for reasons that have nothing to do with the description.
+    fn details_panel_with_description(description: &str) -> Vec<RenderCommand> {
+        let mut ui = SystemRestoreUI::new();
+        let id = *ui
+            .manager
+            .tree
+            .all_ids_by_timestamp()
+            .first()
+            .expect("the default tree has at least one snapshot");
+        ui.manager
+            .tree
+            .get_snapshot_mut(id)
+            .expect("the id came from the tree")
+            .description = description.to_string();
+        ui.selected_id = Some(id);
+        let snap = ui
+            .manager
+            .tree
+            .get_snapshot(id)
+            .expect("the id came from the tree")
+            .clone();
+        let mut rt = RenderTree::new();
+        ui.render_snapshot_details(
+            &mut rt,
+            &snap,
+            WINDOW_HEIGHT - DETAILS_PANEL_HEIGHT - STATUS_BAR_HEIGHT,
+        );
+        rt.commands
+    }
+
+    /// The details panel for a snapshot `depth` links deep in its own root's
+    /// history, every ancestor named too long to fit one link.
+    fn details_panel_with_deep_ancestry(depth: usize) -> Vec<RenderCommand> {
+        let mut ui = SystemRestoreUI::new();
+        let mut parent = None;
+        let mut last = 0;
+        for i in 0..depth {
+            // The index leads the name: a link is elided from its end, so a
+            // trailing index would be the first thing cut and the test could
+            // not tell the links apart.
+            let id = ui
+                .manager
+                .tree
+                .add_snapshot(
+                    &format!("{i}-a-very-long-snapshot-name-that-will-not-fit-in-one-link"),
+                    "",
+                    1_000 + i as u64,
+                    SnapshotType::Manual,
+                    Vec::new(),
+                    parent,
+                )
+                .expect("the parent was created on the previous iteration");
+            parent = Some(id);
+            last = id;
+        }
+        ui.selected_id = Some(last);
+        let snap = ui
+            .manager
+            .tree
+            .get_snapshot(last)
+            .expect("the snapshot was just created")
+            .clone();
+        let mut rt = RenderTree::new();
+        ui.render_snapshot_details(
+            &mut rt,
+            &snap,
+            WINDOW_HEIGHT - DETAILS_PANEL_HEIGHT - STATUS_BAR_HEIGHT,
+        );
+        rt.commands
+    }
+
+    /// The y the ancestry chain is anchored to.
+    fn ancestry_row_y() -> f32 {
+        WINDOW_HEIGHT - DETAILS_PANEL_HEIGHT - STATUS_BAR_HEIGHT + DETAILS_PANEL_HEIGHT - 22.0
+    }
+
+    /// The text commands on the ancestry row, left to right.
+    fn ancestry_row(cmds: &[RenderCommand]) -> Vec<(f32, String, f32, FontWeightHint)> {
+        let chain_y = ancestry_row_y();
+        let mut row: Vec<(f32, String, f32, FontWeightHint)> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text {
+                    x,
+                    y,
+                    text,
+                    font_size,
+                    font_weight,
+                    ..
+                } if (y - chain_y).abs() < 0.5 => {
+                    Some((*x, text.clone(), *font_size, *font_weight))
+                }
+                _ => None,
+            })
+            .collect();
+        row.sort_by(|a, b| a.0.total_cmp(&b.0));
+        row
+    }
+
+    /// Capping each link said nothing about the chain: the cursor advanced once
+    /// per ancestor with no reference to the panel's right edge, so a deep
+    /// history ran clean off the side of the window.
+    #[test]
+    fn a_deep_ancestry_chain_stays_inside_the_panel() {
+        let cmds = details_panel_with_deep_ancestry(12);
+        let right = WINDOW_WIDTH - PADDING;
+        let row = ancestry_row(&cmds);
+        let mut checked = 0usize;
+        for (x, text, size, weight) in &row {
+            let end = x + text::measure(text, *size, *weight);
+            assert!(
+                end <= right + 0.5,
+                "chain element {text:?} starts at {x} and ends at {end}, \
+                 past the panel's right edge {right}",
+            );
+            checked = checked.saturating_add(1);
+        }
+        assert!(
+            checked >= 4,
+            "expected the Path label and several links on the chain row, checked {checked}",
+        );
+    }
+
+    /// The tail of the chain is the snapshot the panel is describing, so the
+    /// links nearest it are the ones worth keeping — and the reader has to be
+    /// told the path shown is partial.
+    #[test]
+    fn a_cut_ancestry_chain_keeps_the_selected_snapshot_and_marks_the_cut() {
+        let cmds = details_panel_with_deep_ancestry(12);
+        let row = ancestry_row(&cmds);
+        let texts: Vec<&String> = row.iter().map(|(_, t, _, _)| t).collect();
+
+        assert!(
+            texts.iter().any(|t| t.as_str() == CHAIN_ELLIPSIS),
+            "the dropped head of the chain is not marked, got {texts:?}",
+        );
+        let last = texts
+            .last()
+            .unwrap_or_else(|| panic!("the chain row should not be empty"));
+        assert!(
+            last.starts_with("11-"),
+            "the selected snapshot must be the last link drawn, got {last:?}",
+        );
+        assert!(
+            !texts.iter().any(|t| t.starts_with("0-")),
+            "the distant root should have been dropped, got {texts:?}",
+        );
+    }
+
+    /// A chain short enough to fit is drawn in full, with no marker — the fix
+    /// must not make the common case look truncated.
+    #[test]
+    fn a_short_ancestry_chain_is_drawn_whole() {
+        let cmds = details_panel_with_deep_ancestry(3);
+        let row = ancestry_row(&cmds);
+        let texts: Vec<&String> = row.iter().map(|(_, t, _, _)| t).collect();
+        assert!(
+            texts.iter().any(|t| t.starts_with("0-")),
+            "the root of a chain that fits must still be drawn, got {texts:?}",
+        );
+        assert!(
+            !texts.iter().any(|t| t.as_str() == CHAIN_ELLIPSIS),
+            "a chain that fits must not be marked as cut, got {texts:?}",
+        );
+    }
+
+    /// Text commands in the details panel, as `(y, text)`, top-down.
+    fn details_panel_text(cmds: &[RenderCommand]) -> Vec<(f32, String)> {
+        let mut rows: Vec<(f32, String)> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { y, text, .. } => Some((*y, text.clone())),
+                _ => None,
+            })
+            .collect();
+        rows.sort_by(|a, b| a.0.total_cmp(&b.0));
+        rows
+    }
+
+    /// A description longer than one line wraps instead of being cut at the
+    /// first line, which is what a bare `Text` command's `max_width` would do.
+    #[test]
+    fn a_long_description_wraps_rather_than_being_clipped() {
+        let words: Vec<String> = (0..60).map(|n| format!("word{n}")).collect();
+        let description = words.join(" ");
+        let rows = details_panel_text(&details_panel_with_description(&description));
+
+        // The first description line is drawn, and so is a second one carrying
+        // words the single-command version would have dropped entirely.
+        let drawn: Vec<&String> = rows.iter().map(|(_, t)| t).collect();
+        let lines: Vec<&&String> = drawn
+            .iter()
+            .filter(|t| t.starts_with("word0 ") || t.contains("word"))
+            .collect();
+        assert!(
+            lines.len() >= 2,
+            "expected the description to occupy more than one line, got {lines:?}",
+        );
+    }
+
+    /// The panel is a fixed-height box with the ancestry chain anchored to its
+    /// bottom, so however far the description wraps, the rows beneath it must
+    /// still clear that chain row.
+    #[test]
+    fn a_long_description_never_pushes_content_onto_the_ancestry_row() {
+        let panel_y = WINDOW_HEIGHT - DETAILS_PANEL_HEIGHT - STATUS_BAR_HEIGHT;
+        let chain_y = panel_y + DETAILS_PANEL_HEIGHT - 22.0;
+        let description = "supercalifragilistic ".repeat(80);
+        let rows = details_panel_text(&details_panel_with_description(&description));
+
+        let mut checked = 0;
+        for (y, text) in &rows {
+            // The chain row itself and anything at or below it is the anchored
+            // content; everything above must stay above it.
+            if *y < chain_y {
+                checked += 1;
+                continue;
+            }
+            assert!(
+                text.starts_with("Path:") || text.contains('>') || text.contains('…'),
+                "row {text:?} at y={y} has been pushed down onto the ancestry row at {chain_y}",
+            );
+        }
+        assert!(checked >= 5, "expected the panel's rows, checked {checked}");
+    }
+
+    /// A short description leaves the panel laid out exactly as before, so the
+    /// wrap fix does not shift the common case.
+    #[test]
+    fn a_short_description_keeps_the_original_row_spacing() {
+        let rows = details_panel_text(&details_panel_with_description("Short."));
+        let panel_y = WINDOW_HEIGHT - DETAILS_PANEL_HEIGHT - STATUS_BAR_HEIGHT;
+        assert!(
+            rows.iter()
+                .any(|(y, t)| t == "Short." && (*y - (panel_y + PADDING + 24.0)).abs() < 0.5),
+            "expected the description on the description row, got {rows:?}",
+        );
+        assert!(
+            rows.iter()
+                .any(|(y, t)| t == "Size:" && (*y - (panel_y + PADDING + 44.0)).abs() < 0.5),
+            "expected the metadata row unmoved, got {rows:?}",
+        );
     }
 
     #[test]

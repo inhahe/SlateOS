@@ -146,9 +146,7 @@ mod tests {
             assert!(x.is_power_of_two());
         }
         assert_eq!(
-            CRYPTO_TFM_REQ_MAY_BACKLOG
-                | CRYPTO_TFM_REQ_MAY_SLEEP
-                | CRYPTO_TFM_REQ_FORBID_WEAK_KEYS,
+            CRYPTO_TFM_REQ_MAY_BACKLOG | CRYPTO_TFM_REQ_MAY_SLEEP | CRYPTO_TFM_REQ_FORBID_WEAK_KEYS,
             0x07
         );
     }

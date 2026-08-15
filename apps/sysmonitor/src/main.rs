@@ -38,6 +38,7 @@ use guitk::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEventKind};
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
 use guitk::style::CornerRadii;
+use guitk::text;
 
 // ============================================================================
 // Catppuccin Mocha palette
@@ -69,6 +70,16 @@ const PINK: Color = Color::from_hex(0xF5C2E7);
 
 /// Height of the tab bar at the top.
 const TAB_BAR_HEIGHT: f32 = 32.0;
+
+/// Width of the tab drawn for `label`, including the 12 px padding on each side.
+///
+/// Measured at whichever weight the tab may end up drawn at, because the active
+/// tab is bold: sizing each tab to its current weight would shuffle the whole
+/// strip sideways every time the selection moved. One function, so the click
+/// handler and the renderer cannot drift apart.
+fn tab_width(label: &str) -> f32 {
+    text::padded_width_any_weight(label, 12.0, 12.0)
+}
 /// Height of the status bar at the bottom.
 const STATUS_BAR_HEIGHT: f32 = 24.0;
 /// Height of a single row in tables.
@@ -83,6 +94,21 @@ const CARD_RADIUS: f32 = 6.0;
 const CONTENT_PAD: f32 = 12.0;
 /// Gap between dashboard cards.
 const CARD_GAP: f32 = 10.0;
+
+/// Height of one row in the overview's alert panel.
+const ALERT_ROW_HEIGHT: f32 = 16.0;
+/// Space the alert panel gives its "Alerts" heading, above the first row.
+const ALERT_PANEL_HEADER: f32 = 26.0;
+/// Space below the alert panel's last row.
+const ALERT_PANEL_FOOTER: f32 = 2.0;
+/// Rows the overview's alert panel will draw, overflow marker included.
+///
+/// The panel is bounded so a machine in trouble cannot push the rest of the
+/// overview off-screen. When there are more alerts than rows, the last row
+/// becomes a `+N more` marker rather than an alert: a hidden alert the user
+/// cannot tell is hidden is worse than one alert fewer, since the whole point
+/// of the panel is to say whether anything is wrong.
+const ALERT_MAX_ROWS: usize = 5;
 
 // ============================================================================
 // Ring buffer for time-series data
@@ -1097,7 +1123,7 @@ impl SysMonitorState {
                 if my < TAB_BAR_HEIGHT {
                     let mut tab_x = 0.0f32;
                     for tab in &Tab::ALL {
-                        let tab_w = tab.label().len() as f32 * 9.0 + 24.0;
+                        let tab_w = tab_width(tab.label());
                         if mx >= tab_x && mx < tab_x + tab_w {
                             self.active_tab = *tab;
                             return EventResult::Consumed;
@@ -1349,7 +1375,7 @@ impl SysMonitorState {
         let mut tx = 0.0f32;
         for tab in &Tab::ALL {
             let label = tab.label();
-            let tab_w = label.len() as f32 * 9.0 + 24.0;
+            let tab_w = tab_width(label);
             let is_active = *tab == self.active_tab;
 
             if is_active {
@@ -1674,15 +1700,26 @@ impl SysMonitorState {
 
         cur_y += disk_card_h + CARD_GAP;
 
-        // Alert panel
+        // Alert panel. The number of alert rows drawn and the height of the
+        // card behind them are one quantity, so they are derived once, here,
+        // rather than computed separately and left to drift.
         if !self.active_alerts.is_empty() {
-            let alert_h = 16.0f32
-                .mul_add(self.active_alerts.len() as f32, 28.0)
-                .min(120.0);
+            let overflowing = self.active_alerts.len() > ALERT_MAX_ROWS;
+            // An overflow marker costs a row, so it displaces an alert.
+            let shown = if overflowing {
+                ALERT_MAX_ROWS.saturating_sub(1)
+            } else {
+                self.active_alerts.len()
+            };
+            let rows = if overflowing { ALERT_MAX_ROWS } else { shown };
+            let alert_h = ALERT_ROW_HEIGHT.mul_add(
+                rows as f32,
+                ALERT_PANEL_HEADER + ALERT_PANEL_FOOTER,
+            );
             self.render_card(tree, CONTENT_PAD, cur_y, content_w, alert_h);
             render_bold_text(tree, CONTENT_PAD + 12.0, cur_y + 8.0, "Alerts", RED, 13.0);
-            let mut alert_y = cur_y + 26.0;
-            for alert in self.active_alerts.iter().take(5) {
+            let mut alert_y = cur_y + ALERT_PANEL_HEADER;
+            for alert in self.active_alerts.iter().take(shown) {
                 tree.push(RenderCommand::FillRect {
                     x: CONTENT_PAD + 16.0,
                     y: alert_y + 3.0,
@@ -1700,7 +1737,19 @@ impl SysMonitorState {
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(content_w - 48.0),
                 });
-                alert_y += 16.0;
+                alert_y += ALERT_ROW_HEIGHT;
+            }
+            if overflowing {
+                let hidden = self.active_alerts.len().saturating_sub(shown);
+                tree.push(RenderCommand::Text {
+                    x: CONTENT_PAD + 28.0,
+                    y: alert_y,
+                    text: format!("+{hidden} more"),
+                    color: SUBTEXT0,
+                    font_size: 11.0,
+                    font_weight: FontWeightHint::Regular,
+                    max_width: Some(content_w - 48.0),
+                });
             }
         }
     }
@@ -1755,7 +1804,12 @@ impl SysMonitorState {
             max_width: Some(filter_w - 16.0),
         });
         if self.filter_focused {
-            let cursor_x = filter_x + 8.0 + self.filter_text.len() as f32 * 7.0;
+            // The caret sits where the glyphs actually end, not where a byte
+            // count guessed they would: a filter containing any non-ASCII
+            // character used to draw the caret well past its own text. It is
+            // held inside the box because the text itself is clipped there.
+            let typed = text::width(&self.filter_text, 11.0).min(filter_w - 16.0);
+            let cursor_x = filter_x + 8.0 + typed;
             tree.fill_rect(cursor_x, content_y + 5.0, 1.0, filter_h - 8.0, TEXT);
         }
 
@@ -3203,8 +3257,91 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+
     use super::*;
     use guitk::event::{Event, KeyEvent, Modifiers, MouseEvent, MouseEventKind};
+
+    // -- Measured-width tests --
+
+    #[test]
+    fn tabs_fit_their_labels_at_either_weight() {
+        for tab in &Tab::ALL {
+            let w = tab_width(tab.label());
+            for weight in [FontWeightHint::Regular, FontWeightHint::Bold] {
+                assert!(
+                    w >= text::measure(tab.label(), 12.0, weight) + 24.0,
+                    "{} does not fit at {weight:?}",
+                    tab.label()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn tab_width_does_not_change_when_a_tab_is_selected() {
+        // The strip must not shuffle sideways as the selection moves, so the
+        // width a tab is given cannot depend on the weight it is drawn at.
+        let widths: Vec<f32> = Tab::ALL.iter().map(|t| tab_width(t.label())).collect();
+        let mut app = SysMonitorState::new();
+        for tab in &Tab::ALL {
+            app.active_tab = *tab;
+            let now: Vec<f32> = Tab::ALL.iter().map(|t| tab_width(t.label())).collect();
+            assert_eq!(widths, now);
+        }
+    }
+
+    #[test]
+    fn tab_width_is_not_driven_by_byte_length() {
+        // Seven characters, one of which takes two bytes, against eight ASCII
+        // ones: by byte count the shorter string wins, by measurement it does
+        // not.
+        let ascii = text::padded_width_any_weight("Prozesse", 12.0, 12.0);
+        let sharp = text::padded_width_any_weight("Proze\u{df}e", 12.0, 12.0);
+        assert!(
+            sharp < ascii,
+            "a seven-character label measured wider than an eight-character one"
+        );
+    }
+
+    #[test]
+    fn the_filter_caret_follows_the_glyphs() {
+        let mut app = SysMonitorState::new();
+        app.active_tab = Tab::Processes;
+        app.filter_focused = true;
+        app.filter_text = String::from("\u{fc}ber");
+        let tree = app.render();
+        // The caret is the one-pixel-wide fill pushed straight after the
+        // filter text, so find the text first and then look forward.
+        let text_i = tree
+            .commands
+            .iter()
+            .position(
+                |c| matches!(c, RenderCommand::Text { text, .. } if *text == app.filter_text),
+            )
+            .expect("filter text not drawn");
+        let text_origin = match tree.commands.get(text_i) {
+            Some(RenderCommand::Text { x, .. }) => *x,
+            _ => unreachable!("just matched a Text command"),
+        };
+        let caret = tree
+            .commands
+            .iter()
+            .skip(text_i)
+            .find_map(|c| match c {
+                RenderCommand::FillRect { x, width, .. } if (width - 1.0).abs() < 0.01 => Some(*x),
+                _ => None,
+            })
+            .expect("no caret drawn");
+        // The caret must sit exactly one measured string past the text origin.
+        // A byte count would put it a whole character out, because the u-umlaut
+        // is two bytes.
+        let expected = text_origin + text::width(&app.filter_text, 11.0);
+        assert!(
+            (caret - expected).abs() < 0.01,
+            "caret at {caret}, glyphs end at {expected}"
+        );
+    }
 
     // -- GraphHistory tests --
 
@@ -3708,6 +3845,111 @@ mod tests {
         s.active_tab = Tab::Overview;
         let tree = s.render();
         assert!(!tree.is_empty());
+    }
+
+    // --- Overview alert panel ---
+
+    /// The overview tab, rendered with `n` synthetic alerts.
+    ///
+    /// Renders the tab rather than the whole window: the status bar also echoes
+    /// the first active alert, and counting that as a panel row would make the
+    /// panel look one row fuller than it is.
+    fn overview_with_alerts(n: usize) -> RenderTree {
+        let mut s = SysMonitorState::new();
+        s.load_demo_data();
+        s.active_tab = Tab::Overview;
+        s.active_alerts = (0..n)
+            .map(|i| Alert {
+                message: format!("Synthetic alert {i}"),
+                severity: AlertSeverity::Warning,
+            })
+            .collect();
+        let mut tree = RenderTree::new();
+        s.render_overview_tab(&mut tree);
+        tree
+    }
+
+    /// Text drawn by the alert panel, in the order it was emitted.
+    fn alert_panel_rows(tree: &RenderTree) -> Vec<String> {
+        tree.commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. }
+                    if text.starts_with("Synthetic alert ") || text.ends_with(" more") =>
+                {
+                    Some(text.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// With more alerts than the panel has rows, the surplus must be *reported*,
+    /// not silently dropped: a panel that shows five of twelve alerts and says
+    /// nothing tells the user the machine has five problems.
+    #[test]
+    fn surplus_alerts_are_counted_rather_than_silently_dropped() {
+        let rows = alert_panel_rows(&overview_with_alerts(12));
+        assert_eq!(rows.len(), ALERT_MAX_ROWS, "panel should be full: {rows:?}");
+        assert_eq!(
+            rows.last().map(String::as_str),
+            Some("+8 more"),
+            "expected an overflow marker, got {rows:?}",
+        );
+    }
+
+    /// Under the limit, every alert is shown and no marker appears.
+    #[test]
+    fn every_alert_is_shown_when_they_fit() {
+        let rows = alert_panel_rows(&overview_with_alerts(3));
+        assert_eq!(rows.len(), 3, "expected all three alerts: {rows:?}");
+        assert!(
+            !rows.iter().any(|r| r.ends_with(" more")),
+            "no overflow marker should appear: {rows:?}",
+        );
+    }
+
+    /// The panel's card must be exactly as tall as the rows it draws — the two
+    /// used to be computed separately, so an overflowing panel drew a card
+    /// sized for alerts it had decided not to draw.
+    #[test]
+    fn the_alert_card_matches_the_rows_it_holds() {
+        for (alerts, rows) in [(1_usize, 1_usize), (5, 5), (12, ALERT_MAX_ROWS)] {
+            let tree = overview_with_alerts(alerts);
+            let drawn = alert_panel_rows(&tree);
+            assert_eq!(drawn.len(), rows, "{alerts} alerts drew {drawn:?}");
+
+            // The first row's y, plus a row per row drawn, must land inside the
+            // card that starts at ALERT_PANEL_HEADER above it.
+            let first_row_y = tree
+                .commands
+                .iter()
+                .find_map(|c| match c {
+                    RenderCommand::Text { y, text, .. }
+                        if text.starts_with("Synthetic alert ") =>
+                    {
+                        Some(*y)
+                    }
+                    _ => None,
+                })
+                .expect("an alert row");
+            let card_top = first_row_y - ALERT_PANEL_HEADER;
+            let card = tree
+                .commands
+                .iter()
+                .find_map(|c| match c {
+                    RenderCommand::FillRect {
+                        y, height, color, ..
+                    } if (*y - card_top).abs() < 0.5 && *color == MANTLE => Some(*height),
+                    _ => None,
+                })
+                .expect("the alert card");
+            let content = ALERT_ROW_HEIGHT.mul_add(rows as f32, ALERT_PANEL_HEADER);
+            assert!(
+                card >= content && card <= content + ALERT_PANEL_FOOTER,
+                "{alerts} alerts: card is {card} tall for {content} of rows",
+            );
+        }
     }
 
     #[test]

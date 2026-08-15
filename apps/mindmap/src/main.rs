@@ -625,10 +625,10 @@ impl MindMap {
                 output.push_str("  ");
             }
             if depth == 0 {
-                output.push_str(&node.text);
+                output.push_str(&outline_text(&node.text));
             } else {
                 output.push_str("- ");
-                output.push_str(&node.text);
+                output.push_str(&outline_text(&node.text));
             }
             output.push('\n');
             for &child_id in &node.children {
@@ -656,6 +656,36 @@ impl MindMap {
     pub fn descendant_count(&self, node_id: NodeId) -> usize {
         self.subtree_ids(node_id).len().saturating_sub(1)
     }
+}
+
+/// Flatten node text onto the single line an outline entry occupies.
+///
+/// In an indented outline, structure *is* whitespace: the line break starts a
+/// sibling and the leading spaces choose its depth. A node whose text contains
+/// a newline therefore draws extra branches in the exported map that do not
+/// exist in the real one -- and unlike the other exporters audited here, this
+/// one has no matching importer to be fooled, so the victim is a human reading
+/// the outline, or whatever other outliner they open it in.
+///
+/// Node text is a short label, so the format offers nothing to escape with and
+/// nothing is lost by folding: control characters become single spaces, and
+/// runs of resulting whitespace collapse so the label still reads as one
+/// phrase rather than acquiring a gap where the break was.
+fn outline_text(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut pending_space = false;
+    for c in s.chars() {
+        if c.is_control() || c == '\t' {
+            pending_space = !out.is_empty();
+            continue;
+        }
+        if pending_space {
+            out.push(' ');
+            pending_space = false;
+        }
+        out.push(c);
+    }
+    out
 }
 
 // ============================================================================
@@ -2399,6 +2429,36 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- Outline export ----
+
+    #[test]
+    fn node_text_cannot_add_branches_to_the_outline() {
+        let mut id_gen = IdGenerator::new();
+        let mut map = MindMap::new("Map".to_string(), &mut id_gen);
+        let root_id = map.root_id;
+        if let Some(root) = map.nodes.get_mut(&root_id) {
+            root.text = "Root\n- forged sibling\n  - forged child".to_string();
+        }
+        map.add_child(root_id, "Child\n- another forged".to_string(), BLUE, 0);
+        let text = map.export_text();
+        // Two real nodes, so two lines -- counting lines rather than searching
+        // for the payload, since a correctly folded label still contains it.
+        assert_eq!(
+            text.lines().count(),
+            2,
+            "node text drew branches that do not exist: {text:?}"
+        );
+    }
+
+    #[test]
+    fn folding_a_label_keeps_it_readable() {
+        assert_eq!(outline_text("one\ntwo"), "one two");
+        assert_eq!(outline_text("a\r\n\nb"), "a b");
+        assert_eq!(outline_text("\n\nleading"), "leading");
+        assert_eq!(outline_text("trailing\n\n"), "trailing");
+        assert_eq!(outline_text("plain label"), "plain label");
+    }
 
     // ---- ID Generator ----
 

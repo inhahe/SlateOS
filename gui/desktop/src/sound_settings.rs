@@ -86,7 +86,12 @@ impl AudioDevice {
             2 => "Stereo",
             6 => "5.1 Surround",
             8 => "7.1 Surround",
-            n => return format!("{} Hz / {}-bit / {} ch", self.sample_rate, self.bit_depth, n),
+            n => {
+                return format!(
+                    "{} Hz / {}-bit / {} ch",
+                    self.sample_rate, self.bit_depth, n
+                );
+            }
         };
         format!("{} Hz / {}-bit / {}", self.sample_rate, self.bit_depth, ch)
     }
@@ -357,11 +362,17 @@ impl SoundSettings {
     }
 
     pub fn output_devices(&self) -> Vec<&AudioDevice> {
-        self.devices.iter().filter(|d| d.kind == DeviceKind::Output).collect()
+        self.devices
+            .iter()
+            .filter(|d| d.kind == DeviceKind::Output)
+            .collect()
     }
 
     pub fn input_devices(&self) -> Vec<&AudioDevice> {
-        self.devices.iter().filter(|d| d.kind == DeviceKind::Input).collect()
+        self.devices
+            .iter()
+            .filter(|d| d.kind == DeviceKind::Input)
+            .collect()
     }
 
     pub fn set_default_device(&mut self, id: u32) {
@@ -376,11 +387,15 @@ impl SoundSettings {
     }
 
     pub fn default_output(&self) -> Option<&AudioDevice> {
-        self.devices.iter().find(|d| d.kind == DeviceKind::Output && d.is_default)
+        self.devices
+            .iter()
+            .find(|d| d.kind == DeviceKind::Output && d.is_default)
     }
 
     pub fn default_input(&self) -> Option<&AudioDevice> {
-        self.devices.iter().find(|d| d.kind == DeviceKind::Input && d.is_default)
+        self.devices
+            .iter()
+            .find(|d| d.kind == DeviceKind::Input && d.is_default)
     }
 
     pub fn set_device_volume(&mut self, id: u32, vol: u32) {
@@ -416,9 +431,9 @@ impl SoundSettings {
         if self.master_muted {
             return 0;
         }
-        let dev_vol = self.get_device(device_id).map_or(0, |d| {
-            if d.muted { 0 } else { d.volume }
-        });
+        let dev_vol = self
+            .get_device(device_id)
+            .map_or(0, |d| if d.muted { 0 } else { d.volume });
         dev_vol.saturating_mul(self.master_volume) / 100
     }
 
@@ -487,11 +502,7 @@ impl SoundSettings {
         }
     }
 
-    pub fn set_system_sound_volume(
-        &mut self,
-        event: SystemSoundEvent,
-        vol: Option<u32>,
-    ) {
+    pub fn set_system_sound_volume(&mut self, event: SystemSoundEvent, vol: Option<u32>) {
         if let Some(s) = self.system_sounds.iter_mut().find(|s| s.event == event) {
             s.volume_override = vol.map(|v| v.min(100));
         }
@@ -609,15 +620,30 @@ impl SoundSettingsUI {
             text: format!(
                 "Master Volume: {}%{}",
                 self.settings.master_volume,
-                if self.settings.master_muted { " (Muted)" } else { "" }
+                if self.settings.master_muted {
+                    " (Muted)"
+                } else {
+                    ""
+                }
             ),
             font_size: 14.0,
-            color: if self.settings.master_muted { RED } else { TEXT },
+            color: if self.settings.master_muted {
+                RED
+            } else {
+                TEXT
+            },
             font_weight: FontWeightHint::Regular,
             max_width: Some(inner),
         });
         cy += 22.0;
-        cy = Self::render_volume_bar(&mut cmds, x + pad, cy, inner, self.settings.master_volume, self.settings.master_muted);
+        cy = Self::render_volume_bar(
+            &mut cmds,
+            x + pad,
+            cy,
+            inner,
+            self.settings.master_volume,
+            self.settings.master_muted,
+        );
         cy += 12.0;
 
         // Tab bar
@@ -639,7 +665,11 @@ impl SoundSettingsUI {
                 text: (*label).into(),
                 font_size: 12.0,
                 color: if active { BLUE } else { SUBTEXT0 },
-                font_weight: if active { FontWeightHint::Bold } else { FontWeightHint::Regular },
+                font_weight: if active {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
                 max_width: Some(tab_w - 16.0),
             });
         }
@@ -717,7 +747,14 @@ impl SoundSettingsUI {
             });
 
             // Volume bar
-            Self::render_volume_bar(cmds, x + 12.0, y + 46.0, width - 24.0, dev.volume, dev.muted);
+            Self::render_volume_bar(
+                cmds,
+                x + 12.0,
+                y + 46.0,
+                width - 24.0,
+                dev.volume,
+                dev.muted,
+            );
 
             y += 72.0;
         }
@@ -791,12 +828,33 @@ impl SoundSettingsUI {
 
         let mic = &self.settings.mic;
         y = Self::render_label_val(cmds, x, y, width, "Gain", &format!("{}%", mic.gain));
-        y = Self::render_toggle_row(cmds, x, y, width, "Noise suppression", mic.noise_suppression);
-        y = Self::render_toggle_row(cmds, x, y, width, "Echo cancellation", mic.echo_cancellation);
+        y = Self::render_toggle_row(
+            cmds,
+            x,
+            y,
+            width,
+            "Noise suppression",
+            mic.noise_suppression,
+        );
+        y = Self::render_toggle_row(
+            cmds,
+            x,
+            y,
+            width,
+            "Echo cancellation",
+            mic.echo_cancellation,
+        );
         y = Self::render_toggle_row(cmds, x, y, width, "Automatic gain", mic.auto_gain);
         y = Self::render_toggle_row(cmds, x, y, width, "Monitor (loopback)", mic.monitor);
         if mic.monitor {
-            y = Self::render_label_val(cmds, x, y, width, "Monitor volume", &format!("{}%", mic.monitor_volume));
+            y = Self::render_label_val(
+                cmds,
+                x,
+                y,
+                width,
+                "Monitor volume",
+                &format!("{}%", mic.monitor_volume),
+            );
         }
 
         y
@@ -850,7 +908,14 @@ impl SoundSettingsUI {
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width * 0.4),
             });
-            Self::render_volume_bar(cmds, x + 12.0, y + 30.0, width - 24.0, entry.volume, entry.muted);
+            Self::render_volume_bar(
+                cmds,
+                x + 12.0,
+                y + 30.0,
+                width - 24.0,
+                entry.volume,
+                entry.muted,
+            );
             y += 56.0;
         }
         y
@@ -953,7 +1018,11 @@ impl SoundSettingsUI {
                 text: format!("{}{}", indicator, mode.label()),
                 font_size: 13.0,
                 color: if active { BLUE } else { TEXT },
-                font_weight: if active { FontWeightHint::Bold } else { FontWeightHint::Regular },
+                font_weight: if active {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
                 max_width: Some(width - 24.0),
             });
             y += 36.0;
@@ -1415,7 +1484,9 @@ mod tests {
         ui.settings_mut().mic.monitor = true;
         ui.set_active_tab(1);
         let cmds = ui.render(0.0, 0.0, 500.0);
-        let has_mon = cmds.iter().any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("Monitor volume")));
+        let has_mon = cmds.iter().any(
+            |c| matches!(c, RenderCommand::Text { text, .. } if text.contains("Monitor volume")),
+        );
         assert!(has_mon);
     }
 }

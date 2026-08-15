@@ -80,6 +80,207 @@ Every performance-critical subsystem has a measured baseline and a concrete targ
 - **No AI features in the OS** (exceptions: speech I/O, opt-in ML image/video indexer). **No ads.**
 - **YAML for all configuration files**, processed with a library that preserves user comments and formatting (e.g., ruamel.yaml or Rust equivalent).
 - **No binary logs** — text-based (JSON-lines) structured logging.
+- **Python (fastpy) is the default implementation language for every part of the OS that is not kernel-space and not somewhere Python would noticeably slow things down.** See the policy immediately below. This is a *default*, not a preference to be re-litigated per component: writing a new userspace tool, service, or app in Rust requires a reason from the exclusion list. The performance caveat is a real constraint, not a formality — but it is about *measured, noticeable* cost (a latency budget, a throughput path, an inner loop run enough times for a 2× to matter), not a general presumption that Python is slow: fastpy is AOT-compiled to native code and the shipped binary contains no interpreter.
+
+#### Implementation Language Policy (operator-directed)
+
+**Default to Python, compiled with fastpy.** Rust is for the kernel, drivers,
+and the measured hot paths. Everything else — userspace tools, services,
+system utilities, settings/config UIs, the package manager, the installer, the
+file indexer, build and maintenance scripts, and the desktop applications — is
+**Python by default**, AOT-compiled to a native binary by fastpy. Agents
+picking up a new userspace component should reach for Python first and justify
+Rust, not the other way around. (This restates and sharpens the rule already
+in `CLAUDE.md` → "Coding Conventions"; it is repeated here because
+`roadmap-detailed.md` is where components get specified, and the choice was
+being made ad-hoc per component.)
+
+**This is a rule about what we write, not about what we replace.** It does not
+license rewriting software that already exists in C, C++ or Rust — see
+"Porting vs. Reimplementing" below, which is the other half of this policy and
+should be read with it.
+
+**There is no interpreter and no CPython in a shipped SlateOS binary, so the
+usual "Python is heavy" objection does not apply here.** fastpy on SlateOS
+builds in **pure mode**: the program is compiled to machine code and statically
+linked against fastpy's small C runtime (7 translation units — `runtime`,
+`objects`, `threading`, `gc`, `bigint`, `bridge_stub`, `pathlib_pure`) plus our
+own `libc.a`. `libpython` is *not* linked; `cpython_bridge.c` is replaced by
+`bridge_stub.c`. Concretely:
+
+- **Memory:** a fastpy binary's footprint is that of a static C program, not of
+  CPython. There is no ~10–30 MB interpreter image, no import machinery, no
+  `.pyc` cache, no per-process module dictionaries. A real fastpy program
+  (lists/iteration/print) links to a **~2.9 MB static ET_EXEC**, and runtime
+  memory is just its own heap plus the refcount/GC bookkeeping. This is the
+  answer to "does fastpy cost memory like CPython does?" — **no**, because
+  pure-mode fastpy does not contain CPython at all.
+- **Speed:** C++-class, not interpreter-class. On fastpy's own benchmark set it
+  runs at **0.2×–2.3× of MSVC /O2 C++** — *faster* than C++ on tight loops
+  (0.5×), function calls (0.2×), recursion (0.6×) and attribute access (0.5×);
+  ~2× slower on allocation-heavy pointer chasing (linked-list traversal 2.3×,
+  object creation 2.2×). Against CPython it is **3×–173×** faster. So the
+  performance argument for choosing Rust over Python is a real but *narrow*
+  one — it bites where the slowdown would actually be noticed (see exclusion 2
+  below), not across userspace in general.
+
+**Choose Rust (or C) only for one of these reasons — and say which one:**
+
+1. **Kernel space or `no_std`** — anything in `kernel/**`, or a component that
+   must run without a heap or before the runtime exists.
+2. **Python would noticeably slow it down.** Two cases:
+   - **A subsystem in the performance-critical table** (`CLAUDE.md` →
+     "Performance-Critical Subsystems"): syscall dispatch, IPC, context switch,
+     page fault, allocators, scheduler, futex, io_uring/IOCP, interrupt
+     dispatch, VFS lookup, FS read/write, compositor frame path.
+   - **Anywhere the slowdown would be *perceptible*** — a user-visible latency
+     budget (input→paint, window open, app launch), a throughput path
+     (compositing, codecs, checksums, compression, indexing a large tree), or
+     an inner loop run enough times for a 2× to matter. The shape of fastpy's
+     remaining gap is known and specific: it loses to C++ mainly on
+     **allocation-heavy pointer chasing** (linked-list traversal 2.3×, object
+     creation 2.2×, tree recursion 2.0×) and wins on scalar loops, calls and
+     attribute access. So the honest test is "does this component churn objects
+     in a hot loop?", not "is this component important?".
+
+   In both cases: **measure, don't assume, in whichever direction.** "It feels
+   like it should be fast" is not a reason to pick Rust, and "Python is the
+   default" is not a reason to keep it after a profile shows it costing real
+   time. A component that turns out to be hot can be moved to Rust, or — often
+   better and much cheaper — have just its hot function moved, since the rest
+   of the program does not have to follow.
+3. **Early boot / init ordering** — a component that must run before the
+   filesystem or the fastpy runtime's dependencies are available.
+4. **Porting existing C/C++** (ext4, Mesa, Chromium, FFmpeg) — port, don't
+   rewrite.
+5. **A binding gap** — the component needs a native SlateOS API that fastpy
+   has no binding for *and* the binding is not worth adding yet. Prefer adding
+   the binding (Phase 0 → "fastpy language bindings"); if you take this exit,
+   record it in `todo.txt` so the gap is visible.
+
+Memory-constrained contexts are a real consideration but a narrow one: the
+~2.9 MB floor is *binary size*, mostly demand-paged text, and it is a floor per
+*distinct program*, not per process. Where many tiny instances of the same tool
+run concurrently this is cheaper than it looks. If a component genuinely cannot
+afford the floor (an early-boot shim, a per-process helper spawned in the
+thousands), that is reason 3 or a measured reason 2 — not a general licence to
+default back to Rust.
+
+#### Porting vs. Reimplementing (read together with the language policy)
+
+**The language policy above governs code we are going to write. It is not a
+mandate to rewrite code that already exists.** If a mature implementation of
+something already exists in C, C++ or Rust — Linux CLI tools, libraries,
+daemons, compilers, codecs — the default is to **use it**, not to reimplement it
+in Python (or in Rust). "Python is our default language" is an answer to *"what
+should I write this in?"*, never an answer to *"should I write this?"*.
+
+**Try cross-compiling before you write a line.** The cheapest port is no port:
+our POSIX layer is mature enough that a lot of upstream software builds
+unmodified against `toolchain/sysroot/lib/libc.a`. Establish that it does or
+doesn't *before* committing to a reimplementation, not after.
+
+##### When the port *fails*, that is usually a bug report against our libc — not a verdict on the port
+
+A failed link is the most valuable output this process produces, and the
+default response is **fix the libc and re-try the port**, not "fall back to
+reimplementing". A real port is the only honest coverage test a libc has: you
+cannot guess which of thousands of symbols matter, but real software tells you,
+weighted by actual usage. And the fix compounds — every later port inherits it,
+whereas a rewrite helps exactly one program and then needs maintaining forever.
+The cost asymmetry says the same thing: implementing a missing libc function is
+minutes to an hour; reimplementing the application is hours to days.
+
+_Precedent (`scripts/bash-spike/README.md`): our `libc.a` defined 2,900 symbols,
+bash referenced 2,030, and the first SlateOS link resolved all but **three**.
+Those three — `killpg`, `eaccess`/`euidaccess`, `__fpurge` — were implemented
+for real in `posix/src` rather than shimmed, so the relink now carries no shim
+at all. One port attempt, converted into permanent coverage._
+
+**Triage the failure. Only the first two categories mean "improve the libc":**
+
+1. **Missing standard POSIX/C function** → implement it in `posix/`. Highest
+   leverage and the common case. This is the answer the rule wants you to
+   reach for.
+2. **Missing non-standard extension** (glibc/BSD-isms) → usually implement it;
+   it is normally cheap. But check first whether upstream's `configure`
+   already has a fallback path for its absence, in which case the gap is
+   imaginary and the right fix is to let autoconf find the fallback.
+3. **Architectural mismatch → do *not* grow the libc into it.** If the program
+   needs something SlateOS deliberately rejects — Unix signals as native
+   process control, 4 KiB page assumptions, ambient-authority fds, `/proc`
+   special nodes — the "Linux Compatibility Boundary (non-negotiable)" section
+   below governs: the answer is `ENOSYS` (or emulation *inside* the compat
+   layer), never a hack into native code to satisfy a Linux quirk. This is the
+   one case where a failed port is genuinely telling you to stop.
+4. **Not a libc gap at all** → build-system friction: cross-compile detection,
+   `configure` assumptions, sysroot plumbing. Fix the build, not the libc. Real
+   example from the bash spike: `$CC` cannot contain spaces (autotools
+   word-splits it) and this repo lives under `D:\visual studio projects\`, so
+   the first attempt died with a thoroughly misleading "C compiler cannot
+   create executables".
+
+**Two refinements, both learned from that spike:**
+
+- **A kernel gap can masquerade as a libc gap.** `killpg` exists now but still
+  returns `ENOSYS`, because process groups do not exist in the kernel — yet the
+  symbol had to exist regardless, since bash references it from job-control code
+  and the *link* needs it even on a build where job control cannot work. So:
+  implement the symbol honestly, and file the underlying gap against the kernel
+  (cross-lane, that means a `requests/` entry, not an edit outside your lane).
+- **Whatever you add must actually work.** The "never accept-without-honoring"
+  rule applies at full force: a stub that returns success is *worse* than
+  `ENOSYS`, because the port links, appears to work, and fails subtly later.
+  `killpg` reporting `ENOSYS` truthfully is the correct shape.
+
+**Where this flips:** the argument is leverage, so it evaporates when there is
+none. If one port needs a large, exotic subsystem nothing else will ever use,
+that is cost without reuse — weigh it like any other feature rather than
+treating "it improves the libc" as automatically decisive.
+
+**Worked example — the expensive lesson (see `design-decisions.md` §305).** A
+session spent roughly 25 days reimplementing bash in Rust (`userspace/oils`)
+chasing byte-for-byte parity. It then turned out that **GNU bash 5.2
+cross-compiles to SlateOS as-is** — a 5.3 MB static ELF against our own libc,
+zero undefined symbols, no shims, done in about a day (`scripts/bash-spike/`).
+osh's bash-fidelity scope is now frozen and the real bash ships beside it. The
+failure was not the rewrite being badly done; it was that nobody spent the one
+day on "does the original just build?" before spending the 25 on the
+alternative. This is the single most costly mistake made on this project so far.
+
+**Reasons that *do* justify writing our own — state which one applies:**
+
+1. **The native API is genuinely richer and the existing tool cannot express
+   it.** The worked example is §2.7's Native Process Tools: `ps` has no columns
+   for capability sets, service-attributed resource use, kernel-captured launch
+   provenance or blocked-on chains, because Linux has no such concepts. Note
+   what that section does — it ships the native tools **alongside** ported
+   `ps`/`kill`/`top`, never instead of them.
+2. **A deliberate superset**, where the point is the added behaviour and
+   compatibility is a floor rather than the goal.
+3. **The security model requires it** — e.g. a handle-based, TOCTOU-free API
+   that the C original structurally cannot use. (The corrode.dev analysis cited
+   under "API Design Principles" found the largest CVE cluster in Rust coreutils
+   was path-resolution races; a rewrite that doesn't fix the class is a rewrite
+   that bought nothing.)
+4. **Upstream is unportable, unmaintained, or licence-incompatible.**
+5. **It is genuinely trivial** — small enough that the port machinery, build
+   plumbing and patch maintenance cost more than the code does.
+
+**Reasons that do not justify it:** it's in a language we'd rather not use; it
+would be "cleaner" in Rust or Python; we want to understand it; the port looks
+fiddly; Rust is memory-safe. A working, battle-tested implementation carries
+years of bug fixes and edge-case handling that a rewrite silently discards, and
+the rewrite ships *new* bugs into a system where we are the only tester.
+
+**Prefer additive over replacement.** Where we do build our own, ship the ported
+original too, because scripts depend on it byte-for-byte. This is already the
+pattern for bash/osh and for `ps`/`pslist`.
+
+**If you take the reimplementation exit, record it** — a one-line note in the
+roadmap item saying which of the five reasons applies, so the next session does
+not have to re-derive the decision (or worse, re-litigate it after the work is
+done).
 
 ### Linux Compatibility Boundary (non-negotiable)
 
@@ -208,7 +409,8 @@ batches must hold to the same discipline.
 - [ ] Later (pre-release): GRUB menu entry support for dual-boot installs
 - [x] Write CLAUDE.md / coding standards
 - [x] Set up benchmark infrastructure (`criterion`, `bench/` directory, `bench/baselines.toml`)
-- [ ] Integrate fastpy compiler into build system
+- [-] Integrate fastpy compiler into build system — **in progress** ("initiative F"; status authority is `roadmap.md`, which tracks the increments in detail). Verified done: the `x86_64-slateos` codegen target, the `rust-lld` link step, the cross-compiled pure-mode C runtime, full program link with the `posix` crt, and **on-target ring-3 execution** under the SlateOS kernel. 60+ fastpy-built binaries now live in `services/fastpy-*`, each paired with a false-pass-proof kernel self-test. Strategy per `design-decisions.md` §80 (Q29): **pure mode first** (AOT-compile, no embedded CPython), CPython bridge later as a superset once CPython is ported.
+
 - [ ] Porting automation toolkit: rule-based source code transformers for large-scale ports
   - [ ] **Coccinelle** (semantic patching for C): preferred tool for pure-C codebases
     - Understands C semantics (types, control flow, macros) — not just text substitution
@@ -238,6 +440,51 @@ batches must hold to the same discipline.
     - Header remapping, ifdef cleanup, simple renames → **comby** (quick, language-agnostic)
     - Large ports often use all three: comby for bulk header/ifdef cleanup first, then Coccinelle or LibTooling for semantic API translation
 
+#### fastpy language bindings for OS APIs
+
+_Python is only the default userspace language (see "Implementation Language
+Policy") to the extent it can actually call the OS. These are the bindings that
+make that true. Each `os.*` lowering is native and bridge-free: codegen emits a
+call to a `fastpy_os_*` runtime function in `runtime/objects.c`, which calls our
+POSIX libc, which dispatches to the kernel `SYS_*` syscalls. No CPython is
+involved on any of these paths._
+
+- [x] **POSIX `os.*` surface (native, pure-mode)** — ~56 functions implemented
+  and on-target tested. Process/identity (`getpid`, `getppid`, `gettid`,
+  `getuid`/`setuid`, `getgid`/`setgid`, `getcwd`, `getenv`, `umask`,
+  `nice`/`getpriority`/`setpriority`); raw-fd I/O (`open`, `read`, `write`,
+  `close`, `dup`, `dup2`, `lseek`, `pread`/`pwrite`, `ftruncate`); pipes
+  (`pipe`); process lifecycle (`fork`, `execv`, `waitpid`, `wifexited`,
+  `wexitstatus`); filesystem (`stat`, `statvfs`, `listdir`, `mkdir`, `rmdir`,
+  `remove`/`unlink`, `rename`, `link`, `symlink`, `readlink`, `truncate`,
+  `chmod`, `chown`, `utime`, `access`); and the `os.path.*` predicates and
+  helpers.
+- [x] **Built-in `open()` / file objects** — native `FILE*`-backed file object
+  over the `SYS_FS_*` VFS syscalls, with `with`-statement and iteration support.
+  Known slice-1 limits: text mode only (no `'rb'`/`bytes`), no `read(n)` size
+  argument, `FileNotFoundError` not yet in the `OSError` hierarchy.
+- [x] **`pathlib.Path`** — CPython-free implementation (`runtime/pathlib_pure.c`).
+- [ ] **Bindings for the *native* (non-POSIX) SlateOS API — the real gap.**
+  SlateOS is a capability/channel microkernel; POSIX is the compatibility
+  surface, not the native one. Python currently has **no** binding for any of
+  it, which is why native-side components still have to be Rust. Needed:
+  - [ ] Capability handles — acquire/inspect/derive/drop, `has_capability()`
+  - [ ] Channel IPC — create, `send`/`send_transfer`/`recv`, capability transfer
+  - [ ] The IOCP-style completion event loop and io_uring submission
+  - [ ] Service discovery / RPC (Cap'n Proto structured messages)
+  - [ ] Shared memory and futexes
+  - [ ] Structured (JSON-lines) logging and the hooks/tracing subsystem
+- [ ] **Remaining POSIX gaps blocking specific components** — add on demand,
+  each with its own ring-3 self-test, in roughly this order of usefulness:
+  - [ ] `socket` / `select` / `selectors` (network tools, service discovery)
+  - [ ] `termios` / `pty` / terminal control (shell, terminal emulator)
+  - [ ] `mmap`
+  - [ ] `posix_spawn` / `subprocess` (higher-level than the raw `fork`+`execv`)
+  - [ ] `threading` on-target (the runtime TU exists; not yet exercised at ring 3)
+- [ ] **GUI toolkit bindings** — the widget API (Phase 3.5) exposed to Python, so
+  the desktop apps specified as Python/fastpy (text editor, music player,
+  Event Viewer, calendar/reminders, settings UI, file explorer) can actually be
+  written in it. Blocked on the toolkit itself.
 _Bootloader: Limine for development (Phases 0-5). For release: GRUB for dual-boot (installer adds menu entry) + minimal custom EFI stub for standalone UEFI boot with Secure Boot._
 
 ---
@@ -1127,7 +1374,20 @@ a direct user gesture and needs none of them._
 ### 2.7 Shell and Basic Userspace Tools
 
 #### Shells
-- [ ] Port Oils (bash-compatible, replaces bash for POSIX compatibility)
+- [-] Port Oils (bash-compatible, replaces bash for POSIX compatibility) — **in
+  progress as `userspace/oils` (binary `osh`), and its bash-fidelity scope is
+  FROZEN as of 2026-08-14: see design-decisions.md §305 before doing any parity
+  work.** GNU bash 5.2 itself cross-compiles and runs on SlateOS, so byte-for-byte
+  osh↔bash parity is no longer a goal; osh divergences are fixed only when
+  something we ship or run hits them, when they are crash/hang/data-loss/security
+  bugs, or when they are regressions. The `TD-OILS-*` family in `known-issues.md`
+  is gated by that criterion and is not a burn-down list.
+- [x] Cross-compile **GNU bash 5.2** for SlateOS — done 2026-08-12
+  (`scripts/bash-spike/`). 5,349,720-byte static ELF against
+  `toolchain/sysroot/lib/libc.a`, zero undefined symbols, no shims; proven each
+  boot by `kernel/src/proc/spawn.rs::self_test_bash_on_slateos_libc`. Ships beside
+  osh as the exact-bash escape hatch and the intended on-device differential
+  oracle (§305).
 - [ ] Port Nushell as default interactive shell (Rust, structured data piping)
 - [ ] **Windows-shell familiarity layer: a `cmd.exe` emulator (and, stretch, a PowerShell emulator).** For users migrating from Windows, provide a shell that accepts classic `cmd.exe` syntax — the builtin commands (`dir`, `copy`, `move`, `del`, `ren`, `type`, `cd`/`chdir`, `md`/`mkdir`, `rd`/`rmdir`, `cls`, `echo`, `set`, `path`, `where`, `for`, `if`, `goto`, `call`, `start`, `title`, `%VAR%`/`%ERRORLEVEL%` expansion, `&`/`&&`/`||`/`|` operators, `.bat`/`.cmd` batch-file execution) — mapping them onto native filesystem/process/env syscalls so muscle-memory and existing `.bat` scripts work. It is an *emulation/compat layer*, not the default shell (Nushell stays default); it lives alongside Oils the same way. **Stretch goal: a PowerShell emulator** — much larger scope (a real object pipeline, cmdlets, .NET-esque type system). Two realistic paths, to be decided when tackled: (a) port PowerShell Core (open-source, MIT) via the .NET/CoreCLR runtime once that's available on the OS — the faithful option; or (b) a *subset* emulator covering the most common cmdlets (`Get-ChildItem`/`gci`, `Get-Content`, `Set-Location`, `Copy-Item`, `Where-Object`, `ForEach-Object`, `Select-Object`, `$_`, object pipeline basics) mapped onto Nushell's already-structured pipeline where semantics align. Record as an open question which path to take before starting PowerShell specifically; the `cmd.exe` emulator is the committed near-term deliverable and does not depend on it.
 
@@ -1139,7 +1399,7 @@ _Nushell as default interactive shell (structured data, Rust-native). Oils for P
 - [ ] Port curl
 - [ ] Port ssh / sshd
 - [ ] Port find (compatible with Linux find)
-- [ ] Build custom grep in Rust (with Python grep's unique features + standard grep features)
+- [ ] Build custom grep (with Python grep's unique features + standard grep features). **Revisit before starting** — this item predates both the language policy and the porting policy in "Design Principles", and as written it contradicts each: it specifies Rust with no stated performance reason, and a from-scratch build with no stated porting reason. The superset motive (reason 2) is plausible but has never been written down, and it is not obvious it needs a rewrite rather than ripgrep/GNU grep plus a wrapper. Before writing any code: check whether GNU grep and/or ripgrep cross-compile as-is (they very likely do), then decide whether the extra features justify our own implementation, and if so record which exclusion applies and why the language is what it is. Ship the ported original alongside regardless — scripts depend on grep byte-for-byte.
 - [ ] Filename sanitizer utility
 - [ ] Monitor-off utility (like nircmd monitor off)
 
@@ -1335,6 +1595,7 @@ _2D library: Vello (Rust-native, GPU compute shaders) + HarfBuzz FFI for complex
 - [ ] Can drag and drop icons into and out of system tray
 - [ ] Apps can start in system tray or minimize to system tray
 - [ ] User can override any app: always start in system tray, always in taskbar, or neither
+- [ ] **One permanent "Activity" tray icon** (never one per app or per process), alongside clock/wifi/volume/battery and as fixed as they are. Click opens a flyout listing the apps currently narrating and what each is doing; picking one opens its console window. It does not badge or shout — a log is a door you go through, not an alert. See §4.14.
 - [ ] **Volume icon popup (click on system-tray volume icon).** Lightweight Aero-styled flyout — opens instantly without launching the full Settings app. Contents:
   - [ ] **Main volume slider** at top with current level, and a mute toggle next to it. Adjusting the slider takes effect immediately (no Apply button).
   - [ ] **Output device selector** — dropdown or radio list of available audio output devices (speakers, headphones, HDMI sinks, Bluetooth devices, USB DACs, virtual outputs). Selecting one switches the system default output. Currently active device shown highlighted; unavailable devices (unplugged, asleep) shown disabled with reason. Refreshes live as devices appear/disappear.
@@ -1871,7 +2132,14 @@ below and read the same kernel views, so the two can never disagree._
 - [ ] Show all subprocesses and threads
 - [ ] Show: capabilities, running user, priority levels, app name, what launched it, is it a service, what's blocking it, what's waiting on its locks, running/paused status, full path
 - [ ] **Launch provenance (command line + who/when started it).** Each process row must surface the full launch context: (a) the *command line* it was launched with — the executable path plus every argument (argv), and if any, the parameters/flags it was passed — shown verbatim when available, and clearly marked "(no arguments)" or "(command line unavailable)" when the process was spawned without a recorded argv or has since cleared it; (b) the *originating process or thread* that launched it — the parent process (and specific thread, when the kernel records launcher thread id) resolved to a clickable identity so the user can jump straight to the launcher's row, with graceful "(launcher exited)" / "(launched by init)" fallbacks; and (c) the *launch timestamp* (wall-clock time the process was created), shown both absolutely and as an elapsed "started N ago" so the user can correlate a process with something they just did. This is read-only informational metadata; the command line is captured by the kernel at `exec`/spawn time (the same argv/envp the loader already stores) and exposed through the `proc.inspect` process-query capability (§1.5), never self-declared by the process (so it can't lie about how it was invoked). Long command lines are truncated in the row with full text on hover / in the detail pane, and are copyable.
+- [ ] **Self-declared process description (the "which one is this?" field).** A process can attach a short human-meaningful description to its own metadata — "GitHub · Pull Request #123 (renderer)", "compiling net/tcp.rs", "worker 3 of 8", "backing up D:\\Photos" — which Process Explorer shows as a column and in the detail pane, and which the `pslist`/`psinfo` CLI tools print. It is settable at any time and updatable in place, because the thing that makes a process identifiable usually changes during its life (the tab navigates, the worker moves to the next file). Without this, a fleet of eight identical worker processes is eight identical rows, and the user's only recourse is reading command lines.
+  - [ ] **Deliberately the opposite of launch provenance, and marked as such in the UI.** Provenance (above) is kernel-stamped precisely so a process cannot lie about it; the description is *self-declared* and a process can put anything it likes there, including something misleading. Both are worth having for opposite reasons — one is trustworthy, one is meaningful — but they must never be presented as the same kind of fact. The description is displayed as the program's own claim about itself, and never replaces the executable path, package identity or command line, which remain visible alongside it.
+  - [ ] **Distinct from the package/app name** (§4.5) and from the current-activity one-liner (§4.14). The app name says *what program this is*, the description says *which instance of it*, and the activity line says *what it is doing this second*. A Chromium renderer needs all three and they change on different timescales; collapsing them into one field is what makes existing task managers unreadable for multi-process apps.
+  - [ ] Threads get the same field, so a thread pool can name its threads and a stuck thread is identifiable without a debugger.
+  - [ ] Length-bounded, single-line, and sanitised for control characters and direction-override marks before display — a process-supplied string rendered in a system tool is an injection surface, and a right-to-left override in a process name is a real spoofing trick on other OSes.
+  - [ ] **Encourage app makers to actually set it.** This has the same adoption problem as §4.14 and the same levers: `libactivity`-adjacent one-liner APIs in the Rust crate and the Python package, the SDK's example programs all set it, developer docs treat it as normal practice for any program that runs more than one process, and the package repository's quality checklist counts it. Ported and legacy programs that set nothing fall back to package name + executable, so the field is additive and never leaves a row emptier than it is today.
 - [ ] Switch to any window or terminal a process owns
+- [ ] **Live activity — what the process is doing right now.** An "Activity" column carrying each process's current-activity one-liner, and a per-process pane tailing its activity stream. The facility, its capability gating and the tray-parked-console alternative are §4.14; this bullet is the Process Explorer half of it.
 - [ ] System resource graphs (CPU, RAM, disk, network over time)
 - [ ] **Service-mediated resource attribution.** When a program's resource use flows through an OS service process — e.g., the program writes to a TCP socket and the network stack runs in a separate daemon, or the program opens a file and the disk I/O is performed by a filesystem service, or the program asks the audio service to mix samples — Process Explorer must attribute the resource consumption back to the *originating* program, not to the service. So a user sees "Firefox is using 4 MB/s of network" and "Slack is using 12% disk I/O" even though the kernel-visible network/disk traffic actually flows through the network/storage daemons.
   - [ ] **Mechanism.** Every service-mediated request carries the originator's identity through the IPC chain as a kernel-stamped tag (not a self-declared field — services can't lie). The service processes' accounting layer attributes bytes/cycles/I/O back to that tag. Process Explorer queries the kernel for a flattened "if I look through every service, who's actually using this resource" view alongside the raw "which process holds the syscall" view.
@@ -2047,7 +2315,11 @@ _The theme editor makes it easy for non-technical users to create themes, which 
 ### 4.7 Port Chromium
 
 - [ ] Port Chromium (~35M lines C++)
-  - [ ] **Name renderer/helper processes so Process Explorer can map each to its tab.** Chromium spawns a process per site/tab (renderer), plus GPU/utility/network-service helpers. When the user opens Process Explorer (§4.3) and sees a fleet of Chromium processes, each must carry a human-meaningful name that identifies *which tab* (or which helper role) it is — e.g. "Chromium — GitHub · Pull Request #123 (renderer)", "Chromium — GPU process", "Chromium — Network service" — not an opaque `chromium-bin ... --type=renderer` command line. Wire Chromium's per-process title/description (it already tracks the primary document title and process type internally) into whatever OS mechanism sets a process's Process-Explorer display name, updating the renderer's name when the tab navigates or the title changes. This makes "which Chromium process is eating my CPU/RAM" answerable at a glance and lets the user kill a single runaway tab's process without guessing. Ties into §4.3 launch-provenance (the raw `--type=` command line is still shown as provenance; the friendly per-tab name is the primary label).
+  - [ ] **Name renderer/helper processes so Process Explorer can map each to its tab.** Chromium spawns a process per site/tab (renderer), plus GPU/utility/network-service helpers. When the user opens Process Explorer (§4.3) and sees a fleet of Chromium processes, each must carry a human-meaningful name that identifies *which tab* (or which helper role) it is — e.g. "Chromium — GitHub · Pull Request #123 (renderer)", "Chromium — GPU process", "Chromium — Network service" — not an opaque `chromium-bin ... --type=renderer` command line. Wire Chromium's per-process title/description (it already tracks the primary document title and process type internally) into the **self-declared process description** field in §4.3, updating the renderer's description when the tab navigates or the title changes. That field is the general OS mechanism — any app may set it and app makers are encouraged to — and Chromium is simply its most demanding consumer: a process per tab, descriptions that change on every navigation, and helper roles that need naming too. Porting Chromium is therefore also the **proof that the general facility is adequate**; if a tab title cannot be expressed through §4.3's field (length, update rate, threading, sanitisation), that is a defect in the field, not something to work around inside the port. This makes "which Chromium process is eating my CPU/RAM" answerable at a glance and lets the user kill a single runaway tab's process without guessing. Ties into §4.3 launch-provenance (the raw `--type=` command line is still shown as provenance; the friendly per-tab name is the primary label).
+    - [ ] **Every process type gets a description, not just renderers** — GPU, network service, storage service, audio service, each utility process by its actual job ("Chromium — Utility: audio decoder"), and each extension by its name. A fleet is only readable if none of it is anonymous; one unlabelled row sends the user back to reading command lines for all of them.
+    - [ ] **Updated on navigation and on title change**, since a renderer outlives the page it started with. A renderer hosting several same-site tabs describes itself by count and foremost tab ("GitHub · PR #123 + 2 more"), because Chromium's process-per-*site* model means the row-to-tab mapping is genuinely many-to-one and pretending otherwise would be a lie the user acts on when they kill it.
+    - [ ] **Private-browsing tabs are described by mode, never by title or URL** ("Chromium — Private tab"). A task manager is visible to anything holding `proc.inspect`, and leaking a private tab's page title into system-wide process metadata would defeat the mode entirely. Same rule for any page the user has marked sensitive.
+    - [ ] Wire the same descriptions into §4.14's activity groups so the Chromium fleet also coheres as one app for activity purposes, and into §4.1's audio-history sub-app granularity (line above) so "which tab played that sound" resolves against the same identity rather than a second, parallel one.
 - [ ] System web app framework (shared Chromium, not per-app Electron)
   - [ ] **Electron-compatible app runtime backed by the shared system Chromium.**
     Ship an Electron-like runtime (Chromium renderer + a Node-compatible main
@@ -2083,7 +2355,7 @@ _Chromium first (required for web app framework + VS Code). Firefox later via Li
 - [ ] gcc, cmake, make, pkg-config (via POSIX layer)
 - [ ] Rust toolchain (for kernel recompilation)
 - [ ] CPython (latest, for ecosystem compatibility and fastpy bootstrapping)
-- [ ] fastpy compiler (AOT Python compiler — first-class language for OS userspace)
+- [ ] fastpy compiler **hosted on SlateOS** (AOT Python compiler — first-class language for OS userspace). Note the distinction: *cross*-compiling Python to SlateOS binaries from the dev machine already works and is in use (60+ `services/fastpy-*` binaries — see Phase 0 → "Integrate fastpy compiler into build system"). This item is the compiler **running on the OS itself**, which needs CPython ported first (fastpy is written in Python and bridges to the CPython runtime for binary-extension imports — `design-decisions.md` §9).
 - [ ] Custom Rust target for the OS
 - [ ] Port Rust std library to native syscalls
 - [ ] Port a debugger (gdb/lldb) — both live attach (`debug.*` capabilities) and **postmortem dump-file loading** (opens the crash dumps from §1.5 → Crash Dumps & Postmortem Debugging, re-symbolicates against recorded store paths). Dump format chosen to match what the ported debugger understands (minidump/ELF-core-compatible) so minimal porting is needed.
@@ -2101,6 +2373,13 @@ _Chromium first (required for web app framework + VS Code). Firefox later via Li
 - [ ] Zig (self-hosted compiler, minimal runtime)
 
 _Goal: a developer should be able to use any mainstream language on this OS. Languages with JIT compilers require the `mem.jit` capability for full performance; they can fall back to interpreter mode without it._
+
+_This list is about what **users** of the OS can write software in. It says
+nothing about what **the OS itself** is written in — for that, see "Design
+Principles → Implementation Language Policy": Rust for kernel/drivers/hot
+paths, **Python (fastpy) by default for everything else**. fastpy binaries are
+AOT-compiled and contain no interpreter, so choosing Python for an OS component
+costs neither the CPython memory footprint nor interpreter-speed execution._
 
 ### 4.9 Remote Desktop
 
@@ -2558,6 +2837,205 @@ Automation support is opt-in, but we want it to be the norm rather than the exce
 - [ ] Automation API coverage is part of the quality checklist for programs in the official package repository
 
 _The automation framework uses the same channel IPC + RPC serialization (Cap'n Proto/FlatBuffers) as the rest of the OS. `libautomation` is a thin layer on top of the service registry — no new kernel primitives required. Programs that don't opt in are simply not automatable. The standard naming conventions ensure that scripts written for one chat client work with any chat client, one media player work with any media player, etc._
+
+---
+
+### 4.14 Program Activity Streams (what is this program doing right now?)
+
+_Operator's idea, 2026-08-14._
+
+On every existing desktop OS, a program that wants to narrate what it is doing
+writes to stdout — and to read stdout you need a console window. Nobody wants a
+console window per GUI app, so in practice GUI programs say nothing at all, and
+when one hangs or misbehaves the user has no way to find out what it was in the
+middle of. The diagnostic chatter either does not exist, or it exists in a log
+file nobody knows the path of.
+
+The fix is to **decouple "the program narrates" from "there is a console window
+on screen."** Every process gets a running activity stream whether or not
+anything is watching it; the OS buffers it; and it is read through the system
+tray, through Process Explorer (§4.3), or through the CLI. Because emitting is
+free and reading is easy, programs can be *encouraged* to narrate — which is the
+whole point, and the reason this has to be an OS facility rather than a
+convention each app reinvents.
+
+**This is deliberately not the event log (§2.6).** The event log is the
+low-volume, high-value, persisted, rotated, queried-months-later record:
+"service X crashed", "auth failed 3 times". An activity stream is the
+high-volume, low-value-per-line, in-memory, seconds-to-minutes record: "loading
+config", "decoding frame 4127", "waiting on DNS for api.example.com". Merging
+the two drowns the event log, which is exactly what makes Windows' Event Viewer
+useless. They stay separate, with one bridge in each direction (promotion on
+crash, below).
+
+#### Core facility
+
+- [ ] **Every process has an activity ring**, created at spawn, whether or not the process ever writes to it and whether or not anyone ever reads it. Bounded (default 256 KB, configurable per-process and by policy), lock-free, overwriting oldest-first. Freed at exit unless promoted.
+- [ ] **Backed by shared memory mapped into the writing process**, so the common case — a program appending a line nobody is currently reading — costs an atomic bump and a memcpy, with **no syscall**. This is a hard requirement, not an optimization: if narrating costs a syscall per line, programs will do it behind a `#[cfg(debug)]` and the feature dies.
+- [ ] **Verbosity levels** per stream (`trace`, `debug`, `info`, `notice`) with the current subscriber-demanded level published back into the shared page, so a program can cheaply test "is anyone asking for trace?" and skip formatting entirely when not. Formatting cost, not I/O cost, is what actually deters instrumentation.
+- [ ] **Automatic stdout/stderr capture.** A process with no controlling terminal has its stdout and stderr wired into its activity ring by default. Every already-written and every ported POSIX program therefore gains an inspectable activity stream with **zero code changes** — this is what makes the feature useful on day one instead of after an ecosystem-wide adoption campaign.
+  - [ ] A process *with* a terminal behaves normally (writes go to the terminal) and additionally tees into the ring, so `pstail` works on terminal programs too.
+  - [ ] Interleaving of stdout and stderr is preserved, with each line tagged by which stream it came from so a viewer can colour or filter them apart.
+- [ ] **Optional structured records** for programs that want to do better than flat text: `enter(fn)` / `exit(fn, outcome)`, `phase(name)`, `progress(done, total)`, `waiting_on(what)`. A viewer renders these as a collapsible call tree or a timeline rather than a scrolling wall, and they are what make "which function is it stuck in" answerable at a glance.
+  - [ ] `libactivity` (Rust crate + Python package via fastpy) with a derive macro / decorator that instruments a function's entry and exit in one annotation.
+  - [ ] Records carry a monotonic timestamp, so a stalled `enter` with no matching `exit` is directly visible as "in `parse_manifest` for 40 s".
+  - [ ] These records are also what produce the nesting hierarchy — `enter`/`exit` pairs and `phase` boundaries *are* the tree, with no separate grouping API. See **Grouping and nesting**, below, for depth and fold policy.
+- [ ] **The current-activity one-liner.** Separate from the scrolling stream, a process publishes a single short "what I am doing right now" string, overwritten in place. This is what appears in the Process Explorer row, the tray menu and `psdoing`. It is far more useful per pixel than any log, and costs one store.
+  - [ ] Derived automatically from the innermost open `phase`/`enter` record when the program has not set one explicitly.
+- [ ] **Promotion on crash.** When a process dies abnormally, the tail of its ring (last N KB, configurable) is captured into the crash report and a `process.crashed` event in the event log references it. This is the bridge that makes the ring worth writing to: the chatter that was worthless a second before the crash becomes the most valuable thing in the postmortem.
+- [ ] **Promotion on demand.** A user watching a stream can hit "keep this" to spill the current ring contents to a file, so an interesting trace survives the ring wrapping.
+
+#### Activity groups — the app is the unit, the process is the detail
+
+_Users think in apps; the kernel thinks in processes. A modern app is a fleet —
+Chromium is a process per tab plus GPU and network helpers, a build is a
+compiler per core, a backup is a coordinator plus workers. Presenting that fleet
+as a dozen unrelated streams pushes the reassembly work onto the user, who then
+has to know which PID is "the app". So there is a **main log per app**, and the
+per-process streams are its detail rows._
+
+- [ ] **Activity group**: a kernel-maintained ID identifying "one app" for activity purposes. Rooted at the process the user launched, **inherited across spawn by default**, and explicitly breakable by a process that is legitimately its own app (a daemon started by the shell must not spend its life inside the shell's group). Inheritance-with-explicit-break, rather than opt-in grouping, is what makes a fleet cohere without every program having to cooperate.
+  - [ ] Reuses the identity machinery that already exists rather than inventing a parallel one: §4.3's kernel-stamped originator tag, §4.3's self-declared per-process descriptions (which is what makes a Chromium row say "GitHub · PR #123 (renderer)" instead of `--type=renderer`; §4.7 is that field's most demanding consumer, not its owner), and the package identity from §4.5.
+  - [ ] A group survives a member exiting and is retired when its last member exits; its ring contents follow the normal promotion rules, so a fleet that crashed leaves one readable app-level trace rather than a dozen orphans.
+- [ ] **The app log is a merged *view*, not a second copy.** Every record already carries `(group, pid, tid)`; the app-level stream is those records merged by timestamp at read time. Storing an aggregate ring *as well as* per-process rings would double the memory, and worse, a chatty worker would evict the coordinator's important lines from the shared buffer — the app log would get less useful exactly as the app got busier. One copy, N views.
+  - [ ] **Every node in the process tree has an activity view, and it is the merge of that node's subtree.** "App log" and "individual process log" are then not two features but the same one at two nodes, which is why both can exist without either being a special case.
+  - [ ] The app's own top-level narration ("Backup started", "phase 2 of 5") needs no special mechanism: it is what the group's root process writes, and it is what a reader sees when the per-process detail is collapsed.
+  - [ ] Merging independent rings that wrap at their own rates gives a **ragged start** — a chatty child may have wrapped while a quiet parent still holds an hour of history. The viewer must mark where each contributor's history begins rather than implying the merged view is complete back to its earliest line.
+- [ ] **Threads do not get their own rings.** Thread ID is a field on each record; a per-thread view is a filter. A ring per thread would multiply the memory by the thread count to answer a question a `WHERE tid = ...` already answers.
+- [ ] **Ring budget is charged per group, not per process**, so one app spawning 200 workers cannot consume the global cap. Within a group, an app can weight its members (give the coordinator a bigger ring than the workers).
+- [ ] **Instances.** Two windows of the same app may be one group or two depending on whether the app is single- or multi-process; the grouping follows the actual process tree rather than the package identity, and the viewer shows the package name with an instance discriminator when there is more than one.
+
+#### Grouping and nesting — subtasks under tasks
+
+_A flat stream is only readable while it is short. Real work is a hierarchy —
+"install package" contains "resolve dependencies" contains "fetch index" — and a
+viewer that cannot show that hierarchy forces the user to reconstruct it from
+indentation they have to squint at, which is what reading a build log is like
+today._
+
+_**Depth is unlimited in the record and limited in the view.** These are separate
+questions and conflating them is the trap. Nesting comes from the call graph, so
+capping it at record time means either refusing to record deeper frames (losing
+the data) or flattening them (misreporting it) — and the cap you picked is
+wrong the first time someone's dependency resolver is one level deeper than you
+guessed. Recording depth costs nothing: it is implicit in the `enter`/`exit`
+pairing that is already there. Meanwhile "how deep do I want to look right now"
+is a display preference that should be changeable live, without re-running the
+program. So: record everything, and let the view fold._
+
+- [ ] **Nesting is created by the structured records already specified**: `enter`/`exit` pairs nest exactly as the call stack does, and `phase(name)` opens a named group that closes when the next phase opens or the enclosing frame exits. No separate grouping API — if a program is instrumented at all, it is already producing the tree.
+- [ ] **A recording-time depth cap as a safety valve, not a design limit** (default 64). Beyond it, frames are counted but not individually recorded — the viewer shows "+1,204 deeper frames elided" — so a runaway recursion cannot consume the whole ring with stack noise. This is set far below any depth a human view would want to show and far above any depth real code produces; it exists to bound the damage, not to shape the feature.
+- [ ] **Unbalanced frames are rendered honestly.** An `enter` with no `exit` is the normal state of a running frame and the *permanent* state of one whose process died mid-call; it renders as still-open with its elapsed time, never silently balanced. A ring that has wrapped can also evict an `enter` whose `exit` survives, so the viewer must tolerate orphan exits and mark them rather than mis-parenting the lines around them.
+- [ ] **Nesting composes with the process tree rather than competing with it.** The outer levels of the tree are app → process → thread (from the activity-group rules above); within a thread, the levels are call and phase nesting. A spawned process attaches as a child of whatever frame was open in its parent at spawn time, so a coordinator's workers appear *under* the phase that launched them instead of as a sibling fleet the user has to mentally re-associate.
+
+**Default fold state — keyed on whether a frame is finished, not on how deep it is:**
+
+- [ ] **Open (still-running) frames are expanded.** They are the current stack, which is the entire point of a live view — "which function is it in" has to be answerable without clicking. A tree that starts collapsed shows a user watching their app work a screen that never moves.
+- [ ] **Completed frames fold to a one-line summary** when they close: name, outcome, duration, and a count of what they contained ("resolve dependencies — ok, 1.4 s, 312 lines"). Work that is done stops taking up space on its own, and the view naturally becomes "full detail on what is happening now, with finished work folding away above it" — which is how a good progress display behaves and how none of them are built.
+- [ ] **A frame that failed, or that contains a warning or error, stays expanded** — auto-expanded down to the offending line if it has already closed. The one case where hiding detail is most tempting is the one case where the user definitely wants it.
+- [ ] **Very short frames fold into their parent entirely** below a threshold (default ~1 ms, configurable, off-able). Ten thousand successful two-microsecond calls are noise; the parent shows them as a count. Anything that failed is exempt regardless of duration.
+- [ ] **Sticky ancestors** when scrolled deep inside a frame: the enclosing frames pin to the top of the pane so the user can always see what the lines they are reading are *part of*, the way sticky scroll works for code.
+- [ ] **Expand-all / collapse-all and an explicit "show N levels" control**, remembered per app, so a user whose mental model of a particular program is "I only ever care about phases" can have that permanently without arguing with the defaults each time.
+- [ ] **A program may request a default fold depth for its own output, as a hint the user overrides** — RESOLVED 2026-08-14 (operator). An installer saying "start me collapsed to phases" is worth honouring because the program is the only party that knows which of its levels are meaningful; a user who disagrees sets a per-app preference, and that preference always wins. The hint is a *default*, never a constraint: it cannot hide a frame from an expand-all, cannot survive the user's explicit setting, and cannot fold a frame the failure rules would expand. A program that abuses it to bury its own noise therefore costs the user one click, not the data.
+  - [ ] The viewer indicates when the current fold depth came from the program rather than from the user or the global default, so "why is this collapsed" always has a visible answer.
+- [ ] **Uninstrumented programs get a heuristic, clearly marked as one.** A program whose stream is only captured stdout has no nesting information at all, but a great many CLI tools indent their own sub-output. An opt-in "infer nesting from leading whitespace" mode recovers a usable tree for those, flagged in the UI as inferred so nobody mistakes a guess for a fact.
+
+#### Surface A — inspection tool (Process Explorer, §4.3)
+
+- [ ] **Activity column** in the main process list showing each process's current-activity one-liner, live-updating. Sortable and filterable; a fleet of otherwise-identical worker processes becomes readable at a glance.
+  - [ ] On a collapsed app row the column shows the *group's* current activity — the root process's one-liner, or a summary ("4 of 8 workers compiling") when the app publishes one.
+- [ ] **Activity pane** in the per-process detail view: live tail of that process's stream, with pause-on-scroll-up, text search, level filter, and stdout/stderr filter.
+  - [ ] **The pane follows the tree selection.** Select the app row and it is the app log; expand and select one process and it is that process's log; select a thread and it is that thread's lines. Same pane, same controls, different node — per the "every node is a view of its subtree" rule above.
+  - [ ] **Provenance gutter** in merged views: each line marked with which process (and thread) emitted it, click-through to that node, and a per-contributor colour so a fleet's interleaving is readable rather than a wall of undifferentiated text.
+  - [ ] **"Only this process" / "include children"** toggle, so a coordinator's own narration can be read without its workers' noise, which is the common case when the coordinator is the thing misbehaving.
+  - [ ] Ragged-history markers where a contributor's ring has wrapped, so a gap is never mistaken for silence.
+- [ ] **Call-tree / timeline view** for processes emitting structured records, with open-but-not-yet-closed frames highlighted — the "it is stuck here" view. This is the primary consumer of the **Grouping and nesting** rules above: open frames expanded, completed frames folded to their summary line, failures auto-expanded, sticky ancestors while scrolled deep.
+  - [ ] Fold and unfold with the keyboard as well as the mouse, and a "show N levels" control in the pane's toolbar; the setting is remembered per app, not per window, so it survives closing and reopening the tool.
+  - [ ] The Activity *pane* and the call-tree *view* are the same widget at two densities rather than two implementations — a flat stream is just a tree whose records carry no nesting, which is exactly the uninstrumented-stdout case.
+- [ ] **"Why is this program not responding?"** — when a window stops pumping events, the hung-app dialog (§4.1/§3.4) shows the program's current activity and the tail of its stream inline, instead of the contentless "This program is not responding" every other OS shows.
+- [ ] Cross-reference: the same kernel-stamped originator tag that powers §4.3's service-mediated resource attribution lets a *service's* activity lines be attributed back to the program that caused them — so "what is the filesystem service doing?" can answer "reading 2 GB for Backup.app".
+
+#### Surface B — the tray (§3.4 System Tray)
+
+_**One icon for the whole facility, not one per app.** The first sketch of this
+gave each app a parked console in the tray, and that is wrong for the reason the
+tray is always wrong: it is the most contended real estate on the desktop, it
+does not scale with the number of running things, and a row of forty
+indistinguishable console icons is worse than no feature at all. Grouping by app
+rather than by process (above) reduces the count but does not fix the shape of
+the problem — twelve apps still means twelve icons, and it means the icons
+appear and vanish as apps come and go, which is the specific tray behaviour
+users hate most._
+
+_The fix is to move the per-app enumeration **out of the icon row and into a
+list inside one icon**. Lists scale to forty entries; rows of icons do not.
+That, not a better grouping key, is what actually solves the clutter._
+
+_**The icon is permanent and static.** An earlier draft had it appear only when
+something wanted attention, which was wrong twice over. It contradicted the very
+objection above — an icon that comes and goes is the churn users dislike,
+whether there is one of them or twelve — and it made Process Explorer the only
+reliable route to a log, which defeats the point of the feature. The tray is
+good at exactly one thing: **a stable, known location.** Its existing permanent
+residents (clock, wifi, volume, battery) are unobjectionable precisely because
+they are few and they never move. A single fixed Activity icon is the same deal,
+and the user can remove it like any other tray icon if they do not want it._
+
+- [ ] **One permanent "Activity" tray icon**, never one per app or per process. Always present, fixed position, does not appear or disappear with what is running. Removable and re-addable by the user per the existing tray drag-and-drop item, and hideable outright in settings.
+- [ ] **Click opens a flyout**, modelled on the volume-icon popup (§3.4): a lightweight instant panel, not the full Process Explorer. It lists the apps currently narrating with each one's current-activity one-liner, scrollable when there are many, most-recently-active first. Picking one opens that app's console window; a "More…" entry jumps to Process Explorer for the full tree.
+- [ ] **Hover tooltip** summarises without opening anything — how many apps are narrating and what the foreground one is doing.
+- [ ] **The log is not an attention channel, and the icon does not shout.** An `error`-level line in a trace stream is chatter, not an alert: a program logging "DNS lookup failed, retrying" is doing its job, and badging the tray for it would build a system that cries wolf constantly — the failure mode of every notification system ever shipped. Things that genuinely want the user go through the mechanisms that already exist for wanting the user: push notifications (§4.12), the hung-app dialog (§4.3), crash reports. The tray icon is a **door you go through**, not a thing that taps you on the shoulder.
+  - [ ] Opt-in, default off: a subtle state on the icon itself (not a layout change, not a popup) when an app the user has specifically marked as worth watching reports an error. Off by default because the default has to be quiet, available because "tell me if the backup fails" is a reasonable thing to want.
+  - [ ] A long-running job may show progress *on the existing icon* (a ring or overlay), never by adding a second icon. Progress is glanceable without being an interruption, and nothing in the tray moves.
+- [ ] **Console windows are views, not owners.** Opening, closing, or never opening a console does not change the program's behaviour or its output — the ring is being written either way. This is the difference from a real terminal, where closing the window kills the child and a program with no reader can block on a full pipe. An activity ring never blocks its writer; it overwrites. A console window can be opened for an app, a process, or a thread, since all three are just nodes.
+- [ ] Console windows are also reachable from Process Explorer's context menu ("open console") and from `pstail` on the command line, so the tray is the *convenient* route rather than the only one.
+
+#### CLI counterpart
+
+_Same rule as §2.7's `pslist`/`psinfo`/`psblame`: the text tools read the same
+kernel views as the GUI so the two can never disagree._
+
+- [ ] `pstail <pid|name|app>` — tail an activity stream (`-f` to follow, `-n` for backlog, level and stream filters). The `journalctl -f` of live process activity.
+  - [ ] Naming an **app** tails the merged group stream; naming a **PID** tails that process. `--children` / `--no-children` picks between a node's subtree and the node alone, matching Process Explorer's toggle so the two tools cannot disagree about what "the app's log" means.
+  - [ ] `--by <pid|tid>` prefixes each line with its emitter, which is what makes a merged tail greppable.
+  - [ ] `--depth N` limits how many levels of nesting are printed (deeper frames collapse into their ancestor's summary line), and `--fold` / `--no-fold` selects between the GUI's completed-frames-fold default and the full flat firehose. A terminal cannot fold interactively, so the choice has to be made at invocation — but the *policy* is the same one the GUI applies, so the two tools show the same tree.
+  - [ ] Nesting is rendered as indentation by default and as flat lines under `--flat`, with a `--json` mode emitting the structured records verbatim (JSON-lines, per the no-binary-logs rule) so the tree can be post-processed rather than screen-scraped.
+- [ ] `psdoing [pid|name|app]` — print the current-activity one-liner for one process, one app, or all of them; one line each, greppable.
+- [ ] `pstree --doing` — the process tree annotated with what each node is currently doing, with activity-group boundaries marked so "which of these processes are one app" is visible in the same output.
+
+#### Capability gating and privacy
+
+- [ ] **Reading another process's activity stream is gated by a distinct capability** (`proc.trace`), *not* folded into the existing `proc.inspect`. Inspecting metadata — name, PID, CPU, memory — is a much weaker thing than reading a live text stream from inside a program, which can contain file paths, URLs, query strings, user names, and anything else the program happened to narrate. A process explorer wants both; a resource-graph widget wants only the first.
+- [ ] A process can always read its own stream without any capability.
+- [ ] **`sensitive` marking** on individual records: redacted in any view the owning user is not entitled to, and never promoted into a crash report that might be shared.
+- [ ] **AMBIGUITY:** whether `proc.trace` should be grantable per-target-process rather than as one blanket grant. Per-target is obviously safer and obviously more annoying; the same tension as every other capability in §1.5, and it should be resolved the same way that one is rather than separately here.
+- [ ] Activity streams are exempt from the "no binary logs" rule only in the sense that the ring's in-memory representation may be framed binary for speed; **everything that leaves the ring — spilled files, promoted crash tails, `pstail` output — is text (JSON-lines for structured records).**
+
+#### Settings
+
+- [ ] Per-app: activity stream on/off, group ring budget and how it is weighted across members, default verbosity, whether this app is one the user wants flagged on the tray icon when it reports an error (default no).
+  - [ ] Per-app fold preference — the remembered "show N levels", and whether this app's own requested default fold depth (the AMBIGUITY above) is honoured or ignored. Per-app rather than global because "I only care about phases" is true of an installer and false of a debugger.
+- [ ] Global: default per-group budget, global cap on memory spent across all rings, whether stdout capture is on by default, whether the Activity tray icon is shown at all, retention of promoted and spilled traces.
+  - [ ] Global fold defaults: whether completed frames fold on close, the short-frame fold threshold (default ~1 ms, settable to zero to disable), the view's default depth limit, and whether leading-whitespace nesting inference is applied to stdout-only streams. The recording-time depth cap (default 64) is a policy knob here too, but presented as a safety limit rather than a display preference, because that is what it is.
+- [ ] A "programs that are narrating" list, so a user can see which programs support structured activity records and which are only being captured from stdout.
+
+#### Making it something programs actually do
+
+_The facility is worthless if no program narrates. The adoption levers, in
+descending order of effect:_
+
+- [ ] **It is free and automatic.** stdout capture means every program has a stream before its author has heard of the feature. Nothing else on this list matters as much.
+- [ ] **It is one annotation.** `libactivity`'s derive macro / decorator turns a function into an instrumented one at the cost of a single line, per §4.13's "~10 lines to add full automation support" precedent.
+- [ ] **The payoff is the crash report.** "Your program crashed and here is exactly what it was doing" is the argument that makes a developer instrument their code; it is a debugging win, not a charity donation to users.
+- [ ] Developer docs treat narration as normal practice, and the SDK's example programs all narrate.
+- [ ] The package repository's quality checklist counts structured activity records, as it does automation coverage.
+
+_Dependencies and lane split: the ring itself and the per-process shared page are
+kernel/runtime work (**A**), the stdout wiring and `libactivity`'s service side
+sit with the userspace runtime (**B**), and both viewing surfaces plus the CLI
+tools' presentation are **C**. The event-log bridge is §2.6 (**B**). This entry
+is filed whole so the shape is visible in one place; the individual tasks belong
+to their owning lanes' backlogs in `roadmap.md`._
 
 ---
 

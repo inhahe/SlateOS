@@ -78,9 +78,7 @@ mod tests {
 
     #[test]
     fn test_verdicts_dense_0_to_5() {
-        let v = [
-            NF_DROP, NF_ACCEPT, NF_STOLEN, NF_QUEUE, NF_REPEAT, NF_STOP,
-        ];
+        let v = [NF_DROP, NF_ACCEPT, NF_STOLEN, NF_QUEUE, NF_REPEAT, NF_STOP];
         for (i, &x) in v.iter().enumerate() {
             assert_eq!(x as usize, i);
         }

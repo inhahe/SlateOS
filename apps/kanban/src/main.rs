@@ -6,10 +6,11 @@
 //! filtering, sorting, WIP limits, swimlanes, archiving, and JSON export/import.
 
 use guitk::color::Color;
-use guitk::event::{KeyEvent, Key};
+use guitk::event::{Key, KeyEvent};
 use guitk::layout::FlexDirection;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
 use guitk::style::CornerRadii;
+use guitk::text;
 use guitk::widget::{Widget, WidgetTree};
 
 use std::collections::HashMap;
@@ -375,7 +376,9 @@ impl Board {
         board.labels.push(Label::new("Bug", palette::RED));
         board.labels.push(Label::new("Feature", palette::BLUE));
         board.labels.push(Label::new("Enhancement", palette::GREEN));
-        board.labels.push(Label::new("Documentation", palette::LAVENDER));
+        board
+            .labels
+            .push(Label::new("Documentation", palette::LAVENDER));
         board.labels.push(Label::new("Urgent", palette::PEACH));
         board.labels.push(Label::new("Design", palette::MAUVE));
         board.labels.push(Label::new("Testing", palette::TEAL));
@@ -383,7 +386,9 @@ impl Board {
         // Default columns
         board.columns.push(Column::new("Backlog"));
         board.columns.push(Column::new("Todo"));
-        board.columns.push(Column::new("In Progress").with_wip_limit(5));
+        board
+            .columns
+            .push(Column::new("In Progress").with_wip_limit(5));
         board.columns.push(Column::new("Review").with_wip_limit(3));
         board.columns.push(Column::new("Done"));
 
@@ -581,13 +586,15 @@ impl FilterState {
 
     fn matches(&self, card: &Card) -> bool {
         if let Some(label_id) = self.label_filter
-            && !card.has_label(label_id) {
-                return false;
-            }
+            && !card.has_label(label_id)
+        {
+            return false;
+        }
         if let Some(priority) = self.priority_filter
-            && card.priority != priority {
-                return false;
-            }
+            && card.priority != priority
+        {
+            return false;
+        }
         if !self.assignee_filter.is_empty()
             && !card
                 .assignee
@@ -744,6 +751,12 @@ struct JsonImporter;
 
 impl JsonImporter {
     /// Parse a JSON string value, returning the unescaped content and next offset.
+    ///
+    /// Unescaped stretches are copied out as whole `&str` slices rather than a
+    /// byte at a time. Pushing `byte as char` would reinterpret each UTF-8
+    /// byte as the Unicode scalar of that value — a Latin-1 reading that turns
+    /// every non-ASCII character into mojibake (`日` = E6 97 A5 becomes three
+    /// chars `æ\u{97}¥`) and then persists the damage on the next save.
     fn parse_string(data: &str, start: usize) -> Option<(String, usize)> {
         let bytes = data.as_bytes();
         if bytes.get(start).copied() != Some(b'"') {
@@ -751,31 +764,93 @@ impl JsonImporter {
         }
         let mut result = String::new();
         let mut i = start.saturating_add(1);
+        // Start of the current run of literal (unescaped) text.
+        let mut run_start = i;
         while i < bytes.len() {
             let b = bytes.get(i).copied()?;
+            // `"` and `\` are ASCII, and an ASCII byte can never occur inside a
+            // multi-byte UTF-8 sequence, so `i` is always a character boundary
+            // here and slicing `run_start..i` can never split a character.
             if b == b'"' {
+                result.push_str(data.get(run_start..i)?);
                 return Some((result, i.saturating_add(1)));
             }
-            if b == b'\\' {
+            if b != b'\\' {
                 i = i.saturating_add(1);
-                let esc = bytes.get(i).copied()?;
-                match esc {
-                    b'"' => result.push('"'),
-                    b'\\' => result.push('\\'),
-                    b'n' => result.push('\n'),
-                    b'r' => result.push('\r'),
-                    b't' => result.push('\t'),
-                    _ => {
-                        result.push('\\');
-                        result.push(esc as char);
-                    }
-                }
-            } else {
-                result.push(b as char);
+                continue;
             }
-            i = i.saturating_add(1);
+            result.push_str(data.get(run_start..i)?);
+            let after = i.saturating_add(1);
+            // Take a whole character, not a byte: an unknown escape may be
+            // followed by a multi-byte character, and consuming one byte of it
+            // would leave `run_start` stranded inside a UTF-8 sequence.
+            let esc = data.get(after..)?.chars().next()?;
+            let mut next = after.saturating_add(esc.len_utf8());
+            match esc {
+                '"' => result.push('"'),
+                '\\' => result.push('\\'),
+                '/' => result.push('/'),
+                'n' => result.push('\n'),
+                'r' => result.push('\r'),
+                't' => result.push('\t'),
+                'b' => result.push('\u{08}'),
+                'f' => result.push('\u{0c}'),
+                'u' => {
+                    let (ch, after_escape) = Self::parse_unicode_escape(data, next)?;
+                    result.push(ch);
+                    next = after_escape;
+                }
+                other => {
+                    // Unknown escape: keep it verbatim rather than silently
+                    // dropping the backslash and changing the user's text.
+                    result.push('\\');
+                    result.push(other);
+                }
+            }
+            i = next;
+            run_start = i;
         }
         None
+    }
+
+    /// Decode a `\u` escape whose four hex digits begin at `start` (just past
+    /// the `u`), returning the character and the offset just past the escape.
+    ///
+    /// A leading surrogate is combined with a following `\uXXXX` trailing
+    /// surrogate, which is how JSON spells characters outside the BMP.
+    fn parse_unicode_escape(data: &str, start: usize) -> Option<(char, usize)> {
+        let (hi, after_hi) = Self::parse_hex4(data, start)?;
+        let bytes = data.as_bytes();
+        if (0xD800..0xDC00).contains(&hi)
+            && bytes.get(after_hi).copied() == Some(b'\\')
+            && bytes.get(after_hi.saturating_add(1)).copied() == Some(b'u')
+            && let Some((lo, after_lo)) = Self::parse_hex4(data, after_hi.saturating_add(2))
+            && (0xDC00..0xE000).contains(&lo)
+            && let Some(combined) = hi
+                .saturating_sub(0xD800)
+                .checked_shl(10)
+                .and_then(|high| high.checked_add(lo.saturating_sub(0xDC00)))
+                .and_then(|offset| offset.checked_add(0x1_0000))
+            && let Some(ch) = char::from_u32(combined)
+        {
+            return Some((ch, after_lo));
+        }
+        // An unpaired surrogate has no scalar value. Substitute U+FFFD rather
+        // than failing the whole import over one malformed escape.
+        Some((char::from_u32(hi).unwrap_or('\u{FFFD}'), after_hi))
+    }
+
+    /// Read exactly four ASCII hex digits at `start`, returning their value and
+    /// the offset just past them.
+    fn parse_hex4(data: &str, start: usize) -> Option<(u32, usize)> {
+        let end = start.checked_add(4)?;
+        let hex = data.get(start..end)?;
+        // `from_str_radix` would accept a leading `+`; require plain digits so
+        // a malformed escape is rejected rather than silently reinterpreted.
+        if !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return None;
+        }
+        u32::from_str_radix(hex, 16).ok().map(|v| (v, end))
     }
 
     /// Parse a JSON number (integer), returning value and next offset.
@@ -990,9 +1065,10 @@ impl KanbanApp {
             col.card_ids
                 .iter()
                 .filter(|cid| {
-                    board.cards.get(cid).is_some_and(|card| {
-                        !card.archived && self.filter.matches(card)
-                    })
+                    board
+                        .cards
+                        .get(cid)
+                        .is_some_and(|card| !card.archived && self.filter.matches(card))
                 })
                 .copied()
                 .collect()
@@ -1053,7 +1129,17 @@ fn render_toolbar(tree: &mut RenderTree, app: &KanbanApp, width: f32) {
     let btn_radius = CornerRadii::all(4.0);
 
     // Board List button
-    render_toolbar_button(tree, 380.0, button_y, 70.0, button_h, "Boards", palette::SURFACE0, palette::TEXT, btn_radius);
+    render_toolbar_button(
+        tree,
+        380.0,
+        button_y,
+        70.0,
+        button_h,
+        "Boards",
+        palette::SURFACE0,
+        palette::TEXT,
+        btn_radius,
+    );
 
     // Filter button
     let filter_color = if app.filter.is_active() {
@@ -1061,19 +1147,69 @@ fn render_toolbar(tree: &mut RenderTree, app: &KanbanApp, width: f32) {
     } else {
         palette::SURFACE0
     };
-    render_toolbar_button(tree, 460.0, button_y, 60.0, button_h, "Filter", filter_color, palette::TEXT, btn_radius);
+    render_toolbar_button(
+        tree,
+        460.0,
+        button_y,
+        60.0,
+        button_h,
+        "Filter",
+        filter_color,
+        palette::TEXT,
+        btn_radius,
+    );
 
     // Stats button
-    render_toolbar_button(tree, 530.0, button_y, 55.0, button_h, "Stats", palette::SURFACE0, palette::TEXT, btn_radius);
+    render_toolbar_button(
+        tree,
+        530.0,
+        button_y,
+        55.0,
+        button_h,
+        "Stats",
+        palette::SURFACE0,
+        palette::TEXT,
+        btn_radius,
+    );
 
     // Archive button
-    render_toolbar_button(tree, 595.0, button_y, 65.0, button_h, "Archive", palette::SURFACE0, palette::TEXT, btn_radius);
+    render_toolbar_button(
+        tree,
+        595.0,
+        button_y,
+        65.0,
+        button_h,
+        "Archive",
+        palette::SURFACE0,
+        palette::TEXT,
+        btn_radius,
+    );
 
     // Export button
-    render_toolbar_button(tree, 670.0, button_y, 60.0, button_h, "Export", palette::SURFACE0, palette::TEXT, btn_radius);
+    render_toolbar_button(
+        tree,
+        670.0,
+        button_y,
+        60.0,
+        button_h,
+        "Export",
+        palette::SURFACE0,
+        palette::TEXT,
+        btn_radius,
+    );
 
     // New Card button
-    render_toolbar_button(tree, width - 110.0, button_y, 100.0, button_h, "+ New Card", palette::BLUE, palette::CRUST, btn_radius);
+    render_toolbar_button(
+        tree,
+        width - 110.0,
+        button_y,
+        100.0,
+        button_h,
+        "+ New Card",
+        palette::BLUE,
+        palette::CRUST,
+        btn_radius,
+    );
 
     // Bottom border line
     tree.push(RenderCommand::Line {
@@ -1187,10 +1323,7 @@ fn render_filter_bar(tree: &mut RenderTree, app: &KanbanApp, width: f32, y_offse
         max_width: None,
     });
 
-    let priority_label = app
-        .filter
-        .priority_filter
-        .map_or("All", |p| p.label());
+    let priority_label = app.filter.priority_filter.map_or("All", |p| p.label());
     tree.push(RenderCommand::FillRect {
         x: 332.0,
         y: y_offset + 5.0,
@@ -1486,7 +1619,13 @@ fn render_column_header(
 }
 
 /// Render the board view with columns of cards.
-fn render_board_view(tree: &mut RenderTree, app: &KanbanApp, width: f32, height: f32, y_start: f32) {
+fn render_board_view(
+    tree: &mut RenderTree,
+    app: &KanbanApp,
+    width: f32,
+    height: f32,
+    y_start: f32,
+) {
     let board = app.active_board();
     let col_count = board.columns.len();
     if col_count == 0 {
@@ -1562,6 +1701,19 @@ fn render_board_view(tree: &mut RenderTree, app: &KanbanApp, width: f32, height:
         }
     }
 }
+
+/// Vertical room the card description keeps even when it is a single line, so
+/// that adding wrapping does not shift the whole pane for the common case.
+const DESC_MIN_HEIGHT: f32 = 30.0;
+/// Horizontal padding inside a comment card, and its bottom padding.
+const COMMENT_PAD: f32 = 8.0;
+/// Offset of a comment's body below the top of its card, leaving room for the
+/// author line drawn at +4.
+const COMMENT_BODY_TOP: f32 = 18.0;
+/// The height a comment card keeps even when its body is a single short line.
+const COMMENT_MIN_HEIGHT: f32 = 36.0;
+/// Vertical gap between consecutive comment cards.
+const COMMENT_GAP: f32 = 6.0;
 
 /// Render card detail view.
 fn render_card_detail(tree: &mut RenderTree, app: &KanbanApp, width: f32, height: f32) {
@@ -1769,20 +1921,24 @@ fn render_card_detail(tree: &mut RenderTree, app: &KanbanApp, width: f32, height
     } else {
         &card.description
     };
-    tree.push(RenderCommand::Text {
-        x: content_x,
-        y: cy,
-        text: desc_text.to_string(),
-        color: if card.description.is_empty() {
+    // A description is prose the user is meant to read in full, and everything
+    // below it sits on this running cursor -- so the height has to come from
+    // the lines actually drawn. `max_width` on a Text command clips to one
+    // line, it does not wrap (known-issues.md TD-GUI-TEXT-COMMAND-DOES-NOT-WRAP).
+    let desc_used = text::Paragraph::new(
+        desc_text,
+        if card.description.is_empty() {
             palette::OVERLAY0
         } else {
             palette::SUBTEXT0
         },
-        font_size: 12.0,
-        font_weight: FontWeightHint::Regular,
-        max_width: Some(content_w),
-    });
-    cy += 30.0;
+    )
+    .at(content_x, cy, content_w)
+    .font(12.0, FontWeightHint::Regular)
+    .draw(tree);
+    // Keep the original 30 px allowance for the common one-line case so the
+    // rest of the pane does not shift; grow only when it genuinely wraps.
+    cy += desc_used.max(DESC_MIN_HEIGHT);
 
     // Checklist
     if !card.checklist.is_empty() {
@@ -1856,16 +2012,28 @@ fn render_card_detail(tree: &mut RenderTree, app: &KanbanApp, width: f32, height
         cy += 20.0;
 
         for comment in &card.comments {
+            // A comment body is prose, and its card is drawn *before* the text
+            // it contains -- so the body is measured first and the card sized
+            // from that measurement, rather than the two being computed
+            // separately and left to disagree.
+            let body = text::Paragraph::new(&comment.text, palette::SUBTEXT0)
+                .at(
+                    content_x + COMMENT_PAD,
+                    cy + COMMENT_BODY_TOP,
+                    content_w - COMMENT_PAD * 2.0,
+                )
+                .font(11.0, FontWeightHint::Regular);
+            let card_h = (COMMENT_BODY_TOP + body.height() + COMMENT_PAD).max(COMMENT_MIN_HEIGHT);
             tree.push(RenderCommand::FillRect {
                 x: content_x,
                 y: cy,
                 width: content_w,
-                height: 36.0,
+                height: card_h,
                 color: palette::SURFACE0,
                 corner_radii: CornerRadii::all(4.0),
             });
             tree.push(RenderCommand::Text {
-                x: content_x + 8.0,
+                x: content_x + COMMENT_PAD,
                 y: cy + 4.0,
                 text: comment.author.clone(),
                 color: palette::BLUE,
@@ -1873,16 +2041,8 @@ fn render_card_detail(tree: &mut RenderTree, app: &KanbanApp, width: f32, height
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
             });
-            tree.push(RenderCommand::Text {
-                x: content_x + 8.0,
-                y: cy + 18.0,
-                text: comment.text.clone(),
-                color: palette::SUBTEXT0,
-                font_size: 11.0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(content_w - 16.0),
-            });
-            cy += 42.0;
+            body.draw(tree);
+            cy += card_h + COMMENT_GAP;
         }
     }
 }
@@ -2014,7 +2174,11 @@ fn render_stats_view(tree: &mut RenderTree, app: &KanbanApp, _width: f32, y_star
     tree.push(RenderCommand::Text {
         x: 20.0,
         y: cy,
-        text: format!("Total Cards: {} | Archived: {}", board.cards.len(), board.archived_card_ids.len()),
+        text: format!(
+            "Total Cards: {} | Archived: {}",
+            board.cards.len(),
+            board.archived_card_ids.len()
+        ),
         color: palette::SUBTEXT0,
         font_size: 13.0,
         font_weight: FontWeightHint::Regular,
@@ -2071,9 +2235,10 @@ fn render_stats_view(tree: &mut RenderTree, app: &KanbanApp, _width: f32, y_star
             corner_radii: CornerRadii::all(3.0),
         });
 
-        let wip_text = stat
-            .wip_limit
-            .map_or_else(|| format!("{}", stat.card_count), |l| format!("{}/{}", stat.card_count, l));
+        let wip_text = stat.wip_limit.map_or_else(
+            || format!("{}", stat.card_count),
+            |l| format!("{}/{}", stat.card_count, l),
+        );
         tree.push(RenderCommand::Text {
             x: 370.0,
             y: cy,
@@ -2399,10 +2564,11 @@ fn handle_key_event(app: &mut KanbanApp, key: &KeyEvent) -> bool {
         // Enter on selected card opens detail
         Key::Enter => {
             if let Some(_card_id) = app.selected_card
-                && app.view == View::Board {
-                    app.view = View::CardDetail;
-                    return true;
-                }
+                && app.view == View::Board
+            {
+                app.view = View::CardDetail;
+                return true;
+            }
             false
         }
 
@@ -2447,10 +2613,11 @@ fn handle_key_event(app: &mut KanbanApp, key: &KeyEvent) -> bool {
         // P = cycle priority on selected card
         Key::P => {
             if let Some(card_id) = app.selected_card
-                && let Some(card) = app.active_board_mut().cards.get_mut(&card_id) {
-                    card.priority = card.priority.next();
-                    return true;
-                }
+                && let Some(card) = app.active_board_mut().cards.get_mut(&card_id)
+            {
+                card.priority = card.priority.next();
+                return true;
+            }
             false
         }
 
@@ -2461,7 +2628,8 @@ fn handle_key_event(app: &mut KanbanApp, key: &KeyEvent) -> bool {
                 if let Some(from_col) = board.find_card_column(card_id) {
                     let to_col = from_col.saturating_add(1);
                     if to_col < board.columns.len() {
-                        app.active_board_mut().move_card(card_id, from_col, to_col, 0);
+                        app.active_board_mut()
+                            .move_card(card_id, from_col, to_col, 0);
                         return true;
                     }
                 }
@@ -2474,11 +2642,13 @@ fn handle_key_event(app: &mut KanbanApp, key: &KeyEvent) -> bool {
             if let Some(card_id) = app.selected_card {
                 let board = app.active_board();
                 if let Some(from_col) = board.find_card_column(card_id)
-                    && from_col > 0 {
-                        let to_col = from_col.saturating_sub(1);
-                        app.active_board_mut().move_card(card_id, from_col, to_col, 0);
-                        return true;
-                    }
+                    && from_col > 0
+                {
+                    let to_col = from_col.saturating_sub(1);
+                    app.active_board_mut()
+                        .move_card(card_id, from_col, to_col, 0);
+                    return true;
+                }
             }
             false
         }
@@ -2534,9 +2704,10 @@ fn handle_input_key(app: &mut KanbanApp, key: &KeyEvent) -> bool {
                 }
                 InputMode::CardDescription => {
                     if let Some(card_id) = app.selected_card
-                        && let Some(card) = app.active_board_mut().cards.get_mut(&card_id) {
-                            card.description = text;
-                        }
+                        && let Some(card) = app.active_board_mut().cards.get_mut(&card_id)
+                    {
+                        card.description = text;
+                    }
                 }
                 InputMode::AddComment => {
                     if let Some(card_id) = app.selected_card {
@@ -2548,15 +2719,17 @@ fn handle_input_key(app: &mut KanbanApp, key: &KeyEvent) -> bool {
                 }
                 InputMode::AddChecklistItem => {
                     if let Some(card_id) = app.selected_card
-                        && let Some(card) = app.active_board_mut().cards.get_mut(&card_id) {
-                            card.add_checklist_item(&text);
-                        }
+                        && let Some(card) = app.active_board_mut().cards.get_mut(&card_id)
+                    {
+                        card.add_checklist_item(&text);
+                    }
                 }
                 InputMode::EditCardTitle => {
                     if let Some(card_id) = app.selected_card
-                        && let Some(card) = app.active_board_mut().cards.get_mut(&card_id) {
-                            card.title = text;
-                        }
+                        && let Some(card) = app.active_board_mut().cards.get_mut(&card_id)
+                    {
+                        card.title = text;
+                    }
                 }
                 InputMode::RenameColumn => {
                     let col = app.selected_column;
@@ -3017,7 +3190,10 @@ mod tests {
         board.sort_column(0);
 
         let ids: Vec<Id> = board.columns.first().unwrap().card_ids.clone();
-        let priorities: Vec<Priority> = ids.iter().map(|id| board.cards.get(id).unwrap().priority).collect();
+        let priorities: Vec<Priority> = ids
+            .iter()
+            .map(|id| board.cards.get(id).unwrap().priority)
+            .collect();
         // Sorted descending by priority
         assert_eq!(priorities.first(), Some(&Priority::Critical));
         assert_eq!(priorities.last(), Some(&Priority::Low));
@@ -3034,7 +3210,10 @@ mod tests {
         board.sort_column(0);
 
         let ids: Vec<Id> = board.columns.first().unwrap().card_ids.clone();
-        let titles: Vec<&str> = ids.iter().map(|id| board.cards.get(id).unwrap().title.as_str()).collect();
+        let titles: Vec<&str> = ids
+            .iter()
+            .map(|id| board.cards.get(id).unwrap().title.as_str())
+            .collect();
         assert_eq!(titles.first().copied(), Some("Apple"));
         assert_eq!(titles.last().copied(), Some("Zebra"));
     }
@@ -3242,6 +3421,91 @@ mod tests {
         assert_eq!(val, "a\"b");
     }
 
+    /// A card title is arbitrary user text. Importing it byte-at-a-time as
+    /// `byte as char` reads UTF-8 as Latin-1 and silently mojibakes every
+    /// non-ASCII character — damage that is then written back on the next save.
+    #[test]
+    fn a_non_ascii_string_is_imported_unchanged() {
+        for text in ["日本語のカード", "Ωμέγα", "café", "🚀 ship it", "Ω日🚀"] {
+            let data = format!("\"{text}\"");
+            let (val, end) = JsonImporter::parse_string(&data, 0)
+                .unwrap_or_else(|| panic!("failed to parse {data:?}"));
+            assert_eq!(val, text, "content changed for {text:?}");
+            assert_eq!(end, data.len(), "wrong end offset for {text:?}");
+        }
+    }
+
+    /// The exporter is the only producer the importer must understand, so
+    /// everything it can emit must come back out identical.
+    #[test]
+    fn export_escaping_round_trips_through_import() {
+        for text in [
+            "plain",
+            "with \"quotes\"",
+            "back\\slash",
+            "line\nbreak\ttab\r",
+            "control\u{01}char",
+            "日本語 \"引用\" と\\バックスラッシュ",
+            "emoji 😀 and\ttab",
+        ] {
+            let escaped = JsonExporter::escape_json(text);
+            let data = format!("\"{escaped}\"");
+            let (val, end) = JsonImporter::parse_string(&data, 0)
+                .unwrap_or_else(|| panic!("failed to parse {data:?}"));
+            assert_eq!(
+                val, text,
+                "round trip changed {text:?} (escaped {escaped:?})"
+            );
+            assert_eq!(end, data.len(), "wrong end offset for {text:?}");
+        }
+    }
+
+    /// `\uXXXX` is what the exporter emits for control characters, and what any
+    /// other JSON producer may emit for anything at all.
+    #[test]
+    fn unicode_escapes_including_surrogate_pairs_are_decoded() {
+        let cases = [
+            (r#""\u0041""#, "A"),
+            (r#""\u00e9""#, "é"),
+            (r#""\u65e5\u672c""#, "日本"),
+            // Astral characters are spelled as a surrogate pair in JSON.
+            (r#""\ud83d\ude00""#, "😀"),
+            (r#""a\u0001b""#, "a\u{01}b"),
+        ];
+        for (data, want) in cases {
+            let (val, end) = JsonImporter::parse_string(data, 0)
+                .unwrap_or_else(|| panic!("failed to parse {data}"));
+            assert_eq!(val, want, "wrong decode of {data}");
+            assert_eq!(end, data.len(), "wrong end offset for {data}");
+        }
+    }
+
+    /// An unpaired surrogate has no scalar value; one malformed escape must not
+    /// abort the import of an otherwise-good board.
+    #[test]
+    fn a_lone_surrogate_becomes_the_replacement_character() {
+        let (val, _) = JsonImporter::parse_string(r#""x\ud83dy""#, 0).expect("should not fail");
+        assert_eq!(val, "x\u{FFFD}y");
+    }
+
+    /// Control: the ASCII path must be byte-for-byte what it always was.
+    #[test]
+    fn ascii_parsing_is_unchanged() {
+        let cases = [
+            (r#""hello world""#, "hello world"),
+            (r#""a\"b""#, "a\"b"),
+            (r#""a\\b""#, "a\\b"),
+            (r#""a\nb\tc""#, "a\nb\tc"),
+            (r#""""#, ""),
+        ];
+        for (data, want) in cases {
+            let (val, end) = JsonImporter::parse_string(data, 0)
+                .unwrap_or_else(|| panic!("failed to parse {data}"));
+            assert_eq!(val, want, "wrong parse of {data}");
+            assert_eq!(end, data.len(), "wrong end offset for {data}");
+        }
+    }
+
     #[test]
     fn test_json_parse_number() {
         let data = "12345,";
@@ -3389,12 +3653,183 @@ mod tests {
         let mut app = KanbanApp::new();
         app.create_sample_data();
         // Select first card
-        let first_card_id = app.active_board().columns.first()
+        let first_card_id = app
+            .active_board()
+            .columns
+            .first()
             .and_then(|c| c.card_ids.first().copied());
         app.selected_card = first_card_id;
         app.view = View::CardDetail;
         let tree = render_app(&app, 1200.0, 800.0);
         assert!(!tree.is_empty());
+    }
+
+    /// Select the first sample card and give it `description` and `comments`.
+    fn app_with_card_prose(description: &str, comments: &[&str]) -> KanbanApp {
+        let mut app = KanbanApp::new();
+        app.create_sample_data();
+        let card_id = app
+            .active_board()
+            .columns
+            .first()
+            .and_then(|c| c.card_ids.first().copied())
+            .expect("sample data has at least one card");
+        {
+            let board = app.active_board_mut();
+            let card = board.cards.get_mut(&card_id).expect("card exists");
+            card.description = description.to_string();
+            card.comments.clear();
+            for (i, body) in comments.iter().enumerate() {
+                card.add_comment("alice", body, i as u64);
+            }
+        }
+        app.selected_card = Some(card_id);
+        app.view = View::CardDetail;
+        app
+    }
+
+    /// Every `Text` command in `tree`, as (y, text).
+    fn text_rows(tree: &RenderTree) -> Vec<(f32, String)> {
+        tree.commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { y, text, .. } => Some((*y, text.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The comment cards, as (y, height), sorted top to bottom.
+    ///
+    /// Anchored to the "Comments (n)" header rather than matched on colour and
+    /// corner radius alone: the pane draws other rounded `SURFACE0` chips (a
+    /// label pill sits well above this section) and a looser filter picks them
+    /// up too.
+    fn comment_cards(tree: &RenderTree) -> Vec<(f32, f32)> {
+        let header_y = text_rows(tree)
+            .into_iter()
+            .find(|(_, t)| t.starts_with("Comments ("))
+            .expect("the comments section has a header")
+            .0;
+        let mut cards: Vec<(f32, f32)> = tree
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::FillRect {
+                    y,
+                    height,
+                    color,
+                    corner_radii,
+                    ..
+                } if *color == palette::SURFACE0
+                    && corner_radii.top_left == 4.0
+                    && *y > header_y =>
+                {
+                    Some((*y, *height))
+                }
+                _ => None,
+            })
+            .collect();
+        cards.sort_by(|a, b| a.0.total_cmp(&b.0));
+        cards
+    }
+
+    #[test]
+    fn a_wrapping_description_is_drawn_as_more_than_one_line() {
+        // `max_width` on a Text command clips to a single line rather than
+        // wrapping, so a long description used to be shown as its first line
+        // and nothing else, with no marker that anything was dropped.
+        let long = "wrap ".repeat(80);
+        let mut tree = RenderTree::new();
+        render_card_detail(&mut tree, &app_with_card_prose(&long, &[]), 1200.0, 800.0);
+        let desc_lines = text_rows(&tree)
+            .into_iter()
+            .filter(|(_, t)| t.contains("wrap"))
+            .count();
+        assert!(
+            desc_lines > 1,
+            "a long description should be drawn as several lines, got {desc_lines}"
+        );
+    }
+
+    #[test]
+    fn a_long_description_pushes_the_comments_below_it_down() {
+        // The whole pane hangs off one running cursor, so a description that
+        // reserves a flat height regardless of its length draws the section
+        // below it straight through its own last lines.
+        let short_y = {
+            let mut tree = RenderTree::new();
+            render_card_detail(
+                &mut tree,
+                &app_with_card_prose("short", &["c"]),
+                1200.0,
+                800.0,
+            );
+            text_rows(&tree)
+                .into_iter()
+                .find(|(_, t)| t == "c")
+                .expect("comment body drawn")
+                .0
+        };
+        let long_y = {
+            let mut tree = RenderTree::new();
+            let app = app_with_card_prose(&"wrap ".repeat(80), &["c"]);
+            render_card_detail(&mut tree, &app, 1200.0, 800.0);
+            text_rows(&tree)
+                .into_iter()
+                .find(|(_, t)| t == "c")
+                .expect("comment body drawn")
+                .0
+        };
+        assert!(
+            long_y > short_y,
+            "a wrapped description must move the comments below it down \
+             ({long_y} should exceed {short_y})"
+        );
+    }
+
+    #[test]
+    fn a_comment_card_contains_the_body_it_draws() {
+        // The card is filled before the body is drawn, so its height is a
+        // second calculation of the same quantity -- the defect class this
+        // whole sweep is about. Assert the box actually contains its text.
+        let mut tree = RenderTree::new();
+        let app = app_with_card_prose("d", &[&"comment ".repeat(40)]);
+        render_card_detail(&mut tree, &app, 1200.0, 800.0);
+
+        let cards = comment_cards(&tree);
+        let body_rows: Vec<f32> = text_rows(&tree)
+            .into_iter()
+            .filter(|(_, t)| t.contains("comment"))
+            .map(|(y, _)| y)
+            .collect();
+        assert!(body_rows.len() > 1, "the comment body should have wrapped");
+
+        for y in body_rows {
+            assert!(
+                cards.iter().any(|(cy, ch)| y >= *cy && y <= cy + ch),
+                "a comment body line at y={y} falls outside every comment card {cards:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn consecutive_comment_cards_do_not_overlap() {
+        let mut tree = RenderTree::new();
+        let app = app_with_card_prose("d", &[&"first ".repeat(40), "second", "third"]);
+        render_card_detail(&mut tree, &app, 1200.0, 800.0);
+
+        let cards = comment_cards(&tree);
+        assert_eq!(cards.len(), 3, "one card per comment: {cards:?}");
+        for pair in cards.windows(2) {
+            let (y, h) = pair[0];
+            assert!(
+                pair[1].0 >= y + h,
+                "comment card at {:?} overlaps the one at {:?}",
+                pair[1],
+                pair[0]
+            );
+        }
     }
 
     #[test]
@@ -3537,7 +3972,10 @@ mod tests {
         app.selected_card = Some(id);
         // Default is Medium
         handle_key_event(&mut app, &make_key(Key::P, Modifiers::NONE));
-        assert_eq!(app.active_board().cards.get(&id).unwrap().priority, Priority::High);
+        assert_eq!(
+            app.active_board().cards.get(&id).unwrap().priority,
+            Priority::High
+        );
     }
 
     #[test]
@@ -3565,7 +4003,10 @@ mod tests {
         app.add_card("A", 0);
         handle_key_event(&mut app, &make_key(Key::T, Modifiers::NONE));
         // Sort happened (by priority, which are both Medium, so stable)
-        assert_eq!(app.active_board().columns.first().unwrap().card_ids.len(), 2);
+        assert_eq!(
+            app.active_board().columns.first().unwrap().card_ids.len(),
+            2
+        );
     }
 
     #[test]
@@ -3618,7 +4059,10 @@ mod tests {
         app.selected_column = 0;
         handle_key_event(&mut app, &make_key(Key::Enter, Modifiers::NONE));
         assert_eq!(app.input_mode, InputMode::None);
-        assert_eq!(app.active_board().columns.first().unwrap().card_ids.len(), 1);
+        assert_eq!(
+            app.active_board().columns.first().unwrap().card_ids.len(),
+            1
+        );
     }
 
     #[test]
@@ -3628,7 +4072,14 @@ mod tests {
         app.input_buffer.clear();
         handle_key_event(&mut app, &make_key(Key::Enter, Modifiers::NONE));
         assert_eq!(app.input_mode, InputMode::None);
-        assert!(app.active_board().columns.first().unwrap().card_ids.is_empty());
+        assert!(
+            app.active_board()
+                .columns
+                .first()
+                .unwrap()
+                .card_ids
+                .is_empty()
+        );
     }
 
     #[test]
@@ -3687,7 +4138,10 @@ mod tests {
         app.input_mode = InputMode::AddChecklistItem;
         app.input_buffer = "Write tests".to_string();
         handle_key_event(&mut app, &make_key(Key::Enter, Modifiers::NONE));
-        assert_eq!(app.active_board().cards.get(&id).unwrap().checklist.len(), 1);
+        assert_eq!(
+            app.active_board().cards.get(&id).unwrap().checklist.len(),
+            1
+        );
     }
 
     #[test]
@@ -3698,7 +4152,10 @@ mod tests {
         app.input_mode = InputMode::EditCardTitle;
         app.input_buffer = "New Title".to_string();
         handle_key_event(&mut app, &make_key(Key::Enter, Modifiers::NONE));
-        assert_eq!(app.active_board().cards.get(&id).unwrap().title, "New Title");
+        assert_eq!(
+            app.active_board().cards.get(&id).unwrap().title,
+            "New Title"
+        );
     }
 
     #[test]
@@ -3709,7 +4166,10 @@ mod tests {
         app.input_mode = InputMode::CardDescription;
         app.input_buffer = "New description".to_string();
         handle_key_event(&mut app, &make_key(Key::Enter, Modifiers::NONE));
-        assert_eq!(app.active_board().cards.get(&id).unwrap().description, "New description");
+        assert_eq!(
+            app.active_board().cards.get(&id).unwrap().description,
+            "New description"
+        );
     }
 
     #[test]
@@ -3757,13 +4217,24 @@ mod tests {
     #[test]
     fn test_palette_colors_distinct() {
         let colors = [
-            palette::BASE, palette::MANTLE, palette::CRUST,
-            palette::SURFACE0, palette::TEXT, palette::BLUE,
-            palette::RED, palette::GREEN,
+            palette::BASE,
+            palette::MANTLE,
+            palette::CRUST,
+            palette::SURFACE0,
+            palette::TEXT,
+            palette::BLUE,
+            palette::RED,
+            palette::GREEN,
         ];
         for i in 0..colors.len() {
             for j in (i + 1)..colors.len() {
-                assert_ne!(colors.get(i), colors.get(j), "colors at {} and {} should differ", i, j);
+                assert_ne!(
+                    colors.get(i),
+                    colors.get(j),
+                    "colors at {} and {} should differ",
+                    i,
+                    j
+                );
             }
         }
     }
@@ -3786,7 +4257,11 @@ mod tests {
         let mut board = Board::default_board();
         board.add_card_to_column(Card::new("A"), 0);
         board.add_card_to_column(Card::new("B"), 0);
-        let count = board.columns.first().unwrap().active_card_count(&board.cards);
+        let count = board
+            .columns
+            .first()
+            .unwrap()
+            .active_card_count(&board.cards);
         assert_eq!(count, 2);
     }
 
@@ -3798,7 +4273,11 @@ mod tests {
         board.add_card_to_column(c1, 0);
         board.add_card_to_column(Card::new("B"), 0);
         board.archive_card(c1_id);
-        let count = board.columns.first().unwrap().active_card_count(&board.cards);
+        let count = board
+            .columns
+            .first()
+            .unwrap()
+            .active_card_count(&board.cards);
         assert_eq!(count, 1);
     }
 }

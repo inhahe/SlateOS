@@ -18,9 +18,8 @@ pub const MODULE_INIT_IGNORE_VERMAGIC: u32 = 2;
 pub const MODULE_INIT_COMPRESSED_FILE: u32 = 4;
 
 /// Mask covering all valid `finit_module` flags.
-pub const MODULE_INIT_ALL_FLAGS: u32 = MODULE_INIT_IGNORE_MODVERSIONS
-    | MODULE_INIT_IGNORE_VERMAGIC
-    | MODULE_INIT_COMPRESSED_FILE;
+pub const MODULE_INIT_ALL_FLAGS: u32 =
+    MODULE_INIT_IGNORE_MODVERSIONS | MODULE_INIT_IGNORE_VERMAGIC | MODULE_INIT_COMPRESSED_FILE;
 
 // ---------------------------------------------------------------------------
 // `delete_module(2)` flags

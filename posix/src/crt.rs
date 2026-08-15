@@ -392,8 +392,7 @@ unsafe fn retrieve_initial_fds() {
     let count = ret as usize;
 
     // Read the entries from the buffer.
-    let entries =
-        unsafe { core::slice::from_raw_parts(buf.cast_const(), count.min(MAX_INIT_FDS)) };
+    let entries = unsafe { core::slice::from_raw_parts(buf.cast_const(), count.min(MAX_INIT_FDS)) };
 
     if entries.is_empty() {
         return;
@@ -1687,7 +1686,9 @@ mod tests {
     /// the guard instead: these tests reset the counters they depend on at
     /// entry, so a predecessor's abandoned state cannot affect them.
     fn atexit_test_guard() -> std::sync::MutexGuard<'static, ()> {
-        ATEXIT_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        ATEXIT_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     extern "C" fn dummy_atexit_handler() {}

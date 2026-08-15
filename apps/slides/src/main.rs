@@ -1222,10 +1222,24 @@ impl SlidesApp {
                         placeholder_label,
                         ..
                     } => {
+                        // The label is escaped like every other text field
+                        // here. It was the one that was not, and the reason is
+                        // worth a comment: the other three -- the title, a
+                        // text box, a bullet item -- each sit in their own
+                        // `push_html_escaped` call, whereas this one was a
+                        // `{}` among five geometry values in a larger
+                        // `format!`, where an unescaped interpolation does not
+                        // look out of place next to `{x}` and `{width}`.
+                        // `placeholder_label` is a public field of a public
+                        // enum, and the variant's own doc says real images
+                        // will reference an asset store -- i.e. this becomes a
+                        // filename.
                         html.push_str(&format!(
                             "  <div class=\"img-placeholder\" style=\"left:{x}px;top:{y}px;width:{width}px;\
-                             height:{height}px;\">{placeholder_label}</div>\n",
+                             height:{height}px;\">",
                         ));
+                        push_html_escaped(&mut html, placeholder_label);
+                        html.push_str("</div>\n");
                     }
                     SlideElement::BulletList {
                         x,
@@ -2454,6 +2468,94 @@ fn main() {
 )]
 mod tests {
     use super::*;
+
+    // ---- HTML export escaping ----------------------------------------------
+
+    /// Count the tags a browser would actually see.
+    ///
+    /// Not a substring search: correctly escaped output legitimately contains
+    /// the payload text `<script>` (spelled `&lt;script&gt;`), so
+    /// `html.contains("<script>")` would be checking the wrong thing in both
+    /// directions. What matters is how many `<` characters survive as tag
+    /// openers.
+    fn tag_count(html: &str, tag: &str) -> usize {
+        html.matches(&format!("<{tag}")).count()
+    }
+
+    /// Every text field reachable from `export_html` must be escaped. Driving
+    /// them all from one list is deliberate: the bug this test was written for
+    /// was a single field among four being missed, so a test that named the
+    /// fields individually would have been just as easy to write incompletely.
+    #[test]
+    fn no_text_field_can_inject_a_tag_into_the_export() {
+        const PAYLOAD: &str = "<script>alert(1)</script>";
+
+        let mut app = SlidesApp::new(800.0, 600.0);
+        app.title = PAYLOAD.to_string();
+        let slide = app.slides.get_mut(0).expect("a new deck has one slide");
+        slide.elements.clear();
+        slide.elements.push(SlideElement::TextBox {
+            id: 1,
+            x: 0.0,
+            y: 0.0,
+            width: 10.0,
+            height: 10.0,
+            text: PAYLOAD.to_string(),
+            font_size: 12.0,
+            color: TEXT,
+            bold: false,
+            centered: false,
+        });
+        slide.elements.push(SlideElement::Image {
+            id: 2,
+            x: 0.0,
+            y: 0.0,
+            width: 10.0,
+            height: 10.0,
+            placeholder_label: PAYLOAD.to_string(),
+        });
+        slide.elements.push(SlideElement::BulletList {
+            id: 3,
+            x: 0.0,
+            y: 0.0,
+            width: 10.0,
+            height: 10.0,
+            items: vec![PAYLOAD.to_string()],
+            font_size: 12.0,
+            color: TEXT,
+        });
+
+        let html = app.export_html();
+        // The export ships exactly one <script> block: its own navigation JS.
+        assert_eq!(
+            tag_count(&html, "script"),
+            1,
+            "a text field injected a script tag:\n{html}"
+        );
+        // And the payload must be present in escaped form, so this test cannot
+        // pass by the fields simply being dropped.
+        assert!(
+            html.contains("&lt;script&gt;"),
+            "payload was dropped rather than escaped:\n{html}"
+        );
+    }
+
+    #[test]
+    fn a_quote_in_a_label_cannot_escape_the_style_attribute() {
+        let mut app = SlidesApp::new(800.0, 600.0);
+        let slide = app.slides.get_mut(0).expect("a new deck has one slide");
+        slide.elements.clear();
+        slide.elements.push(SlideElement::Image {
+            id: 1,
+            x: 0.0,
+            y: 0.0,
+            width: 10.0,
+            height: 10.0,
+            placeholder_label: "\"><img onerror=alert(1) src=x>".to_string(),
+        });
+        let html = app.export_html();
+        assert_eq!(tag_count(&html, "img "), 0, "label forged a tag:\n{html}");
+    }
 
     // ---- IdGen tests -------------------------------------------------------
 

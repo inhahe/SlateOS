@@ -96,10 +96,7 @@ mod tests {
     fn test_cgroup_inet_ingress_egress_pair() {
         assert_eq!(BPF_CGROUP_INET_INGRESS, 0);
         assert_eq!(BPF_CGROUP_INET_EGRESS, 1);
-        assert_eq!(
-            BPF_CGROUP_INET_EGRESS - BPF_CGROUP_INET_INGRESS,
-            1
-        );
+        assert_eq!(BPF_CGROUP_INET_EGRESS - BPF_CGROUP_INET_INGRESS, 1);
     }
 
     #[test]

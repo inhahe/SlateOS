@@ -128,7 +128,12 @@ mod tests {
 
     #[test]
     fn test_bus_types_distinct() {
-        let b = [UHID_BUS_USB, UHID_BUS_BLUETOOTH, UHID_BUS_VIRTUAL, UHID_BUS_I2C];
+        let b = [
+            UHID_BUS_USB,
+            UHID_BUS_BLUETOOTH,
+            UHID_BUS_VIRTUAL,
+            UHID_BUS_I2C,
+        ];
         for i in 0..b.len() {
             for j in (i + 1)..b.len() {
                 assert_ne!(b[i], b[j]);

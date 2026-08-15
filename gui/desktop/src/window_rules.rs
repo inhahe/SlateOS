@@ -19,6 +19,21 @@
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand};
 use guitk::style::CornerRadii;
+use guitk::text;
+
+// Rule-list column widths. Defined once because the header row and the rule
+// rows both lay out against them, and two copies of a column width drift.
+const COL_PRIORITY: f32 = 70.0;
+const COL_NAME: f32 = 180.0;
+const COL_MATCH: f32 = 200.0;
+const COL_ACTIONS: f32 = 60.0;
+const COL_HITS: f32 = 50.0;
+const COL_STATUS: f32 = 60.0;
+/// Room left between a column's text and the next column's edge.
+const COL_GUTTER: f32 = 8.0;
+/// Horizontal room the action-summary line gives up to the icon on its left
+/// and the row's right margin.
+const SUMMARY_INSET: f32 = 86.0;
 
 // ============================================================================
 // Catppuccin Mocha theme constants
@@ -68,12 +83,8 @@ impl MatchCriteria {
                 let lower_sub = sub.to_lowercase();
                 lower_title.contains(&lower_sub)
             }
-            Self::ProcessName(name) => {
-                process.eq_ignore_ascii_case(name)
-            }
-            Self::WindowClass(cls) => {
-                class.eq_ignore_ascii_case(cls)
-            }
+            Self::ProcessName(name) => process.eq_ignore_ascii_case(name),
+            Self::WindowClass(cls) => class.eq_ignore_ascii_case(cls),
             Self::Any => true,
         }
     }
@@ -193,45 +204,113 @@ impl RuleActions {
     /// Merge another set of actions on top of this one (other's values
     /// take precedence where set).
     pub fn merge(&mut self, other: &Self) {
-        if other.position.is_some() { self.position = other.position; }
-        if other.size.is_some() { self.size = other.size; }
-        if other.desktop.is_some() { self.desktop = other.desktop; }
-        if other.always_on_top.is_some() { self.always_on_top = other.always_on_top; }
-        if other.always_on_bottom.is_some() { self.always_on_bottom = other.always_on_bottom; }
-        if other.initial_state.is_some() { self.initial_state = other.initial_state; }
-        if other.opacity.is_some() { self.opacity = other.opacity; }
-        if other.skip_taskbar.is_some() { self.skip_taskbar = other.skip_taskbar; }
-        if other.skip_alt_tab.is_some() { self.skip_alt_tab = other.skip_alt_tab; }
-        if other.target_monitor.is_some() { self.target_monitor = other.target_monitor; }
-        if other.no_decorations.is_some() { self.no_decorations = other.no_decorations; }
-        if other.min_size.is_some() { self.min_size = other.min_size; }
-        if other.max_size.is_some() { self.max_size = other.max_size; }
-        if other.prevent_close.is_some() { self.prevent_close = other.prevent_close; }
-        if other.prevent_move.is_some() { self.prevent_move = other.prevent_move; }
-        if other.prevent_resize.is_some() { self.prevent_resize = other.prevent_resize; }
-        if other.snap_zone.is_some() { self.snap_zone = other.snap_zone; }
+        if other.position.is_some() {
+            self.position = other.position;
+        }
+        if other.size.is_some() {
+            self.size = other.size;
+        }
+        if other.desktop.is_some() {
+            self.desktop = other.desktop;
+        }
+        if other.always_on_top.is_some() {
+            self.always_on_top = other.always_on_top;
+        }
+        if other.always_on_bottom.is_some() {
+            self.always_on_bottom = other.always_on_bottom;
+        }
+        if other.initial_state.is_some() {
+            self.initial_state = other.initial_state;
+        }
+        if other.opacity.is_some() {
+            self.opacity = other.opacity;
+        }
+        if other.skip_taskbar.is_some() {
+            self.skip_taskbar = other.skip_taskbar;
+        }
+        if other.skip_alt_tab.is_some() {
+            self.skip_alt_tab = other.skip_alt_tab;
+        }
+        if other.target_monitor.is_some() {
+            self.target_monitor = other.target_monitor;
+        }
+        if other.no_decorations.is_some() {
+            self.no_decorations = other.no_decorations;
+        }
+        if other.min_size.is_some() {
+            self.min_size = other.min_size;
+        }
+        if other.max_size.is_some() {
+            self.max_size = other.max_size;
+        }
+        if other.prevent_close.is_some() {
+            self.prevent_close = other.prevent_close;
+        }
+        if other.prevent_move.is_some() {
+            self.prevent_move = other.prevent_move;
+        }
+        if other.prevent_resize.is_some() {
+            self.prevent_resize = other.prevent_resize;
+        }
+        if other.snap_zone.is_some() {
+            self.snap_zone = other.snap_zone;
+        }
     }
 
     /// Count how many actions are actively set.
     pub fn active_count(&self) -> usize {
         let mut n = 0;
-        if self.position.is_some() { n += 1; }
-        if self.size.is_some() { n += 1; }
-        if self.desktop.is_some() { n += 1; }
-        if self.always_on_top.is_some() { n += 1; }
-        if self.always_on_bottom.is_some() { n += 1; }
-        if self.initial_state.is_some() { n += 1; }
-        if self.opacity.is_some() { n += 1; }
-        if self.skip_taskbar.is_some() { n += 1; }
-        if self.skip_alt_tab.is_some() { n += 1; }
-        if self.target_monitor.is_some() { n += 1; }
-        if self.no_decorations.is_some() { n += 1; }
-        if self.min_size.is_some() { n += 1; }
-        if self.max_size.is_some() { n += 1; }
-        if self.prevent_close.is_some() { n += 1; }
-        if self.prevent_move.is_some() { n += 1; }
-        if self.prevent_resize.is_some() { n += 1; }
-        if self.snap_zone.is_some() { n += 1; }
+        if self.position.is_some() {
+            n += 1;
+        }
+        if self.size.is_some() {
+            n += 1;
+        }
+        if self.desktop.is_some() {
+            n += 1;
+        }
+        if self.always_on_top.is_some() {
+            n += 1;
+        }
+        if self.always_on_bottom.is_some() {
+            n += 1;
+        }
+        if self.initial_state.is_some() {
+            n += 1;
+        }
+        if self.opacity.is_some() {
+            n += 1;
+        }
+        if self.skip_taskbar.is_some() {
+            n += 1;
+        }
+        if self.skip_alt_tab.is_some() {
+            n += 1;
+        }
+        if self.target_monitor.is_some() {
+            n += 1;
+        }
+        if self.no_decorations.is_some() {
+            n += 1;
+        }
+        if self.min_size.is_some() {
+            n += 1;
+        }
+        if self.max_size.is_some() {
+            n += 1;
+        }
+        if self.prevent_close.is_some() {
+            n += 1;
+        }
+        if self.prevent_move.is_some() {
+            n += 1;
+        }
+        if self.prevent_resize.is_some() {
+            n += 1;
+        }
+        if self.snap_zone.is_some() {
+            n += 1;
+        }
         n
     }
 }
@@ -357,7 +436,8 @@ impl WindowRulesManager {
     fn add_default_rules(&mut self) {
         // Terminal windows: remember last position and size
         let mut terminal_rule = WindowRule::new(
-            self.alloc_id(), "Terminal: remember position",
+            self.alloc_id(),
+            "Terminal: remember position",
             MatchCriteria::ProcessName("terminal".to_string()),
         );
         terminal_rule.actions.position = Some(PositionSpec::RememberLast);
@@ -367,7 +447,8 @@ impl WindowRulesManager {
 
         // Settings: always center on primary monitor
         let mut settings_rule = WindowRule::new(
-            self.alloc_id(), "Settings: center on primary",
+            self.alloc_id(),
+            "Settings: center on primary",
             MatchCriteria::ProcessName("settings".to_string()),
         );
         settings_rule.actions.position = Some(PositionSpec::CenterOnMonitor(0));
@@ -376,7 +457,8 @@ impl WindowRulesManager {
 
         // Dialog windows: prevent resize
         let mut dialog_rule = WindowRule::new(
-            self.alloc_id(), "Dialogs: no resize",
+            self.alloc_id(),
+            "Dialogs: no resize",
             MatchCriteria::WindowClass("dialog".to_string()),
         );
         dialog_rule.actions.prevent_resize = Some(true);
@@ -564,7 +646,8 @@ impl WindowRulesManager {
         } else {
             // Evict oldest if at capacity.
             if self.remembered.len() >= MAX_REMEMBERED {
-                let oldest_idx = self.remembered
+                let oldest_idx = self
+                    .remembered
                     .iter()
                     .enumerate()
                     .min_by_key(|(_, s)| s.last_updated)
@@ -633,7 +716,8 @@ impl WindowRulesManager {
     pub fn export_config(&self) -> String {
         let mut out = String::from("# Window Rules Configuration\n");
         for rule in &self.rules {
-            out.push_str(&format!("rule|{}|{}|{}|{}|{}\n",
+            out.push_str(&format!(
+                "rule|{}|{}|{}|{}|{}\n",
                 rule.id,
                 rule.name,
                 rule.priority,
@@ -792,19 +876,32 @@ impl RulesSettingsUI {
     }
 
     /// Render the rules settings panel.
-    pub fn render(&self, manager: &WindowRulesManager, x: f32, y: f32, w: f32, h: f32) -> Vec<RenderCommand> {
+    pub fn render(
+        &self,
+        manager: &WindowRulesManager,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+    ) -> Vec<RenderCommand> {
         let mut cmds = Vec::new();
 
         // Background panel.
         cmds.push(RenderCommand::FillRect {
-            x, y, width: w, height: h,
+            x,
+            y,
+            width: w,
+            height: h,
             color: MOCHA_BASE,
             corner_radii: CornerRadii::all(8.0),
         });
 
         // Title bar.
         cmds.push(RenderCommand::FillRect {
-            x, y, width: w, height: 40.0,
+            x,
+            y,
+            width: w,
+            height: 40.0,
             color: MOCHA_MANTLE,
             corner_radii: CornerRadii::ZERO,
         });
@@ -814,11 +911,13 @@ impl RulesSettingsUI {
             text: "Window Rules".to_string(),
             font_size: 16.0,
             color: MOCHA_TEXT,
-            font_weight: FontWeightHint::Bold, max_width: None,
+            font_weight: FontWeightHint::Bold,
+            max_width: None,
         });
 
         // Rule count badge.
-        let count_text = format!("{} rules ({} active)",
+        let count_text = format!(
+            "{} rules ({} active)",
             manager.total_rule_count(),
             manager.active_rule_count(),
         );
@@ -828,7 +927,8 @@ impl RulesSettingsUI {
             text: count_text,
             font_size: 12.0,
             color: MOCHA_SUBTEXT0,
-            font_weight: FontWeightHint::Regular, max_width: None,
+            font_weight: FontWeightHint::Regular,
+            max_width: None,
         });
 
         // Eval mode indicator.
@@ -842,7 +942,8 @@ impl RulesSettingsUI {
             text: mode_text.to_string(),
             font_size: 10.0,
             color: MOCHA_OVERLAY0,
-            font_weight: FontWeightHint::Regular, max_width: None,
+            font_weight: FontWeightHint::Regular,
+            max_width: None,
         });
 
         match self.active_tab {
@@ -869,8 +970,17 @@ impl RulesSettingsUI {
         let rules = manager.rules();
         let row_h = 48.0;
 
-        // Column headers.
-        let headers = [("Priority", 70.0), ("Name", 180.0), ("Match", 200.0), ("Actions", 60.0), ("Hits", 50.0), ("Status", 60.0)];
+        // Column headers. The widths come from the shared constants rather
+        // than being written out again here: the row loop below advances by
+        // the same figures, and two copies of a column width drift.
+        let headers = [
+            ("Priority", COL_PRIORITY),
+            ("Name", COL_NAME),
+            ("Match", COL_MATCH),
+            ("Actions", COL_ACTIONS),
+            ("Hits", COL_HITS),
+            ("Status", COL_STATUS),
+        ];
         let mut hx = x + 8.0;
         for (label, col_w) in &headers {
             cmds.push(RenderCommand::Text {
@@ -879,7 +989,8 @@ impl RulesSettingsUI {
                 text: label.to_string(),
                 font_size: 11.0,
                 color: MOCHA_SUBTEXT0,
-                font_weight: FontWeightHint::Bold, max_width: None,
+                font_weight: FontWeightHint::Bold,
+                max_width: None,
             });
             hx += col_w;
         }
@@ -929,31 +1040,52 @@ impl RulesSettingsUI {
                 text: format!("{}", rule.priority),
                 font_size: 12.0,
                 color: priority_color,
-                font_weight: FontWeightHint::Bold, max_width: None,
+                font_weight: FontWeightHint::Bold,
+                max_width: None,
             });
-            cx += 70.0;
+            cx += COL_PRIORITY;
 
-            // Name.
+            // Name. These cells carry no `max_width`, so the elision is the
+            // only thing keeping a long rule name -- which the user types --
+            // out of the next column. Cut it to the column it occupies.
             cmds.push(RenderCommand::Text {
                 x: cx,
                 y: ry + 8.0,
-                text: truncate_string(&rule.name, 24),
+                text: text::elide(
+                    &rule.name,
+                    COL_NAME - COL_GUTTER,
+                    "...",
+                    12.0,
+                    FontWeightHint::Regular,
+                ),
                 font_size: 12.0,
-                color: if rule.enabled { MOCHA_TEXT } else { MOCHA_OVERLAY0 },
-                font_weight: FontWeightHint::Regular, max_width: None,
+                color: if rule.enabled {
+                    MOCHA_TEXT
+                } else {
+                    MOCHA_OVERLAY0
+                },
+                font_weight: FontWeightHint::Regular,
+                max_width: None,
             });
-            cx += 180.0;
+            cx += COL_NAME;
 
             // Match criteria.
             cmds.push(RenderCommand::Text {
                 x: cx,
                 y: ry + 8.0,
-                text: truncate_string(&rule.criteria.description(), 28),
+                text: text::elide(
+                    &rule.criteria.description(),
+                    COL_MATCH - COL_GUTTER,
+                    "...",
+                    11.0,
+                    FontWeightHint::Regular,
+                ),
                 font_size: 11.0,
                 color: MOCHA_BLUE,
-                font_weight: FontWeightHint::Regular, max_width: None,
+                font_weight: FontWeightHint::Regular,
+                max_width: None,
             });
-            cx += 200.0;
+            cx += COL_MATCH;
 
             // Action count.
             let ac = rule.actions.active_count();
@@ -963,7 +1095,8 @@ impl RulesSettingsUI {
                 text: format!("{} act.", ac),
                 font_size: 11.0,
                 color: if ac > 0 { MOCHA_GREEN } else { MOCHA_OVERLAY0 },
-                font_weight: FontWeightHint::Regular, max_width: None,
+                font_weight: FontWeightHint::Regular,
+                max_width: None,
             });
             cx += 60.0;
 
@@ -974,7 +1107,8 @@ impl RulesSettingsUI {
                 text: format!("{}", rule.match_count),
                 font_size: 11.0,
                 color: MOCHA_SUBTEXT0,
-                font_weight: FontWeightHint::Regular, max_width: None,
+                font_weight: FontWeightHint::Regular,
+                max_width: None,
             });
             cx += 50.0;
 
@@ -998,7 +1132,8 @@ impl RulesSettingsUI {
                 text: status_text.to_string(),
                 font_size: 10.0,
                 color: status_color,
-                font_weight: FontWeightHint::Bold, max_width: None,
+                font_weight: FontWeightHint::Bold,
+                max_width: None,
             });
 
             // One-shot indicator.
@@ -1009,7 +1144,8 @@ impl RulesSettingsUI {
                     text: "1x".to_string(),
                     font_size: 9.0,
                     color: MOCHA_PEACH,
-                    font_weight: FontWeightHint::Bold, max_width: None,
+                    font_weight: FontWeightHint::Bold,
+                    max_width: None,
                 });
             }
 
@@ -1019,10 +1155,19 @@ impl RulesSettingsUI {
                 cmds.push(RenderCommand::Text {
                     x: x + 78.0,
                     y: ry + 26.0,
-                    text: truncate_string(&summary, 60),
+                    // Spans the rest of the row rather than a fixed column, so
+                    // it is elided to the room actually left beside the icon.
+                    text: text::elide(
+                        &summary,
+                        (w - SUMMARY_INSET).max(0.0),
+                        "...",
+                        10.0,
+                        FontWeightHint::Regular,
+                    ),
                     font_size: 10.0,
                     color: MOCHA_OVERLAY0,
-                    font_weight: FontWeightHint::Regular, max_width: None,
+                    font_weight: FontWeightHint::Regular,
+                    max_width: None,
                 });
             }
         }
@@ -1043,18 +1188,12 @@ impl RulesSettingsUI {
             text: "+ Add Rule".to_string(),
             font_size: 12.0,
             color: MOCHA_BASE,
-            font_weight: FontWeightHint::Bold, max_width: None,
+            font_weight: FontWeightHint::Bold,
+            max_width: None,
         });
     }
 
-    fn render_rule_editor(
-        &self,
-        cmds: &mut Vec<RenderCommand>,
-        x: f32,
-        y: f32,
-        w: f32,
-        _h: f32,
-    ) {
+    fn render_rule_editor(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, w: f32, _h: f32) {
         let label_x = x + 16.0;
         let input_x = x + 140.0;
         let input_w = w - 170.0;
@@ -1071,7 +1210,8 @@ impl RulesSettingsUI {
             text: title.to_string(),
             font_size: 14.0,
             color: MOCHA_TEXT,
-            font_weight: FontWeightHint::Bold, max_width: None,
+            font_weight: FontWeightHint::Bold,
+            max_width: None,
         });
         cy += 30.0;
 
@@ -1082,7 +1222,8 @@ impl RulesSettingsUI {
             text: "Name:".to_string(),
             font_size: 12.0,
             color: MOCHA_SUBTEXT0,
-            font_weight: FontWeightHint::Regular, max_width: None,
+            font_weight: FontWeightHint::Regular,
+            max_width: None,
         });
         cmds.push(RenderCommand::FillRect {
             x: input_x,
@@ -1101,20 +1242,32 @@ impl RulesSettingsUI {
                 self.editing_name.clone()
             },
             font_size: 12.0,
-            color: if self.editing_name.is_empty() { MOCHA_OVERLAY0 } else { MOCHA_TEXT },
-            font_weight: FontWeightHint::Regular, max_width: None,
+            color: if self.editing_name.is_empty() {
+                MOCHA_OVERLAY0
+            } else {
+                MOCHA_TEXT
+            },
+            font_weight: FontWeightHint::Regular,
+            max_width: None,
         });
         cy += 36.0;
 
         // Match type selector.
-        let criteria_labels = ["Title (exact)", "Title (contains)", "Process name", "Window class", "Any"];
+        let criteria_labels = [
+            "Title (exact)",
+            "Title (contains)",
+            "Process name",
+            "Window class",
+            "Any",
+        ];
         cmds.push(RenderCommand::Text {
             x: label_x,
             y: cy + 4.0,
             text: "Match:".to_string(),
             font_size: 12.0,
             color: MOCHA_SUBTEXT0,
-            font_weight: FontWeightHint::Regular, max_width: None,
+            font_weight: FontWeightHint::Regular,
+            max_width: None,
         });
         for (i, label) in criteria_labels.iter().enumerate() {
             let bx = input_x + (i as f32) * 110.0;
@@ -1133,7 +1286,11 @@ impl RulesSettingsUI {
                 text: label.to_string(),
                 font_size: 10.0,
                 color: if selected { MOCHA_BASE } else { MOCHA_TEXT },
-                font_weight: if selected { FontWeightHint::Bold } else { FontWeightHint::Regular },
+                font_weight: if selected {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
                 max_width: None,
             });
         }
@@ -1147,7 +1304,8 @@ impl RulesSettingsUI {
                 text: "Value:".to_string(),
                 font_size: 12.0,
                 color: MOCHA_SUBTEXT0,
-                font_weight: FontWeightHint::Regular, max_width: None,
+                font_weight: FontWeightHint::Regular,
+                max_width: None,
             });
             cmds.push(RenderCommand::FillRect {
                 x: input_x,
@@ -1166,8 +1324,13 @@ impl RulesSettingsUI {
                     self.editing_criteria_value.clone()
                 },
                 font_size: 12.0,
-                color: if self.editing_criteria_value.is_empty() { MOCHA_OVERLAY0 } else { MOCHA_TEXT },
-                font_weight: FontWeightHint::Regular, max_width: None,
+                color: if self.editing_criteria_value.is_empty() {
+                    MOCHA_OVERLAY0
+                } else {
+                    MOCHA_TEXT
+                },
+                font_weight: FontWeightHint::Regular,
+                max_width: None,
             });
             cy += 36.0;
         }
@@ -1179,7 +1342,8 @@ impl RulesSettingsUI {
             text: "Priority:".to_string(),
             font_size: 12.0,
             color: MOCHA_SUBTEXT0,
-            font_weight: FontWeightHint::Regular, max_width: None,
+            font_weight: FontWeightHint::Regular,
+            max_width: None,
         });
         cmds.push(RenderCommand::FillRect {
             x: input_x,
@@ -1195,7 +1359,8 @@ impl RulesSettingsUI {
             text: format!("{}", self.editing_priority),
             font_size: 12.0,
             color: MOCHA_TEXT,
-            font_weight: FontWeightHint::Regular, max_width: None,
+            font_weight: FontWeightHint::Regular,
+            max_width: None,
         });
         cy += 40.0;
 
@@ -1214,7 +1379,8 @@ impl RulesSettingsUI {
             text: "Save".to_string(),
             font_size: 12.0,
             color: MOCHA_BASE,
-            font_weight: FontWeightHint::Bold, max_width: None,
+            font_weight: FontWeightHint::Bold,
+            max_width: None,
         });
         cmds.push(RenderCommand::FillRect {
             x: input_x + 92.0,
@@ -1230,7 +1396,8 @@ impl RulesSettingsUI {
             text: "Cancel".to_string(),
             font_size: 12.0,
             color: MOCHA_TEXT,
-            font_weight: FontWeightHint::Regular, max_width: None,
+            font_weight: FontWeightHint::Regular,
+            max_width: None,
         });
     }
 }
@@ -1245,40 +1412,60 @@ impl Default for RulesSettingsUI {
 // Helpers
 // ============================================================================
 
-/// Truncate a string to max chars, adding "..." if truncated.
-fn truncate_string(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        let mut result: String = s.chars().take(max.saturating_sub(3)).collect();
-        // Strip trailing whitespace before appending the ellipsis so we
-        // don't produce ugly "word ..." with a space between word and dots.
-        while result.ends_with(char::is_whitespace) {
-            result.pop();
-        }
-        result.push_str("...");
-        result
-    }
-}
+// `truncate_string` lived here: it compared `s.len()` (bytes) against a
+// character budget, and each of its three call sites passed a budget picked
+// independently of the column the text was drawn in. Replaced by
+// `text::elide`, which measures against the actual column width. See
+// known-issues.md TD-APPS-ESTIMATE-TEXT-WIDTH.
 
 /// Build a human-readable summary of a rule's actions.
 fn action_summary(actions: &RuleActions) -> String {
     let mut parts = Vec::new();
-    if actions.position.is_some() { parts.push("position"); }
-    if actions.size.is_some() { parts.push("size"); }
-    if actions.desktop.is_some() { parts.push("desktop"); }
-    if actions.always_on_top == Some(true) { parts.push("on-top"); }
-    if actions.always_on_bottom == Some(true) { parts.push("on-bottom"); }
-    if actions.initial_state.is_some() { parts.push("initial-state"); }
-    if actions.opacity.is_some() { parts.push("opacity"); }
-    if actions.skip_taskbar == Some(true) { parts.push("skip-taskbar"); }
-    if actions.skip_alt_tab == Some(true) { parts.push("skip-alt-tab"); }
-    if actions.target_monitor.is_some() { parts.push("monitor"); }
-    if actions.no_decorations == Some(true) { parts.push("no-decor"); }
-    if actions.prevent_close == Some(true) { parts.push("no-close"); }
-    if actions.prevent_move == Some(true) { parts.push("no-move"); }
-    if actions.prevent_resize == Some(true) { parts.push("no-resize"); }
-    if actions.snap_zone.is_some() { parts.push("snap"); }
+    if actions.position.is_some() {
+        parts.push("position");
+    }
+    if actions.size.is_some() {
+        parts.push("size");
+    }
+    if actions.desktop.is_some() {
+        parts.push("desktop");
+    }
+    if actions.always_on_top == Some(true) {
+        parts.push("on-top");
+    }
+    if actions.always_on_bottom == Some(true) {
+        parts.push("on-bottom");
+    }
+    if actions.initial_state.is_some() {
+        parts.push("initial-state");
+    }
+    if actions.opacity.is_some() {
+        parts.push("opacity");
+    }
+    if actions.skip_taskbar == Some(true) {
+        parts.push("skip-taskbar");
+    }
+    if actions.skip_alt_tab == Some(true) {
+        parts.push("skip-alt-tab");
+    }
+    if actions.target_monitor.is_some() {
+        parts.push("monitor");
+    }
+    if actions.no_decorations == Some(true) {
+        parts.push("no-decor");
+    }
+    if actions.prevent_close == Some(true) {
+        parts.push("no-close");
+    }
+    if actions.prevent_move == Some(true) {
+        parts.push("no-move");
+    }
+    if actions.prevent_resize == Some(true) {
+        parts.push("no-resize");
+    }
+    if actions.snap_zone.is_some() {
+        parts.push("snap");
+    }
     parts.join(", ")
 }
 
@@ -1498,7 +1685,11 @@ mod tests {
     fn test_evaluate_no_match() {
         let mut mgr = WindowRulesManager::new();
         mgr.rules.clear();
-        let mut r = WindowRule::new(0, "specific", MatchCriteria::ProcessName("firefox".to_string()));
+        let mut r = WindowRule::new(
+            0,
+            "specific",
+            MatchCriteria::ProcessName("firefox".to_string()),
+        );
         r.actions.opacity = Some(0.5);
         mgr.add_rule(r);
 
@@ -1543,14 +1734,27 @@ mod tests {
 
         // Create a rule that uses RememberLast.
         mgr.rules.clear();
-        let mut r = WindowRule::new(0, "term", MatchCriteria::ProcessName("terminal".to_string()));
+        let mut r = WindowRule::new(
+            0,
+            "term",
+            MatchCriteria::ProcessName("terminal".to_string()),
+        );
         r.actions.position = Some(PositionSpec::RememberLast);
         r.actions.size = Some(SizeSpec::RememberLast);
         mgr.add_rule(r);
 
         let result = mgr.evaluate("", "terminal", "");
-        assert_eq!(result.position, Some(PositionSpec::Absolute { x: 100, y: 200 }));
-        assert_eq!(result.size, Some(SizeSpec::Exact { width: 800, height: 600 }));
+        assert_eq!(
+            result.position,
+            Some(PositionSpec::Absolute { x: 100, y: 200 })
+        );
+        assert_eq!(
+            result.size,
+            Some(SizeSpec::Exact {
+                width: 800,
+                height: 600
+            })
+        );
     }
 
     #[test]
@@ -1565,14 +1769,21 @@ mod tests {
         mgr.add_rule(r);
 
         let result = mgr.evaluate("", "vim", "");
-        assert_eq!(result.position, Some(PositionSpec::Absolute { x: 50, y: 60 }));
+        assert_eq!(
+            result.position,
+            Some(PositionSpec::Absolute { x: 50, y: 60 })
+        );
     }
 
     #[test]
     fn test_remember_no_state_returns_none() {
         let mut mgr = WindowRulesManager::new();
         mgr.rules.clear();
-        let mut r = WindowRule::new(0, "unknown", MatchCriteria::ProcessName("unknown".to_string()));
+        let mut r = WindowRule::new(
+            0,
+            "unknown",
+            MatchCriteria::ProcessName("unknown".to_string()),
+        );
         r.actions.position = Some(PositionSpec::RememberLast);
         mgr.add_rule(r);
 
@@ -1644,7 +1855,10 @@ mod tests {
         assert_eq!(rule.name, "My Rule");
         assert_eq!(rule.priority, 20);
         assert!(rule.enabled);
-        assert_eq!(rule.criteria, MatchCriteria::ProcessName("firefox".to_string()));
+        assert_eq!(
+            rule.criteria,
+            MatchCriteria::ProcessName("firefox".to_string())
+        );
     }
 
     #[test]
@@ -1702,10 +1916,64 @@ mod tests {
     }
 
     #[test]
-    fn test_truncate_string() {
-        assert_eq!(truncate_string("short", 10), "short");
-        assert_eq!(truncate_string("a very long string indeed", 10), "a very...");
-        assert_eq!(truncate_string("", 5), "");
+    fn a_rule_name_stays_inside_its_column() {
+        // These cells carry no `max_width`, so nothing downstream will save a
+        // name that overruns -- it draws straight over the Match column. The
+        // old character budget could not prevent that, because 24 characters
+        // is a different width for every 24 characters.
+        let mut mgr = WindowRulesManager::new();
+        for (i, name) in [
+            "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW",
+            "a rule name with accents ééééééééééééééé",
+            "short",
+        ]
+        .iter()
+        .enumerate()
+        {
+            mgr.add_rule(WindowRule::new(i as u32, name, MatchCriteria::Any));
+        }
+        let ui = RulesSettingsUI::new();
+        let mut cmds = Vec::new();
+        ui.render_rule_list(&mut cmds, &mgr, 0.0, 0.0, 900.0, 600.0);
+
+        let mut checked = 0;
+        for cmd in &cmds {
+            if let RenderCommand::Text {
+                text,
+                font_size,
+                font_weight,
+                ..
+            } = cmd
+                && (*font_size - 12.0).abs() < 0.01
+                && text != "Priority"
+            {
+                let w = guitk::text::measure(text, *font_size, *font_weight);
+                assert!(
+                    w <= COL_NAME - COL_GUTTER + 0.01,
+                    "rule name {text:?} measures {w}, wider than its {} px column",
+                    COL_NAME - COL_GUTTER
+                );
+                checked += 1;
+            }
+        }
+        // Without this the test passes on a render that drew no names at all.
+        assert!(checked >= 3, "expected three rule names, checked {checked}");
+    }
+
+    #[test]
+    fn a_short_rule_name_is_not_elided() {
+        let mut mgr = WindowRulesManager::new();
+        mgr.add_rule(WindowRule::new(1, "short", MatchCriteria::Any));
+        let ui = RulesSettingsUI::new();
+        let mut cmds = Vec::new();
+        ui.render_rule_list(&mut cmds, &mgr, 0.0, 0.0, 900.0, 600.0);
+        assert!(
+            cmds.iter().any(|c| matches!(
+                c,
+                RenderCommand::Text { text, .. } if text == "short"
+            )),
+            "a name that fits its column should be drawn whole"
+        );
     }
 
     #[test]
@@ -1769,7 +2037,10 @@ mod tests {
     fn test_position_spec_variants() {
         let abs = PositionSpec::Absolute { x: 100, y: 200 };
         let center = PositionSpec::CenterOnMonitor(1);
-        let pct = PositionSpec::Percentage { x_pct: 0.5, y_pct: 0.5 };
+        let pct = PositionSpec::Percentage {
+            x_pct: 0.5,
+            y_pct: 0.5,
+        };
         let rem = PositionSpec::RememberLast;
         // Just ensure they're distinct.
         assert_ne!(abs, center);
@@ -1778,8 +2049,14 @@ mod tests {
 
     #[test]
     fn test_size_spec_variants() {
-        let exact = SizeSpec::Exact { width: 800, height: 600 };
-        let pct = SizeSpec::Percentage { w_pct: 0.5, h_pct: 0.5 };
+        let exact = SizeSpec::Exact {
+            width: 800,
+            height: 600,
+        };
+        let pct = SizeSpec::Percentage {
+            w_pct: 0.5,
+            h_pct: 0.5,
+        };
         let rem = SizeSpec::RememberLast;
         assert_ne!(exact, pct);
         assert_ne!(pct, rem);

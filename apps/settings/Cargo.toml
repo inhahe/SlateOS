@@ -5,3 +5,7 @@ edition = "2024"
 description = "SlateOS Settings — centralized system configuration UI"
 [dependencies]
 guitk = { path = "../../gui/toolkit" }
+# The Personalization pages edit the same preferences the desktop shell paints
+# from, so they share one model and one file rather than each keeping a copy.
+# See known-issues.md TD-THREE-INDEPENDENT-APPEARANCE-MODELS.
+appearance = { path = "../../gui/appearance" }

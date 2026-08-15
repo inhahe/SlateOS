@@ -17,8 +17,7 @@ pub const SYSCTL_WATCHDOG: &str = "/proc/sys/kernel/watchdog";
 pub const SYSCTL_WATCHDOG_THRESH: &str = "/proc/sys/kernel/watchdog_thresh";
 pub const SYSCTL_WATCHDOG_CPUMASK: &str = "/proc/sys/kernel/watchdog_cpumask";
 pub const SYSCTL_PANIC_ON_OOPS: &str = "/proc/sys/kernel/panic_on_oops";
-pub const SYSCTL_PANIC_ON_UNRECOVERED_NMI: &str =
-    "/proc/sys/kernel/panic_on_unrecovered_nmi";
+pub const SYSCTL_PANIC_ON_UNRECOVERED_NMI: &str = "/proc/sys/kernel/panic_on_unrecovered_nmi";
 pub const SYSCTL_UNKNOWN_NMI_PANIC: &str = "/proc/sys/kernel/unknown_nmi_panic";
 
 // ---------------------------------------------------------------------------

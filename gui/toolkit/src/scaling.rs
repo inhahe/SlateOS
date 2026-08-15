@@ -120,7 +120,10 @@ impl ScaledSize {
     /// Construct from a physical size at the given scale factor.
     pub fn from_physical(phys: PhysicalSize, scale: f32) -> Self {
         if scale == 0.0 {
-            return Self { width: 0.0, height: 0.0 };
+            return Self {
+                width: 0.0,
+                height: 0.0,
+            };
         }
         Self {
             width: phys.width as f32 / scale,
@@ -172,7 +175,12 @@ impl ScaledRect {
     /// Construct from a physical rectangle at the given scale factor.
     pub fn from_physical(phys: PhysicalRect, scale: f32) -> Self {
         if scale == 0.0 {
-            return Self { x: 0.0, y: 0.0, w: 0.0, h: 0.0 };
+            return Self {
+                x: 0.0,
+                y: 0.0,
+                w: 0.0,
+                h: 0.0,
+            };
         }
         Self {
             x: phys.x as f32 / scale,
@@ -486,8 +494,7 @@ static SCALE_TABLE: [AtomicU32; MAX_MONITORS + 1] = {
     // the AtomicU32 (which has interior mutability) — `[CONST; N]` would
     // copy the same value into every slot, which clippy correctly warns
     // against for interior-mutable types.
-    let mut table: [AtomicU32; MAX_MONITORS + 1] =
-        [const { AtomicU32::new(0) }; MAX_MONITORS + 1];
+    let mut table: [AtomicU32; MAX_MONITORS + 1] = [const { AtomicU32::new(0) }; MAX_MONITORS + 1];
     // Slot 0 = global default 1.0
     table[0] = AtomicU32::new(f32_to_bits(1.0));
     table
@@ -553,29 +560,80 @@ pub fn get_global_scale() -> f32 {
 mod tests {
     use super::*;
 
+    /// Serialises the tests that touch [`SCALE_TABLE`].
+    ///
+    /// The scale table is process-wide and cargo runs tests in parallel
+    /// threads, so two tests that each set the global scale and then assert on
+    /// it will intermittently read the other's value — `per_monitor_clear_falls_back`
+    /// sets 1.5 and any concurrent `set_global_scale(1.0)` makes it fail. That
+    /// is a flake in the test harness, not in the code under test, but a suite
+    /// that fails at random teaches everyone to ignore it.
+    static SCALE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Take the scale lock and restore the table when the test ends.
+    ///
+    /// Restoring on drop rather than at the end of the test body means a test
+    /// that fails an assertion — which unwinds — still leaves the table clean
+    /// for the next one, instead of turning one failure into several.
+    struct ScaleGuard(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
+
+    impl ScaleGuard {
+        fn new() -> Self {
+            // A test that panicked while holding the lock poisons it. The state
+            // it guards is restored by this guard's own `Drop` regardless, so
+            // the poison carries no information worth failing the next test
+            // over.
+            Self(SCALE_LOCK.lock().unwrap_or_else(|e| e.into_inner()))
+        }
+    }
+
+    impl Drop for ScaleGuard {
+        fn drop(&mut self) {
+            set_global_scale(1.0);
+            for monitor in 0..MAX_MONITORS {
+                set_monitor_scale(monitor, 0.0);
+            }
+        }
+    }
+
     // --- Logical <-> Physical conversions ---
 
     #[test]
     fn logical_to_physical_1x() {
-        assert_eq!(logical_to_physical(LogicalPixel(100.0), 1.0), PhysicalPixel(100));
+        assert_eq!(
+            logical_to_physical(LogicalPixel(100.0), 1.0),
+            PhysicalPixel(100)
+        );
     }
 
     #[test]
     fn logical_to_physical_1_5x() {
         // 100 * 1.5 = 150
-        assert_eq!(logical_to_physical(LogicalPixel(100.0), 1.5), PhysicalPixel(150));
+        assert_eq!(
+            logical_to_physical(LogicalPixel(100.0), 1.5),
+            PhysicalPixel(150)
+        );
         // 7 * 1.5 = 10.5 -> rounds to 11 (nearest integer)
-        assert_eq!(logical_to_physical(LogicalPixel(7.0), 1.5), PhysicalPixel(11));
+        assert_eq!(
+            logical_to_physical(LogicalPixel(7.0), 1.5),
+            PhysicalPixel(11)
+        );
     }
 
     #[test]
     fn logical_to_physical_2x() {
-        assert_eq!(logical_to_physical(LogicalPixel(50.0), 2.0), PhysicalPixel(100));
+        assert_eq!(
+            logical_to_physical(LogicalPixel(50.0), 2.0),
+            PhysicalPixel(100)
+        );
     }
 
     #[test]
     fn logical_to_physical_3x() {
-        assert_eq!(logical_to_physical(LogicalPixel(33.0), 3.0), PhysicalPixel(99));
+        assert_eq!(
+            logical_to_physical(LogicalPixel(33.0), 3.0),
+            PhysicalPixel(99)
+        );
     }
 
     #[test]
@@ -613,12 +671,7 @@ mod tests {
     #[test]
     fn scalable_value_stepped() {
         // Example: border width steps
-        let v = ScalableValue::Stepped(vec![
-            (1.0, 1.0),
-            (1.5, 2.0),
-            (2.0, 2.0),
-            (2.5, 3.0),
-        ]);
+        let v = ScalableValue::Stepped(vec![(1.0, 1.0), (1.5, 2.0), (2.0, 2.0), (2.5, 3.0)]);
         assert_eq!(v.resolve(1.0), 1.0);
         assert_eq!(v.resolve(1.25), 1.0); // between 1.0 and 1.5 -> use 1.0's value
         assert_eq!(v.resolve(1.5), 2.0);
@@ -781,7 +834,7 @@ mod tests {
     fn spacing_scales_correctly() {
         let ctx = ScaleContext::new(1.5);
         assert_eq!(ctx.spacing(8.0), 12.0); // 8 * 1.5
-        assert_eq!(ctx.spacing(4.0), 6.0);  // 4 * 1.5
+        assert_eq!(ctx.spacing(4.0), 6.0); // 4 * 1.5
     }
 
     #[test]
@@ -814,50 +867,46 @@ mod tests {
 
     #[test]
     fn global_scale_default_is_1() {
-        // Reset to known state.
+        let _guard = ScaleGuard::new();
         set_global_scale(1.0);
         assert_eq!(get_global_scale(), 1.0);
     }
 
     #[test]
     fn set_and_get_global_scale() {
+        let _guard = ScaleGuard::new();
         set_global_scale(2.0);
         assert_eq!(get_global_scale(), 2.0);
-        // Reset
-        set_global_scale(1.0);
     }
 
     #[test]
     fn global_scale_clamped() {
+        let _guard = ScaleGuard::new();
         set_global_scale(100.0);
         assert_eq!(get_global_scale(), 8.0);
         set_global_scale(0.01);
         assert_eq!(get_global_scale(), 0.25);
-        // Reset
-        set_global_scale(1.0);
     }
 
     #[test]
     fn per_monitor_override() {
+        let _guard = ScaleGuard::new();
         set_global_scale(1.0);
         set_monitor_scale(0, 2.5);
         assert_eq!(get_effective_scale(0), 2.5);
         // Other monitors fall back to global
         set_monitor_scale(1, 0.0); // clear
         assert_eq!(get_effective_scale(1), 1.0);
-        // Cleanup
-        set_monitor_scale(0, 0.0);
     }
 
     #[test]
     fn per_monitor_clear_falls_back() {
+        let _guard = ScaleGuard::new();
         set_global_scale(1.5);
         set_monitor_scale(2, 3.0);
         assert_eq!(get_effective_scale(2), 3.0);
         set_monitor_scale(2, 0.0); // clear override
         assert_eq!(get_effective_scale(2), 1.5);
-        // Reset
-        set_global_scale(1.0);
     }
 
     // --- Geometry type conversions ---
@@ -866,7 +915,13 @@ mod tests {
     fn scaled_size_roundtrip() {
         let s = ScaledSize::new(120.0, 80.0);
         let phys = s.to_physical(2.0);
-        assert_eq!(phys, PhysicalSize { width: 240, height: 160 });
+        assert_eq!(
+            phys,
+            PhysicalSize {
+                width: 240,
+                height: 160
+            }
+        );
         let back = ScaledSize::from_physical(phys, 2.0);
         assert_eq!(back, s);
     }
@@ -898,13 +953,27 @@ mod tests {
 
     #[test]
     fn from_physical_zero_scale_safe() {
-        let s = ScaledSize::from_physical(PhysicalSize { width: 100, height: 100 }, 0.0);
+        let s = ScaledSize::from_physical(
+            PhysicalSize {
+                width: 100,
+                height: 100,
+            },
+            0.0,
+        );
         assert_eq!(s, ScaledSize::new(0.0, 0.0));
 
         let p = ScaledPoint::from_physical(PhysicalPoint { x: 50, y: 50 }, 0.0);
         assert_eq!(p, ScaledPoint::new(0.0, 0.0));
 
-        let r = ScaledRect::from_physical(PhysicalRect { x: 10, y: 10, w: 50, h: 50 }, 0.0);
+        let r = ScaledRect::from_physical(
+            PhysicalRect {
+                x: 10,
+                y: 10,
+                w: 50,
+                h: 50,
+            },
+            0.0,
+        );
         assert_eq!(r, ScaledRect::new(0.0, 0.0, 0.0, 0.0));
     }
 }

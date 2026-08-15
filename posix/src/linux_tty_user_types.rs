@@ -141,7 +141,9 @@ mod tests {
 
     #[test]
     fn test_line_discipline_numbers_dense_0_to_7() {
-        let n = [N_TTY, N_SLIP, N_MOUSE, N_PPP, N_STRIP, N_AX25, N_X25, N_6PACK];
+        let n = [
+            N_TTY, N_SLIP, N_MOUSE, N_PPP, N_STRIP, N_AX25, N_X25, N_6PACK,
+        ];
         for (i, &v) in n.iter().enumerate() {
             assert_eq!(v as usize, i);
         }

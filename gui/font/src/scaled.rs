@@ -1,0 +1,1994 @@
+//! A font face pinned to one pixel size, with a glyph cache.
+//!
+//! [`sfnt::Face`] answers questions in *font units* and [`raster`] turns one
+//! outline into one mask. Neither is what a caller wants: a toolkit wants to
+//! say "draw this string at 13 px" and have it happen, without re-flattening
+//! the same 'e' for every word on the screen. [`ScaledFont`] is that layer.
+//!
+//! # Why the cache is behind `&mut self`
+//!
+//! Drawing mutates the cache, and the signature says so. The obvious
+//! alternative — `&self` plus a `RefCell`/`Mutex` inside — buys the ability
+//! to share one `ScaledFont` immutably at the cost of either giving up `Sync`
+//! or paying for a lock on every glyph. Callers that genuinely share a font
+//! across threads already have a lock around their draw state; callers that
+//! don't (the common case: one cache per rendering thread) should not pay for
+//! one. So the type stays a plain owned value and the borrow checker enforces
+//! the exclusion.
+//!
+//! # Coordinates
+//!
+//! Everything here is in pixels with y increasing downward, matching the
+//! framebuffer. A glyph's `top` is relative to the baseline, so it is
+//! negative for the part of a glyph above the baseline — the usual
+//! convention, and the one [`raster::GlyphMask`] already uses.
+
+use alloc::collections::BTreeMap;
+use alloc::string::String;
+use alloc::sync::Arc;
+use alloc::vec::Vec;
+
+use crate::FontMetrics;
+use crate::bidi::{self, Base, Level};
+use crate::fallback::{self, Extents};
+use crate::gpos::{Adjust, Run};
+use crate::gsub::SubGlyph;
+use crate::hangul;
+use crate::indic::Char;
+use crate::indic_shape::{Script, continues_word};
+use crate::joining::{self, Form};
+use crate::norm;
+use crate::raster::{GlyphMask, rasterize};
+use crate::script::{self, ScriptTags};
+use crate::sfnt::{Face, PathCmd, SfntError};
+use crate::shape::{GlyphKey, ShapedGlyph, ShapedRun, TAB_WIDTH_IN_SPACES};
+
+/// How many rasterized glyphs one [`ScaledFont`] keeps before it starts
+/// evicting.
+///
+/// A screenful of Latin text touches on the order of 100 distinct glyphs;
+/// 512 leaves room for punctuation, accents and a little CJK without letting
+/// a hostile string (say, a scroll through every codepoint in a CJK face)
+/// grow the cache without bound. At 13 px a cached mask is a couple of
+/// hundred bytes, so the ceiling is well under a megabyte.
+pub const GLYPH_CACHE_LIMIT: usize = 512;
+
+/// Why a [`ScaledFont`] could not be built or could not draw.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScaledFontError {
+    /// The underlying face could not be read.
+    Sfnt(SfntError),
+    /// The requested pixel size is zero, negative, or not a number.
+    InvalidSize,
+}
+
+impl From<SfntError> for ScaledFontError {
+    fn from(e: SfntError) -> Self {
+        Self::Sfnt(e)
+    }
+}
+
+impl core::fmt::Display for ScaledFontError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Sfnt(e) => write!(f, "{e}"),
+            Self::InvalidSize => f.write_str("pixel size must be finite and positive"),
+        }
+    }
+}
+
+impl core::error::Error for ScaledFontError {
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
+        match self {
+            Self::Sfnt(e) => Some(e),
+            Self::InvalidSize => None,
+        }
+    }
+}
+
+/// One glyph, rasterized and ready to blit.
+#[derive(Clone, Debug)]
+pub struct Glyph {
+    /// Anti-aliased coverage and its offset from the pen position.
+    pub mask: GlyphMask,
+    /// How far the pen advances after drawing this glyph, in pixels.
+    pub advance: f32,
+}
+
+/// A face pinned to a pixel size, caching the glyphs it has drawn.
+pub struct ScaledFont {
+    /// Shared because a UI wants the same face at several sizes at once — a
+    /// label, a title, a tooltip — and a `Face` owns the whole font file.
+    /// Holding it by value meant a megabyte of `Vec<u8>` per size, and
+    /// re-parsing the tables each time to get it.
+    face: Arc<Face>,
+    px_per_em: f32,
+    scale: f32,
+    metrics: FontMetrics,
+    /// Keyed by glyph id, not character: two characters that map to the same
+    /// glyph (and there are many — the space-like codepoints, the various
+    /// hyphens in some faces) must not each get their own entry.
+    cache: BTreeMap<u16, Glyph>,
+    /// Insertion order, for eviction. A true LRU would need to reorder on
+    /// every hit; text rendering hits the same small working set over and
+    /// over, so first-in-first-out evicts almost the same entries for none of
+    /// the bookkeeping.
+    order: Vec<u16>,
+}
+
+impl core::fmt::Debug for ScaledFont {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("ScaledFont")
+            .field("px_per_em", &self.px_per_em)
+            .field("units_per_em", &self.face.units_per_em())
+            .field("num_glyphs", &self.face.num_glyphs())
+            .field("cached", &self.cache.len())
+            // The face bytes and the masks are megabytes; naming them here
+            // would make `{:?}` on a font unusable.
+            .finish_non_exhaustive()
+    }
+}
+
+/// One stretch of glyphs that shapes as a unit, in post-substitution glyph
+/// indices.
+///
+/// The output of the substitution pass and the input to the positioning one.
+/// A segment never spans a tab or a script change, and never contains one: a
+/// layout table's lookups may not reach across either, so the two passes cut
+/// the run the same way and the cut is made once.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Segment {
+    /// Index of the segment's first glyph.
+    start: usize,
+    /// One past its last.
+    end: usize,
+    /// The script the stretch was opened under, which chooses its features.
+    script: Option<ScriptTags>,
+}
+
+impl ScaledFont {
+    /// Pin `face` to `px_per_em` pixels per em.
+    ///
+    /// # Errors
+    ///
+    /// [`ScaledFontError::InvalidSize`] if `px_per_em` is not finite and
+    /// positive.
+    pub fn new(face: Face, px_per_em: f32) -> Result<Self, ScaledFontError> {
+        Self::shared(Arc::new(face), px_per_em)
+    }
+
+    /// Pin an already-parsed, shared `face` to `px_per_em` pixels per em.
+    ///
+    /// This is the constructor a font cache wants: parsing a face is the
+    /// expensive part and its result is immutable, so several sizes of the same
+    /// family should share one. Only the rasterized glyphs differ per size, and
+    /// those are this type's own.
+    ///
+    /// # Errors
+    ///
+    /// [`ScaledFontError::InvalidSize`] if `px_per_em` is not finite and
+    /// positive.
+    pub fn shared(face: Arc<Face>, px_per_em: f32) -> Result<Self, ScaledFontError> {
+        if !px_per_em.is_finite() || px_per_em <= 0.0 {
+            return Err(ScaledFontError::InvalidSize);
+        }
+        let scale = face.scale_for_px(px_per_em);
+        let metrics = Self::derive_metrics(&face, scale);
+        Ok(Self {
+            face,
+            px_per_em,
+            scale,
+            metrics,
+            cache: BTreeMap::new(),
+            order: Vec::new(),
+        })
+    }
+
+    /// The face these glyphs come from, for sharing with another size.
+    #[must_use]
+    pub fn shared_face(&self) -> Arc<Face> {
+        Arc::clone(&self.face)
+    }
+
+    /// The face's design grid, in units per em.
+    ///
+    /// Only interesting to a caller comparing this crate's output with another
+    /// shaper's: pin a face to this many pixels and the scale factor is one,
+    /// so shaped advances come out in the font's own units, which is what
+    /// every other shaper reports. `examples/shape_dump.rs` does exactly that.
+    #[must_use]
+    pub fn units_per_em(&self) -> u16 {
+        self.face.units_per_em()
+    }
+
+    /// Read a font file and pin it to a size in one step.
+    ///
+    /// # Errors
+    ///
+    /// Whatever [`Face::parse`] rejects the file with, or
+    /// [`ScaledFontError::InvalidSize`].
+    pub fn from_bytes(data: Vec<u8>, px_per_em: f32) -> Result<Self, ScaledFontError> {
+        Self::new(Face::parse(data)?, px_per_em)
+    }
+
+    /// Translate the face's font-unit metrics into pixels.
+    ///
+    /// `cap_height` and `x_height` are measured from the outlines of 'H' and
+    /// 'x' rather than read from `OS/2`, because `OS/2` is optional, is
+    /// frequently absent from older and from bare `glyf` faces, and carries
+    /// zeros in those fields in plenty of the faces that do have it. The
+    /// outline is the ground truth and we already have a parser for it.
+    fn derive_metrics(face: &Face, scale: f32) -> FontMetrics {
+        let fm = face.metrics();
+        let ascent = f32::from(fm.ascender) * scale;
+        // `descender` is negative per spec; `FontMetrics::descent` is
+        // positive-downward, so flip it.
+        let descent = -f32::from(fm.descender) * scale;
+        #[allow(clippy::cast_precision_loss)]
+        // line_height() is a sum of three i16s, far inside f32's exact range.
+        let line_height = fm.line_height() as f32 * scale;
+        let max_advance = f32::from(fm.advance_width_max) * scale;
+
+        let cap_height = Self::glyph_top(face, 'H', scale).unwrap_or(ascent * 0.7);
+        let x_height = Self::glyph_top(face, 'x', scale).unwrap_or(ascent * 0.5);
+        let average_advance = Self::average_advance(face, scale);
+
+        FontMetrics {
+            ascent,
+            descent,
+            line_height,
+            max_advance,
+            average_advance,
+            cap_height,
+            x_height,
+        }
+    }
+
+    /// Height of `ch`'s outline above the baseline, in pixels.
+    ///
+    /// `None` when the face has no such glyph or the glyph is blank, so the
+    /// caller can fall back rather than record a height of zero.
+    fn glyph_top(face: &Face, ch: char, scale: f32) -> Option<f32> {
+        let gid = face.glyph_index(ch)?;
+        let outline = face.outline(gid).ok()?;
+        let mut top = f32::NEG_INFINITY;
+        let mut note = |y: f32| {
+            if y.is_finite() {
+                top = top.max(y);
+            }
+        };
+        for cmd in &outline.commands {
+            // A curve's control points are an upper bound on the curve, never
+            // points on it, so only the endpoint counts — which is why every
+            // arm below looks at the endpoint and nothing else.
+            match *cmd {
+                PathCmd::MoveTo(p)
+                | PathCmd::LineTo(p)
+                | PathCmd::QuadTo(_, p)
+                | PathCmd::CurveTo(_, _, p) => note(p.y),
+                PathCmd::Close => {}
+            }
+        }
+        (top > 0.0).then_some(top * scale)
+    }
+
+    /// Mean advance across the characters ordinary text is mostly made of.
+    ///
+    /// Averaging over *every* glyph would be dominated by whatever exotica
+    /// the face happens to include; averaging over lowercase Latin plus space
+    /// is what a caller asking "how wide is a character, roughly" means.
+    fn average_advance(face: &Face, scale: f32) -> f32 {
+        let mut total = 0.0_f32;
+        let mut count = 0.0_f32;
+        for ch in "abcdefghijklmnopqrstuvwxyz ".chars() {
+            let Some(gid) = face.glyph_index(ch) else {
+                continue;
+            };
+            let Ok(adv) = face.advance(gid) else { continue };
+            total += f32::from(adv);
+            count += 1.0;
+        }
+        if count == 0.0 {
+            // A face with no Latin lowercase at all — a CJK or symbol face.
+            // Its declared maximum is a better guess than zero.
+            return f32::from(face.metrics().advance_width_max) * scale;
+        }
+        total / count * scale
+    }
+
+    /// The size this font was pinned to.
+    #[must_use]
+    pub fn px_per_em(&self) -> f32 {
+        self.px_per_em
+    }
+
+    /// Pixel-space metrics for the face.
+    #[must_use]
+    pub fn metrics(&self) -> &FontMetrics {
+        &self.metrics
+    }
+
+    /// The underlying face, for callers that need font-unit data.
+    #[must_use]
+    pub fn face(&self) -> &Face {
+        &self.face
+    }
+
+    /// How many glyphs are currently rasterized and held.
+    #[must_use]
+    pub fn cached_glyphs(&self) -> usize {
+        self.cache.len()
+    }
+
+    /// Drop every cached glyph. Useful when memory is tight.
+    pub fn clear_cache(&mut self) {
+        self.cache.clear();
+        self.order.clear();
+    }
+
+    /// The glyph id `ch` maps to, or glyph 0 (`.notdef`) if the face has no
+    /// mapping for it.
+    ///
+    /// Substituting `.notdef` rather than returning `None` is deliberate:
+    /// `.notdef` is the empty box every font draws for "I don't have this",
+    /// which is exactly what should appear on screen, and it keeps the
+    /// advance non-zero so the rest of the line does not collapse onto it.
+    #[must_use]
+    pub fn glyph_id(&self, ch: char) -> u16 {
+        self.face.glyph_index(ch).unwrap_or(0)
+    }
+
+    /// Rasterize `gid` at this font's size, or return the cached result.
+    ///
+    /// # Errors
+    ///
+    /// [`ScaledFontError::Sfnt`] if the glyph cannot be decoded. A glyph that
+    /// decodes but rasterizes to nothing (a space, a zero-area contour) is
+    /// not an error — it yields an empty mask.
+    pub fn glyph(&mut self, gid: u16) -> Result<&Glyph, ScaledFontError> {
+        if !self.cache.contains_key(&gid) {
+            let entry = self.rasterize_glyph(gid)?;
+            self.insert(gid, entry);
+        }
+        self.cache
+            .get(&gid)
+            .ok_or(ScaledFontError::Sfnt(SfntError::GlyphOutOfRange))
+    }
+
+    /// The coverage bitmap for one glyph of a [`ShapedRun`] this font
+    /// produced.
+    ///
+    /// `None` when the glyph cannot be decoded, which is not something a
+    /// caller can act on — a run is drawn glyph by glyph and one that will not
+    /// rasterize is skipped, the pen still advancing so the rest of the line
+    /// stays where it was measured to be.
+    ///
+    /// This is the only way to get from a [`GlyphKey`] to pixels, and it is
+    /// deliberately the only way: the key is opaque so that a caller cannot
+    /// start treating an outline run and a bitmap run differently. See
+    /// [`SystemFont::glyph_mask`](crate::system::SystemFont::glyph_mask) for
+    /// the backend-agnostic form.
+    pub fn glyph_mask(&mut self, key: GlyphKey) -> Option<&GlyphMask> {
+        Some(&self.glyph(key.gid()).ok()?.mask)
+    }
+
+    fn rasterize_glyph(&self, gid: u16) -> Result<Glyph, ScaledFontError> {
+        let outline = self.face.outline(gid)?;
+        let advance = f32::from(self.face.advance(gid)?) * self.scale;
+        // Every rasterizer failure is swallowed, and deliberately: a glyph
+        // whose outline is absurd or malformed still has to occupy its
+        // advance, or every following glyph on the line shifts left. Draw
+        // nothing, keep the space — exactly what a blank glyph does.
+        // (`InvalidScale` cannot occur at all here; `new` validated it.)
+        let mask = rasterize(&outline, self.scale).unwrap_or_default();
+        Ok(Glyph { mask, advance })
+    }
+
+    fn insert(&mut self, gid: u16, glyph: Glyph) {
+        if self.cache.len() >= GLYPH_CACHE_LIMIT {
+            // Evict the oldest still-present entry. The loop (rather than a
+            // single `remove(0)`) skips ids already gone via `clear_cache`.
+            while !self.order.is_empty() {
+                let victim = self.order.remove(0);
+                if self.cache.remove(&victim).is_some() {
+                    break;
+                }
+            }
+        }
+        self.cache.insert(gid, glyph);
+        self.order.push(gid);
+    }
+
+    /// The gap to add between two glyphs, in pixels, on top of the first
+    /// one's advance. Negative for the pairs that need pulling together.
+    ///
+    /// Separate from `glyph` because a caller that draws one glyph at a time
+    /// (the compositor does, so that it can blend coverage through its own
+    /// clip stack) has to be able to ask about a pair without giving up the
+    /// per-glyph loop. Callers that use `measure` or `draw_text` get it
+    /// applied for them.
+    #[must_use]
+    pub fn kern(&self, left: u16, right: u16) -> f32 {
+        self.kern_across(left, right, &[])
+    }
+
+    /// The same, for a pair with `between` standing between them — the marks a
+    /// face's "ignore marks" kerning is meant to be read across.
+    #[must_use]
+    pub fn kern_across(&self, left: u16, right: u16, between: &[u16]) -> f32 {
+        f32::from(self.face.kern_across(left, right, between)) * self.scale
+    }
+
+    /// The same, read from the legacy `kern` table alone.
+    ///
+    /// What the shaper charges a pair in a run whose script reaches no `GPOS`
+    /// `kern` feature. Not public: a caller with no run behind it has no script
+    /// to decide with, and [`kern_across`](Self::kern_across) is the answer for
+    /// that caller.
+    fn legacy_kern_across(&self, left: u16, right: u16, between: &[u16]) -> f32 {
+        f32::from(self.face.legacy_kern_across(left, right, between)) * self.scale
+    }
+
+    /// Font units to pixels.
+    ///
+    /// The cast is exact for anything a layout table can produce: font units
+    /// are bounded by the em square times a few, and a whole run's accumulated
+    /// advance by the length of the run — both orders of magnitude inside the
+    /// range where `f32` counts integers one at a time.
+    #[must_use]
+    fn px(&self, units: i32) -> f32 {
+        units as f32 * self.scale
+    }
+
+    /// The glyphs `text` turns into, with final advances.
+    ///
+    /// Everything that walks text goes through here — measuring, drawing,
+    /// hit-testing, truncating — so that they cannot come to different
+    /// answers about the same string. See [`shape`](crate::shape) for why
+    /// that is not a theoretical concern.
+    ///
+    /// Does not rasterize anything and does not touch the glyph cache: this
+    /// needs `cmap`, `hmtx` and the layout tables only, which is what lets a
+    /// widget measure its label without paying to draw it.
+    #[must_use]
+    pub fn shape(&self, text: &str) -> ShapedRun {
+        // Six passes, because each one needs all of the previous one's
+        // output. Bidi settles which characters are mirrored and where the
+        // direction boundaries are, and it reads the string as typed;
+        // normalization settles *which characters there are* and so must
+        // finish before any of them is looked up in `cmap`; `GSUB` decides
+        // which glyphs there are, and cannot run while characters are still
+        // arriving; kerning applies to the glyphs that *survive* substitution,
+        // so `fi` must be kerned as the single glyph it became, not as the `f`
+        // and `i` it was; reordering needs the finished glyphs; and a mark's
+        // placement is measured from a pen that both kerning and reordering
+        // are still moving.
+        let space = self.glyph_id(' ');
+        // A level per byte of `text`, indexed by the byte offset a character
+        // starts at — which is what a glyph's cluster is, whatever
+        // substitution did to the glyph count. Empty for text that needs no
+        // bidi at all, which is every left-to-right string.
+        let levels = byte_levels(text);
+        let mut pieces = norm::pieces(text, |ch| self.face.glyph_index(ch).is_some());
+        // Korean, which `norm::pieces` deliberately left spelled as the text
+        // spelled it. Which spelling to draw is a question about the face —
+        // whether it ships the 11,172 precomposed syllables, the conjoining
+        // jamo, or both — so it is answered here, with the `cmap` in hand, and
+        // not by a normalization pass that can only see the text.
+        //
+        // Before `piece_levels` below and not after: this rewrites `pieces`,
+        // and that vector is one level per piece by index.
+        //
+        // `zero_width` is asked only about tone marks, and is the narrower
+        // question than `has_glyph`: a face that draws a tone mark with no
+        // advance is declaring that it overstrikes, and a mark that overstrikes
+        // must not be moved to the front of its syllable.
+        let mut jamo: Vec<Option<hangul::Jamo>> = Vec::new();
+        hangul::preprocess(
+            &mut pieces,
+            &mut jamo,
+            |ch| self.face.glyph_index(ch).is_some(),
+            |ch| {
+                self.face
+                    .glyph_index(ch)
+                    .is_some_and(|gid| self.face.advance(gid).is_ok_and(|adv| adv == 0))
+            },
+        );
+        // A level per *piece*, for the run splitter, and rule L4 while we are
+        // here: a bracket in a right-to-left run is drawn as its pair, because
+        // the character encodes the bracket that *opens* and which side that
+        // is depends on which way the text runs.
+        let piece_levels: Vec<Level> = if levels.is_empty() {
+            Vec::new()
+        } else {
+            let out: Vec<Level> = pieces
+                .iter()
+                .map(|&(_, at)| levels.get(at).copied().unwrap_or(0))
+                .collect();
+            for (piece, level) in pieces.iter_mut().zip(out.iter()) {
+                if !level.is_multiple_of(2)
+                    && let Some(m) = bidi::mirror(piece.0)
+                    && self.face.glyph_index(m).is_some()
+                {
+                    piece.0 = m;
+                }
+            }
+            out
+        };
+        // Which cursive form each character takes, decided from the characters
+        // rather than the glyphs because it is a property of the *text*: what
+        // a letter joins to does not depend on which face is drawing it. Empty
+        // for text that does not join, which is nearly all of it.
+        let mut forms: Vec<Option<Form>> = Vec::new();
+        joining::forms(&pieces, &mut forms);
+        // Split now, while glyphs are still one per piece, so that a run
+        // boundary counted in pieces is a boundary counted in glyphs. That
+        // stops being true the moment anything ligates. Both users need it
+        // before that happens: substitution picks its features per run, and
+        // the fallback asks each run whether its script is one whose marks it
+        // is allowed to place.
+        let runs = script::runs(&pieces, &piece_levels);
+        let mut glyphs: Vec<SubGlyph> = Vec::with_capacity(pieces.len());
+        let mut tabs: Vec<bool> = Vec::with_capacity(pieces.len());
+        // The run the piece loop is inside, and the three things the fallback
+        // asks about its script: whether the face's `GPOS` applies to this run
+        // at all, whether a mark here may be *placed* by measurement, and
+        // whether a mark here takes no room. Three questions and not one — the
+        // first is about the face as well as the script, and ten scripts answer
+        // the last two differently, see [`fallback::zeroes_mark_advances`].
+        // Walked forward with the loop rather than searched, since all three
+        // are in piece order.
+        // Whether this face leaves it to the shaper to say which glyphs are
+        // marks. A face with a `GDEF` `GlyphClassDef` has stated it, and a
+        // glyph the table omits is one it declined to call a mark; a face
+        // without one has stated nothing, and the general category of the
+        // *character* is the only answer available. HarfBuzz's
+        // `fallback_glyph_classes`, and — this is the part that was missing —
+        // it has nothing to do with whether `GPOS` applies, because zeroing a
+        // mark's advance happens twice on two different grounds:
+        // `zero_mark_widths_by_gdef` runs on every face and reads the glyph's
+        // class, while the measuring fallback's own `zero_mark_advances` runs
+        // only when the fallback does and reads the character's general
+        // category. `DejaVuMathTeXGyre.ttf` on Thai needs the first: it has a
+        // `GPOS` so no fallback runs, and no `GDEF` at all so the classes are
+        // synthesized, and HarfBuzz zeroes two `Mn` characters it cannot draw
+        // where we charged them a full missing-glyph box each.
+        let by_category = !self.face.classifies_glyphs();
+        let mut run = 0usize;
+        // Which shaper the run reaches, which the last three all read: a
+        // complex script in a face that files its features under `DFLT` or
+        // `latn` is shaped by the default shaper, and that shaper places marks
+        // by measurement, zeroes their advances, and does no reordering. See
+        // [`Face::shapes_as_default`](crate::sfnt::Face::shapes_as_default).
+        let mut simple = runs.first().is_some_and(|&(_, t)| self.face.shapes_as_default(t));
+        let mut synth = runs.first().is_none_or(|&(_, t)| !self.applies_gpos(t));
+        let mut placeable = runs
+            .first()
+            .is_none_or(|&(_, t)| fallback::positions_marks(t, simple));
+        let mut zeroed = runs
+            .first()
+            .is_none_or(|&(_, t)| fallback::zeroes_mark_advances(t, simple));
+        // And whether this run is one the Indic shaper will lay out, which
+        // decides whether the two facts it reads off the *character* are worth
+        // deriving. Neither is free — one is a binary search of the Indic
+        // table, the other of the bidi table — and neither is read anywhere
+        // else, so a line of Latin pays for neither.
+        let mut indic =
+            !simple && runs.first().is_some_and(|&(_, t)| Script::shaping(t).is_some());
+        for (i, &(ch, cluster)) in pieces.iter().enumerate() {
+            while runs.get(run).is_some_and(|&(end, _)| end <= i) {
+                run = run.saturating_add(1);
+                simple = runs
+                    .get(run)
+                    .is_some_and(|&(_, t)| self.face.shapes_as_default(t));
+                synth = runs.get(run).is_none_or(|&(_, t)| !self.applies_gpos(t));
+                placeable = runs
+                    .get(run)
+                    .is_none_or(|&(_, t)| fallback::positions_marks(t, simple));
+                zeroed = runs
+                    .get(run)
+                    .is_none_or(|&(_, t)| fallback::zeroes_mark_advances(t, simple));
+                indic = !simple
+                    && runs.get(run).is_some_and(|&(_, t)| Script::shaping(t).is_some());
+            }
+            // A tab has no glyph. Drawn through `cmap` it comes out as the
+            // missing-glyph box, one space wide; the width every caller wants
+            // is several spaces of nothing. Substituting the space glyph gets
+            // both — it draws blank, and its advance is the unit to multiply.
+            let tab = ch == '\t';
+            let gid = if tab { space } else { self.glyph_id(ch) };
+            glyphs.push(SubGlyph {
+                klass: if synth && placeable && !tab {
+                    fallback::attach_class(ch)
+                } else {
+                    0
+                },
+                // Either of HarfBuzz's two zeroing passes is enough, and they
+                // are gated on different things — see `by_category`. The
+                // fallback's own pass runs exactly when the fallback does, so
+                // it takes `placeable`; the `GDEF` pass runs on every face but
+                // is switched off entirely for the ten scripts of
+                // [`fallback::zeroes_mark_advances`], so it takes `zeroed`.
+                // Neither is gated on the combining class, which is an ordering
+                // and leaves plenty of marks at zero.
+                mark: !tab
+                    && norm::is_mark(ch)
+                    && ((synth && placeable) || (by_category && zeroed)),
+                // What the Indic shaper needs and cannot recover later: both
+                // are properties of the character, and by the time it runs
+                // there may be no character left to ask — a conjunct is one
+                // glyph standing for four of them.
+                indic: if indic && !tab {
+                    Char::of(ch)
+                } else {
+                    Char::DEFAULT
+                },
+                word: indic && !tab && continues_word(ch),
+                // A conjoining jamo takes its slot's feature and gives up
+                // `calt`; everything else takes its cursive form. The two are
+                // exclusive — no character is both — and `jamo` is empty for
+                // every run with no Korean in it, so the lookup costs nothing.
+                ..if hangul::is_jamo(ch) {
+                    SubGlyph::jamo(gid, cluster, jamo.get(i).copied().flatten())
+                } else {
+                    SubGlyph::cursive(gid, cluster, forms.get(i).copied().flatten())
+                }
+            });
+            tabs.push(tab);
+        }
+
+        let segments = self.substitute_runs(&runs, &mut glyphs, &mut tabs);
+
+        // The same question the piece loop asked, re-asked per *glyph*, because
+        // the two are no longer the same list: a stretch that ligated is
+        // shorter than the pieces it came from, so a piece index cannot be used
+        // to look anything up down here. The segments survive that — they are
+        // rewritten by the substitution to say where each stretch landed — and
+        // they carry the script, which is the only input the answer has.
+        //
+        // A glyph no segment covers is a tab, which is not a mark and is not
+        // positioned by anything, so `false` is both answers at once.
+        let mut synth_at: Vec<bool> = alloc::vec![false; glyphs.len()];
+        // And, the same way and for the same reason, whether the segment's
+        // kerning has to come from the legacy `kern` table. Also a per-segment
+        // question, because `GPOS` files its `kern` feature under particular
+        // scripts: Leelawadee registers only `thai`, so the Latin half of a
+        // mixed line reaches no `GPOS` kerning and wants the legacy table while
+        // the Thai half does not. A segment the pass skipped outright reaches
+        // no `GPOS` feature of any kind, so it wants the legacy table too.
+        let legacy = self.face.has_legacy_kern();
+        let mut legacy_at: Vec<bool> = alloc::vec![false; glyphs.len()];
+        for segment in &segments {
+            let applies = self.applies_gpos(segment.script);
+            let answer = !applies;
+            let kern = legacy && (!applies || !self.face.gpos_kerns(segment.script));
+            for slot in synth_at
+                .get_mut(segment.start..segment.end)
+                .unwrap_or_default()
+            {
+                *slot = answer;
+            }
+            for slot in legacy_at
+                .get_mut(segment.start..segment.end)
+                .unwrap_or_default()
+            {
+                *slot = kern;
+            }
+        }
+        let synthesize = synth_at.iter().any(|&yes| yes);
+
+        let marked = self.face.has_marks();
+        // The combining classes, one per glyph, kept aside for the placement
+        // pass: `glyphs` is consumed into `out` below and `ShapedGlyph` has no
+        // business carrying a combining class around for the rest of its life.
+        // Empty unless the fallback is going to run.
+        let klasses: Vec<u8> = if synthesize {
+            glyphs.iter().map(|g| g.klass).collect()
+        } else {
+            Vec::new()
+        };
+        // Which glyphs are combining marks, and what each one's nominal width
+        // is. Both are wanted twice — once by the positioning pass, which is
+        // handed whole runs, and once by the loop below, which walks one glyph
+        // at a time — so they are settled here rather than recomputed.
+        //
+        // Two ways to be a mark, because two different things are being asked.
+        // A face with anchors is asked about the *glyph*, since that is what
+        // the anchors are indexed by and what `GDEF` classes. A run the face's
+        // `GPOS` does not reach can only be asked about the *character*, and
+        // the answer is its general category — carried on the glyph as
+        // `SubGlyph::mark`, because substitution is free to change the glyph id
+        // and a cluster cannot tell a base from the marks that share it.
+        //
+        // Both can be true of one glyph, and `||` is the right join: a Hebrew
+        // point in a face that classes it in `GDEF` but files its `GPOS` under
+        // `latn` is a mark by either route, and HarfBuzz zeroes it by either
+        // route too — `GDEF` late-zeroing and the fallback are separate passes
+        // there, both switched on.
+        let marks: Vec<bool> = glyphs
+            .iter()
+            .enumerate()
+            .map(|(i, glyph)| {
+                let tab = tabs.get(i).copied().unwrap_or(false);
+                (marked && !tab && self.face.is_mark(glyph.gid)) || glyph.mark
+            })
+            .collect();
+        let advances: Vec<i32> = glyphs
+            .iter()
+            .map(|g| i32::from(self.face.advance(g.gid).unwrap_or(0)))
+            .collect();
+        let adjusted = self.position_segments(&segments, &glyphs, &advances, &marks, &levels);
+        // Whether pairs still have to be kerned one at a time here. They do
+        // only where the run's kerning is the legacy `kern` table's, which the
+        // positioning pass cannot read; pairs the pass has already charged must
+        // not be charged again, in the company of every other lookup.
+        let legacy_kerning = legacy_at.iter().any(|&yes| yes);
+        let mut out: Vec<ShapedGlyph> = Vec::with_capacity(glyphs.len());
+        // Where in `out` the left half of the next kerning pair sits, and the
+        // glyphs standing between it and the position being filled. A tab is
+        // never a left half: its advance is a layout decision, not a glyph
+        // width, and a face that kerns after a space would quietly narrow it.
+        let mut kern_left: Option<usize> = None;
+        let mut between: Vec<u16> = Vec::new();
+        for (i, glyph) in glyphs.iter().enumerate() {
+            let tab = tabs.get(i).copied().unwrap_or(false);
+            let gid = glyph.gid;
+            // A combining mark is not part of the spacing, and real faces mark
+            // their kerning lookups "ignore marks" so that `A` and `V` still
+            // kern with an accent between them. The mark goes into `between`
+            // and the face decides from its own lookup flags whether to read
+            // across it; kerning *against* the mark instead would shove the
+            // accent off the letter it belongs to.
+            let mark = marks.get(i).copied().unwrap_or(false);
+            let adjust = adjusted
+                .get(i)
+                .copied()
+                .unwrap_or_else(|| Adjust::plain(advances.get(i).copied().unwrap_or(0)));
+            // Kerning is part of the width, not a drawing-time flourish: a
+            // measurement that leaves it out is one that disagrees with what
+            // the compositor puts on the screen, which is how a label ends up
+            // centred half a pixel off in every button on the desktop. It is
+            // charged to the pair's *left* glyph — not to whatever was pushed
+            // last — so that the advances still sum to the run's width when
+            // the pair was read across a mark.
+            if legacy_at.get(i).copied().unwrap_or(false)
+                && !tab
+                && !mark
+                && let Some(last) = kern_left.and_then(|at| out.get_mut(at))
+            {
+                let kern = self.legacy_kern_across(last.key.gid(), gid, &between);
+                last.advance += kern;
+                last.kern_next = kern;
+            }
+            let advance = self.px(adjust.x_advance);
+            // How far back a zeroed mark has to be moved so that taking its
+            // advance away does not also move its image.
+            //
+            // Zeroing the advance stops the pen travelling, but the mark is
+            // drawn at the pen it *arrives* at, which is still the far side of
+            // the letter. HarfBuzz's `adjust_mark_offsets` subtracts the
+            // advance from the offset for exactly this reason, and only when
+            // nothing else is going to place the mark — `!has_gpos_mark` there,
+            // `klass == 0` here, which is the same claim in the same order:
+            // a mark the fallback below will position gets an offset measured
+            // from its base and does not want a second, blind shift on top.
+            // Left-to-right only, as in HarfBuzz: in a right-to-left run the
+            // pen arrives on the mark's *right*, which is where a mark drawn
+            // at offset zero already belongs.
+            let back = if mark
+                && synth_at.get(i).copied().unwrap_or(false)
+                && klasses.get(i).copied().unwrap_or(0) == 0
+                && levels
+                    .get(glyph.cluster)
+                    .is_none_or(|l| l.is_multiple_of(2))
+            {
+                advance
+            } else {
+                0.0
+            };
+            out.push(ShapedGlyph {
+                key: GlyphKey::outline(gid),
+                // Substitution carried this along: a ligature reports its
+                // first component's byte offset, so a caret or a truncation
+                // can land before or after it but never inside it — there is
+                // no boundary there to find.
+                cluster: glyph.cluster,
+                // A combining mark takes no room, whatever `hmtx` says. Many
+                // faces give U+0301 a real advance — Segoe UI's is over half
+                // an `e` — because the same outline doubles as the spacing
+                // acute; honouring it would put a gap after every accented
+                // letter and make `é` measure wider than `e`. HarfBuzz zeroes
+                // mark advances for the same reason. The positioning pass has
+                // already done it for the glyphs it saw; this catches the rest.
+                advance: if mark {
+                    0.0
+                } else if tab {
+                    advance * TAB_WIDTH_IN_SPACES
+                } else {
+                    advance
+                },
+                kern_next: self.px(adjust.kern),
+                // Where `GPOS` put the glyph's image relative to the pen: a
+                // mark's displacement onto its base, and the odd letter a
+                // single adjustment nudges. Zero for everything the pass did
+                // not touch, and for every glyph when there is no pass — the
+                // fallback fills those in below. `y` points up, which is both
+                // `GPOS`'s convention and `ShapedGlyph`'s, so it passes through
+                // unflipped; the flip happens once, at the blit.
+                offset: (self.px(adjust.x_offset) - back, self.px(adjust.y_offset)),
+            });
+            if mark {
+                // Keep the mark in the run between the pair, but only while
+                // there is a pair to read across: a mark with no letter before
+                // it starts nothing.
+                if kern_left.is_some() {
+                    between.push(gid);
+                }
+            } else {
+                between.clear();
+                // A tab ends the pair rather than starting one, so the glyph
+                // after it kerns against nothing.
+                kern_left = (!tab).then(|| out.len().saturating_sub(1));
+            }
+        }
+
+        // Rule L2, over glyphs rather than characters: a ligature is one glyph
+        // for several characters and a decomposition several glyphs for one,
+        // so by now the run has no one-to-one correspondence left with the
+        // string — but every glyph still knows the byte it came from, and so
+        // its level.
+        let visual = if levels.is_empty() {
+            Vec::new()
+        } else {
+            let per_glyph: Vec<Level> = out
+                .iter()
+                .map(|g| levels.get(g.cluster).copied().unwrap_or(0))
+                .collect();
+            let order = bidi::visual_order(&per_glyph);
+            if legacy_kerning {
+                recharge_kerns(&mut out, &order);
+            }
+            order
+                .into_iter()
+                .map(|i| u32::try_from(i).unwrap_or(u32::MAX))
+                .collect()
+        };
+
+        if synthesize {
+            // The only mark pass left here. A run the positioning pass *did*
+            // reach had its marks placed there, in font units and before the
+            // reordering — which is where the placement belongs, since a
+            // mark's offset is measured against a pen the lookups themselves
+            // were still moving. The two never touch the same glyph: a run the
+            // pass ran on has `klass` zero throughout, because the piece loop
+            // only fills `klass` in where `applies_gpos` said no, and this pass
+            // does nothing to a glyph whose class is zero but treat it as a
+            // base.
+            self.synthesize_marks(&mut out, &visual, &klasses, &levels);
+        }
+        ShapedRun::reordered(out, visual)
+    }
+
+    /// Cut `glyphs` into the stretches that shape together — between tabs and
+    /// script changes — substitute each under its own script, and report where
+    /// the survivors landed.
+    ///
+    /// Runs even for a face with no `GSUB`, because the cut is wanted by more
+    /// than the substitution: the returned [`Segment`]s are what
+    /// [`position_segments`](Self::position_segments) hands to `GPOS`, and a
+    /// positioning lookup may no more reach across a tab or a script change
+    /// than a substitution one may. `Face::substitute` is a no-op on a face
+    /// with nothing to substitute, so the extra call costs a branch.
+    ///
+    /// Two boundaries, for two reasons.
+    ///
+    /// A substitution may not reach across a **tab**. The tab is not a glyph
+    /// the font knows about, so joining what sits either side of it would
+    /// silently swallow the gap it exists to make — and a `GSUB` lookup, which
+    /// is handed a whole run and matches anywhere in it, has no way to be told
+    /// about a boundary except by not being shown across it.
+    ///
+    /// A substitution may not reach across a **script change** either, and
+    /// here the boundary is not only about reach but about *which rules*: the
+    /// features on each side are chosen by different script tags, and a face
+    /// that registers both Arabic and Latin has two features called `liga`
+    /// that mean different things. Shaping the whole string under one script —
+    /// which is what a single call would do, and what HarfBuzz's
+    /// `guess_segment_properties` does — applies one writing system's rules to
+    /// the other's half of the string.
+    ///
+    /// `runs` is [`script::runs`]'s output over the pieces these glyphs came
+    /// from, so its ends are glyph indices for as long as nothing has ligated
+    /// yet — which is why this is the pass that consumes them.
+    ///
+    /// Both vectors are rewritten, since a run that ligates comes out shorter
+    /// and `tabs` has to keep lining up with it — which is the other reason the
+    /// segments have to come from here. A caller could not compute them
+    /// afterwards: once a stretch has ligated, nothing left in `glyphs` says
+    /// where it began.
+    fn substitute_runs(
+        &self,
+        runs: &[(usize, Option<ScriptTags>)],
+        glyphs: &mut Vec<SubGlyph>,
+        tabs: &mut Vec<bool>,
+    ) -> Vec<Segment> {
+        let mut out: Vec<SubGlyph> = Vec::with_capacity(glyphs.len());
+        let mut out_tabs: Vec<bool> = Vec::with_capacity(tabs.len());
+        let mut segments: Vec<Segment> = Vec::new();
+        let mut run: Vec<SubGlyph> = Vec::new();
+        /// Shape the open stretch and append it, recording where it landed.
+        ///
+        /// A nested function rather than a closure because it needs the face
+        /// *and* four separate `&mut`s to locals the loop also touches, which
+        /// a closure would have to capture and so hold for its whole lifetime.
+        fn flush(
+            font: &ScaledFont,
+            script: Option<ScriptTags>,
+            run: &mut Vec<SubGlyph>,
+            out: &mut Vec<SubGlyph>,
+            out_tabs: &mut Vec<bool>,
+            segments: &mut Vec<Segment>,
+        ) {
+            if run.is_empty() {
+                return;
+            }
+            font.face.substitute(script, run);
+            let start = out.len();
+            segments.push(Segment {
+                start,
+                end: start.saturating_add(run.len()),
+                script,
+            });
+            out_tabs.extend(core::iter::repeat_n(false, run.len()));
+            out.append(run);
+        }
+        // Which script run `i` falls in. Advanced rather than searched: `i`
+        // only moves forward, and there are a handful of runs at most.
+        let mut at = 0usize;
+        // The script the *open* stretch was collected under, which is not the
+        // script at `i` once a boundary has been crossed. Keeping it separate
+        // is what makes a stretch shaped under the script that opened it.
+        let mut open: Option<ScriptTags> = None;
+        // One past the end, where there is no glyph and `tabs` reads `true`,
+        // so that the last stretch is flushed by the same code as every
+        // stretch a tab ends — including the whole of a run with no tabs at
+        // all, which is nearly every run.
+        for i in 0..=glyphs.len() {
+            // Ends are exclusive: `end == i` means the run stopped *before*
+            // this glyph, so the stretch closes and `i` opens the next one.
+            if runs.get(at).is_some_and(|&(end, _)| end <= i) {
+                flush(self, open, &mut run, &mut out, &mut out_tabs, &mut segments);
+                while runs.get(at).is_some_and(|&(end, _)| end <= i) {
+                    at = at.saturating_add(1);
+                }
+            }
+            open = runs.get(at).and_then(|&(_, script)| script);
+            if !tabs.get(i).copied().unwrap_or(true) {
+                if let Some(glyph) = glyphs.get(i) {
+                    run.push(*glyph);
+                }
+                continue;
+            }
+            flush(self, open, &mut run, &mut out, &mut out_tabs, &mut segments);
+            if let Some(glyph) = glyphs.get(i) {
+                out.push(*glyph);
+                out_tabs.push(true);
+            }
+        }
+        *glyphs = out;
+        *tabs = out_tabs;
+        segments
+    }
+
+    /// Whether the face's `GPOS` positions a run of `script` — and so, by its
+    /// negation, whether that run's marks have to be placed by measurement.
+    ///
+    /// Two conditions, and the second is the one that makes this a question
+    /// about the run rather than about the face. The face must carry a `GPOS`
+    /// at all; see [`Face::has_positioning`](crate::sfnt::Face::has_positioning)
+    /// for why a face that has one is taken at its word even when it positions
+    /// nothing. And the run's script must accept it: Hebrew does not accept a
+    /// `GPOS` written for some other script, which is
+    /// [`fallback::demands_own_gpos_script`] and the only case there is.
+    ///
+    /// Asked once per run and once per segment rather than cached, because the
+    /// answer is a binary search over a handful of four-byte tags and caching
+    /// it would mean deciding where — the face cannot hold it, since it depends
+    /// on the run.
+    fn applies_gpos(&self, script: Option<ScriptTags>) -> bool {
+        self.face.has_positioning()
+            && fallback::demands_own_gpos_script(script)
+                .is_none_or(|tag| self.face.gpos_names_script(&tag))
+    }
+
+    /// Position each of `segments` with the face's `GPOS`, into one adjustment
+    /// per glyph in `glyphs`.
+    ///
+    /// Whole segments at a time, because that is the unit a `GPOS` lookup
+    /// applies to, exactly as for `GSUB`: each lookup runs across the segment
+    /// before the next begins, and a mark's attachment is measured against the
+    /// advances the earlier lookups left behind. See [`gpos`](crate::gpos).
+    ///
+    /// A glyph no segment covers — a tab, and every glyph when the face has no
+    /// `GPOS` — keeps its nominal advance and no displacement, which is the
+    /// same answer the pass would give for a glyph no lookup matched.
+    fn position_segments(
+        &self,
+        segments: &[Segment],
+        glyphs: &[SubGlyph],
+        advances: &[i32],
+        marks: &[bool],
+        levels: &[Level],
+    ) -> Vec<Adjust> {
+        let mut out: Vec<Adjust> = advances.iter().copied().map(Adjust::plain).collect();
+        if !self.face.has_gpos_lookups() {
+            return out;
+        }
+        for segment in segments {
+            // A segment whose script refuses this face's `GPOS` outright. Not
+            // "no lookup matched" — those two look the same in the output and
+            // are not the same claim, and it is this one that switches the
+            // measuring fallback on for the segment.
+            if !self.applies_gpos(segment.script) {
+                continue;
+            }
+            let span = segment.start..segment.end;
+            let (Some(run), Some(widths), Some(is_mark)) = (
+                glyphs.get(span.clone()),
+                advances.get(span.clone()),
+                marks.get(span.clone()),
+            ) else {
+                continue;
+            };
+            // Which way the segment reads, taken from its first glyph's level.
+            // One level for the whole segment is sound because a script run is
+            // already a bidi run: `script::runs` splits on a level change as
+            // well as on a script change, which is what makes this the pass
+            // that can ask.
+            let rtl = run.first().is_some_and(|glyph| {
+                levels
+                    .get(glyph.cluster)
+                    .is_some_and(|level| !level.is_multiple_of(2))
+            });
+            let Some(done) = self.face.position(&Run {
+                glyphs: run,
+                advances: widths,
+                marks: is_mark,
+                rtl,
+                script: segment.script,
+            }) else {
+                continue;
+            };
+            for (offset, adjust) in done.into_iter().enumerate() {
+                if let Some(slot) = segment
+                    .start
+                    .checked_add(offset)
+                    .and_then(|at| out.get_mut(at))
+                {
+                    *slot = adjust;
+                }
+            }
+        }
+        out
+    }
+
+    /// Place every combining mark in `glyphs` by measuring it against the
+    /// glyph it follows, for a face that carries no `GPOS` at all.
+    ///
+    /// The counterpart to what [`gpos`](crate::gpos) does with a face's mark
+    /// anchors, and reached on the same terms: offsets measured from the base
+    /// glyph's origin with the pen travel taken back off. What differs is where
+    /// the numbers come from — two ink boxes and a combining class rather than
+    /// a pair of anchors — and when: this runs *after* reordering, because the
+    /// ink boxes it measures have to be the ones on the line, whereas `GPOS`
+    /// runs before it, in the logical order its lookups are written against.
+    /// [`fallback`] holds the geometry and explains why it is HarfBuzz's
+    /// geometry and not something invented here.
+    ///
+    /// `klass` is one combining class per glyph, `0` for anything that is not
+    /// a mark; `levels` is [`byte_levels`]'s output, consulted only for the
+    /// double-width marks whose placement depends on which side the next glyph
+    /// is on.
+    fn synthesize_marks(
+        &self,
+        glyphs: &mut [ShapedGlyph],
+        visual: &[u32],
+        klass: &[u8],
+        levels: &[Level],
+    ) {
+        // Nothing in the run is a mark, which is the overwhelmingly common
+        // case: no pens to accumulate and no boxes to read.
+        if !klass.iter().any(|&k| k != 0) {
+            return;
+        }
+        let pens = pens(glyphs, visual);
+        let upem = i32::from(self.face.units_per_em());
+        // The clearance between a letter and the mark over it, and between one
+        // mark and the next. A sixteenth of the em is HarfBuzz's choice, and
+        // matching it is the point — see [`fallback`].
+        let gap = upem / 16;
+
+        // The base glyph's own box, which every fresh stack starts from...
+        let mut origin = Extents::BLANK;
+        // ...and the box as the marks placed so far have grown it, which is
+        // what makes the second accent of a stack clear the first.
+        let mut grown = Extents::BLANK;
+        let mut base: Option<usize> = None;
+        // The class the open stack is of. Marks above and marks below grow the
+        // box in opposite directions, so a change of class starts a new stack
+        // from the letter rather than from the far side of the previous mark.
+        // 255 is not a combining class, so the first mark always starts one.
+        let mut open: u8 = 255;
+        // Whether the base is in right-to-left text, which decides which edge
+        // a double-width mark straddles.
+        let mut rtl = false;
+        for i in 0..glyphs.len() {
+            let Some(glyph) = glyphs.get(i) else { break };
+            let (gid, cluster) = (glyph.key.gid(), glyph.cluster);
+            if klass.get(i).copied().unwrap_or(0) == 0 {
+                // A glyph with no combining class is what the marks after it
+                // attach to — including one this face draws blank, which is
+                // why the box comes from `glyph_bbox` and the width from the
+                // advance rather than from the ink.
+                origin = self
+                    .face
+                    .glyph_bbox(gid)
+                    .map_or(Extents::BLANK, |b| Extents::new(
+                        num(b.x_min),
+                        num(b.y_min),
+                        num(b.x_max),
+                        num(b.y_max),
+                    ));
+                // Horizontal placement measures against the *cell*, not the
+                // ink: a letter with no ink at all still has a width to centre
+                // an accent in, and a letter whose ink overhangs its cell
+                // (an italic `f`) would otherwise drag the accent out with it.
+                origin.x_bearing = 0;
+                origin.width = self.face.advance(gid).map_or(0, i32::from);
+                grown = origin;
+                base = Some(i);
+                open = 255;
+                rtl = levels.get(cluster).is_some_and(|l| !l.is_multiple_of(2));
+                continue;
+            }
+            let (Some(at), Some(k)) = (base, klass.get(i).copied()) else {
+                continue;
+            };
+            let Some(mark) = self.face.glyph_bbox(gid).map(|b| {
+                Extents::new(num(b.x_min), num(b.y_min), num(b.x_max), num(b.y_max))
+            }) else {
+                continue;
+            };
+            if open != k {
+                open = k;
+                grown = origin;
+            }
+            let (dx, dy) = fallback::place(&mut grown, &mark, k, gap, rtl);
+            // The offset is from the base's origin; the mark is drawn at its
+            // own pen, which is however far the line has moved since. Same
+            // subtraction `gpos`'s attachment propagation makes, and right in a
+            // right-to-left run for the same reason: both pens are real
+            // positions on the line.
+            let back = pens.get(at).copied().unwrap_or(0.0) - pens.get(i).copied().unwrap_or(0.0);
+            if let Some(glyph) = glyphs.get_mut(i) {
+                #[allow(clippy::cast_precision_loss)]
+                let (dx, dy) = (dx as f32, dy as f32);
+                glyph.offset = (dx.mul_add(self.scale, back), dy * self.scale);
+            }
+        }
+    }
+
+    /// Width of `text` in pixels, ignoring line breaks.
+    #[must_use]
+    pub fn measure(&self, text: &str) -> f32 {
+        self.shape(text).width()
+    }
+
+    /// Break `text` into lines no wider than `max_width`, at whitespace.
+    ///
+    /// A single word longer than `max_width` is left on its own over-long
+    /// line rather than being cut mid-word: breaking inside a word is a
+    /// per-script decision (it is wrong for Latin, required for CJK) that
+    /// belongs to a real line breaker, not here.
+    #[must_use]
+    pub fn wrap(&self, text: &str, max_width: f32) -> Vec<String> {
+        let mut lines = Vec::new();
+        for para in text.split('\n') {
+            let mut line = String::new();
+            for word in para.split(' ') {
+                if line.is_empty() {
+                    line.push_str(word);
+                    continue;
+                }
+                let mut candidate = line.clone();
+                candidate.push(' ');
+                candidate.push_str(word);
+                if self.measure(&candidate) <= max_width {
+                    line = candidate;
+                } else {
+                    lines.push(core::mem::take(&mut line));
+                    line.push_str(word);
+                }
+            }
+            lines.push(line);
+        }
+        lines
+    }
+
+    /// Draw `text` with its baseline at `y`, starting at pen position `x`.
+    ///
+    /// Returns the pen position after the last glyph, so callers can chain
+    /// runs (a bold span after a regular one, say) without re-measuring.
+    ///
+    /// `color` is `0xAARRGGBB`. Each glyph's coverage is multiplied into the
+    /// alpha, so a fully opaque colour still anti-aliases.
+    pub fn draw_text(&mut self, text: &str, target: &mut Target<'_>, x: f32, y: f32) -> f32 {
+        let mut pen = x;
+        // Shaped up front, and into a local, because the loop needs `&mut
+        // self` to rasterize while it walks the run.
+        let run = self.shape(text);
+        // Drawing order, not logical order: in a right-to-left run the two
+        // differ, and it is this loop's accumulating pen that makes the
+        // difference visible.
+        let drawn: Vec<ShapedGlyph> = run.draw_order().copied().collect();
+        for shaped in &drawn {
+            let advance = shaped.advance;
+            let Ok(glyph) = self.glyph(shaped.key.gid()) else {
+                pen += advance;
+                continue;
+            };
+            // A mask's left/top come from a bitmap bounded by
+            // `MAX_GLYPH_PIXELS`, so they are small integers; the pen and
+            // baseline are caller-supplied and may be anything, which is why
+            // the sum goes through `pixel_coord` (which rejects the
+            // degenerate cases) and then `blit_mask` (which clips the rest).
+            // `offset` is zero except on an attached combining mark, and its
+            // `y` points up where the screen's points down.
+            #[allow(clippy::cast_precision_loss)]
+            let placed = (
+                pixel_coord(pen + shaped.offset.0 + glyph.mask.left as f32),
+                pixel_coord(y - shaped.offset.1 + glyph.mask.top as f32),
+            );
+            if let (Some(gx), Some(gy)) = placed {
+                blit_mask(&glyph.mask, target, gx, gy);
+            }
+            pen += advance;
+        }
+        pen
+    }
+}
+
+/// A bidi embedding level per *byte* of `text`, at the offsets characters
+/// start at, or empty for text that needs no bidi at all.
+///
+/// Indexed by byte offset rather than by character because that is what
+/// survives the rest of the pipeline: normalization composes and decomposes,
+/// substitution ligates, and neither keeps a character count — but every
+/// piece and every glyph carries the byte offset it came from, and the level
+/// of the character starting there is the level it should be drawn at.
+///
+/// The whole of it is skipped for a string with no right-to-left character
+/// and no directional formatting in it, which is every string this crate is
+/// asked to draw on an English desktop. See [`bidi::is_trivially_ltr`].
+fn byte_levels(text: &str) -> Vec<Level> {
+    if bidi::is_trivially_ltr(text) {
+        return Vec::new();
+    }
+    let chars: Vec<char> = text.chars().collect();
+    // `Base::Auto` — rule P2 — because the direction of a string is a
+    // property of what it says. A caller that knows better (a UI label in a
+    // left-to-right layout, say) cannot say so yet; that is a signature
+    // change, filed as `TD-FONT-CANNOT-BE-TOLD-A-PARAGRAPH-DIRECTION` in
+    // `known-issues.md`.
+    let para = bidi::resolve(&chars, Base::Auto);
+    let mut out: Vec<Level> = vec![0; text.len()];
+    for ((at, _), level) in text.char_indices().zip(para.render_levels()) {
+        if let Some(slot) = out.get_mut(at) {
+            *slot = level;
+        }
+    }
+    out
+}
+
+/// Where each glyph's pen sits on the line, indexed by *logical* position.
+///
+/// Accumulated in *drawing* order, because a pen is a place on the line and
+/// reordering moves it. In a right-to-left word a mark is drawn before the
+/// letter it sits on, so its pen is the lower of the two and the displacement
+/// a caller computes from the pair comes out positive; in a left-to-right word
+/// it is the other way round. Neither case is special-cased: the subtraction
+/// is the same one, and it is right because both pens are real positions.
+///
+/// `visual` is [`ShapedRun`]'s permutation, empty when nothing was reordered.
+fn pens(glyphs: &[ShapedGlyph], visual: &[u32]) -> Vec<f32> {
+    let mut out: Vec<f32> = alloc::vec![0.0; glyphs.len()];
+    let mut pen = 0.0f32;
+    let mut step = |i: usize| {
+        let Some(glyph) = glyphs.get(i) else { return };
+        if let Some(slot) = out.get_mut(i) {
+            *slot = pen;
+        }
+        pen += glyph.advance;
+    };
+    if visual.is_empty() {
+        for i in 0..glyphs.len() {
+            step(i);
+        }
+    } else {
+        for &v in visual {
+            if let Ok(i) = usize::try_from(v) {
+                step(i);
+            }
+        }
+    }
+    out
+}
+
+/// A font-unit measurement as the integer it always was.
+///
+/// [`BBox`](crate::sfnt::BBox) carries `f32` because an outline's box is
+/// computed from `f32` points, but a `glyf` face's stated box is four `i16`s,
+/// so nothing is lost on the faces this is used for. A CFF face's box really
+/// is fractional; truncating it toward zero is the same rounding `glyf` did in
+/// the file.
+fn num(v: f32) -> i32 {
+    #[allow(clippy::cast_possible_truncation)]
+    {
+        v as i32
+    }
+}
+
+/// Move each kern onto the glyph that is now to the *left* of the pair.
+///
+/// Kerning is a correction to the gap between two glyph images. Which of the
+/// two carries it in its advance is bookkeeping — but it is bookkeeping that
+/// depends on the order they are drawn in, because an advance pushes the pen
+/// rightwards regardless of which way the text reads. The shaping pass charges
+/// every kern to the pair's logically-first glyph, which is the left one in
+/// left-to-right text; after rule L2 has reversed a run, the left one is the
+/// logically-*second*, and leaving the kern where it was would put the gap on
+/// the far side of the pair — visible as a word whose letters are correctly
+/// ordered and incorrectly spaced.
+///
+/// So: strip every kern, then walk the pairs that are actually adjacent on
+/// the line and give each its own kern back. A pair that became adjacent only
+/// through reordering — the two glyphs either side of a direction boundary —
+/// gets nothing, which is right: they were never kerned as a pair, and
+/// HarfBuzz does not kern across a run boundary either.
+///
+/// This is for the legacy `kern` table only, and the caller gates it on
+/// [`kerns_outside_gpos`](crate::sfnt::Face::kerns_outside_gpos). A legacy
+/// value is a pure gap with no direction in it, so it genuinely belongs to
+/// whichever glyph ends up on the left. A `GPOS` pair is not: a font
+/// expressing a right-to-left adjustment writes XPlacement *and* XAdvance
+/// into the same value record — the placement opens the gap by moving the
+/// ink, the advance keeps the rest of the line where it was — so the font
+/// author has already written the correction for the reversal, and the value
+/// belongs exactly where the record put it. Moving it again would apply the
+/// same correction twice.
+fn recharge_kerns(glyphs: &mut [ShapedGlyph], order: &[usize]) {
+    let kerns: Vec<f32> = glyphs.iter().map(|g| g.kern_next).collect();
+    if kerns.iter().all(|&k| k == 0.0) {
+        return;
+    }
+    for glyph in glyphs.iter_mut() {
+        glyph.advance -= glyph.kern_next;
+        glyph.kern_next = 0.0;
+    }
+    for pair in order.windows(2) {
+        let (Some(&left), Some(&right)) = (pair.first(), pair.get(1)) else {
+            continue;
+        };
+        let kern = if right == left.saturating_add(1) {
+            // Still in logical order: the kern is already the left glyph's.
+            kerns.get(left).copied().unwrap_or(0.0)
+        } else if left == right.saturating_add(1) {
+            // Reversed: the pair was charged to what is now the right glyph.
+            kerns.get(right).copied().unwrap_or(0.0)
+        } else {
+            0.0
+        };
+        if kern != 0.0
+            && let Some(glyph) = glyphs.get_mut(left)
+        {
+            glyph.advance += kern;
+            glyph.kern_next = kern;
+        }
+    }
+}
+
+/// An ARGB surface to draw into, plus the colour to draw with.
+///
+/// Bundled into one struct because the alternative is a seven-argument
+/// function that is easy to call wrongly — `stride` and `height` are both
+/// `u32` and transposing them silently corrupts memory bounds.
+pub struct Target<'a> {
+    /// The pixel buffer, `0xAARRGGBB` per pixel, row-major.
+    pub buffer: &'a mut [u32],
+    /// Pixels per row. May exceed the visible width.
+    pub stride: u32,
+    /// Rows in the buffer.
+    pub height: u32,
+    /// Foreground colour, `0xAARRGGBB`.
+    pub color: u32,
+}
+
+/// A colour split into 8-bit channels, so the blend loop does not have to
+/// re-extract them for every pixel.
+#[derive(Clone, Copy)]
+struct Channels {
+    red: u32,
+    green: u32,
+    blue: u32,
+}
+
+impl Channels {
+    fn from_argb(argb: u32) -> Self {
+        Self {
+            red: (argb >> 16) & 0xFF,
+            green: (argb >> 8) & 0xFF,
+            blue: argb & 0xFF,
+        }
+    }
+}
+
+/// Blend one 8-bit channel: `src` over `dst` at `alpha`/255.
+///
+/// Every input is masked to 8 bits by its caller, so the weighted sum
+/// `src * alpha + dst * (255 - alpha)` peaks at `65_025` — far inside a
+/// `u32`, so it cannot overflow. The saturating
+/// forms state that invariant in the code rather than leaving the reader to
+/// re-derive it.
+fn blend_channel(src: u32, dst: u32, alpha: u32) -> u32 {
+    let inv = 255_u32.saturating_sub(alpha);
+    src.saturating_mul(alpha)
+        .saturating_add(dst.saturating_mul(inv))
+        / 255
+}
+
+/// Converts a pen position to a whole-pixel coordinate, or `None` when it is
+/// not a real number.
+///
+/// Rust's `as` maps NaN to `0` and saturates infinities, so feeding a
+/// degenerate layout straight into `blit_mask` would stamp the text at the
+/// origin instead of dropping it — a corrupt or uninitialised position would
+/// paint garbage over the top-left of the screen rather than doing nothing
+/// visible, which is far harder to diagnose. Infinities are excluded too:
+/// they saturate to `i32::MIN`/`MAX`, which clips correctly today only
+/// because `blit_mask` adds to them with `saturating_add`.
+pub(crate) fn pixel_coord(v: f32) -> Option<i32> {
+    if !v.is_finite() {
+        return None;
+    }
+    // Guarded by `is_finite` above, and the range check keeps the cast from
+    // saturating, so the truncation is exactly the intended floor-toward-zero.
+    #[allow(clippy::cast_possible_truncation)]
+    let clamped = (v >= -2_147_483_648.0 && v <= 2_147_483_647.0).then_some(v as i32);
+    clamped
+}
+
+/// Blend one anti-aliased mask onto a surface at `(x, y)`.
+///
+/// `x` and `y` are the mask's top-left corner in surface coordinates and may
+/// be negative; anything outside the surface is clipped.
+pub fn blit_mask(mask: &GlyphMask, target: &mut Target<'_>, x: i32, y: i32) {
+    let src_alpha = (target.color >> 24) & 0xFF;
+    if src_alpha == 0 {
+        return;
+    }
+    let src = Channels::from_argb(target.color);
+    let max_y = i32::try_from(target.height).unwrap_or(i32::MAX);
+    let max_x = i32::try_from(target.stride).unwrap_or(i32::MAX);
+
+    for row in 0..mask.height {
+        let Ok(dy) = i32::try_from(row) else { break };
+        let py = y.saturating_add(dy);
+        if py < 0 || py >= max_y {
+            continue;
+        }
+        for col in 0..mask.width {
+            let coverage = u32::from(mask.at(col, row));
+            if coverage == 0 {
+                continue;
+            }
+            let Ok(dx) = i32::try_from(col) else { break };
+            let px = x.saturating_add(dx);
+            if px < 0 || px >= max_x {
+                continue;
+            }
+            // Coverage scales the colour's own alpha: a 50%-covered pixel of
+            // a 50%-transparent colour is 25% opaque.
+            let alpha = src_alpha.saturating_mul(coverage) / 255;
+            if alpha == 0 {
+                continue;
+            }
+            let (Ok(px), Ok(py)) = (u32::try_from(px), u32::try_from(py)) else {
+                continue;
+            };
+            let Some(idx) = py
+                .checked_mul(target.stride)
+                .and_then(|start| start.checked_add(px))
+                .map(|i| i as usize)
+            else {
+                continue;
+            };
+            let Some(dest) = target.buffer.get_mut(idx) else {
+                continue;
+            };
+            let under = Channels::from_argb(*dest);
+            *dest = 0xFF00_0000
+                | (blend_channel(src.red, under.red, alpha) << 16)
+                | (blend_channel(src.green, under.green, alpha) << 8)
+                | blend_channel(src.blue, under.blue, alpha);
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
+mod tests {
+    use super::*;
+    use crate::sfnt::tests::{
+        build_test_font, build_test_font_with_gdef_classes, build_test_font_with_gpos_scripts,
+        build_test_font_with_layout,
+    };
+
+    fn font(px: f32) -> ScaledFont {
+        ScaledFont::from_bytes(build_test_font(), px).unwrap()
+    }
+
+    /// LAMED then QAMATS: one Hebrew letter and one Hebrew point, neither of
+    /// which the fixture has a glyph for, so both come out `.notdef` — which is
+    /// exactly the case this is about. The point is still a point.
+    const POINTED: &str = "\u{5dc}\u{5b8}";
+
+    /// How far below the baseline each glyph is drawn, shaping [`POINTED`] at
+    /// the em size against a face that registers `scripts` in its `GPOS`.
+    ///
+    /// The em size so the numbers are the font's own units: the fixture is a
+    /// 1000-unit em, `.notdef` is 600 units wide, and the fallback's clearance
+    /// is `upem / 16` = 62.
+    ///
+    /// The *vertical* offset, and not the advance which this used to read,
+    /// because the advance no longer answers the question: a face with no
+    /// `GDEF` zeroes a mark's advance whether or not anything placed it — see
+    /// `by_category` in `shape`. Nothing but the measuring fallback ever moves
+    /// a glyph off the baseline, so a non-zero drop here means it ran.
+    fn pointed_drops(scripts: &[[u8; 4]]) -> Vec<f32> {
+        let f = ScaledFont::from_bytes(build_test_font_with_gpos_scripts(scripts), 1000.0)
+            .unwrap();
+        f.shape(POINTED)
+            .glyphs()
+            .iter()
+            .map(|g| g.offset.1)
+            .collect()
+    }
+
+    /// The bug this fixes: a face carrying a `GPOS` for some other script used
+    /// to switch the measuring fallback off for *every* run in it, because the
+    /// question was asked of the file rather than of the run. A Hebrew point in
+    /// a Latin-and-Arabic face then kept its full nominal advance and sat
+    /// beside its letter instead of under it.
+    ///
+    /// HarfBuzz's rule, and now ours: the Hebrew shaper is the one that sets a
+    /// `gpos_tag`, so a Hebrew run refuses a `GPOS` whose ScriptList does not
+    /// name `hebr` and is positioned by measurement instead. Measured against
+    /// HarfBuzz over the host's 556 faces, this is the difference between 249
+    /// and 6 disagreements on the corpus's pointed-Hebrew string.
+    #[test]
+    fn a_hebrew_run_refuses_a_gpos_written_for_another_script() {
+        // No `hebr`: the fallback runs, and the point is measured onto the
+        // underside of its letter — one clearance below the baseline, since
+        // `.notdef` here draws nothing and its box is empty.
+        for scripts in [
+            [*b"DFLT", *b"arab", *b"latn"].as_slice(),
+            [*b"latn"].as_slice(),
+            [*b"cyrl", *b"grek"].as_slice(),
+        ] {
+            assert_eq!(
+                pointed_drops(scripts),
+                alloc::vec![0.0, -62.0],
+                "a GPOS naming {scripts:?} says nothing about Hebrew"
+            );
+        }
+        // `hebr` present: the face has been written with Hebrew in mind, so it
+        // is taken at its word even though this `GPOS` positions nothing, and
+        // the point is left on the baseline where `hmtx` put it.
+        for scripts in [
+            [*b"hebr"].as_slice(),
+            [*b"DFLT", *b"hebr", *b"latn"].as_slice(),
+        ] {
+            assert_eq!(
+                pointed_drops(scripts),
+                alloc::vec![0.0, 0.0],
+                "a GPOS naming {scripts:?} owns its Hebrew"
+            );
+        }
+    }
+
+    /// The other half of the same claim: a face with no `GPOS` at all falls
+    /// back for every script, and one whose `GPOS` names the run's own script
+    /// falls back for none — so the new gate cannot have been implemented by
+    /// simply always falling back, or never.
+    #[test]
+    fn a_latin_run_takes_whatever_gpos_the_face_offers() {
+        // 'A' plus a combining acute, which is an `Mn` mark. The fixture has no
+        // glyph for the acute, so it comes out `.notdef` — 600 units wide and
+        // drawing nothing.
+        let acute = "A\u{301}";
+        let shaped = |bytes: Vec<u8>| -> Vec<(f32, f32)> {
+            ScaledFont::from_bytes(bytes, 1000.0)
+                .unwrap()
+                .shape(acute)
+                .glyphs()
+                .iter()
+                .map(|g| (g.advance, g.offset.1))
+                .collect::<Vec<_>>()
+        };
+        let with_gpos =
+            |scripts: &[[u8; 4]]| shaped(build_test_font_with_gpos_scripts(scripts));
+        // 'A' is glyph 1, 300 units wide. A `GPOS` under `DFLT` alone still
+        // covers a Latin run, so nothing measures the acute onto it and it
+        // stays on the baseline — but it is still an `Mn` character in a face
+        // with no `GDEF`, so it still takes no room.
+        assert_eq!(with_gpos(&[*b"DFLT"]), alloc::vec![(300.0, 0.0), (0.0, 0.0)]);
+        assert_eq!(with_gpos(&[*b"hebr"]), alloc::vec![(300.0, 0.0), (0.0, 0.0)]);
+        // No `GPOS` at all, and the fallback runs for everything: the acute is
+        // lifted a clearance above the top of 'A', whose ink reaches y = 100.
+        assert_eq!(
+            shaped(build_test_font()),
+            alloc::vec![(300.0, 0.0), (0.0, 162.0)]
+        );
+    }
+
+    /// Both of HarfBuzz's zeroing passes, each shown where the other cannot
+    /// reach.
+    ///
+    /// `A` plus a combining acute the fixture has no glyph for, so the acute is
+    /// a 600-unit `.notdef` unless something takes its width away.
+    ///
+    /// - A face that classifies its glyphs and carries a `GPOS`: no fallback
+    ///   runs, and the `GDEF` pass reads the class rather than the character.
+    ///   This face calls every glyph it mentions a base, `.notdef` included, so
+    ///   the acute keeps its width — a face that has stated which of its glyphs
+    ///   are marks is believed.
+    /// - The same classes with no `GPOS`: the fallback runs, and *its* zeroing
+    ///   reads the general category, so the acute loses its width and is
+    ///   measured onto the letter regardless of what `GDEF` called it. This is
+    ///   the pass that the `GDEF` one cannot stand in for.
+    #[test]
+    fn a_face_that_classifies_its_glyphs_decides_which_of_them_take_room() {
+        // Glyphs 0..=3, every one of them a base.
+        const BASES: &[u16] = &[1, 1, 1, 1];
+        let shaped = |bytes: Vec<u8>| -> Vec<(f32, f32)> {
+            ScaledFont::from_bytes(bytes, 1000.0)
+                .unwrap()
+                .shape("A\u{301}")
+                .glyphs()
+                .iter()
+                .map(|g| (g.advance, g.offset.1))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            shaped(build_test_font_with_layout(&[*b"DFLT"], BASES)),
+            alloc::vec![(300.0, 0.0), (600.0, 0.0)]
+        );
+        assert_eq!(
+            shaped(build_test_font_with_gdef_classes(BASES)),
+            alloc::vec![(300.0, 0.0), (0.0, 162.0)]
+        );
+    }
+
+    #[test]
+    fn rejects_a_nonsense_size() {
+        for px in [0.0_f32, -12.0, f32::NAN, f32::INFINITY] {
+            assert_eq!(
+                ScaledFont::from_bytes(build_test_font(), px).err(),
+                Some(ScaledFontError::InvalidSize),
+                "{px} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn metrics_scale_with_size() {
+        // The fixture declares ascender 800, descender -200, lineGap 100 on a
+        // 1000-unit em, so at 100 px those are exactly 80, 20 and 110.
+        let f = font(100.0);
+        let m = f.metrics();
+        assert!((m.ascent - 80.0).abs() < 0.01, "ascent {}", m.ascent);
+        assert!((m.descent - 20.0).abs() < 0.01, "descent {}", m.descent);
+        assert!(
+            (m.line_height - 110.0).abs() < 0.01,
+            "line_height {}",
+            m.line_height
+        );
+        // advanceWidthMax is 600 font units.
+        assert!(
+            (m.max_advance - 60.0).abs() < 0.01,
+            "max_advance {}",
+            m.max_advance
+        );
+
+        // Half the size, half the metrics.
+        let h = font(50.0);
+        assert!((h.metrics().ascent - 40.0).abs() < 0.01);
+        assert!((h.metrics().line_height - 55.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn unmapped_characters_become_notdef_not_a_hole() {
+        let f = font(32.0);
+        // The fixture maps only A, B and C.
+        assert_eq!(f.glyph_id('A'), 1);
+        assert_eq!(f.glyph_id('\u{4e2d}'), 0);
+        assert_eq!(f.glyph_id('z'), 0);
+    }
+
+    #[test]
+    fn a_glyph_rasterizes_and_is_cached() {
+        let mut f = font(64.0);
+        assert_eq!(f.cached_glyphs(), 0);
+        let gid = f.glyph_id('A');
+        let first = f.glyph(gid).unwrap().clone();
+        assert_eq!(f.cached_glyphs(), 1);
+        assert!(!first.mask.is_empty(), "'A' should produce ink");
+
+        // A second request must not re-rasterize, and must be identical.
+        let second = f.glyph(gid).unwrap().clone();
+        assert_eq!(f.cached_glyphs(), 1);
+        assert_eq!(second.mask.width, first.mask.width);
+        assert_eq!(second.mask.coverage, first.mask.coverage);
+    }
+
+    #[test]
+    fn the_square_glyph_is_the_size_the_font_says_it_is() {
+        // Glyph 1 of the fixture is a 100x100 unit square on a 1000-unit em,
+        // so at 200 px per em it is exactly 20x20 pixels.
+        let mut f = font(200.0);
+        let gid = f.glyph_id('A');
+        let g = f.glyph(gid).unwrap();
+        assert_eq!(
+            (g.mask.width, g.mask.height),
+            (20, 20),
+            "got {}x{}",
+            g.mask.width,
+            g.mask.height
+        );
+        // Fully inside, so fully covered.
+        assert_eq!(g.mask.at(10, 10), 255);
+    }
+
+    #[test]
+    fn advance_scales_and_measure_agrees_with_it() {
+        let mut f = font(100.0);
+        let gid = f.glyph_id('A');
+        let adv = f.glyph(gid).unwrap().advance;
+        assert!(adv > 0.0, "advance should be positive, got {adv}");
+        assert!((f.measure("A") - adv).abs() < 0.01);
+        // Three of them is three times as wide.
+        assert!((f.measure("AAA") - adv * 3.0).abs() < 0.05);
+        assert!((f.measure("") - 0.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn measure_does_not_disturb_the_cache() {
+        let f = font(24.0);
+        let _ = f.measure("ABCABC");
+        assert_eq!(f.cached_glyphs(), 0, "measuring must not rasterize");
+    }
+
+    #[test]
+    fn the_cache_stops_growing_at_its_limit() {
+        let mut f = font(8.0);
+        // The fixture has only 4 glyphs, so drive the cache directly to prove
+        // the eviction path rather than the glyph count.
+        for gid in 0..u16::try_from(GLYPH_CACHE_LIMIT + 10).unwrap() {
+            f.insert(
+                gid,
+                Glyph {
+                    mask: GlyphMask::default(),
+                    advance: 1.0,
+                },
+            );
+        }
+        assert_eq!(f.cached_glyphs(), GLYPH_CACHE_LIMIT);
+        // The oldest entries went first.
+        let newest = u16::try_from(GLYPH_CACHE_LIMIT + 9).unwrap();
+        assert!(!f.cache.contains_key(&0));
+        assert!(f.cache.contains_key(&newest));
+    }
+
+    #[test]
+    fn clearing_the_cache_empties_it() {
+        let mut f = font(16.0);
+        let gid = f.glyph_id('A');
+        let _ = f.glyph(gid).unwrap();
+        assert_eq!(f.cached_glyphs(), 1);
+        f.clear_cache();
+        assert_eq!(f.cached_glyphs(), 0);
+        // And it still works afterwards.
+        let _ = f.glyph(gid).unwrap();
+        assert_eq!(f.cached_glyphs(), 1);
+    }
+
+    #[test]
+    fn wrapping_breaks_at_spaces_and_keeps_long_words_whole() {
+        let f = font(100.0);
+        let one = f.measure("A");
+        // Room for three glyphs plus their spaces.
+        let lines = f.wrap("A A A A A A", one * 5.0);
+        assert!(lines.len() > 1, "should have wrapped: {lines:?}");
+        for line in &lines {
+            assert!(!line.is_empty(), "no empty lines: {lines:?}");
+        }
+        // Nothing is lost.
+        assert_eq!(lines.join(" "), "A A A A A A");
+
+        // A word wider than the limit survives intact on its own line.
+        let lines = f.wrap("AAAAAAAA", one * 2.0);
+        assert_eq!(lines, ["AAAAAAAA"]);
+
+        // Explicit newlines are honoured.
+        let lines = f.wrap("A\nA", one * 100.0);
+        assert_eq!(lines, ["A", "A"]);
+    }
+
+    #[test]
+    fn drawing_puts_ink_in_the_buffer_and_returns_the_pen() {
+        let mut f = font(64.0);
+        let mut buf = alloc::vec![0xFF00_0000_u32; 128 * 128];
+        let mut target = Target {
+            buffer: &mut buf,
+            stride: 128,
+            height: 128,
+            color: 0xFFFF_FFFF,
+        };
+        let end = f.draw_text("A", &mut target, 10.0, 64.0);
+        assert!(end > 10.0, "pen should have advanced, ended at {end}");
+        assert!((end - (10.0 + f.measure("A"))).abs() < 0.01);
+
+        let lit = buf.iter().filter(|&&p| p != 0xFF00_0000).count();
+        assert!(lit > 0, "drawing produced no visible pixels");
+    }
+
+    #[test]
+    fn drawing_off_surface_clips_instead_of_corrupting() {
+        let mut f = font(64.0);
+        let mut buf = alloc::vec![0u32; 32 * 32];
+        // Far off every edge, in turn. None of these may panic, and the
+        // wildly-out-of-range ones must not touch the buffer.
+        for (x, y) in [
+            (-1000.0_f32, 16.0_f32),
+            (1000.0, 16.0),
+            (16.0, -1000.0),
+            (16.0, 1000.0),
+        ] {
+            buf.fill(0);
+            let mut target = Target {
+                buffer: &mut buf,
+                stride: 32,
+                height: 32,
+                color: 0xFFFF_FFFF,
+            };
+            f.draw_text("A", &mut target, x, y);
+            assert!(
+                buf.iter().all(|&p| p == 0),
+                "({x},{y}) should have been clipped entirely"
+            );
+        }
+    }
+
+    #[test]
+    fn a_transparent_colour_draws_nothing() {
+        let mut f = font(64.0);
+        let mut buf = alloc::vec![0u32; 128 * 128];
+        let mut target = Target {
+            buffer: &mut buf,
+            stride: 128,
+            height: 128,
+            color: 0x0000_0000,
+        };
+        f.draw_text("A", &mut target, 10.0, 64.0);
+        assert!(buf.iter().all(|&p| p == 0));
+    }
+
+    #[test]
+    fn coverage_blends_rather_than_replacing() {
+        // A half-transparent white over black must land near mid grey, not at
+        // either extreme — that is the whole point of the coverage multiply.
+        let mask = GlyphMask {
+            width: 1,
+            height: 1,
+            left: 0,
+            top: 0,
+            coverage: alloc::vec![128],
+        };
+        let mut buf = alloc::vec![0xFF00_0000_u32; 4];
+        let mut target = Target {
+            buffer: &mut buf,
+            stride: 2,
+            height: 2,
+            color: 0xFFFF_FFFF,
+        };
+        blit_mask(&mask, &mut target, 0, 0);
+        let grey = buf[0] & 0xFF;
+        assert!((100..=160).contains(&grey), "expected mid grey, got {grey}");
+    }
+
+    /// `n` glyphs 10 px wide, with `kern` charged to glyph `at` as the
+    /// shaping pass charges it: added to the advance *and* recorded.
+    fn kerned(n: usize, at: usize, kern: f32) -> alloc::vec::Vec<ShapedGlyph> {
+        (0..n)
+            .map(|i| ShapedGlyph {
+                key: crate::shape::GlyphKey::outline(u16::try_from(i).unwrap()),
+                cluster: i,
+                advance: if i == at { 10.0 + kern } else { 10.0 },
+                kern_next: if i == at { kern } else { 0.0 },
+                offset: (0.0, 0.0),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_reversal_moves_a_kern_to_the_pair_s_new_left_glyph() {
+        // Three glyphs, the pair (0,1) kerned by -2, drawn right to left.
+        let mut glyphs = kerned(3, 0, -2.0);
+        recharge_kerns(&mut glyphs, &[2, 1, 0]);
+        // Glyph 1 is now the left half of the pair, so it holds the kern and
+        // glyph 0 — now on the right, kerning against nothing — does not.
+        assert!((glyphs[1].kern_next + 2.0).abs() < f32::EPSILON);
+        assert!((glyphs[1].advance - 8.0).abs() < f32::EPSILON);
+        assert!(glyphs[0].kern_next.abs() < f32::EPSILON);
+        assert!((glyphs[0].advance - 10.0).abs() < f32::EPSILON);
+        // The line is the same width either way round.
+        let width: f32 = glyphs.iter().map(|g| g.advance).sum();
+        assert!((width - 28.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn a_kern_survives_an_order_that_did_not_change() {
+        let mut glyphs = kerned(3, 1, -2.0);
+        recharge_kerns(&mut glyphs, &[0, 1, 2]);
+        assert!((glyphs[1].kern_next + 2.0).abs() < f32::EPSILON);
+        assert!((glyphs[1].advance - 8.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn a_pair_the_reversal_invented_is_not_kerned() {
+        // (0,1) were kerned; the order draws 0 beside 2, which never were a
+        // pair. Charging them anything would invent a correction the face
+        // never asked for.
+        let mut glyphs = kerned(3, 0, -2.0);
+        recharge_kerns(&mut glyphs, &[2, 0, 1]);
+        assert!(glyphs[2].kern_next.abs() < f32::EPSILON);
+        // 0 is followed by 1 here, so that pair keeps its kern.
+        assert!((glyphs[0].kern_next + 2.0).abs() < f32::EPSILON);
+        let width: f32 = glyphs.iter().map(|g| g.advance).sum();
+        assert!((width - 28.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn an_unkerned_run_is_left_exactly_as_it_was() {
+        let mut glyphs = kerned(3, 0, 0.0);
+        let before = glyphs.clone();
+        recharge_kerns(&mut glyphs, &[2, 1, 0]);
+        assert_eq!(glyphs, before);
+    }
+
+    #[test]
+    fn levels_are_not_resolved_for_text_that_cannot_need_them() {
+        assert!(byte_levels("The quick brown fox").is_empty());
+        assert!(byte_levels("").is_empty());
+        // Every byte of a two-byte character gets the level, so a lookup by
+        // cluster start cannot miss.
+        let levels = byte_levels("a\u{5d0}");
+        assert_eq!(levels.len(), 3);
+        assert_eq!(levels[0], 0);
+        assert_eq!(levels[1], 1);
+    }
+}

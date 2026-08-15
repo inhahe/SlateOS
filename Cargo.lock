@@ -338,6 +338,14 @@ name = "appdynamics-cli"
 version = "0.1.0"
 
 [[package]]
+name = "appearance"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+ "yamldoc",
+]
+
+[[package]]
 name = "appimage-cli"
 version = "0.1.0"
 
@@ -1712,6 +1720,7 @@ version = "0.1.0"
 dependencies = [
  "guiremote",
  "guitk",
+ "osfont",
 ]
 
 [[package]]
@@ -2226,8 +2235,10 @@ version = "0.1.0"
 name = "desktop"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "tzrules",
+ "yamldoc",
 ]
 
 [[package]]
@@ -4037,6 +4048,10 @@ dependencies = [
 [[package]]
 name = "guitk"
 version = "0.1.0"
+dependencies = [
+ "osfont",
+ "textfmt",
+]
 
 [[package]]
 name = "guix-cli"
@@ -4495,6 +4510,9 @@ version = "0.1.0"
 [[package]]
 name = "indexer-app"
 version = "0.1.0"
+dependencies = [
+ "textfmt",
+]
 
 [[package]]
 name = "inetd"
@@ -9296,6 +9314,7 @@ version = "0.1.0"
 name = "settings"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
 ]
 
@@ -10516,6 +10535,10 @@ dependencies = [
 
 [[package]]
 name = "texlive-cli"
+version = "0.1.0"
+
+[[package]]
+name = "textfmt"
 version = "0.1.0"
 
 [[package]]
@@ -11982,6 +12005,10 @@ dependencies = [
 
 [[package]]
 name = "yambar-cli"
+version = "0.1.0"
+
+[[package]]
+name = "yamldoc"
 version = "0.1.0"
 
 [[package]]

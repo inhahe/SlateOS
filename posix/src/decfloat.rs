@@ -142,7 +142,10 @@ impl<const N: usize> Big<N> {
         let mut i = new_len;
         while i > 0 {
             i -= 1;
-            let hi = i.checked_sub(whole).and_then(|j| self.limbs.get(j)).copied();
+            let hi = i
+                .checked_sub(whole)
+                .and_then(|j| self.limbs.get(j))
+                .copied();
             let lo = i
                 .checked_sub(whole)
                 .and_then(|j| j.checked_sub(1))
@@ -366,10 +369,7 @@ impl Decimal {
             end -= 1;
         }
         out.len = end - pos;
-        if let (Some(dst), Some(src)) = (
-            out.digits.get_mut(..out.len),
-            scratch.get(pos..end),
-        ) {
+        if let (Some(dst), Some(src)) = (out.digits.get_mut(..out.len), scratch.get(pos..end)) {
             dst.copy_from_slice(src);
         }
         if out.len == 0 {
@@ -805,7 +805,11 @@ pub(crate) fn scan_float_token<S: ByteSource + ?Sized>(
             after_x
         };
         if src.byte_at(first).is_ascii_hexdigit() {
-            return (FloatToken::Number, negative, scan_hex_body(src, acc, after_x));
+            return (
+                FloatToken::Number,
+                negative,
+                scan_hex_body(src, acc, after_x),
+            );
         }
     }
 
@@ -833,7 +837,11 @@ pub(crate) fn scan_float_token<S: ByteSource + ?Sized>(
         return (FloatToken::None, negative, 0);
     }
 
-    (FloatToken::Number, negative, scan_exponent(src, acc, i, b'e'))
+    (
+        FloatToken::Number,
+        negative,
+        scan_exponent(src, acc, i, b'e'),
+    )
 }
 
 /// Scan the body of a hex float after its `0x`, and return where it ended.
@@ -1052,7 +1060,10 @@ pub(crate) fn decimal_to_f64(digits: &[u8], exp10: i32, truncated: bool) -> (f64
 /// So `f32` is rounded straight from the exact decimal expansion.
 pub(crate) fn decimal_to_f32(digits: &[u8], exp10: i32, truncated: bool) -> (f32, bool) {
     let (bits, out_of_range) = decimal_to_binary(digits, exp10, truncated, &F32_FORMAT);
-    (f32::from_bits(u32::try_from(bits).unwrap_or(0)), out_of_range)
+    (
+        f32::from_bits(u32::try_from(bits).unwrap_or(0)),
+        out_of_range,
+    )
 }
 
 /// The shape of a binary floating-point format, as much of it as rounding into
@@ -1099,7 +1110,12 @@ const F32_FORMAT: Format = Format {
 /// than one unit in `b`'s last place.  Returns `(bits, out_of_range)` with the
 /// same `ERANGE` meaning as [`decimal_to_binary`].
 #[allow(clippy::arithmetic_side_effects)]
-fn round_to_binary<const N: usize>(b: &Big<N>, e: i32, sticky_in: bool, fmt: &Format) -> (u64, bool) {
+fn round_to_binary<const N: usize>(
+    b: &Big<N>,
+    e: i32,
+    sticky_in: bool,
+    fmt: &Format,
+) -> (u64, bool) {
     let n = b.bits();
     if n == 0 {
         return (0, false);
@@ -1319,8 +1335,14 @@ mod tests {
         assert_eq!(conv("5", -1), (0.5, false));
         assert_eq!(conv("125", -3), (0.125, false));
         // Every integer below 2^53 is exact, whatever route it takes.
-        assert_eq!(conv("9007199254740992", 0), (9.007_199_254_740_992e15, false));
-        assert_eq!(conv("90071992547409920000", -4), (9.007_199_254_740_992e15, false));
+        assert_eq!(
+            conv("9007199254740992", 0),
+            (9.007_199_254_740_992e15, false)
+        );
+        assert_eq!(
+            conv("90071992547409920000", -4),
+            (9.007_199_254_740_992e15, false)
+        );
     }
 
     #[test]
@@ -1342,9 +1364,15 @@ mod tests {
         assert_eq!(conv("5", -324), (f64::from_bits(1), true));
         assert_eq!(conv("1", -310), ("1e-310".parse::<f64>().unwrap(), true));
         // Just over half an ulp above zero rounds up to the least subnormal.
-        assert_eq!(conv("2470328229206232720882843964341106861826", -363).0, f64::from_bits(1));
+        assert_eq!(
+            conv("2470328229206232720882843964341106861826", -363).0,
+            f64::from_bits(1)
+        );
         // Exactly half rounds down, because zero is the even side.
-        assert_eq!(conv("2470328229206232720882843964341106861825", -363).0, 0.0);
+        assert_eq!(
+            conv("2470328229206232720882843964341106861825", -363).0,
+            0.0
+        );
     }
 
     #[test]
@@ -1354,7 +1382,10 @@ mod tests {
         // Normal results are never out of range; subnormals always are.
         assert!(!conv("1", 0).1);
         assert!(conv("1", -320).1);
-        assert!(!conv("22250738585072014", -324).1, "least normal is in range");
+        assert!(
+            !conv("22250738585072014", -324).1,
+            "least normal is in range"
+        );
     }
 
     #[test]
@@ -1371,8 +1402,7 @@ mod tests {
             }
             let text = format!("{:.25e}", v.abs());
             let (mantissa, exponent) = text.split_once('e').unwrap_or((text.as_str(), "0"));
-            let digits: String =
-                mantissa.chars().filter(char::is_ascii_digit).collect();
+            let digits: String = mantissa.chars().filter(char::is_ascii_digit).collect();
             // `{:.25e}` writes one digit before the point and 25 after it.
             let exp10 = exponent.parse::<i32>().unwrap_or(0) - 25;
             assert_eq!(

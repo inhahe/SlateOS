@@ -92,6 +92,41 @@ impl Borders {
     }
 }
 
+/// A drop shadow, apart from the shape that casts it.
+///
+/// One value rather than five loose parameters because the five are one
+/// decision: an offset without the blur that goes with it is a different
+/// shadow, not a partly-specified one. It also lets a surface style name its
+/// shadow once and reuse it at every place it is drawn.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Shadow {
+    pub offset_x: f32,
+    pub offset_y: f32,
+    /// How far the edge fades out over.
+    pub blur: f32,
+    /// How much larger than the caster the shadow is drawn, before blurring.
+    pub spread: f32,
+    /// Usually black at low alpha: a shadow is the absence of light, not a
+    /// colour of its own. A grey one reads as a drawn border over a light
+    /// background and is brighter than what it falls on over a dark one.
+    pub color: Color,
+}
+
+impl Shadow {
+    /// A shadow cast straight down, with no spread — what a surface floating a
+    /// short way above its background casts.
+    #[must_use]
+    pub const fn drop(offset_y: f32, blur: f32, color: Color) -> Self {
+        Self {
+            offset_x: 0.0,
+            offset_y,
+            blur,
+            spread: 0.0,
+            color,
+        }
+    }
+}
+
 /// Corner radii for rounded rectangles.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct CornerRadii {
@@ -116,6 +151,21 @@ impl CornerRadii {
             top_right: radius,
             bottom_right: radius,
             bottom_left: radius,
+        }
+    }
+
+    /// Rounded across the top, square across the bottom.
+    ///
+    /// The shape of anything that sits on top of a larger square surface and
+    /// shares its lower edge — a window title bar above the client area, a tab
+    /// above its page. Rounding the bottom corners too would cut a notch out of
+    /// the join between the two.
+    pub const fn top(radius: f32) -> Self {
+        Self {
+            top_left: radius,
+            top_right: radius,
+            bottom_right: 0.0,
+            bottom_left: 0.0,
         }
     }
 }

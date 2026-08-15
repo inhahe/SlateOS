@@ -16,6 +16,7 @@ use guitk::color::Color;
 use guitk::layout::FlexDirection;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
 use guitk::style::{CornerRadii, Edges};
+use guitk::text;
 use guitk::widget::{Widget, WidgetTree};
 
 // ---------------------------------------------------------------------------
@@ -210,18 +211,72 @@ impl ClipTemplate {
         let mut i = 0usize;
         while i < len {
             if bytes.get(i).copied() == Some(b'{')
-                && let Some(end) = self.body[i..].find('}') {
-                    let name = &self.body[i + 1..i + end];
-                    if !name.is_empty() && !out.contains(&name.to_string()) {
-                        out.push(name.to_string());
-                    }
-                    i = i + end + 1;
-                    continue;
+                && let Some(end) = self.body[i..].find('}')
+            {
+                let name = &self.body[i + 1..i + end];
+                if !name.is_empty() && !out.contains(&name.to_string()) {
+                    out.push(name.to_string());
                 }
+                i = i + end + 1;
+                continue;
+            }
             i = i.saturating_add(1);
         }
         out
     }
+}
+
+// ---------------------------------------------------------------------------
+// Export format primitives
+// ---------------------------------------------------------------------------
+
+/// The line that begins a record in the text export.
+///
+/// It is only ever recognised as an entire line, never as a substring. That
+/// distinction is the whole bug the length-prefixed body exists to close: a
+/// clipboard entry containing this text used to split its own record in half.
+const ENTRY_MARKER: &str = "---ENTRY---";
+
+/// Render a short string so it can occupy one header line safely.
+///
+/// Header values are display strings — an application name, a tag — for which
+/// the format offers no way to spell a line break. Per the reject-or-sanitise
+/// rule this leaves only sanitising, and control characters become spaces: the
+/// value stays legible and, more importantly, stays on its own line, so it
+/// cannot invent a sibling field or a record marker below itself.
+fn header_value(s: &str) -> String {
+    s.chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect()
+}
+
+/// Split off the next line, returning it (without its terminator) and the rest.
+///
+/// Accepts both `\n` and `\r\n`, and treats an unterminated final line as a
+/// line, so a hand-edited or truncated export still parses.
+fn take_line(s: &str) -> Option<(&str, &str)> {
+    if s.is_empty() {
+        return None;
+    }
+    let (raw, rest) = match s.find('\n') {
+        Some(i) => (
+            s.get(..i).unwrap_or(""),
+            s.get(i.saturating_add(1)..).unwrap_or(""),
+        ),
+        None => (s, ""),
+    };
+    Some((raw.strip_suffix('\r').unwrap_or(raw), rest))
+}
+
+/// Advance past the next record marker, returning the text after it.
+fn next_record(mut s: &str) -> Option<&str> {
+    while let Some((line, after)) = take_line(s) {
+        s = after;
+        if line == ENTRY_MARKER {
+            return Some(s);
+        }
+    }
+    None
 }
 
 // ---------------------------------------------------------------------------
@@ -257,13 +312,14 @@ impl ClipboardStore {
     ) -> u64 {
         // Deduplicate: if identical content exists, move it to front instead.
         if let Some(pos) = self.entries.iter().position(|e| e.content == content)
-            && let Some(mut existing) = self.entries.remove(pos) {
-                existing.timestamp = timestamp;
-                existing.source_app = source_app;
-                let id = existing.id;
-                self.entries.push_front(existing);
-                return id;
-            }
+            && let Some(mut existing) = self.entries.remove(pos)
+        {
+            existing.timestamp = timestamp;
+            existing.source_app = source_app;
+            let id = existing.id;
+            self.entries.push_front(existing);
+            return id;
+        }
 
         // Evict oldest unpinned entries if at capacity.
         while self.entries.len() >= MAX_ENTRIES {
@@ -291,10 +347,11 @@ impl ClipboardStore {
             }
         }
         if let Some(i) = idx
-            && let Some(removed) = self.entries.remove(i) {
-                self.total_size = self.total_size.saturating_sub(removed.size_bytes);
-                return true;
-            }
+            && let Some(removed) = self.entries.remove(i)
+        {
+            self.total_size = self.total_size.saturating_sub(removed.size_bytes);
+            return true;
+        }
         false
     }
 
@@ -311,10 +368,11 @@ impl ClipboardStore {
     /// Delete an entry by id.
     fn delete(&mut self, id: u64) -> bool {
         if let Some(pos) = self.entries.iter().position(|e| e.id == id)
-            && let Some(removed) = self.entries.remove(pos) {
-                self.total_size = self.total_size.saturating_sub(removed.size_bytes);
-                return true;
-            }
+            && let Some(removed) = self.entries.remove(pos)
+        {
+            self.total_size = self.total_size.saturating_sub(removed.size_bytes);
+            return true;
+        }
         false
     }
 
@@ -345,9 +403,10 @@ impl ClipboardStore {
     /// Add a tag to an entry (no duplicates).
     fn add_tag(&mut self, id: u64, tag: String) {
         if let Some(entry) = self.get_mut(id)
-            && !entry.tags.contains(&tag) {
-                entry.tags.push(tag);
-            }
+            && !entry.tags.contains(&tag)
+        {
+            entry.tags.push(tag);
+        }
     }
 
     /// Remove a tag from an entry.
@@ -442,19 +501,50 @@ impl ClipboardStore {
     }
 
     /// Export all entries to a simple text format.
+    ///
+    /// The format is deliberately escape-free. Every field is one of two
+    /// shapes, and neither can be forged by its own value:
+    ///
+    /// * a **header line** `key:value`, whose value is a short display string
+    ///   with control characters replaced by spaces, so it cannot start a new
+    ///   line and therefore cannot invent a sibling field or a record;
+    /// * the **body**, introduced by `content:<byte length>` and read by
+    ///   counting bytes rather than by scanning for a terminator.
+    ///
+    /// The body is why this is not merely an escaping question. A clipboard
+    /// entry is arbitrary copied text — the one field in the whole desktop
+    /// that is guaranteed to contain whatever the user last selected in a
+    /// browser. The previous format wrote it raw after a bare `content:` line
+    /// and recovered it by splitting the file on the substring `---ENTRY---`,
+    /// so copying any text that happened to contain that marker split one
+    /// entry into two on import, and the second half's lines were then parsed
+    /// as *headers* — meaning copied text could name its own `source:` and set
+    /// `pinned:`. Escaping the body would work, but it would also make the
+    /// export unreadable for the one format whose whole point is that you can
+    /// open it and see what you copied. A length prefix keeps it readable and
+    /// removes the ambiguity outright: bytes inside the body are never
+    /// examined, so no byte sequence in them means anything.
+    ///
+    /// Tags get a line each rather than a comma-joined list for the same
+    /// reason at smaller scale: a comma-separated field cannot represent a tag
+    /// containing a comma, and one line per tag is a fix rather than an escape.
     fn export_text(&self) -> String {
         let mut out = String::new();
-        for entry in &self.entries {
-            out.push_str("---ENTRY---\n");
+        // Oldest first, though the store is newest first. The file is a log,
+        // and import replays it through `add`, which prepends -- so writing it
+        // in store order made importing your own export reverse your history.
+        for entry in self.entries.iter().rev() {
+            out.push_str(ENTRY_MARKER);
+            out.push('\n');
             out.push_str(&format!("id:{}\n", entry.id));
             out.push_str(&format!("type:{}\n", entry.clip_type.label()));
             out.push_str(&format!("timestamp:{}\n", entry.timestamp));
-            out.push_str(&format!("source:{}\n", entry.source_app));
+            out.push_str(&format!("source:{}\n", header_value(&entry.source_app)));
             out.push_str(&format!("pinned:{}\n", entry.pinned));
-            if !entry.tags.is_empty() {
-                out.push_str(&format!("tags:{}\n", entry.tags.join(",")));
+            for tag in &entry.tags {
+                out.push_str(&format!("tag:{}\n", header_value(tag)));
             }
-            out.push_str("content:\n");
+            out.push_str(&format!("content:{}\n", entry.content.len()));
             out.push_str(&entry.content);
             out.push('\n');
         }
@@ -462,28 +552,45 @@ impl ClipboardStore {
     }
 
     /// Import entries from text format. Returns count of imported entries.
+    ///
+    /// A single left-to-right pass over the document, because the body length
+    /// is only known once its header has been read — the previous
+    /// `split("---ENTRY---")` could not have consulted it.
     fn import_text(&mut self, data: &str, base_timestamp: u64) -> usize {
         let mut count = 0usize;
-        for block in data.split("---ENTRY---") {
-            let block = block.trim();
-            if block.is_empty() {
-                continue;
-            }
-            let mut content_lines: Vec<&str> = Vec::new();
+        let mut rest = data;
+
+        // Anything before the first record marker is preamble and is skipped.
+        while let Some(after_marker) = next_record(rest) {
+            let mut cursor = after_marker;
             let mut clip_type = ClipType::PlainText;
             let mut source = String::from("import");
             let mut pinned = false;
             let mut tags: Vec<String> = Vec::new();
-            let mut in_content = false;
+            let mut content: Option<String> = None;
 
-            for line in block.lines() {
-                if in_content {
-                    content_lines.push(line);
-                    continue;
+            // Headers, up to and including the `content:` line that ends them.
+            while let Some((line, after_line)) = take_line(cursor) {
+                // A marker ends the record without consuming it, so the outer
+                // loop sees it as the start of the next one. Deciding before
+                // advancing is what makes that possible.
+                if line == ENTRY_MARKER {
+                    break;
                 }
-                if line == "content:" {
-                    in_content = true;
-                    continue;
+                cursor = after_line;
+                if let Some(val) = line.strip_prefix("content:") {
+                    // A declared length that runs past the end of the document
+                    // or lands inside a character is a truncated or corrupt
+                    // file, not an attack: take the longest valid prefix.
+                    let want: usize = val.trim().parse().unwrap_or(0);
+                    let mut end = want.min(cursor.len());
+                    while end > 0 && !cursor.is_char_boundary(end) {
+                        end = end.saturating_sub(1);
+                    }
+                    let body = cursor.get(..end).unwrap_or("");
+                    content = Some(body.to_string());
+                    cursor = cursor.get(end..).unwrap_or("");
+                    break;
                 }
                 if let Some(val) = line.strip_prefix("type:") {
                     clip_type = match val.trim() {
@@ -498,16 +605,20 @@ impl ClipboardStore {
                     source = val.trim().to_string();
                 } else if let Some(val) = line.strip_prefix("pinned:") {
                     pinned = val.trim() == "true";
-                } else if let Some(val) = line.strip_prefix("tags:") {
-                    tags = val.split(',').map(|s| s.trim().to_string()).collect();
+                } else if let Some(val) = line.strip_prefix("tag:") {
+                    tags.push(val.trim().to_string());
                 }
                 // id: and timestamp: are ignored on import (we assign fresh ones)
             }
 
-            let content = content_lines.join("\n");
-            if content.is_empty() {
+            rest = cursor;
+
+            // An entry with no body at all is a malformed record, not an empty
+            // clip: skip it. An entry whose body is legitimately empty is
+            // representable (`content:0`) and is kept.
+            let Some(content) = content else {
                 continue;
-            }
+            };
 
             let id = self.add(content, clip_type, base_timestamp, source);
             if let Some(entry) = self.get_mut(id) {
@@ -751,11 +862,12 @@ impl AppState {
     /// Delete the currently selected template.
     fn delete_selected_template(&mut self) {
         if let Some(idx) = self.selected_template
-            && let Some(tmpl) = self.store.templates.get(idx) {
-                let name = tmpl.name.clone();
-                self.store.remove_template(&name);
-                self.selected_template = None;
-            }
+            && let Some(tmpl) = self.store.templates.get(idx)
+        {
+            let name = tmpl.name.clone();
+            self.store.remove_template(&name);
+            self.selected_template = None;
+        }
     }
 
     /// Select a template by index and populate placeholder vars.
@@ -763,7 +875,10 @@ impl AppState {
         self.selected_template = Some(idx);
         if let Some(tmpl) = self.store.templates.get(idx) {
             let placeholders = tmpl.placeholders();
-            self.template_vars = placeholders.into_iter().map(|p| (p, String::new())).collect();
+            self.template_vars = placeholders
+                .into_iter()
+                .map(|p| (p, String::new()))
+                .collect();
         }
     }
 
@@ -823,7 +938,14 @@ fn build_render_tree(state: &AppState, width: f32, height: f32) -> RenderTree {
 
     // ---- Tab bar ----
     let tab_y = 8.0 + top_bar_h + 4.0;
-    render_tab_bar(&mut rt, state, margin, tab_y, width - margin * 2.0, tab_bar_h);
+    render_tab_bar(
+        &mut rt,
+        state,
+        margin,
+        tab_y,
+        width - margin * 2.0,
+        tab_bar_h,
+    );
 
     // ---- Content area ----
     let content_y = tab_y + tab_bar_h + 4.0;
@@ -831,20 +953,48 @@ fn build_render_tree(state: &AppState, width: f32, height: f32) -> RenderTree {
 
     match state.active_tab {
         ActiveTab::History => {
-            render_history_panel(&mut rt, state, margin, content_y, width - margin * 2.0, content_h);
+            render_history_panel(
+                &mut rt,
+                state,
+                margin,
+                content_y,
+                width - margin * 2.0,
+                content_h,
+            );
         }
         ActiveTab::Templates => {
-            render_templates_panel(&mut rt, state, margin, content_y, width - margin * 2.0, content_h);
+            render_templates_panel(
+                &mut rt,
+                state,
+                margin,
+                content_y,
+                width - margin * 2.0,
+                content_h,
+            );
         }
     }
 
     // ---- Toolbar ----
     let toolbar_y = height - stats_bar_h - toolbar_h - 4.0;
-    render_toolbar(&mut rt, state, margin, toolbar_y, width - margin * 2.0, toolbar_h);
+    render_toolbar(
+        &mut rt,
+        state,
+        margin,
+        toolbar_y,
+        width - margin * 2.0,
+        toolbar_h,
+    );
 
     // ---- Statistics bar ----
     let stats_y = height - stats_bar_h - 2.0;
-    render_stats_bar(&mut rt, state, margin, stats_y, width - margin * 2.0, stats_bar_h);
+    render_stats_bar(
+        &mut rt,
+        state,
+        margin,
+        stats_y,
+        width - margin * 2.0,
+        stats_bar_h,
+    );
 
     rt
 }
@@ -893,12 +1043,8 @@ fn render_search_bar(rt: &mut RenderTree, state: &AppState, x: f32, y: f32, w: f
     });
 
     // Type filter badge
-    let filter_label = state
-        .type_filter
-        .map_or("All Types", |t| t.label());
-    let filter_color = state
-        .type_filter
-        .map_or(OVERLAY0, |t| t.badge_color());
+    let filter_label = state.type_filter.map_or("All Types", |t| t.label());
+    let filter_color = state.type_filter.map_or(OVERLAY0, |t| t.badge_color());
     let badge_x = x + w - 100.0;
     rt.push(RenderCommand::FillRect {
         x: badge_x,
@@ -929,7 +1075,10 @@ fn render_tab_bar(rt: &mut RenderTree, state: &AppState, x: f32, y: f32, w: f32,
         corner_radii: CornerRadii::all(4.0),
     });
 
-    let tabs = [("History", ActiveTab::History), ("Templates", ActiveTab::Templates)];
+    let tabs = [
+        ("History", ActiveTab::History),
+        ("Templates", ActiveTab::Templates),
+    ];
     let mut tx = x + 4.0;
     for (label, tab) in &tabs {
         let is_active = state.active_tab == *tab;
@@ -962,14 +1111,7 @@ fn render_tab_bar(rt: &mut RenderTree, state: &AppState, x: f32, y: f32, w: f32,
     }
 }
 
-fn render_history_panel(
-    rt: &mut RenderTree,
-    state: &AppState,
-    x: f32,
-    y: f32,
-    w: f32,
-    h: f32,
-) {
+fn render_history_panel(rt: &mut RenderTree, state: &AppState, x: f32, y: f32, w: f32, h: f32) {
     // Split: left = entry list, right = preview/detail.
     let list_w = w * 0.55;
     let detail_w = w - list_w - 8.0;
@@ -999,10 +1141,20 @@ fn render_history_panel(
     let mut ry = y + 4.0;
     for i in state.scroll_offset..end {
         if let Some(&id) = state.filtered_ids.get(i)
-            && let Some(entry) = state.store.get(id) {
-                let is_selected = state.selected_id == Some(id);
-                render_entry_row(rt, entry, x + 4.0, ry, list_w - 8.0, row_h, is_selected, state.now);
-            }
+            && let Some(entry) = state.store.get(id)
+        {
+            let is_selected = state.selected_id == Some(id);
+            render_entry_row(
+                rt,
+                entry,
+                x + 4.0,
+                ry,
+                list_w - 8.0,
+                row_h,
+                is_selected,
+                state.now,
+            );
+        }
         ry += row_h + 2.0;
     }
 
@@ -1233,7 +1385,7 @@ fn render_detail_panel(
     if !entry.tags.is_empty() {
         let mut tx = x + pad;
         for tag in &entry.tags {
-            let tag_w = tag.len() as f32 * 7.0 + 16.0;
+            let tag_w = text::padded_width(tag, 8.0, 10.0, FontWeightHint::Regular);
             rt.push(RenderCommand::FillRect {
                 x: tx,
                 y: cy,
@@ -1258,26 +1410,27 @@ fn render_detail_panel(
 
     // Code detection hint
     if (entry.clip_type == ClipType::Code || entry.clip_type == ClipType::PlainText)
-        && let Some(lang) = detect_code_language(&entry.content) {
-            rt.push(RenderCommand::FillRect {
-                x: x + pad,
-                y: cy,
-                width: 100.0,
-                height: 18.0,
-                color: SURFACE1,
-                corner_radii: CornerRadii::all(3.0),
-            });
-            rt.push(RenderCommand::Text {
-                x: x + pad + 6.0,
-                y: cy + 3.0,
-                text: format!("lang: {lang}"),
-                color: MAUVE,
-                font_size: 10.0,
-                font_weight: FontWeightHint::Bold,
-                max_width: None,
-            });
-            cy += 24.0;
-        }
+        && let Some(lang) = detect_code_language(&entry.content)
+    {
+        rt.push(RenderCommand::FillRect {
+            x: x + pad,
+            y: cy,
+            width: 100.0,
+            height: 18.0,
+            color: SURFACE1,
+            corner_radii: CornerRadii::all(3.0),
+        });
+        rt.push(RenderCommand::Text {
+            x: x + pad + 6.0,
+            y: cy + 3.0,
+            text: format!("lang: {lang}"),
+            color: MAUVE,
+            font_size: 10.0,
+            font_weight: FontWeightHint::Bold,
+            max_width: None,
+        });
+        cy += 24.0;
+    }
 
     // Separator
     cy += 4.0;
@@ -1321,14 +1474,7 @@ fn render_detail_panel(
     rt.push(RenderCommand::PopClip);
 }
 
-fn render_templates_panel(
-    rt: &mut RenderTree,
-    state: &AppState,
-    x: f32,
-    y: f32,
-    w: f32,
-    h: f32,
-) {
+fn render_templates_panel(rt: &mut RenderTree, state: &AppState, x: f32, y: f32, w: f32, h: f32) {
     rt.push(RenderCommand::FillRect {
         x,
         y,
@@ -1575,10 +1721,7 @@ fn render_stats_bar(rt: &mut RenderTree, state: &AppState, x: f32, y: f32, w: f3
     });
 
     // Show filtered count on right
-    let filtered_info = format!(
-        "{} shown",
-        state.filtered_ids.len()
-    );
+    let filtered_info = format!("{} shown", state.filtered_ids.len());
     rt.push(RenderCommand::Text {
         x: x + w - 80.0,
         y: y + 5.0,
@@ -1622,11 +1765,179 @@ fn main() {}
 mod tests {
     use super::*;
 
+    // == Export format ======================================================
+
+    /// Contents a user could plausibly copy that the old format could not
+    /// survive. Every one of these is ordinary text somewhere -- a diff, a
+    /// config file, a paste of this very export -- not a crafted payload.
+    const HOSTILE_CONTENT: &[&str] = &[
+        "---ENTRY---",
+        "before\n---ENTRY---\nsource:forged\npinned:true\ncontent:3\nbad\n",
+        "content:0",
+        "id:99\ntype:Code\n",
+        "\n\n   \n",
+        "trailing newline\n",
+        "  leading and trailing spaces  ",
+        "",
+        "tag:injected",
+    ];
+
+    /// Round-trip a store through the text format, returning the reloaded one.
+    fn reload(store: &ClipboardStore) -> ClipboardStore {
+        let text = store.export_text();
+        let mut out = ClipboardStore::new();
+        out.import_text(&text, 500);
+        out
+    }
+
+    #[test]
+    fn copied_text_cannot_forge_a_second_entry() {
+        for content in HOSTILE_CONTENT {
+            let mut store = ClipboardStore::new();
+            store.add(
+                (*content).to_string(),
+                ClipType::PlainText,
+                100,
+                "real".to_string(),
+            );
+            let back = reload(&store);
+            // One entry in, one entry out -- regardless of what it contained.
+            // Counting is the assertion because correct output legitimately
+            // *contains* the marker; only the record count can tell whether it
+            // was interpreted as one.
+            assert_eq!(
+                back.entries.len(),
+                1,
+                "content forged a record boundary: {content:?}"
+            );
+            let entry = back.entries.front().expect("one entry");
+            assert_eq!(entry.content, *content, "content changed: {content:?}");
+            assert_eq!(entry.source_app, "real", "content forged a header field");
+            assert!(!entry.pinned, "content forged a header field");
+            assert!(entry.tags.is_empty(), "content forged a header field");
+        }
+    }
+
+    #[test]
+    fn several_hostile_entries_survive_together() {
+        // Alone, a bad record could be masked by the parser recovering at the
+        // end of input; in a run, a miscount shifts every entry after it.
+        let mut store = ClipboardStore::new();
+        for (i, content) in HOSTILE_CONTENT.iter().enumerate() {
+            store.add(
+                format!("{i}:{content}"),
+                ClipType::PlainText,
+                100,
+                "real".to_string(),
+            );
+        }
+        let expected = store.entries.len();
+        let back = reload(&store);
+        assert_eq!(back.entries.len(), expected);
+        for (got, want) in back.entries.iter().zip(store.entries.iter()) {
+            assert_eq!(got.content, want.content, "history order changed");
+        }
+    }
+
+    #[test]
+    fn a_tag_containing_a_comma_stays_one_tag() {
+        let mut store = ClipboardStore::new();
+        let id = store.add("x".to_string(), ClipType::PlainText, 100, "app".to_string());
+        if let Some(e) = store.get_mut(id) {
+            e.tags = vec!["a,b".to_string(), "plain".to_string()];
+        }
+        let back = reload(&store);
+        let entry = back.entries.front().expect("one entry");
+        assert_eq!(entry.tags, vec!["a,b".to_string(), "plain".to_string()]);
+    }
+
+    #[test]
+    fn a_newline_in_a_source_name_cannot_add_a_field() {
+        let mut store = ClipboardStore::new();
+        store.add(
+            "x".to_string(),
+            ClipType::PlainText,
+            100,
+            "app\npinned:true\ntag:forged".to_string(),
+        );
+        let back = reload(&store);
+        assert_eq!(back.entries.len(), 1);
+        let entry = back.entries.front().expect("one entry");
+        assert!(!entry.pinned, "source name forged a field");
+        assert!(entry.tags.is_empty(), "source name forged a field");
+    }
+
+    #[test]
+    fn a_truncated_export_yields_the_entries_it_has() {
+        let mut store = ClipboardStore::new();
+        store.add(
+            "first".to_string(),
+            ClipType::PlainText,
+            100,
+            "a".to_string(),
+        );
+        store.add(
+            "second entry".to_string(),
+            ClipType::PlainText,
+            100,
+            "a".to_string(),
+        );
+        let text = store.export_text();
+        let cut = text.len().saturating_sub(6);
+        let mut back = ClipboardStore::new();
+        // Must not panic, and must not invent an entry.
+        let n = back.import_text(text.get(..cut).unwrap_or(""), 500);
+        assert!(n <= 2);
+        assert_eq!(back.entries.len(), n);
+    }
+
+    #[test]
+    fn a_marker_mentioned_inside_a_line_does_not_start_a_record() {
+        // Reachable because the scan for the first record runs over whatever
+        // preamble the file happens to have -- a covering note, an email
+        // header, a paste into a bug report. Inside a record this case cannot
+        // arise, since the body is skipped by length and header values are
+        // sanitised; the equality test is what keeps the preamble honest.
+        let mut back = ClipboardStore::new();
+        let n = back.import_text(
+            "note: the ---ENTRY--- lines below are records\ncontent:5\nfake\n",
+            0,
+        );
+        assert_eq!(n, 0, "a mention of the marker started a record");
+        assert!(back.entries.is_empty());
+    }
+
+    #[test]
+    fn a_declared_length_past_the_end_does_not_panic() {
+        let mut back = ClipboardStore::new();
+        back.import_text("---ENTRY---\ncontent:9999\nshort", 0);
+        assert_eq!(back.entries.len(), 1);
+        assert_eq!(
+            back.entries.front().map(|e| e.content.as_str()),
+            Some("short")
+        );
+    }
+
+    #[test]
+    fn a_declared_length_inside_a_character_does_not_panic() {
+        // 3 bytes into a 3-byte character's 4-byte neighbour: the length lands
+        // mid-scalar, which `str` slicing would reject.
+        let mut back = ClipboardStore::new();
+        back.import_text("---ENTRY---\ncontent:2\n\u{1F600}", 0);
+        assert_eq!(back.entries.len(), 1);
+    }
+
     // == ClipEntry tests ====================================================
 
     #[test]
     fn test_clip_entry_creation() {
-        let e = ClipEntry::new(1, "hello".to_string(), ClipType::PlainText, 100, "app".to_string());
+        let e = ClipEntry::new(
+            1,
+            "hello".to_string(),
+            ClipType::PlainText,
+            100,
+            "app".to_string(),
+        );
         assert_eq!(e.id, 1);
         assert_eq!(e.content, "hello");
         assert_eq!(e.clip_type, ClipType::PlainText);
@@ -1637,7 +1948,13 @@ mod tests {
 
     #[test]
     fn test_clip_entry_preview_short() {
-        let e = ClipEntry::new(1, "short text".to_string(), ClipType::PlainText, 0, String::new());
+        let e = ClipEntry::new(
+            1,
+            "short text".to_string(),
+            ClipType::PlainText,
+            0,
+            String::new(),
+        );
         assert_eq!(e.preview(), "short text");
     }
 
@@ -1723,7 +2040,12 @@ mod tests {
     #[test]
     fn test_store_add_and_get() {
         let mut store = ClipboardStore::new();
-        let id = store.add("hello".to_string(), ClipType::PlainText, 100, "vim".to_string());
+        let id = store.add(
+            "hello".to_string(),
+            ClipType::PlainText,
+            100,
+            "vim".to_string(),
+        );
         let entry = store.get(id);
         assert!(entry.is_some());
         assert_eq!(entry.map(|e| e.content.as_str()), Some("hello"));
@@ -1751,7 +2073,12 @@ mod tests {
     fn test_store_capacity_eviction() {
         let mut store = ClipboardStore::new();
         for i in 0..MAX_ENTRIES + 10 {
-            store.add(format!("entry-{i}"), ClipType::PlainText, i as u64, String::new());
+            store.add(
+                format!("entry-{i}"),
+                ClipType::PlainText,
+                i as u64,
+                String::new(),
+            );
         }
         assert!(store.total_entries() <= MAX_ENTRIES);
     }
@@ -1762,9 +2089,17 @@ mod tests {
         let pin_id = store.add("pinned".to_string(), ClipType::PlainText, 0, String::new());
         store.toggle_pin(pin_id);
         for i in 1..=MAX_ENTRIES {
-            store.add(format!("entry-{i}"), ClipType::PlainText, i as u64, String::new());
+            store.add(
+                format!("entry-{i}"),
+                ClipType::PlainText,
+                i as u64,
+                String::new(),
+            );
         }
-        assert!(store.get(pin_id).is_some(), "Pinned entry must survive eviction");
+        assert!(
+            store.get(pin_id).is_some(),
+            "Pinned entry must survive eviction"
+        );
     }
 
     #[test]
@@ -1808,8 +2143,18 @@ mod tests {
     #[test]
     fn test_store_search_case_insensitive() {
         let mut store = ClipboardStore::new();
-        store.add("Hello World".to_string(), ClipType::PlainText, 0, String::new());
-        store.add("goodbye world".to_string(), ClipType::PlainText, 0, String::new());
+        store.add(
+            "Hello World".to_string(),
+            ClipType::PlainText,
+            0,
+            String::new(),
+        );
+        store.add(
+            "goodbye world".to_string(),
+            ClipType::PlainText,
+            0,
+            String::new(),
+        );
         let results = store.search("HELLO");
         assert_eq!(results.len(), 1);
     }
@@ -1838,7 +2183,12 @@ mod tests {
         let mut store = ClipboardStore::new();
         let id = store.add("tagged".to_string(), ClipType::PlainText, 0, String::new());
         store.add_tag(id, "important".to_string());
-        store.add("untagged".to_string(), ClipType::PlainText, 0, String::new());
+        store.add(
+            "untagged".to_string(),
+            ClipType::PlainText,
+            0,
+            String::new(),
+        );
         assert_eq!(store.filter_by_tag("important").len(), 1);
         assert_eq!(store.filter_by_tag("nope").len(), 0);
     }
@@ -1846,8 +2196,18 @@ mod tests {
     #[test]
     fn test_store_search_filtered() {
         let mut store = ClipboardStore::new();
-        store.add("hello text".to_string(), ClipType::PlainText, 0, String::new());
-        store.add("<p>hello html</p>".to_string(), ClipType::Html, 0, String::new());
+        store.add(
+            "hello text".to_string(),
+            ClipType::PlainText,
+            0,
+            String::new(),
+        );
+        store.add(
+            "<p>hello html</p>".to_string(),
+            ClipType::Html,
+            0,
+            String::new(),
+        );
         let results = store.search_filtered("hello", Some(ClipType::Html));
         assert_eq!(results.len(), 1);
     }
@@ -1895,8 +2255,14 @@ mod tests {
         store.add("b".to_string(), ClipType::PlainText, 0, String::new());
         store.add("c".to_string(), ClipType::Code, 0, String::new());
         let stats = store.stats_by_type();
-        let text_count = stats.iter().find(|(t, _)| *t == ClipType::PlainText).map(|(_, c)| *c);
-        let code_count = stats.iter().find(|(t, _)| *t == ClipType::Code).map(|(_, c)| *c);
+        let text_count = stats
+            .iter()
+            .find(|(t, _)| *t == ClipType::PlainText)
+            .map(|(_, c)| *c);
+        let code_count = stats
+            .iter()
+            .find(|(t, _)| *t == ClipType::Code)
+            .map(|(_, c)| *c);
         assert_eq!(text_count, Some(2));
         assert_eq!(code_count, Some(1));
     }
@@ -1937,7 +2303,10 @@ mod tests {
 
     #[test]
     fn test_template_render_with_placeholders() {
-        let t = ClipTemplate::new("email".to_string(), "Dear {name}, re: {subject}".to_string());
+        let t = ClipTemplate::new(
+            "email".to_string(),
+            "Dear {name}, re: {subject}".to_string(),
+        );
         let vars = vec![
             ("name".to_string(), "Alice".to_string()),
             ("subject".to_string(), "Meeting".to_string()),
@@ -1980,7 +2349,10 @@ mod tests {
         store.add_template("greet".to_string(), "Hi {name}".to_string());
         store.add_template("greet".to_string(), "Hey {name}!".to_string());
         assert_eq!(store.templates.len(), 1);
-        assert_eq!(store.get_template("greet").map(|t| t.body.as_str()), Some("Hey {name}!"));
+        assert_eq!(
+            store.get_template("greet").map(|t| t.body.as_str()),
+            Some("Hey {name}!")
+        );
     }
 
     #[test]
@@ -1996,7 +2368,12 @@ mod tests {
     #[test]
     fn test_export_import_roundtrip() {
         let mut store = ClipboardStore::new();
-        let id = store.add("test content".to_string(), ClipType::PlainText, 100, "editor".to_string());
+        let id = store.add(
+            "test content".to_string(),
+            ClipType::PlainText,
+            100,
+            "editor".to_string(),
+        );
         store.toggle_pin(id);
         store.add_tag(id, "important".to_string());
         let exported = store.export_text();
@@ -2031,17 +2408,26 @@ mod tests {
 
     #[test]
     fn test_detect_rust() {
-        assert_eq!(detect_code_language("fn main() -> Result<()> { }"), Some("rust"));
+        assert_eq!(
+            detect_code_language("fn main() -> Result<()> { }"),
+            Some("rust")
+        );
     }
 
     #[test]
     fn test_detect_python() {
-        assert_eq!(detect_code_language("def hello():\n    pass"), Some("python"));
+        assert_eq!(
+            detect_code_language("def hello():\n    pass"),
+            Some("python")
+        );
     }
 
     #[test]
     fn test_detect_javascript() {
-        assert_eq!(detect_code_language("function foo() {}"), Some("javascript"));
+        assert_eq!(
+            detect_code_language("function foo() {}"),
+            Some("javascript")
+        );
     }
 
     #[test]
@@ -2062,7 +2448,10 @@ mod tests {
 
     #[test]
     fn test_detect_plain_text() {
-        assert_eq!(detect_code_language("Hello world, how are you today?"), None);
+        assert_eq!(
+            detect_code_language("Hello world, how are you today?"),
+            None
+        );
     }
 
     // == Format size tests ==================================================
@@ -2087,8 +2476,12 @@ mod tests {
     #[test]
     fn test_app_state_refresh_filter() {
         let mut state = AppState::new();
-        state.store.add("hello".to_string(), ClipType::PlainText, 0, String::new());
-        state.store.add("world".to_string(), ClipType::PlainText, 0, String::new());
+        state
+            .store
+            .add("hello".to_string(), ClipType::PlainText, 0, String::new());
+        state
+            .store
+            .add("world".to_string(), ClipType::PlainText, 0, String::new());
         state.refresh_filter();
         assert_eq!(state.filtered_ids.len(), 2);
     }
@@ -2096,8 +2489,12 @@ mod tests {
     #[test]
     fn test_app_state_search_filter() {
         let mut state = AppState::new();
-        state.store.add("alpha".to_string(), ClipType::PlainText, 0, String::new());
-        state.store.add("beta".to_string(), ClipType::PlainText, 0, String::new());
+        state
+            .store
+            .add("alpha".to_string(), ClipType::PlainText, 0, String::new());
+        state
+            .store
+            .add("beta".to_string(), ClipType::PlainText, 0, String::new());
         state.search_query = "alpha".to_string();
         state.refresh_filter();
         assert_eq!(state.filtered_ids.len(), 1);
@@ -2106,8 +2503,12 @@ mod tests {
     #[test]
     fn test_app_state_type_filter() {
         let mut state = AppState::new();
-        state.store.add("txt".to_string(), ClipType::PlainText, 0, String::new());
-        state.store.add("code".to_string(), ClipType::Code, 0, String::new());
+        state
+            .store
+            .add("txt".to_string(), ClipType::PlainText, 0, String::new());
+        state
+            .store
+            .add("code".to_string(), ClipType::Code, 0, String::new());
         state.type_filter = Some(ClipType::Code);
         state.refresh_filter();
         assert_eq!(state.filtered_ids.len(), 1);
@@ -2116,9 +2517,15 @@ mod tests {
     #[test]
     fn test_app_state_select_next_prev() {
         let mut state = AppState::new();
-        state.store.add("a".to_string(), ClipType::PlainText, 0, String::new());
-        state.store.add("b".to_string(), ClipType::PlainText, 0, String::new());
-        state.store.add("c".to_string(), ClipType::PlainText, 0, String::new());
+        state
+            .store
+            .add("a".to_string(), ClipType::PlainText, 0, String::new());
+        state
+            .store
+            .add("b".to_string(), ClipType::PlainText, 0, String::new());
+        state
+            .store
+            .add("c".to_string(), ClipType::PlainText, 0, String::new());
         state.refresh_filter();
 
         state.select_next();
@@ -2145,7 +2552,9 @@ mod tests {
     #[test]
     fn test_app_state_delete_selected() {
         let mut state = AppState::new();
-        let id = state.store.add("del".to_string(), ClipType::PlainText, 0, String::new());
+        let id = state
+            .store
+            .add("del".to_string(), ClipType::PlainText, 0, String::new());
         state.refresh_filter();
         state.selected_id = Some(id);
         state.delete_selected();
@@ -2156,7 +2565,9 @@ mod tests {
     #[test]
     fn test_app_state_toggle_pin_selected() {
         let mut state = AppState::new();
-        let id = state.store.add("pin".to_string(), ClipType::PlainText, 0, String::new());
+        let id = state
+            .store
+            .add("pin".to_string(), ClipType::PlainText, 0, String::new());
         state.selected_id = Some(id);
         state.toggle_pin_selected();
         assert_eq!(state.store.get(id).map(|e| e.pinned), Some(true));
@@ -2165,7 +2576,9 @@ mod tests {
     #[test]
     fn test_app_state_add_tag_to_selected() {
         let mut state = AppState::new();
-        let id = state.store.add("t".to_string(), ClipType::PlainText, 0, String::new());
+        let id = state
+            .store
+            .add("t".to_string(), ClipType::PlainText, 0, String::new());
         state.selected_id = Some(id);
         state.tag_input = "work".to_string();
         state.add_tag_to_selected();
@@ -2176,7 +2589,9 @@ mod tests {
     #[test]
     fn test_app_state_add_empty_tag_ignored() {
         let mut state = AppState::new();
-        let id = state.store.add("t".to_string(), ClipType::PlainText, 0, String::new());
+        let id = state
+            .store
+            .add("t".to_string(), ClipType::PlainText, 0, String::new());
         state.selected_id = Some(id);
         state.tag_input = "   ".to_string();
         state.add_tag_to_selected();
@@ -2186,7 +2601,9 @@ mod tests {
     #[test]
     fn test_app_state_remove_tag_from_selected() {
         let mut state = AppState::new();
-        let id = state.store.add("t".to_string(), ClipType::PlainText, 0, String::new());
+        let id = state
+            .store
+            .add("t".to_string(), ClipType::PlainText, 0, String::new());
         state.store.add_tag(id, "work".to_string());
         state.selected_id = Some(id);
         state.remove_tag_from_selected("work");
@@ -2216,7 +2633,9 @@ mod tests {
     #[test]
     fn test_app_state_delete_selected_template() {
         let mut state = AppState::new();
-        state.store.add_template("t".to_string(), "body".to_string());
+        state
+            .store
+            .add_template("t".to_string(), "body".to_string());
         state.selected_template = Some(0);
         state.delete_selected_template();
         assert!(state.store.templates.is_empty());
@@ -2226,7 +2645,10 @@ mod tests {
     #[test]
     fn test_app_state_select_template_populates_vars() {
         let mut state = AppState::new();
-        state.store.add_template("email".to_string(), "Dear {name}, re: {subject}".to_string());
+        state.store.add_template(
+            "email".to_string(),
+            "Dear {name}, re: {subject}".to_string(),
+        );
         state.select_template(0);
         assert_eq!(state.template_vars.len(), 2);
     }
@@ -2234,7 +2656,9 @@ mod tests {
     #[test]
     fn test_app_state_render_template() {
         let mut state = AppState::new();
-        state.store.add_template("greet".to_string(), "Hi {name}!".to_string());
+        state
+            .store
+            .add_template("greet".to_string(), "Hi {name}!".to_string());
         state.select_template(0);
         state.template_vars = vec![("name".to_string(), "Bob".to_string())];
         state.render_template();
@@ -2247,7 +2671,9 @@ mod tests {
     #[test]
     fn test_app_state_stats_line() {
         let mut state = AppState::new();
-        state.store.add("data".to_string(), ClipType::PlainText, 0, String::new());
+        state
+            .store
+            .add("data".to_string(), ClipType::PlainText, 0, String::new());
         let line = state.stats_line();
         assert!(line.contains("1 entries"));
         assert!(line.contains("0 pinned"));
@@ -2265,7 +2691,12 @@ mod tests {
     #[test]
     fn test_build_render_tree_with_entries() {
         let mut state = AppState::new();
-        state.store.add("hello".to_string(), ClipType::PlainText, 100, "app".to_string());
+        state.store.add(
+            "hello".to_string(),
+            ClipType::PlainText,
+            100,
+            "app".to_string(),
+        );
         state.refresh_filter();
         state.selected_id = state.filtered_ids.first().copied();
         let rt = build_render_tree(&state, 800.0, 600.0);
@@ -2276,7 +2707,9 @@ mod tests {
     fn test_build_render_tree_templates_tab() {
         let mut state = AppState::new();
         state.active_tab = ActiveTab::Templates;
-        state.store.add_template("t".to_string(), "body".to_string());
+        state
+            .store
+            .add_template("t".to_string(), "body".to_string());
         let rt = build_render_tree(&state, 800.0, 600.0);
         assert!(!rt.is_empty());
     }
@@ -2295,7 +2728,12 @@ mod tests {
     fn test_store_many_entries_and_search() {
         let mut store = ClipboardStore::new();
         for i in 0..200 {
-            store.add(format!("entry number {i}"), ClipType::PlainText, i, String::new());
+            store.add(
+                format!("entry number {i}"),
+                ClipType::PlainText,
+                i,
+                String::new(),
+            );
         }
         let results = store.search("number 15");
         // Should match "entry number 15", "entry number 150", etc.
@@ -2306,7 +2744,9 @@ mod tests {
     fn test_scroll_offset_adjustment() {
         let mut state = AppState::new();
         for i in 0..30 {
-            state.store.add(format!("e{i}"), ClipType::PlainText, i, String::new());
+            state
+                .store
+                .add(format!("e{i}"), ClipType::PlainText, i, String::new());
         }
         state.refresh_filter();
         state.visible_rows = 5;
@@ -2320,8 +2760,18 @@ mod tests {
     #[test]
     fn test_dedup_updates_timestamp_and_source() {
         let mut store = ClipboardStore::new();
-        store.add("same".to_string(), ClipType::PlainText, 10, "old".to_string());
-        store.add("same".to_string(), ClipType::PlainText, 20, "new".to_string());
+        store.add(
+            "same".to_string(),
+            ClipType::PlainText,
+            10,
+            "old".to_string(),
+        );
+        store.add(
+            "same".to_string(),
+            ClipType::PlainText,
+            20,
+            "new".to_string(),
+        );
         let front = store.entries.front();
         assert_eq!(front.map(|e| e.timestamp), Some(20));
         assert_eq!(front.map(|e| e.source_app.as_str()), Some("new"));

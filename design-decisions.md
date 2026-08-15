@@ -4802,6 +4802,22 @@ the whole question.
 
 ## 72. Oils (OSH) port strategy (Q25-A) — **Rust reimplementation of the OSH language in-tree**, not a C++ `oils-for-unix` cross-compile
 
+> ## ⛔ SUPERSEDED IN PART — 2026-08-14, by **§305**. Read §305 before doing any osh parity work.
+>
+> **Do not read this entry's rationale as current, and do not treat its "How to
+> reverse" clause as live — it already fired, on 2026-07-22, and went unchecked
+> for 25 days.** The operator settled the resulting question (Q41) on
+> 2026-08-14 with the **hybrid**: osh remains the shell, the cross-compiled GNU
+> bash ships beside it as the escape hatch and future on-device differential
+> oracle, and **osh's bash-fidelity scope is frozen** behind a written stopping
+> criterion. §305 carries that criterion and is binding on all `TD-OILS-*` work
+> and on `userspace/oils/tests/corpus/`.
+>
+> What survives here: the *choice* of a Rust reimplementation, which stands.
+> What does not: the "no C/C++ → `x86_64-slateos` cross-toolchain" premise
+> (false since 2026-07-22 — bash now boots and runs on SlateOS) and the
+> open-ended byte-for-byte parity goal that grew out of it.
+
 **Decided by:** Claude (operator-approved scope) — the operator committed to "port
 Oils (OSH), a bash-*superset* shell (NOT bash itself)" as the first large
 initiative (§69, Q25→A). *How* to port it (faithful C++ cross-compile vs. Rust
@@ -4881,6 +4897,9 @@ Tracking: open-questions.md Q26.
 > **feasibility is settled and is no longer an input to Q41**, which is now
 > purely a scope/ownership question — keep osh, switch to bash, or keep both
 > and use bash as a differential oracle running on SlateOS itself.
+>
+> **Answered 2026-08-14 — the third option, and osh's scope is now frozen.
+> See §305.**
 
 ## 73. YSH port strategy — **defer YSH; obtain it by cross-compiling genuine Oils once a C++/slateos toolchain exists, NOT by hand-porting or auto-translating**
 
@@ -9371,3 +9390,3732 @@ documented errno instead — and say so at the site.
 - Tests that encode an errno now carry a one-line citation of the upstream
   source. Without it, a test is only evidence that the code and the test were
   written by the same pass — which is precisely what happened here.
+
+---
+
+## 86. The font engine — own the bytes, reject CFF loudly, no hinting, signed-area rasterization
+
+**Date:** 2026-08-13
+
+**Decided by:** Claude (autonomous)
+
+**Context.** Nothing in the tree could open a `.ttf`. The entire UI — desktop,
+toolkit, compositor, every app — was capped at one procedurally generated 8x16
+bitmap face, which means one size, no anti-aliasing, and no script outside the
+handful of ranges that face was written to cover. The `[C]` roadmap item "2D
+drawing library: Vello + HarfBuzz" has a GPU-dependent half (blocked on lane
+A's DRM/KMS and GPU driver) and a GPU-independent half — reading font files and
+turning glyphs into coverage — which is not blocked on anything. That half is
+`gui/font/src/{sfnt,raster,scaled}.rs`. Four decisions inside it had real
+alternatives.
+
+### 86a. `Face` owns its bytes rather than borrowing them
+
+**Decision.** `Face::parse(data: Vec<u8>)` takes ownership; the table spans are
+offsets into the owned buffer, not `&[u8]` slices.
+
+**Rationale.** The natural callers — a font cache, a `ScaledFont`, a per-display
+font set — all outlive whatever read the file. A borrowing parser would push a
+lifetime parameter into every one of them, and into every struct that holds one,
+for no benefit: nobody has a font's bytes already resident and wants to avoid the
+copy.
+
+**Alternative considered.** `Face<'a>` borrowing a `&'a [u8]`, as `ttf-parser`
+does. Genuinely better for a caller that mmaps a font file and wants zero copies,
+and we may want exactly that once there is a real filesystem-backed font
+directory. Rejected for now because the lifetime infects the entire GUI stack and
+the copy is one memcpy per font per boot.
+
+**How to reverse.** Add a borrowing `FaceRef<'a>` beside `Face` sharing the same
+table-offset logic; `Face` becomes a thin owning wrapper over it. The parsing
+code is already written against offsets, so this is mechanical.
+
+### 86b. CFF/Type 2 outlines are a hard error, not an empty glyph
+
+**Decision.** A face whose outlines live in `CFF `/`CFF2` rather than `glyf` is
+rejected at `parse` time with `SfntError::CffOutlinesUnsupported`.
+
+**Rationale.** The alternative — open the face and return an empty outline for
+every glyph — produces a font that *appears* to work and draws nothing. That
+failure surfaces far from its cause and reads at the call site as a rasterizer
+bug. Failing at `parse` names the actual limitation, and the caller can fall back
+to another face or tell the user.
+
+**Cost, measured.** 18 of the 556 fonts installed on the dev host are CFF (~3%),
+but that 3% is most Adobe faces and much of what a user installs by hand.
+Tracked as `TD-FONT-NO-CFF-OUTLINES` in `known-issues.md` with the shape of the
+real fix.
+
+**How to reverse.** Implement the Type 2 charstring interpreter; the error
+variant then becomes unreachable and can be deleted.
+
+### 86c. No TrueType hinting interpreter
+
+**Decision.** `fpgm`/`prep`/`glyf` instruction streams are ignored entirely.
+Outlines are scaled and filled as the designer drew them.
+
+**Rationale.** Hinting is a full stack-machine bytecode interpreter — a large,
+security-sensitive attack surface (it has historically been a rich source of
+remote-code-execution bugs in FreeType and in Windows' font driver) executing
+attacker-supplied programs, in exchange for sharper stems at small sizes on
+low-DPI displays. FreeType's own default has been the unhinted/auto-hinted path
+for years, and the displays this OS targets are high-DPI, where the benefit
+largely evaporates. Not writing an interpreter is both the safer and the cheaper
+choice.
+
+**Alternative considered.** A vertical-only autohinter (snap horizontal stems to
+the pixel grid without running font bytecode) — no attacker-controlled execution,
+most of the small-size benefit. Worth doing if small text on a 1080p panel looks
+soft. Deliberately deferred, not rejected.
+
+**How to reverse.** Additive: an autohinter is a pass over the `Outline` between
+`Face::outline` and `rasterize`, so it needs no change to either.
+
+### 86d. Signed-area accumulation rather than a scanline/active-edge rasterizer
+
+**Decision.** One `f32` accumulator per pixel; each segment deposits *signed*
+area only into the cells it crosses; a per-row prefix sum recovers coverage;
+`abs().min(1.0)` gives non-zero-winding fill. After Raph Levien's `font-rs`.
+
+**Rationale.** It is branch-light, allocation-free after one buffer, trivially
+correct for the non-zero winding rule TrueType requires (counter-wound contours
+cancel to zero and become holes without any special casing), and it produces
+true analytic anti-aliasing rather than a supersampled approximation. A classic
+active-edge-table rasterizer needs per-scanline edge lists, sorting, and explicit
+winding bookkeeping — more code and more allocation for the same output.
+
+**Divergences from `font-rs`, both because our input is untrusted.** Every
+accumulator write goes through a bounds-checked `add()` that *clips* rather than
+clamps (folding an off-left edge's area onto column 0 would paint a spurious
+vertical bar), and `into_coverage` resets the running sum per row rather than
+sweeping linearly (so a clipped row cannot bleed a solid bar into the next).
+
+**How to reverse.** `rasterize()` is a pure function from `&Outline` and a scale
+to a `GlyphMask`; swapping the algorithm touches nothing else.
+
+**Where it lives.** `gui/font/src/sfnt.rs` (86a, 86b, 86c),
+`gui/font/src/raster.rs` (86d), `gui/font/src/scaled.rs` (the caching layer
+above both), `gui/font/tests/host_fonts.rs` (the 556-font sweep that measured
+86b).
+
+---
+
+## §400 — Every GUI process finds its own UI font, lazily, from a compiled-in fallback list
+
+**Date:** 2026-08-14
+**Decided by:** Claude (autonomous)
+
+### The problem
+
+`osfont` can now parse a real face, scale it, and rasterize its outlines, but
+nothing had ever handed it one: both the toolkit's measurement cache and the
+compositor's drawing cache were constructed with `FontCache::new()` and left
+holding the built-in 8x16 bitmap face. The outline stack was complete and
+unreachable.
+
+Getting a face into those caches raises a question that is not obviously
+answerable, because the two caches live in *different processes*. An
+application measures its own text — that is how it decides a button is wide
+enough for its label — and the compositor draws it. If the two disagree about
+which file "the UI font" is, every centred label in the system is off by half
+the difference between two fonts' metrics, every right-aligned one by the
+whole difference, and neither process looks wrong on its own. It is a bug that
+presents as "the UI is subtly crooked" with no component to blame.
+
+### The options
+
+**(a) An explicit startup call.** Each process calls something like
+`text::init_fonts()` before it draws. Cheapest, and it makes the cost of the
+directory scan visible at the point it is paid.
+
+**(b) Configuration: read the family from a settings file.** The desktop
+already has an `ui_font` field in `appearance_settings.rs`, so the machinery
+half-exists.
+
+**(c) Lazy automatic installation from a list compiled into the toolkit.**
+The first call that touches text builds the index and installs the first
+family on `DEFAULT_UI_FAMILIES` that resolves.
+
+### The decision
+
+(c), with (b) deferred until settings actually persist.
+
+(a) was rejected on the specific grounds that it is wrong the *first time an
+app forgets*, and the failure is silent: an app that skips the call still
+draws — in the bitmap face, against a compositor drawing in the real one. An
+API whose misuse is invisible and whose correct use has to be repeated in
+every process is the wrong shape for something every process needs. The
+scan is not expensive enough to be worth that risk: 558 faces in 0.36 s on
+this host in a debug build, once per process, and only for processes that
+draw text at all.
+
+(b) is where this should end up, and cannot go there yet:
+`AppearanceSettings::save()` copies the pending settings into a `saved` field
+and writes nothing to disk. There is therefore no cross-process source of
+truth to read — a settings-driven font would be read by the app that changed
+it and by nothing else, which is exactly the divergence being avoided.
+`text::set_font_family` exists and works; it just has no persistent caller
+yet.
+
+The fallback list is ordered `Inter` (the design's intended UI font), then the
+default sans of each platform this runs on, ending with `DejaVu Sans` /
+`Liberation Sans` / `Arial`, which are installed almost everywhere. The
+alternative to finding *a* face is the bitmap font, which is legible but looks
+nothing like the system it stands in for, so it is worth walking a list of
+eight to avoid.
+
+### What makes the two processes agree
+
+Not the list — a shared *function*. `guitk::text::install_ui_faces(&mut
+FontCache)` is public precisely so the compositor can call it instead of
+resolving a family by its own rule. Two copies of a fallback list agree until
+the first time one of them is edited; one function cannot disagree with
+itself. The compositor keeps a separate `FontCache` (it only draws, and would
+otherwise take the toolkit's global lock once per glyph run and never measure
+anything), but the *contents* of that cache come from the toolkit's own
+resolution path.
+
+`FontDb::finish()` sorting its faces by path is the other half of this:
+directory iteration order is unspecified, so two processes scanning the same
+directories could otherwise index the same family in different orders and pick
+different files for it.
+
+### Consequences
+
+- Installation is atomic across regular and bold. A family that loaded one
+  weight and not the other would draw a label's bold run in one face and the
+  rest in another, which reads as a rendering fault rather than as a missing
+  font, so `install_family` loads both before touching the cache.
+- Toolkit tests that asserted pixel geometry against the bitmap face's 16 px
+  line height had to start pinning their own cell size — a test about
+  scrolling arithmetic must not depend on which fonts the host has installed.
+- The desktop's `ui_font` setting is still inert. Wiring it up is blocked on
+  settings persistence, not on this.
+
+**Where it lives.** `gui/toolkit/src/text.rs` (the cache, the fallback list,
+`install_ui_faces`/`install_family`/`set_font_family`),
+`gui/toolkit/src/fontdb.rs` (the index and the family→file resolution),
+`gui/font/src/select.rs` (the CSS Fonts 4 matching rule),
+`gui/compositor/src/main.rs` (`RenderEngine::new`).
+
+## §401 — Kerning reads GPOS in preference to the legacy `kern` table, and reads both
+
+**Date:** 2026-08-14
+**Decided by:** Claude (autonomous)
+
+### The problem
+
+The layout path advanced the pen by one glyph's own advance width and nothing
+else. That is the width the designer drew around the letter *in isolation*;
+for a pair like `AV`, `To`, `Yo`, `P.` or `r.` they also specify a correction,
+and without it the diagonal of the `V` sits a visible gap away from the `A`.
+Text set this way does not look broken so much as amateur, and the error is
+systematic — it accumulates along a run, so a long right-aligned string drifts.
+
+The corrections live in one of two places, and which one is not a matter of the
+font's age: `GPOS`'s `kern` feature (OpenType, class-based, the table a modern
+designer maintains) or the legacy `kern` table (a flat pair list). Supporting
+one is much less work than supporting both.
+
+### The options
+
+**(a) Legacy `kern` only.** A few hundred lines: a flat, sorted pair array with
+a binary search over it.
+
+**(b) `GPOS` only.** The table modern tooling emits, and the one that is
+authoritative where a face has both.
+
+**(c) Both, preferring `GPOS`.**
+
+### The decision: (c), and the reason is measured, not assumed
+
+A sweep of the 556 faces installed on this machine, reading only each file's
+table directory, gives:
+
+| carries | faces |
+|---|---|
+| neither | 126 |
+| `GPOS` only | 188 |
+| `kern` only | 94 |
+| both | 133 |
+
+So (a) leaves 188 faces unkerned and (b) leaves 94 — in both cases a large,
+arbitrary slice of the installed fonts silently renders worse than the rest,
+with no way for a user to tell why one font looks right and another does not.
+Neither table is a legacy concern that can be skipped. `GPOS` wins when a face
+has both, because it is the table the designer's tooling generates and the
+legacy copy in such a face is a compatibility shim that may be a lossy
+flattening of it.
+
+The host sweep is kept as an `#[ignore]`d integration test
+(`installed_fonts_kern_the_pairs_that_need_it`), not because the counts must
+hold on another machine but because kerning is the one part of the stack whose
+correctness cannot be seen in a glyph: a wrong pair value still parses, still
+rasterizes, and still has ink. The test therefore also pins five known faces
+(Arial, Times, Segoe UI, DejaVu Sans, Verdana) to the assertion that `AV` is
+*narrower* than `A` plus `V`, which is an oracle independent of our own parser.
+
+### What is deliberately left out
+
+- **Script and language selection.** Every lookup reachable from any feature
+  tagged `kern` is used, whatever script system it hangs under. Correct
+  selection needs the itemised script of the run, which the layout path does
+  not yet compute; using all of them is wrong only for a face that kerns a pair
+  differently per script, which is rare, and the failure is a slightly wrong
+  gap rather than a wrong glyph.
+- **Contextual and cross-stream kerning**, and the legacy table's format 2.
+  Vanishingly rare; the subtables are skipped rather than misread.
+- **Device tables** on value records. They tune a value for one specific ppem
+  and are a sub-pixel concern.
+
+Each of these is noted in `gui/font/src/kern.rs`'s module documentation so the
+next reader does not have to rediscover that the omission was a decision.
+
+### Consequences
+
+- `SystemFont::kern` and `ScaledFont::kern` are *public*, and kerning is
+  applied inside `measure`/`draw_text` as well. The public form exists because
+  the compositor draws one glyph at a time through its own clip stack and
+  cannot call `draw_text`; if it could not ask about a pair it would space runs
+  differently from the way the toolkit measured them, which is exactly the
+  cross-process divergence §400 exists to prevent.
+- `Face::kern` is infallible and returns 0 for a malformed table. A bad kerning
+  table means text spaced slightly wrong, which is not worth failing a draw
+  over when the alternative is a blank window.
+- Parsing is eager at face load (it resolves to a short list of subtable
+  offsets) so that "GPOS or the legacy table?" is not re-decided on every pair
+  of glyphs drawn.
+
+**Where it lives.** `gui/font/src/kern.rs` (all table parsing),
+`gui/font/src/sfnt.rs` (`Face::kern`, `Face::has_kerning`),
+`gui/font/src/scaled.rs` and `gui/font/src/system.rs` (application during
+measurement and drawing), `gui/compositor/src/main.rs`
+(`RenderEngine::draw_text`).
+
+---
+
+## §402 — Text is shaped once into a run; ligatures are `liga` + `rlig` only, in a single pass
+
+**Date:** 2026-08-14
+**Decided by:** Claude (autonomous)
+
+**Decision.** Every consumer of a string's layout — measuring, drawing,
+hit-testing, truncation — goes through one `ScaledFont::shape` /
+`SystemFont::shape` call that returns a `ShapedRun`. On top of that run,
+GSUB ligature substitution is enabled for exactly two features, `liga`
+(standard ligatures) and `rlig` (required ligatures), read from LookupType 4
+in a single left-to-right pass with longest-match-first within a ligature
+set.
+
+**Why one run.** The recurring bug class in this code is two loops over the
+same string arriving at different answers. It has now happened twice for
+real: kerning was added to `measure` but not to `fit`/`char_index_at`, so a
+prefix chosen to fit *N* px measured wider than *N* px and a click landed on
+one character while the caret drew at another; and `measure` expanded `\t`
+to four cells while `draw_text` drew it as the missing-glyph box. Neither
+was a hard fault — both are text that is quietly wrong, which is the kind of
+defect that survives every test that looks at a single function. A single
+`ShapedRun` walked by all four callers makes the divergence unrepresentable
+rather than merely discouraged, and it is what made ligatures expressible at
+all: the old `SystemFont::glyph(ch)` API was 1:1 char→glyph, so no ligature
+could have been returned through it. That API was deleted rather than
+documented.
+
+*Cost:* shaping allocates a `Vec` per call where the old loop allocated
+nothing, and a widget that measures then draws shapes twice. Accepted:
+`shape` touches `cmap`/`hmtx`/GPOS/GSUB only, never the rasterizer or the
+glyph cache, and the alternative — a cache keyed by (string, size, weight) —
+buys a memcpy-scale saving at the price of an invalidation problem. Revisit
+if profiling of a real desktop frame says otherwise.
+
+**Why kerning is charged to the preceding glyph.** A `ShapedGlyph`'s
+`advance` includes the kern against the glyph that follows it, so
+`sum(advance) == run.width()` and the draw loop is exactly `pen +=
+advance` — no separate "look at the next glyph" step that a caller could
+forget. The part of the advance that is a kern is kept in `kern_next`
+because it has to be *recoverable*: `fit` cuts a prefix that the caller then
+draws **alone**, so the kern pulling the last surviving glyph toward a
+dropped one must come off. Without that, `fit("AVATAR", 10.0)` keeps the `A`
+on the strength of a −0.4 px correction for a `V` that is no longer there,
+and the result measures 10.32 px — wider than the budget it was asked to
+fit. `fit_end` needs no such correction, which is the same fact seen from
+the other side.
+
+**Why only `liga` and `rlig`.**
+
+- `liga` is what a face means by "this is how I am meant to be set": `fi`,
+  `fl`, `ffi`. Leaving it off means the `f`'s hood collides with the `i`'s
+  dot in every serif face on the desktop — the font ships a fix for its own
+  defect and we were declining it.
+- `rlig` is not optional in the sense that matters: Arabic lam-alef is a
+  *required* ligature, and text that omits it is not a stylistic variant,
+  it is wrong.
+- `dlig`, `hlig` and `swsh` are discretionary by definition — the spec says
+  they are off unless the *document* asks. There is no per-run feature list
+  in this stack to ask with, so enabling them would apply a typographic
+  choice to every button label on the system.
+- `clig` (contextual ligatures) is excluded for a different reason: it needs
+  LookupType 6 (chained context) to be honest, and a half-implementation
+  that fires context-dependent lookups without their context is worse than
+  none.
+
+**Why a single pass.** The spec's model is iterative — a lookup's output can
+feed a later lookup. In practice `LigatureSet`s are ordered longest-first by
+convention, so trying every record at a position and taking the first match
+gets `ffi` right without a second pass. The alternative (loop until
+fixpoint) costs a bounded-iteration guard and a re-walk of the run for a
+gain no Latin face demonstrates. Documented here so the next session knows
+it is a decision, not an oversight: a script that genuinely needs multi-pass
+substitution (Indic reordering) needs far more than this anyway.
+
+**What is deliberately left out.** Script and language selection (the
+`ScriptList` is not consulted — features are taken from the `FeatureList`
+by tag, which is the default-script behaviour every Latin face wants and is
+wrong for a face whose `liga` differs by script); GPOS mark attachment;
+contextual and chained-context substitution; bidi. Each is a separate
+roadmap step, not a gap this one should have closed.
+
+**Measured.** Of 556 faces installed on the development host, 169 carry
+ligature lookups this reads and 114 substitute `fi`. Notably `times.ttf` and
+`segoeui.ttf` do **not** — the shipped Microsoft core versions carry no
+`liga` ligature lookup for it — which is why the host-font test treats its
+oracle list as "at least one of these" rather than "all of these".
+
+**Where it lives.** `gui/font/src/shape.rs` (`ShapedRun`, `ShapedGlyph`,
+`GlyphKey`, `fit`/`fit_end`/`offset_at`/`x_of`), `gui/font/src/gsub.rs`
+(ligature parsing), `gui/font/src/otl.rs` (the walk shared with GPOS),
+`gui/font/src/sfnt.rs` (`Face::ligature`, `Face::has_ligatures`),
+`gui/font/src/scaled.rs` and `gui/font/src/system.rs` (`shape`, `measure`,
+`draw_text`, `glyph_mask`), `gui/toolkit/src/text.rs` (`fit`, `fit_end`,
+`char_index_at`), `gui/compositor/src/main.rs` (`RenderEngine::draw_text`).
+
+---
+
+## §403 — Combining marks: attach from GPOS anchors, zero their advance, and decide mark-ness from GDEF ∪ coverage
+
+**Date:** 2026-08-14
+**Decided by:** Claude (autonomous)
+
+**Context.** Kerning (§401) and ligatures (§402) are refinements: get them
+wrong and text is a fraction of a pixel off, or an `fi` has a visible
+collision. Mark attachment is not in that class. A combining mark is drawn
+at the pen, and the pen for the mark is the *left edge* of the following
+cell — so with no positioning at all, `e` + U+0301 draws the acute in the
+gap **before** the `e`, and a second mark draws on top of the first. Every
+accented language on the machine renders visibly broken. `hmtx` cannot help:
+it says a mark takes no room, never where it goes.
+
+**Decision, in four parts.**
+
+*1. Read MarkBasePos (GPOS type 4, feature `mark`) and MarkMarkPos (type 6,
+`mkmk`); do not read MarkLigPos (type 5).* The first two share a
+byte-for-byte identical header — coverage for the attachee, coverage for the
+mark, a class count, two arrays — so one reader handles both, which is not
+a coincidence being exploited but how the spec defines them. MarkLigPos is
+left out because it attaches a mark to one *component* of a ligature, which
+requires remembering which component each mark belonged to before
+substitution collapsed them. A `ShapedRun` glyph knows its cluster, not its
+components. A mark on a ligature therefore falls back to MarkBasePos, which
+most faces also provide; where they do not it lands unpositioned, which is
+wrong in the way the font asked for rather than wrong in a way nobody could
+trace back.
+
+*2. Mark-ness is `GDEF` class 3 **or** membership of a mark coverage — the
+union, not `GDEF` alone.* This was measured, not chosen: DejaVu Sans Mono
+classes `acutecomb` as `GlyphClassDef` 1 (base) while its own `mark` feature
+carries an anchor for that very glyph, so a `GDEF`-exclusive reader leaves
+every accent in that family unattached. Coverage alone is equally wrong: a
+mark the face has no anchor for would read as a base, and the *next* mark
+would then stack onto it. The fully correct answer is Unicode general
+category `Mn`/`Mc`/`Me`, which is a property of the character and true
+whatever the font claims; that needs a category table this crate does not
+have. The union covers every face that has anchors to attach with, which is
+every face where the answer changes anything.
+
+*3. A mark's advance is zero, whatever `hmtx` says.* Also measured: Segoe UI
+gives U+0301 an advance more than half an `e` wide, because the same outline
+doubles as the spacing acute U+00B4. Honouring it made `e` + U+0301 measure
+25.3 px against the bare `e`'s 16.7 — a gap after every accented letter, and
+a caret that lands in it. HarfBuzz zeroes mark advances after positioning
+for exactly this reason. Because mark-ness now decides a *width*, not just a
+placement, `MarkPositioning` is kept for a face that has `GDEF` classes but
+no anchors — it still knows which glyphs are marks, and that alone is worth
+having. Hence `Face::has_marks()` rather than `has_mark_positioning()`.
+
+*4. Marks are never kerned.* Real faces set `IgnoreMarks` on their kerning
+lookups so that `A` and `V` still kern with an accent between them. This
+engine walks a run strictly in order and cannot skip, so it declines
+instead: a pair separated by a mark goes unkerned, losing a fraction of a
+pixel, where kerning *against* the mark would shove the accent off the
+letter it belongs to. (Ligatures likewise may not span a tab — the tab's
+width is a layout decision, not a glyph width, and joining across it would
+swallow the gap it exists to make.)
+
+**Cost.** `ScaledFont::shape` is now four passes rather than three, each
+justified by a data dependency: substitution cannot be decided while
+characters are still arriving; kerning applies to the glyphs that *survive*
+substitution; and a mark's displacement is measured from its base glyph's
+origin, whose distance from the pen is the sum of the advances in between —
+which pass three is still adjusting. The fourth pass allocates one `f32` per
+glyph to hold the running pen and runs only on faces that know about marks.
+
+**Alternatives rejected.** Decomposing precomposed characters and
+recomposing via `ccmp` (needs Unicode normalization data we do not have, and
+buys nothing for text that already arrives precomposed); synthesising an
+accent placement from the base glyph's bounding box when the font offers no
+anchor (invents a number the font never authorised, and it would be wrong in
+a way no one could attribute).
+
+**Measured.** Of 556 faces on the development host, 349 can tell a mark from
+a letter and 175 place a combining acute on an `e`. The four oracle faces
+(Segoe UI, DejaVu Sans, Calibri, Times New Roman) all put the accent's ink
+inside the `e`'s advance and above the baseline. Note that the *sign* of the
+displacement is not an oracle here, unlike kerning's: Cascadia Code draws
+its combining acute already at accent height inside its cell, so its anchors
+coincide and the displacement is legitimately `(0, 0)`.
+
+**Where it lives.** `gui/font/src/mark.rs` (`MarkPositioning`, anchor and
+`MarkArray`/`BaseArray` reading), `gui/font/src/otl.rs` (the walk shared
+with GSUB and kerning), `gui/font/src/sfnt.rs` (`Face::is_mark`,
+`mark_on_base`, `mark_on_mark`, `has_marks`), `gui/font/src/shape.rs`
+(`ShapedGlyph::offset`), `gui/font/src/scaled.rs` (`shape`'s fourth pass,
+`attach_marks`, `glyph_mask`, `draw_text`), `gui/font/src/system.rs`,
+`gui/compositor/src/main.rs` (`RenderEngine::draw_text`).
+
+## §404 — Configuration is edited as text, not serialized: a format-preserving YAML document with a line index
+
+**Date:** 2026-08-14
+**Decided by:** Claude (autonomous)
+
+**Context.** `design.txt` mandates YAML for configuration, "processed with a
+library that preserves comments and formatting", and nothing in the tree could
+do the second half — the installer's parser is read-only and lossy, and there
+is no YAML crate anywhere in the lock file. Meanwhile
+`gui/desktop/src/appearance_settings.rs` had a `save()` that copied one struct
+field into another and wrote nothing
+(`known-issues.md`, TD-APPEARANCE-SETTINGS-ARE-NEVER-WRITTEN-TO-DISK), and
+about twenty other `*_settings.rs` panels have the same shape. Persisting even
+one of them required deciding what "preserves comments and formatting" means in
+code.
+
+**Decision.** `yamldoc` is not a serializer. A `Document` holds the file's
+original lines; a write splices the new value into the one line that holds it,
+and every region the edit did not name comes out byte for byte as it went in.
+The line classification (`scan()`) is recomputed on demand rather than cached.
+
+Four consequences follow, each chosen deliberately:
+
+1. **Anything not modelled is opaque, not an error.** Anchors, tags, flow
+   collections, block scalars and multi-document files are carried through
+   untouched but are not indexed, so they cannot be read or written through the
+   API. A block scalar's body is explicitly excluded from key indexing, so a
+   user's prose containing a colon is never mined for a key.
+2. **Parsing is infallible; every getter returns `Option`.** There is nothing
+   useful a config reader could do with a "malformed YAML" error: its answer to
+   a key it cannot read is the default, which is what `None` says.
+3. **Paths are `&[&str]`, never dotted strings.** A dotted path does the wrong
+   thing the first time a key holds a font family (`Noto Sans CJK.Bold`) or a
+   hostname.
+4. **Reading is liberal, writing is conservative.** `get_bool` refuses the
+   YAML 1.1 spellings — `NO` is a country, not `false` — but `set_str` quotes
+   them anyway, along with hex/octal/underscored numbers. The file is not only
+   read back by us: the user's `yq`, their editor's highlighter and the next
+   tool to touch it all get a look. The asymmetry is the point.
+
+**Alternatives rejected.**
+
+*Deserialize into a struct, mutate, re-serialize.* The obvious approach, and
+the reason `design.txt` calls the requirement out. It is lossy by construction:
+it discards every comment, blank line, deliberate ordering and choice of
+quoting, and hands the user a machine-flattened version of what they wrote. Do
+that once and nobody hand-edits a config again, because their annotations do not
+survive the next time they touch a setting in the UI.
+
+*Take a dependency (`serde_yaml`, `yaml-rust`).* Only twelve external crates
+exist in the whole lock file, none of them YAML. `serde_yaml` is lossy in
+exactly the way above and is unmaintained; a full round-trip implementation
+(the `ruamel.yaml` model) is far more machinery than a settings file needs. And
+configuration is read where there is no `std` — the service manager and the
+package manager both run early — so the crate is `no_std` + `alloc` and
+dependency-free, mirroring `tzrules` and `netproto`. A config reader that only
+works once `std` is up cannot be used to decide how `std` comes up.
+
+*Cache the line index inside the `Document`.* Rejected on the recurring lesson
+of this lane: two loops over the same text coming to different answers is the
+bug class that keeps costing the most (§401, §402). The lines are the single
+source of truth, and a cached index that can disagree with them makes that
+divergence representable. Config files are a few dozen lines and edits happen
+when a user clicks Save, so the scan is not on any hot path.
+
+**Cost.** `set_*` is O(lines) per call rather than O(1). A settings panel
+writing twenty keys rescans twenty times. Measured against the alternative —
+an index that can go stale — this is the right trade at this size, and if a
+consumer ever writes thousands of keys the fix is a batch API, not a cache.
+
+**Second decision, same commit: where configuration lives.**
+`gui/desktop/src/config.rs` resolves `$XDG_CONFIG_HOME/slateos/<name>.yaml`,
+falling back to `$HOME/.config/slateos/`. XDG because the rest of the tree
+already assumes an XDG-shaped home (`~/.cache`, `~/.local/share/Trash`) and a
+user who set the variable has said plainly where they want their config. With
+neither variable set, `store` reports `NotFound` rather than inventing a
+location: writing one user's personal preferences into a system-wide path
+because `$HOME` was missing is worse than not writing them. Writes go to a
+`.new` file beside the target and are renamed over it — rename within a
+directory is atomic, so a crash mid-save leaves the whole old file or the whole
+new one, never a truncated middle. The temporary is named after the target
+rather than randomly, so a crash between write and rename leaves one
+identifiable piece of litter the next save overwrites, not an unbounded pile.
+
+**Third: config spellings are not UI labels.** Each settings enum gets a
+`yaml_name`/`from_yaml_name` pair (generated by the `yaml_enum!` macro) that is
+deliberately separate from `label()`. A label is screen text — "Extra Large
+(96px)", "Accent Color" — and changes when the wording is improved or a preset
+is retuned. A config spelling is part of the file format: change it and every
+existing user's saved choice silently reverts to the default on next start. An
+unknown spelling reads as `None` and leaves the field at its default, so a file
+written by a newer desktop degrades rather than refusing to load.
+
+**Where it lives.** `yamldoc/src/lib.rs` (the whole crate); the "Configuration
+file" section of `gui/desktop/src/appearance_settings.rs`
+(`read_from`/`write_into`, `yaml_enum!`, `color_to_hex`/`color_from_hex`);
+`gui/desktop/src/config.rs` (`config_dir`, `path_for`, `load`, `store`).
+
+## §405 — The accent is a role with two values, and it is chosen for contrast rather than fidelity to Catppuccin
+
+**Date:** 2026-08-14
+**Decided by:** Claude (autonomous)
+
+**Context.** Wiring the saved appearance settings into the shell meant the
+desktop finally had to paint a *light* theme — it had only ever had the
+hard-coded Catppuccin Mocha one. An accent colour then stops being a single
+constant: `AccentColor::Blue` has to mean one thing on a near-black base and
+another on a near-white one, because the shell draws the accent as **text**
+(the start glyph on the taskbar, the start-menu heading), not only as a fill.
+
+**Decision.** `AccentColor` carries two values per name — `color()` for dark
+backgrounds and `color_light()` for light ones — and `effective_accent()`
+resolves between them from `theme_mode`. The light values are Catppuccin
+Latte's hues **darkened until they clear 4.6:1 on the Latte base**, not Latte's
+published values.
+
+**Why the deviation.** Measured against Latte base `#EFF1F5`, the upstream
+Latte accents are decorative, not text-safe: yellow 2.31:1, pink 2.34:1,
+rosewater 2.34:1, sky 2.47:1, flamingo 2.64:1, peach 2.64:1, sapphire 2.78:1,
+lavender 2.81:1, green 2.96:1, teal 3.31:1, maroon 3.48:1 — only blue (4.34, so
+also nudged), mauve (4.79) and red (4.80) approach or clear the 4.5:1 that body
+text needs. Shipping them unmodified would have meant a light mode whose start
+menu heading is illegible for eleven of the fourteen accents. Each value is
+therefore its Latte hue with all three channels scaled toward black by the
+smallest factor reaching 4.6:1, which holds the hue — these still read as the
+colours Catppuccin named. Blue, mauve and red are barely touched. The dark
+palette needed no treatment at all: every Mocha accent is 7:1–13:1 on Mocha.
+
+**Alternatives rejected.**
+
+- *Ship Latte as published and accept the contrast.* The honest form of "match
+  the upstream palette", and rejected because a heading nobody can read is not
+  a style choice. Catppuccin publishes accents for syntax highlighting and
+  decoration, where a 2.3:1 accent sits next to a label that carries the
+  meaning; here the accent *is* the label.
+- *Keep one accent value and never draw the accent as text.* Structurally
+  cleaner — one constant per name — but it forbids the two places the shell
+  already uses the accent to mean "this is the thing you pressed", and would
+  push every accent onto a fill with a contrasting foreground, which is a much
+  heavier visual language for a start-menu heading.
+- *Derive the light value at runtime by darkening.* Rejected: the same loop
+  that produced these constants would then run on every theme change, and a
+  colour a user sees would be the output of a search rather than a value anyone
+  can look up, diff, or override. The search was run once, offline; its results
+  are the table.
+
+**Consequences.** `every_accent_is_readable_as_text_in_both_modes` asserts the
+4.5:1 bar for all fourteen accents in both modes, so the palette cannot regress
+to the upstream values without a test failing. A **custom** accent is exempt —
+`effective_accent()` returns `custom_accent` verbatim in either mode, because
+the user named a specific colour rather than a role, and silently darkening it
+would override the one choice that was stated in full. That exemption is the
+known hole in the contrast guarantee.
+
+**Companion decision — `ThemeMode::System` resolves to dark.** `System` means
+"follow the system's light/dark schedule", and nothing in this tree computes
+sunrise or watches a time-of-day trigger yet. It answers dark, because dark is
+what the shell has always painted and what every other default is tuned
+against; answering light would flip the whole desktop for a user who asked only
+to be left on automatic. `ThemeMode::is_light()` is the single place that has
+to change when a schedule exists.
+
+**Companion decision — the resolved palette is a separate type from the
+settings.** Render functions read `DesktopTheme` fields and never consult
+`AppearanceSettings`. A renderer that derived colours itself would re-derive
+them every frame and, worse, would be free to derive them slightly differently
+in each of the dozen places a colour is drawn. `DesktopShell::set_appearance()`
+is the single door: it re-derives the theme and stores the settings together,
+so `theme` can never be a stale derivation of an older `appearance`. Each
+surface also carries its own foreground, because a shared one is only correct
+while every surface has a similar brightness — which "accent on the taskbar"
+ends the moment it is switched on.
+
+**Where it lives.** The light-accent palette and `AccentColor::color_light`,
+`ThemeMode::is_light`, `AppearanceSettings::effective_accent` in
+`gui/desktop/src/appearance_settings.rs`; `DesktopTheme::{dark, light,
+from_settings}`, `readable_on`, `emphasized`, `taskbar_alpha` and
+`DesktopShell::{set_appearance, load_appearance}` in `gui/desktop/src/main.rs`.
+
+## §406 — GSUB is an ordered list of lookups, not a bag of subtables; single substitution and `ccmp` before contextual (GSUB 5/6)
+
+**Date:** 2026-08-14
+**Decided by:** Claude (autonomous)
+
+**Context.** §402 read GSUB for one purpose — find LookupType 4 anywhere in
+`liga`/`rlig` and join glyphs — so it flattened every matching lookup into one
+list of subtable offsets and walked that. That is adequate for ligatures alone
+and wrong for anything else, which the next step needed.
+
+**Decision, part one: a lookup is the unit of application.** `otl::Lookup`
+keeps a lookup's type together with its own subtable offsets, and
+`Substitutions::apply` runs each lookup across the *whole* glyph buffer before
+starting the next. Within one lookup, subtables are tried in font order and the
+first match wins; a glyph one subtable substituted is not re-offered to the
+rest of that lookup.
+
+This is not a refactor for tidiness — it is the only mechanism that makes
+`ccmp` reliably precede `liga`. A font lists its lookups in the order it wants
+them applied, so what lookup 1 substitutes is what lookup 2 sees. Flattening
+subtables into one list destroys that boundary: `ccmp` mapping A→B and a
+ligature covering B but not A would find nothing to join in a single flat pass.
+Two tests pin the semantics in both directions —
+`an_earlier_lookup_feeds_a_later_one` and
+`a_later_lookup_does_not_feed_an_earlier_one`.
+
+*Looping to a fixpoint was rejected*, and the second of those tests is why: a
+pass that repeated until nothing changed would ligate in the second case too,
+which is the font asking for the opposite. It also would not terminate on a
+font whose lookups feed each other cyclically. One ordered pass is both correct
+and total.
+
+Callers with genuinely one lookup type and no ordering to preserve — pair
+kerning, mark attachment — keep the flat list through `feature_subtables`,
+which is now a thin wrapper over `feature_lookups`. They were not touched.
+
+**Decision, part two: type 1 and `ccmp` now, types 5/6 later.** The roadmap
+bullet named contextual substitution (GSUB 5/6) as the next unblocked step.
+That is out of order: 5 and 6 work by invoking *other* lookups by index at a
+matched position, so a general "apply lookup N here" mechanism plus the simple
+types it dispatches to are a strict prerequisite, not a parallel feature. This
+commit therefore builds the ordered lookup list and LookupType 1 (Single
+Substitution, both formats) and adds `ccmp` to the default-on feature set;
+5/6 become implementable rather than blocked.
+
+**What is deliberately still out, each for its own reason.**
+
+- *Type 2 (Multiple).* One glyph becomes several, so the run grows and two
+  glyphs share a cluster — which `shape.rs` currently assumes cannot happen.
+  `ShapedRun::x_of` and `fit_end` both give wrong answers under it (traced:
+  with clusters `[0,0,1]`, `x_of(0)` returns the first glyph's advance instead
+  of zero). That is a change to `shape.rs`'s invariants with its own test
+  story, not a change to `gsub.rs`, and is the next commit rather than this
+  one.
+- *Type 3 (Alternate).* Picks by an alternate index that only a per-run feature
+  list can supply, and there is none. It has no default-on caller, so
+  implementing it would add an unreachable branch.
+- *`locl`.* On by default in every shaper, but *language*-specific. Applying it
+  without knowing the run's language hands every reader some other locale's
+  letterforms, which is worse than not applying it.
+
+**Consequence, and the known hole.** Widening the read from `liga`-only to
+"any applicable substitution" makes the existing no-script-selection limitation
+bite for the first time: the feature walk takes every script's features, and
+`ccmp` is precisely where a script puts its normalisation rules. On the
+development host this is visible — `ebrima.ttf` substitutes the *space* glyph
+from an African script's `ccmp`. Logged as
+`TD-GSUB-APPLIES-EVERY-SCRIPTS-FEATURES` and verified against an independent
+Python parse of the table, so it is our *selection* that is wrong, not our
+*parsing*. Two new host-font tests bound the damage:
+`installed_fonts_leave_plain_latin_alone` asserts the *proportion* of faces
+that alter Latin prose stays tiny (a parser fault hits fonts in bulk, a genuine
+rule hits a handful), and `installed_fonts_leave_a_tab_alone` asserts the tab
+survives.
+
+**Decision, part three: a substitution may not reach across a tab.** A tab is
+carried through shaping as the space glyph, but it is a layout decision wearing
+a glyph's clothes. A GSUB lookup handed a run matches anywhere in it, so the
+only way to express a boundary is to not show the lookup across one:
+`ScaledFont::substitute_between_tabs` substitutes each stretch separately.
+Without it a lookup covering the space replaces the tab (Ebrima again), or a
+ligature swallows it and the tab flags stop lining up with the glyphs, after
+which every advance past that point is charged to the wrong glyph. The same
+mechanism is what style changes and bidi run edges will use: `Face::substitute`
+takes a run, and the caller decides what one run is.
+
+**Where it lives.** `otl::{Lookup, feature_lookups, read_lookup,
+lookup_indices}` in `gui/font/src/otl.rs`; `gsub::{SubGlyph, Substitutions,
+apply_single, single_at, apply_ligature}` in `gui/font/src/gsub.rs`;
+`Face::{substitute, has_substitutions}` in `gui/font/src/sfnt.rs`;
+`ScaledFont::{shape, substitute_between_tabs}` in `gui/font/src/scaled.rs`.
+
+## §407 — A cluster is a boundary, not an index: `ShapedRun` works in whole clusters, and GSUB LookupType 2 (Multiple Substitution)
+
+**Date:** 2026-08-14
+**Decided by:** Claude (autonomous)
+
+**Context.** §406 left LookupType 2 out with a reason and a plan: one glyph
+becomes several, so the run *grows* and two glyphs come to share a cluster —
+which `shape.rs` assumed could not happen. This is that follow-up. It is two
+changes, and the order matters: `shape.rs` first, because implementing type 2
+against the old invariant would have produced a run whose own queries lied
+about it.
+
+**Decision, part one: the glyph↔character map is many-to-many in *both*
+directions, and every `ShapedRun` query works in whole clusters.** A ligature
+already gave several characters one cluster; type 2 gives several glyphs one
+cluster. What a cluster is, therefore, is not an index — glyph *n* is not
+character *n* in either direction — but a *boundary*: a caret, a cut and a hit
+test may only land where a cluster starts, because every one of them is a byte
+offset into the string and the offsets a string admits are its character
+boundaries.
+
+The three queries were each wrong in their own way under the new case, and the
+fix is the same shape in each: walk *groups* of equal cluster, not glyphs.
+
+- `x_of` tested the *next glyph's* cluster to decide whether it had passed the
+  target, so with clusters `[0,0,1]` it counted the first half of a decomposed
+  character and answered `x_of(0)` with that glyph's advance instead of zero.
+  It now tests the next *group's* cluster.
+- `fit_end` walked backwards a glyph at a time, so a budget could cut between
+  the `e` and the acute of a decomposed `é` and return an offset naming a
+  character that is not there in the cut. It now steps whole clusters.
+- `offset_at` tipped at a glyph's midpoint, so a two-glyph cluster had a tipping
+  point in its middle that no string offset corresponds to. It now tips at the
+  *cluster's* midpoint.
+
+Three private helpers (`group_end`, `group_start`, `span_width`) carry the
+grouping so the rule lives in one place rather than three. `fit` needed no
+change and says why in a comment: it already returns the *failing glyph's*
+cluster, which is a cluster start by construction.
+
+**Decision, part two: type 2 is implemented; the run may grow.** `ccmp`
+decomposes precomposed characters so GPOS mark attachment can place the pieces
+— which is the textbook reason the type exists, and is not hypothetical here:
+Cambria on the development host decomposes `é` into `e` + acute, and the new
+host test `shaped_runs_agree_with_their_strings_about_boundaries` finds exactly
+that one grown run in 281 GSUB faces × 6 strings. Every glyph of a sequence
+carries the cluster of the glyph it replaced, because they all came from the
+same character. Walking resumes *after* the inserted glyphs, so a font that
+decomposes A into A-and-something cannot loop.
+
+**An empty `Sequence` is refused, and refused in the subtable rather than the
+lookup.** `glyphCount == 0` would delete the glyph; the spec forbids it and
+some shapers honour it anyway. Deleting takes the cluster with it, leaving a
+character that no caret position corresponds to — worse than a character drawn
+as it arrived. The placement is the subtle half: refusing inside `sequence_at`
+lets `find_map` try a *later subtable of the same lookup*, whereas the earlier
+draft's check in the caller short-circuited the whole lookup. The distinction
+was invisible until mutation testing: removing the guard changed nothing,
+because the caller's check masked it. Removing the *caller's* check made the
+guard load-bearing and the mutation fatal to two named tests.
+
+**`sequence_at` clears the output buffer on entry, not the caller.** Found
+while resolving that redundancy, and a genuine bug rather than a tidiness
+point: a subtable that reads half a sequence and then finds the table truncated
+leaves those glyphs behind, and `find_map` hands the same buffer to the next
+subtable — so subtable 1's junk is prepended to subtable 2's answer
+(`[44, 30, 31]` where `[30, 31]` was right). The buffer exists to keep ordinary
+text from allocating once per position; making it the callee's to clear keeps
+that without letting a failed read be seen as part of a successful one.
+
+**Bounds.** `MAX_SEQUENCE = 16`, deliberately set to match `MAX_COMPONENTS` —
+they are inverses of each other, and a font that decomposes one glyph into more
+than sixteen is malformed rather than ambitious. Exactly the cap is still
+allowed: the bound is on absurdity, not on a font sitting at the limit.
+
+**What is still out.** Type 3 (Alternate) and `locl`, both for the reasons in
+§406, and types 5/6 (contextual/chaining), which the ordered lookup list now
+makes implementable and which `clig`/`calt` need.
+
+**Where it lives.** `gsub::{apply_multiple, sequence_at, MAX_SEQUENCE}` in
+`gui/font/src/gsub.rs`; `ShapedRun::{group_end, group_start, span_width, x_of,
+fit_end, offset_at}` and the `ShapedGlyph::cluster` doc in
+`gui/font/src/shape.rs`; the host tests `installed_fonts_leave_a_tab_alone` and
+`shaped_runs_agree_with_their_strings_about_boundaries` in
+`gui/font/tests/host_fonts.rs`.
+
+## §408 — A lookup type is a rule about one position; the pass belongs to a shared driver (GSUB 5/6)
+
+**Date:** 2026-08-14
+**Decided by:** Claude (autonomous)
+
+### Context
+
+GSUB lookup types 5 (contextual) and 6 (chained contextual) do not
+substitute anything themselves. They match a pattern and then say "run
+lookup 12 at input glyph 0, then lookup 7 at input glyph 2." The lookups
+they name are named *by index into the font's LookupList* — not by
+feature, not by anything a feature walk would have found. That is exactly
+how a font hides a helper lookup that only makes sense inside one
+context.
+
+Until now every lookup type in `gsub.rs` owned its own loop over the run:
+`apply_single` walked the buffer, `apply_ligature` walked the buffer, and
+so on. Types 5/6 cannot be written that way, because what they need is to
+apply some *other* lookup at one position.
+
+### Decision
+
+Invert it. Each lookup type became a function that answers one question —
+"what, if anything, do you do at position `i`, and how far does that
+carry the cursor?" — and a single shared driver (`apply_lookup`) turns
+any such rule into a pass over the run. `apply_at` dispatches on the
+type.
+
+Consequences that fall out of the shape rather than being decided
+separately:
+
+- **Termination is structural.** The driver resumes past what a match
+  produced, so a lookup is never offered its own output. A font whose
+  ligature is also its own input, or whose Multiple Substitution
+  decomposes a glyph to itself, cannot loop. Because this lives in the
+  driver, no lookup type can forget it — which is the real argument for
+  the refactor, over and above types 5/6 needing it.
+- **Recursion is bounded explicitly**, by `MAX_NESTING = 6` carried in
+  `Ctx`, since a font may have lookup 5 invoke lookup 6 invoke lookup 5.
+
+### The hard part: nested position bookkeeping
+
+A `SequenceLookupRecord` names a glyph of the input *as it was matched*.
+But the lookup it invokes may grow the run (Multiple Substitution) or
+shrink it (Ligature), and a later record in the same list still refers to
+the original numbering. Tracking a single offset is not enough, because a
+ligature does not just shift later glyphs left — it *swallows* some of
+them, and a later record must not silently slide onto a glyph the context
+never matched.
+
+So positions are a `Vec<Option<usize>>`, one entry per matched input
+glyph. Growth shifts later entries right. Shrinkage shifts them left
+*and* sets the swallowed ones to `None`, and a record naming a `None`
+position is skipped. `None` is "this glyph no longer exists," which is a
+different fact from "this glyph moved," and conflating them is the bug
+this representation exists to prevent.
+
+### Alternatives considered
+
+- **Whole-run passes only, with types 5/6 re-entering `apply_lookup`.**
+  Rejected: a nested lookup must apply at *one* position, not everywhere.
+  Re-running a lookup across the whole run would apply it to text the
+  context never matched.
+- **Re-matching the context after each nested lookup**, instead of
+  tracking positions. Simpler to write, but quadratic, and it changes
+  meaning: the spec matches the context once and then edits it.
+- **Decoding the whole LookupList up front** so nested lookups are a
+  table index. Rejected: most of it is never reached by a given run, and
+  re-reading a lookup header on invocation is a handful of offsets.
+
+### Format details worth recording
+
+- Format 1 rules name glyph ids, format 2 rules name *classes*. It is one
+  rule layout read two ways, which is why they share the `By` enum. This
+  bit us in testing: a rule written `&[11]` (a glyph id) in a format-2
+  context is a class number, and matched the wrong thing.
+- Chained format 2 has **three separate ClassDefs**. A glyph may be one
+  class as lookahead and another as input. Reusing one ClassDef for all
+  three would be wrong on real fonts.
+- Backtrack is stored **closest-glyph-first**: entry 0 is the glyph
+  immediately before the input, not the leftmost of the context.
+- A null (zero) offset means "absent" everywhere in OpenType. Following
+  one lands back on the subtable's own header, where a format number
+  would be read as a coverage format and match plausible-looking
+  garbage. `sub_offset` refuses null for this reason.
+
+### `clig` and `calt` are on by default
+
+Both are `On by default` in the OpenType spec, and `calt` in particular
+is what makes many faces look right rather than merely legible. Turning
+them on changed shaping on 292 of the installed faces, so it is a real
+behaviour change, not a formality.
+
+It immediately broke `installed_fonts_ligate_fi`, which demanded that a
+pair that does not ligate come back as *the same two glyphs*. Cambria
+resolves the `f`+`i` collision contextually instead — a `calt` swaps in a
+short-hooked `f` and leaves two glyphs. HarfBuzz produces the identical
+`[976, 139]`, so our answer was right and the test's assumption was
+stale. The test now checks length, clusters and glyph range, and counts
+the faces taking the contextual route.
+
+### Where this lives
+
+`gui/font/src/gsub.rs` (`Ctx`, `apply_lookup`, `apply_at`,
+`apply_nested`, `context_match`, `chain_match`, `By`, `Nested`);
+`otl::{lookup_list, lookup_at}` in `gui/font/src/otl.rs`;
+`installed_fonts_ligate_fi` in `gui/font/tests/host_fonts.rs`.
+
+## §409 — Shape every installed face against HarfBuzz, and set limits from what that measures
+
+**Date:** 2026-08-14
+**Decided by:** Claude (autonomous)
+
+### Context
+
+Our GSUB implementation had 222 unit tests, mutation-tested guards, and
+13 host-font tests over 556 real faces. All green. It was also silently
+dropping most of the lookups in 61 of the 365 installed faces that have a
+`GSUB`.
+
+The unit tests could not catch it because they build their own fonts, and
+a font written to test a feature has exactly the lookups that feature
+needs. The host tests could not catch it because *returning the input
+unchanged is a legal answer*: a face with no ligature for `fi` correctly
+gives back two glyphs, so "gave back two glyphs" cannot distinguish a
+face that has no ligature from a face whose ligature we failed to reach.
+Every assertion we had was consistent with the bug.
+
+### Decision
+
+Use HarfBuzz as an independent oracle: shape a fixed corpus through every
+installed face with both implementations and compare glyph ids. This
+meant installing `uharfbuzz` on the development host.
+
+Result over 556 faces and 13 strings: **6426 agree, 324 differ**, and the
+324 fall into exactly three classes, of which one was ours:
+
+- **288 — `e` + U+0301.** HarfBuzz runs its own Unicode normalizer
+  (`hb-ot-shape-normalize`) before GSUB and composes the pair to a single
+  precomposed glyph. That is not GSUB and not a fault in our tables; it
+  is a genuine missing stage, now the next shaping item on the roadmap.
+- **33 — Amiri and FiraCode** losing Latin ligatures and contextual
+  alternates entirely. A real bug: see below.
+- **3 — Calibri `1/2`.** A one-glyph disagreement in fraction handling,
+  logged in `known-issues.md` rather than guessed at.
+
+### The bug it found, and the rule it produced
+
+`otl::MAX_SUBTABLES` was 64, shared across every lookup a face's features
+reach, and its doc comment justified that as "real fonts use single
+digits; the largest seen on the development host is 4." That number was
+per *lookup*. Summed across the lookups our features reach, 61 installed
+faces exceed 64 and the worst declares 1874.
+
+Amiri lists its large Arabic feature set before its Latin `liga`, so the
+budget was exhausted before the ligature lookup was reached and `office`
+came back as six separate glyphs. FiraCode never reached the `calt` that
+shortens `f` before `i`.
+
+The cap itself is kept — the cost of a shape is the run length times this
+number, so a hostile font must not be able to set it — but the value is
+now measured and the measurement is recorded beside it:
+
+| measure | worst face | count |
+|---|---|---|
+| subtables in one lookup | SansSerifCollection | 675 |
+| lookups reached | SansSerifCollection | 256 |
+| subtables in total | SansSerifCollection | 1874 |
+| runner-up total | JetBrains Mono | 768 |
+
+8192 is a little over four times the worst real face. Exceeding it still
+shapes with the lookups found rather than rejecting the font: a slightly
+wrong ligature is a better failure than a blank page.
+
+**The general rule this establishes: a limit whose justification is a
+glance is a bug waiting to happen, and the failure mode of a limit set
+too low is silence.** Any budget, cap or depth in this crate should carry
+the measurement that set it, so the next person to touch it knows what it
+protects against and what it must clear.
+
+### Alternatives considered
+
+- **Derive the budget from the table's byte length** (a subtable offset
+  costs two bytes, so the count is bounded by `len/2`). Attractive
+  because it cannot be outgrown, but it makes the worst case scale with
+  font size, which is precisely what the cap exists to stop.
+- **Reject a face that exceeds the budget.** Rejected: a face that is
+  merely large is not hostile, and a missing font is a worse
+  user-visible failure than a missing ligature.
+- **Commit the HarfBuzz comparison as a test.** Rejected for now: it
+  needs Python and `uharfbuzz` on the host, which the Rust test suite
+  cannot assume. What is committed instead is
+  `installed_fonts_reach_lookups_past_the_subtable_budget`, which names
+  specific faces whose answers are known to live deep. The choice of
+  faces is the content of that test: JetBrains Mono declares more
+  subtables than FiraCode and is deliberately *not* listed, because
+  HarfBuzz shapes its `fi` unchanged too — a deep face only makes a
+  witness when something deep applies to it.
+
+### Where this lives
+
+`MAX_SUBTABLES` and its measurement table in `gui/font/src/otl.rs`;
+`installed_fonts_reach_lookups_past_the_subtable_budget` in
+`gui/font/tests/host_fonts.rs`.
+
+## §410 — Normalize to NFC before shaping, as a layer that knows nothing about the font
+
+**Date:** 2026-08-14
+**Decided by:** Claude (autonomous)
+
+Shaping used to ask `cmap` for exactly the characters the caller typed. So
+`"e"` followed by U+0301 COMBINING ACUTE missed the precomposed `é` glyph that
+288 of the 556 installed faces carry, and drew a bare `e` with a mark floated
+over it by GPOS where every other shaper draws one letter. The fix is a
+normalization stage in front of `cmap`. The decisions worth recording are not
+*whether* to normalize but how it is split and where it deliberately differs
+from HarfBuzz.
+
+### NFC, not NFD, and not NFKC
+
+NFC because fonts are built for it: a face that has `é` at all has it as one
+glyph, and its kerning and ligature rules name that glyph. NFD would decompose
+into pieces the font's own tables never mention, and would then rely on mark
+positioning to reassemble what the font already had. NFKC is simply the wrong
+form for rendering — it replaces a superscript with a digit and `ﬁ` with `f`
+`i`, which is a change to what the text *says*. The generator skips every
+decomposition carrying a `<...>` tag for that reason.
+
+### Two layers: what the text is, then what the face can show
+
+`nfc()` is pure Unicode and never sees a font. `fit_to_face()` then takes a
+character back apart when the face cannot draw it. The alternative — one pass
+that composes only when the font has the composed glyph — is smaller, faster
+and is what HarfBuzz does, and it was rejected.
+
+The reason is that composability depends on context. Whether `a` and `b` join
+depends on the marks between them, so a font-dependent compose gives
+canonically equivalent spellings different answers. This is observable in
+HarfBuzz on an ordinary Windows font: Agency FB has `ç` and `é` but no
+combining acute, and HarfBuzz renders `c` + U+0327 + U+0301 as `ç` plus a
+missing-glyph box while rendering the identical text spelled U+1E09 as a
+single box. Canonical equivalence means those are the same string; a renderer
+that draws them differently is wrong, and no amount of care in the caller can
+work around it.
+
+The cost is a second pass over the pieces. It is guarded: `fit_to_face`
+returns immediately when the face has everything, which is the common case,
+and `needs_work` skips `nfc` entirely for text that cannot change — all ASCII,
+and nearly all Latin.
+
+**Pro (chosen):** one answer per string, independent of spelling; the Unicode
+half is testable against the UCD with no font in the picture; the font half is
+testable with a closure and no font file.
+**Con:** two passes rather than one, and a rule (below) about partial fits
+that a font-dependent compose gets for free.
+
+### Splitting is decided by the base, and the marks ride along
+
+When a face cannot draw a composed character, `fit_to_face` replaces it with
+its pieces only if the face can draw what the decomposition chain bottoms out
+at. Marks are emitted whether or not the face has them.
+
+Both halves were chosen from measurements against HarfBuzz over all 556
+installed faces, and each half fixes a different failure:
+
+* **Requiring the base.** A face with no `가` also has no `ᄀ` and no `ᅡ`.
+  Splitting there turns one missing-glyph box into two — one more wrong thing
+  on screen, and one more caret stop than the text has characters. 553 of 556
+  faces disagreed with us on this before the rule existed.
+* **Not requiring the marks.** A face with `ç` but no combining acute should
+  still draw the `ç`. The base carries nearly all the meaning; a missing accent
+  costs an accent, whereas refusing to split costs the letter too. 263 faces
+  disagreed before this half.
+
+### A mark takes its base's cluster
+
+A combining mark is charged to the cluster of the character it attaches to,
+not to its own byte offset. This is partly forced — canonical ordering moves
+marks around, and clusters must not decrease along a run — and partly a
+choice: a caret must not be able to land between a letter and its accent.
+
+**Pro:** the caret moves over `é` as one thing however it is spelled, which is
+what a text field wants and what a grapheme-aware editor would have had to
+impose anyway.
+**Con:** a mark is no longer individually addressable, so an editor that wants
+to delete just the accent cannot use cluster boundaries to find it and must
+consult the string.
+
+### Deliberate divergences from HarfBuzz, and why they are not bugs
+
+After this change the corpus sweep leaves three classes of disagreement. All
+three are cases where HarfBuzz is font-dependent and we are not, and none is
+tracked as a defect:
+
+1. **Jamo runs (553 faces).** `ᄀ ᅡ ᆨ` is canonically `각`, and we compose it.
+   HarfBuzz's Hangul shaper composes only when the font has the syllable, so on
+   a face with no Hangul it emits three boxes where we emit one. One box for
+   one character is the honest report of what NFC says the text is.
+2. **Singletons (57 faces).** U+212B ANGSTROM SIGN is canonically U+00C5, and
+   we fold it. HarfBuzz keeps U+212B when the face has a glyph for it. Ours is
+   what the standard says; the two glyphs are the same shape in practice.
+3. **Partial fits (27 faces).** The HarfBuzz self-inconsistency described
+   above. We give both spellings the same answer, which is the point.
+
+**Code:** `gui/font/src/norm.rs`, `gui/font/tools/gen_norm_tables.py`,
+`gui/font/src/norm_tables.rs` (generated); wired in `ScaledFont::shape` in
+`gui/font/src/scaled.rs`.
+
+---
+
+## §411 — Choose `GSUB` features by the run's script; decode them once per face
+
+**Date:** 2026-08-14
+**Decided by:** Claude (autonomous)
+
+An OpenType feature tag is not unique. A face that supports both Arabic and
+Latin registers a `liga` for each, filed under different ScriptRecords, and
+they mean entirely different things. The walk in `otl.rs` used to start at the
+FeatureList and take every feature carrying a wanted tag, so both applied to
+every run. That is not a theoretical hazard — it was two live bugs on a stock
+Windows host, and the second one had been mis-filed as a font quirk:
+
+* `calibri.ttf` shaped `1/2` as `[1005, 877, 1006]` where every other shaper
+  gives `[1005, 876, 1006]`. Lookup 92 is reached only by `calt` and `rclt`
+  registered under `arab`; it rewrote the slash of a Latin string.
+  (`B-FONT-CALIBRI-SHAPES-A-FRACTION-SLASH-DIFFERENTLY-FROM-HARFBUZZ`.)
+* `ebrima.ttf` substituted the *space* glyph in plain English prose from a
+  `ccmp` belonging to one of the African scripts it covers.
+  (`TD-GSUB-APPLIES-EVERY-SCRIPTS-FEATURES`.)
+
+### Selection is per run; decoding is per face
+
+The obvious implementation walks the ScriptList at shaping time. It was
+measured and rejected: the worst face installed here re-reads 1874 subtable
+offsets to answer one string, and `ScaledFont::shape` is on a
+per-label-per-frame path. The obvious alternative — decode once per script and
+keep a table per script — duplicates every lookup a face shares between
+scripts, which on a pan-Unicode face is nearly all of them.
+
+`ByScript` does neither. It resolves every script the face registers up front,
+takes the *union* of their lookup indices, sorts and dedups it, and decodes
+that list once. Each script then keeps only positions into the shared vector.
+Selecting at shaping time is a binary search on a 4-byte tag.
+
+Sorting the union is not incidental. Lookups must be applied in LookupList
+order — that ordering is the whole mechanism by which `ccmp` runs before the
+ligatures that depend on it — and decoding in sorted index order is what makes
+each script's stored positions ascending, which is what makes "iterate the
+positions in order" the correct application order rather than a coincidence.
+
+**Pro:** one decode per face, no duplication, O(log n) selection, and the
+ordering invariant falls out of the data layout instead of being asserted.
+**Con:** a face's lookups are decoded even for scripts the user never types,
+so the parse cost is the union rather than the subset. That cost is paid once
+at face load and is bounded by `MAX_SUBTABLES`; the shaping path — the one
+that runs per label per frame — pays nothing for it.
+
+The subtable budget (`MAX_SUBTABLES`) is shared across the union rather than
+per script. A per-script budget was tried first and is wrong twice over: it
+multiplies the worst-case work by the script count, which is exactly what the
+budget exists to bound, and it makes the answer for a Latin run depend on how
+many other writing systems the face happens to cover.
+
+### The fallback chain belongs to the run, not to the font
+
+A run asks for its script, then that script's older OpenType spelling
+(`dev2` → `deva`), then `DFLT`, then `dflt`. `DFLT` is the registered tag;
+`dflt` is a misspelling real fonts ship and every shaper accepts. Text with no
+script of its own — `"123 456"` — starts at `DFLT`, which is what HarfBuzz does
+with a `Common` buffer.
+
+The chain is applied when a *run* looks a script up. It is deliberately not
+applied when `ByScript::parse` indexes the font, where each script is filed
+under its own tag exactly: doing it there would file `DFLT`'s lookups under
+every script's name and make the fallback unobservable.
+
+### `GSUB` selects; `GPOS` does not
+
+The asymmetry is deliberate. `GSUB` rewrites glyph *identity*, so a
+wrong-script rule corrupts text. `GPOS` only moves glyphs, and every
+positioning subtable is gated on glyph coverage, so a face's Arabic `kern`
+simply does not cover Latin glyphs. `GPOS` is also reached through
+`ScaledFont::kern(left, right)` — a public API that is handed a glyph pair with
+no run behind it and therefore has no script to select with. It keeps the
+union over all scripts through `feature_subtables`, tracked as
+`TD-GPOS-APPLIES-EVERY-SCRIPTS-FEATURES`.
+
+**Pro:** fixes the whole class of bug where it can corrupt text, without
+inventing a script for a two-glyph positioning query.
+**Con:** the two halves of the same table walk now answer differently, which is
+a thing a reader has to be told rather than infer. Hence this section and the
+note in `otl.rs`'s module doc.
+
+### Reading `locl` became safe, and was overdue
+
+`locl` is on by default in every shaper. This crate skipped it on the grounds
+that it is language-specific and applying it blind would hand a reader some
+other locale's letterforms. Under the old script-blind walk that was right. It
+is no longer: only DefaultLangSys is read, so what `locl` yields is the face's
+*default* localization — precisely what a shaper applies when the caller names
+no language.
+
+Skipping it was visible. `SansSerifCollection.ttf` maps `space` through its
+Latin `locl`, so every space in every Latin string came out as the wrong glyph
+on that face. Adding the tag fixed four of the five strings it disagreed with
+HarfBuzz about.
+
+### What the oracle says now
+
+556 faces x 18 strings: 9066 agree, 942 differ, and every differing string is
+accounted for:
+
+| Count | String | Why |
+|---|---|---|
+| 553 | `각` | §410 class 1, jamo composition |
+| 255 | `ḉ` | §410 class 3, HarfBuzz's own spelling-dependence |
+| 57 | `Å` | §410 class 2, singleton folding |
+| 44 | `العربية` | no Arabic joining shaper yet — fixed in §412, where these 44 move to `reversed` (identical glyphs, RTL order) |
+| 27 | `été`, `e◌́te◌́`, `c◌̧◌́` | §410 class 3 |
+| 5 | `हिन्दी` | no Indic reordering shaper yet |
+| 1 | `hello שלום world` | we itemize the string, HarfBuzz guesses one script for it |
+
+The last row is the change working. HarfBuzz's `guess_segment_properties`
+assigns one script to the whole buffer, so it applies Latin's `locl` to the
+space between the Hebrew and the English. We give that space to the Hebrew run,
+which is what UAX #24 says and what any real itemizer does.
+
+**Code:** `gui/font/src/script.rs`, `gui/font/src/script_tables.rs`
+(generated by `gui/font/tools/gen_script_tables.py`), `ByScript` in
+`gui/font/src/otl.rs`, `Substitutions` in `gui/font/src/gsub.rs`,
+`ScaledFont::substitute_runs` in `gui/font/src/scaled.rs`. Checked by
+`gui/font/examples/shape_dump.rs` + `gui/font/tools/harfbuzz_sweep.py`.
+
+## §412 — A positional feature is gated by a per-glyph mask, not by its tag; and the mask belongs to the (script, lookup) pair
+
+**Date:** 2026-08-14
+**Decided by:** Claude (autonomous)
+
+### The problem
+
+A face reaches Arabic's four positional forms through the features `isol`,
+`init`, `medi` and `fina`. Those are ordinary GSUB type-1 lookups. Their
+coverage, in every real face, is *every Arabic letter the face has* — that is
+what makes them useful: give `fina` any letter and it hands back that letter's
+final form.
+
+That makes them unlike every feature the shaper had handled before. `liga` is
+unconditional: if it matches, it applies, and asking "should this glyph be
+eligible for `liga`?" has the answer "yes, always". `fina` is conditional on
+something the lookup itself cannot express — whether *this* letter, in *this*
+word, happens to be at the end of a join. Selecting `fina` by tag and running
+it the way `liga` is run rewrites an entire word into final forms.
+
+So the shaper's model — "a feature is a set of lookups; run them in order" —
+is not expressive enough. It needs a second input: which glyphs each lookup is
+allowed to touch.
+
+### The decision
+
+Three parts.
+
+**1. A per-glyph mask, intersected with a per-lookup mask.** Each feature tag
+in the shaper's list is assigned a bit. A lookup's mask is the union of the
+bits of the tags that selected it. A glyph's mask is the seven unconditional
+bits, plus at most one positional bit chosen by the joining pass. A lookup is
+applied at a position only when `glyph.mask & lookup.mask != 0`.
+
+This is HarfBuzz's design and it was adopted deliberately rather than
+reinvented. The alternative considered was a per-glyph *feature set* — carry
+the list of tags each glyph is eligible for and test membership. It is more
+obvious to read and strictly worse to run: shaping is a nest of two loops over
+lookups and positions, so the eligibility test is the innermost operation in
+the crate. One `and` against a `u32` is the right cost for it. The mask's
+limit is 32 features, and the shaper's list has 11.
+
+**2. The mask belongs to the (script, lookup) pair, not to the lookup.** This
+is the part that is easy to get wrong. Faces share lookups between features —
+one lookup can be reached by Latin's `liga` and by Arabic's `fina`. If masks
+were folded per lookup across the whole font, that lookup's mask would carry
+the `liga` bit, and `liga` is always on in every glyph's mask, so the
+positional gate would be defeated for every glyph in the run. `ByScript` in
+`otl.rs` therefore stores `Vec<([u8; 4], Vec<(u16, u32)>)>` — per script, the
+lookups it selects, each with the mask *for that script* — and folding
+duplicates happens only within one script's selection.
+
+**3. Alternate substitution resolves to the first alternate.** GSUB type 3
+offers a list of candidates and expects the caller to pick one by feature
+value. OpenType numbers alternates from 1 and a boolean feature that is on has
+value 1, which selects `alternates[0]`. This is not a guess: HarfBuzz reaches
+the same answer by packing the feature's value into the glyph mask and
+indexing with it, which for an on-by-default feature is exactly 1. Type 3 had
+to be implemented at all because Microsoft Uighur and its relatives write
+their `init`/`medi`/`fina` as type 3 rather than type 1. A user-facing
+alternate picker (`salt`, `ss01`…`ss20`, `aalt`) would need the value to be
+plumbed through as data rather than assumed; that is not built.
+
+Note that `AlternateSubstFormat1` and `MultipleSubstFormat1` are byte-for-byte
+identical. Only the lookup type distinguishes "this glyph becomes these three
+glyphs" from "this glyph becomes the first of these three candidates". The
+dispatcher must therefore trust the declared type and never sniff the
+subtable; a test (`a_subtable_is_read_as_the_type_its_lookup_declares`) pins
+that.
+
+### What was rejected
+
+**A dedicated Arabic pass that rewrites glyph IDs directly**, consulting
+`cmap` for each form, bypassing GSUB. This is how a naive shaper does it and
+it cannot work: the four forms are not required to be at any predictable
+place, faces disagree about which letters have which forms, and a face is
+entitled to reach a form through a contextual lookup rather than a simple
+substitution. The face's own lookups are the only correct source. The joining
+pass's job is to say *which* feature applies where and then get out of the
+way.
+
+**Checking the mask at every matched position.** HarfBuzz tests the mask at
+each component of a ligature and each glyph of a context's input. We test only
+at the applied position. This is a real narrowness and it is filed as
+`TD-FONT-CHECKS-FEATURE-MASKS-ONLY-AT-THE-APPLIED-POSITION`; it was left
+because the check wants to live in the same skipping iterator that lookup
+flags need, and building it twice is worse than building it once.
+
+### The joining rule itself
+
+A character joins to a neighbour only when *both* are willing, and the
+neighbour is the nearest one that is not `Transparent` — so a combining mark
+between two letters never breaks the join. "Before" and "after" are logical
+order, not visual: this runs before any reordering, and reasoning about it in
+visual order is how RTL shapers get written backwards. Join-causing (ZWJ) is
+excluded from `shapes()` on purpose — it makes its neighbours join but has no
+glyph of its own to put a form on.
+
+`joining::forms` early-outs when no character in the run has a joining type
+that shapes, so Latin pays one table lookup per character and nothing else.
+
+### What the oracle says now
+
+556 faces x 18 strings, against HarfBuzz:
+
+| | before | after |
+|---|---|---|
+| agree | 9066 | 9023 |
+| reversed (same glyphs, RTL order) | — | 44 |
+| differ | 942 | 941 |
+
+All 44 Arabic-capable faces moved from `differ` to `reversed`: the glyphs are
+identical and only the order differs, because HarfBuzz reverses an RTL buffer
+for the caller and we do not reorder at all
+(`TD-FONT-DOES-NOT-REORDER-RIGHT-TO-LEFT-TEXT`). `Amiri-Bold.ttf` gives
+`[55, 1700, 1428, 1745, 3113, 2420, 1633]` against HarfBuzz's
+`[1633, 2420, 3113, 1745, 1428, 1700, 55]`. The sweep was taught to classify
+that case separately for exactly this reason — burying it in `differ` would
+have hidden the fact that the shaping agrees perfectly, which for Arabic is
+the whole question.
+
+The remaining 941 are the three deliberate normalization divergences of §410
+(553 + 255 + 57 + 27), 43 mixed-script Arabic where HarfBuzz's whole-buffer
+script guess is *less* correct than our itemizer, 5 Devanagari with no USE
+shaper, and 1 Hebrew in SansSerifCollection.
+
+**Code:** `gui/font/src/joining.rs`, `gui/font/src/joining_tables.rs`
+(generated by `gui/font/tools/gen_joining_tables.py` from Unicode 16.0.0),
+`ByScript::lookup_indices` and `for_script` in `gui/font/src/otl.rs`,
+`FEATURES`/`form_mask`/`apply_lookup`/`apply_alternate` in
+`gui/font/src/gsub.rs`, `ScaledFont::shape` in `gui/font/src/scaled.rs`.
+Checked by `installed_fonts_join_arabic_letters` in
+`gui/font/tests/host_fonts.rs` and by `gui/font/tools/harfbuzz_sweep.py`.
+
+## §413 — One skipping iterator for every matcher: skipping is not the same as not matching, and the feature mask gates the input only
+
+**Date:** 2026-08-14
+**Decided by:** Claude (autonomous)
+
+**Context.** Every GSUB lookup carries a `lookupFlag` naming glyph classes it
+is not allowed to see — `IgnoreBaseGlyphs`, `IgnoreLigatures`, `IgnoreMarks`,
+a mark-attachment class, or an explicit `MarkGlyphSet`. We parsed the field
+and ignored it. Separately, §412 added a per-glyph feature mask but tested it
+only at the position a lookup was applied to. Both are the same question —
+"may this matcher consider this glyph?" — asked at every position every
+matcher steps to, and `gsub.rs` had eight or so places that stepped with
+`i + 1`.
+
+**Decision.** A single `Skipper` (`gui/font/src/skip.rs`), built once per
+lookup from the flag, the `markFilteringSet` index, the `GDEF` class
+definitions and the lookup's feature mask. It exposes `next` / `prev` /
+`at_or_after` / `considers` and the two counted walks `walk_forward` /
+`walk_backward`. Every matcher in `gsub.rs` — the driver loop, the ligature
+component walk, and the backtrack/input/lookahead walks of types 5 and 6 —
+goes through it. This is the same shape as HarfBuzz's
+`hb_ot_apply_context_t::skipping_iterator_t`, for the same reason: honouring
+the flag in one matcher and not the others produces output that is harder to
+debug than uniformly ignoring it.
+
+**Three things the design had to get right.**
+
+*Skipping is not the same as not matching.* A glyph the flag excludes is
+**stepped over** and the match continues — that is precisely what lets an
+`fi` ligature form across a fatha. A glyph the *feature mask* excludes is a
+**non-match** and the walk stops. Conflating them in either direction is a
+real bug: treat a skip as a stop and `IgnoreMarks` does nothing; treat a
+non-match as a skip and a `fina` ligature forms across a letter that is not
+in final form. So `skips()` continues the loop and `eligible()` returns
+`None`.
+
+*The mask gates the input only.* `Skipper::context()` returns the same
+iterator with an all-ones mask, and the backtrack and lookahead walks use it.
+A neighbour is a neighbour whatever feature reached the rule; gating context
+on the mask made every chaining `fina` rule fail whenever its lookahead was a
+medial letter. HarfBuzz draws the same line — `iter_input` carries
+`c->lookup_mask`, `iter_context` does not.
+
+*The mask does not change on recursion; the flag does.* A contextual rule
+reached by `fina` is still a `fina` rule when it invokes a helper, so `Ctx`
+keeps the mask across the nested call — but the nested lookup's own flag is
+what the nested `Skipper` is built from.
+
+**Alternatives rejected.**
+
+- *A check inside each matcher.* Eight copies of the same predicate, which is
+  how a shaper ends up honouring the flag in three matchers and not the other
+  five. Rejected on the same grounds the entry it replaces was filed:
+  partial support is worse than none.
+- *Repositioning the skipped marks after a ligature, as HarfBuzz does.* When
+  `f` mark `i` becomes `fi`, HarfBuzz moves the mark to sit after the whole
+  ligature and rewrites its attachment component. We leave the mark where the
+  run had it, which for the two-component case is already after the ligature
+  glyph and therefore identical. It diverges only for a mark between
+  components three and four of a four-component ligature, which no face in
+  the 556-face sweep exercises. Filed rather than guessed at, because getting
+  it wrong moves diacritics onto the wrong letter — a visible corruption —
+  and the correct behaviour needs GPOS 5 (mark-to-ligature) to be meaningful
+  anyway.
+- *Honouring the flag in GPOS at the same time.* `kern.rs` and `mark.rs`
+  reach their subtables through `otl::feature_subtables`, which returns a
+  flat list of subtable offsets and has already thrown the `Lookup` away.
+  Threading a `Skipper` there means changing that function's return type and
+  both callers, which is a separate change with a separate blast radius. Left
+  open in `TD-FONT-IGNORES-GSUB-LOOKUP-FLAGS`.
+
+**What it is checked by.** Twelve unit tests in `skip.rs` covering each flag
+bit, a `GDEF` too old to have mark glyph sets, an ineligible glyph stopping a
+walk, and a walk that runs out of run. Six end-to-end tests in `gsub.rs` —
+built on `gsub_flagged` / `gsub_lookups_flagged` / `gdef`, added because
+every other GSUB test builder writes a zero flag and so exercised the skipper
+only in its do-nothing configuration — proving that `IgnoreMarks` forms a
+ligature across a mark and keeps the mark, that it still stops at a non-mark,
+that the flag hides nothing when the face ships no `GDEF`, that a mark
+filtering set hides every mark it does *not* name, and that a chaining rule
+skips marks in its backtrack. Measured end to end by the sweep: the corpus
+gained a fully vowelled Arabic string, which 8 of the 556 host faces shaped
+wrongly before this change (949 differ / 36 reversed) and none do after
+(941 / 44).
+
+**Where.** `gui/font/src/skip.rs` (new), `Lookup::flag` / `Lookup::filter` and
+`read_lookup` in `gui/font/src/otl.rs`, `Substitutions::parse` / `Ctx` /
+`apply_lookup` / `apply_ligature` / `Matched` / the `forward`/`backward`
+walkers in `gui/font/src/gsub.rs`, the `Substitutions::parse` call in
+`gui/font/src/sfnt.rs`.
+
+## §414 — Kerning reads across a mark by being told what stood between the pair, not by becoming run-aware
+
+**Date:** 2026-08-14
+**Decided by:** Claude (autonomous)
+
+**Context.** §413 gave GSUB a skipping iterator, but GPOS was left alone.
+Kerning was the half that measurably mattered: real faces flag their `kern`
+lookups `IgnoreMarks` precisely so that `A` and `V` keep kerning with an
+accent between them, and this engine walked the run strictly in order and
+could not skip. `scaled.rs` carried a comment apologising for it — pairs
+separated by a mark simply went unkerned, so every accented word measured one
+kern wider than the face asked for. On this host that is 82 of the 139 faces
+that kern `(T,o)`.
+
+The awkwardness is that kerning is not shaped like substitution. `GSUB` walks
+a run and can hold an iterator over it; `Face::kern(left, right)` is a
+*pair-at-a-time* query with no run behind it, called from the shaping loop
+once per adjacent pair. A pair-at-a-time API cannot skip anything, because it
+cannot see what it would be skipping.
+
+**The decision.** Give the query a third argument instead of a run:
+`kern_across(left, right, between)`, where `between` is the glyphs that stood
+between the pair in the caller's run. The caller says what was there; each
+lookup decides, from its own `lookupFlag`, whether it may read across it. A
+lookup is consulted only if it would have skipped *every* glyph in `between`.
+
+This required `Kerning` to stop flattening its subtables. `otl::feature_subtables`
+returns a flat `Vec<usize>` and throws the `Lookup` away with the flag on it;
+a new `otl::feature_lookups` returns the lookups whole, and `Kerning` keeps
+one `Group { flag, filter, subtables }` per lookup. The flat shape is still
+the right one for mark attachment, which asks a coverage-only question, so
+both functions stay.
+
+`scaled.rs` tracks the marks between the pair and charges the kern to the
+pair's *left* glyph rather than to whatever it pushed last, so the advances
+still sum to the run's width when the pair was read across a mark. Mark
+attachment already measures its offsets from the accumulated pen, so the
+accent lands on the letter regardless of the kern inserted after it.
+
+**Alternatives rejected.**
+
+*Make kerning run-aware, as `GSUB` is.* The honest shape: hand `Kerning` the
+whole run and let it hold a `Skipper`. Rejected because `Face::kern` is public
+API used by callers who genuinely do have only a pair (the host tests, the
+terminal's fixed-cell measurement), and because the shaping loop already
+walks the run once — a second walk inside `Kerning` would have to re-derive
+the tab and script boundaries the loop already knows about. `between` carries
+exactly the information the flag needs and nothing else.
+
+*Skip marks unconditionally, since nearly every `kern` lookup is `IgnoreMarks`
+anyway.* This is the tempting shortcut and it is wrong on real faces:
+DejaVuSans and Verdana both ship `PairPos` lookups with flag 0, and HarfBuzz
+accordingly widens `T`+acute+`o` by their full kern (348 and 220 units). An
+engine that always skipped would disagree with both. The flag has to be read.
+
+*Honour the flag in `mark.rs` at the same time.* Deferred, and recorded as
+still-open in `known-issues.md`. `scaled.rs` already picks a mark's base by
+walking back past marks, which is what `IgnoreMarks` would have said, so the
+change would be a no-op today. It becomes real with GPOS 5
+(mark-to-ligature), where `IgnoreLigatures` and the mark-attachment class
+decide which component a mark lands on.
+
+*Apply the flag to the legacy `kern` table too.* The legacy table predates
+lookups and has no flags, so there is nothing to honour; it is parsed as one
+group with flag 0, which is also the historically correct reading — engines
+that used it kerned strictly adjacent glyphs.
+
+**What it is checked by.** Five unit tests in `kern.rs` (reads across one mark
+and across two; declines across a letter, and across a mark-then-letter; an
+unflagged lookup declines; a flag with no `GDEF` behind it names an empty set
+and so hides nothing; the legacy table kerns only adjacent glyphs), and the
+host test `a_mark_between_a_kerning_pair_costs_the_kern_only_if_the_flag_says_so`,
+which checks the whole thing at the level a caller sees it — `measure` of
+`T`+combining-acute+`o` against HarfBuzz's own answer on five installed faces,
+chosen so that three read across and two do not.
+
+**Where.** `feature_lookups` in `gui/font/src/otl.rs`; `Skipper::skips` made
+`pub(crate)` in `gui/font/src/skip.rs`; `Kerning` / `Group` / `parse` / `pair`
+in `gui/font/src/kern.rs`; `Face::kern_across` in `gui/font/src/sfnt.rs`; the
+`kern_left`/`between` shaping loop and `ScaledFont::kern_across` in
+`gui/font/src/scaled.rs`.
+
+## §415 — Bidi belongs inside the shaper: glyphs stay in logical order and carry a permutation beside them
+
+**Date:** 2026-08-14
+**Decided by:** Claude (autonomous)
+
+**Context.** `gui/font/src/bidi.rs` implements UAX #9 and passes all 91,707
+cases of Unicode's `BidiCharacterTest.txt`. Wiring it into `ScaledFont::shape`
+raised two questions that the conformance suite says nothing about: *where*
+the pass runs, and *what shape* its answer takes in `ShapedRun`.
+
+`known-issues.md` had already proposed an answer to the first —
+"the bidi pass belongs above the shaper, next to `script::runs`, and wants to
+be written once for the whole toolkit rather than hidden inside the font
+crate" — and implementing it showed that answer to be wrong.
+
+**The decision, part one: the levels are resolved inside `shape`.** Five
+things depend on the embedding levels, and three of them are shaping
+decisions that no layout stage above the shaper could make:
+
+* **Rule L4, mirroring.** `(` in a right-to-left run is drawn with the glyph
+  for `)`. That is a *character* substitution, so it has to happen before
+  `cmap` is consulted. A caller above the shaper can only mirror by editing
+  the string and shaping again.
+* **Run splitting.** `script::runs` now splits on level parity as well as on
+  script, because a ligature or a kern must not form across a direction
+  change. The run list is built inside `shape`.
+* **Kern re-charging** (part three below), which needs the glyph vector.
+* Reordering itself, and the caret queries — the two a layout stage *could*
+  have done.
+
+Three of five is decisive. Resolving levels above the shaper would mean
+passing them back down again for the other three, which is the same coupling
+with an extra interface.
+
+**The decision, part two: `ShapedRun` stores glyphs in logical order and
+carries a `visual: Vec<u32>` permutation.** The obvious alternative is to
+store them already reordered. It was rejected because logical order is what
+every existing query on the type is built on: `cluster` is documented
+non-decreasing along the run, `offset_at` binary-searches on it, `glyphs()` is
+zipped against the source text by two callers. Reordering the vector breaks
+all of that silently — the code still compiles, the clusters merely stop being
+sorted — and the fix would be to re-derive the logical order from the visual
+one, which is the same permutation kept in the other direction.
+
+So: `glyphs()` is logical and unchanged, `draw_order()` walks the permutation,
+and a renderer uses the latter and needs to know nothing else. The permutation
+is left **empty when it would be the identity**, which is the common case, so
+`draw_order()` on English text iterates the glyph slice directly with no
+indirection and `is_reordered()` is a length check.
+
+**The decision, part three: kerns are re-charged onto the new left glyph.**
+The shaping pass charges each pair's kern to the *logically*-first glyph,
+which is the left one in left-to-right text and the **right** one after
+reversal. Leaving it there puts the gap on the far side of the pair — an
+`AV` kern in a Hebrew run would tighten the space to the left of the `A`
+rather than between the two. `recharge_kerns` strips every kern, walks the
+pairs that are adjacent *in drawing order*, and gives each its kern back on
+the left-hand glyph. A pair that became adjacent only because of the reversal
+gets nothing, which is correct: those two glyphs were never a kerning pair,
+and HarfBuzz does not kern across a direction boundary either.
+
+Mark offsets needed no such treatment, which is worth recording because it
+looks like it should. `attach_marks` computes `offset.x = ... + (pen[base] -
+pen[mark])`, so the mark lands at `pen[base] + dx` whichever of the two is
+drawn first — provided the pens are accumulated in *drawing* order. Making
+that loop follow `visual` was the whole change.
+
+**The decision, part four: a fast path that never consults the class table.**
+`is_trivially_ltr` rejects a string with one numeric comparison per character:
+the lowest right-to-left code point in Unicode is U+0590, so anything below it
+cannot be strong-RTL and cannot be an explicit format character. Latin, Greek,
+Cyrillic, Han, Kana and Devanagari — that is to say, almost everything — leave
+`shape` having paid one scan, with no `resolve` call, no level vector, no
+permutation and no re-charging pass.
+
+**How it was checked.** `tools/harfbuzz_sweep.py` compares against HarfBuzz
+over every installed face; `examples/shape_dump.rs` prints *both* orders
+because HarfBuzz has no bidi in it and answers in whichever one its
+`guess_segment_properties` guessed. Across 556 faces × 19 strings the
+`reordered` bucket — same glyphs, different order — went from 44 to **0**.
+
+The sweep also learned to compare positions, in font units, which caught
+nothing about bidi and three things about everything else (all now filed in
+`known-issues.md`). It required one insight to be useful at all: the two
+engines charge a kern to different glyphs and *both are right*. HarfBuzz
+splits a legacy `kern` value, giving `k >> 1` to the left glyph's advance and
+the remainder to the right glyph's advance *and* offset; we put the whole
+correction on the left advance, because that is what makes a run's width the
+sum of its advances. Arial Rounded Bold shaping `Th` is the worked example:
+HarfBuzz says advances 1266, 1224 with the `h` offset -13, we say 1253, 1237
+with no offset, and every glyph lands on the same pixel. So the sweep compares
+accumulated *ink positions* and the total width, not raw advances.
+
+**Where.** `gui/font/src/scaled.rs` — `shape`, the `byte_levels` and
+`recharge_kerns` helpers, and the drawing-order pen loop in `attach_marks`;
+`gui/font/src/shape.rs` — `ShapedRun::visual`, `reordered`, `draw_order`,
+`is_reordered`; `gui/font/src/script.rs` — `runs`, which now takes levels;
+`gui/font/src/bidi.rs` — `visual_order`, `render_levels`, `is_trivially_ltr`;
+`gui/font/examples/shape_dump.rs` and `gui/font/tools/harfbuzz_sweep.py`.
+
+## §416 — Place a mark by measurement when the face has no `GPOS` at all, reimplementing HarfBuzz bug-for-bug, and refuse the scripts whose clusters need a shaper we do not have
+
+**Date:** 2026-08-14
+**Decided by:** Claude (autonomous)
+
+**Context.** `tools/harfbuzz_sweep.py` compares this crate against HarfBuzz
+over every installed face. Its `misplaced` bucket — same glyphs, different
+positions — stood at **559** of 10,564 runs, and roughly **489** of those were
+one failure: a combining mark drawn at the pen. `c` + U+0327 + U+0301 on a
+face with no `GPOS` put both accents in the gap *after* the letter, where they
+overprinted each other and the next glyph. 222 of the host's 556 installed
+faces have no `GPOS` table whatsoever; they were built when `é` was one
+character with one glyph and a bare U+0301 was somebody else's problem.
+
+Three decisions came out of fixing it.
+
+**Part one: the trigger is "no `GPOS` table", not "no `mark` feature".**
+The tempting rule is "if the font cannot tell me where this mark goes,
+measure". That is wrong, and a face on this machine proves it: Candara has a
+`GPOS` with kerning and no `mark` feature at all. HarfBuzz leaves its marks
+exactly where they fall, and so must we. The distinction is that a `GPOS`
+table is a *statement* — the designer opened the file, wrote down positioning
+rules, and did not write one for this mark. Overruling that is second-guessing
+a decision that was made. A missing `GPOS` is not a statement; it is the
+absence of one, and there is nothing to overrule. `Face::has_positioning`
+exists to carry exactly this distinction, separately from the three things
+this crate actually reads out of `GPOS` (`kern`, `mark`, `mkmk`).
+
+**Part two: reimplement HarfBuzz's arithmetic exactly, including its
+rounding.** `gui/font/src/fallback.rs` is a transcription of
+`hb-ot-shape-fallback.cc`: the `upem/16` gap, the truncating integer division
+in the centring, the two `if` branches that pull a mark back when the gap and
+the computed offset have the same sign, the growth of the base's box after
+each mark so a second accent clears the first. It would have been easy to
+"improve" any of these. Two reasons not to. The output is *checked* against
+HarfBuzz, so an improvement reads as a regression in the sweep and hides real
+divergence in the noise. And the numbers are not arbitrary taste — they are
+what a decade of complaints about specific fonts settled on, and this crate
+has no evidence to overrule them with. The arithmetic is done in font units
+as `i32` for the same reason: doing it in floats would round differently in
+the last unit and make an exact comparison impossible.
+
+The one deliberate divergence is that we do not implement HarfBuzz's
+*modified* combining classes, which permute Hebrew ccc 10–26 and Arabic 27–36
+so that marks sort into display order. We do implement the recategorization
+those classes feed — transposed to match on real Unicode classes, which is
+sound because the permutation is injective within each block — but not the
+re-sorting. Two Hebrew points in the wrong canonical order stack in the wrong
+order. Filed in `known-issues.md`.
+
+**Part three: the script gate, which is the part that was nearly got wrong.**
+The first working version ran the fallback on every script, and the sweep
+immediately caught a *new* failure: 33 Devanagari runs, where the virama's
+advance was zeroed and the glyph centred on the consonant before it.
+
+The available quick fix was to skip combining class 9 (virama). It would have
+made the sweep green. It would also have been a coincidence: HarfBuzz's actual
+rule is per-script, `hb_ot_shaper_t::fallback_position`, and it is `false` for
+the Indic, Khmer, Myanmar and USE shapers and for Thai/Lao — the whole
+Brahmic-and-relatives family, viramas and matras and nuktas alike, not one
+combining class out of it. Matching the symptom rather than the rule would
+have left the other classes wrong and put a band-aid where the reason belongs.
+
+So `fallback::positions_marks` gates on the run's OpenType script tag, against
+the script set of `hb_ot_shaper_categorize` in `hb-ot-shaper.hh` mapped
+through this crate's own tag table — 101 tags, binary-searched. The reason it
+is the right rule and not merely HarfBuzz's rule: in a Brahmic cluster the
+marks are not a stack of accents on one base. A virama is a *spacing* glyph
+that suppresses a vowel; a matra may be reordered to before the consonant it
+logically follows; which glyph a mark belongs to is the output of a reordering
+pass, not "the last non-mark to my left". Measuring a box and centring on it
+produces a confident wrong answer. Leaving the mark at its natural advance
+produces an obviously unshaped one, which is both more honest and, in
+practice, closer to legible.
+
+Getting the gate required hoisting `script::runs` out of the
+`if has_substitutions()` branch of `shape`, so it is now computed once and
+used by both the substitution pass and the placement pass. That is strictly
+better regardless: the two passes were always answering the same question.
+
+**One thing not copied.** HarfBuzz decides the shaper from the tag the *font*
+registers its features under, so a Devanagari-glyph face whose `GSUB` says
+only `DFLT` gets the default shaper and does get the fallback. We match on
+the tag the *character's script* maps to, unconditionally. Following
+HarfBuzz here would mean asking the font which scripts it declares before
+deciding how to place a mark — a coupling not worth having for the sake of
+faces that carry Devanagari glyphs, no `GPOS`, and no Devanagari `GSUB`
+script record. Filed in `known-issues.md`.
+
+**What it measured.** Over 556 faces × 19 strings the `misplaced` bucket fell
+from **559 to 98**, and the two largest contributors — `c` + cedilla + acute,
+and vowelled Arabic — vanished entirely. The 98 that remain are kerning-charge
+and `GPOS`-path divergences that predate this work. Unit tests went 320 → 336;
+`installed_fonts_without_gpos_still_place_combining_marks` checks the 22 host
+faces that have no `GPOS` and do draw a combining acute.
+
+**Where.** `gui/font/src/fallback.rs` (new); `gui/font/src/sfnt.rs` —
+`Face::has_positioning`, `Face::glyph_bbox`; `gui/font/src/gsub.rs` —
+`SubGlyph::klass`, which rides the attachment class through substitution
+because a `cluster` is shared by a base and its marks and a glyph id is
+changed by substitution; `gui/font/src/scaled.rs` — `synthesize_marks`, the
+`pens` helper factored out of `attach_marks`, and the hoisted `script::runs`;
+`gui/font/tests/host_fonts.rs`.
+
+## §417 — One `GPOS` pass over a segmentation shared with `GSUB`; and a `GPOS` kern is not moved when the run reverses
+
+**Date:** 2026-08-14
+**Decided by:** Claude (autonomous)
+
+**Context.** `GPOS` has eight lookup types. This crate read three of them, and
+read them in two places that each went to the table on their own:
+`gui/font/src/kern.rs` picked out the type-2 pair lookups and walked them, and
+`gui/font/src/mark.rs` picked out the type-4 and type-6 mark lookups and
+walked those. Types 1 (single adjustment) and 3 (cursive attachment) had no
+walker, so they were skipped entirely, which is what
+`TD-FONT-IGNORES-GPOS-SINGLE-AND-CURSIVE-ADJUSTMENTS` was filed on.
+
+The obvious increment — add a third standalone walker for types 1 and 3 —
+is wrong for a reason that is worth writing down, because it is the same
+reason §408 gave for `GSUB`. **A `GPOS` table is an ordered list of lookups,
+and the order is semantic.** A face routinely tunes one letter's fit with a
+type-1 adjustment and then kerns the tuned letter with a type-2 pair; run the
+pair lookup first and the pair sees a glyph the font never intended it to see.
+Three walkers each sweeping the whole run cannot express that ordering no
+matter what order the walkers themselves are called in.
+
+**Decision, part one: one pass.** `gui/font/src/gpos.rs` takes a `Run` — the
+glyphs, their nominal advances, which of them are marks, the direction, the
+script — and returns one `Adjust` per glyph. Inside, the lookups a run's
+features reach are collected once and applied in table order, each through the
+same `Skipper` that `GSUB` uses, with types 1, 2, 3, 4 and 6 dispatched from
+one place. `kern.rs` keeps only the legacy `kern` table, which the pass
+genuinely cannot see; `mark.rs` keeps only its anchor and subtable readers,
+which the pass calls.
+
+*Against:* it is a bigger change than adding a walker, and it deletes public
+API (`Face::mark_on_base` / `mark_on_mark`) that a test was using to sweep
+mark placement across every installed face. *For:* the alternative is
+knowingly-wrong output that gets harder to correct with every walker added,
+and the deleted API was itself the bug in miniature — it let a caller ask for
+mark attachment *out of lookup order*, which is not a question with a correct
+answer. The test now sweeps through `ScaledFont::shape`, which is what a real
+caller does anyway.
+
+**Decision, part two: the two passes share one segmentation.** `shape` cuts
+the string into `Segment`s — on tabs and on script changes — once, before
+substitution, and hands the same segments to positioning. The alternative,
+re-deriving the cut after substitution, is not merely wasteful: it is
+impossible. Once a stretch has ligated there is nothing left in the glyph run
+that says where it began, because a ligature is one glyph for several
+characters. The cost is that `substitute_runs` now runs even for a face with
+no `GSUB`, purely to produce segments. That is a walk over the run with no
+lookups to apply, which is cheap, and the alternative is a second
+segmentation that must be kept in agreement with the first by hand.
+
+**Decision, part three: `recharge_kerns` is for the legacy `kern` table
+only.** This is the subtle one, and it was a live bug for the length of one
+sweep. When bidi rule L2 reverses a run, `recharge_kerns` strips every kern
+and re-charges it to whichever glyph is now on the *left* of each visually
+adjacent pair — because an advance pushes the pen rightwards regardless of
+which way the text reads, and a legacy `kern` value is a pure gap with no
+direction in it.
+
+A `GPOS` pair is not a pure gap. A font expressing a right-to-left adjustment
+writes **XPlacement and XAdvance into the same value record**: the placement
+moves the ink to open the gap, the advance keeps the rest of the line where it
+was. That idiom is self-correcting under reversal — it has to be, since the
+font author knows the run will be reversed — which means an engine that also
+moves the kern applies the correction twice. Measured on Amiri-Bold shaping
+`العربية`: HarfBuzz charges the pair's +83 to gid 1745 (343 → 426) alongside
+its x_offset of 83; we were charging it to gid 3113 (247 → 330) *and* keeping
+the x_offset, putting glyph 3 at x=960 where HarfBuzz has 877.
+
+So `shape` gates the call on `Face::kerns_outside_gpos()`. A `GPOS` value
+belongs exactly where its record put it; a legacy value belongs to whichever
+pair ends up visually adjacent. *Against:* two kerning paths that behave
+differently under reordering is a thing to remember. *For:* they are two
+different things — one is a font author's directional statement and the other
+is a direction-blind number from a table that predates `GPOS` — and treating
+them alike is what was wrong.
+
+**Measured.** `tools/harfbuzz_sweep.py` over 556 host faces x 19 strings:
+agree 9526 → 9539, misplaced 98 → 85, reordered 0 before and after. The
+Arabic string the known-issues entry was filed on went from 14 disagreeing
+faces to 1.
+
+**Where.** `gui/font/src/gpos.rs` (new — `Run`, `Adjust`, the pass);
+`gui/font/src/scaled.rs` — `Segment`, `substitute_runs`, `position_segments`,
+the `recharge_kerns` gate, and the deleted `attach_marks`;
+`gui/font/src/kern.rs` — `Kerning::is_legacy`; `gui/font/src/sfnt.rs` —
+`Face::position`, `has_gpos_lookups`, `kerns_outside_gpos`;
+`gui/font/src/mark.rs`; `gui/font/tests/host_fonts.rs`.
+
+## §418 — Ligature component numbers are carried on the glyph run, not inferred at positioning time
+
+**Date:** 2026-08-14
+**Decided by:** Claude (autonomous)
+
+**Context.** `GPOS` type 5, mark-to-ligature attachment, is the lookup that
+places a mark over one *component* of a ligature. A `LigatureAttach` table
+offers one row of anchors per component, and applying it requires knowing which
+row — which half of an `ﻻ` the fatha belongs over. Type 4's reader plus a row
+index would have been an afternoon's work; the problem is that nothing in our
+run answered "which row".
+
+By the time `GPOS` runs, the ligature has already formed. The run holds one
+glyph where three stood, and the mark's cluster is the byte offset of the
+*first* character behind the ligature — shared with the base and with every
+other mark on it, so it cannot tell them apart. The information is destroyed
+during substitution and there is no way to recover it afterwards.
+
+**Options.**
+
+1. **Always use the last component.** HarfBuzz's own fallback when it cannot
+   identify the component. One line, no bookkeeping, no new state on the glyph.
+2. **Re-derive the component from clusters at positioning time.** Count how
+   many characters the ligature's cluster spans, count marks, divide.
+3. **Record it during substitution**, as HarfBuzz does: a `lig_props` byte per
+   glyph written by ligature substitution and read back by `GPOS`.
+
+**Chosen: 3**, ported from HarfBuzz's `ligate_input` / `match_input` /
+`Sequence::apply` rather than reinvented.
+
+**Reasoning.**
+
+*For 1.* It is what the format degrades to anyway for uncovered cases, and for
+Latin — where a ligature is `ffi` and nobody puts a mark on it — the difference
+is unobservable. It would have shipped in twenty minutes.
+
+*Against 1.* It is wrong exactly where the feature exists to be right. Arabic
+`لَا` is lam + fatha + alef: the two letters ligate across the fatha, and the
+fatha belongs over the *lam* — component 1 of 2. "Last component" puts it over
+the alef, every time, on every vowelled Arabic word with a lam-alef in it. That
+is not a fractional-pixel error; it is a diacritic on the wrong letter, which
+in Arabic changes what the word says. Shipping the fallback as the *only* path
+would have meant writing code whose entire purpose is to be correct here and
+having it be wrong here.
+
+*Against 2.* It cannot work. A cluster is a byte offset, and a ligature keeps
+its first component's — so a two-component and a three-component ligature over
+the same text are indistinguishable by cluster. Worse, `ccmp` decompositions
+and nested ligatures make the character-to-component mapping non-monotonic, and
+a mark can end up *after* the whole match while belonging to a component inside
+it. Any inference would be a guess that fails on precisely the fonts that need
+type 5.
+
+*For 3, and the real cost.* It is not one field. Getting HarfBuzz's answers
+requires its three special cases — a base joining with only marks stays a base
+so further marks can still attach to it; a ligature of only marks keeps its old
+id so it still belongs to the ligature underneath; the pieces of a
+decomposition after the first are worth zero components so a later ligature
+counts them as one thing — plus `match_input`'s legality rules that stop a mark
+being pulled out of one ligature and joined to a stranger, plus a trailing
+re-adjust pass because a component may itself be a ligature whose marks stand
+after the match. Each of those exists because a real font broke without it, and
+each is cited in the code with the HarfBuzz issue behind it. That is ~120 lines
+of transcription where option 1 was one line.
+
+We took it because the alternative was a known-wrong result on a whole script,
+and because the standing rule here is that a fix that needs a refactor gets the
+refactor. Option 1 survives *as the fallback* — `lig_attachment` uses the last
+component when the ids disagree, which is both HarfBuzz's behaviour and the
+right answer for the faces that write mark-to-base as a one-component type 5.
+
+**Consequence.** `SubGlyph` is one byte-ish wider (a `Lig` of four small
+fields, unpacked from HarfBuzz's bit-packing because keeping the packing would
+buy nothing in a struct the caller does not allocate per character, and would
+hide the genuinely subtle part — that the component count and the component
+index are mutually exclusive). Substitution does bookkeeping work on every
+ligature whether or not the face has a type-5 lookup; the cost is a few
+arithmetic ops per matched component and no allocation.
+
+**Measured.** Over 556 host faces, 56 of which ship a type-5 lookup, with a
+lam-fatha-alef string added to the sweep corpus: `agree` 10055 → 10081,
+`misplaced` 125 → 99. Nothing regressed.
+
+**Where.** `gui/font/src/gsub.rs` — `Lig`, `stamp_components`, `renumber`,
+`ligation_allowed`, `base_is_hidden`, and the numbering in `apply_multiple`;
+`gui/font/src/mark.rs` — `marked`, `lig_attachment`; `gui/font/src/gpos.rs` —
+`MARK_LIG_POS` and `attach_to_lig`; `gui/font/tools/harfbuzz_sweep.py` — the
+corpus string that can see the difference.
+
+## §419 — Marks are sorted twice: once into canonical order, once into the order they are drawn
+
+**Date:** 2026-08-14
+**Decided by:** Claude (autonomous)
+
+Unicode's canonical combining classes are an *ordering*, chosen so that two
+spellings of the same text normalize to one string. They are not a description
+of where a mark sits, and for the fixed-position classes — Hebrew 10–26, Arabic
+27–35, Syriac 36, Telugu 84 and 91, Thai 103, Tibetan 129–132 — the order they
+impose is close to the opposite of the order the marks are stacked in. A Hebrew
+vowel is typed before the shin dot and drawn under the letter while the dot goes
+over it. Arabic shadda is typed after a vowel and drawn nearer the letter than
+it; Unicode's own normalization FAQ names that case and declines to renumber,
+because the classes are a stability guarantee and cannot move.
+
+So a renderer that sorts marks only into canonical order stacks them wrong. Ours
+did, and it was 465 of the sweep's 841 `misplaced` cases — one string,
+`שָׁלוֹם` typed with the qamats before the shin dot.
+
+**Decision.** Sort twice. `norm::sort_marks` takes the class function as a
+parameter; `nfc` calls it with `combining_class` and the shaper's entry point,
+`norm::pieces`, calls it a second time with `display_class` — a permutation of
+the fixed-position blocks whose *numeric* order is stacking order, bottom to
+top. This is HarfBuzz's `_hb_modified_combining_class`, which exists for exactly
+this and does exactly this.
+
+**Where the second sort goes, which is the actual decision.** §410 says `nfc()`
+is pure Unicode and never sees a font, and that is the promise worth keeping:
+it is the function a caller with a *text* question asks, and its answer must be
+NFC or it is not an answer. HarfBuzz has no such constraint — its normalizer is
+private to the shaper — so it substitutes the modified classes inside
+normalization and sorts once. Three options were live:
+
+1. *Sort with the modified classes inside `nfc`,* as HarfBuzz does. Smallest
+   change and one pass instead of two. Rejected: `nfc` would return something
+   that is not NFC, silently, and the name would be a lie. §410's two-layer
+   split exists precisely so that "what the text is" has a home separate from
+   "what this face can show".
+2. *Sort in the shaper, in `scaled.rs`.* Keeps `norm.rs` entirely about
+   Unicode. Rejected: the sort is a Unicode fact — a table of classes and a
+   stable insertion sort — and putting it in `scaled.rs` means `scaled.rs`
+   grows a second copy of the loop `norm.rs` already has, and a second answer to
+   "which characters are starters".
+3. **Chosen:** sort in `norm::pieces`, the shaper's entry point, leaving `nfc`
+   exactly NFC. `pieces` already promises less than `nfc` does — it is
+   *"the characters a face should actually be asked for"*, and has been
+   font-dependent since §410 — so display order is the same kind of claim as
+   `fit_to_face`'s, made in the same place.
+
+**Pro:** one implementation of the sort, one table, one definition of a
+starter; `nfc` keeps its meaning; the fallback's `attach_class` needs no change
+at all, because it matches on real classes and the permutation is injective
+within each block.
+**Con:** `pieces` output is not NFC for five scripts, which a reader could
+assume it is. Stated in its doc comment, in `display_class`'s, and here.
+
+**The bijectivity is load-bearing and is tested.** If two classes the canonical
+sort keeps apart mapped onto one display class, the second sort would merge them
+and their *typed* order would start deciding their stacking order — silently,
+and only for the colliding pair. `each_permuted_block_is_a_bijection_onto_itself`
+checks it. It also found the one place the claim is narrower than it looks:
+Tibetan 132 maps to 131, which is legal only because Unicode assigns no
+character class 131. HarfBuzz's table collides there too.
+
+**Measured.** 556 faces x 23 strings: `agree` 10917 → 11223, `misplaced`
+841 → 625, `reordered` 32 → 0, `differ` 998 → 940. The pointed-Hebrew string
+went 465 → 249. Nothing regressed.
+
+**Where.** `gui/font/src/norm.rs` — `display_class`, `permute`, `sort_marks`
+and the second call in `pieces`. `gui/font/src/fallback.rs` — `attach_class`,
+whose doc records why matching real classes still selects the right characters.
+
+---
+
+## §420 — The HarfBuzz sweep reports mixed-script strings apart from its verdict
+
+**Date:** 2026-08-14
+**Decided by:** Claude (autonomous)
+
+`gui/font/tools/harfbuzz_sweep.py` shapes a 23-string corpus with both this
+crate and HarfBuzz over every face on the host, and its value is entirely in
+the *set* of disagreements staying the one you expect. Two of the 23 strings
+mix scripts:
+
+    hello <hebrew> world
+    abc <arabic> xyz
+
+The two halves of the sweep cannot be asked the same question about those.
+`hb_buffer_guess_segment_properties` takes the first strong character and
+picks **one** script and one direction for the whole buffer; both strings
+start with Latin, so HarfBuzz shapes the Hebrew and the Arabic as Latin. This
+crate itemizes into script runs and shapes each on its own. The resulting
+differences are real and are the itemizer's, not the shaper's:
+
+* FrankRuehlCLM-Bold put `vav` 10 units left of HarfBuzz, because our `hebr`
+  run reaches a kern that HarfBuzz's `latn` buffer never selects. The Hebrew
+  word shaped **on its own** agrees exactly, -10 and all.
+* 43 Arabic faces returned isolated forms from HarfBuzz where we returned
+  joined ones, for the same reason.
+
+Two options.
+
+**Itemize inside the sweep** — split the string into script runs in Python and
+shape each with its own HarfBuzz buffer, so both halves answer the same
+question. Correct in principle, and it would turn 49 dead lines into real
+comparisons. But `uharfbuzz` exposes no script-property lookup, so it means
+reimplementing the itemizer in the oracle: the Unicode script property, the
+Common/Inherited absorption rule, and the bidi run splitting. An oracle that
+reimplements the thing under test tells you the two implementations agree with
+*each other*, and every rule mirrored slightly wrong becomes a false alarm
+that costs a diagnosis to dismiss.
+
+**Report them apart** — keep shaping the whole buffer, count the mismatches,
+and print them under their own heading instead of mixing them into
+`misplaced`/`differ`. Chosen. The cost is that a genuine mixed-script
+regression would land in a bucket already known to be non-empty, which is a
+real loss. It is outweighed by what the buckets were doing before: 49 of the
+report's lines were noise, and each of the two had already cost a full
+diagnosis session to trace back to `guess_segment_properties`. With them held
+out, `misplaced` fell from 19 to 13 and every remaining entry is one string —
+Devanagari, waiting on the Indic shaper — so the next real regression will be
+visible the moment it appears.
+
+Revisit if the crate ever exposes its run boundaries to `shape_dump`: the
+sweep could then feed *our* itemization to HarfBuzz, which is the honest
+version of the first option and costs no reimplementation.
+
+**Where.** `gui/font/tools/harfbuzz_sweep.py` — the `MIXED` set, the branch on
+it in `main`, and the `mixed` line in the report.
+
+## §421 — Transcribe HarfBuzz's Indic shaper, not the Universal Shaping Engine it superseded
+
+**Date:** 2026-08-14
+**Decided by:** Claude (autonomous)
+
+`TD-FONT-HAS-NO-JOINING-OR-REORDERING-SHAPER` proposed "a Universal Shaping
+Engine pass for Indic and South-East Asian" as the second of its two shapers.
+That is the shape the Unicode spec suggests — USE was written to be the one
+shaper every complex script could share, and the Indic scripts are complex
+scripts — and it is what a reading of the standards would produce. It is
+nevertheless the wrong target here, and the reason is a fact about the oracle
+rather than about the spec.
+
+**HarfBuzz does not run USE for Devanagari.** `hb-ot-shaper-indic.cc` and
+`hb-ot-shaper-use.cc` are separate modules, and `hb_ot_shaper_categorize`
+sends the nine Indic scripts to the first one. The split is not an accident of
+history that USE will eventually absorb: the Indic scripts' reordering is
+specified against **Uniscribe**, whose behaviour predates USE and whose quirks
+Microsoft's fonts were built around — the `dev2`/`deva` tag revision, the
+old-spec halant move, the reph position table, Malayalam's zero-context
+exception. USE's cluster grammar deliberately does not reproduce them.
+
+So the two options were not "USE or a narrower USE".
+
+**Write USE and point Devanagari at it.** One shaper instead of two, covering
+~90 further scripts as a side effect, and the standards-blessed model. But it
+would have matched neither oracle: not HarfBuzz, which runs the Indic shaper,
+and not the fonts, which were built for Uniscribe. Every disagreement it
+produced would have needed a judgement about whether HarfBuzz or the spec was
+right, which is exactly the diagnosis cost the sweep exists to avoid. And it
+would not have fixed the measured symptom, since the sweep's only complex-script
+strings are Arabic and Devanagari.
+
+**Transcribe the Indic shaper.** More total code — USE still has to be written
+afterwards for the scripts it covers, and is now filed as
+`TD-FONT-HAS-NO-UNIVERSAL-SHAPING-ENGINE` — and a second syllable grammar to
+maintain. In exchange every disagreement is a bug in the transcription and can
+be diagnosed by reading one file of HarfBuzz beside one file of ours, which is
+the property that took `हिन्दी` from 5 disagreeing faces to 0 and the whole
+`misplaced` bucket to 0.
+
+The second is what was done. The parts that are *not* Indic-specific were
+written to be reused: `apply_stages` (a lookup set per stage, the shaper's own
+features confined to one syllable), the syllable stamping in `setup_syllables`
+(a byte per glyph rather than a range, so a `ccmp` ligature cannot invalidate a
+boundary), and `Plan`'s once-per-run probing of what the face declares. USE
+needs all three and none of them assumes Indic.
+
+**Where.** `gui/font/src/indic.rs`, `indic_machine.rs`, `indic_shape.rs`;
+`gui/font/src/gsub.rs` — `apply_stages`; `gui/font/src/sfnt.rs` —
+`Face::substitute`, which dispatches on `Script::shaping`.
+
+## §422 — The face chooses the shaper, not the character
+
+**Date:** 2026-08-14
+**Decided by:** Claude (autonomous)
+
+Which shaper a run gets looked like a property of the text: Devanagari
+characters want the Indic shaper, Arabic characters the joining one. That is
+what `fallback::positions_marks` and `Face::substitute` both assumed, and it is
+wrong. `hb_ot_shaper_categorize(script, direction, gsub_script)` takes a third
+argument, and for most complex scripts the **font** gets a veto: a Devanagari
+run in a face that files its `GSUB` features under `DFLT` or `latn` is shaped
+by the *default* shaper, which places marks by measurement and zeroes their
+advances where the Indic shaper withholds both. `Hack` rendering `हिन्दी` is
+that face and that string, and it was the last 13 cases in the sweep's
+`misplaced` bucket.
+
+The veto is not uniform, which is the awkward part: Thai, Lao and Khmer reach
+their shapers unconditionally, Myanmar treats a third tag (`mymr`, which
+predates the Myanmar shaping spec) as a veto alongside `DFLT` and `latn`, and
+Arabic inverts the test (`gsub_script != DFLT`). There is no stated principle
+behind the asymmetry — the Thai shaper predates the check, Khmer was split out
+of Indic after it — so it is transcribed rather than tidied, in
+`fallback::ALWAYS_COMPLEX` and the `mymr` arm of `shaped_as_default`.
+
+**Two options for where the answer lives.**
+
+*A `Shaper` enum resolved once per run*, mirroring HarfBuzz's struct: each
+variant carrying `fallback_position`, `zero_width_marks` and the substitution
+entry point, with every consumer reading fields off it. Structurally the right
+shape, and it makes the "three questions, one answer" property unforgeable.
+But `COMPLEX_SCRIPTS` and `NO_ZERO_WIDTH_MARKS` are *measured* lists — probed
+against real faces, not read off the source — and folding them into an enum
+means rederiving both from the shaper table by hand, with 11,834 agreeing runs
+riding on getting it right. The rewrite risked more than it bought.
+
+*A predicate beside the lists that already exist.* `shaped_as_default(tags,
+gsub)` answers "did the face call this run's shaper off", and the three
+consumers take it as a parameter. Less tidy — the shaper is still implicit,
+spread across three lists and a predicate — but every existing measurement
+survives untouched, and the one new claim is small enough to test directly.
+
+The second was chosen. The discipline that replaces the enum is that
+`scaled.rs` resolves the answer **once per run** and feeds all three consumers
+from that one binding: whether the Indic shaper runs, whether marks may be
+placed by measurement, and whether their advances are zeroed are three fields
+of one HarfBuzz struct, and the failure mode of the predicate form is letting
+them disagree.
+
+**One correction the implementation forced.** The chosen tag has to be read
+from the raw `GSUB` ScriptList, not from `Substitutions`. `Substitutions`
+records only the scripts that reached a lookup this crate can apply, and
+`ByScript::parse` returns `None` outright when none does — so `Hack`, with 16
+`GSUB` lookups and both `DFLT` and `latn` registered, appears to name no script
+at all, and routing the question through it left the sweep stuck at
+`misplaced 5`. `Face` now holds `gsub_scripts` and `otl::chosen_from` walks
+HarfBuzz's `hb_ot_layout_table_select_script` chain over that. `None` is
+`HB_TAG_NONE`, which equals neither `DFLT` nor `latn`, so a face with **no**
+`GSUB` keeps its complex shaper — which is exactly the kind of face
+`NO_ZERO_WIDTH_MARKS` was measured against.
+
+**Known divergence, deliberate.** Arabic's inverted test would demote a Syriac
+run in a `latn`-only face to the default shaper and so suppress
+`init/medi/fina/isol`. It is not modelled, because both the Arabic and the
+default shaper set `fallback_position = true` and `zero_width_marks =
+BY_GDEF_LATE` — the divergence is in joining only, and is recorded under
+`TD-FONT-GATES-THE-MARK-FALLBACK-ON-THE-CHARACTERS-SCRIPT-NOT-THE-FONTS`.
+
+**Where.** `gui/font/src/fallback.rs` — `shaped_as_default`, `ALWAYS_COMPLEX`,
+and the `simple` parameter on `positions_marks`/`zeroes_mark_advances`;
+`gui/font/src/sfnt.rs` — `gsub_scripts`, `shapes_as_default`,
+`gsub_chosen_script`; `gui/font/src/otl.rs` — `chosen_from`;
+`gui/font/src/scaled.rs` — the per-run `simple` binding in `shape`.
+
+## §423 — Normalization takes a Hangul policy, so NFC stays NFC and the shaper still sees jamo
+
+**Date:** 2026-08-15
+**Decided by:** Claude (autonomous)
+**Lane:** C (graphics, apps & net)
+**Affects:** `gui/font/src/norm.rs` (`Hangul`, `normalize`, `nfc`, `pieces`,
+`split_undrawable`, `needs_work`), `gui/font/src/scaled.rs` (`shape`),
+`gui/font/src/hangul.rs`, `gui/font/src/gsub.rs`, `gui/font/src/fallback.rs`
+
+Korean is encoded two ways — 11,172 precomposed syllables, or conjoining
+jamo — and the two are canonically equivalent, so Unicode is content either
+way. Normalization is not: NFC composes `<L,V,T>` into a syllable, and that
+composition destroys precisely the distinction the Hangul shaper reads.
+HarfBuzz's Hangul shaper therefore sets
+`HB_OT_SHAPE_NORMALIZATION_MODE_NONE` and does its own thing.
+
+We could not simply copy that, because in this crate `pieces`' composition was
+the **only** reason Korean rendered at all: the ordinary Korean text font ships
+the precomposed syllables and no jamo, so a run of jamo through a
+normalization-free path draws three missing-glyph boxes where it used to draw
+one correct syllable. Which encoding to *draw* is a question about the face,
+not about the text — and that is the observation the decision turns on.
+
+**Three options.**
+
+*Drop Hangul composition from `nfc` outright*, as HarfBuzz's mode name
+suggests. Smallest edit, and wrong: `nfc` is also the answer to "what is the
+NFC of this string", which is a question about text with a fixed answer.
+Bending it to suit one consumer makes a general-purpose function quietly
+lie.
+
+*Keep `nfc` and let the shaper undo its work* — compose, then decompose
+syllables back to jamo when the face wants them. Preserves every caller, but
+it is two passes that cancel, and the round trip is lossy in the cases where
+it matters most (a syllable that composed from a jamo sequence the face can
+draw is indistinguishable afterwards from one the author typed precomposed).
+
+*Parameterize normalization on a Hangul policy.* A private
+`enum Hangul { Normalize, LeaveAlone }` threads through `decompose_once`,
+`compose_pair`, `decompose_into` and `compose`; `nfc(text)` passes
+`Normalize` and keeps its meaning exactly, while `pieces` — the shaping
+entry point — passes `LeaveAlone` and hands jamo to `hangul::preprocess`,
+which decides per face whether to compose. Chosen. It costs one enum and
+one argument, and it is the only form in which both callers get a true
+answer instead of a compromise between them.
+
+Two consequences worth writing down. `nfc` lost its last production caller
+in the split — everything in the shaping path now goes through
+`normalize(text, LeaveAlone)` — so it carries an explicit
+`#[cfg_attr(not(test), allow(dead_code, …))]` rather than being deleted: it
+is the text-half of a deliberate split, and deleting it would leave the crate
+with no answer to a question it should be able to answer. And `needs_work`
+deliberately asks with `Normalize`, the *conservative* direction: it gates a
+fast path, so over-reporting work costs time and under-reporting costs
+correctness.
+
+The measured result: the HarfBuzz differential sweep went from 892
+disagreements to 339 across 556 host faces × 23 strings, with `reordered` and
+`misplaced` both staying at 0, and `osfont` from 482 to 501 passing tests
+(`hangul.rs`'s own 19 had never run, because an undeclared module compiles
+nowhere). The 339 that remain are a different question — font-aware
+recomposition of Latin diacritics — filed as `open-questions.md` C-Q1
+because it would invert this same layering for a different script.
+
+## §301 — Slot pools are serialised by one shared spin lock over the whole scan, not by a per-slot atomic, and the lock is scoped exactly like the table
+
+**Date:** 2026-08-13
+**Decided by:** Claude (autonomous)
+**Lane:** B (POSIX & userland)
+**Affects:** `posix/src/perprocess.rs` (the primitive), `posix/src/{dirent,stdio,aio,epoll,mqueue,semaphore,sysv_msg,sysv_sem,sysv_shm}.rs` (the pools)
+
+### The problem
+
+The POSIX layer keeps about fifteen fixed-size slot pools — `DIR` handles,
+`FILE` handles, `popen` children, `aiocb` records, epoll/timerfd/inotify
+instances, the getdents caches, POSIX message queues and their descriptors,
+named semaphores, and the three System V tables. Ten of them claimed a slot
+like this:
+
+```rust
+for (i, slot) in table.iter_mut().enumerate() {
+    if !slot.in_use {       // check ...
+        slot.in_use = true; // ... then set, with nothing held
+        return Some(i);
+    }
+}
+```
+
+Check-then-set with nothing held is correct in a single-threaded process, and
+every one of these modules carried a `// SAFETY: single-threaded posix layer`
+comment saying so. That comment stopped being true when this crate grew a
+`pthread_create`. Two threads calling `opendir` at the same instant can both
+read `in_use == false` for slot 3 and both be handed slot 3, after which each
+silently scribbles on the other's directory stream. Nothing in the type system
+or the test suite catches it: single-threaded tests pass forever.
+
+The remaining five modules (`mqueue`, `semaphore`, and the three System V
+ones) already locked correctly — but each with its own hand-rolled
+`AtomicBool` + `lock_acquire`/`lock_release`/`struct Guard`, five near-identical
+copies of the same twenty lines.
+
+### Decision 1 — one lock over the whole scan, not a per-slot `compare_exchange`
+
+`PoolLock` is a spin lock; `lock_pool()` returns a `PoolGuard` that releases on
+`Drop`; the entire scan-and-claim runs inside one critical section.
+
+The obvious cheaper alternative is a `compare_exchange` on each slot's `in_use`
+flag: no lock, no contention between threads claiming *different* slots, and it
+makes the simple pools correct. It was rejected because it does not cover the
+*compound* pools. `sysv_msg::alloc_queue(key)`, `sysv_sem::alloc_set(key, …)`
+and `sysv_shm::alloc_segment(key, …)` first scan for an existing entry with a
+matching key and allocate only if there is none. A per-slot atomic claim keeps
+two threads from taking the same *slot*, but does nothing to stop them each
+creating a *separate* segment for the same key — the lookup and the claim have
+to be one indivisible step, and a per-slot CAS cannot express that. The
+getdents cache has the same find-or-create shape.
+
+So the choice was between one primitive that covers every pool, or two
+primitives where the weaker one silently does not apply to a third of them and
+the next person to add a pool has to work out which. Allocation is not a hot
+path — once per `opendir`, per `epoll_create`, per `mq_open` — the critical
+section is a bounded scan of a small array, and the crate is `no_std` on the
+target with no blocking primitive available. Uniformity wins; the contention
+cost is not measurable at these call rates.
+
+### Decision 2 — the lock covers *scans*, not the objects in the pool
+
+Only allocate, release, and find-by-key take the lock. Once a caller holds the
+`DIR *`, `mqd_t`, or instance index that names its own slot, it reaches that
+slot unlocked: `with_instance_mut`, `readdir`, `epoll_ctl` and friends stay
+lock-free.
+
+This is a real boundary, not laziness. POSIX already makes concurrent use of a
+single `DIR *` or `FILE *` by two threads the caller's problem, so there is no
+contract to uphold; and taking a process-wide lock on every `readdir` would
+serialise unrelated directory streams for nothing. The lock is on the *pool*,
+not on the objects in it — and each unlocked accessor now says so in place of
+the old "single-threaded" comment, so the boundary is documented where someone
+would otherwise "fix" it.
+
+Two consequences are accepted rather than solved:
+
+- **Releases take the lock too.** Clearing `in_use` outside it is a plain data
+  race against a concurrent claim reading it, and could let a slot be reissued
+  before the release is visible. Every `*_close` therefore takes the guard even
+  though it, too, names its slot by index.
+- **The getdents cache can still end up with two slots for one fd.** Its
+  `SYS_FS_LIST_DIR` snapshot is far too slow to hold a process-wide lock
+  across, so the pool uses claim-then-publish: `claim_getdents_cache()` takes
+  the slot with `fd = -1` (so no concurrent `find_getdents_cache` can match it)
+  and `publish_getdents_cache(slot, fd)` sets the real fd once the buffer is
+  filled. Two threads calling `getdents64` on the *same* fd simultaneously can
+  therefore each get their own cache slot, each with its own position. That is
+  concurrent use of one fd — already the caller's problem — and it is
+  memory-safe, which is what the lock is for.
+
+### Decision 3 — the lock's scope must match its table's scope
+
+The pools are declared two ways, and the lock has to follow:
+
+| the table is | the lock must be | why |
+|---|---|---|
+| `process_global!` (`epoll`, `mqueue`, `semaphore`, `aio`, `stdio`'s popen store) | `process_global!`, declared in the same block | on the host each test thread owns its own table, so a shared lock serialises threads that cannot collide |
+| a plain `static mut` (`dirent`, `stdio`'s `FILE` pool, the three System V tables) | a plain `static` | the table really is shared on both builds, so a per-thread lock would guard nothing |
+
+Getting this backwards is silent — a too-narrow lock compiles, passes every
+single-threaded test, and protects nothing. `mqueue` and `semaphore` were both
+found with the *other* mismatch: a plain `static` lock over a `process_global!`
+table. That direction is safe (over-broad, not under-broad) and correct on the
+target, where `process_global!` is itself a `static mut`. It was still fixed,
+because a spin lock has no poisoning and no unwinding path: one host test that
+panics inside the critical section of a *shared* lock hangs every later test
+that touches the pool, including tests that share no data with it. Declaring
+the lock inside the `process_global!` block, beside its table, is what keeps
+the two from drifting apart later.
+
+The one deliberate exception is `epoll`'s `event_scratch_lock`, which guards a
+~8 KiB *buffer* rather than a slot table and is held across the
+`SYS_FS_WATCH_READ` syscall. It has to be: the syscall is what fills the
+buffer, and the records are parsed straight out of it, so releasing the lock in
+between would let another thread refill it mid-parse. It is re-taken per batch
+so a long drain does not monopolise the buffer.
+
+### Alternatives considered
+
+**Leave it single-threaded and document the restriction.** The pools predate
+`pthread_create`; one could declare that the POSIX layer's allocators are
+simply not thread-safe. Rejected: the whole point of this layer is that
+unmodified Linux binaries behave as they do on Linux, and on Linux `opendir`
+from two threads is ordinary, unremarkable code. A documented restriction that
+real programs violate by default is not a restriction, it is a latent bug.
+
+**A `Mutex`-like type with poisoning.** No `std` on the target, and poisoning
+implies unwinding, which the kernel-side build does not have. The spin lock's
+failure mode under a panic is a hang rather than a poisoned error — which is
+exactly why Decision 3 pushes every lock to the narrowest scope its table
+allows.
+
+**Keep the five hand-rolled locks.** They worked. But five copies of the same
+twenty lines is five places for the next fix to be applied to four of them, and
+the copies had already drifted (`AcqRel` vs `Acquire` on the exchange, differing
+guard names, and the two scope mismatches above). Collapsing them onto the
+shared primitive is what surfaced the mismatches in the first place.
+
+### How the test has teeth
+
+`a_scan_and_claim_under_the_lock_never_hands_out_a_slot_twice` is worth
+describing, because its *first* version proved nothing: it passed with
+`lock_pool` deliberately removed. The `Mutex<Vec<usize>>` used to collect the
+claimed indices was serialising the worker threads all by itself, so they never
+actually raced. The version in the tree fixes that three ways — a
+`std::sync::Barrier` so all eight threads enter the claim loop together, a
+`yield_now()` between the read of `in_use` and the write to widen the window,
+and per-thread private `Vec`s merged only after `join`. With the lock removed
+it now fails as `left: 20, right: 64`. A concurrency test that has never been
+observed to fail is not evidence of anything.
+
+### How to reverse
+
+`PoolLock` is a private crate primitive with no ABI surface; the guard is
+acquired at the top of each allocator. Reverting means deleting the
+`let _guard = …` lines and the lock statics. The claim/publish split in
+`dirent`'s getdents cache is the one structural change that would need undoing
+separately.
+
+---
+
+## §302 — A zoneinfo zone is a borrowed view over the file's bytes, and the POSIX rule engine is its *tail*, not its alternative
+
+**Date:** 2026-08-13
+**Decided by:** Claude (autonomous)
+**Lane:** B (POSIX & userland)
+**Affects:** `tzrules/src/tzif.rs` (the reader), `posix/src/tz.rs` (`Zone`, `ZONE_FILE`), `userspace/oils/src/interp.rs` (`ShellZone`, `Zone<'a>`)
+
+### The problem
+
+`tzrules` already understood the POSIX `TZ` grammar. To make
+`TZ=America/New_York` work, both the libc and osh had to learn to read TZif
+(RFC 8536) binary zoneinfo files. Three things had to be decided along the way,
+each with a real trade-off.
+
+### Decision 1 — the reader borrows the file's bytes rather than owning a table
+
+`TzFile<'a>` holds four slices into the caller's buffer (transition times,
+transition types, ttinfo records, designations) and decodes an entry on each
+lookup. It does not copy the transition table into a struct.
+
+**For:** `tzrules` is `no_std` with no allocator — it is linked into the libc,
+where `localtime()` must not allocate. The alternatives are a fixed inline
+array, which either wastes kilobytes in every `Tz` or caps the transition count
+at some arbitrary number (`America/New_York` has 236 transitions; some zones
+have over 1 000), or requiring an allocator, which the libc cannot provide on
+this path.
+
+**Against:** it pushes the lifetime problem onto every consumer — the bytes
+must outlive the zone. In the libc that meant a `static mut ZONE_FILE` buffer
+and `TzFile<'static>`; in osh it meant an owning `ShellZone` holding an
+`Rc<[u8]>` with a `view()` that borrows it. Two different answers to the same
+question is a smell, but they are genuinely different situations: the libc has
+one process-wide zone and no allocator, osh has an allocator and wants a
+snapshot per prompt.
+
+**Also against:** decoding per lookup is a few big-endian loads and a binary
+search rather than a single indexed read. Measured against the cost of the
+`open`/`read` that precedes it, this is noise.
+
+### Decision 2 — the footer rule governs at and after the last transition
+
+A TZif v2+ file ends with a POSIX `TZ` string. `TzFile::lookup` consults the
+existing `Tz` engine for any instant at or past the last recorded transition
+(and for *every* instant in a file with no transitions at all), and the
+transition table only before that.
+
+**For:** this is what the format means. `zic -b slim` — the default in modern
+tzdata — stops emitting transitions as soon as the footer describes them, so a
+reader that ignored the footer would freeze every zone at its last recorded
+entry and report the wrong offset for every future date. Treating the rule
+engine as the *tail* of the file engine also means the two paths share one
+implementation of DST arithmetic and can never disagree about a future date,
+which is the property the whole shared-crate arrangement exists to guarantee.
+
+**Against:** it means a lookup can take either of two quite different code
+paths depending on the instant, so a bug in one is invisible from the other.
+Mitigated by testing both sides of the boundary in the same fixture.
+
+### Decision 3 — the v2+ footer is mandatory
+
+`parse` returns `None` for a v2+ file with no `\n<rule>\n` footer, even though
+the data block before it is complete and self-consistent.
+
+**For:** RFC 8536 §3.3 requires it, and it is the *only* structural check that
+catches a file truncated exactly at the end of its data block — every count
+still adds up, every index is in range, and the file looks perfectly valid. A
+truncated zoneinfo file that silently becomes a zone with a plausible-looking
+history is exactly the failure that is hardest to notice.
+
+**Against:** a hand-written or unusual file with an empty footer is refused
+where a more permissive reader would accept it. Judged the right trade: `TZ` is
+attacker-shaped input (any libc will open the path you give it), so refusing
+the ambiguous case is worth more than accepting the odd one.
+
+### Decision 4 — `standard()`/`daylight()` prefer the tail over the history
+
+The summary accessors that back `tzname[]`, `timezone` and `daylight` report
+the footer rule's two halves when there is a footer, and fall back to the most
+recent matching type in the table only when there is not.
+
+**For:** it matches glibc, and it matches what a user means. Europe/Moscow has
+decades of DST transitions on record and abandoned DST in 2011; São Paulo did
+the same in 2019. A "does this zone have DST?" that answers from the history
+says yes for both, and `daylight = 1` on a machine in Moscow is simply wrong.
+
+**Against:** it makes the accessors disagree with `lookup()` for a historical
+instant — `daylight()` says "no DST half" for a zone that was in DST in 1985.
+That is the same thing glibc does, and the POSIX globals are documented as
+describing the *current* zone, so the disagreement is in the spec rather than
+in us.
+
+### Reversibility
+
+Decision 1 is the structural one: undoing it means giving `TzFile` an owned
+table and an allocator, which would change every consumer's type. Decisions 2,
+3 and 4 are each a handful of lines in `tzrules/src/tzif.rs` (`lookup`,
+`footer_body`, `standard`/`daylight`) with tests naming the behaviour they pin,
+so each can be revisited on its own.
+
+## §303 — NPTL validates its scalar argument before it touches the pointer, so an out-of-domain scalar outranks a NULL pointer
+
+**Date:** 2026-08-13
+**Decided by:** Claude (autonomous)
+**Lane:** B
+
+### The problem
+
+§300 established the rule for *which* errno a NULL pointer produces, and its
+Consequences section asked for a per-function audit of the ~330 remaining
+`is_null() -> EFAULT` sites. `known-issues.md`'s
+`D-POSIX-NULL-POINTER-ERRNO-NEEDS-A-PER-FUNCTION-AUDIT` singled out
+`posix/src/pthread.rs` (47 sites) as "the one that still needs a decision
+rather than a lookup", because glibc's NPTL contains **no NULL checks at
+all** — every one of these functions simply dereferences and faults. There is
+no upstream errno to copy, so the audit appeared to be blocked on a judgement
+call about what to substitute.
+
+That framing was wrong. §300's own closing instruction says to "check the
+*order* of the validations too, not only the constant — that is what
+`ptsname_r` actually got wrong", and ordering is exactly what `pthread.rs` had
+wrong, nine times over. The question is answerable from the source without any
+judgement at all.
+
+### What the source says
+
+NPTL has one consistent shape. Every entry point that takes both an attribute
+pointer and a scalar validates the **scalar first**, returns `EINVAL`/`ERANGE`
+from that test, and dereferences the pointer only afterwards:
+
+| Function | glibc source | first test |
+|---|---|---|
+| `pthread_attr_setstacksize` | `nptl/pthread_attr_setstacksize.c` | `int ret = check_stacksize_attr (stacksize); if (ret) return ret;` |
+| `pthread_attr_setstack` | `nptl/pthread_attr_setstack.c` | same `check_stacksize_attr` prologue |
+| `pthread_attr_setdetachstate` | `nptl/pthread_attr_setdetachstate.c` | `/* Catch invalid values.  */` on `detachstate` |
+| `pthread_mutexattr_settype` | `nptl/pthread_mutexattr_settype.c` | `if (kind < PTHREAD_MUTEX_NORMAL \|\| kind > PTHREAD_MUTEX_ERRORCHECK) return EINVAL;` |
+| `pthread_condattr_setclock` | `nptl/pthread_condattr_setclock.c` | full `clock_id` validation |
+| `pthread_rwlockattr_setpshared` | `nptl/pthread_rwlockattr_setpshared.c` | `futex_supports_pshared (pshared)` |
+| `pthread_barrier_init` | `nptl/pthread_barrier_init.c` | `if (count == 0 \|\| count >= BARRIER_IN_THRESHOLD) return EINVAL;` |
+| `pthread_getname_np` | `nptl/pthread_getname.c` | `if (len < TASK_COMM_LEN) return ERANGE;` |
+
+So on Linux, a call that is bad in *both* ways — a NULL pointer **and** an
+out-of-domain scalar — returns the scalar's errno, and never faults. Our code
+checked the pointer first in every one of these, so it returned `EFAULT` where
+Linux returns `EINVAL` or `ERANGE`.
+
+The affinity pair is the interesting case, because the two halves order their
+checks *oppositely*, and the asymmetry is the kernel's rather than glibc's
+(both glibc wrappers are bare `INTERNAL_SYSCALL_CALL`s):
+
+- `sched_getaffinity` (`kernel/sched/core.c:8506-8509`) has two `EINVAL`
+  tests — `len < cpumask_size()` and `len & (sizeof (unsigned long) - 1)` —
+  and both sit **above** the `copy_to_user` that would fault. Length wins.
+- `sched_setaffinity`'s `get_user_cpu_mask` (`kernel/sched/core.c:8429`) has
+  **no** size rejection at all; a short `len` merely leaves the top of the
+  mask clear. `copy_from_user` runs first, so the NULL pointer wins. (A short
+  `len` still reaches `EINVAL` there, but the long way round: the cleared mask
+  is empty, and `__sched_setaffinity` rejects an empty CPU set.)
+
+### The decision
+
+1. **Order our checks the way NPTL and the kernel order theirs.** Scalar
+   first in the eight table rows above and in `pthread_getaffinity_np`;
+   pointer first in `pthread_setaffinity_np` alone.
+
+2. **Keep `EFAULT` for the pointer itself**, when every scalar is valid. glibc
+   segfaults there, which is not an errno we can return, so a substitute is
+   unavoidable. `EFAULT` is the right substitute because on the two paths where
+   the pointer genuinely does reach a syscall — the affinity pair, and
+   `pthread_setname_np`'s `prctl` — `EFAULT` is precisely what Linux gives; a
+   caller who checks for it is never surprised by the ones that don't syscall.
+
+The alternative to (2) was to fault as glibc does, on the grounds that
+returning *any* errno invents behaviour no Linux program can observe. Rejected:
+we are a hosted libc whose callers include our own test suite and our own
+userland, and a diagnosable errno is worth more than bug-compatibility with a
+segfault. The alternative to (1) was to leave the order alone and document the
+divergence. Rejected because the order is part of the ABI — a program that
+passes a stack size of 8192 and a null attribute expects `EINVAL`, and getting
+`EFAULT` sends it down an error path that was written for a different bug.
+
+### Three latent bugs the audit turned up
+
+Reordering the checks was not the whole of it. Reading the glibc source
+line-by-line exposed three cases where our *constants* were wrong too:
+
+- **`PTHREAD_STACK_MIN` was hardcoded as `4096`** in `pthread_attr_setstacksize`
+  and `pthread_attr_setstack`, while the crate's own
+  `linux_pthread_key_types::PTHREAD_STACK_MIN` is `16384` (glibc's
+  `check_stacksize_attr`, `sysdeps/nptl/pthreadP.h:704`, on x86-64). We
+  accepted three stack sizes glibc rejects, and contradicted ourselves. The
+  setters now use the shared constant.
+
+- **`pthread_getname_np` applied `ERANGE` only when the stored name did not
+  fit.** glibc compares `len` against `TASK_COMM_LEN` (16) *unconditionally*,
+  never against the name's actual length, so `pthread_getname_np(t, buf, 4)`
+  is `ERANGE` even for a two-character name — a call we used to accept. With
+  the entry test corrected, the second length test becomes dead and is gone;
+  glibc has no second test either.
+
+- **`pthread_barrier_init` accepted `count == u32::MAX`.** That was a latent
+  hang: our arrival counter is an `AtomicI32`, so a count above `i32::MAX`
+  can never be reached and every waiter would block forever. glibc caps
+  `count` at `BARRIER_IN_THRESHOLD` (`UINT_MAX / 2`,
+  `sysdeps/nptl/internaltypes.h:119`) for its own reset protocol; we adopt the
+  same bound for our own reason, and the constant is now named in the code.
+
+And one errno was simply the wrong constant:
+**`pthread_rwlockattr_setpshared` returned `ENOTSUP` for any non-`PRIVATE`
+value**, conflating "we don't support cross-process rwlocks" with "that isn't
+a pshared value". glibc gates on `futex_supports_pshared`
+(`sysdeps/nptl/futex-internal.h:102`), which accepts *both* POSIX values and
+returns `EINVAL` for anything else. `ENOTSUP` is our own verdict on
+`PTHREAD_PROCESS_SHARED` — which glibc accepts and we do not — and must not
+swallow out-of-domain values with it.
+
+### Consequences
+
+Nine functions changed behaviour, all in the direction of matching Linux.
+Callers that passed a bad scalar *and* a null pointer see a different errno;
+callers that passed only one of the two are unaffected, except for the three
+constant fixes above, which reject inputs we previously accepted (an 8 KiB
+stack, a short `getname` buffer, a `u32::MAX` barrier). Each is a case where
+the old acceptance was itself the bug.
+
+Every changed site carries the glibc (or kernel) file name and the actual
+check in a comment, at both the code and the test, per §300's rule that "a test
+that encodes an errno with no upstream citation is only evidence that the code
+and the test were written by the same pass."
+
+The audit's remaining clusters — `file.rs` (28), `spawn.rs` (16), `socket.rs`
+(15), `unistd.rs` (13), `xattr.rs` (11) — are unaffected by this entry's
+reasoning, which is specific to NPTL's shape. They are ordinary §300 lookups:
+does the pointer reach a syscall or not.
+
+## §304 — A timed wait validates its deadline where *its own* upstream validates it, even though they all share one predicate
+
+**Date:** 2026-08-14
+**Decided by:** Claude (autonomous)
+**Lane:** B
+
+### The problem
+
+None of `pthread_cond_timedwait`, `pthread_mutex_timedlock` or
+`sem_timedwait` checked `abstime->tv_nsec` at all. Adding the check is not the
+decision; *where* to add it is. glibc calls one shared inline predicate,
+`valid_nanoseconds` (`include/time.h:517`), from all three — which makes it
+look as though the natural port is one helper called from one place in each
+function, namely the top. That port would be wrong in two of the three.
+
+### What the source says
+
+| Function | glibc source | position of the check |
+|---|---|---|
+| `pthread_cond_timedwait` | `nptl/pthread_cond_wait.c:635` | **first statement**, above the mutex release |
+| `sem_timedwait` | `nptl/sem_timedwait.c:28` | **above** `__new_sem_wait_fast` |
+| `pthread_mutex_timedlock` | `nptl/pthread_mutex_timedlock.c:221` | **inside the contended branch**, under the comment "We are about to block; check whether the timeout is invalid" |
+| `pthread_rwlock_{rd,wr}lock_full64` | `nptl/pthread_rwlock_common.c:292` | **first statement**, with a comment recording that this was *changed* from lazy to eager |
+
+The observable consequence: `pthread_mutex_timedlock` on an **uncontended**
+mutex with `tv_nsec = 1e9` returns 0, while `sem_timedwait` on a semaphore
+with a **positive count** and the same timespec returns `EINVAL`. Same
+predicate, same class of caller error, opposite answers.
+
+POSIX permits both — "the validity of the abstime parameter need not be
+checked if the lock can be immediately acquired" — which is precisely why the
+implementations diverged and why the rwlock comment exists: glibc took the
+allowance for mutexes, declined it for rwlocks and semaphores, and documented
+the switch.
+
+The fourth site is a different predicate entirely. `mq_timedsend` and
+`mq_timedreceive` are bare syscalls, so the kernel validates: `prepare_timeout`
+(`ipc/mqueue.c`) → `timespec64_valid` (`include/linux/time64.h`), which
+rejects `tv_sec < 0` as well as an out-of-range `tv_nsec`. glibc's predicate
+never inspects `tv_sec`, so for the pthread and semaphore waits a negative
+`tv_sec` is a deadline in the past — `ETIMEDOUT`, not `EINVAL`.
+
+### The decision
+
+1. **Port the predicate once** (`time::valid_nanoseconds`, glibc's definition
+   verbatim) but **place each call where its own upstream places it** —
+   eagerly in `pthread_cond_timedwait` and `sem_timedwait`, lazily in
+   `pthread_mutex_timedlock`.
+
+2. **Do not share the predicate with `mqueue`.** `deadline_from_timespec`
+   keeps its own `tv_sec < 0` test on top of `valid_nanoseconds`, because it
+   is implementing `timespec64_valid`, not `valid_nanoseconds`.
+
+The alternative to (1) was to check eagerly everywhere: one rule, simpler to
+state, and arguably *better* — a caller who passes a malformed timespec has a
+bug whether or not the lock happened to be free, and the lazy version makes
+that bug appear only under contention, i.e. intermittently. Rejected anyway.
+The whole point of this layer is that a program built against glibc behaves
+the same here, and a real program does depend on the lazy behaviour by
+accident: an uncontended `pthread_mutex_timedlock` with a sloppily-computed
+deadline is a common pattern that works on Linux, and failing it would be a
+regression visible only to us. The eager version is a defensible libc design
+and not the one we are implementing. (§303 made the same call for a different
+reason: the order of validations is part of the ABI.)
+
+The alternative to (2) was one predicate for everything, taking the union or
+the intersection. Rejected: the union breaks `sem_timedwait` with a
+past deadline (`EINVAL` instead of `ETIMEDOUT`), the intersection breaks
+`mq_timedsend` with `tv_sec = -1` (a very long wait instead of `EINVAL`).
+Two rules that differ by one line and cannot be merged.
+
+### Consequences
+
+Anyone adding `pthread_cond_clockwait`, `sem_clockwait` or the
+`pthread_rwlock_{timed,clock}{rd,wr}lock` family must look up that function's
+own placement rather than copying a neighbour's. The rwlocks are **eager**,
+and the clock-taking variants additionally reject an unsupported `clockid`
+(`futex_abstimed_supported_clockid`) *before* the nanoseconds check.
+
+The general form of the rule, which outlives this entry: a shared helper
+upstream is evidence about the *predicate*, not about the *control flow*.
+§303's "port the upstream helper rather than the check" is necessary and not
+sufficient.
+
+
+## §305 — osh ships as the shell, cross-compiled bash ships beside it, and osh's bash-fidelity scope is **frozen**
+
+**Date:** 2026-08-14
+**Decided by:** Operator (Claude recommended this option; the operator asked the
+question that exposed the problem in the first place — see the history below)
+
+### The question
+
+Should SlateOS's POSIX shell be `userspace/oils` (osh — a 141,899-line Rust
+reimplementation, 1,210 commits, 662/662 corpus cases byte-exact against bash
+5.2.37), or the genuine GNU bash 5.2 that we can now cross-compile and which
+**already boots and runs on this OS**? Tracked as open-questions **Q41**, now
+closed by this entry.
+
+### Decision — the hybrid, with a stopping criterion
+
+Three parts, and the third is the one that actually changes day-to-day work:
+
+1. **osh remains the shell.** It works today, it is ours to debug and extend,
+   it needs no dynamic linker, and 141k lines of it are already correct. No
+   rewrite, no deletion, no migration project.
+2. **The cross-compiled bash stays and is a first-class artifact.** It is the
+   escape hatch (a script that genuinely needs exact bash can run exact bash)
+   and, longer term, the differential oracle *running on SlateOS itself* —
+   which is the path to dropping `scripts/osh-bash-diff.py`'s dependency on a
+   host Linux/MSYS reference bash. Keep `scripts/bash-spike/` reproducible and
+   keep `self_test_bash_on_slateos_libc` green.
+3. **osh's fidelity scope is frozen.** Byte-for-byte parity with bash is no
+   longer an open-ended goal. The corpus stops growing for its own sake. The
+   stopping criterion is written out below, and it is binding.
+
+### The stopping criterion (read this before opening a `TD-OILS-*` entry)
+
+**Fix an osh divergence when at least one of these is true:**
+
+- **Something on SlateOS actually hits it.** A real script, service, init file,
+  build step, package recipe, test harness or interactive session that we ship
+  or run. "A user might type this" does not qualify; "our own `create-ext4-rootfs.sh`
+  types this" does.
+- **It is a crash, hang, wrong-exit-status-that-propagates, data-loss or
+  security bug.** These are bugs on their own terms, independent of bash.
+- **It is a regression** against a corpus case that is already green. The 662
+  existing cases stay green; that is a floor, not a ceiling.
+
+**Do not fix — and do not write a corpus case for:**
+
+- **Diagnostic wording, spelling, and the exact substring a message echoes.**
+  Two of the last three sessions' fixes were of exactly this kind: which of
+  bash's two messages an unterminated `${` takes when its *name* scan runs off
+  the text, and the precise `%s` slice in ``bad substitution: no closing "`" in
+  …`` when an unmated backquote sits inside a single-quoted run in an array
+  subscript. Both are now correct, both were verified byte-exact, and neither
+  will ever matter to anything running on this OS.
+- **Artifacts of bash being a 40-year-old C program.** The canonical example,
+  already in the corpus: `OPTIND=4294967297` wraps to the first argument
+  because bash stores it in a C `int`. That is a fact about `int`, not about
+  shells.
+- **Constructs only reachable by adversarial or nonsense input** whose only
+  observable difference is which error text appears.
+
+**When a divergence is real but out of scope**, the answer is now bash: note it
+in the `TD-OILS-*` entry as `SCOPE: out of frozen scope (§305)` and move on.
+Do not open a fidelity investigation.
+
+### Why this and not the alternatives
+
+- **B — keep osh, close Q41 permanently.** Rejected as stated, because it
+  answers the feasibility question that was already settled and leaves the
+  *actual* problem — that byte-for-byte fidelity has no stopping criterion —
+  exactly where it was. This entry is B plus the missing stopping criterion,
+  which is why it supersedes rather than contradicts it.
+- **C — switch to cross-compiling bash, retire osh.** Rejected: it discards
+  141k lines of working, byte-exact, dependency-free Rust in exchange for
+  maintaining a fork of 40-year-old C, and osh's independence from a C
+  toolchain has value on an OS whose toolchain story is still moving. Note
+  that this rejection is *not* on feasibility grounds — bash demonstrably runs.
+- **The hybrid (chosen).** Gets C's benefit (fidelity is available exactly,
+  for free, when something actually needs it) without C's cost (no rewrite, no
+  fork to maintain), and converts the unbounded chase into a bounded job.
+
+### The history this entry exists to prevent repeating
+
+This is the part a future session must read. **§72 chose the Rust
+reimplementation on one decisive fact — "there is no C/C++ → `x86_64-slateos`
+cross-toolchain in this repo" — and wrote its own reversal condition. The
+condition fired four days later and nobody checked for twenty-five days.**
+
+| Date | Event |
+|---|---|
+| 2026-07-18 | `userspace/oils` begins; §72 rejects the cross-compile as prerequisite-blocked |
+| 2026-07-21 | `x86_64-slateos` C cross-target lands (fastpy, initiative F) |
+| 2026-07-22 | `zig cc` wired in; `toolchain/sysroot/lib/libc.a` exists — **§72's premise is now false** |
+| 2026-08-12 | The operator asks the question. Spike measures it: **bash 5.2 boots and runs on SlateOS**, 5,349,720-byte static ELF against our own `libc.a`, zero undefined symbols, no shims, three small `posix/src` additions (`killpg`, `eaccess`/`euidaccess`, `__fpurge`) |
+| 2026-08-14 | This entry |
+
+Roughly 1,100 of oils' 1,210 commits postdate the moment §72's stated blocker
+ceased to exist. The original call was correctly reasoned **on the facts of its
+day**; the failure was procedural, not analytical — a decision carrying an
+explicit expiry condition was never re-audited, and a large initiative kept
+compounding on a premise that had quietly become false.
+
+### The general rule this establishes
+
+**A decision whose rationale rests on a stated prerequisite being absent must
+name the condition that reverses it, and that condition must be *checked*, not
+merely recorded.** Concretely, for this repo:
+
+- When a `design-decisions.md` entry contains a "How to reverse" / "revisit if
+  …" clause, the reversing condition belongs in `todo.txt` as a live item, not
+  only in the entry's prose. A clause nobody is scheduled to evaluate is a
+  comment, not a control.
+- **When you build a capability, grep the design decisions for entries that
+  were rejected for lack of it.** The `zig cc` work of 2026-07-21/22 was the
+  moment to re-read §72, and the person best placed to notice was whoever
+  landed the toolchain. `grep -n "no C/C++\|cross-toolchain\|prerequisite"
+  design-decisions.md` would have found it.
+- Prefer rationales that rest on *tradeoffs*, which age slowly, over rationales
+  that rest on a *missing prerequisite*, which can evaporate overnight.
+
+### Where it bites
+
+`design-decisions.md` §72 (superseded in part — its prerequisite claim and its
+"How to reverse" clause are both spent; see the pointer added there),
+`open-questions.md` Q41 (closed by this entry), `roadmap.md` §2.7 and the Lane B
+backlog summary, `roadmap-detailed.md` §2.7, `todo.txt`, `known-issues.md` (the
+whole `TD-OILS-*` family is now scope-gated by the criterion above),
+`userspace/oils/` (all of it), `scripts/osh-bash-diff.py` and
+`userspace/oils/tests/corpus/` (the corpus no longer grows for its own sake),
+`scripts/bash-spike/`, `scripts/create-ext4-rootfs.sh` (stages `/bin/bash`) and
+`kernel/src/proc/spawn.rs::self_test_bash_on_slateos_libc`.
+
+
+## §306 — The shared documents stay per-branch; a fetch/merge cadence is what keeps them current
+
+**Date:** 2026-08-14
+**Decided by:** Claude (operator-approved scope — the operator was offered
+three options and delegated the choice: "do whichever one you think is best")
+
+**The question.** `roadmap.md`, `known-issues.md`, `design-decisions.md`,
+`open-questions.md`, `todo.txt` and `requests/` are ordinary tracked files, so
+each lane branch carries **its own copy** of every one of them. Should they
+instead live in one place — on `main` only — so that all three lanes read the
+same bytes?
+
+**What prompted it.** Two failures on the same day, both mine:
+
+1. `requests/a-b-init-conflates-syscall-error-with-exit-code.md` — Lane A's
+   report that `services/init/src/main.rs` treats `process_try_wait`'s negative
+   kernel error as a child exit code — sat on `origin/main` **unread for a
+   day**. It was never in my worktree, because `lane-b` had never once fetched
+   or merged since the split (55 ahead, 72 behind).
+2. I then diagnosed the repo's integration state by reading the shared docs in
+   `D:\visual studio projects\os`, and concluded that no lane had ever merged
+   to `main`. That was **wrong**: the `os` directory is a checkout of `main`
+   sitting **67 commits behind `origin/main`**, and Lane A had in fact merged
+   (`6d69d308e`). I recommended an architecture change to the operator on the
+   strength of it, then had to retract the reasoning before it was acted on.
+3. **A third surfaced while writing this entry, and it is the cleanest
+   illustration of the three.** The first boot test after the merge failed on
+   a missing `limine/BOOTX64.EFI`, and before that on six missing service ELFs
+   that `kernel/src/main.rs` `include_bytes!`es. Every one of them is
+   provisioned by `scripts/bootstrap-worktree.sh` — a script that exists *for
+   exactly this purpose*, that landed on `main` on 2026-08-13 (`0d013beb1`,
+   `60dab49d5`), and that `lane-b` had never seen. I was one `git merge` away
+   from a provisioned worktree for a day, and instead diagnosed it as a
+   sequence of unrelated build failures.
+
+**The decision.** Keep the per-branch copies. Add an explicit **sync cadence**
+instead, recorded in `roadmap.md` §5.5 and mirrored into `CLAUDE.md`:
+
+- `git fetch origin && git merge origin/main` at the **start** of every task;
+- push the lane and **merge the lane up into `main`** at the **end** of every
+  green one;
+- `origin/main` is the trunk — the `os` directory is a *view* of it that may
+  be arbitrarily stale, and must be pulled before it is read as authoritative;
+- **merge, never rebase**, when integrating `origin/main` into a lane (see
+  below).
+
+**The alternative, and why not.** Option B was to move the shared docs to
+`main` only. It buys freshness by construction and would have prevented failure
+(1) outright. It was rejected because:
+
+- **It trades away worktree isolation — the one property the three-lane
+  arrangement exists to provide.** Editing a doc that lives only on `main`
+  means three agents writing the same file in the same checkout, which is
+  precisely the clobbering failure mode the lanes were drawn to prevent. It
+  would reintroduce it for exactly the files that are hardest to reconstruct
+  from memory.
+- **The per-lane conventions demonstrably work.** The merge that closed the
+  72-commit gap produced **zero** conflicts in `design-decisions.md` — the
+  §200/§300/§400 numbering split doing its job across two lanes appending
+  simultaneously — and five elsewhere, every one of them the trivial "both
+  lanes appended at the same spot" shape. Total resolution: minutes.
+- **The failure was not structural.** The dropbox was not broken; nobody
+  emptied it. A problem that regular fetching solves does not justify
+  surrendering a safety property.
+
+A narrower slice of B — make `requests/` alone main-only — was also considered
+and dropped: a lane cannot write to the `os` worktree (the rule forbidding it
+is not negotiable), so filing a request would still require getting a commit
+onto `main`, which is the same merge-up step the cadence already mandates. It
+would add a mechanism without removing one.
+
+**A correction that came out of this.** `roadmap.md` rule 5 said "**Rebase on
+`main`, never merge**". That is unsafe now: the lane branches are *published*
+at `origin/lane-<x>`, so rebasing one requires a force-push — which the very
+next bullet of the same rule forbids outright, because it destroys the other
+lanes' work. The rule contradicted itself, and following its first half is what
+would have stranded `lane-b`. It now reads: merge `origin/main` in; rebase
+remains fine only for commits never pushed.
+
+**Where it bites:** `roadmap.md` §5 and the new §5.5, `CLAUDE.md` ("Three
+Sessions", "Branch Strategy", "When You Start a Task" step 1, "When You Finish
+a Task" step 11, and the push bullet under Autonomous Work), and
+`requests/b-a-fetch-and-merge-main-every-task.md` /
+`requests/b-c-fetch-and-merge-main-every-task.md`, which carry the rule to the
+other two lanes — since the only correct way to change their copy of a shared
+document is to land it on `main` and let them merge it down.
+
+---
+
+## §307 — A failed port is a bug report against our libc; the default is to fix the libc and re-try, not to reimplement
+
+**Date:** 2026-08-14
+**Decided by:** Operator (Claude proposed the framing, the four-way triage and
+the two refinements; the operator raised the question — "if upstream pkgconf
+doesn't build against our libc, could that be taken as a suggestion to improve
+our libc for it and for future apps instead?" — and made the call)
+
+**The question.** `roadmap-detailed.md` now tells you to try cross-compiling an
+existing C/C++/Rust program before writing a replacement for it. That rule only
+covered the *success* branch. What is the correct response when the port does
+**not** build against `toolchain/sysroot/lib/libc.a`?
+
+**The decision.** A failed link is treated as a **defect report against the
+libc**, and the default action is to implement the missing surface in `posix/`
+and re-try the port. "Fall back to reimplementing the application" is not the
+default and now requires a reason from the triage below.
+
+**Why the operator's framing is right, stated as reasons rather than assertion:**
+
+- **A real port is the only honest coverage test a libc has.** You cannot guess
+  which of several thousand symbols matter; real software tells you, weighted by
+  actual usage rather than by what looked important when the header was written.
+- **The fix compounds; a rewrite does not.** A libc function added for one port
+  is inherited free by every later port. A reimplementation helps exactly one
+  program, and then has to be maintained forever against upstream's bug fixes.
+- **The cost asymmetry points the same way.** Implementing a missing libc
+  function is minutes to an hour. Reimplementing the application is hours to
+  days — and §305 is the measured proof of how far that can run (~25 days on a
+  bash reimplementation, against ~a day for cross-compiling GNU bash as-is).
+- **Precedent, not theory.** In `scripts/bash-spike/`, `libc.a` defined 2,900
+  symbols, bash referenced 2,030, and the first SlateOS link resolved all but
+  **three** — `killpg`, `eaccess`/`euidaccess`, `__fpurge`. All three were
+  implemented for real in `posix/src` rather than shimmed. One port attempt
+  converted into permanent coverage for everything that follows.
+
+**The nuance that makes it a decision rather than a slogan — triage.** Only the
+first two categories mean "improve the libc":
+
+1. **Missing standard POSIX/C function** → implement it in `posix/`. Highest
+   leverage, and the common case.
+2. **Missing non-standard extension** (glibc/BSD-isms) → usually implement, but
+   check first whether upstream's `configure` already has a fallback path, in
+   which case the gap is imaginary and the fix is to let autoconf find it.
+3. **Architectural mismatch → do *not* grow the libc into it.** If the program
+   needs something SlateOS deliberately rejects — Unix signals as native process
+   control, 4 KiB page assumptions, ambient-authority fds, `/proc` special nodes
+   — the Linux Compatibility Boundary governs: `ENOSYS`, or emulation *inside*
+   the compat layer, never a hack into native code to satisfy a Linux quirk.
+   This is the one case where a failed port genuinely says stop.
+4. **Not a libc gap at all** → build-system friction (cross-compile detection,
+   sysroot plumbing). Fix the build. The bash spike's own example: `$CC` cannot
+   contain spaces because autotools word-splits it, and this repo lives under
+   `D:\visual studio projects\`, so the first attempt died with a thoroughly
+   misleading "C compiler cannot create executables".
+
+**Two refinements, both learned from that spike:**
+
+- **A kernel gap can masquerade as a libc gap.** `killpg` exists now and still
+  returns `ENOSYS`, because process groups do not exist in the kernel — yet the
+  symbol had to exist, since bash references it from job-control code and the
+  *link* needs it even where job control cannot work. Implement the symbol
+  honestly; file the underlying gap against the kernel (cross-lane: a
+  `requests/` entry, not an edit outside your lane).
+- **Whatever you add must actually work.** "Never accept-without-honoring"
+  applies at full force: a stub returning success is *worse* than `ENOSYS`,
+  because the port links, appears to work, and fails subtly later. `killpg`
+  reporting `ENOSYS` truthfully is the correct shape.
+
+**Where it flips.** The argument is leverage, so it evaporates when there is
+none. If one port needs a large, exotic subsystem nothing else will ever use,
+that is cost without reuse — weigh it like any other feature rather than
+treating "it improves the libc" as automatically decisive.
+
+**The alternative that was rejected**, and why it is tempting: treat a failed
+build as evidence that the program is "not portable to SlateOS" and write our
+own. It is tempting because it is *unblocking* — reimplementation never fails to
+link, so it always feels like progress, and the failure it replaces is concrete
+and immediate while the compounding benefit is diffuse and deferred. That is
+precisely the bias this entry exists to counter: the cheap-feeling path is the
+one that costs 25 days.
+
+**Where it bites:** `roadmap-detailed.md` §"Porting vs. Reimplementing" (the
+sub-block "When the port *fails*, that is usually a bug report against our libc
+— not a verdict on the port"), the whole of `posix/`, and — immediately —
+`userspace/pkgconf/`, whose in-progress Rust rewrite prompted the question and
+whose fate now depends on whether upstream pkgconf cross-compiles.
+
+
+## §308 — A private file stays out of GitHub via a pre-push hook plus an orphan branch, not by being untracked
+
+**Date:** 2026-08-14
+**Decided by:** Claude (operator-approved scope) — the operator set the
+requirement verbatim ("todo2.txt can be committed to the local git, but i don't
+want it on github"); the mechanism below is my call and is mine to revisit.
+
+**The requirement, and why it is not trivially satisfiable.** Git has no
+per-file push filter. A pushed branch carries every file its commits contain,
+and every earlier version of that file that its history contains. So "tracked
+locally but never published" is not a property you can attach to a *file* — it
+has to be enforced at the boundary where publication actually happens.
+
+That matters more here than in a normal repo, because three autonomous agents
+push freely and often, under a standing instruction to "push often, on your own
+volition". Anything tracked on a shared branch reaches GitHub within minutes,
+by design. A convention would not survive that.
+
+**Decision — three parts, each covering a gap the others leave:**
+
+1. **`/todo2.txt` stays in `.gitignore` on the shared branches.** This is the
+   cheap guard: it stops the file being swept up by a `git add -A`, which is
+   how it would realistically get committed by accident.
+2. **A `pre-push` hook (`scripts/hooks/pre-push`) refuses any push whose new
+   commits add or touch a guarded path.** This is the guard that actually
+   implements the operator's requirement, because it holds even when the file
+   *is* committed. It is deliberately not a blanket block: it inspects the tip
+   tree of each ref being pushed and the commits not yet on any remote-tracking
+   branch, so ordinary lane pushes are untouched and only an actual leak is
+   stopped. `ALLOW_PRIVATE_PUSH=1` bypasses it for the day the operator changes
+   their mind.
+3. **Local history lives on the orphan branch `private/todo2`,** appended to by
+   `scripts/snapshot-todo2.sh` using plumbing (`hash-object` / `mktree` /
+   `commit-tree` / `update-ref`) so no worktree HEAD ever moves. This is the
+   part that delivers "can be committed to the local git" for real — the file
+   gets genuine version history and diffs — without that history riding on a
+   branch anyone pushes.
+
+**Why the file cannot simply be committed on `main` or a lane branch.** This is
+the option that first looks right and is in fact the worst one. Those branches
+are pushed constantly; with the hook in place, committing `todo2.txt` on `main`
+would make *every subsequent push of `main` by any of the three lanes* fail
+until someone removed it. The requirement would be met and the project would be
+bricked. An orphan branch shares no commits with the project, so it can never be
+dragged along by a merge or a push of something else.
+
+**Alternative considered: a separate local-only repository** (a bare repo
+outside the tree, driven with `--git-dir`/`--work-tree`). Strictly safer — there
+is no remote at all, so no hook to forget. Rejected because it puts the
+operator's file under a second VCS with its own path incantations for every
+read, and because the failure it prevents (a hook lost to a fresh clone) is
+already handled: the hook source is *tracked* at `scripts/hooks/pre-push` and
+`scripts/install-hooks.sh` re-arms it in one command. Worth revisiting if the
+set of private files ever grows beyond one.
+
+**Alternative considered: rely on `.gitignore` alone** (the status quo before
+this entry). Rejected because it answers a different question. Ignoring a file
+prevents it being *staged*; it does nothing once the file is tracked — and the
+file *was* tracked on all five branches until 2026-08-14, which is exactly how
+it reached GitHub in the first place. `.gitignore` guards the input; the hook
+guards the output; the operator asked about the output.
+
+**Limits, stated plainly.** The hook stops *future* publication. It does not
+remove `todo2.txt` from history already on GitHub — every revision pushed
+before 2026-08-14 is still reachable there, and purging it would require
+rewriting published history and force-pushing, which this project forbids and
+which would break all three lanes. Hooks are also per-clone and not carried by
+`clone`/`fetch`; all four worktrees share one `.git`, so one install covers
+every lane today, but a fresh clone starts unarmed.
+
+**Where it bites:** `.gitignore`, `scripts/hooks/pre-push`,
+`scripts/install-hooks.sh`, `scripts/snapshot-todo2.sh`, the orphan branch
+`private/todo2` (never merge it into anything), and
+`requests/b-a-todo2-untracked.md` / `requests/b-c-todo2-untracked.md`, which
+tell lanes A and C why a push of theirs might be refused.
+
+---
+
+## §424 — A program may request a default fold depth for its own activity log, as a hint the user overrides
+
+**Date:** 2026-08-14
+**Decided by:** Operator (Claude proposed this option and recommended it)
+
+`roadmap-detailed.md` §4.14 gives every process an activity stream whose
+`enter`/`exit` and `phase` records form a tree, and specifies that the viewer
+folds it: open frames expanded, completed frames folded to a summary line,
+failures expanded regardless. That left one question genuinely open — may a
+*program* say how its own output should start out folded? An installer would
+like to say "start me collapsed to phases."
+
+### The tension
+
+Both sides are real, which is why it was filed as an ambiguity rather than
+decided in passing.
+
+**For allowing it.** The program is the only party that knows which of its
+nesting levels are semantically meaningful. Depth is a poor proxy for
+importance: one program's level 3 is its phase boundary, another's is a
+logging helper's inner frame. A viewer choosing purely by depth will collapse
+the interesting level of one program and expand the noise of another, and no
+global default fixes both.
+
+**Against.** The program is also the party with an incentive to hide its own
+noise, and the party most likely to get it wrong — a default fold depth chosen
+by a developer watching their own program on their own machine is tuned for
+someone who already knows what the levels mean. A hint mechanism is also a
+mechanism, and every "the app can influence the system UI" affordance ever
+shipped has been abused by somebody.
+
+### What was decided
+
+Allow it, strictly as a default the user's per-app preference overrides. The
+constraints are what make this safe, and they are specified rather than left
+implied:
+
+* it cannot survive an explicit user setting for that app;
+* it cannot hide a frame from expand-all;
+* it cannot fold a frame that the failure rules (a frame that failed, or
+  contains an error or warning) would expand;
+* the viewer indicates when the active fold depth came from the program rather
+  than from the user or the global default, so "why is this collapsed" always
+  has a visible answer.
+
+The reasoning that settles it: with those constraints, a program that abuses
+the hint costs the user **one click, not the data**. The failure mode is
+bounded and self-correcting, whereas the failure mode of refusing the hint —
+every program's log folding at a depth that is meaningless for that program —
+is unbounded and has no recourse at all.
+
+### The alternative that was rejected
+
+Depth-only folding chosen entirely by the viewer, with no program input. It is
+simpler and unabusable, and it is what most log viewers do. It was rejected
+because it makes the fold depth a property of the *viewer* when the thing being
+folded is a property of the *program*, and because §4.14 already establishes
+that adoption is the hard part of this feature: a facility that ignores what
+instrumented programs tell it gives authors one less reason to instrument.
+
+**Where it bites:** `roadmap-detailed.md` §4.14 → "Grouping and nesting —
+subtasks under tasks" (the fold-state bullets) and "Settings" (the per-app
+"whether this app's requested default fold depth is honoured" toggle).
+Implementation is lane **C**, in the Process Explorer activity pane and the
+call-tree view.
+
+---
+
+## §425 — A monospace face is a *scoped render-tree state*, not a field on every text command
+
+**Date:** 2026-08-15
+**Decided by:** Claude (autonomous)
+**Zone:** gui-toolkit / gui-core / apps
+
+**Context.** The toolkit had no way to ask for a fixed-pitch face at all.
+Every `text::measure` call resolved against the one installed UI face, so the
+terminal-shaped apps — `apps/tmux` above all — sized their character cell from
+`text::digit_advance`, i.e. the advance of `'0'` *in a proportional face*. At
+13px that is 7.55px, while `'W'` in the same face measures 13.08px. The grid
+was laid out on one width and filled with glyphs of another: characters
+overhung their neighbours' cell backgrounds, and the block cursor was drawn
+beside the character it was supposed to mark rather than on it. This is a real
+rendering bug, not a test artifact, and it cannot be fixed by picking a
+different measuring character — a proportional face has no single advance to
+pick.
+
+So `osfont` grew a `Family { Ui, Mono }` axis on its cache key, and the
+question became how a *caller* names the family it wants, given that the
+render tree is the interface between an app and whatever draws it.
+
+**Options.**
+
+1. **A `family` field on `RenderCommand::Text`.** Each string carries its own
+   face. Maximally explicit; no state to get out of balance.
+2. **Scoped `PushFont { family }` / `PopFont` commands**, following the
+   existing `PushClip`/`PopClip` and `PushTranslate`/`PopTranslate` grammar.
+   A region of the tree is drawn in a family; commands inside inherit it.
+
+**Decision: (2), scoped.**
+
+**Reasoning.**
+
+- *It matches what the property actually is.* A family is a property of a
+  **region** — a terminal pane, a code block, a hex dump — not of each
+  individual string inside it. The clip rectangle and the translate are scoped
+  for exactly this reason, and a family behaves the same way: it is set once
+  on entering a region and restored on leaving.
+- *The cost of (1) is paid by everyone and the benefit is collected by almost
+  nobody.* The tree contains **4570 `RenderCommand::Text {` construction sites
+  across 208 files**. Option (1) puts a new field on every one of them so that
+  a handful — one terminal, one editor gutter, one hex view — can set it to
+  something other than the default. Even with `..Default::default()` that is
+  4570 sites of churn and 4570 places to get it subtly wrong later.
+- *Backends that do not implement it degrade correctly.* A renderer that
+  ignores `PushFont`/`PopFont` draws everything in the UI face — precisely
+  what it did before the commands existed. Option (1) has the same property
+  only if the field is `Option`-shaped, which weakens its one advantage.
+
+**Cost we accept.** Scoped state can go unbalanced: a `PushFont` on a path
+that returns early leaks the family into whatever is drawn next. The
+mitigations are the same ones the clip stack already uses — the compositor
+clears its `font_stack` at both ends of `execute()`, so a leak cannot survive
+a frame — plus a per-app test. `apps/tmux`'s
+`the_grid_is_drawn_in_the_family_it_was_measured_in` walks the command list,
+asserts the depth returns to zero, that the scope was opened exactly one deep,
+and that cell glyphs were actually drawn *inside* it. That last assertion is
+the one that matters: without it the test passes vacuously on a fresh
+multiplexer, whose buffer is all spaces and whose cell loop skips them.
+
+**Wire protocol.** `guiremote` encodes the two commands as tags `0x0B`/`0x0C`
+with a one-byte `FontFamilyTag`. `PROTOCOL_VERSION` stays at **1**: the change
+is purely additive, every frame a v1 encoder could produce still decodes
+identically, and the only mismatch — a new encoder against an old decoder —
+already fails cleanly with `DecodeError::BadTag` rather than misrendering.
+
+**Fallback semantics.** A family with no installed face falls back to the
+built-in 8x16 bitmap face, which is *itself* monospace — never to the other
+family's face. This matters because `Mono` is a promise about **metrics**, not
+about looks: a caller may treat the text as a grid. Falling back from `Mono` to
+a proportional UI face would silently reintroduce the exact bug this entry
+exists to fix, so the fallback preserves the promise even when it cannot
+preserve the appearance.
+
+**Where it bites:** `gui/font/src/system.rs` (`Family`, the cache key),
+`gui/toolkit/src/render.rs` (`FontFamily`, `PushFont`/`PopFont`),
+`gui/toolkit/src/text.rs` (`measure_in`, `cell_advance`, `line_height_in`,
+`ascent_in`, mono face installation), `gui/remote/src/lib.rs` (tags
+`0x0B`/`0x0C`), `gui/compositor/src/main.rs` (`font_stack`), `apps/tmux`.
+
+## §426 — On-disk records store paths percent-encoded from their bytes, behind a format version marker
+
+**Date:** 2026-08-15
+**Decided by:** Claude (autonomous)
+**Zone:** apps
+
+**Context.** Two lane-C programs keep a record whose whole purpose is to name a
+file well enough to reproduce it later: the file explorer's recycle bin
+(`meta.txt`, holding the path an entry came from) and the backup program's
+manifest (the JSON list of everything in an archive). Both wrote the path as
+text — `path.display()` and `to_string_lossy()` respectively — and our paths
+are byte strings that allow every byte except `/` and NUL. A name that is not
+UTF-8 therefore became U+FFFD *in the record*, and since the record is the only
+copy, "restore" recreated the file under a different name while reporting
+success. Both programs were self-consistently wrong: they re-read exactly what
+they wrote, so nothing downstream could notice.
+
+The fix has to make an arbitrary byte string survive a file that also wants to
+stay human-readable and line- or JSON-oriented. Both formats already existed in
+the field.
+
+**Options.**
+
+1. **Store the raw bytes.** Write the path verbatim and parse it back. Exact,
+   zero encoding logic — but `meta.txt` is line-oriented and a path may contain
+   `\n`, and JSON strings are Unicode by definition, so a raw byte string is
+   not representable in the manifest at all.
+2. **Base64 the path.** Exact and trivially unambiguous, but the record stops
+   being readable: the overwhelmingly common case is an ordinary ASCII path,
+   and a recycle bin you cannot inspect with a text editor is a real loss when
+   the thing you are debugging is "where did my file go".
+3. **Percent-encode: escape `%` and every byte outside `0x20..0x7f`.**
+   Ordinary paths are unchanged apart from a literal `%`; the record stays
+   printable ASCII, single-line, and valid JSON; and the encoding is exact.
+4. **Escape only what the container forbids** (newline for `meta.txt`,
+   non-UTF-8 for JSON). Minimal diff, but each format gets a different escape
+   with different edge cases, and "what the container forbids" is exactly the
+   kind of thing that is revisited later and gets it wrong.
+
+**Decision: (3), the same percent-encoding in both formats, each guarded by a
+version marker** — line 1 of `meta.txt` is `slate-recycle-v2`, and the manifest
+carries `"version": 2`. Absence of the marker means version 1, which is read
+with paths verbatim.
+
+**Reasoning.**
+
+- *It is exact where exactness is the point and invisible where it is not.* The
+  encoded form of `/home/u/notes.txt` is `/home/u/notes.txt`. Only the rare
+  path pays, and it pays with a form that is still readable (`caf%E9.txt`).
+- *One escape, two formats.* Both records now have the same failure modes and
+  the same tests. Option (4) would have produced two encodings that look alike
+  and differ in the corners.
+- *The version marker is what makes the change deployable.* Both formats had
+  live data. Refusing to read it would strand every existing backup and every
+  populated recycle bin; reading it as if it were escaped would silently
+  rename any file whose name contains `%20`. The marker is one line and one
+  field, and it makes the old data read correctly instead of plausibly.
+- *Against (2):* the readability of the common case is worth more than the
+  uniformity of the rare one. Against (1): it does not work in JSON, and a
+  path with a newline in it is exactly the case the record must survive.
+
+**Consequences.** A decoder must treat a `%` not followed by two hex digits as
+a literal `%` rather than dropping it — a hand-edited file must not lose a byte
+silently. The lossless part is kept at byte level (`encode_bytes` /
+`decode_bytes`) with the `OsStr` conversion as a thin platform layer above it,
+because the byte level is the level the file is written at and the only level
+that can be asserted on a non-Unix test host.
+
+**Where it bites:** `apps/explorer/src/fileops.rs` (`encode_path`,
+`encode_bytes`, `decode_path`, `decode_bytes`, `META_VERSION`, `RecycleBin`),
+`apps/backup/src/main.rs` (the same four functions, `MANIFEST_VERSION`,
+`FileEntry::to_json`/`from_json`, `relative_path`).
+
+
+## §309 — Byte-fidelity with bash has an "unless it is a defect" clause; osh does not reproduce the null array element
+
+**Date:** 2026-08-15
+**Decided by:** Operator (Claude recommended this option — open-questions.md Q40 option B)
+
+**The question.** osh is held to byte-fidelity with bash 5.2.37. One measured
+bash behaviour, reachable only through a nameref, stores a **null pointer** into
+an array element (`n=(a b c); declare -n q='n[1]'; declare q`), after which the
+array reads as empty while its elements are demonstrably still present. It looks
+like a defect rather than a design: bash cannot describe the resulting state
+with any of its own printers, no bash-level operation other than this one can
+produce it, and the bind carries `ASS_FORCE` so it also silently defeats
+`readonly`.
+
+**Decision: do not reproduce it (option B).** osh keeps `Str` array elements and
+the array reads normally. The divergence is waived in the corpus and the full
+write-up stays in `known-issues.md` →
+`TD-OILS-A-DECLARATION-WITH-NOTHING-TO-DO-BINDS-A-NULL-THROUGH-THE-REFERENCE`,
+so the decision is reversible if a real script is ever found that depends on it.
+
+**What this actually settles — the precedent, not the bug.** The narrow
+cost/benefit was never close: option A wanted every array reader in `interp.rs`
+rewritten around an `Option<Str>` element type, permanently, to preserve a state
+no bash-level operation can otherwise produce. The reason it needed the operator
+is that it establishes **whether byte-fidelity has an "unless it's a bug" clause
+at all**. It now does. Consequences:
+
+- "The measurement wins" is no longer absolute. A measured bash behaviour may be
+  waived when it is (i) unreachable except through a construct built to reach
+  it, (ii) inconsistent with bash's own observable model, and (iii) expensive to
+  reproduce in a way that degrades osh's value model.
+- Every future waiver must be argued against those three tests **in
+  `known-issues.md`**, not decided silently. A waiver that is not written down is
+  a divergence, not a decision.
+- This does not loosen §305's frozen fidelity scope. §305 says which behaviours
+  are in scope; this says a behaviour in scope may still be waived as a defect.
+
+**Rejected alternative — option C, reproduce only the visible half** via an
+out-of-band "poisoned index" marker. It is a second parallel representation of
+emptiness, threaded through the same readers as option A, for a less honest
+model — most of A's cost without A's one virtue.
+
+**Where it bites:** `userspace/oils/src/interp.rs` (`Shell::declare_ref_bind_read`,
+`Shell::arrays`, `Shell::assoc`), the corpus case
+`a-declaration-with-nothing-to-do-evaluates-the-subscript-the-reference-carries.sh`
+(which covers the evaluated-subscript half osh *does* match and deliberately
+stops short of the store), and `known-issues.md` as above.
+
+
+## §310 — One-shot repo-wide rustfmt, with a `.git-blame-ignore-revs` file alongside
+
+**Date:** 2026-08-15
+**Decided by:** Operator (Claude recommended this option — open-questions.md Q42 option A)
+
+**The question.** `CLAUDE.md` sets the convention as "rustfmt defaults, no manual
+formatting overrides", but two crates are not rustfmt-clean: `kernel` (16 911
+hunks) and `posix` (389 hunks across 244 of 2 299 files). Because `cargo fmt` is
+package-scoped with no file filter, formatting your own change in a drifted
+crate rewrites hundreds of files you never touched — one ~150-line edit in
+`posix` produced a 1 403-insertion / 1 429-deletion diff across 173 files that
+could not afterwards be separated from the real change, costing a
+revert-and-redo.
+
+**Decision: option A — reformat the whole repo once, and commit a
+`.git-blame-ignore-revs` file naming the reformat commits.** Afterwards
+`cargo fmt` is safe, the stated convention becomes true rather than
+aspirational, and any future drift is a real diff.
+
+**The cost, stated honestly.** This rewrites `git blame` for ~17 000 hunks of
+kernel code. Blame is the primary tool for "why is this line here?" in a
+codebase with no human reviewer and a 4 600-commit history, and this is the one
+part that cannot be undone. `.git-blame-ignore-revs` mitigates it for anyone who
+configures it (`git config blame.ignoreRevsFile .git-blame-ignore-revs`) and for
+`git blame --ignore-rev`, but **not** for GitHub's plain blame view or a casual
+`git log -S`. The operator accepted that trade: the trap is permanent and recurs
+on every edit, the blame churn is one-time.
+
+**Execution constraints that shape how it lands.**
+
+- `cargo fmt --all` does **not** run in this workspace — it dies with
+  `The filename or extension is too long. (os error 206)`, the Windows
+  command-line limit, hit by the sheer number of workspace members. The
+  reformat must iterate crates one at a time.
+- It is **two commits in two lanes**, not one. `posix/` is Lane B's and
+  `kernel/` is Lane A's; a single cross-lane reformat commit would be exactly
+  the clobbering the lane split exists to prevent. Each lane reformats its own
+  crate, and both commit hashes go into `.git-blame-ignore-revs`.
+- Each reformat commit must contain **nothing but** formatting, so that
+  `--ignore-rev` is safe to apply wholesale.
+
+**Rejected alternatives.** **B** (format only files you edited, via
+`rustfmt --edition 2024 <file>`) was the working stopgap and has zero history
+churn, but leaves the trap armed for anyone reaching for the obvious command and
+never shrinks the drift. **C** (reformat `posix` only) clears the crate under
+daily work for 1.5% of A's blame cost, but leaves the worst offender armed — and
+a half-applied convention is the state that caused the incident.
+
+**Where it bites:** every `.rs` file in `kernel/` and `posix/`, the new
+`.git-blame-ignore-revs`, `CLAUDE.md`'s formatting convention (now true), and
+`known-issues.md` → `TD-REPO-IS-NOT-RUSTFMT-CLEAN-SO-RUNNING-CARGO-FMT-IS-A-TRAP`.
+
+
+## §311 — Ship full tzdata, vendored as prebuilt TZif binaries, updated as a `pkg/` package
+
+**Date:** 2026-08-15
+**Decided by:** Operator (Claude recommended this combination — open-questions.md B-Q1, A1 + B1 + C1)
+
+**The situation.** Both the libc and osh resolve `TZ` through real binary
+zoneinfo: `tzrules::TzFile` reads TZif v1/v2/v3 (RFC 8536) with no allocator,
+`TZDIR` defaults to `/usr/share/zoneinfo`, and an unset `TZ` follows
+`/etc/localtime` exactly as glibc does. Every piece was built except the data,
+so `TZ=America/New_York` silently answered UTC — the user gets UTC while
+believing they selected Eastern. Shipping the data is a packaging decision, not
+a coding one, which is why it went to the operator.
+
+**Decision, in three parts:**
+
+- **(a) A1 — full tzdata**, including the `backward` compatibility links
+  (`US/Eastern`, `Asia/Calcutta`). ~450 KiB and ~1 800 files in every base
+  image. Chosen because ~450 KiB is nothing against being *wrong* about
+  `US/Eastern`, and because the entire reason to use TZif rather than invent a
+  format is that ported programs expect exactly what everyone else ships.
+  A2 (`zic -b slim`, no backward links) saves ~200 KiB and breaks a very common
+  spelling **silently, back to UTC** — the same failure mode this work exists to
+  end. A3 (minimal at install, rest as a package) leaves a fully-installed-looking
+  machine unable to resolve a zone the user did not personally pick.
+- **(b) B1 — vendor the prebuilt binaries** from the IANA distribution,
+  checked in and version-pinned. Reproducible, no build dependency, ~450 KiB of
+  binary per update in git history. B2 (port `zic`) and B3 (write our own TZif
+  generator in Rust) were both rejected for the same reason: `zic` is a real
+  compiler for the tzdata source grammar, and getting it subtly wrong produces a
+  **wrong clock that nobody notices for months**. B3 is the most likely of the
+  three to be subtly wrong and would put that risk on our own code.
+- **(c) C1 — updated as a `pkg/` package.** tzdata changes several times a year
+  at short notice; that cadence is exactly what `pkg/` exists for. C2 (ship with
+  the OS image only) ties a timezone fix to a full release. C3 (a dedicated fast
+  channel for tzdata alone) is infrastructure to build only once C1 has proven
+  too slow in practice — not before.
+
+**The residual risk this accepts.** A user who never runs `pkg update` drifts
+into a stale tzdata and therefore a wrong wall clock, with nothing loud to tell
+them. If that proves common, C3 is the escalation, and it is additive.
+
+**Cross-lane note.** The reader, the libc paths and osh are Lane B; the `pkg/`
+packaging is **Lane C's tree**, so the C1 half lands via a `requests/` entry
+rather than directly.
+
+**Where it bites:** `pkg/` (Lane C), `posix/src/tz.rs` (`TZDIR_DEFAULT`,
+`LOCALTIME_PATH`, `load_zoneinfo`), `userspace/oils/src/interp.rs`
+(`TZDIR_DEFAULT`, `Shell::zoneinfo_dir`), `tzrules/src/tzif.rs` (the reader,
+already done), the installer (which must write `/etc/localtime`), and the two
+tests that assert the current UTC fallback and **must start failing the day the
+data lands** — `test_zoneinfo_names_resolve_to_utc_until_tzdata_is_shipped`
+(libc) and `printf_time_falls_back_to_utc_for_a_zone_it_cannot_resolve` (oils).
+
+## §312 — libc's Linux capability words are a conservative projection of the kernel's `(ResourceType, Rights)` handles, not a fiction
+
+**Date:** 2026-08-15
+**Decided by:** Operator (Claude recommended this option)
+**Question:** `open-questions.md` Q44 (now RESOLVED)
+**Answer, verbatim:** *"Q44: a."*
+
+### The decision
+
+**Option A — conservative projection.** Each Linux `CAP_*` bit is derived from a
+specific `(ResourceType, Rights)` predicate over the capabilities the process
+actually holds, and reports **not held** whenever no rule matches. The default
+is *deny*, not *allow*: an unmapped `CAP_*` is false, never true.
+
+Worked examples of the rule shape:
+
+| `CAP_*` | Predicate over held capabilities |
+|---|---|
+| `CAP_SYS_RAWIO` | any `PortIo` handle with `READ` or `WRITE` |
+| `CAP_KILL` | any `Process` handle with `SIGNAL` |
+| `CAP_SYS_PTRACE` | any `Process` handle with `DEBUG` |
+| `CAP_SYS_NICE` | any `Thread` handle with `IO_REALTIME` |
+| `CAP_NET_RAW` | any `NetRaw` handle |
+| `CAP_SYS_ADMIN` | **hand-maintained union** — see below |
+
+`CAP_SYS_ADMIN` is the exception and is explicitly *not* derived. It is Linux's
+junk drawer, it has no natural preimage in a per-object model, and it accounts
+for 20 of libc's 63 gate sites. It gets an explicit, hand-written union of the
+predicates that each of those 20 sites actually needs, maintained as a list with
+a comment per member. A derived rule for it would either be permanently false
+(breaking 20 sites) or so broad that it re-grants everything (which is the bug
+being fixed).
+
+### What this replaces
+
+`posix/src/sys_capability.rs` kept Linux's three capability words in libc's own
+memory and initialised them from `CAPS_DEFAULT` with **every bit set**. Nothing
+ever asked the kernel what the process held, so `capget()` reported the full set
+to a process spawned with `capabilities: &[]`, and every libc-side gate passed.
+
+That was safe only by accident: the kernel re-checks every privileged operation
+itself, so libc's optimistic answer could never *grant* anything. The failure
+mode is the silent one — a port that trusts `capget()` to decide what to attempt,
+or to drop privileges, gets a confidently wrong answer with no error anywhere.
+
+### Why A and not the others
+
+- **B (a `ResourceType::PosixCapability` handle granted per `CAP_*` at spawn)**
+  was rejected on principle. It is ambient authority wearing a capability
+  costume: a handle meaning "may do `CAP_SYS_ADMIN` things", process-wide, tied
+  to no object. It reproduces exactly the property `design.txt` rejects while
+  looking compliant because it is spelled as a handle. Notably it is the option
+  that would have made `CAP_SYS_ADMIN` *easy*, and it was still not worth it.
+- **C (keep libc optimistic, document `capget()` as "the ceiling, not the
+  grant")** is the honest do-nothing. It breaks no fixture and carries no risk,
+  but it leaves the silent-wrong-answer trap open — which is the entire reason
+  `TD-POSIX-CAPS-ARE-NOT-THE-KERNEL'S` was logged.
+- **D (make `capget()` fail with `ENOSYS`)** is the most honest answer and the
+  worst outcome for a compatibility layer. Linux software calls `capget()`
+  informationally and does not expect failure; this trades one silent wrong
+  answer for loud breakage across every port.
+
+### Consequences, in the order they have to happen
+
+1. **An enumerating capability query syscall must exist first.** This is not
+   optional under any option and is not in dispute. `SYS_CAP_QUERY` (400,
+   `kernel/src/syscall/handlers.rs::sys_cap_query`) returns only a *count* of
+   the caller's capabilities; its own doc comment says "a future extension will
+   support filling a user-space buffer with detailed capability entries", and
+   its sole consumer today is `userspace/strace`'s syscall name table. **That
+   handler is Lane A's tree** — filed as `requests/b-a-cap-enumerating-query-syscall.md`.
+2. **libc seeds its words from that query**, once, at process start, and on
+   demand after any operation that could change the set.
+3. **The libc gates stay advisory until the fixtures are given real
+   capabilities.** This is the staging that keeps the change from being a
+   flag-day. Making a gate truthful breaks every fixture that relies on the
+   permissive behaviour, and there are known ones:
+   `services/ctest-jobctl` (its doc comment says so out loud — "our libc's own
+   `CAP_KILL` gate reads the process capability words, which start out with
+   every capability held"), `self_test_cctty`, and `self_test_cpgroup`, all
+   spawned with `capabilities: &[]`. That is boot-test-visible, so the flip
+   from advisory to enforcing lands with QEMU free.
+
+### The cost accepted
+
+`capget()` becomes truthful, which means code that previously sailed through a
+libc gate now gets refused by it. That is the point — but it means the flip is a
+behavioural change to every fixture's effective privilege, not a no-op refactor,
+and it must be sequenced (step 3) rather than switched on with the mapping.
+
+**Where it lives:** `posix/src/sys_capability.rs` (`CAPS_DEFAULT` ~line 251),
+the 63 gate sites led by `posix/src/process.rs` (13) and `posix/src/unistd.rs`
+(10), `kernel/src/cap/mod.rs` + `kernel/src/cap/rights.rs` (the model being
+projected), `kernel/src/syscall/handlers.rs` (`sys_cap_query`), and
+`known-issues.md` → `TD-POSIX-CAPS-ARE-NOT-THE-KERNEL'S`.
+
+## §313 — `open-questions.md` is written for a reader who does not know the subsystem, and questions that are not yet answerable move to `deferred-questions.md`
+
+**Date:** 2026-08-15
+**Decided by:** Operator (operator's own proposal, both halves)
+
+**In short:** the operator said they often cannot understand the entries in
+`open-questions.md` — partly terse wording, but mostly terms they do not know.
+They also pointed out that one entry (Q39) says in its own text that now is not
+the time to decide it, and asked whether it should live somewhere else. Both
+observations are about the same failure: the file is supposed to be a list of
+things the operator can act on, and it had drifted into being a list of things
+Claude found interesting.
+
+### The problem, stated plainly
+
+`open-questions.md` is the **operator's decision queue**. Its only job is to let
+the operator make a decision. An entry that is technically flawless but not
+understandable has failed at that job completely — it produces no decision, and
+worse, it produces *silence*, which is indistinguishable from "not yet read".
+Several of today's answers arrived days after the questions were filed for
+exactly this reason, and one (`Q44`) came back not as an answer but as a
+question about a term used in the question itself ("i forget what 'ambient'
+means").
+
+The second failure is padding. Q39's own recommendation section read "None yet,
+on purpose… Ask again then." A queue containing items that say *do not act on
+this* teaches the reader to skim the queue, which costs attention on the items
+that genuinely need it.
+
+### Decision, part 1 — legibility rules for `open-questions.md`
+
+Recorded in `CLAUDE.md` under the `open-questions.md` bullet, and mirrored in
+the file's own header:
+
+- **Every entry opens with `In short:` — 2–4 sentences, no jargon at all**:
+  what is wrong now, what a user would actually see, what the choice is between.
+  If a term of art seems unavoidable there, the paragraph is wrong.
+- **Every term of art is glossed in-line on first use, in ≤ 10 words**, even if
+  it was glossed in another entry, another file, or last week. The operator
+  reads one entry at a time, months apart; nothing carries over.
+- **Every option carries a one-line `What changes:`** stated as an observable
+  difference ("the clock reads Eastern instead of UTC"), not an implementation,
+  so options can be compared without reading the prose.
+- **Every entry says what happens if it is never answered** — is today's
+  behaviour safe, is anything blocked, does it get worse with time.
+- **Entries are capped to what a decision needs.** Detail that only matters
+  *after* the answer goes in `known-issues.md` or the `requests/` file. Prefer a
+  table to a paragraph, an example to an abstraction.
+- The same `In short:` opener applies to `design-decisions.md` entries, so a
+  decision can be re-read a year later without reconstructing the context.
+
+**The tension this creates, and how it resolves.** The operator also said they
+do not want *a lot more reading*. Glossing terms and adding a summary both add
+words, so the rules above are not purely additive — the length cap is part of
+the decision, not a footnote to it. The `In short:` paragraph is meant to
+*replace* the rambling first section of an entry, and the "cap it to what a
+decision needs" rule is what pays for the glosses. An entry that gets longer
+overall has applied the rule wrong.
+
+**Alternative rejected: a project glossary.** A central `glossary.md` looks like
+the tidy answer — define "ambient authority" once, link it everywhere. It was
+rejected because it optimises for the writer, not the reader: it turns one
+unfamiliar word into a click, a context switch, and a second document, at the
+exact moment the reader is trying to hold a tradeoff in their head. A ten-word
+parenthetical costs the writer a repetition and costs the reader nothing. The
+repetition is the feature.
+
+### Decision, part 2 — `deferred-questions.md`
+
+A new shared document at the repo root for questions that will need the operator
+**eventually** but cannot be answered usefully **today**, because the evidence or
+the prerequisite does not exist.
+
+- **Every entry carries a `Trigger:` line** — the concrete event that makes it
+  answerable. Without one it is either a real open question or dead; it is never
+  deferred. This is the whole mechanism: a deferred question with no trigger is
+  just a question that has been hidden.
+- Entries are numbered `D-Q<n>` and are append-only, same as the other shared
+  docs (`roadmap.md` rule 3, now updated).
+- When the trigger fires, the entry moves *back* into `open-questions.md`,
+  refreshed with whatever the evidence turned out to be, and is deleted here.
+
+**Moved on creation:** Q39 (which way the shipping default points once a fastpy
+utility clears both the parity bar and the performance bar) became **D-Q1**. Its
+trigger is the first fastpy utility clearing both bars; nothing does today, so
+answering it now would be answering without evidence.
+
+**The risk accepted.** A deferred question is easier to forget than an open one —
+that is the point, and it is also the hazard. `deferred-questions.md` has no
+process that surfaces it on a schedule; it relies on whoever fires the trigger
+noticing the entry. The mitigation is that triggers are written as events in the
+work (*"the first fastpy utility clears both bars"*), so the person who causes
+the event is the person reading the file's subject matter at that moment. If
+that proves optimistic, the escalation is a check in the task-completion
+checklist, not a bigger file.

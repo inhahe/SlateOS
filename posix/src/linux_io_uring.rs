@@ -558,9 +558,10 @@ fn validate_register(opcode: u32, arg: *mut u8, nr_args: u32) -> Result<(), i32>
         | IORING_REGISTER_SYNC_CANCEL
         | IORING_REGISTER_FILE_ALLOC_RANGE
         | IORING_REGISTER_PBUF_STATUS
-            if arg.is_null() => {
-                return Err(errno::EFAULT);
-            }
+            if arg.is_null() =>
+        {
+            return Err(errno::EFAULT);
+        }
         _ => {} // remaining valid ops: pass through.
     }
     Ok(())
@@ -1560,16 +1561,14 @@ mod tests {
         const CAP_SYS_NICE: u32 = crate::sys_capability::CAP_SYS_NICE;
 
         struct CapGuard {
-
             lo: u32,
 
             hi: u32,
-
         }
         impl CapGuard {
             fn snapshot() -> Self {
-            let (lo, hi) = crate::sys_capability::current_caps_effective();
-            Self { lo, hi }
+                let (lo, hi) = crate::sys_capability::current_caps_effective();
+                Self { lo, hi }
             }
         }
         impl Drop for CapGuard {

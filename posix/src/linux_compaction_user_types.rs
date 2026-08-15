@@ -33,8 +33,7 @@ pub const COMPACT_PRIO_ASYNC: u32 = 2;
 pub const PROC_VM_COMPACT_MEMORY: &str = "/proc/sys/vm/compact_memory";
 pub const PROC_VM_EXTFRAG_THRESHOLD: &str = "/proc/sys/vm/extfrag_threshold";
 pub const PROC_VM_COMPACTION_PROACTIVENESS: &str = "/proc/sys/vm/compaction_proactiveness";
-pub const PROC_VM_COMPACT_UNEVICTABLE_ALLOWED: &str =
-    "/proc/sys/vm/compact_unevictable_allowed";
+pub const PROC_VM_COMPACT_UNEVICTABLE_ALLOWED: &str = "/proc/sys/vm/compact_unevictable_allowed";
 
 // ---------------------------------------------------------------------------
 // Proactiveness default value (0..100, 20 is kernel default)

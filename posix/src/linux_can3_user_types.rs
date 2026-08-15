@@ -61,8 +61,8 @@ mod tests {
     #[test]
     fn test_bcm_opcodes_dense_1_to_12() {
         let o = [
-            TX_SETUP, TX_DELETE, TX_READ, TX_SEND, RX_SETUP, RX_DELETE, RX_READ,
-            TX_STATUS, TX_EXPIRED, RX_STATUS, RX_TIMEOUT, RX_CHANGED,
+            TX_SETUP, TX_DELETE, TX_READ, TX_SEND, RX_SETUP, RX_DELETE, RX_READ, TX_STATUS,
+            TX_EXPIRED, RX_STATUS, RX_TIMEOUT, RX_CHANGED,
         ];
         for (i, &v) in o.iter().enumerate() {
             assert_eq!(v as usize, i + 1);
@@ -72,9 +72,18 @@ mod tests {
     #[test]
     fn test_flag_bits_are_single_bits_and_disjoint() {
         let f = [
-            SETTIMER, STARTTIMER, TX_COUNTEVT, TX_ANNOUNCE, TX_CP_CAN_ID,
-            RX_FILTER_ID, RX_CHECK_DLC, RX_NO_AUTOTIMER, RX_ANNOUNCE_RESUME,
-            TX_RESET_MULTI_IDX, RX_RTR_FRAME, CAN_FD_FRAME,
+            SETTIMER,
+            STARTTIMER,
+            TX_COUNTEVT,
+            TX_ANNOUNCE,
+            TX_CP_CAN_ID,
+            RX_FILTER_ID,
+            RX_CHECK_DLC,
+            RX_NO_AUTOTIMER,
+            RX_ANNOUNCE_RESUME,
+            TX_RESET_MULTI_IDX,
+            RX_RTR_FRAME,
+            CAN_FD_FRAME,
         ];
         for &v in &f {
             assert!(v.is_power_of_two());
@@ -88,9 +97,18 @@ mod tests {
 
     #[test]
     fn test_flag_bits_fit_in_lower_12_bits() {
-        let all = SETTIMER | STARTTIMER | TX_COUNTEVT | TX_ANNOUNCE | TX_CP_CAN_ID
-            | RX_FILTER_ID | RX_CHECK_DLC | RX_NO_AUTOTIMER | RX_ANNOUNCE_RESUME
-            | TX_RESET_MULTI_IDX | RX_RTR_FRAME | CAN_FD_FRAME;
+        let all = SETTIMER
+            | STARTTIMER
+            | TX_COUNTEVT
+            | TX_ANNOUNCE
+            | TX_CP_CAN_ID
+            | RX_FILTER_ID
+            | RX_CHECK_DLC
+            | RX_NO_AUTOTIMER
+            | RX_ANNOUNCE_RESUME
+            | TX_RESET_MULTI_IDX
+            | RX_RTR_FRAME
+            | CAN_FD_FRAME;
         // All 12 single-bit flags pack into the low 12 bits.
         assert_eq!(all, (1u32 << 12) - 1);
     }

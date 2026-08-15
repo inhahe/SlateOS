@@ -17,6 +17,7 @@ use guitk::event::{Event, EventResult, Key, KeyEvent, Modifiers};
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
+use guitk::text;
 
 // ============================================================================
 // Theme — Catppuccin Mocha palette
@@ -840,7 +841,8 @@ impl LauncherState {
 
             // Category badge (right-aligned)
             let badge_text = entry.category.label();
-            let badge_width = badge_text.len() as f32 * DESC_FONT_SIZE * 0.6 + 12.0;
+            let badge_width =
+                text::padded_width(badge_text, 6.0, DESC_FONT_SIZE, FontWeightHint::Regular);
             let badge_x = input_width - badge_width - 8.0;
             let badge_y = row_y + (ROW_HEIGHT - 20.0) / 2.0;
 

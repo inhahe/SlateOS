@@ -157,7 +157,11 @@ pub unsafe extern "C" fn __vasprintf_chk(
 ) -> i32 {
     // SAFETY: as for `__vprintf_chk`; `asprintf` walks the format string
     // twice, so it takes a snapshot by value and replays it (C's `va_copy`).
-    let snapshot = if ap.is_null() { None } else { Some(unsafe { *ap }) };
+    let snapshot = if ap.is_null() {
+        None
+    } else {
+        Some(unsafe { *ap })
+    };
     unsafe { printf::_asprintf_impl(strp, fmt, snapshot) }
 }
 

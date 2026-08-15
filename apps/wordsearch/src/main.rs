@@ -27,6 +27,7 @@ use guitk::color::Color;
 use guitk::event::{Event, Key, KeyEvent, Modifiers};
 use guitk::render::{FontWeightHint, RenderCommand};
 use guitk::style::CornerRadii;
+use guitk::text;
 
 // ── Catppuccin Mocha palette ────────────────────────────────────────
 const BASE: Color = Color::from_hex(0x1E1E2E);
@@ -57,6 +58,13 @@ const CELL_FONT_SIZE: f32 = 16.0;
 const STATUS_FONT_SIZE: f32 = 14.0;
 const LABEL_FONT_SIZE: f32 = 12.0;
 const WORD_LIST_FONT_SIZE: f32 = 13.0;
+/// What a word in the list is clipped to when drawn.
+///
+/// The strikethrough rule and the checkmark are placed from the *measured*
+/// width of the word, so they have to respect the same clamp — otherwise a
+/// word wider than the column gets a rule running out past the letters the
+/// renderer actually drew, and a checkmark floating in the grid.
+const WORD_LIST_MAX_WIDTH: f32 = 140.0;
 
 const MAX_HINTS: usize = 5;
 
@@ -941,12 +949,17 @@ impl WordSearchApp {
                 font_size: WORD_LIST_FONT_SIZE,
                 color: word_color,
                 font_weight: weight,
-                max_width: Some(140.0),
+                max_width: Some(WORD_LIST_MAX_WIDTH),
             });
 
             // Strikethrough line for found words
             if pw.found {
-                let text_w = pw.word.len() as f32 * 8.0;
+                // The rule has to be exactly as long as the word it strikes
+                // through, so it is measured in the weight the word was drawn
+                // at rather than guessed from its byte count — and clamped to
+                // the same width the word itself is clipped to.
+                let text_w = text::measure(&pw.word, WORD_LIST_FONT_SIZE, weight)
+                    .min(WORD_LIST_MAX_WIDTH);
                 cmds.push(RenderCommand::Line {
                     x1: list_x,
                     y1: wy + 7.0,
@@ -1084,8 +1097,114 @@ fn main() {
 // Tests
 // ═══════════════════════════════════════════════════════════════════════
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
+
+    // ── Strikethrough width ─────────────────────────────────────────
+
+    /// The `(x, text, weight)` of every word drawn in the list, and the
+    /// `(x1, x2)` of every strikethrough rule, from one render.
+    #[allow(clippy::type_complexity)]
+    fn word_list_marks(
+        app: &WordSearchApp,
+    ) -> (Vec<(f32, String, FontWeightHint)>, Vec<(f32, f32)>) {
+        let mut cmds = Vec::new();
+        app.render_word_list(&mut cmds);
+        let mut words = Vec::new();
+        let mut rules = Vec::new();
+        for cmd in cmds {
+            match cmd {
+                RenderCommand::Text {
+                    x,
+                    text,
+                    font_size,
+                    font_weight,
+                    ..
+                } if (font_size - WORD_LIST_FONT_SIZE).abs() < 0.01 => {
+                    words.push((x, text, font_weight));
+                }
+                RenderCommand::Line { x1, x2, .. } => rules.push((x1, x2)),
+                _ => {}
+            }
+        }
+        (words, rules)
+    }
+
+    #[test]
+    fn a_strikethrough_is_as_long_as_the_word_it_strikes() {
+        // Compared against the render rather than against a literal, because
+        // how wide a word measures is a fact about the host's fonts: an
+        // assertion pinned to a constant stops testing the rule and starts
+        // testing the font. What matters is that the rule agrees with the
+        // word beneath it, whatever that word measures.
+        let mut app = WordSearchApp::new();
+        let word = {
+            let first = app
+                .placed_words
+                .first_mut()
+                .expect("the puzzle placed no words");
+            first.found = true;
+            first.word.clone()
+        };
+
+        let (words, rules) = word_list_marks(&app);
+        assert_eq!(rules.len(), 1, "one found word should draw one rule");
+        let (rule_x1, rule_x2) = rules[0];
+        let (word_x, _, weight) = words
+            .iter()
+            .find(|(_, t, _)| *t == word)
+            .cloned()
+            .expect("the found word was not drawn");
+
+        let drawn = text::measure(&word, WORD_LIST_FONT_SIZE, weight).min(WORD_LIST_MAX_WIDTH);
+        assert!((rule_x1 - word_x).abs() < 0.01, "the rule starts elsewhere");
+        assert!(
+            (rule_x2 - rule_x1 - drawn).abs() < 0.01,
+            "{word} is drawn {drawn}px wide but struck through for {}px",
+            rule_x2 - rule_x1
+        );
+    }
+
+    #[test]
+    fn a_found_word_is_measured_by_character_not_by_byte() {
+        // The rule used to be placed from `word.len()`, which is a byte count.
+        // These two spellings are the same eight characters and the same eight
+        // glyph advances, but 8 and 11 bytes — a byte estimate would make the
+        // accented one ~37% longer.
+        let weight = FontWeightHint::Light;
+        let plain = text::measure("ELEPHANT", WORD_LIST_FONT_SIZE, weight);
+        let accented = text::measure("\u{c9}L\u{c9}PHANT", WORD_LIST_FONT_SIZE, weight);
+        assert!(plain > 0.0, "ELEPHANT measured as nothing");
+        assert!(
+            accented < plain * 1.1,
+            "the accented spelling measured {accented}px against {plain}px plain, \
+             which is byte-count territory"
+        );
+    }
+
+    #[test]
+    fn a_rule_never_runs_past_the_column_the_word_is_clipped_to() {
+        // `RenderCommand::Text` clips at `max_width`, so a word wider than the
+        // column is drawn short. The rule has to stop where the letters do.
+        let mut app = WordSearchApp::new();
+        {
+            let first = app
+                .placed_words
+                .first_mut()
+                .expect("the puzzle placed no words");
+            first.found = true;
+            first.word = "PNEUMONOULTRAMICROSCOPICSILICOVOLCANOCONIOSIS".to_string();
+        }
+        let (_, rules) = word_list_marks(&app);
+        assert_eq!(rules.len(), 1);
+        let (x1, x2) = rules[0];
+        assert!(
+            x2 - x1 <= WORD_LIST_MAX_WIDTH + 0.01,
+            "a rule {}px long in a {WORD_LIST_MAX_WIDTH}px column",
+            x2 - x1
+        );
+    }
 
     // ── LCG tests ───────────────────────────────────────────────────
 

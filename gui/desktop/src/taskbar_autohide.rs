@@ -355,9 +355,7 @@ impl AutoHideManager {
                 }
                 true
             }
-            AutoHideState::Hidden => {
-                false
-            }
+            AutoHideState::Hidden => false,
             AutoHideState::SlidingIn => {
                 let elapsed = now_ms.saturating_sub(self.anim_start_ms);
                 let duration = self.config.slide_duration_ms.max(1);

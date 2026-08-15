@@ -60898,6 +60898,26 @@ proved it out.
   required `Table::header_weighted`, because this app marks headings by colour
   alone and `Table::header` forces bold; "my headings are the wrong weight" was
   otherwise a reason to leave a table hand-drawn and unfitted.
+- ~~`apps/defrag`~~ **done**. Found by the new search rather than the `cx +=`
+  one: the fragmented-file list held four column *positions*
+  (`x + w*0.55/0.70/0.85`) restated in the header loop and again in every row,
+  with three of the four cells carrying `max_width: None`. The path cell did
+  have a bound — `Some(w * 0.50)` — but it was a **fifth number agreeing with
+  none of the others**: the path column actually runs to `w*0.55 - PADDING`, so
+  the clip fell ~25px short of its own column *and* had no marker. The
+  regression test finds a path 140px past its column edge.
+  Two things generalise. First, **a proportional layout hides the missing bound
+  better than a fixed one**, because there is no width array to notice is
+  missing an entry — the columns are positions, and a position cannot be
+  overflowed, only passed. `file_list_columns(w)` returns widths precisely so
+  "does the last column end inside the panel?" becomes answerable, and there is
+  now a test asking it at three panel widths. Second, a fractional width minus a
+  constant **goes negative on a narrow panel**, and `text::elide` of a negative
+  width returns the empty string — so the column would silently blank rather
+  than shrink. Clamped with `.max(0.0)` and tested at w = 0, 1, 20, 60.
+  Paths use `Fit::End`: the list is sorted by severity, so its rows are
+  typically siblings under one deep directory, and cut at the end they collapse
+  to one repeated prefix with every filename gone.
 
 The lesson that generalises past the cursor pattern: **a per-element bound is
 not a bound on the row.** Eliding each cell to its own width makes every cell

@@ -60667,10 +60667,31 @@ pass starts from a triaged list rather than re-deriving one:
 `apps/sysmonitor` alert messages (`:1708`, `alert_y += 16.0`),
 `apps/renamer` operation detail (`:1173`, `oy += 34.0`),
 `apps/undelete` (`:2931`), `apps/passwordgen` pattern descriptions (`:1546`).
-`gui/desktop/src/notification_settings.rs` (`:1137`) is the interesting one:
-it wraps the body in a home-grown `truncate_text(&entry.body, 60)`, which is
-the byte-budget truncation class TD-APPS-ESTIMATE-TEXT-WIDTH found four of —
-check whether it counts bytes, and if so replace it with `text::elide`.
+~~`gui/desktop/src/notification_settings.rs` (`:1137`)~~ — **done** in
+`19ee5234e`. It was the interesting one, and it did count bytes. Chasing it
+turned up two more copies of the same helper in the same shell —
+`window_rules.rs`'s `truncate_string` and `notif_pane.rs`'s `truncate_body` —
+so all three went in one commit. Four notes worth keeping:
+
+- All three compared `s.len()` (**bytes**) against a **character** budget, and
+  all three picked that budget (24/28/60/60) independently of the width the
+  text is drawn in. Both halves have to be wrong together for the bug to stay
+  invisible, which is why they survived so long: on ASCII of average width the
+  two errors roughly cancel.
+- `window_rules.rs` was the one that could actually *mislead* rather than
+  merely look bad: all three of its call sites passed `max_width: None`, so
+  the home-grown elision was the only thing keeping a user-typed rule name out
+  of the adjacent column. **Check `max_width` first when triaging one of
+  these** — a helper backed by a real `max_width` is cosmetic; one without it
+  is a correctness bug.
+- `notif_pane.rs`'s copy also underflowed (`max_chars - 3` panics for a budget
+  under 3, where the other two used `saturating_sub`) — the usual outcome of a
+  utility being copy-pasted between files instead of shared.
+- `window_rules.rs`'s column widths existed *twice* — once in the `headers`
+  array, once as `cx += 70.0/180.0/200.0` in the row loop — and were free to
+  drift. Now one set of constants both sides read. That is the same
+  two-calculations-for-one-quantity shape as the wrap defect above, so other
+  hand-drawn tables are worth grepping for it.
 
 *Probably fine — a fixed-height row whose subtitle is a developer-authored
 enum string, where clipping is the intended behaviour:*

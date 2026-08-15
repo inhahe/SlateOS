@@ -1595,7 +1595,7 @@ _2D library: Vello (Rust-native, GPU compute shaders) + HarfBuzz FFI for complex
 - [ ] Can drag and drop icons into and out of system tray
 - [ ] Apps can start in system tray or minimize to system tray
 - [ ] User can override any app: always start in system tray, always in taskbar, or neither
-- [ ] **Parked consoles** — a program's activity console can live in the tray instead of on screen, tooltip showing its title and what it is currently doing. Off by default and opt-in per program; see §4.14 for the facility this is a view onto.
+- [ ] **A single "Activity" tray icon** (never one per app or per process) listing the apps currently narrating and what each is doing, with warning/error badges. Absent until something wants attention; an app running a long foreground job can request its own entry for that job's duration only. See §4.14, where the facility and the reasoning for keeping the tray's role this small live.
 - [ ] **Volume icon popup (click on system-tray volume icon).** Lightweight Aero-styled flyout — opens instantly without launching the full Settings app. Contents:
   - [ ] **Main volume slider** at top with current level, and a mute toggle next to it. Adjusting the slider takes effect immediately (no Apply button).
   - [ ] **Output device selector** — dropdown or radio list of available audio output devices (speakers, headphones, HDMI sinks, Bluetooth devices, USB DACs, virtual outputs). Selecting one switches the system default output. Currently active device shown highlighted; unavailable devices (unplugged, asleep) shown disabled with reason. Refreshes live as devices appear/disappear.
@@ -2869,35 +2869,79 @@ crash, below).
 - [ ] **Optional structured records** for programs that want to do better than flat text: `enter(fn)` / `exit(fn, outcome)`, `phase(name)`, `progress(done, total)`, `waiting_on(what)`. A viewer renders these as a collapsible call tree or a timeline rather than a scrolling wall, and they are what make "which function is it stuck in" answerable at a glance.
   - [ ] `libactivity` (Rust crate + Python package via fastpy) with a derive macro / decorator that instruments a function's entry and exit in one annotation.
   - [ ] Records carry a monotonic timestamp, so a stalled `enter` with no matching `exit` is directly visible as "in `parse_manifest` for 40 s".
-- [ ] **The current-activity one-liner.** Separate from the scrolling stream, a process publishes a single short "what I am doing right now" string, overwritten in place. This is what appears in the Process Explorer row and the tray tooltip. It is far more useful per pixel than any log, and costs one store.
+- [ ] **The current-activity one-liner.** Separate from the scrolling stream, a process publishes a single short "what I am doing right now" string, overwritten in place. This is what appears in the Process Explorer row, the tray menu and `psdoing`. It is far more useful per pixel than any log, and costs one store.
   - [ ] Derived automatically from the innermost open `phase`/`enter` record when the program has not set one explicitly.
 - [ ] **Promotion on crash.** When a process dies abnormally, the tail of its ring (last N KB, configurable) is captured into the crash report and a `process.crashed` event in the event log references it. This is the bridge that makes the ring worth writing to: the chatter that was worthless a second before the crash becomes the most valuable thing in the postmortem.
 - [ ] **Promotion on demand.** A user watching a stream can hit "keep this" to spill the current ring contents to a file, so an interesting trace survives the ring wrapping.
 
+#### Activity groups — the app is the unit, the process is the detail
+
+_Users think in apps; the kernel thinks in processes. A modern app is a fleet —
+Chromium is a process per tab plus GPU and network helpers, a build is a
+compiler per core, a backup is a coordinator plus workers. Presenting that fleet
+as a dozen unrelated streams pushes the reassembly work onto the user, who then
+has to know which PID is "the app". So there is a **main log per app**, and the
+per-process streams are its detail rows._
+
+- [ ] **Activity group**: a kernel-maintained ID identifying "one app" for activity purposes. Rooted at the process the user launched, **inherited across spawn by default**, and explicitly breakable by a process that is legitimately its own app (a daemon started by the shell must not spend its life inside the shell's group). Inheritance-with-explicit-break, rather than opt-in grouping, is what makes a fleet cohere without every program having to cooperate.
+  - [ ] Reuses the identity machinery that already exists rather than inventing a parallel one: §4.3's kernel-stamped originator tag, §4.7's per-process display names (which is what makes a Chromium row say "GitHub · PR #123 (renderer)" instead of `--type=renderer`), and the package identity from §4.5.
+  - [ ] A group survives a member exiting and is retired when its last member exits; its ring contents follow the normal promotion rules, so a fleet that crashed leaves one readable app-level trace rather than a dozen orphans.
+- [ ] **The app log is a merged *view*, not a second copy.** Every record already carries `(group, pid, tid)`; the app-level stream is those records merged by timestamp at read time. Storing an aggregate ring *as well as* per-process rings would double the memory, and worse, a chatty worker would evict the coordinator's important lines from the shared buffer — the app log would get less useful exactly as the app got busier. One copy, N views.
+  - [ ] **Every node in the process tree has an activity view, and it is the merge of that node's subtree.** "App log" and "individual process log" are then not two features but the same one at two nodes, which is why both can exist without either being a special case.
+  - [ ] The app's own top-level narration ("Backup started", "phase 2 of 5") needs no special mechanism: it is what the group's root process writes, and it is what a reader sees when the per-process detail is collapsed.
+  - [ ] Merging independent rings that wrap at their own rates gives a **ragged start** — a chatty child may have wrapped while a quiet parent still holds an hour of history. The viewer must mark where each contributor's history begins rather than implying the merged view is complete back to its earliest line.
+- [ ] **Threads do not get their own rings.** Thread ID is a field on each record; a per-thread view is a filter. A ring per thread would multiply the memory by the thread count to answer a question a `WHERE tid = ...` already answers.
+- [ ] **Ring budget is charged per group, not per process**, so one app spawning 200 workers cannot consume the global cap. Within a group, an app can weight its members (give the coordinator a bigger ring than the workers).
+- [ ] **Instances.** Two windows of the same app may be one group or two depending on whether the app is single- or multi-process; the grouping follows the actual process tree rather than the package identity, and the viewer shows the package name with an instance discriminator when there is more than one.
+
 #### Surface A — inspection tool (Process Explorer, §4.3)
 
 - [ ] **Activity column** in the main process list showing each process's current-activity one-liner, live-updating. Sortable and filterable; a fleet of otherwise-identical worker processes becomes readable at a glance.
+  - [ ] On a collapsed app row the column shows the *group's* current activity — the root process's one-liner, or a summary ("4 of 8 workers compiling") when the app publishes one.
 - [ ] **Activity pane** in the per-process detail view: live tail of that process's stream, with pause-on-scroll-up, text search, level filter, and stdout/stderr filter.
+  - [ ] **The pane follows the tree selection.** Select the app row and it is the app log; expand and select one process and it is that process's log; select a thread and it is that thread's lines. Same pane, same controls, different node — per the "every node is a view of its subtree" rule above.
+  - [ ] **Provenance gutter** in merged views: each line marked with which process (and thread) emitted it, click-through to that node, and a per-contributor colour so a fleet's interleaving is readable rather than a wall of undifferentiated text.
+  - [ ] **"Only this process" / "include children"** toggle, so a coordinator's own narration can be read without its workers' noise, which is the common case when the coordinator is the thing misbehaving.
+  - [ ] Ragged-history markers where a contributor's ring has wrapped, so a gap is never mistaken for silence.
 - [ ] **Call-tree / timeline view** for processes emitting structured records, with open-but-not-yet-closed frames highlighted — the "it is stuck here" view.
 - [ ] **"Why is this program not responding?"** — when a window stops pumping events, the hung-app dialog (§4.1/§3.4) shows the program's current activity and the tail of its stream inline, instead of the contentless "This program is not responding" every other OS shows.
 - [ ] Cross-reference: the same kernel-stamped originator tag that powers §4.3's service-mediated resource attribution lets a *service's* activity lines be attributed back to the program that caused them — so "what is the filesystem service doing?" can answer "reading 2 GB for Backup.app".
 
-#### Surface B — tray-parked consoles (§3.4 System Tray)
+#### Surface B — the tray (§3.4 System Tray)
 
-- [ ] **A program's console can exist without being on screen**, parked as a system-tray icon. Hovering shows a tooltip with the program's title and its current-activity one-liner; clicking opens the console window; closing the window parks it again rather than terminating the program.
-- [ ] **Off by default, opt-in per program** — the tray is finite and 40 tray consoles is worse than none. Enabled from the program's tray/taskbar override settings (§3.4), from Process Explorer's context menu ("show console in tray"), or requested by the program itself at launch for the cases where narration is the point (build tools, backup runs, long imports).
-- [ ] **Badge on the icon** when the stream has produced warnings or errors since it was last looked at, so a parked console can get attention without stealing focus.
-- [ ] **Consoles are views, not owners.** Opening, closing, or never opening a console does not change the program's behaviour or its output — the ring is being written either way. This is the difference from a real terminal, where closing the window kills the child and a program with no reader can block on a full pipe. An activity ring never blocks its writer; it overwrites.
-- [ ] A parked console can be dragged out of the tray into a real window and back, per the existing tray drag-and-drop item.
+_**One icon for the whole facility, not one per app.** The first sketch of this
+gave each app a parked console in the tray, and that is wrong for the reason the
+tray is always wrong: it is the most contended real estate on the desktop, it
+does not scale with the number of running things, and a row of forty
+indistinguishable console icons is worse than no feature at all. Grouping by app
+rather than by process (above) reduces the count but does not fix the shape of
+the problem — twelve apps still means twelve icons, and it means the icons
+appear and vanish as apps come and go, which is the specific tray behaviour
+users hate most._
+
+_So the tray's job here is **attention, not browsing**. Browsing lives in
+Process Explorer, which has the screen space for it. The tray answers only "is
+anything asking for my eyes right now?", and the console window it can summon is
+a convenience for the one case Process Explorer serves badly: a long-running
+foreground job whose narration is the point._
+
+- [ ] **A single "Activity" tray icon**, not one per app or per process. Its menu lists the apps currently narrating, each with its current-activity one-liner and a warning/error badge; picking one opens that app's console window or jumps to it in Process Explorer.
+- [ ] **The icon earns its place**: absent by default, appearing only when something wants attention (a warning or error since last looked at, or an app that explicitly requested it), and disappearing when nothing does. A permanent icon most users never click is itself the clutter this is trying to avoid. Users who want it always visible can pin it, per the existing tray drag-and-drop item.
+- [ ] **Transient per-app presence, opt-in and self-limiting**: an app running a job where narration *is* the point — a build, a backup, a package install, a long import — can request its own tray entry **for the duration of that job only**, and it goes away when the job finishes. This covers the "glance at the progress without hunting for it" case without any app being able to homestead a tray slot. Gated the same way as everything else in §3.4: the user can override any app to always-tray, never-tray, or neither.
+- [ ] **Console windows are views, not owners.** Opening, closing, or never opening a console does not change the program's behaviour or its output — the ring is being written either way. This is the difference from a real terminal, where closing the window kills the child and a program with no reader can block on a full pipe. An activity ring never blocks its writer; it overwrites. A console window can be opened for an app, a process, or a thread, since all three are just nodes.
+- [ ] A console window can be opened from Process Explorer's context menu ("open console"), which is the discoverable path and does not involve the tray at all.
+- [ ] **AMBIGUITY (operator to confirm):** the above keeps a *reduced* tray role — one earned icon plus transient per-job entries — rather than dropping the tray entirely. Dropping it completely is a defensible simplification: Process Explorer plus `pstail` cover every inspection need, and the tray adds a surface to build and maintain for a case that is arguably rare. The argument for keeping it is that a background job with no window of its own has nowhere else to surface, and that "open the task manager to watch your backup" is a worse answer than a glanceable icon.
 
 #### CLI counterpart
 
 _Same rule as §2.7's `pslist`/`psinfo`/`psblame`: the text tools read the same
 kernel views as the GUI so the two can never disagree._
 
-- [ ] `pstail <pid|name>` — tail a process's activity stream (`-f` to follow, `-n` for backlog, level and stream filters). The `journalctl -f` of live process activity.
-- [ ] `psdoing [pid|name]` — print the current-activity one-liner for one process or all of them; one line each, greppable.
-- [ ] `pstree --doing` — the process tree annotated with what each node is currently doing.
+- [ ] `pstail <pid|name|app>` — tail an activity stream (`-f` to follow, `-n` for backlog, level and stream filters). The `journalctl -f` of live process activity.
+  - [ ] Naming an **app** tails the merged group stream; naming a **PID** tails that process. `--children` / `--no-children` picks between a node's subtree and the node alone, matching Process Explorer's toggle so the two tools cannot disagree about what "the app's log" means.
+  - [ ] `--by <pid|tid>` prefixes each line with its emitter, which is what makes a merged tail greppable.
+- [ ] `psdoing [pid|name|app]` — print the current-activity one-liner for one process, one app, or all of them; one line each, greppable.
+- [ ] `pstree --doing` — the process tree annotated with what each node is currently doing, with activity-group boundaries marked so "which of these processes are one app" is visible in the same output.
 
 #### Capability gating and privacy
 
@@ -2909,8 +2953,8 @@ kernel views as the GUI so the two can never disagree._
 
 #### Settings
 
-- [ ] Per-program: activity stream on/off, ring size, default verbosity, tray console on/off/auto.
-- [ ] Global: default ring size, global cap on memory spent across all rings, whether stdout capture is on by default, retention of promoted/spilled traces.
+- [ ] Per-app: activity stream on/off, group ring budget and how it is weighted across members, default verbosity, whether the app may request a transient tray entry.
+- [ ] Global: default per-group budget, global cap on memory spent across all rings, whether stdout capture is on by default, whether the Activity tray icon is pinned / earned / disabled outright, retention of promoted and spilled traces.
 - [ ] A "programs that are narrating" list, so a user can see which programs support structured activity records and which are only being captured from stdout.
 
 #### Making it something programs actually do

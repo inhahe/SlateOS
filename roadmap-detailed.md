@@ -95,6 +95,11 @@ in `CLAUDE.md` → "Coding Conventions"; it is repeated here because
 `roadmap-detailed.md` is where components get specified, and the choice was
 being made ad-hoc per component.)
 
+**This is a rule about what we write, not about what we replace.** It does not
+license rewriting software that already exists in C, C++ or Rust — see
+"Porting vs. Reimplementing" below, which is the other half of this policy and
+should be read with it.
+
 **There is no interpreter and no CPython in a shipped SlateOS binary, so the
 usual "Python is heavy" objection does not apply here.** fastpy on SlateOS
 builds in **pure mode**: the program is compiled to machine code and statically
@@ -160,6 +165,64 @@ run concurrently this is cheaper than it looks. If a component genuinely cannot
 afford the floor (an early-boot shim, a per-process helper spawned in the
 thousands), that is reason 3 or a measured reason 2 — not a general licence to
 default back to Rust.
+
+#### Porting vs. Reimplementing (read together with the language policy)
+
+**The language policy above governs code we are going to write. It is not a
+mandate to rewrite code that already exists.** If a mature implementation of
+something already exists in C, C++ or Rust — Linux CLI tools, libraries,
+daemons, compilers, codecs — the default is to **use it**, not to reimplement it
+in Python (or in Rust). "Python is our default language" is an answer to *"what
+should I write this in?"*, never an answer to *"should I write this?"*.
+
+**Try cross-compiling before you write a line.** The cheapest port is no port:
+our POSIX layer is mature enough that a lot of upstream software builds
+unmodified against `toolchain/sysroot/lib/libc.a`. Establish that it does or
+doesn't *before* committing to a reimplementation, not after.
+
+**Worked example — the expensive lesson (see `design-decisions.md` §305).** A
+session spent roughly 25 days reimplementing bash in Rust (`userspace/oils`)
+chasing byte-for-byte parity. It then turned out that **GNU bash 5.2
+cross-compiles to SlateOS as-is** — a 5.3 MB static ELF against our own libc,
+zero undefined symbols, no shims, done in about a day (`scripts/bash-spike/`).
+osh's bash-fidelity scope is now frozen and the real bash ships beside it. The
+failure was not the rewrite being badly done; it was that nobody spent the one
+day on "does the original just build?" before spending the 25 on the
+alternative. This is the single most costly mistake made on this project so far.
+
+**Reasons that *do* justify writing our own — state which one applies:**
+
+1. **The native API is genuinely richer and the existing tool cannot express
+   it.** The worked example is §2.7's Native Process Tools: `ps` has no columns
+   for capability sets, service-attributed resource use, kernel-captured launch
+   provenance or blocked-on chains, because Linux has no such concepts. Note
+   what that section does — it ships the native tools **alongside** ported
+   `ps`/`kill`/`top`, never instead of them.
+2. **A deliberate superset**, where the point is the added behaviour and
+   compatibility is a floor rather than the goal.
+3. **The security model requires it** — e.g. a handle-based, TOCTOU-free API
+   that the C original structurally cannot use. (The corrode.dev analysis cited
+   under "API Design Principles" found the largest CVE cluster in Rust coreutils
+   was path-resolution races; a rewrite that doesn't fix the class is a rewrite
+   that bought nothing.)
+4. **Upstream is unportable, unmaintained, or licence-incompatible.**
+5. **It is genuinely trivial** — small enough that the port machinery, build
+   plumbing and patch maintenance cost more than the code does.
+
+**Reasons that do not justify it:** it's in a language we'd rather not use; it
+would be "cleaner" in Rust or Python; we want to understand it; the port looks
+fiddly; Rust is memory-safe. A working, battle-tested implementation carries
+years of bug fixes and edge-case handling that a rewrite silently discards, and
+the rewrite ships *new* bugs into a system where we are the only tester.
+
+**Prefer additive over replacement.** Where we do build our own, ship the ported
+original too, because scripts depend on it byte-for-byte. This is already the
+pattern for bash/osh and for `ps`/`pslist`.
+
+**If you take the reimplementation exit, record it** — a one-line note in the
+roadmap item saying which of the five reasons applies, so the next session does
+not have to re-derive the decision (or worse, re-litigate it after the work is
+done).
 
 ### Linux Compatibility Boundary (non-negotiable)
 
@@ -1278,7 +1341,7 @@ _Nushell as default interactive shell (structured data, Rust-native). Oils for P
 - [ ] Port curl
 - [ ] Port ssh / sshd
 - [ ] Port find (compatible with Linux find)
-- [ ] Build custom grep in Rust (with Python grep's unique features + standard grep features)
+- [ ] Build custom grep (with Python grep's unique features + standard grep features). **Revisit before starting** — this item predates both the language policy and the porting policy in "Design Principles", and as written it contradicts each: it specifies Rust with no stated performance reason, and a from-scratch build with no stated porting reason. The superset motive (reason 2) is plausible but has never been written down, and it is not obvious it needs a rewrite rather than ripgrep/GNU grep plus a wrapper. Before writing any code: check whether GNU grep and/or ripgrep cross-compile as-is (they very likely do), then decide whether the extra features justify our own implementation, and if so record which exclusion applies and why the language is what it is. Ship the ported original alongside regardless — scripts depend on grep byte-for-byte.
 - [ ] Filename sanitizer utility
 - [ ] Monitor-off utility (like nircmd monitor off)
 

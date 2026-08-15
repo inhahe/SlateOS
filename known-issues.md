@@ -64427,3 +64427,23 @@ the fast path, and `hangul::preprocess` early-outs on `present`.)
 elided" against a hard-coded width has the same failure mode latent in it. The
 rule that avoids it: derive the box from a measurement of the content, never
 from a literal.
+
+**Follow-up sweep, same day.** Every other `text::wrap` / `text::elide`
+assertion in `apps/**` and `gui/**` was checked for the same shape. One more
+had it: `logviewer::tests::the_raw_line_is_cut_to_the_box_drawn_behind_it`
+asserted `out.ends_with("...")` against a hard-coded `room = 400.0`, and the
+lines it uses measure **450px** — a 12% margin, one font-metric change from
+the failure dbviewer had already hit. Fixed the same way (`room` derived as
+half the line's measured width).
+
+The rest are sound, and the reason is worth naming: they assert a
+*postcondition of the function* rather than a fact about the environment.
+`regextester::elided_text_fits_the_box_it_is_drawn_in` checks `w <= box_w`,
+which holds whether or not elision was needed; `logviewer::a_short_raw_line_is_left_alone`
+and `regextester::text_that_fits_is_not_elided` assert the *non*-action at
+widths (400px, 500px) nothing plausible could overflow; and
+`dbviewer::a_wordy_message_does_not_crowd_out_the_results` uses
+`"word ".repeat(2000)`, which overflows any face. Only an assertion that
+something *must* overflow a literal is fragile, because only that direction
+depends on the font staying at least as wide as it was the day the number was
+written.

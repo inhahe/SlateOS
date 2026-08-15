@@ -2051,12 +2051,21 @@ mod tests {
     /// while it still fitted, and a line of wide glyphs ran past the box.
     #[test]
     fn the_raw_line_is_cut_to_the_box_drawn_behind_it() {
-        let room = 400.0;
         for raw in [
             "2026-08-14T10:00:00Z INFO kernel: a raw log line long enough to need cutting down",
             "2026-08-14T10:00:00Z INFO kernel: une ligne brute avec des caractères accentués \
              suffisamment longue",
         ] {
+            // Half of what the line actually measures, rather than a literal.
+            // The `ends_with("...")` assertion below only means anything if
+            // the line really does overflow `room`, and with a literal that is
+            // a race between the constant and however wide the host's font
+            // draws. These lines measure 450px against the 400px that used to
+            // be hard-coded here — a 12% margin — and the same shape of test
+            // in dbviewer had already lost that race and begun failing when
+            // `SystemFont` started resolving a narrower face. Half the
+            // measured width cannot lose it, on any face.
+            let room = text::measure(raw, SMALL_TEXT, FontWeightHint::Regular) / 2.0;
             let out = text::elide(raw, room, "...", SMALL_TEXT, FontWeightHint::Regular);
             let w = text::measure(&out, SMALL_TEXT, FontWeightHint::Regular);
             assert!(w <= room + 0.01, "{out:?} is {w} px in {room} px of room");

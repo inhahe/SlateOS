@@ -57,6 +57,7 @@ use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
+use guitk::text;
 
 use std::collections::BTreeMap;
 
@@ -96,6 +97,20 @@ const FOOTER_HEIGHT: f32 = 48.0;
 const PADDING: f32 = 12.0;
 const ITEM_HEIGHT: f32 = 56.0;
 const CORNER_RADIUS: f32 = 8.0;
+
+/// Room the preview panel reserves for its "Detection Method" sentence.
+///
+/// A one-line sentence is shorter than this; the rest of the panel was laid out
+/// against this figure, so the short case keeps its original spacing.
+const DETECTION_METHOD_ROW_HEIGHT: f32 = 24.0;
+
+/// Share of the preview panel's metadata row given to the value column.
+///
+/// The label column takes the rest. Written once because the value's `x` and
+/// its width are the same quantity seen from two ends, and were previously
+/// spelled out as two separate `inner_w * 0.4` / `inner_w * 0.6` expressions
+/// that were free to stop adding up.
+const META_VALUE_FRACTION: f32 = 0.6;
 const SMALL_RADIUS: f32 = 4.0;
 const FONT_SIZE: f32 = 13.0;
 const FONT_SIZE_SMALL: f32 = 11.0;
@@ -2834,6 +2849,7 @@ impl UndeleteApp {
             all_meta.push(("Disk Offset", format!("0x{off:08X}")));
         }
 
+        let value_w = inner_w * META_VALUE_FRACTION;
         for (label, value) in &all_meta {
             cmds.push(RenderCommand::Text {
                 x: inner_x,
@@ -2842,16 +2858,25 @@ impl UndeleteApp {
                 color: OVERLAY0,
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Bold,
-                max_width: Some(inner_w * 0.4),
+                max_width: Some(inner_w - value_w),
             });
+            // These rows are a fixed 20px, so a long value is elided rather
+            // than wrapped — but *which end* is cut matters. A path's tail is
+            // its filename, the one part the user is looking for, so paths are
+            // elided from the front: `…/2024/report.pdf`, not `/home/user/Doc…`.
+            let fitted = if *label == "Original Path" {
+                text::elide_start(value, value_w, "…", FONT_SIZE_SMALL, FontWeightHint::Regular)
+            } else {
+                text::elide(value, value_w, "…", FONT_SIZE_SMALL, FontWeightHint::Regular)
+            };
             cmds.push(RenderCommand::Text {
-                x: inner_x + inner_w * 0.4,
+                x: inner_x + inner_w - value_w,
                 y: cy,
-                text: value.clone(),
+                text: fitted,
                 color: SUBTEXT1,
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Regular,
-                max_width: Some(inner_w * 0.6),
+                max_width: Some(value_w),
             });
             cy += 20.0;
         }
@@ -2925,16 +2950,14 @@ impl UndeleteApp {
         });
         cy += 18.0;
 
-        cmds.push(RenderCommand::Text {
-            x: inner_x,
-            y: cy,
-            text: file.source.description().to_string(),
-            color: SUBTEXT0,
-            font_size: FONT_SIZE_SMALL,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(inner_w),
-        });
-        cy += 24.0;
+        // A full sentence in a 296px column, so it wraps rather than being cut
+        // at whatever word the column edge lands on, and the cursor advances by
+        // the height the paragraph reports rather than a guess.
+        cy += text::Paragraph::new(file.source.description(), SUBTEXT0)
+            .at(inner_x, cy, inner_w)
+            .font(FONT_SIZE_SMALL, FontWeightHint::Regular)
+            .draw(cmds)
+            .max(DETECTION_METHOD_ROW_HEIGHT);
 
         // Preview bytes section
         if !file.preview_bytes.is_empty() {
@@ -4175,6 +4198,107 @@ mod tests {
         app.select_file(0);
         let cmds = app.render();
         assert!(!cmds.is_empty());
+    }
+
+    // --- Preview panel text layout ---
+
+    /// A scanned app with one file selected, ready for the preview panel.
+    fn app_with_selection() -> UndeleteApp {
+        let mut app = UndeleteApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        app.start_scan();
+        app.select_file(0);
+        app
+    }
+
+    /// Text drawn in the preview panel: `(text, size, weight, max_width)`.
+    ///
+    /// The weight is carried through because bold text measures wider than
+    /// regular at the same size — measuring a bold row as regular would let a
+    /// genuine overflow slip past.
+    fn preview_panel_text(app: &UndeleteApp) -> Vec<(String, f32, FontWeightHint, f32)> {
+        let panel_x = WINDOW_WIDTH - PREVIEW_PANEL_WIDTH;
+        app.render()
+            .into_iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text {
+                    x,
+                    text,
+                    font_size,
+                    font_weight,
+                    max_width: Some(w),
+                    ..
+                } if x >= panel_x => Some((text, font_size, font_weight, w)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Everything the preview panel draws fits the column it is drawn in.
+    ///
+    /// The detection-method line is a full sentence in a 296px column, so it
+    /// wraps; the metadata values are fixed-height rows, so they are elided.
+    /// Either way, nothing may be silently cut by the render command.
+    #[test]
+    fn every_preview_panel_line_fits_its_column() {
+        let mut app = app_with_selection();
+        if let Some(file) = app.engine.files.first_mut() {
+            file.original_path =
+                Some("/home/user/Documents/archive/2024/quarterly/report-final.pdf".to_string());
+            file.partition_name = "a-very-long-partition-label-indeed".to_string();
+        }
+        let mut checked = 0;
+        for (text, size, weight, max_width) in preview_panel_text(&app) {
+            let measured = text::measure(&text, size, weight);
+            assert!(
+                measured <= max_width + 0.5,
+                "preview line {text:?} measures {measured} in a {max_width} column",
+            );
+            checked += 1;
+        }
+        assert!(checked >= 10, "expected the panel's lines, checked {checked}");
+    }
+
+    /// A path too long for its column is cut at the *front*, because its tail
+    /// is the filename — the one part the user is looking for.
+    #[test]
+    fn a_long_original_path_keeps_its_filename() {
+        let mut app = app_with_selection();
+        if let Some(file) = app.engine.files.first_mut() {
+            file.original_path =
+                Some("/home/user/Documents/archive/2024/quarterly/report-final.pdf".to_string());
+        }
+        let drawn: Vec<String> = preview_panel_text(&app)
+            .into_iter()
+            .map(|(t, _, _, _)| t)
+            .filter(|t| t.contains("report-final.pdf") || t.contains("/home/user"))
+            .collect();
+        assert_eq!(drawn.len(), 1, "expected one path row, got {drawn:?}");
+        assert!(
+            drawn[0].ends_with("report-final.pdf"),
+            "the filename was elided away: {:?}",
+            drawn[0],
+        );
+        assert!(
+            drawn[0].starts_with('…'),
+            "expected the cut marked at the front: {:?}",
+            drawn[0],
+        );
+    }
+
+    /// A short value is drawn verbatim — the elision must not touch the common
+    /// case.
+    #[test]
+    fn a_short_metadata_value_is_not_elided() {
+        let mut app = app_with_selection();
+        if let Some(file) = app.engine.files.first_mut() {
+            file.partition_name = "sda1".to_string();
+        }
+        assert!(
+            preview_panel_text(&app)
+                .iter()
+                .any(|(t, _, _, _)| t == "sda1"),
+            "expected the partition name drawn in full",
+        );
     }
 
     #[test]

@@ -16391,7 +16391,27 @@ What that bind then *stores* is still not modelled — see
 `TD-OILS-A-DECLARATION-WITH-NOTHING-TO-DO-BINDS-A-NULL-THROUGH-THE-REFERENCE`
 below.
 
-### TD-OILS-A-DECLARATION-WITH-NOTHING-TO-DO-BINDS-A-NULL-THROUGH-THE-REFERENCE. `declare -n q='n[1]'; declare q` makes bash's `n` read as empty — 2026-08-06 — OPEN, operator-gated (`open-questions.md` Q40)
+### TD-OILS-A-DECLARATION-WITH-NOTHING-TO-DO-BINDS-A-NULL-THROUGH-THE-REFERENCE. `declare -n q='n[1]'; declare q` makes bash's `n` read as empty — 2026-08-06 — ⚖️ WAIVED 2026-08-15 by the operator (`design-decisions.md` §309)
+
+> **RESOLVED 2026-08-15 — deliberately NOT reproduced.** The operator answered
+> `open-questions.md` Q40 with **option B**: osh keeps `Str` array elements and
+> the array reads normally. This is a **knowing, documented divergence from
+> measured bash** — the first of its kind in oils — not an unfixed bug. Do not
+> "fix" it by implementing option A.
+>
+> **This entry stays open-shaped on purpose**, because it is the record that
+> makes the divergence reversible: if a real script is ever found that depends
+> on the null-element behaviour, everything needed to reproduce it is below.
+>
+> **The precedent it set matters more than the case.** Byte-fidelity with bash
+> now has an *"unless it is a defect"* clause. Per §309, a measured behaviour may
+> be waived only when all three hold: (i) it is unreachable except through a
+> construct built to reach it, (ii) it is inconsistent with bash's own
+> observable model, and (iii) reproducing it would degrade osh's value model.
+> **Any future waiver must be argued against those three tests, here, in
+> writing** — a waiver that is not written down is a divergence, not a decision.
+> This does not loosen §305's frozen fidelity scope: §305 says what is in scope,
+> §309 says something in scope may still be waived as a defect.
 
 **Where:** `userspace/oils/src/interp.rs` — `Shell::declare_ref_bind_read` reads
 the element the reference designates but performs no store; the store would have

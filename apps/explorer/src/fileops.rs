@@ -995,7 +995,14 @@ const META_VERSION: &str = "slate-recycle-v2";
 /// exact bytes back; everything outside printable ASCII, plus `%` itself, is
 /// percent-encoded so the metadata file stays line-oriented text.
 fn encode_path(path: &Path) -> String {
-    let bytes = path.as_os_str().as_encoded_bytes();
+    encode_bytes(path.as_os_str().as_encoded_bytes())
+}
+
+/// The lossless core of [`encode_path`], on bytes rather than a path.
+///
+/// Kept separate because this — not the `OsStr` conversion around it — is where
+/// the round-trip property lives, and it can be tested on any host.
+fn encode_bytes(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len());
     for &b in bytes {
         if b == b'%' || !(0x20..0x7f).contains(&b) {
@@ -1009,6 +1016,15 @@ fn encode_path(path: &Path) -> String {
 
 /// Reverse of [`encode_path`].
 fn decode_path(encoded: &str) -> PathBuf {
+    PathBuf::from(os_string_from_bytes(decode_bytes(encoded)))
+}
+
+/// Reverse of [`encode_bytes`].
+///
+/// A `%` not followed by two hex digits is passed through literally rather than
+/// dropped: the metadata file may have been hand-edited, and losing a byte
+/// silently is worse than keeping one that was never an escape.
+fn decode_bytes(encoded: &str) -> Vec<u8> {
     let bytes = encoded.as_bytes();
     let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
     let mut i = 0;
@@ -1024,14 +1040,37 @@ fn decode_path(encoded: &str) -> PathBuf {
         out.push(b);
         i = i.saturating_add(1);
     }
-    // SAFETY: `out` is either bytes produced by `OsStr::as_encoded_bytes` (the
-    // only writer of this field is `encode_path`) or, for a hand-edited or
-    // truncated file, an arbitrary byte string. `from_encoded_bytes_unchecked`
-    // requires the latter to be valid for the platform's `OsStr`
-    // representation; on the platforms this program targets every byte string
-    // is, and the value is only ever used as a path, never re-decoded as UTF-8.
-    let os = unsafe { std::ffi::OsStr::from_encoded_bytes_unchecked(&out) };
-    PathBuf::from(os)
+    out
+}
+
+/// Build an `OsString` from the raw bytes of a path.
+///
+/// This is where the byte world meets the platform's path type, so it is split
+/// per platform rather than papered over with
+/// `OsStr::from_encoded_bytes_unchecked`: that function's contract is that the
+/// bytes are valid for the platform's `OsStr` encoding, which is true for
+/// arbitrary bytes on Unix but *not* on Windows, where `OsStr` is WTF-8. Since
+/// our target is `target-family = ["unix"]`, the safe, total conversion below
+/// is the one that actually runs; Windows appears only as a test host.
+#[cfg(unix)]
+fn os_string_from_bytes(bytes: Vec<u8>) -> std::ffi::OsString {
+    use std::os::unix::ffi::OsStringExt;
+    std::ffi::OsString::from_vec(bytes)
+}
+
+/// Test-host fallback. Windows `OsString` cannot hold a byte string that is not
+/// WTF-8, so bytes that are not valid UTF-8 cannot survive here. They are not
+/// silently mangled: [`decode_bytes`] is still exact, and the tests assert the
+/// round-trip at that level, which is the level `meta.txt` is written at.
+#[cfg(not(unix))]
+fn os_string_from_bytes(bytes: Vec<u8>) -> std::ffi::OsString {
+    match String::from_utf8(bytes) {
+        Ok(s) => std::ffi::OsString::from(s),
+        // Reachable only on a non-Unix host reading a bin written on the
+        // target. Nothing better is representable; `decode_bytes` is the API to
+        // use if the exact bytes are needed.
+        Err(e) => std::ffi::OsString::from(String::from_utf8_lossy(e.as_bytes()).into_owned()),
+    }
 }
 
 /// Move `src` to `dest`, falling back to copy-then-remove across devices.
@@ -1780,18 +1819,37 @@ mod tests {
         // must carry bytes, not characters. Writing the path with `Display`
         // replaced undecodable bytes with U+FFFD and the original name was
         // then unrecoverable.
+        //
+        // Asserted at the byte level, which is the level `meta.txt` is written
+        // at: `OsString` on the Windows test host cannot hold a non-WTF-8 byte
+        // string at all, so going through `PathBuf` here would be testing the
+        // host's limitation rather than our encoding.
         let encoded = "/home/u/caf%E9.txt";
-        let decoded = decode_path(encoded);
+        let decoded = decode_bytes(encoded);
         assert_eq!(
-            decoded.as_os_str().as_encoded_bytes(),
-            b"/home/u/caf\xE9.txt",
+            decoded, b"/home/u/caf\xE9.txt",
             "a lone 0xE9 must come back as 0xE9, not as U+FFFD"
         );
         assert_eq!(
-            encode_path(&decoded),
+            encode_bytes(&decoded),
             encoded,
             "and must re-encode to the same text"
         );
+    }
+
+    /// Every byte value must survive, not just the one a bug happened to hit.
+    #[test]
+    fn every_byte_value_round_trips_through_the_encoding() {
+        let all: Vec<u8> = (0u8..=255).collect();
+        assert_eq!(decode_bytes(&encode_bytes(&all)), all);
+    }
+
+    #[test]
+    fn a_percent_that_is_not_an_escape_is_kept_verbatim() {
+        // A hand-edited file may contain a bare `%`. Dropping it would silently
+        // rename the entry; the decoder passes it through instead.
+        assert_eq!(decode_bytes("100%"), b"100%");
+        assert_eq!(decode_bytes("a%zz"), b"a%zz");
     }
 
     #[test]

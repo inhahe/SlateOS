@@ -17,10 +17,11 @@
 
 use std::collections::BTreeMap;
 use std::env;
+use std::ffi::OsString;
 use std::fmt;
 use std::fs;
 use std::io::{self, Read};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -339,7 +340,15 @@ fn glob_match_simple(pattern: &[u8], text: &[u8]) -> bool {
 }
 
 /// Check if a path should be excluded based on exclude patterns.
-fn is_excluded(path: &str, patterns: &[String]) -> bool {
+fn is_excluded(path: &Path, patterns: &[String]) -> bool {
+    // Exclusion patterns are UTF-8 text the user typed, so matching against a
+    // lossy rendering is the only thing that can be meant. This is a selection
+    // heuristic, not an identity check: the ASCII structure a glob keys on
+    // (separators, extensions) survives the conversion exactly, and the
+    // undecodable bytes a pattern could never have named become U+FFFD, which
+    // no pattern contains.
+    let path = path.to_string_lossy();
+    let path = path.as_ref();
     for pattern in patterns {
         if glob_matches(pattern, path) {
             return true;
@@ -804,11 +813,23 @@ impl fmt::Display for BackupType {
     }
 }
 
+/// Manifest format version written into every new manifest.
+///
+/// Version 1 stored paths as plain JSON strings, which meant they had already
+/// been through `to_string_lossy` and could not name a non-UTF-8 file. Version 2
+/// stores them percent-encoded (see [`encode_path`]). Absence of the field means
+/// version 1, so an existing archive still restores.
+const MANIFEST_VERSION: u64 = 2;
+
 /// Metadata about a single file in a backup manifest.
 #[derive(Clone, Debug)]
 struct FileEntry {
     /// Relative path from backup source root.
-    path: String,
+    ///
+    /// A `PathBuf`, not a `String`: paths on this OS may contain any byte
+    /// except `/` and NUL, and a backup that cannot record the name of a file
+    /// it copied cannot restore it either.
+    path: PathBuf,
     /// File size in bytes.
     size: u64,
     /// Modification time as seconds since UNIX epoch.
@@ -817,27 +838,39 @@ struct FileEntry {
     hash: String,
     /// Whether this is a symlink.
     is_symlink: bool,
-    /// Symlink target (if is_symlink).
-    link_target: Option<String>,
+    /// Symlink target (if is_symlink). Also an arbitrary byte string.
+    link_target: Option<PathBuf>,
 }
 
 impl FileEntry {
     fn to_json(&self) -> JsonValue {
         let mut entries = vec![
-            ("path".to_string(), JsonValue::Str(self.path.clone())),
+            ("path".to_string(), JsonValue::Str(encode_path(&self.path))),
             ("size".to_string(), JsonValue::Number(self.size as f64)),
             ("mtime".to_string(), JsonValue::Number(self.mtime as f64)),
             ("hash".to_string(), JsonValue::Str(self.hash.clone())),
             ("is_symlink".to_string(), JsonValue::Bool(self.is_symlink)),
         ];
         if let Some(ref target) = self.link_target {
-            entries.push(("link_target".to_string(), JsonValue::Str(target.clone())));
+            entries.push((
+                "link_target".to_string(),
+                JsonValue::Str(encode_path(target)),
+            ));
         }
         JsonValue::Object(entries)
     }
 
-    fn from_json(val: &JsonValue) -> Option<Self> {
-        let path = val.get("path")?.as_str()?.to_string();
+    /// Read one entry. `encoded` selects the path representation: version 2
+    /// manifests percent-encode, version 1 stored the path verbatim.
+    fn from_json(val: &JsonValue, encoded: bool) -> Option<Self> {
+        let read_path = |s: &str| {
+            if encoded {
+                decode_path(s)
+            } else {
+                PathBuf::from(s)
+            }
+        };
+        let path = read_path(val.get("path")?.as_str()?);
         let size = val.get("size")?.as_u64()?;
         let mtime = val.get("mtime")?.as_u64()?;
         let hash = val.get("hash")?.as_str()?.to_string();
@@ -848,7 +881,7 @@ impl FileEntry {
         let link_target = val
             .get("link_target")
             .and_then(|v| v.as_str())
-            .map(String::from);
+            .map(&read_path);
         Some(FileEntry {
             path,
             size,
@@ -857,6 +890,94 @@ impl FileEntry {
             is_symlink,
             link_target,
         })
+    }
+}
+
+/// Escape a path into printable ASCII, losslessly.
+///
+/// The manifest is JSON, whose strings are Unicode, but a path is a byte
+/// string. `to_string_lossy` would substitute U+FFFD for every undecodable
+/// byte — and since the manifest is the only record of what a backup contains,
+/// that byte is then gone: restore recreates the file under a different name
+/// and verify reports the original as missing. `OsStr::as_encoded_bytes` gives
+/// the exact bytes; anything outside printable ASCII, plus `%` itself, is
+/// percent-encoded.
+fn encode_path(path: &Path) -> String {
+    encode_bytes(path.as_os_str().as_encoded_bytes())
+}
+
+/// The lossless core of [`encode_path`], on bytes rather than a path.
+///
+/// Kept separate because this — not the `OsStr` conversion around it — is where
+/// the round-trip property lives, and it can be tested on any host.
+fn encode_bytes(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len());
+    for &b in bytes {
+        if b == b'%' || !(0x20..0x7f).contains(&b) {
+            out.push_str(&format!("%{b:02X}"));
+        } else {
+            out.push(b as char); // guarded: printable ASCII only
+        }
+    }
+    out
+}
+
+/// Reverse of [`encode_path`].
+fn decode_path(encoded: &str) -> PathBuf {
+    PathBuf::from(os_string_from_bytes(decode_bytes(encoded)))
+}
+
+/// Reverse of [`encode_bytes`].
+///
+/// A `%` not followed by two hex digits is passed through literally rather than
+/// dropped: this reads files that may have been hand-edited, and losing a byte
+/// silently is worse than keeping one that was never an escape.
+fn decode_bytes(encoded: &str) -> Vec<u8> {
+    let bytes = encoded.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while let Some(&b) = bytes.get(i) {
+        if b == b'%'
+            && let Some(hex) = encoded.get(i.saturating_add(1)..i.saturating_add(3))
+            && let Ok(v) = u8::from_str_radix(hex, 16)
+        {
+            out.push(v);
+            i = i.saturating_add(3);
+            continue;
+        }
+        out.push(b);
+        i = i.saturating_add(1);
+    }
+    out
+}
+
+/// Build an `OsString` from the raw bytes of a path.
+///
+/// This is where the byte world meets the platform's path type, so it is split
+/// per platform rather than papered over with
+/// `OsStr::from_encoded_bytes_unchecked`: that function's contract is that the
+/// bytes are valid for the platform's `OsStr` encoding, which is true for
+/// arbitrary bytes on Unix but *not* on Windows, where `OsStr` is WTF-8. Since
+/// our target is `target-family = ["unix"]`, the safe, total conversion below
+/// is the one that actually runs; Windows appears only as a test host.
+#[cfg(unix)]
+fn os_string_from_bytes(bytes: Vec<u8>) -> OsString {
+    use std::os::unix::ffi::OsStringExt;
+    OsString::from_vec(bytes)
+}
+
+/// Test-host fallback. Windows `OsString` cannot hold a byte string that is not
+/// WTF-8, so bytes that are not valid UTF-8 cannot survive here. They are not
+/// silently mangled: [`decode_bytes`] is still exact, and the tests assert the
+/// round-trip at that level, which is the level the manifest is written at.
+#[cfg(not(unix))]
+fn os_string_from_bytes(bytes: Vec<u8>) -> OsString {
+    match String::from_utf8(bytes) {
+        Ok(s) => OsString::from(s),
+        // Reachable only on a non-Unix host reading a manifest written on the
+        // target. Nothing better is representable; `decode_bytes` is the API to
+        // use if the exact bytes are needed.
+        Err(e) => OsString::from(String::from_utf8_lossy(e.as_bytes()).into_owned()),
     }
 }
 
@@ -872,17 +993,28 @@ impl Manifest {
     }
 
     fn to_json(&self) -> JsonValue {
-        JsonValue::Object(vec![(
-            "files".to_string(),
-            JsonValue::Array(self.files.iter().map(|f| f.to_json()).collect()),
-        )])
+        JsonValue::Object(vec![
+            (
+                "version".to_string(),
+                JsonValue::Number(MANIFEST_VERSION as f64),
+            ),
+            (
+                "files".to_string(),
+                JsonValue::Array(self.files.iter().map(|f| f.to_json()).collect()),
+            ),
+        ])
     }
 
     fn from_json(val: &JsonValue) -> Option<Self> {
+        // A manifest with no version field predates path escaping and stored
+        // paths verbatim. Reading it is still worth doing: refusing would
+        // strand every backup taken before this change.
+        let version = val.get("version").and_then(|v| v.as_u64()).unwrap_or(1);
+        let encoded = version >= 2;
         let files_val = val.get("files")?.as_array()?;
         let mut files = Vec::new();
         for fv in files_val {
-            files.push(FileEntry::from_json(fv)?);
+            files.push(FileEntry::from_json(fv, encoded)?);
         }
         Some(Manifest { files })
     }
@@ -1109,19 +1241,37 @@ fn normalize_path(path: &str) -> String {
 }
 
 /// Get relative path of `full` with respect to `base`.
-fn relative_path(full: &Path, base: &Path) -> String {
-    let full_str = full.to_string_lossy().replace('\\', "/");
-    let base_str = base.to_string_lossy().replace('\\', "/");
-    let base_prefix = if base_str.ends_with('/') {
-        base_str.to_string()
-    } else {
-        format!("{}/", base_str)
-    };
-    if full_str.starts_with(&base_prefix) {
-        full_str[base_prefix.len()..].to_string()
-    } else {
-        full_str
+///
+/// Byte-exact. The previous implementation went through `to_string_lossy`,
+/// which is where a non-UTF-8 filename was destroyed — before the manifest
+/// writer ever saw it, so fixing the manifest parser alone was not enough.
+///
+/// Components are rejoined with `/` rather than by `PathBuf::push` so the
+/// manifest records the same text regardless of the host's separator. `/` is
+/// ASCII and cannot occur inside a component's encoding, so the join is
+/// reversible.
+///
+/// The root and prefix components are handled separately because their
+/// `as_os_str` is already a separator (`/`, or `\` on Windows): joining them
+/// like a normal component yields a doubled or mixed separator.
+fn relative_path(full: &Path, base: &Path) -> PathBuf {
+    let rel = full.strip_prefix(base).unwrap_or(full);
+    let mut out: Vec<u8> = Vec::new();
+    for comp in rel.components() {
+        match comp {
+            Component::Prefix(prefix) => {
+                out.extend_from_slice(prefix.as_os_str().as_encoded_bytes())
+            }
+            Component::RootDir => out.push(b'/'),
+            _ => {
+                if !out.is_empty() && !out.ends_with(b"/") {
+                    out.push(b'/');
+                }
+                out.extend_from_slice(comp.as_os_str().as_encoded_bytes());
+            }
+        }
     }
+    PathBuf::from(os_string_from_bytes(out))
 }
 
 /// Format byte size as human-readable string.
@@ -1374,7 +1524,7 @@ fn scan_dir_recursive(
 
             progress.processed_files += 1;
             progress.processed_bytes += meta.len();
-            progress.current_file = rel.clone();
+            progress.current_file = rel.display().to_string();
 
             // Report progress every 100 files
             if progress.processed_files.is_multiple_of(100) {
@@ -1390,11 +1540,10 @@ fn scan_dir_recursive(
                 link_target: None,
             });
         } else if meta.file_type().is_symlink() {
-            let target = match fs::read_link(&path) {
-                Ok(t) => t.to_string_lossy().to_string(),
-                Err(_) => String::new(),
-            };
-            let hash = sha256_hex(target.as_bytes());
+            // A symlink target is an arbitrary byte string too, and it is
+            // what restore recreates, so it must not be flattened either.
+            let target = fs::read_link(&path).unwrap_or_default();
+            let hash = sha256_hex(target.as_os_str().as_encoded_bytes());
 
             entries.push(FileEntry {
                 path: rel,
@@ -1452,63 +1601,44 @@ fn estimate_recursive(
 
 /// Compare current scan against a previous manifest to detect changes.
 fn detect_changes(current: &[FileEntry], previous: &Manifest) -> DiffResult {
-    let prev_map: BTreeMap<&str, &FileEntry> = previous
+    let prev_map: BTreeMap<&Path, &FileEntry> = previous
         .files
         .iter()
-        .map(|f| (f.path.as_str(), f))
+        .map(|f| (f.path.as_path(), f))
         .collect();
 
-    let curr_map: BTreeMap<&str, &FileEntry> =
-        current.iter().map(|f| (f.path.as_str(), f)).collect();
+    let curr_map: BTreeMap<&Path, &FileEntry> =
+        current.iter().map(|f| (f.path.as_path(), f)).collect();
 
     let mut added = Vec::new();
     let mut modified = Vec::new();
     let mut deleted = Vec::new();
 
-    // Find added and modified files
+    // A path present now but not before is an addition; a path present in both
+    // whose content hash differs is a modification. Size and mtime are not
+    // consulted: the hash is authoritative, and a file can be rewritten with
+    // identical size and a preserved mtime.
     for entry in current {
-        match prev_map.get(entry.path.as_str()) {
+        match prev_map.get(entry.path.as_path()) {
             None => added.push(entry.clone()),
             Some(prev_entry) => {
-                // Check if modified: different hash means content changed
                 if entry.hash != prev_entry.hash {
-                    modified.push((*prev_entry).clone());
-                    modified.pop(); // Remove the old, we'll push a tuple below
-                }
-                // Use size/mtime as quick check, then verify with hash
-                if entry.size != prev_entry.size
-                    || entry.mtime != prev_entry.mtime
-                    || entry.hash != prev_entry.hash
-                {
-                    // Actually modified
-                    if entry.hash != prev_entry.hash {
-                        // Let the caller handle this via the modified list
-                    }
+                    modified.push(((*prev_entry).clone(), entry.clone()));
                 }
             }
         }
     }
 
-    // Rebuild modified properly as tuples
-    let mut modified_tuples = Vec::new();
-    for entry in current {
-        if let Some(prev_entry) = prev_map.get(entry.path.as_str())
-            && entry.hash != prev_entry.hash
-        {
-            modified_tuples.push(((*prev_entry).clone(), entry.clone()));
-        }
-    }
-
     // Find deleted files
     for prev_entry in &previous.files {
-        if !curr_map.contains_key(prev_entry.path.as_str()) {
+        if !curr_map.contains_key(prev_entry.path.as_path()) {
             deleted.push(prev_entry.clone());
         }
     }
 
     DiffResult {
         added,
-        modified: modified_tuples,
+        modified,
         deleted,
     }
 }
@@ -1782,7 +1912,10 @@ fn cmd_restore(opts: RestoreOptions) -> io::Result<()> {
     let files_to_restore: Vec<&FileEntry> = if let Some(ref pattern) = opts.file_pattern {
         full_files
             .iter()
-            .filter(|f| glob_matches(pattern, &f.path))
+            // The pattern is UTF-8 text the user typed, so matching a lossy
+            // rendering of the stored path is a selection heuristic, not an
+            // identity check. The path itself is still restored byte-exactly.
+            .filter(|f| glob_matches(pattern, &f.path.to_string_lossy()))
             .collect()
     } else {
         full_files.iter().collect()
@@ -1812,7 +1945,7 @@ fn cmd_restore(opts: RestoreOptions) -> io::Result<()> {
                 #[cfg(not(unix))]
                 {
                     // On non-Unix, write the target path as file content
-                    fs::write(&dest_path, target.as_bytes())?;
+                    fs::write(&dest_path, target.as_os_str().as_encoded_bytes())?;
                 }
             }
             restored += 1;
@@ -1857,7 +1990,7 @@ fn reconstruct_full_manifest(
     meta: &BackupMeta,
     manifest: &Manifest,
 ) -> io::Result<Vec<FileEntry>> {
-    let mut file_map: BTreeMap<String, FileEntry> = BTreeMap::new();
+    let mut file_map: BTreeMap<PathBuf, FileEntry> = BTreeMap::new();
 
     // Walk back to find the full base
     let mut chain = vec![(meta.clone(), manifest.clone())];
@@ -1947,7 +2080,7 @@ fn cmd_verify(dest: &Path, backup_id: &str) -> io::Result<()> {
         }
 
         if !store.has_blob(&entry.hash) {
-            eprintln!("  MISSING: {} (hash: {})", entry.path, entry.hash);
+            eprintln!("  MISSING: {} (hash: {})", entry.path.display(), entry.hash);
             missing += 1;
             continue;
         }
@@ -1955,11 +2088,11 @@ fn cmd_verify(dest: &Path, backup_id: &str) -> io::Result<()> {
         match store.verify_blob(&entry.hash) {
             Ok(true) => ok += 1,
             Ok(false) => {
-                eprintln!("  CORRUPT: {} (hash: {})", entry.path, entry.hash);
+                eprintln!("  CORRUPT: {} (hash: {})", entry.path.display(), entry.hash);
                 corrupt += 1;
             }
             Err(e) => {
-                eprintln!("  ERROR: {} — {}", entry.path, e);
+                eprintln!("  ERROR: {} — {}", entry.path.display(), e);
                 corrupt += 1;
             }
         }
@@ -2207,7 +2340,7 @@ fn cmd_diff(dest: &Path, id1: &str, id2: &str) -> io::Result<()> {
     if !diff.added.is_empty() {
         println!("Added ({}):", diff.added.len());
         for f in &diff.added {
-            println!("  + {} ({})", f.path, format_size(f.size));
+            println!("  + {} ({})", f.path.display(), format_size(f.size));
         }
         println!();
     }
@@ -2217,7 +2350,7 @@ fn cmd_diff(dest: &Path, id1: &str, id2: &str) -> io::Result<()> {
         for (old, new) in &diff.modified {
             let size_change = new.size as i64 - old.size as i64;
             let sign = if size_change >= 0 { "+" } else { "" };
-            println!("  ~ {} ({}{} bytes)", new.path, sign, size_change);
+            println!("  ~ {} ({}{} bytes)", new.path.display(), sign, size_change);
         }
         println!();
     }
@@ -2225,7 +2358,7 @@ fn cmd_diff(dest: &Path, id1: &str, id2: &str) -> io::Result<()> {
     if !diff.deleted.is_empty() {
         println!("Deleted ({}):", diff.deleted.len());
         for f in &diff.deleted {
-            println!("  - {} ({})", f.path, format_size(f.size));
+            println!("  - {} ({})", f.path.display(), format_size(f.size));
         }
         println!();
     }
@@ -2282,12 +2415,12 @@ fn cmd_info(dest: &Path, backup_id: &str) -> io::Result<()> {
     // File type breakdown
     let mut by_ext: BTreeMap<String, (u64, u64)> = BTreeMap::new();
     for entry in &manifest.files {
-        let ext = entry
-            .path
-            .rsplit('.')
-            .next()
-            .unwrap_or("(no ext)")
-            .to_string();
+        // `Path::extension` (unlike splitting on '.') correctly reports no
+        // extension for "README" and for a dotfile like ".gitignore".
+        let ext = entry.path.extension().map_or_else(
+            || "(no ext)".to_string(),
+            |e| e.to_string_lossy().into_owned(),
+        );
         let (count, size) = by_ext.entry(ext).or_insert((0, 0));
         *count += 1;
         *size += entry.size;
@@ -2900,10 +3033,16 @@ mod tests {
         // The two entry points a pattern actually reaches: whole-path matching
         // and the filename-only fallback in `is_excluded`.
         let patterns = vec!["**/?.log".to_string()];
-        assert!(is_excluded("var/\u{65e5}.log", &patterns));
-        assert!(!is_excluded("var/\u{65e5}\u{672c}.log", &patterns));
+        assert!(is_excluded(Path::new("var/\u{65e5}.log"), &patterns));
+        assert!(!is_excluded(
+            Path::new("var/\u{65e5}\u{672c}.log"),
+            &patterns
+        ));
         let patterns = vec!["\u{65e5}*".to_string()];
-        assert!(is_excluded("dir/\u{65e5}\u{672c}\u{8a9e}.txt", &patterns));
+        assert!(is_excluded(
+            Path::new("dir/\u{65e5}\u{672c}\u{8a9e}.txt"),
+            &patterns
+        ));
     }
 
     #[test]
@@ -2972,7 +3111,7 @@ mod tests {
     #[test]
     fn test_detect_no_changes() {
         let files = vec![FileEntry {
-            path: "a.txt".to_string(),
+            path: PathBuf::from("a.txt"),
             size: 100,
             mtime: 1000,
             hash: "abc123".to_string(),
@@ -2992,7 +3131,7 @@ mod tests {
     fn test_detect_added() {
         let prev = Manifest {
             files: vec![FileEntry {
-                path: "a.txt".to_string(),
+                path: PathBuf::from("a.txt"),
                 size: 100,
                 mtime: 1000,
                 hash: "aaa".to_string(),
@@ -3002,7 +3141,7 @@ mod tests {
         };
         let current = vec![
             FileEntry {
-                path: "a.txt".to_string(),
+                path: PathBuf::from("a.txt"),
                 size: 100,
                 mtime: 1000,
                 hash: "aaa".to_string(),
@@ -3010,7 +3149,7 @@ mod tests {
                 link_target: None,
             },
             FileEntry {
-                path: "b.txt".to_string(),
+                path: PathBuf::from("b.txt"),
                 size: 200,
                 mtime: 2000,
                 hash: "bbb".to_string(),
@@ -3020,7 +3159,7 @@ mod tests {
         ];
         let diff = detect_changes(&current, &prev);
         assert_eq!(diff.added.len(), 1);
-        assert_eq!(diff.added[0].path, "b.txt");
+        assert_eq!(diff.added[0].path, Path::new("b.txt"));
         assert!(diff.modified.is_empty());
         assert!(diff.deleted.is_empty());
     }
@@ -3029,7 +3168,7 @@ mod tests {
     fn test_detect_modified() {
         let prev = Manifest {
             files: vec![FileEntry {
-                path: "a.txt".to_string(),
+                path: PathBuf::from("a.txt"),
                 size: 100,
                 mtime: 1000,
                 hash: "old_hash".to_string(),
@@ -3038,7 +3177,7 @@ mod tests {
             }],
         };
         let current = vec![FileEntry {
-            path: "a.txt".to_string(),
+            path: PathBuf::from("a.txt"),
             size: 150,
             mtime: 2000,
             hash: "new_hash".to_string(),
@@ -3058,7 +3197,7 @@ mod tests {
         let prev = Manifest {
             files: vec![
                 FileEntry {
-                    path: "a.txt".to_string(),
+                    path: PathBuf::from("a.txt"),
                     size: 100,
                     mtime: 1000,
                     hash: "aaa".to_string(),
@@ -3066,7 +3205,7 @@ mod tests {
                     link_target: None,
                 },
                 FileEntry {
-                    path: "b.txt".to_string(),
+                    path: PathBuf::from("b.txt"),
                     size: 200,
                     mtime: 2000,
                     hash: "bbb".to_string(),
@@ -3076,7 +3215,7 @@ mod tests {
             ],
         };
         let current = vec![FileEntry {
-            path: "a.txt".to_string(),
+            path: PathBuf::from("a.txt"),
             size: 100,
             mtime: 1000,
             hash: "aaa".to_string(),
@@ -3087,7 +3226,7 @@ mod tests {
         assert!(diff.added.is_empty());
         assert!(diff.modified.is_empty());
         assert_eq!(diff.deleted.len(), 1);
-        assert_eq!(diff.deleted[0].path, "b.txt");
+        assert_eq!(diff.deleted[0].path, Path::new("b.txt"));
     }
 
     // --- Manifest Serialization Tests ---
@@ -3097,7 +3236,7 @@ mod tests {
         let manifest = Manifest {
             files: vec![
                 FileEntry {
-                    path: "src/main.rs".to_string(),
+                    path: PathBuf::from("src/main.rs"),
                     size: 1024,
                     mtime: 1700000000,
                     hash: "abcdef0123456789".to_string(),
@@ -3105,7 +3244,7 @@ mod tests {
                     link_target: None,
                 },
                 FileEntry {
-                    path: "README.md".to_string(),
+                    path: PathBuf::from("README.md"),
                     size: 512,
                     mtime: 1699999000,
                     hash: "9876543210fedcba".to_string(),
@@ -3119,22 +3258,22 @@ mod tests {
         let deserialized = Manifest::deserialize(&serialized).unwrap();
 
         assert_eq!(deserialized.files.len(), 2);
-        assert_eq!(deserialized.files[0].path, "src/main.rs");
+        assert_eq!(deserialized.files[0].path, Path::new("src/main.rs"));
         assert_eq!(deserialized.files[0].size, 1024);
         assert_eq!(deserialized.files[0].hash, "abcdef0123456789");
-        assert_eq!(deserialized.files[1].path, "README.md");
+        assert_eq!(deserialized.files[1].path, Path::new("README.md"));
     }
 
     #[test]
     fn test_manifest_with_symlink() {
         let manifest = Manifest {
             files: vec![FileEntry {
-                path: "link".to_string(),
+                path: PathBuf::from("link"),
                 size: 0,
                 mtime: 0,
                 hash: "linkhash".to_string(),
                 is_symlink: true,
-                link_target: Some("/usr/bin/target".to_string()),
+                link_target: Some(PathBuf::from("/usr/bin/target")),
             }],
         };
 
@@ -3144,7 +3283,7 @@ mod tests {
         assert!(deserialized.files[0].is_symlink);
         assert_eq!(
             deserialized.files[0].link_target.as_deref(),
-            Some("/usr/bin/target")
+            Some(Path::new("/usr/bin/target"))
         );
     }
 
@@ -3417,7 +3556,7 @@ mod tests {
         let mut manifest = Manifest::new();
         for path in ["写真/2024.jpg", "Ωμέγα.txt", "plain.txt"] {
             manifest.files.push(FileEntry {
-                path: path.to_string(),
+                path: PathBuf::from(path),
                 size: 7,
                 mtime: 11,
                 hash: "abc".to_string(),
@@ -3427,8 +3566,164 @@ mod tests {
         }
         let serialized = manifest.serialize();
         let back = Manifest::deserialize(&serialized).expect("manifest should parse");
-        let got: Vec<&str> = back.files.iter().map(|f| f.path.as_str()).collect();
-        assert_eq!(got, ["写真/2024.jpg", "Ωμέγα.txt", "plain.txt"]);
+        let got: Vec<&Path> = back.files.iter().map(|f| f.path.as_path()).collect();
+        assert_eq!(
+            got,
+            [
+                Path::new("写真/2024.jpg"),
+                Path::new("Ωμέγα.txt"),
+                Path::new("plain.txt")
+            ]
+        );
+    }
+
+    /// The write side. Fixing the manifest *parser* was not enough: the entry
+    /// handed to the writer had already been through `to_string_lossy` in
+    /// `relative_path`, so a byte the filesystem allowed was destroyed before
+    /// the manifest ever saw it, and restore recreated the file under a
+    /// different name.
+    ///
+    /// Asserted on bytes because that is what the manifest stores; on the
+    /// Windows test host an `OsString` cannot hold a non-WTF-8 byte string at
+    /// all, so routing through `PathBuf` would test the host, not the format.
+    #[test]
+    fn a_path_byte_the_filesystem_allows_survives_the_manifest() {
+        let raw = b"photos/caf\xE9.jpg";
+        let encoded = encode_bytes(raw);
+        assert_eq!(encoded, "photos/caf%E9.jpg");
+        assert_eq!(
+            decode_bytes(&encoded),
+            raw,
+            "a lone 0xE9 must come back as 0xE9, not as U+FFFD"
+        );
+    }
+
+    #[test]
+    fn every_byte_value_round_trips_through_the_path_encoding() {
+        let all: Vec<u8> = (0u8..=255).collect();
+        assert_eq!(decode_bytes(&encode_bytes(&all)), all);
+    }
+
+    #[test]
+    fn a_percent_in_a_filename_is_not_mistaken_for_an_escape() {
+        // "100% done.txt" is a legal filename. Round-tripping it must not eat
+        // the "20", and a `%` that is not a valid escape is kept verbatim.
+        let raw = b"100% done.txt";
+        assert_eq!(encode_bytes(raw), "100%25 done.txt");
+        assert_eq!(decode_bytes(&encode_bytes(raw)), raw);
+        assert_eq!(decode_bytes("a%zz"), b"a%zz");
+    }
+
+    /// `relative_path` produces every `FileEntry.path`, so its output is what
+    /// the manifest records. It must strip the base and normalise separators
+    /// without going anywhere near a string conversion.
+    #[test]
+    fn relative_path_strips_the_base_and_joins_with_forward_slashes() {
+        let base = PathBuf::from("/srv/data");
+        assert_eq!(
+            relative_path(Path::new("/srv/data/a/b/c.txt"), &base),
+            PathBuf::from("a/b/c.txt")
+        );
+        // A path that is not under the base is kept whole rather than silently
+        // becoming empty — an empty relative path would collide with every
+        // other such file in the manifest. The root component must survive as a
+        // single leading `/`, not as a doubled or host-flavoured separator.
+        assert_eq!(
+            relative_path(Path::new("/elsewhere/x.txt"), &base),
+            PathBuf::from("/elsewhere/x.txt")
+        );
+        // Host separators are normalised to `/` so the manifest reads the same
+        // whichever machine wrote it.
+        assert_eq!(
+            relative_path(Path::new(r"a\b\c.txt"), Path::new("")),
+            PathBuf::from(if cfg!(windows) {
+                "a/b/c.txt"
+            } else {
+                r"a\b\c.txt"
+            })
+        );
+        // The base itself is relative to nothing.
+        assert_eq!(relative_path(&base, &base), PathBuf::new());
+    }
+
+    /// The defect this whole change exists for, at the point it happened:
+    /// `relative_path` produced the name the manifest recorded, and it went
+    /// through `to_string_lossy`, so a byte the filesystem allowed became
+    /// U+FFFD before anything could escape it.
+    ///
+    /// Unix-only because a Windows `OsString` cannot hold such a path at all —
+    /// and our target is `target-family = ["unix"]`, so this is the platform
+    /// that matters.
+    #[cfg(unix)]
+    #[test]
+    fn relative_path_does_not_mangle_a_non_utf8_name() {
+        use std::os::unix::ffi::OsStrExt;
+        let full = Path::new(std::ffi::OsStr::from_bytes(b"/srv/data/photos/caf\xE9.jpg"));
+        let rel = relative_path(full, Path::new("/srv/data"));
+        assert_eq!(
+            rel.as_os_str().as_bytes(),
+            b"photos/caf\xE9.jpg",
+            "the 0xE9 must reach the manifest writer intact"
+        );
+    }
+
+    /// Version 1 manifests stored paths verbatim. Refusing to read them would
+    /// strand every backup taken before path escaping existed.
+    #[test]
+    fn a_version_1_manifest_is_still_readable() {
+        let legacy = r#"{
+          "files": [
+            {"path": "src/main.rs", "size": 10, "mtime": 1, "hash": "aa", "is_symlink": false},
+            {"path": "50%20off.txt", "size": 20, "mtime": 2, "hash": "bb", "is_symlink": false}
+          ]
+        }"#;
+        let back = Manifest::deserialize(legacy).expect("a v1 manifest should still parse");
+        let got: Vec<&Path> = back.files.iter().map(|f| f.path.as_path()).collect();
+        assert_eq!(
+            got,
+            [Path::new("src/main.rs"), Path::new("50%20off.txt")],
+            "v1 paths are literal: `%20` is part of the name, not an escape"
+        );
+    }
+
+    /// The version marker is what tells the two formats apart, so a manifest we
+    /// write must carry it.
+    #[test]
+    fn a_manifest_we_write_declares_its_version() {
+        let mut manifest = Manifest::new();
+        manifest.files.push(FileEntry {
+            path: PathBuf::from("100% done.txt"),
+            size: 1,
+            mtime: 2,
+            hash: "aa".to_string(),
+            is_symlink: false,
+            link_target: None,
+        });
+        let text = manifest.serialize();
+        let val = json_parse(&text).expect("our own output should parse");
+        assert_eq!(val.get("version").and_then(JsonValue::as_u64), Some(2));
+        // Written escaped, and read back as the original name.
+        assert!(text.contains("100%25 done.txt"), "escaped on disk: {text}");
+        let back = Manifest::deserialize(&text).expect("round trip");
+        assert_eq!(back.files[0].path, PathBuf::from("100% done.txt"));
+    }
+
+    #[test]
+    fn a_symlink_target_is_escaped_like_any_other_path() {
+        let mut manifest = Manifest::new();
+        manifest.files.push(FileEntry {
+            path: PathBuf::from("link"),
+            size: 0,
+            mtime: 0,
+            hash: "aa".to_string(),
+            is_symlink: true,
+            link_target: Some(PathBuf::from("/opt/50% off/bin")),
+        });
+        let back = Manifest::deserialize(&manifest.serialize()).expect("round trip");
+        assert_eq!(
+            back.files[0].link_target.as_deref(),
+            Some(Path::new("/opt/50% off/bin"))
+        );
     }
 
     /// `\uXXXX` is what our own writer emits for control characters, and what
@@ -3538,21 +3833,24 @@ mod tests {
     #[test]
     fn test_is_excluded_simple() {
         let patterns = vec!["*.tmp".to_string(), "*.log".to_string()];
-        assert!(is_excluded("file.tmp", &patterns));
-        assert!(is_excluded("debug.log", &patterns));
-        assert!(!is_excluded("file.txt", &patterns));
+        assert!(is_excluded(Path::new("file.tmp"), &patterns));
+        assert!(is_excluded(Path::new("debug.log"), &patterns));
+        assert!(!is_excluded(Path::new("file.txt"), &patterns));
     }
 
     #[test]
     fn test_is_excluded_directory_pattern() {
         let patterns = vec!["**/node_modules/**".to_string()];
-        assert!(is_excluded("project/node_modules/pkg/index.js", &patterns));
+        assert!(is_excluded(
+            Path::new("project/node_modules/pkg/index.js"),
+            &patterns
+        ));
     }
 
     #[test]
     fn test_is_excluded_filename_fallback() {
         // Pattern matches just the filename component
         let patterns = vec![".gitignore".to_string()];
-        assert!(is_excluded("project/.gitignore", &patterns));
+        assert!(is_excluded(Path::new("project/.gitignore"), &patterns));
     }
 }

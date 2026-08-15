@@ -27,6 +27,40 @@ const COL_RED: Color = Color::from_hex(0xF38BA8);
 const COL_PEACH: Color = Color::from_hex(0xFAB387);
 const COL_LAVENDER: Color = Color::from_hex(0xB4BEFE);
 
+/// The ellipsis marking a cut. `guitk::table` keeps its own copy private, so
+/// this module needs one.
+const ELLIPSIS: &str = "…";
+
+/// How much of a text entry's content the history retains.
+///
+/// A clipboard entry can be megabytes and the history holds many of them, so an
+/// entry keeps a bounded prefix rather than the whole thing. This is a bound on
+/// *retention*, not on display: how much fits on screen depends on the panel's
+/// width and is decided at draw time.
+///
+/// It is a **character** count. It used to be a byte slice — `content[..197]`
+/// behind an `if content.len() > 200` guard — which aborted the process
+/// whenever byte 197 landed inside a character. The guard made that likelier,
+/// not less likely: a Japanese clipping reaches 200 bytes at ~67 characters, so
+/// the guard fired only for content whose byte 197 was very probably a
+/// continuation byte.
+const PREVIEW_CHARS: usize = 200;
+
+/// Where an entry row's text starts, measured from the panel's left edge. The
+/// format badge occupies everything to the left of it.
+const ROW_TEXT_X: f32 = 40.0;
+
+/// Where the pin / sensitive indicators start, measured back from the panel's
+/// right edge. Text on a row that has one must stop short of it.
+const ROW_INDICATOR_INSET: f32 = 28.0;
+
+/// The row background's inset from the panel edge; text on a row with no
+/// indicator still stops here.
+const ROW_RIGHT_PAD: f32 = 8.0;
+
+/// Gap kept between a row's text and whatever is drawn to its right.
+const ROW_GUTTER: f32 = 6.0;
+
 // ============================================================================
 // Clipboard entry types
 // ============================================================================
@@ -109,10 +143,11 @@ pub struct ClipEntry {
 impl ClipEntry {
     /// Create a text entry.
     pub fn text(id: u64, content: &str, timestamp: u64) -> Self {
-        let preview = if content.len() > 200 {
-            let mut s = content[..197].to_string();
-            s.push_str("...");
-            s
+        // `nth` walks at most `PREVIEW_CHARS` characters, so this stays cheap
+        // even when `content` is a megabyte of pasted text.
+        let preview = if content.chars().nth(PREVIEW_CHARS).is_some() {
+            let kept: String = content.chars().take(PREVIEW_CHARS - 1).collect();
+            format!("{kept}{ELLIPSIS}")
         } else {
             content.to_string()
         };
@@ -533,7 +568,7 @@ impl ClipboardViewer {
         // Entry count badge.
         let count_text = format!("{}", self.history.len());
         cmds.push(RenderCommand::FillRect {
-            x: w - 50.0,
+            x: x + w - 50.0,
             y: y + 8.0,
             width: 30.0,
             height: 20.0,
@@ -541,7 +576,7 @@ impl ClipboardViewer {
             corner_radii: CornerRadii::all(10.0),
         });
         cmds.push(RenderCommand::Text {
-            x: w - 44.0,
+            x: x + w - 44.0,
             y: y + 11.0,
             text: count_text,
             color: COL_SUBTEXT0,
@@ -673,24 +708,37 @@ impl ClipboardViewer {
                 });
 
                 // Preview text.
-                let preview_text = entry.preview.lines().next().unwrap_or("").to_string();
-                let max_preview_len = 40;
-                let display_text = if preview_text.len() > max_preview_len {
-                    format!(
-                        "{}...",
-                        &preview_text[..max_preview_len.min(preview_text.len())]
-                    )
+                //
+                // This used to be cut at 40 *bytes* — which aborted on any
+                // non-Latin clipping, since the `len() > 40` guard fires only
+                // for strings long enough in bytes and so selected for the ones
+                // whose byte 40 is a continuation byte. A byte count was not a
+                // bound on the row either: the row's width depends on the
+                // panel's, and the pin indicator sits at a fixed inset from its
+                // right edge. Eliding to the room that is actually there makes
+                // the cut and the space agree at every width.
+                let text_x = x + ROW_TEXT_X;
+                let preview_stop = if entry.pinned {
+                    x + w - ROW_INDICATOR_INSET
                 } else {
-                    preview_text
+                    x + w - ROW_RIGHT_PAD
                 };
+                let preview_room = (preview_stop - ROW_GUTTER - text_x).max(0.0);
+                let preview_text = entry.preview.lines().next().unwrap_or("");
                 cmds.push(RenderCommand::Text {
-                    x: x + 40.0,
+                    x: text_x,
                     y: ey + 6.0,
-                    text: display_text,
+                    text: text::elide(
+                        preview_text,
+                        preview_room,
+                        ELLIPSIS,
+                        12.0,
+                        FontWeightHint::Regular,
+                    ),
                     color: COL_TEXT,
                     font_size: 12.0,
                     font_weight: FontWeightHint::Regular,
-                    max_width: Some(w - 80.0),
+                    max_width: Some(preview_room),
                 });
 
                 // Meta line (age, size, source).
@@ -701,20 +749,29 @@ impl ClipboardViewer {
                     meta_parts.push(app.clone());
                 }
                 let meta = meta_parts.join(" · ");
+                // `source_app` is an application-supplied name, so the meta
+                // line is variable-length too, and its own neighbour is the
+                // sensitive indicator rather than the pin.
+                let meta_stop = if entry.sensitive {
+                    x + w - ROW_INDICATOR_INSET
+                } else {
+                    x + w - ROW_RIGHT_PAD
+                };
+                let meta_room = (meta_stop - ROW_GUTTER - text_x).max(0.0);
                 cmds.push(RenderCommand::Text {
-                    x: x + 40.0,
+                    x: text_x,
                     y: ey + 22.0,
-                    text: meta,
+                    text: text::elide(&meta, meta_room, ELLIPSIS, 10.0, FontWeightHint::Light),
                     color: COL_SUBTEXT0,
                     font_size: 10.0,
                     font_weight: FontWeightHint::Light,
-                    max_width: Some(w - 80.0),
+                    max_width: Some(meta_room),
                 });
 
                 // Pin indicator.
                 if entry.pinned {
                     cmds.push(RenderCommand::Text {
-                        x: w - 28.0,
+                        x: x + w - ROW_INDICATOR_INSET,
                         y: ey + 6.0,
                         text: "P".to_string(),
                         color: COL_YELLOW,
@@ -727,7 +784,7 @@ impl ClipboardViewer {
                 // Sensitive indicator.
                 if entry.sensitive {
                     cmds.push(RenderCommand::Text {
-                        x: w - 28.0,
+                        x: x + w - ROW_INDICATOR_INSET,
                         y: ey + 22.0,
                         text: "S".to_string(),
                         color: COL_RED,
@@ -770,7 +827,7 @@ impl ClipboardViewer {
         let pinned = self.history.pinned_count();
         if pinned > 0 {
             cmds.push(RenderCommand::Text {
-                x: w - 100.0,
+                x: x + w - 100.0,
                 y: bottom_y + 8.0,
                 text: format!("{} pinned", pinned),
                 color: COL_YELLOW,
@@ -807,8 +864,10 @@ mod tests {
     fn test_text_entry_long_preview_truncated() {
         let long = "a".repeat(300);
         let e = ClipEntry::text(1, &long, 1000);
-        assert_eq!(e.preview.len(), 200); // 197 + "..."
-        assert!(e.preview.ends_with("..."));
+        // A *character* count: the old assertion was on `.len()`, a byte count,
+        // which is exactly the confusion that made this abort on non-ASCII.
+        assert_eq!(e.preview.chars().count(), PREVIEW_CHARS);
+        assert!(e.preview.ends_with(ELLIPSIS));
     }
 
     #[test]
@@ -1156,5 +1215,181 @@ mod tests {
         v.format_filter = Some(ClipFormat::Image);
         v.is_open = true;
         assert_eq!(v.filtered_count(), 1);
+    }
+
+    // -- Previews are bounded in characters and elided to the row -------------
+
+    /// Content whose byte length picks a cut its character length cannot take.
+    ///
+    /// Both byte budgets this replaced were anti-protective: `content[..197]`
+    /// behind `len() > 200`, and `&preview_text[..40]` behind `len() > 40`.
+    /// Each fired *only* for strings long enough in bytes, and Japanese reaches
+    /// 200 bytes at ~67 characters and 40 bytes at ~13 — so each guard selected
+    /// for exactly the content whose cut index is a continuation byte.
+    fn adversarial_clips() -> Vec<String> {
+        vec![
+            "\u{3053}\u{308c}\u{306f}\u{30af}\u{30ea}\u{30c3}\u{30d7}\u{30dc}\u{30fc}\u{30c9}\u{306e}\u{5185}\u{5bb9}\u{3067}\u{3059}".repeat(20),
+            "\u{42d}\u{442}\u{43e} \u{441}\u{43e}\u{434}\u{435}\u{440}\u{436}\u{438}\u{43c}\u{43e}\u{435} \u{431}\u{443}\u{444}\u{435}\u{440}\u{430} \u{43e}\u{431}\u{43c}\u{435}\u{43d}\u{430}".repeat(12),
+            "\u{1f4cc}\u{1f4dd}\u{1f5d2}\u{fe0f}\u{1f4a1}\u{1f9e0}\u{1f4da}".repeat(30),
+            // Byte 197 and byte 40 both land inside one of these U+00E9s.
+            format!("{}\u{e9}{}", "x".repeat(39), "y".repeat(400)),
+            format!("{}\u{e9}{}", "x".repeat(196), "y".repeat(400)),
+            "brief".to_string(),
+        ]
+    }
+
+    fn viewer_with_adversarial_clips(width: f32) -> ClipboardViewer {
+        let mut v = ClipboardViewer::new();
+        v.width = width;
+        v.is_open = true;
+        for (i, clip) in adversarial_clips().iter().enumerate() {
+            let id = v.history.push_text(clip, 1000 + i as u64);
+            // Exercise both indicator layouts: a pinned row loses width on its
+            // preview line, a sensitive one on its meta line.
+            if let Some(e) = v.history.entries.iter_mut().find(|e| e.id == id) {
+                e.pinned = i % 2 == 0;
+                e.sensitive = i % 3 == 0;
+                e.source_app = Some(
+                    "\u{3068}\u{3066}\u{3082}\u{9577}\u{3044}\u{30a2}\u{30d7}\u{30ea}\u{540d}"
+                        .repeat(3),
+                );
+            }
+        }
+        v
+    }
+
+    #[test]
+    fn a_non_ascii_clip_does_not_abort_the_viewer() {
+        for width in [240.0_f32, 360.0, 520.0] {
+            let v = viewer_with_adversarial_clips(width);
+            assert!(!v.render().is_empty(), "no commands at width {width}");
+        }
+    }
+
+    #[test]
+    fn a_non_ascii_clip_is_retained_by_characters_not_bytes() {
+        for clip in adversarial_clips() {
+            let e = ClipEntry::text(1, &clip, 1000);
+            assert!(
+                e.preview.chars().count() <= PREVIEW_CHARS,
+                "retained {} chars of {:?}",
+                e.preview.chars().count(),
+                clip
+            );
+            // A prefix of the original, so search over the preview still means
+            // something.
+            let body = e.preview.strip_suffix(ELLIPSIS).unwrap_or(&e.preview);
+            assert!(
+                clip.starts_with(body),
+                "preview is not a prefix of the clip"
+            );
+        }
+    }
+
+    /// No row text may run into whatever is drawn beside it, at any width the
+    /// popup can be given.
+    ///
+    /// The bound is read off the *drawn* commands rather than recomputed from
+    /// the constants: each line is paired with the indicator sharing its `y`,
+    /// if there is one, and otherwise stops at the row background's edge. A
+    /// line on an unpinned row genuinely has more room than one on a pinned
+    /// row, and a test that applied the tighter bound to both would be
+    /// asserting a layout the code is right not to use.
+    #[test]
+    fn no_entry_row_text_reaches_its_indicator() {
+        let mut checked = 0usize;
+        for width in [240.0_f32, 360.0, 520.0] {
+            let v = viewer_with_adversarial_clips(width);
+            let cmds = v.render();
+
+            // Indicators are the only text drawn at the indicator inset.
+            let indicator_x = width - ROW_INDICATOR_INSET;
+            let indicators: Vec<f32> = cmds
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Text { x, y, .. }
+                        if (*x - indicator_x).abs() <= f32::EPSILON =>
+                    {
+                        Some(*y)
+                    }
+                    _ => None,
+                })
+                .collect();
+
+            for cmd in &cmds {
+                let RenderCommand::Text {
+                    x,
+                    y,
+                    text,
+                    font_size,
+                    font_weight,
+                    ..
+                } = cmd
+                else {
+                    continue;
+                };
+                // Only the entry rows' own text starts at ROW_TEXT_X.
+                if (*x - ROW_TEXT_X).abs() > f32::EPSILON {
+                    continue;
+                }
+                let has_indicator = indicators.iter().any(|iy| (iy - y).abs() <= f32::EPSILON);
+                let stop = if has_indicator {
+                    indicator_x
+                } else {
+                    width - ROW_RIGHT_PAD
+                };
+                let right = x + text::measure(text, *font_size, *font_weight);
+                assert!(
+                    right <= stop - ROW_GUTTER + 0.5,
+                    "at width {width} the row text {text:?} runs to {right}, past \
+                     the {} at {stop}",
+                    if has_indicator {
+                        "indicator"
+                    } else {
+                        "row edge"
+                    }
+                );
+                checked += 1;
+            }
+        }
+        assert!(
+            checked >= adversarial_clips().len() * 2,
+            "expected a preview and a meta line per row, checked {checked}"
+        );
+    }
+
+    /// The pairing the test above relies on has to actually happen: if no row
+    /// ever drew an indicator, that test would be checking only the loose
+    /// bound and would pass with the indicator-aware branch deleted.
+    #[test]
+    fn the_adversarial_rows_cover_both_indicator_layouts() {
+        let v = viewer_with_adversarial_clips(360.0);
+        let pinned = v.history.entries.iter().filter(|e| e.pinned).count();
+        let sensitive = v.history.entries.iter().filter(|e| e.sensitive).count();
+        assert!(
+            pinned > 0 && pinned < v.history.entries.len(),
+            "pinned {pinned}"
+        );
+        assert!(
+            sensitive > 0 && sensitive < v.history.entries.len(),
+            "sensitive {sensitive}"
+        );
+    }
+
+    #[test]
+    fn a_short_clip_is_drawn_verbatim() {
+        let v = viewer_with_adversarial_clips(520.0);
+        let cmds = v.render();
+        let drawn: Vec<&str> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            drawn.contains(&"brief"),
+            "a short preview was altered: {drawn:?}"
+        );
     }
 }

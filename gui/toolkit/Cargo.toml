@@ -6,3 +6,4 @@ description = "SlateOS GUI toolkit — widget library with Flexbox/Grid layout e
 
 [dependencies]
 osfont = { path = "../font" }
+textfmt = { path = "../../textfmt" }

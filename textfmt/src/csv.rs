@@ -16,6 +16,10 @@
 //! tell the two cases apart — quoting is precisely how a writer says the
 //! surrounding spaces are significant.
 
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+
 /// Render a string as one field of a CSV record, per RFC 4180.
 ///
 /// The field is wrapped in quotes, with any embedded quote doubled, exactly
@@ -28,7 +32,7 @@
 /// readers even though it looks harmless in a terminal.
 ///
 /// ```
-/// # use guitk::csv;
+/// # use textfmt::csv;
 /// assert_eq!(csv::field("plain"), "plain");
 /// assert_eq!(csv::field("a,b"), "\"a,b\"");
 /// assert_eq!(csv::field("say \"hi\""), "\"say \"\"hi\"\"\"");
@@ -85,7 +89,7 @@ impl Field {
 /// does have.
 ///
 /// ```
-/// # use guitk::csv;
+/// # use textfmt::csv;
 /// let records = csv::parse_records("a,b\n\"x,y\",\"two\nlines\"");
 /// assert_eq!(records.len(), 2);
 /// assert_eq!(records[1][0].text, "x,y");
@@ -120,15 +124,15 @@ pub fn parse_records(data: &str) -> Vec<Vec<Field>> {
                 quoted = true;
             }
             ',' => record.push(Field {
-                text: std::mem::take(&mut text),
-                quoted: std::mem::take(&mut quoted),
+                text: core::mem::take(&mut text),
+                quoted: core::mem::take(&mut quoted),
             }),
             '\n' => {
                 record.push(Field {
-                    text: std::mem::take(&mut text),
-                    quoted: std::mem::take(&mut quoted),
+                    text: core::mem::take(&mut text),
+                    quoted: core::mem::take(&mut quoted),
                 });
-                records.push(std::mem::take(&mut record));
+                records.push(core::mem::take(&mut record));
             }
             // A CR outside quotes is the first half of a CRLF terminator; the
             // LF that follows ends the record.
@@ -149,6 +153,7 @@ pub fn parse_records(data: &str) -> Vec<Vec<Field>> {
 #[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 mod tests {
     use super::*;
+    use alloc::vec;
 
     // -- writing ---------------------------------------------------------
 

@@ -18,6 +18,8 @@
 //! The functions escape *contents*: they never add the surrounding quotes, so
 //! the caller stays in charge of the delimiters it is writing.
 
+use alloc::string::String;
+
 /// Escape a string for use as XML/HTML character data **or** as a quoted
 /// attribute value.
 ///
@@ -28,7 +30,7 @@
 /// chance of a caller picking the wrong one of two nearly-identical helpers.
 ///
 /// ```
-/// # use guitk::escape;
+/// # use textfmt::escape;
 /// assert_eq!(escape::xml("a<b>c&d\"e'f"), "a&lt;b&gt;c&amp;d&quot;e&#39;f");
 /// ```
 #[must_use]
@@ -47,7 +49,7 @@ pub fn xml(s: &str) -> String {
     out
 }
 
-// CSV lives in `guitk::csv`, not here. Escaping a CSV field is inseparable
+// CSV lives in `textfmt::csv`, not here. Escaping a CSV field is inseparable
 // from parsing one back -- the two apps that got this wrong both had a
 // correct field escaper and a reader that could not consume its output --
 // so the format owns one module containing both directions.
@@ -65,7 +67,7 @@ pub fn xml(s: &str) -> String {
 /// non-English document.
 ///
 /// ```
-/// # use guitk::escape;
+/// # use textfmt::escape;
 /// assert_eq!(escape::json_string("a\"b\\c\nd"), "a\\\"b\\\\c\\nd");
 /// assert_eq!(escape::json_string("bell:\u{7}"), "bell:\\u0007");
 /// ```
@@ -115,7 +117,7 @@ pub fn json_string(s: &str) -> String {
 /// user's document.
 ///
 /// ```
-/// # use guitk::escape;
+/// # use textfmt::escape;
 /// // The case a replace-chain gets wrong: a literal backslash-n survives.
 /// let text = r"a\nb";
 /// assert_eq!(escape::unescape_json_string(&escape::json_string(text)), text);
@@ -231,6 +233,8 @@ fn parse_hex4(data: &str, start: usize) -> Option<(u32, usize)> {
 #[allow(clippy::unwrap_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
+    use alloc::format;
+    use alloc::string::ToString;
 
     // -- XML -------------------------------------------------------------
 

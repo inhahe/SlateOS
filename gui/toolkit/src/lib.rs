@@ -32,11 +32,9 @@
 pub mod color;
 pub mod colorpicker;
 pub mod context_ext;
-pub mod csv;
 pub mod dialog;
 pub mod disabled;
 pub mod dnd;
-pub mod escape;
 pub mod event;
 pub mod filetypes;
 pub mod fontdb;
@@ -58,6 +56,13 @@ pub mod textview;
 pub mod theme;
 pub mod tree;
 pub mod widget;
+
+// Text-format escaping lives in `textfmt`, a dependency-free crate, because
+// the components that most need it are headless and must not link a widget
+// library. It is re-exported here under its original paths: `guitk::csv` and
+// `guitk::escape` are what 137 applications already say, and moving the code
+// is not a reason to touch all of them.
+pub use textfmt::{csv, escape, kv};
 
 pub use color::Color;
 pub use event::{Event, KeyEvent, MouseButton, MouseEvent};

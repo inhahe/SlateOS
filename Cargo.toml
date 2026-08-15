@@ -22,6 +22,13 @@ members = [
     # workspace-root target is x86_64-unknown-none and there is no reason to
     # rebuild it on every kernel build.
     "yamldoc",
+    # Shared no_std escaping/parsing for the line-oriented text formats the
+    # system reads and writes (CSV, XML/JSON, `key = value` config). It lived
+    # in `gui/toolkit` until the headless components that need it most — the
+    # indexer, the backup tool, the installer — turned out to be exactly the
+    # ones that must not depend on a widget library, and had each grown their
+    # own subtly-wrong copy. Same member-not-exclude rationale as `yamldoc`.
+    "textfmt",
 ]
 # Default members: only the crates that build under the workspace-root
 # target (x86_64-unknown-none). A plain `cargo build` from the project

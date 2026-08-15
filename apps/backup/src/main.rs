@@ -210,6 +210,58 @@ fn glob_matches(pattern: &str, path: &str) -> bool {
     glob_match_recursive(pattern.as_bytes(), path.as_bytes())
 }
 
+/// The length in bytes of the UTF-8 character starting at `i`, or 1 if the byte
+/// there does not begin a well-formed sequence.
+///
+/// Matching runs over bytes, which is right: our paths are byte strings and are
+/// not required to be valid UTF-8. But `?` is documented as "single char except
+/// /", and a character is not a byte. Advancing one byte per `?` meant
+/// `?.txt` did not match `日.txt` — the `?` ate a third of the kanji and the
+/// literal `.` was then compared against a continuation byte. `?` has no
+/// backtracking (only `*` does), so the match simply failed.
+///
+/// In a backup tool that is not cosmetic. These patterns drive include and
+/// exclude lists, so a pattern that silently fails to match either backs up a
+/// file the user meant to exclude or, worse, skips one they believed was
+/// covered — and they find out when they try to restore it.
+///
+/// Only `?` needs this. `*` is byte-greedy but can only *succeed* on a
+/// character boundary, because UTF-8 is self-synchronising: the literal that
+/// follows a `*` comes from a `&str`, so it is well-formed, and a well-formed
+/// sequence can never match starting inside another one. `/` is likewise safe
+/// to test byte-wise, as an ASCII byte cannot occur inside a multi-byte
+/// character.
+fn utf8_char_len(text: &[u8], i: usize) -> usize {
+    let Some(&b) = text.get(i) else {
+        return 1;
+    };
+    let want = if b < 0x80 {
+        1
+    } else if b >> 5 == 0b110 {
+        2
+    } else if b >> 4 == 0b1110 {
+        3
+    } else if b >> 3 == 0b11110 {
+        4
+    } else {
+        // A continuation byte or an invalid lead: not a character start, so
+        // consume one byte and let the literal comparison decide.
+        return 1;
+    };
+    // Only treat this as a multi-byte character if the sequence it announces is
+    // actually there and well-formed. Clamping to what remains instead would be
+    // wrong in a way that matters: for the bytes `[0xE6, b'/']` a lead byte
+    // claiming three bytes would consume both, and `?` would have crossed a
+    // separator — the one thing it must never do. Falling back to a single byte
+    // for an ill-formed sequence keeps that invariant and still guarantees
+    // forward progress.
+    let follows_are_continuations = (1..want).all(|k| {
+        text.get(i.saturating_add(k))
+            .is_some_and(|&c| (0x80..=0xBF).contains(&c))
+    });
+    if follows_are_continuations { want } else { 1 }
+}
+
 fn glob_match_recursive(pattern: &[u8], text: &[u8]) -> bool {
     // Check for ** at the start — matches any number of path segments
     if pattern.len() >= 2 && pattern[0] == b'*' && pattern[1] == b'*' {
@@ -250,7 +302,8 @@ fn glob_match_simple(pattern: &[u8], text: &[u8]) -> bool {
     while ti < text.len() {
         if pi < pattern.len() && pattern[pi] == b'?' && text[ti] != b'/' {
             pi += 1;
-            ti += 1;
+            // One character, not one byte — see `utf8_char_len`.
+            ti += utf8_char_len(text, ti);
         } else if pi < pattern.len() && pattern[pi] == b'*' {
             // Handle ** in the middle of a pattern
             if pi + 1 < pattern.len() && pattern[pi + 1] == b'*' {
@@ -2741,6 +2794,81 @@ mod tests {
         assert!(glob_matches("file?.txt", "fileA.txt"));
         assert!(!glob_matches("file?.txt", "file12.txt"));
         assert!(!glob_matches("file?.txt", "file.txt"));
+    }
+
+    #[test]
+    fn a_question_mark_matches_one_character_not_one_byte() {
+        // `?` is documented as "single char except /". Every one of these is a
+        // single character, and every one of them is more than a single byte.
+        for ch in ["\u{e9}", "\u{65e5}", "\u{03b1}", "\u{0440}", "\u{1f600}"] {
+            assert!(
+                glob_matches("?.txt", &format!("{ch}.txt")),
+                "?.txt should match {ch}.txt"
+            );
+            assert!(
+                glob_matches("file?.txt", &format!("file{ch}.txt")),
+                "file?.txt should match file{ch}.txt"
+            );
+            // ...and still exactly one of them.
+            assert!(
+                !glob_matches("?.txt", &format!("{ch}{ch}.txt")),
+                "?.txt should not match two characters"
+            );
+            assert!(
+                glob_matches("??.txt", &format!("{ch}{ch}.txt")),
+                "??.txt should match two characters"
+            );
+        }
+        // Mixed widths in one name, and `?` against an ASCII character still
+        // consumes exactly one byte.
+        assert!(glob_matches("?x?.txt", "\u{65e5}x\u{672c}.txt"));
+        assert!(glob_matches("a?c", "abc"));
+        assert!(!glob_matches("a?c", "ab"));
+        // `?` must not swallow a separator, whatever its width.
+        assert!(!glob_matches("a?c", "a/c"));
+    }
+
+    #[test]
+    fn a_non_ascii_name_is_matched_and_excluded_consistently() {
+        // The two entry points a pattern actually reaches: whole-path matching
+        // and the filename-only fallback in `is_excluded`.
+        let patterns = vec!["**/?.log".to_string()];
+        assert!(is_excluded("var/\u{65e5}.log", &patterns));
+        assert!(!is_excluded("var/\u{65e5}\u{672c}.log", &patterns));
+        let patterns = vec!["\u{65e5}*".to_string()];
+        assert!(is_excluded("dir/\u{65e5}\u{672c}\u{8a9e}.txt", &patterns));
+    }
+
+    #[test]
+    fn a_truncated_utf8_sequence_does_not_run_past_the_end() {
+        // Paths are byte strings and need not be well-formed UTF-8. An
+        // ill-formed sequence falls back to one byte per `?`, so a lead byte
+        // whose continuations are missing is just a byte.
+        assert!(glob_match_recursive(b"?", &[0xE6]));
+        assert!(!glob_match_recursive(b"?", &[0xE6, 0x97]));
+        assert!(glob_match_recursive(b"??", &[0xE6, 0x97]));
+        // A complete sequence is one character.
+        assert!(glob_match_recursive(b"?", &[0xE6, 0x97, 0xA5]));
+        // A stray continuation byte is consumed one byte at a time.
+        assert!(glob_match_recursive(b"?", &[0x97]));
+        assert!(glob_match_recursive(b"??", &[0x97, 0xA5]));
+    }
+
+    #[test]
+    fn a_question_mark_never_crosses_a_separator() {
+        // The invariant that made clamping-to-what-remains the wrong fallback:
+        // a lead byte announcing three bytes, followed by a separator, must not
+        // let `?` consume the separator.
+        // This is the case that actually pins it. A lead byte claiming three
+        // bytes, with only a separator behind it: consuming "what remains"
+        // would swallow the `/` and report a match for a name that contains
+        // one. Validating the continuations rejects it.
+        assert!(!glob_match_recursive(b"?", &[0xE6, b'/']));
+        assert!(!glob_match_recursive(b"?c", &[0xE6, b'/', b'c']));
+        assert!(!glob_match_recursive(b"??c", &[0xE6, b'/', b'c']));
+        // Well-formed input, same rule.
+        assert!(!glob_matches("a?c", "a/c"));
+        assert!(!glob_matches("?", "/"));
     }
 
     #[test]

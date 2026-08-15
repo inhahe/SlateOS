@@ -4,10 +4,10 @@
 
 **Status: FIXED 2026-08-15** (lane C, commits `f508f76cf`, `f53562a09`,
 `feb695bbd`, `8208fad9d`, `83dfaff21`, `5750232c5`, `a8d659199`, `ffbdec410`,
-`54fd94f2b`, `5305d139f`, and the markdowneditor commit following it). Found
-while surveying app tables for unbounded columns. Twelve sites across `apps/`
-and `gui/` confused a byte count with a character count, usually while
-truncating a *display* string:
+`54fd94f2b`, `5305d139f`, `b3373ad17`, and the `apps/backup` commit following
+it). Found while surveying app tables for unbounded columns. Thirteen sites
+across `apps/` and `gui/` confused a byte count with a character count, usually
+while truncating a *display* string:
 
 ```rust
 let display = if title.len() > 20 {
@@ -38,8 +38,9 @@ particular apps — it is their ordinary input.
 | `apps/videoplayer/src/main.rs:538` | `padded[..3]` in the SRT timestamp parser | **A subtitle file the user merely opened.** |
 | `apps/renamer/src/main.rs:450,460,489,509` | the filename stem, cut at a position the user types | **Any non-ASCII filename**, and it aborts a batch rename *partway through*. |
 | `apps/markdowneditor/src/main.rs` (14 sites) | `cursor_col`, the selection anchor, undo columns | **Press Down onto a line with a wide character, then type.** Aborts with the document unsaved. |
+| `apps/backup/src/main.rs:302` | the `?` glob wildcard, over path bytes | **Not a panic** — an include/exclude pattern silently stops matching, so a file the user believed was covered is not backed up. |
 
-The last five were found while fixing the first seven and were not in the
+The last six were found while fixing the first seven and were not in the
 original count. `gui/clipboard/src/main.rs:183` looked like another but is not:
 it already goes through `find_char_boundary`.
 
@@ -54,7 +55,7 @@ and a byte count are used interchangeably. Rust's own `format!` width is a
 character count, which makes it a natural source of the confusion.
 
 **`apps/renamer` is the one site where the byte/character confusion was also a
-*semantic* bug, and the most damaging of the eleven.** Four rename rules —
+*semantic* bug, and the most damaging of the thirteen.** Four rename rules —
 insert-at, remove-from, number-at, datestamp-at — slice the filename stem at a
 position the *user types into the rule*, clamped only with `.min(stem.len())`,
 a byte length. `InsertPosition::At`'s own doc comment has always read "insert at
@@ -94,6 +95,33 @@ of the character it landed in -- where a user who pressed Down onto a wide
 character expects to be -- and for an all-ASCII document it returns exactly what
 `.min(line.len())` did, which a test asserts directly.
 
+**`apps/backup`'s `?` wildcard is the only member of the class that never
+panics, which is exactly what made it the easiest to miss.** The glob matcher
+works on `&[u8]` throughout, which is *correct* — our paths are byte strings
+that need not be UTF-8 (`CLAUDE.md` item 7), and rewriting it over `&str` would
+have been the wrong fix. But `?` is documented as "any single character except
+`/`" and advanced `ti` by one **byte**, so against `日本.txt` it matched one
+third of a kanji. `file?.txt` silently stopped matching `file日.txt`. In a
+backup tool a pattern that quietly fails to match is worse than a crash: an
+exclude that misses copies a directory the user meant to skip, and an include
+that misses leaves a file unprotected with the run still reporting success.
+
+Fixed with `utf8_char_len(text, i)`, so `?` advances one character. Only `?`
+needed it. `*` is byte-greedy but can only ever *succeed* on a boundary — a
+well-formed needle cannot match starting inside another sequence, by UTF-8
+self-synchronization — and `/` is ASCII, so it can never occur inside a
+multi-byte character.
+
+The interesting part was ill-formed input. The first version clamped a
+truncated sequence to the bytes remaining (`want.min(len - i).max(1)`), which
+my own test caught as a real defect rather than a wrong expectation: for the
+bytes `[0xE6, b'/']` a lead byte announcing three bytes consumes both, and `?`
+has crossed a separator — the one thing it must never do. The rule that works
+is **validate, then consume**: only treat a lead byte as multi-byte if the
+continuation bytes it announces are actually present and in `0x80..=0xBF`,
+otherwise advance one byte and let the literal comparison decide. That keeps
+the separator invariant and still guarantees forward progress.
+
 **The fix was not to hunt for char boundaries at each site.** All but one of
 these is a *display* truncation, and each already had a box to draw into, so
 each became `guitk::text::elide` / `RenderTree::text_in` (or a `guitk::table`
@@ -127,16 +155,19 @@ indicator.
 
 Grep shape, if this recurs: `&<ident>[..<literal>]` where the receiver is a
 `String`/`&str`, and its `if x.len() > N` guard. That shape found seven of the
-eleven; the other four needed a wider sweep for *any* mixing of the two counts —
-`format!` width against a byte slice (videoplayer), and `.min(s.len())` used to
-clamp a position the user thinks of in characters (renamer). Note this is the same root
+thirteen; the other six needed a wider sweep for *any* mixing of the two counts.
+Three further forms showed up, none of which the grep can see: `format!` width
+(a *character* count) meeting a byte slice (videoplayer); `.min(s.len())` used
+to clamp a position the user thinks of in characters (renamer,
+markdowneditor); and a byte-at-a-time advance where a character was meant
+(backup's `?`), which involves no slicing and no `len()` at all. Note this is the same root
 cause as the unbounded-column survey below — **counting characters instead of
 measuring the box** — and it was worth treating as one problem.
 
 Every fix is covered by a test using Japanese/Greek/Russian/emoji input plus a
 string pinning the exact cut index to a continuation byte, and every one was
 verified non-vacuous by re-breaking the production code and confirming the test
-fails. That discipline earned its keep four times here:
+fails. That discipline earned its keep five times here:
 
 - `colorpicker`'s `chars[2]` index was in fact *unreachable* -- `hex_char_to_u8`
   rejects a multi-byte char one step earlier -- so the "second panic" claimed
@@ -151,6 +182,12 @@ fails. That discipline earned its keep four times here:
   undo replay and click-positioning strand it without any vertical move.
 - `markdowneditor`'s reload clamp passed with the clamp removed -- no test
   reached it -- until a test was added for it specifically.
+- `backup`'s "`?` never crosses a separator" test passed under the very break
+  it existed to catch: `?c` against `[0xE6, b'/', b'c']` fails for an unrelated
+  reason, so the assertion never distinguished the two versions. Pinned with
+  `assert!(!glob_match_recursive(b"?", &[0xE6, b'/']))`, which does. A test
+  aimed at an invariant is not the same as a test that can *see* the invariant
+  break.
 
 General rule this keeps re-teaching: **when several defects can abort, break
 them one at a time**, and be suspicious of a break that leaves the failure

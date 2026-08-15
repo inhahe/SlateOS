@@ -2131,18 +2131,7 @@ fn render_inlines_html(inlines: &[MdInline], html: &mut String) {
 
 /// Escape HTML special characters.
 fn escape_html(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    for ch in input.chars() {
-        match ch {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            '\'' => out.push_str("&#39;"),
-            _ => out.push(ch),
-        }
-    }
-    out
+    guitk::escape::xml(input)
 }
 
 // ============================================================================

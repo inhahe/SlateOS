@@ -35,6 +35,7 @@ pub mod context_ext;
 pub mod dialog;
 pub mod disabled;
 pub mod dnd;
+pub mod escape;
 pub mod event;
 pub mod filetypes;
 pub mod fontdb;

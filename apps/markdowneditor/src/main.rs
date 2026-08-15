@@ -409,6 +409,38 @@ impl Default for Document {
     }
 }
 
+/// Clamp a byte offset into `line` to the nearest character boundary at or
+/// before it.
+///
+/// Every column in this editor -- `cursor_col`, the selection anchor, the
+/// columns recorded in undo actions -- is a **byte** offset into a line. The
+/// clamp that kept such an offset in range was `.min(line.len())`, and a byte
+/// length is the wrong bound for it: it keeps the offset inside the line but
+/// says nothing about whether it lands *on* a character.
+///
+/// That gap is reachable by pressing Down. `move_cursor_down` carries the
+/// column across to a line that may be shorter in bytes and differently shaped:
+/// from column 1 of `"abc"` onto `"\u{65e5}x"`, `.min(4)` leaves 1, which is
+/// inside the kanji. The next Backspace, Delete, insert or selection then
+/// sliced there and aborted the editor -- with the user's unsaved document in
+/// it, which is the worst place in this app to panic.
+///
+/// Rounding *down* is the right direction: it puts the cursor at the start of
+/// the character it landed in, which is where a user who pressed Down onto a
+/// wide character expects to be, and it can never run past the end of a line.
+/// For an all-ASCII document it returns exactly what `.min(line.len())` did.
+fn clamp_col(line: &str, byte: usize) -> usize {
+    if byte >= line.len() {
+        return line.len();
+    }
+    let mut i = byte;
+    // Byte 0 is always a character boundary, so this terminates.
+    while !line.is_char_boundary(i) {
+        i = i.saturating_sub(1);
+    }
+    i
+}
+
 impl Document {
     /// Create a new empty document.
     pub fn new() -> Self {
@@ -614,13 +646,10 @@ impl Document {
         if self.cursor_line > last_line {
             self.cursor_line = last_line;
         }
-        let line_len = self
+        self.cursor_col = self
             .lines
             .get(self.cursor_line)
-            .map_or(0, std::string::String::len);
-        if self.cursor_col > line_len {
-            self.cursor_col = line_len;
-        }
+            .map_or(0, |line| clamp_col(line, self.cursor_col));
         if self.scroll_line > last_line {
             self.scroll_line = last_line;
         }
@@ -667,9 +696,8 @@ impl Document {
         let line = self.cursor_line;
         let col = self.cursor_col;
         if line < self.lines.len() {
-            let current = &mut self.lines[line];
-            let clamped_col = col.min(current.len());
-            current.insert(clamped_col, ch);
+            let clamped_col = clamp_col(&self.lines[line], col);
+            self.lines[line].insert(clamped_col, ch);
             self.cursor_col = clamped_col + ch.len_utf8();
             self.push_undo(EditAction::Insert {
                 line,
@@ -695,9 +723,8 @@ impl Document {
                 let line = self.cursor_line;
                 let col = self.cursor_col;
                 if line < self.lines.len() {
-                    let current = &mut self.lines[line];
-                    let clamped_col = col.min(current.len());
-                    current.insert(clamped_col, ch);
+                    let clamped_col = clamp_col(&self.lines[line], col);
+                    self.lines[line].insert(clamped_col, ch);
                     self.cursor_col = clamped_col + ch.len_utf8();
                     actions.push(EditAction::Insert {
                         line,
@@ -725,7 +752,7 @@ impl Document {
     fn insert_newline_internal(&mut self, actions: &mut Vec<EditAction>) {
         let line = self.cursor_line;
         if line < self.lines.len() {
-            let col = self.cursor_col.min(self.lines[line].len());
+            let col = clamp_col(&self.lines[line], self.cursor_col);
             let remainder = self.lines[line][col..].to_string();
             self.lines[line].truncate(col);
             self.cursor_line += 1;
@@ -742,7 +769,7 @@ impl Document {
     pub fn insert_newline(&mut self) {
         let line = self.cursor_line;
         if line < self.lines.len() {
-            let col = self.cursor_col.min(self.lines[line].len());
+            let col = clamp_col(&self.lines[line], self.cursor_col);
             let remainder = self.lines[line][col..].to_string();
             self.lines[line].truncate(col);
             self.cursor_line += 1;
@@ -761,8 +788,7 @@ impl Document {
         let col = self.cursor_col;
 
         if col > 0 && line < self.lines.len() {
-            let current = &self.lines[line];
-            let clamped_col = col.min(current.len());
+            let clamped_col = clamp_col(&self.lines[line], col);
             if clamped_col > 0 {
                 // Find the previous character boundary.
                 let prev_boundary = self.lines[line][..clamped_col]
@@ -799,7 +825,7 @@ impl Document {
 
         if line < self.lines.len() {
             let current_len = self.lines[line].len();
-            let clamped_col = col.min(current_len);
+            let clamped_col = clamp_col(&self.lines[line], col);
 
             if clamped_col < current_len {
                 // Delete the character at cursor.
@@ -850,18 +876,19 @@ impl Document {
         match action {
             EditAction::Insert { line, col, text } => {
                 if *line < self.lines.len() {
-                    let end = (*col + text.len()).min(self.lines[*line].len());
-                    self.lines[*line].replace_range(*col..end, "");
+                    let start = clamp_col(&self.lines[*line], *col);
+                    let end = clamp_col(&self.lines[*line], start.saturating_add(text.len()));
+                    self.lines[*line].replace_range(start..end, "");
                     self.cursor_line = *line;
-                    self.cursor_col = *col;
+                    self.cursor_col = start;
                 }
             }
             EditAction::Delete { line, col, text } => {
                 if *line < self.lines.len() {
-                    let clamped_col = (*col).min(self.lines[*line].len());
+                    let clamped_col = clamp_col(&self.lines[*line], *col);
                     self.lines[*line].insert_str(clamped_col, text);
                     self.cursor_line = *line;
-                    self.cursor_col = clamped_col + text.len();
+                    self.cursor_col = clamped_col.saturating_add(text.len());
                 }
             }
             EditAction::InsertLine { line, text: _ } => {
@@ -893,18 +920,19 @@ impl Document {
         match action {
             EditAction::Insert { line, col, text } => {
                 if *line < self.lines.len() {
-                    let clamped_col = (*col).min(self.lines[*line].len());
+                    let clamped_col = clamp_col(&self.lines[*line], *col);
                     self.lines[*line].insert_str(clamped_col, text);
                     self.cursor_line = *line;
-                    self.cursor_col = clamped_col + text.len();
+                    self.cursor_col = clamped_col.saturating_add(text.len());
                 }
             }
             EditAction::Delete { line, col, text } => {
                 if *line < self.lines.len() {
-                    let end = (*col + text.len()).min(self.lines[*line].len());
-                    self.lines[*line].replace_range(*col..end, "");
+                    let start = clamp_col(&self.lines[*line], *col);
+                    let end = clamp_col(&self.lines[*line], start.saturating_add(text.len()));
+                    self.lines[*line].replace_range(start..end, "");
                     self.cursor_line = *line;
-                    self.cursor_col = *col;
+                    self.cursor_col = start;
                 }
             }
             EditAction::InsertLine { line, text } => {
@@ -941,7 +969,7 @@ impl Document {
     pub fn move_cursor_up(&mut self) {
         if self.cursor_line > 0 {
             self.cursor_line -= 1;
-            self.cursor_col = self.cursor_col.min(self.lines[self.cursor_line].len());
+            self.cursor_col = clamp_col(&self.lines[self.cursor_line], self.cursor_col);
         }
     }
 
@@ -949,7 +977,7 @@ impl Document {
     pub fn move_cursor_down(&mut self) {
         if self.cursor_line + 1 < self.lines.len() {
             self.cursor_line += 1;
-            self.cursor_col = self.cursor_col.min(self.lines[self.cursor_line].len());
+            self.cursor_col = clamp_col(&self.lines[self.cursor_line], self.cursor_col);
         }
     }
 
@@ -959,7 +987,7 @@ impl Document {
             // Move to previous character boundary.
             if self.cursor_line < self.lines.len() {
                 let line = &self.lines[self.cursor_line];
-                let clamped = self.cursor_col.min(line.len());
+                let clamped = clamp_col(line, self.cursor_col);
                 self.cursor_col = line[..clamped]
                     .char_indices()
                     .next_back()
@@ -978,7 +1006,7 @@ impl Document {
             let line_len = self.lines[self.cursor_line].len();
             if self.cursor_col < line_len {
                 let line = &self.lines[self.cursor_line];
-                let clamped = self.cursor_col.min(line.len());
+                let clamped = clamp_col(line, self.cursor_col);
                 self.cursor_col = line[clamped..]
                     .char_indices()
                     .nth(1)
@@ -1006,12 +1034,10 @@ impl Document {
     /// Move cursor to a specific line (0-based), clamping to valid range.
     pub fn go_to_line(&mut self, line: usize) {
         self.cursor_line = line.min(self.lines.len().saturating_sub(1));
-        self.cursor_col = self.cursor_col.min(
-            self.lines
-                .get(self.cursor_line)
-                .map(|l| l.len())
-                .unwrap_or(0),
-        );
+        self.cursor_col = self
+            .lines
+            .get(self.cursor_line)
+            .map_or(0, |line| clamp_col(line, self.cursor_col));
     }
 
     /// Delete the currently selected text (if any).
@@ -1027,19 +1053,19 @@ impl Document {
         if start.0 == end.0 {
             // Selection within a single line.
             if start.0 < self.lines.len() {
-                let s = start.1.min(self.lines[start.0].len());
-                let e = end.1.min(self.lines[start.0].len());
+                let s = clamp_col(&self.lines[start.0], start.1);
+                let e = clamp_col(&self.lines[start.0], end.1).max(s);
                 deleted = self.lines[start.0][s..e].to_string();
                 self.lines[start.0].replace_range(s..e, "");
             }
         } else {
             // Multi-line selection.
             if end.0 < self.lines.len() {
-                let end_col = end.1.min(self.lines[end.0].len());
+                let end_col = clamp_col(&self.lines[end.0], end.1);
                 let remaining = self.lines[end.0][end_col..].to_string();
 
                 // Collect deleted text.
-                let start_col = start.1.min(self.lines[start.0].len());
+                let start_col = clamp_col(&self.lines[start.0], start.1);
                 deleted.push_str(&self.lines[start.0][start_col..]);
                 for i in (start.0 + 1)..end.0 {
                     deleted.push('\n');
@@ -1061,7 +1087,10 @@ impl Document {
         }
 
         self.cursor_line = start.0;
-        self.cursor_col = start.1;
+        self.cursor_col = self
+            .lines
+            .get(start.0)
+            .map_or(0, |line| clamp_col(line, start.1));
         self.selection_anchor = None;
 
         if !deleted.is_empty() {
@@ -1087,13 +1116,13 @@ impl Document {
         let mut result = String::new();
         if start.0 == end.0 {
             if start.0 < self.lines.len() {
-                let s = start.1.min(self.lines[start.0].len());
-                let e = end.1.min(self.lines[start.0].len());
+                let s = clamp_col(&self.lines[start.0], start.1);
+                let e = clamp_col(&self.lines[start.0], end.1).max(s);
                 result.push_str(&self.lines[start.0][s..e]);
             }
         } else {
             if start.0 < self.lines.len() {
-                let s = start.1.min(self.lines[start.0].len());
+                let s = clamp_col(&self.lines[start.0], start.1);
                 result.push_str(&self.lines[start.0][s..]);
             }
             for i in (start.0 + 1)..end.0 {
@@ -1104,7 +1133,7 @@ impl Document {
             }
             if end.0 < self.lines.len() {
                 result.push('\n');
-                let e = end.1.min(self.lines[end.0].len());
+                let e = clamp_col(&self.lines[end.0], end.1);
                 result.push_str(&self.lines[end.0][..e]);
             }
         }
@@ -1282,7 +1311,9 @@ pub fn parse_markdown(input: &str) -> Vec<MdBlock> {
             idx += 1;
             while idx < lines.len() {
                 let cl = lines[idx];
-                if cl.trim_start().starts_with(&format!("{}{}{}", fence_char, fence_char, fence_char))
+                if cl
+                    .trim_start()
+                    .starts_with(&format!("{}{}{}", fence_char, fence_char, fence_char))
                     && cl.trim().chars().all(|c| c == fence_char)
                 {
                     idx += 1;
@@ -1303,7 +1334,8 @@ pub fn parse_markdown(input: &str) -> Vec<MdBlock> {
             let mut quote_lines = Vec::new();
             while idx < lines.len() && lines[idx].trim_start().starts_with('>') {
                 let ql = lines[idx].trim_start();
-                let stripped = ql.strip_prefix("> ")
+                let stripped = ql
+                    .strip_prefix("> ")
                     .or_else(|| ql.strip_prefix('>'))
                     .unwrap_or(ql);
                 quote_lines.push(stripped);
@@ -1361,10 +1393,7 @@ pub fn parse_markdown(input: &str) -> Vec<MdBlock> {
 
         // Paragraph: everything else until a blank line or block-level element.
         let mut para_lines = Vec::new();
-        while idx < lines.len()
-            && !lines[idx].trim().is_empty()
-            && !is_block_start(lines[idx])
-        {
+        while idx < lines.len() && !lines[idx].trim().is_empty() && !is_block_start(lines[idx]) {
             para_lines.push(lines[idx]);
             idx += 1;
         }
@@ -1388,7 +1417,8 @@ fn is_horizontal_rule(line: &str) -> bool {
     if first != '-' && first != '*' && first != '_' {
         return false;
     }
-    trimmed.chars().all(|c| c == first || c == ' ') && trimmed.chars().filter(|c| *c == first).count() >= 3
+    trimmed.chars().all(|c| c == first || c == ' ')
+        && trimmed.chars().filter(|c| *c == first).count() >= 3
 }
 
 /// Parse a heading line (# through ######).
@@ -1476,11 +1506,9 @@ fn parse_list_item(line: &str, ordered: bool) -> ListItem {
 
     let content = if ordered {
         // Skip the number and separator (e.g., "1. " or "1) ").
-        let after_num: String = trimmed
-            .chars()
-            .skip_while(|c| c.is_ascii_digit())
-            .collect();
-        after_num.strip_prefix(". ")
+        let after_num: String = trimmed.chars().skip_while(|c| c.is_ascii_digit()).collect();
+        after_num
+            .strip_prefix(". ")
             .or_else(|| after_num.strip_prefix(") "))
             .map_or_else(|| after_num.clone(), str::to_string)
     } else {
@@ -1493,7 +1521,10 @@ fn parse_list_item(line: &str, ordered: bool) -> ListItem {
     };
 
     // Check for task list syntax: [x] or [ ].
-    let (task, final_content) = if let Some(rest) = content.strip_prefix("[x] ").or_else(|| content.strip_prefix("[X] ")) {
+    let (task, final_content) = if let Some(rest) = content
+        .strip_prefix("[x] ")
+        .or_else(|| content.strip_prefix("[X] "))
+    {
         (Some(true), rest.to_string())
     } else if let Some(rest) = content.strip_prefix("[ ] ") {
         (Some(false), rest.to_string())
@@ -1639,16 +1670,18 @@ pub fn parse_inlines(input: &str) -> Vec<MdInline> {
             }
             let alt_start = pos + 2;
             if let Some(alt_end) = find_single_closing(&chars, alt_start, ']')
-                && alt_end + 1 < chars.len() && chars[alt_end + 1] == '(' {
-                    let url_start = alt_end + 2;
-                    if let Some(url_end) = find_single_closing(&chars, url_start, ')') {
-                        let alt: String = chars[alt_start..alt_end].iter().collect();
-                        let url: String = chars[url_start..url_end].iter().collect();
-                        result.push(MdInline::Image { alt, url });
-                        pos = url_end + 1;
-                        continue;
-                    }
+                && alt_end + 1 < chars.len()
+                && chars[alt_end + 1] == '('
+            {
+                let url_start = alt_end + 2;
+                if let Some(url_end) = find_single_closing(&chars, url_start, ')') {
+                    let alt: String = chars[alt_start..alt_end].iter().collect();
+                    let url: String = chars[url_start..url_end].iter().collect();
+                    result.push(MdInline::Image { alt, url });
+                    pos = url_end + 1;
+                    continue;
                 }
+            }
         }
 
         // Link: [text](url)
@@ -1659,27 +1692,26 @@ pub fn parse_inlines(input: &str) -> Vec<MdInline> {
             }
             let text_start = pos + 1;
             if let Some(text_end) = find_single_closing(&chars, text_start, ']')
-                && text_end + 1 < chars.len() && chars[text_end + 1] == '(' {
-                    let url_start = text_end + 2;
-                    if let Some(url_end) = find_single_closing(&chars, url_start, ')') {
-                        let link_text: String = chars[text_start..text_end].iter().collect();
-                        let url: String = chars[url_start..url_end].iter().collect();
-                        let text_inlines = parse_inlines(&link_text);
-                        result.push(MdInline::Link {
-                            text: text_inlines,
-                            url,
-                        });
-                        pos = url_end + 1;
-                        continue;
-                    }
+                && text_end + 1 < chars.len()
+                && chars[text_end + 1] == '('
+            {
+                let url_start = text_end + 2;
+                if let Some(url_end) = find_single_closing(&chars, url_start, ')') {
+                    let link_text: String = chars[text_start..text_end].iter().collect();
+                    let url: String = chars[url_start..url_end].iter().collect();
+                    let text_inlines = parse_inlines(&link_text);
+                    result.push(MdInline::Link {
+                        text: text_inlines,
+                        url,
+                    });
+                    pos = url_end + 1;
+                    continue;
                 }
+            }
         }
 
         // Line break: two trailing spaces.
-        if chars[pos] == ' '
-            && pos + 1 < chars.len()
-            && chars[pos + 1] == ' '
-        {
+        if chars[pos] == ' ' && pos + 1 < chars.len() && chars[pos + 1] == ' ' {
             // Check if this is at end of content or before more spaces.
             let mut space_end = pos;
             while space_end < chars.len() && chars[space_end] == ' ' {
@@ -1915,13 +1947,17 @@ pub fn export_html(blocks: &[MdBlock]) -> String {
     html.push_str("<meta charset=\"utf-8\">\n");
     html.push_str("<title>Markdown Export</title>\n");
     html.push_str("<style>\n");
-    html.push_str("body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; ");
+    html.push_str(
+        "body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; ",
+    );
     html.push_str("max-width: 800px; margin: 0 auto; padding: 20px; ");
     html.push_str("background: #1e1e2e; color: #cdd6f4; }\n");
     html.push_str("h1, h2, h3, h4, h5, h6 { color: #89b4fa; }\n");
     html.push_str("a { color: #89b4fa; }\n");
     html.push_str("code { background: #313244; padding: 2px 6px; border-radius: 4px; }\n");
-    html.push_str("pre { background: #313244; padding: 16px; border-radius: 8px; overflow-x: auto; }\n");
+    html.push_str(
+        "pre { background: #313244; padding: 16px; border-radius: 8px; overflow-x: auto; }\n",
+    );
     html.push_str("pre code { padding: 0; }\n");
     html.push_str("blockquote { border-left: 4px solid #89b4fa; margin-left: 0; padding-left: 16px; color: #a6adc8; }\n");
     html.push_str("table { border-collapse: collapse; width: 100%; }\n");
@@ -1957,7 +1993,10 @@ fn render_block_html(block: &MdBlock, html: &mut String) {
             if language.is_empty() {
                 html.push_str("<pre><code>");
             } else {
-                html.push_str(&format!("<pre><code class=\"language-{}\">", escape_html(language)));
+                html.push_str(&format!(
+                    "<pre><code class=\"language-{}\">",
+                    escape_html(language)
+                ));
             }
             html.push_str(&escape_html(code));
             html.push_str("</code></pre>\n");
@@ -2586,11 +2625,12 @@ pub fn insert_heading(doc: &mut Document, level: u8) {
 /// Insert a link template.
 pub fn insert_link(doc: &mut Document) {
     if doc.selection_anchor.is_some()
-        && let Some(selected) = doc.selected_text() {
-            doc.delete_selection();
-            insert_snippet(doc, &format!("[{}](url)", selected));
-            return;
-        }
+        && let Some(selected) = doc.selected_text()
+    {
+        doc.delete_selection();
+        insert_snippet(doc, &format!("[{}](url)", selected));
+        return;
+    }
     insert_snippet(doc, "[link text](url)");
 }
 
@@ -2983,7 +3023,13 @@ pub fn render_preview(
 
     let content_x = x + PREVIEW_PADDING;
     let content_width = width - PREVIEW_PADDING * 2.0;
-    let mut ctx = PreviewContext::new(content_x, y + PREVIEW_PADDING, content_width, height, scroll_offset);
+    let mut ctx = PreviewContext::new(
+        content_x,
+        y + PREVIEW_PADDING,
+        content_width,
+        height,
+        scroll_offset,
+    );
 
     for block in blocks {
         render_block_preview(block, &mut ctx);
@@ -3035,7 +3081,13 @@ fn render_block_preview(block: &MdBlock, ctx: &mut PreviewContext) {
             ctx.add_spacing(spacing);
         }
         MdBlock::Paragraph { inlines } => {
-            render_inlines_preview(inlines, ctx, EDITOR_FONT_SIZE, TEXT, FontWeightHint::Regular);
+            render_inlines_preview(
+                inlines,
+                ctx,
+                EDITOR_FONT_SIZE,
+                TEXT,
+                FontWeightHint::Regular,
+            );
             ctx.add_spacing(8.0);
         }
         MdBlock::CodeBlock { language, code } => {
@@ -3646,12 +3698,7 @@ pub fn default_toolbar_buttons() -> Vec<ToolbarButton> {
 }
 
 /// Render the toolbar.
-pub fn render_toolbar(
-    buttons: &[ToolbarButton],
-    x: f32,
-    y: f32,
-    width: f32,
-) -> Vec<RenderCommand> {
+pub fn render_toolbar(buttons: &[ToolbarButton], x: f32, y: f32, width: f32) -> Vec<RenderCommand> {
     let mut cmds = Vec::new();
 
     // Toolbar background.
@@ -3765,8 +3812,8 @@ pub fn render_tab_bar(
         } else {
             FontWeightHint::Regular
         };
-        let tab_width = (text::measure(&label, TOOLBAR_FONT_SIZE, label_weight) + 24.0)
-            .clamp(80.0, 200.0);
+        let tab_width =
+            (text::measure(&label, TOOLBAR_FONT_SIZE, label_weight) + 24.0).clamp(80.0, 200.0);
 
         let bg_color = if is_active { BASE } else { MANTLE };
         let text_color = if is_active { TEXT } else { SUBTEXT0 };
@@ -3938,12 +3985,7 @@ pub fn render_status_bar(
 // ============================================================================
 
 /// Render the table of contents sidebar.
-pub fn render_toc_sidebar(
-    entries: &[TocEntry],
-    x: f32,
-    y: f32,
-    height: f32,
-) -> Vec<RenderCommand> {
+pub fn render_toc_sidebar(entries: &[TocEntry], x: f32, y: f32, height: f32) -> Vec<RenderCommand> {
     let mut cmds = Vec::new();
 
     // Sidebar background.
@@ -4171,12 +4213,7 @@ pub fn render_find_replace(
 // ============================================================================
 
 /// Render a template chooser dialog overlay.
-pub fn render_template_chooser(
-    x: f32,
-    y: f32,
-    width: f32,
-    height: f32,
-) -> Vec<RenderCommand> {
+pub fn render_template_chooser(x: f32, y: f32, width: f32, height: f32) -> Vec<RenderCommand> {
     let mut cmds = Vec::new();
 
     // Overlay dimmer.
@@ -4657,7 +4694,9 @@ impl App {
         }
         for doc in &mut self.documents {
             doc.seconds_since_save += elapsed_seconds;
-            if doc.modified && doc.path.is_some() && doc.seconds_since_save >= self.autosave_interval
+            if doc.modified
+                && doc.path.is_some()
+                && doc.seconds_since_save >= self.autosave_interval
             {
                 let _ = doc.save();
             }
@@ -4671,8 +4710,7 @@ impl App {
         let scroll_fraction = doc.scroll_line as f32 / total_lines;
         // Estimate total preview height (rough approximation).
         let estimated_preview_height = total_lines * LINE_HEIGHT * 1.5;
-        self.documents[self.active_doc].preview_scroll =
-            scroll_fraction * estimated_preview_height;
+        self.documents[self.active_doc].preview_scroll = scroll_fraction * estimated_preview_height;
     }
 
     /// Render the full application frame.
@@ -4873,7 +4911,9 @@ impl App {
         let (title, body): (&str, String) = match &prompt.change {
             DiskChange::Deleted => (
                 "File deleted on disk",
-                format!("\"{name}\" was deleted outside the editor while you have unsaved changes."),
+                format!(
+                    "\"{name}\" was deleted outside the editor while you have unsaved changes."
+                ),
             ),
             _ => (
                 "File changed on disk",
@@ -5266,11 +5306,10 @@ pub fn handle_key(app: &mut App, key: Key, modifiers: Modifiers) {
             app.active_document_mut().insert_text("    ");
             app.refresh_cache();
         }
-        Key::Char(ch)
-            if !modifiers.ctrl && !modifiers.alt => {
-                app.active_document_mut().insert_char(ch);
-                app.refresh_cache();
-            }
+        Key::Char(ch) if !modifiers.ctrl && !modifiers.alt => {
+            app.active_document_mut().insert_char(ch);
+            app.refresh_cache();
+        }
         _ => {}
     }
 
@@ -5543,10 +5582,7 @@ mod tests {
     #[test]
     fn test_word_count_multiline() {
         let mut doc = Document::new();
-        doc.lines = vec![
-            "Hello World".to_string(),
-            "foo bar baz".to_string(),
-        ];
+        doc.lines = vec!["Hello World".to_string(), "foo bar baz".to_string()];
         assert_eq!(doc.word_count(), 5);
     }
 
@@ -6521,7 +6557,8 @@ mod tests {
     #[test]
     fn test_app_refresh_cache() {
         let mut app = App::new(1280.0, 800.0);
-        app.active_document_mut().insert_text("# Heading\n\nParagraph");
+        app.active_document_mut()
+            .insert_text("# Heading\n\nParagraph");
         app.refresh_cache();
         assert!(!app.cached_blocks.is_empty());
         assert!(!app.cached_toc.is_empty());
@@ -6597,7 +6634,11 @@ mod tests {
                 alt: false,
             },
         );
-        assert!(app.active_document().full_text().contains("[link text](url)"));
+        assert!(
+            app.active_document()
+                .full_text()
+                .contains("[link text](url)")
+        );
     }
 
     #[test]
@@ -6829,9 +6870,7 @@ mod tests {
     #[test]
     fn test_sync_scroll() {
         let mut app = App::new(1280.0, 800.0);
-        app.active_document_mut().lines = (0..100)
-            .map(|i| format!("Line {}", i))
-            .collect();
+        app.active_document_mut().lines = (0..100).map(|i| format!("Line {}", i)).collect();
         app.active_document_mut().scroll_line = 50;
         app.sync_scroll();
         assert!(app.active_document().preview_scroll > 0.0);
@@ -7020,7 +7059,10 @@ mod tests {
                 FontWeightHint::Bold,
                 FontFamily::Mono,
             );
-            assert!(w <= cell + 0.01, "bold {ch:?} measures {w} in a {cell} cell");
+            assert!(
+                w <= cell + 0.01,
+                "bold {ch:?} measures {w} in a {cell} cell"
+            );
         }
     }
 
@@ -7030,14 +7072,7 @@ mod tests {
     fn the_source_pane_is_drawn_in_the_family_it_was_measured_in() {
         let mut doc = Document::new();
         doc.insert_text("# Heading WWWW\n\nBody text with iiii and *emphasis*.\n");
-        let cmds = render_editor(
-            &doc,
-            0.0,
-            0.0,
-            600.0,
-            400.0,
-            &FindReplaceState::default(),
-        );
+        let cmds = render_editor(&doc, 0.0, 0.0, 600.0, 400.0, &FindReplaceState::default());
 
         let mut depth = 0_i32;
         let mut deepest = 0_i32;
@@ -7059,7 +7094,10 @@ mod tests {
         }
         assert_eq!(depth, 0, "the font scopes do not balance");
         assert_eq!(deepest, 1, "the source pane's scope was never opened");
-        assert!(inside > 0, "no source glyph was drawn inside the mono scope");
+        assert!(
+            inside > 0,
+            "no source glyph was drawn inside the mono scope"
+        );
     }
 
     /// A byte offset past the end (or off a character boundary, which the
@@ -7094,6 +7132,301 @@ mod tests {
                 "{label:?} does not fit its button"
             );
             assert!(w > 16.0, "{label:?} produced a zero-width button");
+        }
+    }
+    // --- Columns are byte offsets, and must stay on character boundaries ---
+
+    /// A document whose lines are the same *character* length but wildly
+    /// different byte lengths, so carrying a column from one to another lands
+    /// mid-character unless it is rounded to a boundary.
+    fn wide_document() -> Vec<String> {
+        [
+            "abcdefgh",                         // 8 chars, 8 bytes
+            "\u{65e5}x\u{672c}y\u{8a9e}",       // mixed widths
+            "\u{03b1}\u{03b2}\u{03b3}\u{03b4}", // 2 bytes/char
+            "\u{1f600}\u{1f601}",               // 4 bytes/char
+            "caf\u{e9}",                        // ASCII then not
+            "",                                 // empty line
+            "\u{0440}\u{0435}\u{0437}\u{0443}\u{043c}\u{0435}",
+        ]
+        .iter()
+        .map(|l| (*l).to_string())
+        .collect()
+    }
+
+    fn wide_doc() -> Document {
+        let mut doc = Document::new();
+        doc.lines = wide_document();
+        doc
+    }
+
+    #[test]
+    fn moving_down_onto_a_wide_line_leaves_the_cursor_on_a_boundary() {
+        // The concrete case: column 1 of an ASCII line is a valid boundary, and
+        // the same byte offset on the line below is inside a kanji.
+        let mut doc = Document::new();
+        doc.lines = vec!["abc".to_string(), "\u{65e5}x".to_string()];
+        doc.cursor_col = 1;
+        doc.move_cursor_down();
+        assert_eq!(doc.cursor_line, 1);
+        assert!(
+            doc.lines[1].is_char_boundary(doc.cursor_col),
+            "cursor landed at byte {} inside a character of {:?}",
+            doc.cursor_col,
+            doc.lines[1]
+        );
+        // Rounding down means the start of the character it landed in.
+        assert_eq!(doc.cursor_col, 0);
+    }
+
+    #[test]
+    fn no_vertical_move_strands_the_cursor_mid_character() {
+        let mut checked = 0usize;
+        for start_line in 0..wide_document().len() {
+            for start_col in 0..=24 {
+                for down in [true, false] {
+                    let mut doc = wide_doc();
+                    doc.cursor_line = start_line;
+                    doc.cursor_col = clamp_col(&doc.lines[start_line], start_col);
+                    if down {
+                        doc.move_cursor_down();
+                    } else {
+                        doc.move_cursor_up();
+                    }
+                    assert!(
+                        doc.lines[doc.cursor_line].is_char_boundary(doc.cursor_col),
+                        "byte {} is inside a character of {:?}",
+                        doc.cursor_col,
+                        doc.lines[doc.cursor_line]
+                    );
+                    checked += 1;
+                }
+            }
+        }
+        assert!(
+            checked >= 300,
+            "expected the sweep to cover every line and column, got {checked}"
+        );
+    }
+
+    #[test]
+    fn an_edit_after_a_vertical_move_does_not_abort_the_editor() {
+        // The panic did not happen on the move -- it happened on the next edit,
+        // by which point the document is unsaved and the user has typed.
+        let mut checked = 0usize;
+        for start_line in 0..wide_document().len() {
+            for start_col in 0..=24 {
+                for edit in 0..6 {
+                    let mut doc = wide_doc();
+                    doc.cursor_line = start_line;
+                    doc.cursor_col = clamp_col(&doc.lines[start_line], start_col);
+                    doc.move_cursor_down();
+                    match edit {
+                        0 => doc.delete_backward(),
+                        1 => doc.delete_forward(),
+                        2 => doc.insert_char('\u{e9}'),
+                        3 => doc.insert_text("\u{65e5}\u{672c}"),
+                        4 => doc.insert_newline(),
+                        _ => doc.move_cursor_left(),
+                    }
+                    // Whatever the edit did, every line is still valid text and
+                    // the cursor is still somewhere we can slice.
+                    assert!(
+                        doc.lines[doc.cursor_line].is_char_boundary(doc.cursor_col),
+                        "edit {edit} left the cursor at byte {} inside a character of {:?}",
+                        doc.cursor_col,
+                        doc.lines[doc.cursor_line]
+                    );
+                    checked += 1;
+                }
+            }
+        }
+        assert!(
+            checked >= 900,
+            "expected the sweep to cover every line, column and edit, got {checked}"
+        );
+    }
+
+    #[test]
+    fn every_edit_survives_a_column_left_mid_character() {
+        // The vertical move is how the cursor *got* off-boundary, but it is not
+        // the only way: an undo replays a recorded column against a line that
+        // has since changed, and a click maps an x to a byte. So each edit path
+        // is checked here against a column stranded directly, rather than
+        // through `move_cursor_down` -- otherwise the first edit to abort masks
+        // every site after it and the sweep proves nothing about them.
+        let mut checked = 0usize;
+        for line_idx in 0..wide_document().len() {
+            let line_len = wide_document()[line_idx].len();
+            for col in 0..=line_len {
+                for edit in 0..7 {
+                    let mut doc = wide_doc();
+                    doc.cursor_line = line_idx;
+                    // Deliberately *not* clamped: this is the stranded state.
+                    doc.cursor_col = col;
+                    match edit {
+                        0 => doc.delete_backward(),
+                        1 => doc.delete_forward(),
+                        2 => doc.insert_char('\u{e9}'),
+                        3 => doc.insert_text("\u{65e5}\u{672c}"),
+                        4 => doc.insert_newline(),
+                        5 => doc.move_cursor_left(),
+                        _ => doc.move_cursor_right(),
+                    }
+                    checked += 1;
+                }
+                // Reading and deleting a selection anchored off-boundary too.
+                let mut doc = wide_doc();
+                doc.cursor_line = line_idx;
+                doc.cursor_col = col;
+                doc.selection_anchor = Some((line_idx, 1));
+                let _ = doc.selected_text();
+                let _ = doc.delete_selection();
+                checked += 1;
+            }
+        }
+        assert!(
+            checked >= 300,
+            "expected the sweep to cover every column of every line, got {checked}"
+        );
+    }
+
+    #[test]
+    fn a_selection_spanning_wide_lines_can_be_read_and_deleted() {
+        let mut checked = 0usize;
+        let n = wide_document().len();
+        for anchor_line in 0..n {
+            for anchor_col in [0usize, 1, 3, 5] {
+                for cursor_line in 0..n {
+                    let mut doc = wide_doc();
+                    // Anchors are set from a click or a shift-drag, so they can
+                    // name any offset the caller likes -- including one that is
+                    // not a boundary on the line it ends up compared against.
+                    doc.selection_anchor = Some((anchor_line, anchor_col));
+                    doc.cursor_line = cursor_line;
+                    doc.cursor_col = 3;
+                    let read = doc.selected_text();
+                    let deleted = doc.delete_selection();
+                    if let (Some(r), Some(d)) = (read, deleted) {
+                        assert_eq!(r, d, "selected_text and delete_selection disagree");
+                    }
+                    checked += 1;
+                }
+            }
+        }
+        assert!(
+            checked >= 150,
+            "expected the sweep to cover every anchor/cursor pair, got {checked}"
+        );
+    }
+
+    #[test]
+    fn a_reload_from_disk_lands_the_cursor_on_a_boundary() {
+        // The file changing outside the editor replaces every line under a
+        // cursor that was a valid boundary in the *old* text. This is the one
+        // clamp the user never triggers themselves.
+        let mut checked = 0usize;
+        for col in 0..=8 {
+            let mut doc = Document::new();
+            doc.lines = vec!["abcdefgh".to_string()];
+            doc.cursor_col = col;
+            let disk = "\u{65e5}x\u{672c}y\u{8a9e}";
+            doc.apply_merged(disk, disk);
+            assert!(
+                doc.lines[doc.cursor_line].is_char_boundary(doc.cursor_col),
+                "a reload left the cursor at byte {} inside a character of {:?}",
+                doc.cursor_col,
+                doc.lines[doc.cursor_line]
+            );
+            checked += 1;
+        }
+        assert!(checked >= 9, "expected every column, got {checked}");
+    }
+
+    #[test]
+    fn jumping_to_a_line_lands_on_a_boundary() {
+        // Go-to-line keeps the column, so it carries the same hazard as Down.
+        let mut checked = 0usize;
+        for target in 0..wide_document().len() {
+            for col in 0..=12 {
+                let mut doc = wide_doc();
+                doc.cursor_col = col;
+                doc.go_to_line(target);
+                assert!(
+                    doc.lines[doc.cursor_line].is_char_boundary(doc.cursor_col),
+                    "go_to_line({target}) with column {col} landed at byte {} inside a \
+                     character of {:?}",
+                    doc.cursor_col,
+                    doc.lines[doc.cursor_line]
+                );
+                checked += 1;
+            }
+        }
+        assert!(
+            checked >= 80,
+            "expected every line/column pair, got {checked}"
+        );
+    }
+
+    #[test]
+    fn an_undo_replayed_against_a_changed_line_does_not_abort() {
+        // A recorded column is a boundary *of the line as it was*. Anything that
+        // rewrites the line underneath -- a later edit, or a reload from disk
+        // when the file changed outside the editor -- can leave that column
+        // pointing inside a character by the time the undo replays it.
+        let mut checked = 0usize;
+        for col in 0..=8 {
+            for text in ["x", "\u{65e5}", "ab"] {
+                let mut doc = Document::new();
+                doc.lines = vec!["abcdefgh".to_string()];
+                doc.cursor_col = col.min(8);
+                doc.insert_text(text);
+                // The document is replaced under the recorded action, the way a
+                // reload does when the file changed outside the editor.
+                let disk = "\u{65e5}x\u{672c}y\u{8a9e}";
+                doc.apply_merged(disk, disk);
+                doc.undo();
+                doc.redo();
+                doc.undo();
+                assert!(
+                    doc.lines[doc.cursor_line].is_char_boundary(doc.cursor_col),
+                    "replay left the cursor at byte {} inside a character of {:?}",
+                    doc.cursor_col,
+                    doc.lines[doc.cursor_line]
+                );
+                checked += 1;
+            }
+        }
+        assert!(
+            checked >= 24,
+            "expected every column/text pair, got {checked}"
+        );
+    }
+
+    #[test]
+    fn undo_and_redo_replay_a_non_ascii_edit() {
+        let mut doc = Document::new();
+        doc.insert_text("\u{65e5}\u{672c}\u{8a9e}");
+        let typed = doc.lines[0].clone();
+        doc.undo();
+        doc.redo();
+        assert_eq!(doc.lines[0], typed);
+        assert!(doc.lines[0].is_char_boundary(doc.cursor_col));
+    }
+
+    #[test]
+    fn an_ascii_document_clamps_exactly_as_before() {
+        // `clamp_col` must be indistinguishable from `.min(line.len())` when
+        // every character is one byte, or it has changed behaviour for the
+        // common case.
+        for line in ["", "a", "hello world"] {
+            for byte in 0..=15 {
+                assert_eq!(
+                    clamp_col(line, byte),
+                    byte.min(line.len()),
+                    "{line:?} {byte}"
+                );
+            }
         }
     }
 }

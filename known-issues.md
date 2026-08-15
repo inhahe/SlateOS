@@ -4,10 +4,10 @@
 
 **Status: FIXED 2026-08-15** (lane C, commits `f508f76cf`, `f53562a09`,
 `feb695bbd`, `8208fad9d`, `83dfaff21`, `5750232c5`, `a8d659199`, `ffbdec410`,
-`54fd94f2b`, and the renamer commit following it). Found while surveying app
-tables for unbounded columns. Eleven sites across `apps/` and `gui/` confused a
-byte count with a character count, usually while truncating a *display*
-string:
+`54fd94f2b`, `5305d139f`, and the markdowneditor commit following it). Found
+while surveying app tables for unbounded columns. Twelve sites across `apps/`
+and `gui/` confused a byte count with a character count, usually while
+truncating a *display* string:
 
 ```rust
 let display = if title.len() > 20 {
@@ -37,8 +37,9 @@ particular apps — it is their ordinary input.
 | `gui/desktop/src/clipboard_viewer.rs:678` | `&preview_text[..40]` on the same | Same, one layer up. |
 | `apps/videoplayer/src/main.rs:538` | `padded[..3]` in the SRT timestamp parser | **A subtitle file the user merely opened.** |
 | `apps/renamer/src/main.rs:450,460,489,509` | the filename stem, cut at a position the user types | **Any non-ASCII filename**, and it aborts a batch rename *partway through*. |
+| `apps/markdowneditor/src/main.rs` (14 sites) | `cursor_col`, the selection anchor, undo columns | **Press Down onto a line with a wide character, then type.** Aborts with the document unsaved. |
 
-The last four were found while fixing the first seven and were not in the
+The last five were found while fixing the first seven and were not in the
 original count. `gui/clipboard/src/main.rs:183` looked like another but is not:
 it already goes through `find_char_boundary`.
 
@@ -68,6 +69,30 @@ renamed, leaving the batch half-applied with no undo record. Fixed with a
 the position mean what it says and makes the slices sound as a side effect. For
 ASCII names the two numbers coincide, so no existing rule changed behaviour —
 the pre-existing tests confirm it.
+
+**`apps/markdowneditor` is the largest instance, and the only one where the
+bad offset *persists in state* rather than being recomputed each frame.** Every
+column in the editor -- `cursor_col`, the selection anchor, the columns recorded
+in undo actions -- is a byte offset into a line, which is what lets an edit
+apply without re-scanning. Fourteen places kept such an offset in range with
+`.min(line.len())`, and a byte length is the wrong bound: it keeps the offset
+inside the line but says nothing about whether it lands *on* a character.
+
+Pressing Down is enough to reach it. `move_cursor_down` carries the column to
+the next line, so from column 1 of `"abc"` onto `"\u{65e5}x"` the clamp leaves 1,
+inside the kanji. Nothing fails yet -- the cursor is simply in an impossible
+place. The abort comes on the *next* keystroke, in whichever of Backspace,
+Delete, insert, Enter, arrow-key or selection the user happens to press, by
+which point the document is unsaved and the user has been typing. Go-to-line, an
+undo replayed against a line that changed underneath it, and a reload after the
+file changed on disk all reach the same state without any cursor movement at
+all.
+
+Fixed with one `clamp_col(line, byte)` that rounds *down* to a character
+boundary, used at all fourteen sites. Rounding down puts the cursor at the start
+of the character it landed in -- where a user who pressed Down onto a wide
+character expects to be -- and for an all-ASCII document it returns exactly what
+`.min(line.len())` did, which a test asserts directly.
 
 **The fix was not to hunt for char boundaries at each site.** All but one of
 these is a *display* truncation, and each already had a box to draw into, so
@@ -111,11 +136,30 @@ measuring the box** — and it was worth treating as one problem.
 Every fix is covered by a test using Japanese/Greek/Russian/emoji input plus a
 string pinning the exact cut index to a continuation byte, and every one was
 verified non-vacuous by re-breaking the production code and confirming the test
-fails. That discipline earned its keep twice here: it showed that
-`colorpicker`'s `chars[2]` index was in fact *unreachable* (`hex_char_to_u8`
-rejects a multi-byte char one step earlier), and that an earlier `file_drop`
-test passed with its bound removed because no reachable payload draws both a
-count badge and a long description.
+fails. That discipline earned its keep four times here:
+
+- `colorpicker`'s `chars[2]` index was in fact *unreachable* -- `hex_char_to_u8`
+  rejects a multi-byte char one step earlier -- so the "second panic" claimed
+  for that site did not exist.
+- An earlier `file_drop` test passed with its bound removed, because no
+  reachable payload draws both a count badge and a long description.
+- `markdowneditor`'s first sweep drove each edit through `move_cursor_down`, so
+  breaking any *edit* site changed nothing: the sweep already aborted on the
+  cursor-position assertion from the vertical move, one case earlier. Five
+  sites looked verified and were not. Replaced with a test that strands the
+  column directly, which both isolates each site and matches reality, since
+  undo replay and click-positioning strand it without any vertical move.
+- `markdowneditor`'s reload clamp passed with the clamp removed -- no test
+  reached it -- until a test was added for it specifically.
+
+General rule this keeps re-teaching: **when several defects can abort, break
+them one at a time**, and be suspicious of a break that leaves the failure
+count unchanged -- it usually means the new failure is the old one.
+
+One further trap, from this same session: do not re-break production code while
+a full-workspace test run is in flight. A workspace gate launched earlier picked
+up `renamer` mid-verification and reported two failures that were the
+scaffolding, not the tree.
 
 Violates `CLAUDE.md` self-review item 7 (never force UTF-8 assumptions on
 OS-boundary data) and trips the workspace's `clippy::indexing_slicing` warn.

@@ -56,6 +56,95 @@ const LEFT_PANEL_WIDTH: f32 = 400.0;
 const ITEM_HEIGHT: f32 = 28.0;
 const CORNER_RADIUS: f32 = 4.0;
 
+/// Height of one row in the analyzer's detected-pattern list.
+const PATTERN_ROW_HEIGHT: f32 = 15.0;
+
+/// Vertical pitch of one row in the history list: the card plus its gap.
+const HISTORY_ROW_PITCH: f32 = ITEM_HEIGHT + 4.0;
+
+/// Most history entries the list will draw, however tall the panel is.
+///
+/// The history itself is longer; the list is the recent end of it, and the
+/// heading states the full count.
+const HISTORY_MAX_ROWS: usize = 20;
+
+/// How many rows of `row_height` fit between `top` and `bottom`.
+///
+/// Counted rather than divided so there is no float-to-integer cast to get
+/// wrong at the boundary, and so a zero-or-negative gap yields zero rather
+/// than a wrapped-around count.
+fn rows_that_fit(top: f32, bottom: f32, row_height: f32) -> usize {
+    if row_height <= 0.0 {
+        return 0;
+    }
+    let mut rows = 0usize;
+    let mut probe = top;
+    while probe + row_height <= bottom {
+        rows = rows.saturating_add(1);
+        probe += row_height;
+    }
+    rows
+}
+
+/// Draw the analyzer's detected-pattern list starting at `top`, returning the
+/// cursor position just past the last row drawn.
+///
+/// The list is bounded by the room that actually exists between `top` and
+/// `bottom` rather than by a fixed count: the pattern list is unbounded — an
+/// adversarial password like `"aaabbbccc…"` yields one entry per run — but the
+/// panel is not, and rows drawn past `bottom` are invisible. When the list does
+/// not fit, the last row that does is spent on a count of what was left out; a
+/// user who cannot see that four more patterns were found reads the truncated
+/// list as the whole answer.
+///
+/// This returns the cursor rather than taking `&mut cy` so that the height the
+/// list occupies is derived from the rows it actually emitted — the caller
+/// cannot disagree with it about how much space was used.
+fn render_pattern_list(
+    cmds: &mut Vec<RenderCommand>,
+    patterns: &[PatternMatch],
+    x: f32,
+    top: f32,
+    bottom: f32,
+    max_width: f32,
+) -> f32 {
+    let total = patterns.len();
+    let room = rows_that_fit(top, bottom, PATTERN_ROW_HEIGHT);
+    let overflowing = total > room;
+    // The marker costs a row, so it displaces a pattern.
+    let shown = if overflowing {
+        room.saturating_sub(1)
+    } else {
+        total
+    };
+    let mut cy = top;
+    for pattern in patterns.iter().take(shown) {
+        cmds.push(RenderCommand::Text {
+            x,
+            y: cy,
+            text: format!("[{}] {}", pattern.kind.label(), pattern.description),
+            color: PEACH,
+            font_size: 10.0,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(max_width),
+        });
+        cy += PATTERN_ROW_HEIGHT;
+    }
+    if overflowing {
+        cmds.push(RenderCommand::Text {
+            x,
+            y: cy,
+            text: format!("+{} more", total.saturating_sub(shown)),
+            color: OVERLAY0,
+            font_size: 10.0,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(max_width),
+        });
+        cy += PATTERN_ROW_HEIGHT;
+    }
+    cy
+}
+
 // ============================================================================
 // Character sets
 // ============================================================================
@@ -1433,8 +1522,12 @@ impl PasswordApp {
 
                 if let Some(ref analysis) = self.current_analysis {
                     // Rating badge
-                    let badge_w =
-                        text::padded_width(analysis.rating.label(), 10.0, 13.0, FontWeightHint::Bold);
+                    let badge_w = text::padded_width(
+                        analysis.rating.label(),
+                        10.0,
+                        13.0,
+                        FontWeightHint::Bold,
+                    );
                     cmds.push(RenderCommand::FillRect {
                         x: lx,
                         y: cy,
@@ -1539,18 +1632,19 @@ impl PasswordApp {
                         });
                         cy += 18.0;
 
-                        for pattern in &analysis.patterns_found {
-                            cmds.push(RenderCommand::Text {
-                                x: lx + 4.0,
-                                y: cy,
-                                text: format!("[{}] {}", pattern.kind.label(), pattern.description),
-                                color: PEACH,
-                                font_size: 10.0,
-                                font_weight: FontWeightHint::Regular,
-                                max_width: Some(max_w - 8.0),
-                            });
-                            cy += 15.0;
-                        }
+                        // The pattern list is the last thing this tab draws, so
+                        // the cursor it returns has nowhere further to go. Bind
+                        // it anyway: whatever gets appended below must start
+                        // from where the list actually ended, not from a second
+                        // guess at how tall it was.
+                        let _list_bottom = render_pattern_list(
+                            cmds,
+                            &analysis.patterns_found,
+                            lx + 4.0,
+                            cy,
+                            y + height,
+                            max_w - 8.0,
+                        );
                     }
                 } else {
                     cmds.push(RenderCommand::Text {
@@ -1576,11 +1670,20 @@ impl PasswordApp {
                 });
                 cy += 22.0;
 
-                for entry in self.history.iter().rev().take(20) {
-                    if cy > y + height {
-                        break;
-                    }
-
+                // The old bound here was `if cy > y + height { break }`, which
+                // tested the row's *top*: the last row could start just inside
+                // the panel and be drawn half outside it. Rows are counted
+                // against the space that fits a whole row, and the entries that
+                // do not fit are counted rather than silently dropped.
+                let total = self.history.len();
+                let room = rows_that_fit(cy, y + height, HISTORY_ROW_PITCH).min(HISTORY_MAX_ROWS);
+                let overflowing = total > room;
+                let shown = if overflowing {
+                    room.saturating_sub(1)
+                } else {
+                    total
+                };
+                for entry in self.history.iter().rev().take(shown) {
                     cmds.push(RenderCommand::FillRect {
                         x: lx,
                         y: cy,
@@ -1600,10 +1703,20 @@ impl PasswordApp {
                         corner_radii: CornerRadii::all(4.0),
                     });
 
+                    // A 28px row cannot wrap, so a password too long for the
+                    // column is elided — but the cut is *marked*, so nobody
+                    // reads a clipped 128-character password as the whole
+                    // thing and copies it down.
                     cmds.push(RenderCommand::Text {
                         x: lx + 22.0,
                         y: cy + 8.0,
-                        text: entry.password.clone(),
+                        text: text::elide(
+                            &entry.password,
+                            max_w - 140.0,
+                            "…",
+                            11.0,
+                            FontWeightHint::Regular,
+                        ),
                         color: TEXT,
                         font_size: 11.0,
                         font_weight: FontWeightHint::Regular,
@@ -1620,7 +1733,18 @@ impl PasswordApp {
                         max_width: Some(100.0),
                     });
 
-                    cy += ITEM_HEIGHT + 4.0;
+                    cy += HISTORY_ROW_PITCH;
+                }
+                if overflowing {
+                    cmds.push(RenderCommand::Text {
+                        x: lx + 4.0,
+                        y: cy + 8.0,
+                        text: format!("+{} older", total.saturating_sub(shown)),
+                        color: OVERLAY0,
+                        font_size: 10.0,
+                        font_weight: FontWeightHint::Regular,
+                        max_width: Some(max_w - 8.0),
+                    });
                 }
             }
         }
@@ -1645,7 +1769,15 @@ fn main() {
 // Tests
 // ============================================================================
 
+// Panicking on bad data is the point of a test, so the workspace's defensive
+// lints are relaxed here — the same opt-out the sibling apps use.
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
 mod tests {
     use super::*;
 
@@ -2065,6 +2197,149 @@ mod tests {
         app.gen_password();
         let cmds = app.render(1100.0, 700.0);
         assert!(!cmds.is_empty());
+    }
+
+    // --- Bounded lists in the right panel ---
+
+    const TEST_WINDOW_W: f32 = 1100.0;
+    const TEST_WINDOW_H: f32 = 700.0;
+
+    /// Every text command drawn, as `(y, text)`.
+    fn text_rows(cmds: &[RenderCommand]) -> Vec<(f32, String)> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { y, text, .. } => Some((*y, text.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The bottom edge the right panel's content must stay above.
+    fn right_panel_bottom() -> f32 {
+        TEST_WINDOW_H - STATUS_BAR_HEIGHT
+    }
+
+    /// An adversarial password yields one "repeated characters" entry per run,
+    /// so the pattern list is unbounded while the panel is not. The list must
+    /// stop at the panel's edge rather than drawing off the bottom of it.
+    #[test]
+    fn the_pattern_list_stays_inside_its_panel() {
+        let mut app = PasswordApp::new(42);
+        // 40 runs of three identical characters: 40 detected patterns.
+        let mut adversarial = String::new();
+        for n in 0..40_u8 {
+            let ch = char::from(b'a'.saturating_add(n % 26));
+            adversarial.extend([ch, ch, ch]);
+        }
+        app.active_tab = ActiveTab::Analyzer;
+        app.set_analyzer_input(&adversarial);
+        app.analyze_input();
+        let analysis = app
+            .current_analysis
+            .as_ref()
+            .expect("analyze_input sets an analysis");
+        assert!(
+            analysis.patterns_found.len() > 20,
+            "test needs a genuinely long pattern list, got {}",
+            analysis.patterns_found.len(),
+        );
+
+        let cmds = app.render(TEST_WINDOW_W, TEST_WINDOW_H);
+        let rows = text_rows(&cmds);
+        let mut checked = 0;
+        for (y, text) in &rows {
+            if text.starts_with('[') || text.ends_with(" more") {
+                assert!(
+                    *y + PATTERN_ROW_HEIGHT <= right_panel_bottom(),
+                    "pattern row {text:?} at y={y} runs past the panel bottom {}",
+                    right_panel_bottom(),
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked >= 5, "expected pattern rows, checked {checked}");
+        assert!(
+            rows.iter().any(|(_, t)| t.ends_with(" more")),
+            "the hidden patterns must be counted, not silently dropped",
+        );
+    }
+
+    /// When they all fit, no marker appears and none are dropped.
+    #[test]
+    fn a_short_pattern_list_is_shown_whole() {
+        let mut app = PasswordApp::new(42);
+        app.active_tab = ActiveTab::Analyzer;
+        app.set_analyzer_input("aaa123qwerty");
+        app.analyze_input();
+        let expected = app
+            .current_analysis
+            .as_ref()
+            .expect("an analysis")
+            .patterns_found
+            .len();
+        assert!(expected > 0, "test needs at least one pattern");
+
+        let rows = text_rows(&app.render(TEST_WINDOW_W, TEST_WINDOW_H));
+        let drawn = rows.iter().filter(|(_, t)| t.starts_with('[')).count();
+        assert_eq!(drawn, expected, "expected every pattern drawn: {rows:?}");
+        assert!(
+            !rows.iter().any(|(_, t)| t.ends_with(" more")),
+            "no overflow marker should appear",
+        );
+    }
+
+    /// The history list is capped, and says how many entries it is not showing.
+    #[test]
+    fn a_long_history_says_how_much_it_is_not_showing() {
+        let mut app = PasswordApp::new(42);
+        for _ in 0..40 {
+            app.gen_password();
+        }
+        app.active_tab = ActiveTab::History;
+        assert!(
+            app.history.len() > HISTORY_MAX_ROWS,
+            "test needs a long history"
+        );
+
+        let rows = text_rows(&app.render(TEST_WINDOW_W, TEST_WINDOW_H));
+        let marker = rows
+            .iter()
+            .find(|(_, t)| t.ends_with(" older"))
+            .map(|(_, t)| t.clone());
+        assert!(
+            marker.is_some(),
+            "expected an overflow marker for a {}-entry history: {rows:?}",
+            app.history.len(),
+        );
+    }
+
+    /// A password too long for the history column is elided *and marked*, so a
+    /// clipped password is never mistaken for the whole one.
+    #[test]
+    fn a_long_history_password_is_marked_where_it_is_cut() {
+        let mut app = PasswordApp::new(42);
+        app.gen_password();
+        if let Some(entry) = app.history.first_mut() {
+            entry.password = "W".repeat(200);
+        }
+        app.active_tab = ActiveTab::History;
+        let column_w = (TEST_WINDOW_W - LEFT_PANEL_WIDTH - 24.0) - 140.0;
+        let rows: Vec<String> = text_rows(&app.render(TEST_WINDOW_W, TEST_WINDOW_H))
+            .into_iter()
+            .map(|(_, t)| t)
+            .filter(|t| t.starts_with('W'))
+            .collect();
+        assert_eq!(rows.len(), 1, "expected one password row: {rows:?}");
+        assert!(
+            rows[0].ends_with('…'),
+            "expected the cut marked: {:?}",
+            rows[0]
+        );
+        let measured = text::measure(&rows[0], 11.0, FontWeightHint::Regular);
+        assert!(
+            measured <= column_w + 0.5,
+            "password row measures {measured} in a {column_w} column",
+        );
     }
 
     #[test]

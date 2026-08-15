@@ -94,3 +94,9 @@ __pycache__/
 # Exception: this saved page is intentionally tracked (reference kept in-repo),
 # even though the blanket *.html rule above ignores saved web pages.
 !Aero Desktop (offline).html
+
+# Operator's private instruction queue. Kept on disk, deliberately NOT tracked:
+# it is a scratch inbox of raw notes to the agents, not a project document, and
+# the operator asked for it to stay off GitHub (2026-08-14). `todo.txt` — the
+# shared, agent-maintained one — IS still tracked; only `todo2.txt` is exempt.
+/todo2.txt

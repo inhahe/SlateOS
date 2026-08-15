@@ -60762,7 +60762,7 @@ it. The fix is structural: `RenderTree` needs a width-taking variant, and the
 dynamic-content call sites move to it. Do not convert all 249 — convert the
 sites whose text is variable-length and has a neighbour.
 
-Also queued from the same survey, `apps/torrent`'s three hand-drawn tables
+~~Also queued from the same survey, `apps/torrent`'s three hand-drawn tables
 (peers `:3054`, files `:3212`, trackers `:3301`): every column width is written
 **three** times — in the `headers` array, in the row cell's `max_width`, and
 again as a literal in the row's `cx +=` (300.0 / `Some(300.0)` / `308.0`). They
@@ -60771,7 +60771,25 @@ two-calculations-for-one-quantity shape as `window_rules.rs`, one copy worse.
 The cells are also wire-supplied — peer client names, torrent file paths,
 tracker URLs — so they clip unmarked, and the file path clips from the *end*,
 losing the filename that identifies it (`text::elide_start`, as used for
-`undelete`'s `Original Path`).
+`undelete`'s `Original Path`).~~ **Done** (`c6c4e9ba4`): each table is one
+`&[Column]` at module scope that the header and the body both walk, with
+`table_header` returning the x of each column so the body positions cells at
+exactly the offsets the header used. A shared `table_cell` elides with a marked
+cut; a `Fit::{Start,End}` enum picks which end survives, and paths/URLs use
+`End`. Seven tests, each column-fit one guarded by a checked-count and
+rendering its panel *directly*; verified non-vacuous by dropping the elide
+(six of seven fail, overruns of 218–262 px).
+
+Worth generalising from it: the three-copies-of-a-width shape is not merely
+redundant, it is what *hides* the clipping bug. When the width lives in three
+places, no single place is obviously "the column", so nobody asks whether the
+text fits in it — the question has no home. Collapsing the copies to one
+`&[Column]` did not just remove the drift risk; it made "does this cell fit
+its column?" a question a test could ask, which is how the six real overruns
+became visible at all. The remaining hand-drawn tables from the survey
+(`apps/filesearch`, `apps/logviewer`, `apps/renamer`, `apps/systemrestore`)
+should be assumed to be hiding the same thing until a counted test says
+otherwise.
 
 **What it is.** `RenderCommand::Text` carries a `max_width`, and the obvious
 reading is that the compositor wraps to it. It does not. `Compositor::draw_text`

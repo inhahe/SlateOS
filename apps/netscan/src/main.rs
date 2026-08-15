@@ -1878,14 +1878,14 @@ pub fn export_csv(result: &ScanResult) -> String {
         // service name closed the field early.
         csv.push_str(&format!(
             "{},{},{},{},{},{:.1},{},{}\n",
-            guitk::escape::csv_field(&host.ip.display()),
-            guitk::escape::csv_field(&hostname),
-            guitk::escape::csv_field(&mac_str),
-            guitk::escape::csv_field(host.os_guess.label()),
+            guitk::csv::field(&host.ip.display()),
+            guitk::csv::field(&hostname),
+            guitk::csv::field(&mac_str),
+            guitk::csv::field(host.os_guess.label()),
             if host.is_up { "Up" } else { "Down" },
             host.latency_ms,
-            guitk::escape::csv_field(&open_ports.join(";")),
-            guitk::escape::csv_field(&services.join(";")),
+            guitk::csv::field(&open_ports.join(";")),
+            guitk::csv::field(&services.join(";")),
         ));
     }
     csv

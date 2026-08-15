@@ -47,31 +47,10 @@ pub fn xml(s: &str) -> String {
     out
 }
 
-/// Render a string as one field of a CSV record, per RFC 4180.
-///
-/// The field is wrapped in quotes, with any embedded quote doubled, exactly
-/// when it contains a character that would otherwise end the field or the
-/// record: a comma, a quote, or a line break. Fields without one are returned
-/// unchanged, which keeps ordinary output readable.
-///
-/// `\r` belongs in that set as much as `\n` does. RFC 4180 records are
-/// CRLF-terminated, so a bare CR inside a field splits the record in most
-/// readers even though it looks harmless in a terminal.
-///
-/// ```
-/// # use guitk::escape;
-/// assert_eq!(escape::csv_field("plain"), "plain");
-/// assert_eq!(escape::csv_field("a,b"), "\"a,b\"");
-/// assert_eq!(escape::csv_field("say \"hi\""), "\"say \"\"hi\"\"\"");
-/// ```
-#[must_use]
-pub fn csv_field(s: &str) -> String {
-    if s.contains([',', '"', '\n', '\r']) {
-        format!("\"{}\"", s.replace('"', "\"\""))
-    } else {
-        s.to_string()
-    }
-}
+// CSV lives in `guitk::csv`, not here. Escaping a CSV field is inseparable
+// from parsing one back -- the two apps that got this wrong both had a
+// correct field escaper and a reader that could not consume its output --
+// so the format owns one module containing both directions.
 
 /// Escape a string for use as the body of a JSON string literal.
 ///
@@ -297,61 +276,6 @@ mod tests {
     #[test]
     fn an_entity_typed_by_the_user_is_not_confused_with_a_real_one() {
         assert_eq!(xml("&lt;"), "&amp;lt;");
-    }
-
-    // -- CSV -------------------------------------------------------------
-
-    #[test]
-    fn csv_leaves_an_ordinary_field_unquoted() {
-        assert_eq!(csv_field("plain text 42"), "plain text 42");
-        assert_eq!(csv_field(""), "");
-    }
-
-    #[test]
-    fn csv_quotes_a_field_containing_a_separator() {
-        assert_eq!(csv_field("a,b"), "\"a,b\"");
-        assert_eq!(csv_field("line\nbreak"), "\"line\nbreak\"");
-    }
-
-    /// A bare CR splits the record in most readers, because RFC 4180 records
-    /// are CRLF-terminated.
-    #[test]
-    fn csv_quotes_a_field_containing_a_bare_carriage_return() {
-        assert_eq!(csv_field("a\rb"), "\"a\rb\"");
-    }
-
-    #[test]
-    fn csv_doubles_an_embedded_quote() {
-        assert_eq!(csv_field("say \"hi\""), "\"say \"\"hi\"\"\"");
-    }
-
-    /// The property that matters: whatever the field contains, the rendered
-    /// record still has exactly as many fields as it was built from.
-    #[test]
-    fn a_hostile_field_cannot_add_a_column_or_a_row() {
-        let row = ["ok", "evil,injected", "x\"y", "line\nbreak", "cr\rhere"];
-        let rendered: Vec<String> = row.iter().map(|f| csv_field(f)).collect();
-        let line = rendered.join(",");
-
-        // Count separators that are outside quotes -- the real field count.
-        let mut in_quotes = false;
-        let mut fields = 1;
-        let mut newlines_outside = 0;
-        let mut chars = line.chars().peekable();
-        while let Some(c) = chars.next() {
-            match c {
-                '"' if in_quotes && chars.peek() == Some(&'"') => {
-                    chars.next();
-                }
-                '"' => in_quotes = !in_quotes,
-                ',' if !in_quotes => fields += 1,
-                '\n' | '\r' if !in_quotes => newlines_outside += 1,
-                _ => {}
-            }
-        }
-        assert_eq!(fields, row.len(), "field count changed: {line}");
-        assert_eq!(newlines_outside, 0, "a field broke the record: {line}");
-        assert!(!in_quotes, "unbalanced quotes: {line}");
     }
 
     // -- JSON escape -----------------------------------------------------

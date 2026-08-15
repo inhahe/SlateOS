@@ -2021,7 +2021,7 @@ fn export_csv(vault: &Vault) -> String {
 /// trigger set; since RFC 4180 records are CRLF-terminated, a bare CR in an
 /// unquoted field splits the record for most readers.
 fn escape_csv(s: &str) -> String {
-    guitk::escape::csv_field(s)
+    guitk::csv::field(s)
 }
 
 /// Serialize vault to a backup string (simplified JSON-like format).

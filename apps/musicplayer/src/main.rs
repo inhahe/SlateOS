@@ -105,9 +105,10 @@ impl AudioFormat {
         // Frame sync: first 11 bits set (0xFF followed by 0xE0+)
         if data.first() == Some(&0xFF)
             && let Some(&b) = data.get(1)
-                && b & 0xE0 == 0xE0 {
-                    return Self::Mp3;
-                }
+            && b & 0xE0 == 0xE0
+        {
+            return Self::Mp3;
+        }
 
         Self::Unknown
     }
@@ -440,6 +441,30 @@ fn decode_id3_text(data: &[u8]) -> Option<String> {
 // ============================================================================
 // Track and Playlist Data Structures
 // ============================================================================
+
+/// The result of writing a playlist as M3U.
+///
+/// Carries the tracks that had to be left out alongside the text, so a caller
+/// can tell the user rather than handing them a playlist that is quietly
+/// shorter than the one they exported.
+#[derive(Clone, Debug, Default)]
+pub struct M3uExport {
+    /// The playlist file's contents.
+    pub text: String,
+    /// Tracks omitted because their path contains a line break and therefore
+    /// has no M3U representation.
+    pub skipped: Vec<PathBuf>,
+}
+
+/// Make a string safe to place on an `#EXTINF` line.
+///
+/// M3U offers no escape syntax, so a line break can only be removed. Doing so
+/// is lossy, but `#EXTINF` is advisory display metadata -- losing a newline
+/// out of a song title costs nothing, whereas keeping it forges a playlist
+/// entry.
+fn m3u_field(s: &str) -> String {
+    s.replace(['\n', '\r'], " ")
+}
 
 /// A single music track.
 #[derive(Clone, Debug)]
@@ -866,19 +891,45 @@ impl PlayerState {
     }
 
     /// Generate M3U playlist content.
-    pub fn export_m3u(&self) -> String {
-        let mut output = String::from("#EXTM3U\n");
+    ///
+    /// M3U is a bare line-oriented format with no quoting or escape mechanism
+    /// whatsoever, so a line break in a field cannot be *escaped* -- it can
+    /// only be removed or refused. That matters here because neither field is
+    /// ours: `artist`/`title` come verbatim from the file's ID3 tags (see
+    /// [`Track::update_from_data`]), and this OS permits every byte except
+    /// `/` and NUL in a path. Written naively, a track whose ID3 title
+    /// contained a newline emitted an extra line that [`Self::load_m3u`] then
+    /// read back as a *file path*, so a downloaded file could inject
+    /// arbitrary entries into the user's playlist.
+    pub fn export_m3u(&self) -> M3uExport {
+        let mut text = String::from("#EXTM3U\n");
+        let mut skipped = Vec::new();
         for track in &self.playlist {
-            output.push_str(&format!(
+            let path = track.path.display().to_string();
+            // A path containing a line break has no M3U representation at
+            // all. Emitting it anyway would silently point the entry at a
+            // different file, so the track is omitted and reported instead.
+            if path.contains(['\n', '\r']) {
+                skipped.push(track.path.clone());
+                continue;
+            }
+            text.push_str(&format!(
                 "#EXTINF:{},{} - {}\n",
-                track.duration_secs as i32, track.artist, track.title
+                track.duration_secs as i32,
+                m3u_field(&track.artist),
+                m3u_field(&track.title)
             ));
-            output.push_str(&format!("{}\n", track.path.display()));
+            text.push_str(&path);
+            text.push('\n');
         }
-        output
+        M3uExport { text, skipped }
     }
 
     /// Load tracks from M3U content.
+    ///
+    /// Note that this reads every non-`#` line as a file path, which is what
+    /// makes an unsanitised [`Self::export_m3u`] a real injection vector
+    /// rather than a cosmetic problem.
     pub fn load_m3u(&mut self, content: &str) {
         self.clear_playlist();
         for line in content.lines() {
@@ -1865,12 +1916,11 @@ fn handle_key(state: &mut PlayerState, key_event: &KeyEvent) -> bool {
                             state.playing = true;
                         }
                     }
-                    Tab::Playlists
-                        if idx < state.playlist.len() => {
-                            state.current_track_index = Some(idx);
-                            state.position_secs = 0.0;
-                            state.playing = true;
-                        }
+                    Tab::Playlists if idx < state.playlist.len() => {
+                        state.current_track_index = Some(idx);
+                        state.position_secs = 0.0;
+                        state.playing = true;
+                    }
                     _ => {}
                 }
             }
@@ -1879,14 +1929,15 @@ fn handle_key(state: &mut PlayerState, key_event: &KeyEvent) -> bool {
         Key::Delete => {
             // Remove selected track from playlist
             if state.active_tab == Tab::Playlists
-                && let Some(idx) = state.selected_index {
-                    state.remove_track(idx);
-                    if state.playlist.is_empty() {
-                        state.selected_index = None;
-                    } else if idx >= state.playlist.len() {
-                        state.selected_index = Some(state.playlist.len() - 1);
-                    }
+                && let Some(idx) = state.selected_index
+            {
+                state.remove_track(idx);
+                if state.playlist.is_empty() {
+                    state.selected_index = None;
+                } else if idx >= state.playlist.len() {
+                    state.selected_index = Some(state.playlist.len() - 1);
                 }
+            }
             true
         }
         Key::Escape => {
@@ -2104,12 +2155,11 @@ fn handle_mouse(state: &mut PlayerState, mouse_event: &MouseEvent) -> bool {
                                 state.playing = true;
                             }
                         }
-                        Tab::Playlists
-                            if row_idx < state.playlist.len() => {
-                                state.current_track_index = Some(row_idx);
-                                state.position_secs = 0.0;
-                                state.playing = true;
-                            }
+                        Tab::Playlists if row_idx < state.playlist.len() => {
+                            state.current_track_index = Some(row_idx);
+                            state.position_secs = 0.0;
+                            state.playing = true;
+                        }
                         _ => {}
                     }
                     return true;
@@ -2451,9 +2501,57 @@ mod tests {
         state.playlist.push(track);
 
         let m3u = state.export_m3u();
-        assert!(m3u.starts_with("#EXTM3U\n"));
-        assert!(m3u.contains("#EXTINF:180,Artist - My Song"));
-        assert!(m3u.contains("/music/song.mp3"));
+        assert!(m3u.text.starts_with("#EXTM3U\n"));
+        assert!(m3u.text.contains("#EXTINF:180,Artist - My Song"));
+        assert!(m3u.text.contains("/music/song.mp3"));
+        assert!(m3u.skipped.is_empty());
+    }
+
+    #[test]
+    fn a_newline_in_an_id3_title_cannot_forge_a_playlist_entry() {
+        // `title` and `artist` are set from the file's own ID3 tags, so for a
+        // downloaded file they are chosen by whoever made it.
+        let mut state = PlayerState::new();
+        let mut track = Track::from_path(PathBuf::from("/music/song.mp3"));
+        track.title = String::from("Song\n/etc/shadow\n#EXTINF:1,x");
+        track.artist = String::from("Artist\n/evil/payload");
+        track.duration_secs = 180.0;
+        state.playlist.push(track);
+
+        let m3u = state.export_m3u();
+        // One track in, one track out: `load_m3u` reads every non-`#` line as
+        // a path, so counting them is exactly counting forged entries.
+        let paths: Vec<&str> = m3u
+            .text
+            .lines()
+            .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
+            .collect();
+        assert_eq!(paths, ["/music/song.mp3"], "forged entries: {}", m3u.text);
+
+        // And the round trip through the reader agrees.
+        let mut back = PlayerState::new();
+        back.load_m3u(&m3u.text);
+        assert_eq!(back.playlist.len(), 1);
+    }
+
+    #[test]
+    fn a_track_whose_path_has_a_newline_is_reported_not_silently_wrong() {
+        // This OS allows every byte but `/` and NUL in a path, so such a path
+        // is legal -- and unrepresentable in M3U.
+        let mut state = PlayerState::new();
+        state
+            .playlist
+            .push(Track::from_path(PathBuf::from("/music/od\nd.mp3")));
+        state
+            .playlist
+            .push(Track::from_path(PathBuf::from("/music/fine.mp3")));
+
+        let m3u = state.export_m3u();
+        assert_eq!(m3u.skipped, [PathBuf::from("/music/od\nd.mp3")]);
+        let mut back = PlayerState::new();
+        back.load_m3u(&m3u.text);
+        assert_eq!(back.playlist.len(), 1);
+        assert_eq!(back.playlist[0].path, PathBuf::from("/music/fine.mp3"));
     }
 
     #[test]

@@ -2471,7 +2471,7 @@ pub fn export_csv(table: &Table) -> String {
     let headers: Vec<String> = table
         .columns
         .iter()
-        .map(|c| guitk::escape::csv_field(&c.name))
+        .map(|c| guitk::csv::field(&c.name))
         .collect();
     out.push_str(&headers.join(","));
     out.push('\n');
@@ -2577,11 +2577,11 @@ pub fn export_sql_inserts(table: &Table) -> String {
 
 /// Import CSV data into a table. Returns the parsed table.
 pub fn import_csv(name: &str, csv_data: &str) -> Result<Table, String> {
-    let mut records = split_csv_records(csv_data).into_iter();
+    let mut records = guitk::csv::parse_records(csv_data).into_iter();
 
     // Detect header. Column names go through the same RFC 4180 decoding as
     // the values: a quoted header field may legitimately contain a comma, and
-    // `export_csv` now emits exactly that when a column name needs it.
+    // `export_csv` emits exactly that when a column name needs it.
     let headers = records.next().ok_or_else(|| "Empty CSV data".to_owned())?;
 
     if headers.is_empty() {
@@ -2590,20 +2590,20 @@ pub fn import_csv(name: &str, csv_data: &str) -> Result<Table, String> {
 
     let columns: Vec<ColumnDef> = headers
         .iter()
-        .map(|h| ColumnDef::new(h, DataType::Text))
+        .map(|h| ColumnDef::new(h.trimmed_if_bare(), DataType::Text))
         .collect();
 
     let mut table = Table::new(name, columns);
 
-    for mut values in records {
-        if values.iter().all(|v| v.trim().is_empty()) {
+    for values in records {
+        if values.iter().all(|v| v.text.trim().is_empty()) {
             continue;
         }
         // Pad short records so a ragged file still imports.
         let mut cells: Vec<CellValue> = values
-            .drain(..)
-            .map(CellValue::Text)
+            .iter()
             .take(headers.len())
+            .map(|f| CellValue::Text(f.trimmed_if_bare().to_owned()))
             .collect();
         while cells.len() < headers.len() {
             cells.push(CellValue::Null);
@@ -2617,74 +2617,6 @@ pub fn import_csv(name: &str, csv_data: &str) -> Result<Table, String> {
     infer_column_types(&mut table);
 
     Ok(table)
-}
-
-/// Split CSV text into records of decoded fields, per RFC 4180.
-///
-/// This is record-oriented rather than line-oriented on purpose: a quoted
-/// field may contain a newline, so splitting on `\n` before parsing fields
-/// tears such a field in half and drops the rest of the record. The previous
-/// importer did exactly that, which meant it could not read back its own
-/// exporter's output.
-///
-/// Leading/trailing whitespace is trimmed from *unquoted* fields only. A
-/// quoted field is taken verbatim -- the quotes are how the writer says the
-/// spaces are data.
-fn split_csv_records(data: &str) -> Vec<Vec<String>> {
-    let mut records = Vec::new();
-    let mut record: Vec<String> = Vec::new();
-    let mut field = String::new();
-    let mut was_quoted = false;
-    let mut in_quotes = false;
-    let mut chars = data.chars().peekable();
-
-    let finish_field = |field: &mut String, was_quoted: &mut bool| -> String {
-        let done = if *was_quoted {
-            std::mem::take(field)
-        } else {
-            let trimmed = field.trim().to_owned();
-            field.clear();
-            trimmed
-        };
-        *was_quoted = false;
-        done
-    };
-
-    while let Some(c) = chars.next() {
-        if in_quotes {
-            if c == '"' {
-                if chars.peek() == Some(&'"') {
-                    chars.next();
-                    field.push('"');
-                } else {
-                    in_quotes = false;
-                }
-            } else {
-                field.push(c);
-            }
-            continue;
-        }
-        match c {
-            '"' => {
-                in_quotes = true;
-                was_quoted = true;
-            }
-            ',' => record.push(finish_field(&mut field, &mut was_quoted)),
-            '\n' => {
-                record.push(finish_field(&mut field, &mut was_quoted));
-                records.push(std::mem::take(&mut record));
-            }
-            // A CR outside quotes is the first half of a CRLF terminator; the
-            // LF below ends the record.
-            '\r' => {}
-            _ => field.push(c),
-        }
-    }
-    if in_quotes || !field.is_empty() || !record.is_empty() {
-        record.push(finish_field(&mut field, &mut was_quoted));
-        records.push(record);
-    }
-    records
 }
 
 /// Infer and convert column types based on data patterns.

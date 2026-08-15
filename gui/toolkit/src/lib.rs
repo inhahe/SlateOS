@@ -32,6 +32,7 @@
 pub mod color;
 pub mod colorpicker;
 pub mod context_ext;
+pub mod csv;
 pub mod dialog;
 pub mod disabled;
 pub mod dnd;

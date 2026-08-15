@@ -76,77 +76,23 @@ whatever assembles the production rootfs `/bin`), `kernel/src/proc/spawn.rs`
 living — most likely the settings surface rather than a build flag, since §108
 makes it a user choice.
 
-## Q40 — Should osh reproduce bash's *null array element*, which looks like an upstream defect? — Status: OPEN
+## Q40 — Should osh reproduce bash's *null array element*, which looks like an upstream defect? — Status: **RESOLVED 2026-08-15 → design-decisions.md §309**
 
-**Question.** osh (`userspace/oils`) is held to byte-fidelity with bash 5.2.37.
-One measured bash behaviour is reachable only through a nameref and appears to
-be a bug rather than a design: a valueless `declare` on a nameref that points at
-an array *element* stores a **null pointer** in that element, and every later
-reader of the array trips over it.
+**Answer: B — do not reproduce it; waive it in the corpus.** osh keeps `Str`
+array elements and the array reads normally. The write-up stays in
+`known-issues.md` →
+`TD-OILS-A-DECLARATION-WITH-NOTHING-TO-DO-BINDS-A-NULL-THROUGH-THE-REFERENCE`
+so the call is reversible if a real script is ever found that depends on it.
 
-```text
-$ n=(a b c); declare -n q='n[1]'; declare q
-$ declare -p n                      # bash: declare -a n
-$ echo "${#n[@]} [${!n[@]}] [${n[@]}]"   # bash: 0 [] []
-$ echo "${n[1]-UNSET}"              # bash: UNSET
-$ n[5]=z; declare -p n              # bash: declare -a n=([0]="a" [1]= [2]="c" [5]="z")
-```
+Decided by the operator; Claude recommended this option.
 
-The array reads as empty while its elements are demonstrably still there; one
-store past the end makes the readers able to walk it again. The path is
-`bind_variable("q", NULL, ASS_FORCE)` → `bind_variable_internal` →
-`assign_array_element("n[1]", NULL, …)` → `make_array_variable_value` returns
-`NULL` → `array_insert(…, NULL)`. The same happens to an associative base, to a
-scalar base, and — because the bind carries `ASS_FORCE` — to a **readonly** one,
-with no `readonly variable` reported.
-
-**Options.**
-
-- **A — reproduce it.** osh's array element type becomes `Option<Str>`, and every
-  reader (`declare -p` listing, `${!a[@]}`, `${#a[@]}`, `${a[@]}`, `${a[i]-D}`,
-  iteration, `unset`, …) learns to stop at the first null. *Pro:* byte-fidelity
-  is the project's stated bar, and this is the only place the bar is knowingly
-  not met for a *measured* behaviour; whatever a real script does that lands here
-  keeps working the same way. *Con:* a large, invasive change to the core value
-  model — every array reader in `interp.rs` — bought entirely to preserve a state
-  no bash-level operation can otherwise produce or explain. It would make the
-  value model permanently harder to reason about for the sake of a defect, and if
-  bash ever fixes it the change becomes dead weight that must be unwound.
-- **B — do not reproduce it; waive it in the corpus.** osh keeps `Str` elements
-  and the array reads normally (`declare -a n=([0]="a" [1]="b" [2]="c")`). *Pro:*
-  no cost, and the divergence is confined to a construct that is hard to reach on
-  purpose. *Con:* a knowing, documented deviation from measured bash — the first
-  of its kind in oils, which so far has treated "the measurement wins" as
-  absolute. Once one exists, "is this one worth reproducing?" becomes a judgement
-  call on every future oddity rather than a settled rule.
-- **C — reproduce only the *visible* half.** Make the element read as unset
-  without a nullable element type (e.g. an out-of-band "poisoned index" marker
-  the readers stop at). *Pro:* much smaller than A. *Con:* it is a second,
-  parallel representation of emptiness that exists for one construct, and it has
-  to be threaded through the same readers anyway — most of A's cost for a less
-  honest model.
-
-**Claude's recommendation.** **B** — do not reproduce it, waive it in the corpus,
-and keep the full write-up in `known-issues.md` so the decision is reversible if
-a real script is ever found that depends on it. The behaviour is not documented,
-not otherwise reachable, and leaves the array in a state bash itself cannot
-describe; paying a core-value-model refactor for it inverts the usual
-cost/benefit. But this is the operator's call precisely because it sets the
-precedent for *whether byte-fidelity has an "unless it's a bug" clause at all* —
-and that is a policy, not a bug fix.
-
-**Meanwhile.** osh does the sane thing (the array keeps its elements). Nothing is
-blocked; the corpus case
-`a-declaration-with-nothing-to-do-evaluates-the-subscript-the-reference-carries.sh`
-covers the *evaluated-subscript* half, which osh does match, and stops short of
-the store.
-
-**Where it bites.** `userspace/oils/src/interp.rs` —
-`Shell::declare_ref_bind_read` (the read with no store), `Shell::arrays` /
-`Shell::assoc` (element type `Str`), and every array reader named under option A.
-Full write-up:
-`known-issues.md` → `TD-OILS-A-DECLARATION-WITH-NOTHING-TO-DO-BINDS-A-NULL-THROUGH-THE-REFERENCE`.
-
+**The part that outlives the bug:** byte-fidelity with bash now has an
+**"unless it is a defect" clause**. A measured behaviour may be waived when it
+is unreachable except through a construct built to reach it, inconsistent with
+bash's own observable model, and expensive to reproduce in a way that degrades
+osh's value model — and every future waiver must be argued against those three
+tests in `known-issues.md` rather than taken silently. See §309; this does not
+loosen §305's frozen fidelity scope.
 
 ## Q41 — Should bash be cross-compiled instead of osh reimplemented? — Status: **RESOLVED 2026-08-14 → design-decisions.md §305**
 
@@ -168,65 +114,52 @@ proves it on every boot. The full spike results, the day-by-day history of how
 §72's expiry condition fired on 2026-07-22 and went unchecked for 25 days, and
 the general rule that failure established, are all in **§305**.
 
-## Q42 — Two crates are not rustfmt-clean, which makes `cargo fmt` a trap. Do a one-shot repo-wide reformat, or keep formatting only touched files? — Status: OPEN
+## Q42 — Two crates are not rustfmt-clean, which makes `cargo fmt` a trap. Do a one-shot repo-wide reformat, or keep formatting only touched files? — Status: **RESOLVED 2026-08-15 → design-decisions.md §310**
 
-**Raised by Claude** (2026-08-12) after it cost a revert-and-redo cycle.
+**Answer: A — one-shot repo-wide reformat, with a `.git-blame-ignore-revs` file
+committed alongside.** Decided by the operator; Claude recommended this option.
 
-**The finding.** CLAUDE.md sets the convention as "`rustfmt` defaults. No manual
-formatting overrides." Two crates comply and two do not (measured with
-`cargo fmt -p <crate> -- --check`):
+Three constraints on how it lands, from §310:
 
-| Crate | Hunks needing reformat |
-|---|---|
-| `kernel` | 16 911 |
-| `posix` | 389 (244 of 2 299 files, ~11%) |
-| `net` | 0 |
-| `fs` | 0 |
+- `cargo fmt --all` **does not run here** (`os error 206`, the Windows
+  command-line length limit, hit by the number of workspace members). Iterate
+  crates one at a time.
+- It is **two commits in two lanes**: `posix/` is Lane B's, `kernel/` is Lane
+  A's (16 911 hunks). A single cross-lane reformat commit is exactly the
+  clobbering the lane split exists to prevent. Both hashes go into
+  `.git-blame-ignore-revs`. Lane A's half is requested in
+  `requests/b-a-rustfmt-repo-wide-reformat.md`.
+- Each reformat commit must contain **nothing but** formatting, so
+  `--ignore-rev` is safe to apply wholesale.
 
-**Why this is more than cosmetic.** `cargo fmt` is package-scoped and has no file
-filter, so in a drifted crate the ordinary act of formatting your own change
-rewrites hundreds of files you never touched. Today, `cargo fmt -p posix` after a
-~150-line edit produced a 1 403-insertion / 1 429-deletion diff across 173 files;
-the two could not be separated afterwards, so the change had to be reverted and
-re-applied by script. It also makes pre-existing oddities look like your own
-damage — I lost time proving a strange `CapGuard` layout predated me. Every fmt
-run in `kernel` or `posix` carries both costs.
+## Q43 — The compiler-KASAN kernel is ~20× slower to boot, so the B-KNULLJUMP soak it was built for would take over a week. How should the hunt be made viable? — Status: **ANSWERED 2026-08-15 — Lane A to record in `design-decisions.md`**
 
-**Options.**
-- **A — one-shot repo-wide reformat, then it stays clean.** *Pro:* removes the
-  trap permanently and makes the stated convention true; afterwards `cargo fmt`
-  is safe and any drift is a real diff. Cheap to do (minutes of active work).
-  *Con:* rewrites `git blame` for ~17 000 hunks of kernel code. Blame is the
-  primary tool for "why is this line here?" in a codebase with no human
-  reviewer and a 4 600-commit history — this is the one cost that cannot be
-  undone. (`git blame --ignore-rev` + a `.git-blame-ignore-revs` file mitigates
-  it for anyone who configures it, but not for GitHub's plain view or a casual
-  `git log -S`.)
-- **B — keep the current working rule: format only the files you edited**, via
-  `rustfmt --edition 2024 <file>` rather than `cargo fmt -p`. *Pro:* zero
-  history churn; already adopted and it works. *Con:* the convention stays
-  aspirational; the trap stays armed for anyone who reaches for the obvious
-  command; drift never shrinks except where files happen to be edited.
-- **C — reformat `posix` only, leave `kernel` alone.** *Pro:* clears 11% drift in
-  the crate under active daily work for ~250 files of blame churn, 1.5% of A's
-  cost. *Con:* leaves the worst offender armed, and a half-applied convention is
-  the state that caused this.
+> **Operator's answer (2026-08-15, given to Lane B): "e, then a if necessary."**
+>
+> That is Claude's revised recommendation: run **E** — soak the ordinary,
+> uninstrumented kernel carrying the `B-NO-CLD-ON-INTERRUPT-ENTRY` fix and see
+> whether B-KNULLJUMP stops — and fall back to **A** (build the instrumented
+> kernel `--release` and soak that) only if E fails to settle it. Note what "if
+> necessary" covers: E catching a B-KNULLJUMP is a *falsification* of the DF
+> hypothesis and is exactly the case that hands A a well-motivated job. E coming
+> back clean is suggestive, not proof — it cannot distinguish "fixed" from "got
+> lucky" — so a clean E is a reason to stop, not a reason to escalate.
+>
+> **A still carries the caveat that made it operator-worthy:** no release kernel
+> has ever been booted in this project, so the cheap gate stands — build
+> `--release`, run `kasan-check-preshadow.py`, attempt **one** boot (~30 min)
+> before committing to a soak. And treat a clean release soak as weaker evidence
+> than a debug one, since optimization perturbs the instruction timing a rare
+> race depends on.
+>
+> **This is Lane A's item.** The answer was delivered in a Lane B session, so it
+> is recorded here rather than in `design-decisions.md` §200–299 — Lane A owns
+> that range. See `requests/b-a-operator-answered-q43.md`. Lane A: record it,
+> then delete this section.
 
-**Claude's recommendation.** **A**, with a `.git-blame-ignore-revs` file
-committed alongside — the blame cost is real but one-time and partially
-mitigable, whereas the trap is permanent and recurs on every edit. If the blame
-history is considered untouchable, **C** is a reasonable middle. I have adopted
-**B** in the meantime, so nothing is blocked either way.
+The original analysis follows, unchanged, because it is what E and A have to be
+executed against.
 
-**Note:** `cargo fmt --all` does not run in this workspace — it dies with
-`The filename or extension is too long. (os error 206)` (Windows command-line
-limit, hit by the number of workspace members). Any of A/C must iterate crates.
-
-**Where it bites:** everywhere, but the recorded incident is
-`known-issues.md` → `TD-REPO-IS-NOT-RUSTFMT-CLEAN-SO-RUNNING-CARGO-FMT-IS-A-TRAP`.
-
-
-## Q43 — The compiler-KASAN kernel is ~20× slower to boot, so the B-KNULLJUMP soak it was built for would take over a week. How should the hunt be made viable? — Status: OPEN
 
 **Raised by Claude** (2026-08-12), on measuring the profile the operator
 approved in §107.
@@ -463,6 +396,56 @@ the 63 gate sites led by `posix/src/process.rs` (13) and `posix/src/unistd.rs`
 projected), `kernel/src/syscall/handlers.rs` (`sys_cap_query`), and
 `known-issues.md` → `TD-POSIX-CAPS-ARE-NOT-THE-KERNEL'S`.
 
+### UPDATE 2026-08-15 — operator asked what "ambient" means; still OPEN
+
+The operator's reply to this question was not an answer but a question:
+*"i forget what 'ambient' means in 'no ambient authority'..?"* Answered in
+session and recorded here so the term is not a barrier next time.
+
+**Ambient authority = permission you have merely by *being* you, rather than by
+*holding* something.** The authority sits in the surrounding environment (the
+process's identity), so any code running in that process can exercise it just by
+asking, without having to present anything.
+
+- **Unix uid is the classic case.** `open("/etc/shadow")` succeeds because the
+  process is root, not because it produced a token for that file. The *name* is
+  the only thing supplied, and the name is not the authority.
+- **Linux capabilities are the same shape, just finer-grained.** `CAP_SYS_ADMIN`
+  is a bit in a process-wide word. If it is set, *every* instruction in that
+  address space can perform every `CAP_SYS_ADMIN` operation — including a linked
+  library, a ported binary, or injected shellcode. Nothing has to be passed
+  around, so nothing can be withheld.
+- **Our model is the opposite.** Authority lives *only* in a handle: to write a
+  file you must possess a `File` handle carrying `Rights::WRITE`. Code that was
+  never given the handle cannot do it, even in the same process, even as the
+  same user. That is what "no ambient authority" in `design.txt` means — there
+  is no set of permissions you get for free by existing.
+
+**Why the distinction is load-bearing here** (and not just vocabulary): it is
+what makes the *confused deputy* structurally impossible. A deputy holding
+ambient authority can be talked into using it on the caller's behalf — pass it a
+path and it opens the file with *its* privileges. A deputy that must be handed
+the actual handle can only act on objects the caller could already reach, so
+there is nothing to trick it into.
+
+**And it is the whole of the objection to option B.** Option B adds
+`ResourceType::PosixCapability` — a handle meaning "may do `CAP_SYS_ADMIN`
+things", process-wide, not tied to any object. That is ambient authority wearing
+a capability costume: it reproduces exactly the property `design.txt` rejected,
+while looking like it complies because it is spelled as a handle. Options A, C
+and D do not have that problem; the choice among *them* is the real question,
+and it is still open.
+
+**Restating the actual decision** so it is not lost behind the terminology:
+**A** = derive each `CAP_*` from a `(ResourceType, Rights)` predicate and report
+*not held* when no rule matches (truthful, auditable, but `CAP_SYS_ADMIN` has no
+natural preimage and fixtures spawned with `capabilities: &[]` start failing);
+**C** = keep libc optimistic but document `capget()` as "the ceiling, not the
+grant" and treat libc gates as advisory (zero risk, silent-wrong-answer trap
+stays open); **D** = make `capget()` fail outright (most honest, but trades a
+silent wrong answer for loud breakage in ports). Claude still recommends **A**,
+staged, with `CAP_SYS_ADMIN` as a hand-maintained union.
+
 ## Q45 — Text clipped by `max_width` is cut mid-glyph with no ellipsis. Should `RenderCommand::Text` carry an overflow policy? — Status: OPEN
 
 **Raised by Claude** (2026-08-14), falling out of the pass that closed
@@ -517,7 +500,9 @@ blindly.
 `gui/toolkit/src/text.rs` (`elide` / `elide_start`), and every `max_width:
 Some(..)` in `gui/**` and `apps/**`.
 
-## Q40 — Install the GNAT/SPARK and LLVM toolchains? Two Lane A roadmap items are blocked on them, and nothing else in Lane A is — Status: OPEN
+## A-Q1 — Install the GNAT/SPARK and LLVM toolchains? Two Lane A roadmap items are blocked on them, and nothing else in Lane A is — Status: OPEN
+
+*(Renumbered from `Q40` on 2026-08-15 by Lane B. It collided with the pre-split `Q40` above, and the operator's one-word answer "q40: b" was genuinely ambiguous between the two. Lane-prefixed per `roadmap.md`'s convention, as `B-Q1`/`C-Q1` already are.)*
 
 **Question.** The Lane A roadmap backlog has five items. Three are either
 "Later" (NTFS/Btrfs/ZFS/F2FS), lane-C-driven (TCP/IP stack), or a very large
@@ -606,85 +591,71 @@ Roadmap lines ~297-298 (`roadmap.md` Lane A backlog) and `design.txt` lines
 
 ---
 
-## B-Q1 — The zoneinfo reader is done and nothing on disk to read: which tzdata do we ship, from where, and how is it updated? — Status: OPEN
+### UPDATE 2026-08-15 — the operator asked why we would not install `gnatprove`; the con was overstated
 
-*(First question filed under `roadmap.md`'s lane-prefix convention; the
-unprefixed `Q1`–`Q44` above predate the three-lane split.)*
+**The operator's question:** *"why wouldn't we install gnatprove?"* Fair — the
+bullet as written implies a reason to skip it, and there isn't one. Corrected:
 
-**Raised by Claude (Lane B)** (2026-08-13), on finishing
-`known-issues.md` → `TD-NO-SYSTEM-DEFAULT-ZONE-WITHOUT-TZ`.
+**`gnatprove` is freely available, including on this machine's platform.** SPARK
+is open source, AdaCore publishes binaries for Windows x86-64 / Linux x86-64 /
+macOS x86-64, there is an Alire crate (`alr with gnatprove`), and the
+alire-project `GNAT-FSF-builds` repository ships FSF builds. No licence blocks
+it and no money is involved.
 
-**The situation.** As of today both the libc and osh resolve `TZ` through real
-binary zoneinfo files: `tzrules::TzFile` reads TZif v1/v2/v3 (RFC 8536) with no
-allocator, `TZ=America/New_York` is looked up under `TZDIR` (default
-`/usr/share/zoneinfo`), and an unset `TZ` follows `/etc/localtime` exactly as
-glibc does. The reader is tested and the search order matches glibc's.
+**So the real content of that bullet is a route warning, not a veto.** The
+obvious way to get Ada on this box — MSYS2's `mingw-w64-x86_64-gcc-ada` — gives
+`gnat` and `gprbuild` and **no** `gnatprove`; MSYS2 has no such package. Stop
+there and we would have paid the whole cost of the feature (a second language
+and toolchain in the build, an FFI bridge, a restricted ZFP/light runtime for a
+freestanding kernel) and collected none of the benefit, because
+**Ada-without-SPARK is just another systems language and we already have a
+memory-safe one.** `design.txt` lines 84-95 justify this on the *proof*
+specifically — no prover, no justification.
 
-**Nothing is on disk.** So `TZ=America/New_York` still silently answers UTC —
-the user gets UTC while believing they selected Eastern — and a fresh machine
-still has no wall clock it can be honest about. Every piece of the fix is built
-except the data, and shipping the data is a packaging decision rather than a
-coding one, which is why it stops here instead of me picking.
+**Therefore, if A is chosen, the prover is part of the definition of done**, and
+the install route must be one that can actually deliver it: Alire
+(`alr toolchain --select`, then the `gnatprove` crate) or AdaCore's own
+download, not MSYS2 alone. Two things worth knowing before committing:
+`gnatprove` needs its prover stack (Why3 + Alt-Ergo, optionally Z3/CVC5)
+installed too, and the toolchain is GPL — it is a tool we *run*, not something
+we link, so it does not reach our output.
 
-**Why this needs you rather than me.** Three sub-decisions, none with an
-obviously-correct answer, and all of them user-visible:
+**What is still open, and still yours.** Nothing above chooses for you. The
+remaining calls are (i) go/no-go on **B** (clang + lld — cheap, uncontroversial,
+I can do it on a one-word yes), (ii) go/no-go on **A**, and (iii) if A, which
+GNAT distribution — the FSF-via-Alire route now looks clearly preferable to
+GNAT Pro given that it carries `gnatprove`, but the restricted-runtime
+(ZFP vs light) configuration is still real work and still a decision. Claude's
+recommendation is unchanged: **B now, A when you want the driver-safety story
+started, sequenced after the IOMMU work it pairs with in `design.txt`.**
 
-**(a) Which zones.** A full tzdata is ~450 KiB of binaries plus ~1 800 files.
+*Sources for the availability claim: AdaCore SPARK User's Guide §3
+"Installation of GNATprove"; alire.ada.dev crate `gnatprove`; alire-project
+`GNAT-FSF-builds`.*
 
-- **A1 — full tzdata.** Everything, including backward-compatibility links
-  (`US/Eastern`, `Asia/Calcutta`). Any ported program finds the name it expects.
-  Costs ~450 KiB of every base image forever.
-- **A2 — current zones only** (`zic -b slim`, no `backward` links). ~250 KiB,
-  ~350 files. A script or a container image that says `TZ=US/Eastern` — a very
-  common spelling — breaks, silently, back to UTC.
-- **A3 — a minimal set at install, the rest as a `pkg/` package.** The
-  installer ships the zone the user picks plus UTC; `pkg install tzdata` gets
-  the rest. Smallest image; but a program that needs a zone the user never
-  picked fails on a machine that looks fully installed.
+## B-Q1 — The zoneinfo reader is done and nothing on disk to read: which tzdata do we ship, from where, and how is it updated? — Status: **RESOLVED 2026-08-15 → design-decisions.md §311**
 
-**(b) Where the bytes come from.** We do not have `zic`, and I would rather not
-write one — it is a real compiler for the tzdata source grammar, and getting it
-subtly wrong means a wrong clock that nobody notices for months.
+**Answer: A1 + B1 + C1.** Decided by the operator; Claude recommended this
+combination.
 
-- **B1 — vendor the prebuilt binaries** from the IANA distribution into the
-  repo (or into `pkg/`), checked in and version-pinned. Reproducible; no build
-  dependency. Adds ~450 KiB of binary to git history per update.
-- **B2 — port `zic`** (it is small, portable C) and compile tzdata from the
-  text sources at image-build time. Keeps only text in git and makes the data
-  auditable, at the cost of a C port on the critical path of the image build.
-- **B3 — generate the TZif files with a small Rust tool of our own** reading
-  the tzdata text sources. Same benefit as B2 with no C port, but it is the
-  option most likely to be subtly wrong, for the reason above.
+- **A1 — full tzdata**, backward links included (`US/Eastern`,
+  `Asia/Calcutta`). ~450 KiB, ~1 800 files in the base image.
+- **B1 — vendor the prebuilt TZif binaries** from IANA, checked in and
+  version-pinned. No `zic` port, no home-grown TZif generator: the failure mode
+  of getting that subtly wrong is a wrong clock nobody notices for months.
+- **C1 — ship it as a `pkg/` package** and update it there. C3's dedicated fast
+  channel is the escalation if C1 proves too slow, not the starting point.
 
-**(c) How it is updated.** tzdata changes several times a year, usually at
-short notice, and a stale one is a wrong clock — the failure mode that started
-this entry.
+**Residual risk accepted:** a user who never runs `pkg update` drifts into a
+stale tzdata, silently.
 
-- **C1 — a `pkg/` package updated like anything else.** Fits the existing
-  machinery; a user who never updates drifts.
-- **C2 — updated with the OS image only.** Simple, but ties a timezone fix to a
-  full release.
-- **C3 — a dedicated fast channel** for tzdata (and only tzdata), so a zone
-  change ships without a release.
-
-**My recommendation: A1 + B1 + C1.** Full tzdata because ~450 KiB is nothing
-against being wrong about `US/Eastern`, and because the whole reason to use TZif
-rather than invent something is that ported programs expect what everyone else
-ships. Vendored prebuilt binaries because the alternative is writing or porting
-a compiler for a grammar whose bugs are invisible. A `pkg/` package because the
-update cadence is exactly what `pkg/` exists for, and C3's dedicated channel is
-infrastructure to build only once C1 has proven too slow in practice.
-
-**Where it bites:** `pkg/` (the packaging decision), `posix/src/tz.rs`
-(`TZDIR_DEFAULT`, `LOCALTIME_PATH`, `load_zoneinfo`),
-`userspace/oils/src/interp.rs` (`TZDIR_DEFAULT`, `Shell::zoneinfo_dir`),
-`tzrules/src/tzif.rs` (the reader, already done), the installer (which must
-write `/etc/localtime`), and the two tests that assert the current
-UTC fallback — `test_zoneinfo_names_resolve_to_utc_until_tzdata_is_shipped`
-(libc) and `printf_time_falls_back_to_utc_for_a_zone_it_cannot_resolve` (oils),
-both of which should start failing the day the data lands.
-
----
+**Execution note:** the reader, the libc paths and osh are Lane B; **`pkg/` is
+Lane C's tree**, so the packaging half goes via `requests/b-c-tzdata-package.md`.
+The two tests asserting the current UTC fallback
+(`test_zoneinfo_names_resolve_to_utc_until_tzdata_is_shipped`,
+`printf_time_falls_back_to_utc_for_a_zone_it_cannot_resolve`) **must start
+failing the day the data lands** — that is the signal it worked, not a
+regression.
 
 ## C-Q1 — Should normalization consult font coverage? The last 339 sweep disagreements are all this one question — Status: OPEN
 

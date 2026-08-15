@@ -12771,3 +12771,159 @@ that can be asserted on a non-Unix test host.
 `encode_bytes`, `decode_path`, `decode_bytes`, `META_VERSION`, `RecycleBin`),
 `apps/backup/src/main.rs` (the same four functions, `MANIFEST_VERSION`,
 `FileEntry::to_json`/`from_json`, `relative_path`).
+
+
+## §309 — Byte-fidelity with bash has an "unless it is a defect" clause; osh does not reproduce the null array element
+
+**Date:** 2026-08-15
+**Decided by:** Operator (Claude recommended this option — open-questions.md Q40 option B)
+
+**The question.** osh is held to byte-fidelity with bash 5.2.37. One measured
+bash behaviour, reachable only through a nameref, stores a **null pointer** into
+an array element (`n=(a b c); declare -n q='n[1]'; declare q`), after which the
+array reads as empty while its elements are demonstrably still present. It looks
+like a defect rather than a design: bash cannot describe the resulting state
+with any of its own printers, no bash-level operation other than this one can
+produce it, and the bind carries `ASS_FORCE` so it also silently defeats
+`readonly`.
+
+**Decision: do not reproduce it (option B).** osh keeps `Str` array elements and
+the array reads normally. The divergence is waived in the corpus and the full
+write-up stays in `known-issues.md` →
+`TD-OILS-A-DECLARATION-WITH-NOTHING-TO-DO-BINDS-A-NULL-THROUGH-THE-REFERENCE`,
+so the decision is reversible if a real script is ever found that depends on it.
+
+**What this actually settles — the precedent, not the bug.** The narrow
+cost/benefit was never close: option A wanted every array reader in `interp.rs`
+rewritten around an `Option<Str>` element type, permanently, to preserve a state
+no bash-level operation can otherwise produce. The reason it needed the operator
+is that it establishes **whether byte-fidelity has an "unless it's a bug" clause
+at all**. It now does. Consequences:
+
+- "The measurement wins" is no longer absolute. A measured bash behaviour may be
+  waived when it is (i) unreachable except through a construct built to reach
+  it, (ii) inconsistent with bash's own observable model, and (iii) expensive to
+  reproduce in a way that degrades osh's value model.
+- Every future waiver must be argued against those three tests **in
+  `known-issues.md`**, not decided silently. A waiver that is not written down is
+  a divergence, not a decision.
+- This does not loosen §305's frozen fidelity scope. §305 says which behaviours
+  are in scope; this says a behaviour in scope may still be waived as a defect.
+
+**Rejected alternative — option C, reproduce only the visible half** via an
+out-of-band "poisoned index" marker. It is a second parallel representation of
+emptiness, threaded through the same readers as option A, for a less honest
+model — most of A's cost without A's one virtue.
+
+**Where it bites:** `userspace/oils/src/interp.rs` (`Shell::declare_ref_bind_read`,
+`Shell::arrays`, `Shell::assoc`), the corpus case
+`a-declaration-with-nothing-to-do-evaluates-the-subscript-the-reference-carries.sh`
+(which covers the evaluated-subscript half osh *does* match and deliberately
+stops short of the store), and `known-issues.md` as above.
+
+
+## §310 — One-shot repo-wide rustfmt, with a `.git-blame-ignore-revs` file alongside
+
+**Date:** 2026-08-15
+**Decided by:** Operator (Claude recommended this option — open-questions.md Q42 option A)
+
+**The question.** `CLAUDE.md` sets the convention as "rustfmt defaults, no manual
+formatting overrides", but two crates are not rustfmt-clean: `kernel` (16 911
+hunks) and `posix` (389 hunks across 244 of 2 299 files). Because `cargo fmt` is
+package-scoped with no file filter, formatting your own change in a drifted
+crate rewrites hundreds of files you never touched — one ~150-line edit in
+`posix` produced a 1 403-insertion / 1 429-deletion diff across 173 files that
+could not afterwards be separated from the real change, costing a
+revert-and-redo.
+
+**Decision: option A — reformat the whole repo once, and commit a
+`.git-blame-ignore-revs` file naming the reformat commits.** Afterwards
+`cargo fmt` is safe, the stated convention becomes true rather than
+aspirational, and any future drift is a real diff.
+
+**The cost, stated honestly.** This rewrites `git blame` for ~17 000 hunks of
+kernel code. Blame is the primary tool for "why is this line here?" in a
+codebase with no human reviewer and a 4 600-commit history, and this is the one
+part that cannot be undone. `.git-blame-ignore-revs` mitigates it for anyone who
+configures it (`git config blame.ignoreRevsFile .git-blame-ignore-revs`) and for
+`git blame --ignore-rev`, but **not** for GitHub's plain blame view or a casual
+`git log -S`. The operator accepted that trade: the trap is permanent and recurs
+on every edit, the blame churn is one-time.
+
+**Execution constraints that shape how it lands.**
+
+- `cargo fmt --all` does **not** run in this workspace — it dies with
+  `The filename or extension is too long. (os error 206)`, the Windows
+  command-line limit, hit by the sheer number of workspace members. The
+  reformat must iterate crates one at a time.
+- It is **two commits in two lanes**, not one. `posix/` is Lane B's and
+  `kernel/` is Lane A's; a single cross-lane reformat commit would be exactly
+  the clobbering the lane split exists to prevent. Each lane reformats its own
+  crate, and both commit hashes go into `.git-blame-ignore-revs`.
+- Each reformat commit must contain **nothing but** formatting, so that
+  `--ignore-rev` is safe to apply wholesale.
+
+**Rejected alternatives.** **B** (format only files you edited, via
+`rustfmt --edition 2024 <file>`) was the working stopgap and has zero history
+churn, but leaves the trap armed for anyone reaching for the obvious command and
+never shrinks the drift. **C** (reformat `posix` only) clears the crate under
+daily work for 1.5% of A's blame cost, but leaves the worst offender armed — and
+a half-applied convention is the state that caused the incident.
+
+**Where it bites:** every `.rs` file in `kernel/` and `posix/`, the new
+`.git-blame-ignore-revs`, `CLAUDE.md`'s formatting convention (now true), and
+`known-issues.md` → `TD-REPO-IS-NOT-RUSTFMT-CLEAN-SO-RUNNING-CARGO-FMT-IS-A-TRAP`.
+
+
+## §311 — Ship full tzdata, vendored as prebuilt TZif binaries, updated as a `pkg/` package
+
+**Date:** 2026-08-15
+**Decided by:** Operator (Claude recommended this combination — open-questions.md B-Q1, A1 + B1 + C1)
+
+**The situation.** Both the libc and osh resolve `TZ` through real binary
+zoneinfo: `tzrules::TzFile` reads TZif v1/v2/v3 (RFC 8536) with no allocator,
+`TZDIR` defaults to `/usr/share/zoneinfo`, and an unset `TZ` follows
+`/etc/localtime` exactly as glibc does. Every piece was built except the data,
+so `TZ=America/New_York` silently answered UTC — the user gets UTC while
+believing they selected Eastern. Shipping the data is a packaging decision, not
+a coding one, which is why it went to the operator.
+
+**Decision, in three parts:**
+
+- **(a) A1 — full tzdata**, including the `backward` compatibility links
+  (`US/Eastern`, `Asia/Calcutta`). ~450 KiB and ~1 800 files in every base
+  image. Chosen because ~450 KiB is nothing against being *wrong* about
+  `US/Eastern`, and because the entire reason to use TZif rather than invent a
+  format is that ported programs expect exactly what everyone else ships.
+  A2 (`zic -b slim`, no backward links) saves ~200 KiB and breaks a very common
+  spelling **silently, back to UTC** — the same failure mode this work exists to
+  end. A3 (minimal at install, rest as a package) leaves a fully-installed-looking
+  machine unable to resolve a zone the user did not personally pick.
+- **(b) B1 — vendor the prebuilt binaries** from the IANA distribution,
+  checked in and version-pinned. Reproducible, no build dependency, ~450 KiB of
+  binary per update in git history. B2 (port `zic`) and B3 (write our own TZif
+  generator in Rust) were both rejected for the same reason: `zic` is a real
+  compiler for the tzdata source grammar, and getting it subtly wrong produces a
+  **wrong clock that nobody notices for months**. B3 is the most likely of the
+  three to be subtly wrong and would put that risk on our own code.
+- **(c) C1 — updated as a `pkg/` package.** tzdata changes several times a year
+  at short notice; that cadence is exactly what `pkg/` exists for. C2 (ship with
+  the OS image only) ties a timezone fix to a full release. C3 (a dedicated fast
+  channel for tzdata alone) is infrastructure to build only once C1 has proven
+  too slow in practice — not before.
+
+**The residual risk this accepts.** A user who never runs `pkg update` drifts
+into a stale tzdata and therefore a wrong wall clock, with nothing loud to tell
+them. If that proves common, C3 is the escalation, and it is additive.
+
+**Cross-lane note.** The reader, the libc paths and osh are Lane B; the `pkg/`
+packaging is **Lane C's tree**, so the C1 half lands via a `requests/` entry
+rather than directly.
+
+**Where it bites:** `pkg/` (Lane C), `posix/src/tz.rs` (`TZDIR_DEFAULT`,
+`LOCALTIME_PATH`, `load_zoneinfo`), `userspace/oils/src/interp.rs`
+(`TZDIR_DEFAULT`, `Shell::zoneinfo_dir`), `tzrules/src/tzif.rs` (the reader,
+already done), the installer (which must write `/etc/localtime`), and the two
+tests that assert the current UTC fallback and **must start failing the day the
+data lands** — `test_zoneinfo_names_resolve_to_utc_until_tzdata_is_shipped`
+(libc) and `printf_time_falls_back_to_utc_for_a_zone_it_cannot_resolve` (oils).

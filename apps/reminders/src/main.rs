@@ -897,20 +897,27 @@ impl Task {
     }
 }
 
+/// Escape a string for the body of a JSON string literal.
+///
+/// The previous local version was a chain of `str::replace` calls that left
+/// every control character except `\n`, `\r` and `\t` raw in the output. A raw
+/// control character inside a JSON string is invalid per RFC 8259, so a task
+/// whose notes contained one produced a file this app could not reload.
 fn escape_json(s: &str) -> String {
-    s.replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n")
-        .replace('\r', "\\r")
-        .replace('\t', "\\t")
+    guitk::escape::json_string(s)
 }
 
+/// Decode the body of a JSON string literal, reversing [`escape_json`].
+///
+/// The previous local version was a chain of `str::replace` calls applied in
+/// the wrong order: `\\n` was decoded before `\\\\`, so the two-character text
+/// `\n` — a literal backslash followed by the letter n — was written as `\\n`
+/// and read back as a *newline*. A Windows path in a note (`C:\temp`) came
+/// back as `C:\<TAB>emp`, and the damage was re-saved, compounding on every
+/// open. The shared decoder is a single left-to-right pass, which structurally
+/// cannot re-examine what it has already decoded.
 fn unescape_json(s: &str) -> String {
-    s.replace("\\n", "\n")
-        .replace("\\r", "\r")
-        .replace("\\t", "\t")
-        .replace("\\\"", "\"")
-        .replace("\\\\", "\\")
+    guitk::escape::unescape_json_string(s)
 }
 
 // ============================================================================
@@ -3892,6 +3899,51 @@ mod tests {
         assert!(escaped.contains("\\n"));
         let unescaped = unescape_json(&escaped);
         assert_eq!(unescaped, "Hello \"world\"\nnew line");
+    }
+
+    /// The test above passes against a broken decoder, because none of its
+    /// sample text contains a *literal* backslash — the only input that
+    /// distinguishes a correct decoder from a `str::replace` chain. These do.
+    #[test]
+    fn a_literal_backslash_in_a_task_survives_a_save_and_reload() {
+        for text in [
+            r"a\nb",         // decoded as a newline by a replace-chain
+            r"C:\temp",      // decoded as a tab by a replace-chain
+            r"C:\new\table", // both, in one path
+            r"a\\b",
+            r"trailing\",
+            r"\u0041 is not an A here",
+        ] {
+            assert_eq!(
+                unescape_json(&escape_json(text)),
+                text,
+                "round trip corrupted {text:?}"
+            );
+        }
+    }
+
+    /// Corruption of this kind compounds: the file is rewritten on every edit,
+    /// so a single round trip can look survivable while five do not.
+    #[test]
+    fn repeated_saves_do_not_let_a_task_decay() {
+        let original = r"C:\new\table and a\nb";
+        let mut text = original.to_string();
+        for pass in 1..=5 {
+            text = unescape_json(&escape_json(&text));
+            assert_eq!(text, original, "task text drifted on save {pass}");
+        }
+    }
+
+    /// A control character has no short escape and must not be emitted raw —
+    /// that produces invalid JSON, so the app could not reload its own file.
+    #[test]
+    fn a_control_character_in_a_note_does_not_produce_invalid_json() {
+        let escaped = escape_json("note with a bell \u{7} in it");
+        assert!(
+            !escaped.chars().any(|c| c < '\u{20}'),
+            "raw control character left in JSON output: {escaped:?}"
+        );
+        assert_eq!(unescape_json(&escaped), "note with a bell \u{7} in it");
     }
 
     #[test]

@@ -38,6 +38,9 @@ pub enum GrubError {
     UpdateFailed(String),
     /// A provided path is syntactically or semantically invalid.
     InvalidPath(String),
+    /// A field of the [`GrubEntry`] cannot be safely rendered into a
+    /// `menuentry` block (see [`GrubEntry::validate`]).
+    InvalidEntry(String),
     /// An underlying I/O error.
     Io(io::Error),
 }
@@ -51,6 +54,7 @@ impl fmt::Display for GrubError {
             Self::EntryNotFound => write!(f, "Slate OS GRUB entry not found"),
             Self::UpdateFailed(msg) => write!(f, "GRUB update failed: {msg}"),
             Self::InvalidPath(p) => write!(f, "invalid path: {p}"),
+            Self::InvalidEntry(msg) => write!(f, "invalid GRUB entry: {msg}"),
             Self::Io(e) => write!(f, "I/O error: {e}"),
         }
     }
@@ -155,66 +159,141 @@ pub const CUSTOM_SCRIPT_NAME: &str = "40_slateos";
 /// Marker embedded inside our generated script so we can reliably identify it.
 const SLATEOS_MARKER: &str = "### Slate OS GRUB entry — managed by Slate OS installer ###";
 
+/// Quote a value for use inside a double-quoted GRUB string.
+///
+/// Everything we interpolate into a `menuentry` block is emitted inside
+/// `"…"`.  Within such a string GRUB's lexer treats exactly three bytes
+/// specially — `\` (escape), `"` (terminator) and `$` (variable expansion) —
+/// so escaping those three with a backslash makes the value inert: it can no
+/// longer terminate the string, start a new command, or expand a variable.
+/// This mirrors `grub_quote()` in GRUB's own `util/grub-mkconfig_lib.in`.
+///
+/// Control characters are *not* handled here because they cannot be escaped
+/// this way; [`GrubEntry::validate`] rejects them before we get here.
+fn grub_quote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if matches!(c, '\\' | '"' | '$') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
+impl GrubEntry {
+    /// Check that every field can be faithfully rendered into a `menuentry`.
+    ///
+    /// A GRUB quoted string has no escape for a control character: a raw
+    /// newline in a title would end the current command and let the remainder
+    /// be parsed as fresh GRUB script, which runs at boot with full firmware
+    /// privilege.  Since no legitimate title, path, UUID or kernel parameter
+    /// contains one, we reject rather than silently mangle — the caller (an
+    /// installer UI, or a title scraped from another OS's `/etc/os-release`)
+    /// gets a hard error instead of a corrupted or hostile boot menu.
+    pub fn validate(&self) -> Result<(), GrubError> {
+        let fields: [(&str, &str); 4] = [
+            ("title", &self.title),
+            ("kernel_path", &self.kernel_path),
+            ("root_partition", &self.root_partition),
+            ("uuid", &self.uuid),
+        ];
+        for (name, value) in fields {
+            check_no_control_chars(name, value)?;
+        }
+        if let Some(initrd) = &self.initrd_path {
+            check_no_control_chars("initrd_path", initrd)?;
+        }
+        for param in &self.kernel_params {
+            check_no_control_chars("kernel_params", param)?;
+        }
+        Ok(())
+    }
+}
+
+fn check_no_control_chars(field: &str, value: &str) -> Result<(), GrubError> {
+    if let Some(c) = value.chars().find(|c| c.is_control()) {
+        return Err(GrubError::InvalidEntry(format!(
+            "{field} contains a control character (U+{:04X})",
+            c as u32
+        )));
+    }
+    Ok(())
+}
+
 /// Generate the GRUB `menuentry` text for the given [`GrubEntry`].
 ///
 /// The returned string is a complete, self-contained `menuentry` block ready to
 /// be embedded in a script that writes to stdout (the `/etc/grub.d/` pattern).
-pub fn generate_entry(entry: &GrubEntry) -> String {
-    match entry.entry_type {
+///
+/// # Errors
+///
+/// Returns [`GrubError::InvalidEntry`] if any field contains a control
+/// character; see [`GrubEntry::validate`].
+pub fn generate_entry(entry: &GrubEntry) -> Result<String, GrubError> {
+    entry.validate()?;
+    Ok(match entry.entry_type {
         GrubEntryType::Chainload => generate_chainload_entry(entry),
         GrubEntryType::Direct => generate_direct_entry(entry),
+    })
+}
+
+/// Emit the `search`/`set root` line that selects the boot partition.
+fn push_root_selection(out: &mut String, entry: &GrubEntry) {
+    // Prefer UUID-based search when a UUID is provided, fall back to device.
+    if entry.uuid.is_empty() {
+        out.push_str(&format!(
+            "    set root=\"{}\"\n",
+            grub_quote(&entry.root_partition)
+        ));
+    } else {
+        out.push_str(&format!(
+            "    search --no-floppy --fs-uuid --set=root \"{}\"\n",
+            grub_quote(&entry.uuid)
+        ));
     }
 }
 
 fn generate_chainload_entry(entry: &GrubEntry) -> String {
     let mut out = String::with_capacity(256);
-    out.push_str(&format!("menuentry \"{}\" {{\n", entry.title));
+    out.push_str(&format!("menuentry \"{}\" {{\n", grub_quote(&entry.title)));
     out.push_str("    insmod part_gpt\n");
     out.push_str("    insmod chain\n");
     out.push_str("    insmod fat\n");
 
-    // Prefer UUID-based search when a UUID is provided, fall back to device.
-    if !entry.uuid.is_empty() {
-        out.push_str(&format!(
-            "    search --no-floppy --fs-uuid --set=root {}\n",
-            entry.uuid
-        ));
-    } else {
-        out.push_str(&format!("    set root='{}'\n", entry.root_partition));
-    }
+    push_root_selection(&mut out, entry);
 
-    out.push_str(&format!("    chainloader {}\n", entry.kernel_path));
+    out.push_str(&format!(
+        "    chainloader \"{}\"\n",
+        grub_quote(&entry.kernel_path)
+    ));
     out.push_str("}\n");
     out
 }
 
 fn generate_direct_entry(entry: &GrubEntry) -> String {
     let mut out = String::with_capacity(256);
-    out.push_str(&format!("menuentry \"{}\" {{\n", entry.title));
+    out.push_str(&format!("menuentry \"{}\" {{\n", grub_quote(&entry.title)));
     out.push_str("    insmod part_gpt\n");
     out.push_str("    insmod multiboot2\n");
 
-    if !entry.uuid.is_empty() {
-        out.push_str(&format!(
-            "    search --no-floppy --fs-uuid --set=root {}\n",
-            entry.uuid
-        ));
-    } else {
-        out.push_str(&format!("    set root='{}'\n", entry.root_partition));
-    }
+    push_root_selection(&mut out, entry);
 
-    let params = entry.kernel_params.join(" ");
-    if params.is_empty() {
-        out.push_str(&format!("    multiboot2 {}\n", entry.kernel_path));
-    } else {
-        out.push_str(&format!(
-            "    multiboot2 {} {}\n",
-            entry.kernel_path, params
-        ));
+    // Each parameter is quoted individually: they are separate arguments, and
+    // quoting the joined string would collapse them into one.  Quoting them
+    // individually also keeps a parameter that itself contains a space intact,
+    // which the previous bare join silently split in two.
+    out.push_str(&format!(
+        "    multiboot2 \"{}\"",
+        grub_quote(&entry.kernel_path)
+    ));
+    for param in &entry.kernel_params {
+        out.push_str(&format!(" \"{}\"", grub_quote(param)));
     }
+    out.push('\n');
 
     if let Some(ref initrd) = entry.initrd_path {
-        out.push_str(&format!("    module2 {}\n", initrd));
+        out.push_str(&format!("    module2 \"{}\"\n", grub_quote(initrd)));
     }
 
     out.push_str("}\n");
@@ -225,14 +304,18 @@ fn generate_direct_entry(entry: &GrubEntry) -> String {
 ///
 /// The script is a standard GRUB custom-entry executable: it prints the menu
 /// entry to stdout so that `update-grub` / `grub2-mkconfig` can incorporate it.
-pub fn generate_custom_script(entry: &GrubEntry) -> String {
-    let menu_entry = generate_entry(entry);
+///
+/// # Errors
+///
+/// Propagates [`GrubError::InvalidEntry`] from [`generate_entry`].
+pub fn generate_custom_script(entry: &GrubEntry) -> Result<String, GrubError> {
+    let menu_entry = generate_entry(entry)?;
     let mut script = String::with_capacity(512);
     script.push_str("#!/bin/sh\n");
     script.push_str(&format!("{SLATEOS_MARKER}\n"));
     script.push_str("exec tail -n +3 \"$0\"\n");
     script.push_str(&menu_entry);
-    script
+    Ok(script)
 }
 
 // ============================================================================
@@ -484,6 +567,9 @@ impl GrubInstaller {
     /// Fails with [`GrubError::EntryAlreadyExists`] if the custom script file
     /// is already present.
     pub fn install(&self, entry: &GrubEntry) -> Result<(), GrubError> {
+        // Reject an unrenderable entry before touching the filesystem.
+        entry.validate()?;
+
         let path = self.script_path();
         if path.exists() {
             return Err(GrubError::EntryAlreadyExists);
@@ -495,7 +581,7 @@ impl GrubInstaller {
             ));
         }
 
-        let script = generate_custom_script(entry);
+        let script = generate_custom_script(entry)?;
         fs::write(&path, &script)?;
 
         // Make the script executable (Unix).
@@ -525,12 +611,15 @@ impl GrubInstaller {
     ///
     /// Fails with [`GrubError::EntryNotFound`] if the script does not exist.
     pub fn update(&self, entry: &GrubEntry) -> Result<(), GrubError> {
+        // Reject an unrenderable entry before touching the filesystem.
+        entry.validate()?;
+
         let path = self.script_path();
         if !path.exists() {
             return Err(GrubError::EntryNotFound);
         }
 
-        let script = generate_custom_script(entry);
+        let script = generate_custom_script(entry)?;
         fs::write(&path, &script)?;
         Ok(())
     }
@@ -697,14 +786,14 @@ mod tests {
     #[test]
     fn test_generate_chainload_entry_with_uuid() {
         let entry = sample_entry_chainload();
-        let text = generate_entry(&entry);
+        let text = generate_entry(&entry).expect("sample entry is renderable");
 
         assert!(text.contains("menuentry \"Slate OS 1.0\""));
         assert!(text.contains("insmod chain"));
         assert!(text.contains("insmod part_gpt"));
         assert!(text.contains("insmod fat"));
-        assert!(text.contains("search --no-floppy --fs-uuid --set=root ABCD-1234"));
-        assert!(text.contains("chainloader /EFI/slateos/limine.efi"));
+        assert!(text.contains("search --no-floppy --fs-uuid --set=root \"ABCD-1234\""));
+        assert!(text.contains("chainloader \"/EFI/slateos/limine.efi\""));
         assert!(text.starts_with("menuentry"));
         assert!(text.ends_with("}\n"));
     }
@@ -713,9 +802,9 @@ mod tests {
     fn test_generate_chainload_entry_without_uuid() {
         let mut entry = sample_entry_chainload();
         entry.uuid = String::new();
-        let text = generate_entry(&entry);
+        let text = generate_entry(&entry).expect("sample entry is renderable");
 
-        assert!(text.contains("set root='(hd0,gpt1)'"));
+        assert!(text.contains("set root=\"(hd0,gpt1)\""));
         assert!(!text.contains("search"));
     }
 
@@ -724,22 +813,22 @@ mod tests {
     #[test]
     fn test_generate_direct_entry_with_uuid_and_params() {
         let entry = sample_entry_direct();
-        let text = generate_entry(&entry);
+        let text = generate_entry(&entry).expect("sample entry is renderable");
 
         assert!(text.contains("menuentry \"Slate OS 1.0\""));
         assert!(text.contains("insmod multiboot2"));
         assert!(text.contains(
-            "search --no-floppy --fs-uuid --set=root a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+            "search --no-floppy --fs-uuid --set=root \"a1b2c3d4-e5f6-7890-abcd-ef1234567890\""
         ));
-        assert!(text.contains("multiboot2 /boot/kernel.elf console=ttyS0 debug"));
-        assert!(text.contains("module2 /boot/initrd.img"));
+        assert!(text.contains("multiboot2 \"/boot/kernel.elf\" \"console=ttyS0\" \"debug\""));
+        assert!(text.contains("module2 \"/boot/initrd.img\""));
     }
 
     #[test]
     fn test_generate_direct_entry_without_initrd() {
         let mut entry = sample_entry_direct();
         entry.initrd_path = None;
-        let text = generate_entry(&entry);
+        let text = generate_entry(&entry).expect("sample entry is renderable");
 
         assert!(!text.contains("module2"));
     }
@@ -748,18 +837,18 @@ mod tests {
     fn test_generate_direct_entry_no_params() {
         let mut entry = sample_entry_direct();
         entry.kernel_params.clear();
-        let text = generate_entry(&entry);
+        let text = generate_entry(&entry).expect("sample entry is renderable");
 
-        assert!(text.contains("multiboot2 /boot/kernel.elf\n"));
+        assert!(text.contains("multiboot2 \"/boot/kernel.elf\"\n"));
     }
 
     #[test]
     fn test_generate_direct_entry_without_uuid() {
         let mut entry = sample_entry_direct();
         entry.uuid = String::new();
-        let text = generate_entry(&entry);
+        let text = generate_entry(&entry).expect("sample entry is renderable");
 
-        assert!(text.contains("set root='(hd0,gpt3)'"));
+        assert!(text.contains("set root=\"(hd0,gpt3)\""));
     }
 
     // -- custom script generation ---------------------------------------------
@@ -767,7 +856,7 @@ mod tests {
     #[test]
     fn test_generate_custom_script_has_shebang_and_marker() {
         let entry = sample_entry_chainload();
-        let script = generate_custom_script(&entry);
+        let script = generate_custom_script(&entry).expect("sample entry is renderable");
 
         assert!(script.starts_with("#!/bin/sh\n"));
         assert!(script.contains(SLATEOS_MARKER));
@@ -778,10 +867,131 @@ mod tests {
     #[test]
     fn test_custom_script_contains_full_entry() {
         let entry = sample_entry_direct();
-        let script = generate_custom_script(&entry);
-        let plain = generate_entry(&entry);
+        let script = generate_custom_script(&entry).expect("sample entry is renderable");
+        let plain = generate_entry(&entry).expect("sample entry is renderable");
 
         assert!(script.contains(&plain));
+    }
+
+    // -- injection resistance --------------------------------------------------
+    //
+    // The generated block is fed to GRUB, which executes it at boot with full
+    // firmware privilege — before any OS, and so before any OS-level security
+    // boundary exists.  A title is not necessarily typed by the person at the
+    // keyboard: `os-prober` scrapes one out of another partition's
+    // `/etc/os-release`, so it can be attacker-controlled on a multi-boot
+    // machine.  Every field must therefore be inert.
+
+    /// A `"` in a title must not be able to close the `menuentry` string and
+    /// let the rest of the title be parsed as GRUB script.
+    #[test]
+    fn a_quote_in_the_title_cannot_open_a_second_menuentry() {
+        let mut entry = sample_entry_chainload();
+        entry.title = r#"Slate" {} menuentry "Backdoor"#.into();
+        let text = generate_entry(&entry).expect("quotes are escapable, not rejected");
+
+        // Exactly one menuentry *command* was emitted.  A bare substring count
+        // would be 2 here and still be correct: the escaped title legitimately
+        // contains the text `menuentry `.  What matters is that only one line
+        // *begins* a menuentry command — the other occurrence is inert payload
+        // inside a quoted string.
+        assert_eq!(
+            text.lines()
+                .filter(|l| l.trim_start().starts_with("menuentry "))
+                .count(),
+            1,
+            "a second menuentry was injected:\n{text}"
+        );
+        // The quotes survive, escaped, so the title still round-trips visually.
+        assert!(
+            text.starts_with(r#"menuentry "Slate\" {} menuentry \"Backdoor" {"#),
+            "unexpected rendering:\n{text}"
+        );
+    }
+
+    /// `$` must not expand: a title must not be able to read GRUB variables.
+    #[test]
+    fn a_dollar_sign_in_the_title_is_not_expanded() {
+        let mut entry = sample_entry_chainload();
+        entry.title = "Slate $root $(cmd)".into();
+        let text = generate_entry(&entry).expect("dollar signs are escapable");
+
+        assert!(
+            text.contains(r#"menuentry "Slate \$root \$(cmd)""#),
+            "{text}"
+        );
+    }
+
+    /// A trailing `\` must not escape the closing quote of the string.
+    #[test]
+    fn a_backslash_cannot_escape_the_closing_quote() {
+        let mut entry = sample_entry_chainload();
+        entry.title = r"Slate\".into();
+        let text = generate_entry(&entry).expect("backslashes are escapable");
+
+        assert!(text.starts_with(r#"menuentry "Slate\\" {"#), "{text}");
+    }
+
+    /// A newline cannot be escaped inside a GRUB string, so it must be
+    /// rejected outright rather than emitted and treated as a command
+    /// separator.
+    #[test]
+    fn a_newline_in_a_field_is_rejected_rather_than_injected() {
+        for (name, mut entry) in [
+            ("title", sample_entry_direct()),
+            ("kernel_path", sample_entry_direct()),
+            ("root_partition", sample_entry_direct()),
+            ("uuid", sample_entry_direct()),
+            ("initrd_path", sample_entry_direct()),
+            ("kernel_params", sample_entry_direct()),
+        ] {
+            let hostile = "x\nlinux /evil\n".to_string();
+            match name {
+                "title" => entry.title = hostile,
+                "kernel_path" => entry.kernel_path = hostile,
+                "root_partition" => entry.root_partition = hostile,
+                "uuid" => entry.uuid = hostile,
+                "initrd_path" => entry.initrd_path = Some(hostile),
+                _ => entry.kernel_params = vec![hostile],
+            }
+            let err =
+                generate_entry(&entry).expect_err(&format!("a newline in {name} must be rejected"));
+            assert!(
+                matches!(err, GrubError::InvalidEntry(ref m) if m.contains(name)),
+                "{name}: wrong error {err:?}"
+            );
+        }
+    }
+
+    /// `install` must refuse an unrenderable entry *before* writing anything.
+    #[test]
+    fn install_rejects_a_hostile_entry_without_writing_a_file() {
+        let dir = tempdir();
+        let installer = GrubInstaller::new(&dir);
+
+        let mut entry = sample_entry_chainload();
+        entry.title = "Slate\nlinux /evil".into();
+
+        assert!(matches!(
+            installer.install(&entry),
+            Err(GrubError::InvalidEntry(_))
+        ));
+        assert!(
+            !dir.join(CUSTOM_SCRIPT_NAME).exists(),
+            "a rejected entry must leave no script behind"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A kernel parameter containing a space is one argument, not two.
+    #[test]
+    fn a_kernel_parameter_containing_a_space_stays_one_argument() {
+        let mut entry = sample_entry_direct();
+        entry.kernel_params = vec!["init=/bin/my init".into()];
+        let text = generate_entry(&entry).expect("spaces are fine");
+
+        assert!(text.contains(r#""init=/bin/my init""#), "{text}");
     }
 
     // -- UUID validation ------------------------------------------------------
@@ -983,7 +1193,7 @@ mod tests {
 
         let contents = fs::read_to_string(installer.script_path()).unwrap();
         assert!(contents.contains(SLATEOS_MARKER));
-        assert!(contents.contains("chainloader /EFI/slateos/limine.efi"));
+        assert!(contents.contains("chainloader \"/EFI/slateos/limine.efi\""));
     }
 
     #[test]

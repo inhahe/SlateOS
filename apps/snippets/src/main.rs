@@ -36,10 +36,7 @@
 // Snippet rendering indexes into chars/bytes slices and into the
 // guitk widget grid — all bounded by len() / widget dimensions; no
 // real DoS risk. Allow the defensive lints file-wide.
-#![allow(
-    clippy::arithmetic_side_effects,
-    clippy::indexing_slicing,
-)]
+#![allow(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
 
 use guitk::Color;
 use guitk::render::{FontFamily, FontWeightHint, RenderCommand};
@@ -794,24 +791,10 @@ fn export_snippets_json(snippets: &[Snippet]) -> String {
     json
 }
 
+/// Render a string as a complete JSON string literal, surrounding quotes
+/// included.
 fn json_escape(s: &str) -> String {
-    use std::fmt::Write as _;
-    let mut escaped = String::from("\"");
-    for c in s.chars() {
-        match c {
-            '"' => escaped.push_str("\\\""),
-            '\\' => escaped.push_str("\\\\"),
-            '\n' => escaped.push_str("\\n"),
-            '\r' => escaped.push_str("\\r"),
-            '\t' => escaped.push_str("\\t"),
-            c if (c as u32) < 0x20 => {
-                let _ = write!(escaped, "\\u{:04x}", c as u32);
-            }
-            c => escaped.push(c),
-        }
-    }
-    escaped.push('"');
-    escaped
+    format!("\"{}\"", guitk::escape::json_string(s))
 }
 
 // ============================================================================
@@ -2570,7 +2553,13 @@ mod tests {
     #[test]
     fn a_short_title_is_left_alone() {
         let title = "Quick sort";
-        let out = text::elide(title, LIST_WIDTH - 20.0, "...", NORMAL_TEXT, FontWeightHint::Bold);
+        let out = text::elide(
+            title,
+            LIST_WIDTH - 20.0,
+            "...",
+            NORMAL_TEXT,
+            FontWeightHint::Bold,
+        );
         assert_eq!(out, title);
     }
 
@@ -2704,7 +2693,10 @@ mod tests {
                 FontWeightHint::Bold,
                 FontFamily::Mono,
             );
-            assert!(w <= cell + 0.01, "bold {ch:?} measures {w} in a {cell} cell");
+            assert!(
+                w <= cell + 0.01,
+                "bold {ch:?} measures {w} in a {cell} cell"
+            );
         }
     }
 

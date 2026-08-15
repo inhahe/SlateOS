@@ -3137,34 +3137,17 @@ fn color_to_svg_hex(c: Color) -> String {
 
 /// Escape XML special characters.
 fn escape_xml(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for ch in s.chars() {
-        match ch {
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '&' => out.push_str("&amp;"),
-            '"' => out.push_str("&quot;"),
-            '\'' => out.push_str("&#39;"),
-            _ => out.push(ch),
-        }
-    }
-    out
+    guitk::escape::xml(s)
 }
 
 /// Escape JSON special characters in a string value.
+///
+/// The previous local version handled only `"`, `\`, `\n`, `\r` and `\t`, and
+/// passed every other control character through raw. RFC 8259 forbids an
+/// unescaped character below `U+0020` inside a string, so a node label
+/// containing one produced an export that no JSON parser would accept.
 fn escape_json(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for ch in s.chars() {
-        match ch {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            _ => out.push(ch),
-        }
-    }
-    out
+    guitk::escape::json_string(s)
 }
 
 // ============================================================================
@@ -4028,6 +4011,21 @@ mod tests {
     fn test_escape_json() {
         assert_eq!(escape_json("he said \"hi\""), "he said \\\"hi\\\"");
         assert_eq!(escape_json("line\nbreak"), "line\\nbreak");
+    }
+
+    /// The two cases above are the ones with a short escape, and they passed
+    /// against a version that emitted every *other* control character raw —
+    /// which is invalid JSON, so the export would not parse.
+    #[test]
+    fn a_control_character_in_a_label_does_not_produce_invalid_json() {
+        for code in 0u32..0x20 {
+            let ch = char::from_u32(code).expect("valid scalar");
+            let escaped = escape_json(&format!("label{ch}end"));
+            assert!(
+                !escaped.chars().any(|c| c < '\u{20}'),
+                "U+{code:04X} was emitted raw: {escaped:?}"
+            );
+        }
     }
 
     // ---- Alignment operations on app ---------------------------------------

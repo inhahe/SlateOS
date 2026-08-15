@@ -73,6 +73,24 @@ const FONT_SIZE_TITLE: f32 = 20.0;
 const BUTTON_WIDTH: f32 = 100.0;
 const BUTTON_HEIGHT: f32 = 30.0;
 const CORNER_RADIUS: f32 = 6.0;
+/// Room the details panel reserves for a snapshot's description row.
+///
+/// A one-line description is shorter than this; the rest of the panel was laid
+/// out against this figure, so a short description keeps the original spacing.
+const DESCRIPTION_ROW_HEIGHT: f32 = 20.0;
+
+/// How far a snapshot description may wrap in the details panel.
+///
+/// The panel is a fixed [`DETAILS_PANEL_HEIGHT`] box with the ancestry chain
+/// anchored to its *bottom*, so the running cursor above cannot grow without
+/// bound. Measured from `panel_y`: name 24, description 20, metadata 20,
+/// components 20, tags 18 — 102px of 160, with the chain row starting at 138.
+/// That leaves 36px of slack, i.e. room for two extra 17px lines; two total is
+/// the cap that still clears the chain with a line to spare. A description
+/// longer than that is ellipsised, which `Paragraph::max_lines` marks so it
+/// does not read as a complete sentence.
+const DESCRIPTION_MAX_LINES: usize = 2;
+
 const TREE_INDENT: f32 = 24.0;
 const TREE_ROW_HEIGHT: f32 = 36.0;
 const TIMELINE_ENTRY_HEIGHT: f32 = 48.0;
@@ -2883,18 +2901,20 @@ impl SystemRestoreUI {
 
         y += 24.0;
 
-        // Description.
-        if !snap.description.is_empty() {
-            rt.push(RenderCommand::Text {
-                x: col1_x,
-                y,
-                text: snap.description.clone(),
-                color: COLOR_SUBTEXT0,
-                font_size: FONT_SIZE,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(WINDOW_WIDTH - 2.0 * PADDING),
-            });
-            y += 20.0;
+        // Description. User-supplied free prose, so it wraps rather than being
+        // clipped to its first line — but the panel is a fixed
+        // DETAILS_PANEL_HEIGHT box with the ancestry chain anchored to its
+        // bottom, so the wrap is capped (see DESCRIPTION_MAX_LINES) and the
+        // cursor advances by the height actually drawn.
+        let description_used = text::Paragraph::new(&snap.description, COLOR_SUBTEXT0)
+            .at(col1_x, y, WINDOW_WIDTH - 2.0 * PADDING)
+            .font(FONT_SIZE, FontWeightHint::Regular)
+            .max_lines(DESCRIPTION_MAX_LINES)
+            .draw(rt);
+        if description_used > 0.0 {
+            // An absent description takes no room at all; a present one takes
+            // at least the row height the rest of the panel was laid out for.
+            y += description_used.max(DESCRIPTION_ROW_HEIGHT);
         }
 
         // Metadata row.
@@ -5397,6 +5417,121 @@ mod tests {
         ui.dialog = DialogKind::ImportDialog;
         let rt = ui.render();
         assert!(!rt.is_empty());
+    }
+
+    // --- Details-panel description layout ---
+
+    /// The details panel alone, for a selected snapshot carrying `description`.
+    ///
+    /// Renders the panel directly rather than the whole window: `render()` also
+    /// emits the status bar, which sits *below* the panel and so would trip the
+    /// "nothing may be pushed past the panel's anchored bottom row" assertion
+    /// for reasons that have nothing to do with the description.
+    fn details_panel_with_description(description: &str) -> Vec<RenderCommand> {
+        let mut ui = SystemRestoreUI::new();
+        let id = *ui
+            .manager
+            .tree
+            .all_ids_by_timestamp()
+            .first()
+            .expect("the default tree has at least one snapshot");
+        ui.manager
+            .tree
+            .get_snapshot_mut(id)
+            .expect("the id came from the tree")
+            .description = description.to_string();
+        ui.selected_id = Some(id);
+        let snap = ui
+            .manager
+            .tree
+            .get_snapshot(id)
+            .expect("the id came from the tree")
+            .clone();
+        let mut rt = RenderTree::new();
+        ui.render_snapshot_details(
+            &mut rt,
+            &snap,
+            WINDOW_HEIGHT - DETAILS_PANEL_HEIGHT - STATUS_BAR_HEIGHT,
+        );
+        rt.commands
+    }
+
+    /// Text commands in the details panel, as `(y, text)`, top-down.
+    fn details_panel_text(cmds: &[RenderCommand]) -> Vec<(f32, String)> {
+        let mut rows: Vec<(f32, String)> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { y, text, .. } => Some((*y, text.clone())),
+                _ => None,
+            })
+            .collect();
+        rows.sort_by(|a, b| a.0.total_cmp(&b.0));
+        rows
+    }
+
+    /// A description longer than one line wraps instead of being cut at the
+    /// first line, which is what a bare `Text` command's `max_width` would do.
+    #[test]
+    fn a_long_description_wraps_rather_than_being_clipped() {
+        let words: Vec<String> = (0..60).map(|n| format!("word{n}")).collect();
+        let description = words.join(" ");
+        let rows = details_panel_text(&details_panel_with_description(&description));
+
+        // The first description line is drawn, and so is a second one carrying
+        // words the single-command version would have dropped entirely.
+        let drawn: Vec<&String> = rows.iter().map(|(_, t)| t).collect();
+        let lines: Vec<&&String> = drawn
+            .iter()
+            .filter(|t| t.starts_with("word0 ") || t.contains("word"))
+            .collect();
+        assert!(
+            lines.len() >= 2,
+            "expected the description to occupy more than one line, got {lines:?}",
+        );
+    }
+
+    /// The panel is a fixed-height box with the ancestry chain anchored to its
+    /// bottom, so however far the description wraps, the rows beneath it must
+    /// still clear that chain row.
+    #[test]
+    fn a_long_description_never_pushes_content_onto_the_ancestry_row() {
+        let panel_y = WINDOW_HEIGHT - DETAILS_PANEL_HEIGHT - STATUS_BAR_HEIGHT;
+        let chain_y = panel_y + DETAILS_PANEL_HEIGHT - 22.0;
+        let description = "supercalifragilistic ".repeat(80);
+        let rows = details_panel_text(&details_panel_with_description(&description));
+
+        let mut checked = 0;
+        for (y, text) in &rows {
+            // The chain row itself and anything at or below it is the anchored
+            // content; everything above must stay above it.
+            if *y < chain_y {
+                checked += 1;
+                continue;
+            }
+            assert!(
+                text.starts_with("Path:") || text.contains('>') || text.contains('…'),
+                "row {text:?} at y={y} has been pushed down onto the ancestry row at {chain_y}",
+            );
+        }
+        assert!(checked >= 5, "expected the panel's rows, checked {checked}");
+    }
+
+    /// A short description leaves the panel laid out exactly as before, so the
+    /// wrap fix does not shift the common case.
+    #[test]
+    fn a_short_description_keeps_the_original_row_spacing() {
+        let rows = details_panel_text(&details_panel_with_description("Short."));
+        let panel_y = WINDOW_HEIGHT - DETAILS_PANEL_HEIGHT - STATUS_BAR_HEIGHT;
+        assert!(
+            rows.iter().any(|(y, t)| t == "Short."
+                && (*y - (panel_y + PADDING + 24.0)).abs() < 0.5),
+            "expected the description on the description row, got {rows:?}",
+        );
+        assert!(
+            rows.iter()
+                .any(|(y, t)| t == "Size:" && (*y - (panel_y + PADDING + 44.0)).abs() < 0.5),
+            "expected the metadata row unmoved, got {rows:?}",
+        );
     }
 
     #[test]

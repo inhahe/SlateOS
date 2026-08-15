@@ -54051,3 +54051,40 @@ FAILs).  Reversible (pure translator change; no PCB/state).
 ## Lane C — graphics, apps & net
 ## ############################################################################
 (no lane-C-specific entries yet; see the pre-split entries above)
+
+## ----------------------------------------------------------------------------
+## Lane C — the toolkit picks its mono face itself, ignoring fs::fontsettings
+## ----------------------------------------------------------------------------
+##
+## Filed 2026-08-15, lane C, alongside the PushFont/PopFont work
+## (design-decisions.md §413).
+##
+## WHAT: `guitk::text` now resolves a monospace face by walking a hardcoded
+## candidate list -- DEFAULT_MONO_FAMILIES in gui/toolkit/src/text.rs: JetBrains
+## Mono, Cascadia Mono, Cascadia Code, Consolas, DejaVu Sans Mono, Liberation
+## Mono, Noto Sans Mono, Menlo, Courier New -- and falls back to the built-in
+## 8x16 bitmap face if none is installed. `set_mono_family` lets a caller
+## override it at runtime, but nothing calls it.
+##
+## THE GAP: the kernel already has the answer. `fs::fontsettings` (roadmap.md
+## line 1567) stores "default/monospace/document font families", and
+## `fs::fontmgr` (line 1442) has a `FontRole::Monospace` default plus a
+## `FontCategory::Monospace` and ships JetBrains Mono as a system font. So the
+## operator can set a monospace family in Settings today and the toolkit will
+## cheerfully ignore it -- every terminal, hex dump, diff and code panel will
+## keep using whichever candidate happens to be installed first.
+##
+## THE PROPER FIX: on toolkit init, read the configured monospace family from
+## fs::fontsettings / fs::fontmgr's FontRole::Monospace and pass it to
+## `text::set_mono_family`, with DEFAULT_MONO_FAMILIES kept only as the fallback
+## for when the setting is unset or names a family that is not installed. Same
+## treatment for the UI family, which has the identical problem.
+##
+## WHY NOT NOW: fs::fontsettings and fs::fontmgr are kernel-side registries in
+## LANE A/B's tree, reached through a syscall or /proc surface. Reading them
+## from the toolkit needs an interface that does not exist yet, and inventing
+## one unilaterally is exactly what the requests/ dropbox is for. File
+## requests/c-a-expose-font-role-defaults-to-userspace.md when picking this up.
+##
+## TRIGGER: when a userspace read path for fs::fontsettings exists, or when the
+## operator reports that changing the monospace font in Settings does nothing.

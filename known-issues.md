@@ -63071,3 +63071,44 @@ less, and the "because" clause attached to it was never checked against the four
 lines of code it describes. A prediction whose stated falsification condition is
 its own confirmation is the same defect this file keeps recording one level down:
 **a check that cannot fire is indistinguishable from a check that passes.**
+
+---
+
+#### P16 instrument landed — first reading, and why it does NOT grade P16
+
+`59d7cfc61` added the HPET-vs-TSC discriminator. Its first output, from the
+release boot at `24a3407cc`:
+
+```
+[spawn]   sleep clocks: HPET 84338300 ns vs TSC/clock_realtime 84001888 ns across
+          the child's lifetime (HPET/TSC = 1.00x)
+[spawn]   -> AGREE within 5%: both oscillators saw the same interval ...
+[spawn]   fastpy-on-SlateOS `sleep` ... : OK
+```
+
+**This run passed.** P16 is registered against "a boot where the child reports
+< 40 ms", and this child reported well over it. So the reading is *not* evidence
+for cause (1) and the "AGREE" line it printed must not be read as a verdict on
+the bug — on a passing run the clocks agreeing is unremarkable, because nothing
+was anomalous for them to disagree about. Banking it as a confirmation would be
+the identical error recorded a few sections up for the P20 load run: reading a
+result as confirming the hypothesis it happens to sit next to.
+
+What it *does* establish is the **control arm**, which the instrument previously
+had none of: on a healthy boot the two oscillators agree to within 0.4%
+(84 338 300 vs 84 001 888 ns). That matters, because it rules out the boring
+explanation in advance — the two clocks are not chronically skewed on this host,
+so if a *failing* boot shows them diverging, the divergence is specific to the
+failure rather than a standing property of the machine. Without this reading, a
+1.36x ratio on a failing boot could not have been distinguished from a machine
+where the ratio is always 1.36x.
+
+P16 therefore remains **unresolved and awaiting a failing boot**. The test is
+intermittent, so this is a matter of accumulating boots, not of doing anything
+further to the instrument. Both branches are now reachable and both say which
+subsystem to open.
+
+Baselines for P21(a) now stand at three idle release runs — `vfs_stat_breakdown_ns`
+= 262, 261, 262 ns — putting run-to-run noise on that phase under 0.5% and the
+20% threshold far outside it. `vfs_stat_breakdown_prologue` = 580, 568 ns across
+the two runs that recorded it (noise ~2%).

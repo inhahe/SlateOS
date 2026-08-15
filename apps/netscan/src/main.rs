@@ -26,7 +26,7 @@ use guitk::color::Color;
 #[allow(unused_imports)]
 use guitk::event::{Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEventKind};
 #[allow(unused_imports)]
-use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
 use guitk::table::{Column, Fit, Table};
@@ -2531,6 +2531,7 @@ impl NetScanApp {
             font_size: 16.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Status indicator
@@ -2558,6 +2559,7 @@ impl NetScanApp {
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -2583,6 +2585,7 @@ impl NetScanApp {
             font_size: 13.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Profile buttons
@@ -2613,6 +2616,7 @@ impl NetScanApp {
                     FontWeightHint::Regular
                 },
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             px += pw + 6.0;
         }
@@ -2627,6 +2631,7 @@ impl NetScanApp {
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         self.render_text_field(
             tree,
@@ -2647,6 +2652,7 @@ impl NetScanApp {
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             self.render_text_field(
                 tree,
@@ -2673,6 +2679,7 @@ impl NetScanApp {
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Bandwidth estimation
@@ -2703,6 +2710,7 @@ impl NetScanApp {
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 
@@ -2732,6 +2740,7 @@ impl NetScanApp {
             font_size: 12.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -2775,6 +2784,7 @@ impl NetScanApp {
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - 16.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -2840,6 +2850,7 @@ impl NetScanApp {
                     FontWeightHint::Regular
                 },
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             tab_x += tw + 4.0;
@@ -2896,6 +2907,7 @@ impl NetScanApp {
                 font_size: 14.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             tree.push(RenderCommand::Text {
                 x: text::center_x(
@@ -2910,6 +2922,7 @@ impl NetScanApp {
                 font_size: CHIP_TEXT,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 
@@ -2936,6 +2949,7 @@ impl NetScanApp {
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -3126,6 +3140,7 @@ impl NetScanApp {
                 font_size: 14.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             tree.push(RenderCommand::Text {
                 x: x + PADDING,
@@ -3135,6 +3150,7 @@ impl NetScanApp {
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(SIDEBAR_WIDTH - PADDING * 2.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // WOL section
@@ -3147,6 +3163,7 @@ impl NetScanApp {
                 font_size: 12.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             self.render_text_field(
                 tree,
@@ -3180,6 +3197,7 @@ impl NetScanApp {
                 font_size: 12.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             // Export button
@@ -3201,6 +3219,7 @@ impl NetScanApp {
                     font_size: 12.0,
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
             }
 
@@ -3235,6 +3254,7 @@ impl NetScanApp {
                     font_size: 12.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
                 tree.push(RenderCommand::Text {
                     x: x + PADDING + 10.0,
@@ -3244,6 +3264,7 @@ impl NetScanApp {
                     font_size: 12.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
             }
         }
@@ -3261,6 +3282,7 @@ impl NetScanApp {
             font_size: 14.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(w),
+            overflow: TextOverflow::Ellipsis,
         });
 
         let mut dy = y + 22.0;
@@ -3297,6 +3319,7 @@ impl NetScanApp {
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             tree.push(RenderCommand::Text {
                 x: x + 85.0,
@@ -3306,6 +3329,7 @@ impl NetScanApp {
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(w - 90.0),
+                overflow: TextOverflow::Ellipsis,
             });
             dy += 18.0;
         }
@@ -3329,6 +3353,7 @@ impl NetScanApp {
             font_size: 12.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         dy += 20.0;
 
@@ -3341,6 +3366,7 @@ impl NetScanApp {
             font_size: 10.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         tree.push(RenderCommand::Text {
             x: x + 55.0,
@@ -3350,6 +3376,7 @@ impl NetScanApp {
             font_size: 10.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         tree.push(RenderCommand::Text {
             x: x + 115.0,
@@ -3359,6 +3386,7 @@ impl NetScanApp {
             font_size: 10.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         tree.push(RenderCommand::Text {
             x: x + 200.0,
@@ -3368,6 +3396,7 @@ impl NetScanApp {
             font_size: 10.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         dy += 16.0;
 
@@ -3397,6 +3426,7 @@ impl NetScanApp {
                 font_size: 10.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             tree.push(RenderCommand::Text {
                 x: x + 55.0,
@@ -3406,6 +3436,7 @@ impl NetScanApp {
                 font_size: 10.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             tree.push(RenderCommand::Text {
                 x: x + 115.0,
@@ -3415,6 +3446,7 @@ impl NetScanApp {
                 font_size: 10.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(80.0),
+                overflow: TextOverflow::Ellipsis,
             });
             tree.push(RenderCommand::Text {
                 x: x + 200.0,
@@ -3424,6 +3456,7 @@ impl NetScanApp {
                 font_size: 10.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             // Show banner if present
@@ -3471,6 +3504,7 @@ impl NetScanApp {
             font_size: 14.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         if let Some(ref result) = self.results {
@@ -3484,6 +3518,7 @@ impl NetScanApp {
                     font_size: 13.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
                 return;
             }
@@ -3509,6 +3544,7 @@ impl NetScanApp {
                 font_size: 10.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             // Host nodes arranged in arcs below the gateway
@@ -3565,6 +3601,7 @@ impl NetScanApp {
                     font_size: 9.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
             }
 
@@ -3596,6 +3633,7 @@ impl NetScanApp {
                     font_size: LEGEND_TEXT,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
                 // 14 px of swatch and gap before the label, 14 after it.
                 lx += 14.0 + text::measure(label, LEGEND_TEXT, FontWeightHint::Regular) + 14.0;
@@ -3610,6 +3648,7 @@ impl NetScanApp {
                 font_size: 13.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
     }
@@ -3625,6 +3664,7 @@ impl NetScanApp {
             font_size: 14.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         if self.history.is_empty() {
@@ -3636,6 +3676,7 @@ impl NetScanApp {
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             return;
         }
@@ -3669,6 +3710,7 @@ impl NetScanApp {
                 font_size: 11.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 
@@ -3702,6 +3744,7 @@ impl NetScanApp {
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             tree.push(RenderCommand::Text {
                 x: PADDING + 40.0,
@@ -3711,6 +3754,7 @@ impl NetScanApp {
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(160.0),
+                overflow: TextOverflow::Ellipsis,
             });
             tree.push(RenderCommand::Text {
                 x: PADDING + 210.0,
@@ -3720,6 +3764,7 @@ impl NetScanApp {
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(180.0),
+                overflow: TextOverflow::Ellipsis,
             });
             tree.push(RenderCommand::Text {
                 x: PADDING + 400.0,
@@ -3729,6 +3774,7 @@ impl NetScanApp {
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             tree.push(RenderCommand::Text {
                 x: PADDING + 510.0,
@@ -3738,6 +3784,7 @@ impl NetScanApp {
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             tree.push(RenderCommand::Text {
                 x: PADDING + 600.0,
@@ -3747,6 +3794,7 @@ impl NetScanApp {
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             tree.push(RenderCommand::Text {
                 x: PADDING + 700.0,
@@ -3756,6 +3804,7 @@ impl NetScanApp {
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 
@@ -3783,6 +3832,7 @@ impl NetScanApp {
                         font_size: 12.0,
                         font_weight: FontWeightHint::Bold,
                         max_width: None,
+                        overflow: TextOverflow::Clip,
                     });
                 }
             }
@@ -3800,6 +3850,7 @@ impl NetScanApp {
             font_size: 14.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Target input
@@ -3812,6 +3863,7 @@ impl NetScanApp {
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         self.render_text_field(
             tree,
@@ -3840,6 +3892,7 @@ impl NetScanApp {
             font_size: 12.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Results
@@ -3870,6 +3923,7 @@ impl NetScanApp {
                     font_size: 11.0,
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
             }
 
@@ -3902,6 +3956,7 @@ impl NetScanApp {
                     font_size: 11.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
 
                 if hop.timed_out {
@@ -3913,6 +3968,7 @@ impl NetScanApp {
                         font_size: 11.0,
                         font_weight: FontWeightHint::Regular,
                         max_width: None,
+                        overflow: TextOverflow::Clip,
                     });
                 } else {
                     let ip_str = hop
@@ -3927,6 +3983,7 @@ impl NetScanApp {
                         font_size: 11.0,
                         font_weight: FontWeightHint::Regular,
                         max_width: None,
+                        overflow: TextOverflow::Clip,
                     });
                     tree.push(RenderCommand::Text {
                         x: PADDING + 220.0,
@@ -3936,6 +3993,7 @@ impl NetScanApp {
                         font_size: 11.0,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(220.0),
+                        overflow: TextOverflow::Ellipsis,
                     });
                     tree.push(RenderCommand::Text {
                         x: PADDING + 450.0,
@@ -3945,6 +4003,7 @@ impl NetScanApp {
                         font_size: 11.0,
                         font_weight: FontWeightHint::Regular,
                         max_width: None,
+                        overflow: TextOverflow::Clip,
                     });
                 }
 
@@ -3976,6 +4035,7 @@ impl NetScanApp {
             font_size: 14.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Target input
@@ -3988,6 +4048,7 @@ impl NetScanApp {
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         self.render_text_field(
             tree,
@@ -4016,6 +4077,7 @@ impl NetScanApp {
             font_size: 12.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // WHOIS result display
@@ -4060,6 +4122,7 @@ impl NetScanApp {
                     font_size: 12.0,
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
                 tree.push(RenderCommand::Text {
                     x: PADDING + 140.0,
@@ -4069,6 +4132,7 @@ impl NetScanApp {
                     font_size: 12.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(340.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
                 fy += 26.0;
             }
@@ -4114,6 +4178,7 @@ impl NetScanApp {
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 }

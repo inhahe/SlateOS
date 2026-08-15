@@ -18,7 +18,7 @@
 
 use guitk::color::Color;
 use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
 const COL_BASE: Color = Color::from_hex(0x1E1E2E);
@@ -295,6 +295,7 @@ impl PongApp {
             color: COL_BLUE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         cmds.push(RenderCommand::Text {
             x: FIELD_X + FIELD_W / 2.0 + 40.0, y: 15.0,
@@ -303,6 +304,7 @@ impl PongApp {
             color: COL_RED,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Labels
@@ -313,6 +315,7 @@ impl PongApp {
             color: COL_SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         cmds.push(RenderCommand::Text {
             x: FIELD_X + FIELD_W / 2.0 + 55.0, y: 18.0,
@@ -321,6 +324,7 @@ impl PongApp {
             color: COL_SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         if self.state == GameState::Playing || self.state == GameState::Paused {
@@ -366,6 +370,7 @@ impl PongApp {
                     color: COL_TEXT,
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
                 cmds.push(RenderCommand::Text {
                     x: FIELD_X + FIELD_W / 2.0 - 80.0,
@@ -375,6 +380,7 @@ impl PongApp {
                     color: COL_SUBTEXT0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
             }
             GameState::Paused => {
@@ -391,6 +397,7 @@ impl PongApp {
                     color: COL_YELLOW,
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
             }
             GameState::GameOver => {
@@ -409,6 +416,7 @@ impl PongApp {
                     color: msg_color,
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
                 cmds.push(RenderCommand::Text {
                     x: FIELD_X + FIELD_W / 2.0 - 90.0,
@@ -418,6 +426,7 @@ impl PongApp {
                     color: COL_SUBTEXT0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
             }
             _ => {}
@@ -431,6 +440,7 @@ impl PongApp {
             color: COL_OVERLAY0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         cmds

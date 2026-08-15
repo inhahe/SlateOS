@@ -18,7 +18,7 @@ use guitk::color::Color;
 #[allow(unused_imports)]
 use guitk::event::{Event, MouseButton, MouseEvent, MouseEventKind};
 #[allow(unused_imports)]
-use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
 
@@ -666,6 +666,7 @@ impl SystemTray {
             font_size,
             font_weight: FontWeightHint::Regular,
             max_width: Some(ICON_CELL_SIZE),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Notification badge (small colored dot in top-right)
@@ -706,6 +707,7 @@ impl SystemTray {
             font_size: HEADER_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(content_width),
+            overflow: TextOverflow::Ellipsis,
         });
         y += HEADER_FONT_SIZE + ITEM_SPACING * 2.0;
 
@@ -785,6 +787,7 @@ impl SystemTray {
             font_size: POPUP_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(content_width),
+            overflow: TextOverflow::Ellipsis,
         });
         y += POPUP_FONT_SIZE + 4.0;
         self.render_slider(
@@ -806,6 +809,7 @@ impl SystemTray {
             font_size: POPUP_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(content_width),
+            overflow: TextOverflow::Ellipsis,
         });
         y += POPUP_FONT_SIZE + 4.0;
         self.render_slider(
@@ -845,6 +849,7 @@ impl SystemTray {
             font_size: HEADER_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(content_width),
+            overflow: TextOverflow::Ellipsis,
         });
         y += HEADER_FONT_SIZE + ITEM_SPACING;
 
@@ -857,6 +862,7 @@ impl SystemTray {
             font_size: POPUP_FONT_SIZE - 1.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(content_width),
+            overflow: TextOverflow::Ellipsis,
         });
         y += POPUP_FONT_SIZE + ITEM_SPACING;
 
@@ -874,6 +880,7 @@ impl SystemTray {
             font_size: POPUP_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(content_width),
+            overflow: TextOverflow::Ellipsis,
         });
         y += POPUP_FONT_SIZE + 4.0;
 
@@ -919,6 +926,7 @@ impl SystemTray {
                 font_size: POPUP_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(content_width),
+                overflow: TextOverflow::Ellipsis,
             });
             y += POPUP_FONT_SIZE + 4.0;
 
@@ -958,6 +966,7 @@ impl SystemTray {
             font_size: HEADER_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(content_width),
+            overflow: TextOverflow::Ellipsis,
         });
         y += HEADER_FONT_SIZE + ITEM_SPACING * 2.0;
 
@@ -980,6 +989,7 @@ impl SystemTray {
             font_size: POPUP_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(content_width),
+            overflow: TextOverflow::Ellipsis,
         });
         y += POPUP_FONT_SIZE + ITEM_SPACING;
 
@@ -992,6 +1002,7 @@ impl SystemTray {
             font_size: POPUP_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(content_width),
+            overflow: TextOverflow::Ellipsis,
         });
         y += POPUP_FONT_SIZE + ITEM_SPACING;
 
@@ -1004,6 +1015,7 @@ impl SystemTray {
             font_size: POPUP_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(content_width),
+            overflow: TextOverflow::Ellipsis,
         });
         y += POPUP_FONT_SIZE + 4.0;
         self.render_slider(
@@ -1025,6 +1037,7 @@ impl SystemTray {
             font_size: POPUP_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(content_width),
+            overflow: TextOverflow::Ellipsis,
         });
         y += POPUP_FONT_SIZE + ITEM_SPACING * 2.0;
 
@@ -1037,6 +1050,7 @@ impl SystemTray {
             font_size: POPUP_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(content_width),
+            overflow: TextOverflow::Ellipsis,
         });
         let _ = y;
     }
@@ -1083,6 +1097,7 @@ impl SystemTray {
             font_size: POPUP_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Month Year centered
@@ -1095,6 +1110,7 @@ impl SystemTray {
             font_size: HEADER_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(content_width),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Right arrow
@@ -1106,6 +1122,7 @@ impl SystemTray {
             font_size: POPUP_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         y += HEADER_FONT_SIZE + ITEM_SPACING * 2.0;
 
@@ -1120,6 +1137,7 @@ impl SystemTray {
                 font_size: POPUP_FONT_SIZE - 1.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
         y += POPUP_FONT_SIZE + ITEM_SPACING;
@@ -1164,6 +1182,7 @@ impl SystemTray {
                     FontWeightHint::Regular
                 },
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             col += 1;
@@ -1191,6 +1210,7 @@ impl SystemTray {
             font_size: POPUP_FONT_SIZE - 1.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(content_width),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -1226,6 +1246,7 @@ impl SystemTray {
             font_size: HEADER_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(content_width),
+            overflow: TextOverflow::Ellipsis,
         });
         y += HEADER_FONT_SIZE + ITEM_SPACING;
 
@@ -1237,6 +1258,7 @@ impl SystemTray {
             font_size: POPUP_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(content_width),
+            overflow: TextOverflow::Ellipsis,
         });
         let _ = y;
     }
@@ -1267,6 +1289,7 @@ impl SystemTray {
                 font_size: POPUP_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(content_width),
+                overflow: TextOverflow::Ellipsis,
             });
             y += POPUP_FONT_SIZE + ITEM_SPACING;
         }
@@ -1306,6 +1329,7 @@ impl SystemTray {
                 font_size: POPUP_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(content_width),
+                overflow: TextOverflow::Ellipsis,
             });
             y += POPUP_FONT_SIZE + ITEM_SPACING;
         }
@@ -1431,6 +1455,7 @@ impl SystemTray {
             font_size: POPUP_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - TOGGLE_WIDTH - 8.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Subtitle (if non-empty)
@@ -1443,6 +1468,7 @@ impl SystemTray {
                 font_size: POPUP_FONT_SIZE - 2.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - TOGGLE_WIDTH - 8.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 

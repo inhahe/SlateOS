@@ -19,7 +19,7 @@
 
 use guitk::color::Color;
 use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
 // ── Catppuccin Mocha palette ────────────────────────────────────────
@@ -1359,6 +1359,7 @@ impl ChessApp {
             font_size: TITLE_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Status
@@ -1382,6 +1383,7 @@ impl ChessApp {
             font_size: INFO_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Draw the chess board
@@ -1399,6 +1401,7 @@ impl ChessApp {
                 font_size: LABEL_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 
@@ -1414,6 +1417,7 @@ impl ChessApp {
                 font_size: LABEL_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 
@@ -1509,6 +1513,7 @@ impl ChessApp {
                         font_size: PIECE_FONT_SIZE,
                         font_weight: FontWeightHint::Regular,
                         max_width: None,
+                        overflow: TextOverflow::Clip,
                     });
                 }
             }
@@ -1561,6 +1566,7 @@ impl ChessApp {
             font_size: LABEL_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         py += 20.0;
 
@@ -1579,6 +1585,7 @@ impl ChessApp {
                 font_size: INFO_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(230.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
         py += 24.0;
@@ -1592,6 +1599,7 @@ impl ChessApp {
             font_size: LABEL_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         py += 20.0;
 
@@ -1610,6 +1618,7 @@ impl ChessApp {
                 font_size: INFO_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(230.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
         py += 30.0;
@@ -1623,6 +1632,7 @@ impl ChessApp {
             font_size: LABEL_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         py += 20.0;
 
@@ -1646,6 +1656,7 @@ impl ChessApp {
                 font_size: MOVE_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(230.0),
+                overflow: TextOverflow::Ellipsis,
             });
             py += 16.0;
             move_idx += 2;
@@ -1664,6 +1675,7 @@ impl ChessApp {
             font_size: LABEL_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         commands.push(RenderCommand::Text {
             x: px,
@@ -1673,6 +1685,7 @@ impl ChessApp {
             font_size: LABEL_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         commands.push(RenderCommand::Text {
             x: px,
@@ -1682,6 +1695,7 @@ impl ChessApp {
             font_size: LABEL_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 }

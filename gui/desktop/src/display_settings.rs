@@ -11,7 +11,7 @@
 //! - Test patterns for calibration (grayscale, color bars, gradient)
 
 use guitk::color::Color;
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
 // ============================================================================
@@ -783,6 +783,7 @@ impl DisplaySettingsManager {
             color: MOCHA_TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width - 32.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Tab bar
@@ -818,6 +819,7 @@ impl DisplaySettingsManager {
                     FontWeightHint::Regular
                 },
                 max_width: Some(120.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -889,6 +891,7 @@ impl DisplaySettingsManager {
                 color: MOCHA_TEXT,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(width),
+                overflow: TextOverflow::Ellipsis,
             });
 
             let mut row_y = y + 30.0;
@@ -939,6 +942,7 @@ impl DisplaySettingsManager {
             color: MOCHA_TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
+            overflow: TextOverflow::Ellipsis,
         });
 
         let mut row_y = y + 30.0;
@@ -963,6 +967,7 @@ impl DisplaySettingsManager {
             color: MOCHA_SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width * 0.6),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Temperature preview swatch
@@ -1005,6 +1010,7 @@ impl DisplaySettingsManager {
                 color: MOCHA_TEXT,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(width),
+                overflow: TextOverflow::Ellipsis,
             });
 
             let mut row_y = y + 30.0;
@@ -1065,6 +1071,7 @@ impl DisplaySettingsManager {
                 color: MOCHA_TEXT,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(100.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }
@@ -1085,6 +1092,7 @@ impl DisplaySettingsManager {
             color: MOCHA_TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
+            overflow: TextOverflow::Ellipsis,
         });
 
         let mut row_y = y + 30.0;
@@ -1116,6 +1124,7 @@ impl DisplaySettingsManager {
                 color: if is_active { MOCHA_MANTLE } else { MOCHA_TEXT },
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 24.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Small preview of the pattern
@@ -1144,6 +1153,7 @@ impl DisplaySettingsManager {
             color: MOCHA_SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width * 0.5),
+            overflow: TextOverflow::Ellipsis,
         });
         cmds.push(RenderCommand::Text {
             x: x + width * 0.5,
@@ -1153,6 +1163,7 @@ impl DisplaySettingsManager {
             color: MOCHA_TEXT,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width * 0.5),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -1175,6 +1186,7 @@ impl DisplaySettingsManager {
             color: MOCHA_SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width * 0.4),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Track
@@ -1233,6 +1245,7 @@ impl DisplaySettingsManager {
             color,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width * 0.4),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Visual gamma curve indicator (simplified)

@@ -25,7 +25,7 @@ use guitk::color::Color;
 #[allow(unused_imports)]
 use guitk::event::{Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEventKind};
 #[allow(unused_imports)]
-use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
 
@@ -1401,6 +1401,7 @@ impl RemoteDesktopApp {
             color: TEXT_COLOR,
             font_weight: FontWeightHint::Bold,
             max_width: Some(300.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Fullscreen indicator
@@ -1421,6 +1422,7 @@ impl RemoteDesktopApp {
                 color: GREEN,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(70.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -1477,6 +1479,7 @@ impl RemoteDesktopApp {
                 color,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(btn_width - 16.0),
+                overflow: TextOverflow::Ellipsis,
             });
             bx += btn_width + gap;
         }
@@ -1490,6 +1493,7 @@ impl RemoteDesktopApp {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(60.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         let preset = self
@@ -1513,6 +1517,7 @@ impl RemoteDesktopApp {
             color: preset.color(),
             font_weight: FontWeightHint::Bold,
             max_width: Some(104.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Separator
@@ -1590,6 +1595,7 @@ impl RemoteDesktopApp {
                     FontWeightHint::Regular
                 },
                 max_width: Some(tab_width - 24.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             tx += tab_width + 2.0;
@@ -1635,6 +1641,7 @@ impl RemoteDesktopApp {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(400.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }
@@ -1676,6 +1683,7 @@ impl RemoteDesktopApp {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(SIDEBAR_WIDTH - 2.0 * SECTION_PADDING),
+                overflow: TextOverflow::Ellipsis,
             });
             cy += 22.0;
 
@@ -1722,6 +1730,7 @@ impl RemoteDesktopApp {
                         color: CRUST,
                         font_weight: FontWeightHint::Bold,
                         max_width: Some(28.0),
+                        overflow: TextOverflow::Ellipsis,
                     });
 
                     // Display name
@@ -1733,6 +1742,7 @@ impl RemoteDesktopApp {
                         color: TEXT_COLOR,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(SIDEBAR_WIDTH - 80.0),
+                        overflow: TextOverflow::Ellipsis,
                     });
 
                     // Hostname
@@ -1744,6 +1754,7 @@ impl RemoteDesktopApp {
                         color: SUBTEXT0,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(SIDEBAR_WIDTH - 80.0),
+                        overflow: TextOverflow::Ellipsis,
                     });
 
                     cy += SIDEBAR_ITEM_HEIGHT;
@@ -1798,6 +1809,7 @@ impl RemoteDesktopApp {
                     FontWeightHint::Regular
                 },
                 max_width: Some(dtab_width - 20.0),
+                overflow: TextOverflow::Ellipsis,
             });
             dtx += dtab_width + 4.0;
         }
@@ -1895,6 +1907,7 @@ impl RemoteDesktopApp {
             color: TEXT_COLOR,
             font_weight: FontWeightHint::Bold,
             max_width: Some(pw),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 22.0;
 
@@ -1968,6 +1981,7 @@ impl RemoteDesktopApp {
             color: TEXT_COLOR,
             font_weight: FontWeightHint::Bold,
             max_width: Some(pw),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 22.0;
 
@@ -1988,6 +2002,7 @@ impl RemoteDesktopApp {
                 color: TEXT_COLOR,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(pw.min(380.0)),
+                overflow: TextOverflow::Ellipsis,
             });
             cy += FIELD_HEIGHT + 4.0;
         }
@@ -2028,6 +2043,7 @@ impl RemoteDesktopApp {
             color: TEXT_COLOR,
             font_weight: FontWeightHint::Bold,
             max_width: Some(pw),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 22.0;
 
@@ -2080,6 +2096,7 @@ impl RemoteDesktopApp {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(SIDEBAR_WIDTH - 2.0 * SECTION_PADDING),
+                overflow: TextOverflow::Ellipsis,
             });
         } else {
             let mut cy = content_y;
@@ -2114,6 +2131,7 @@ impl RemoteDesktopApp {
                     color: TEXT_COLOR,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(SIDEBAR_WIDTH - 60.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
 
                 cmds.push(RenderCommand::Text {
@@ -2124,6 +2142,7 @@ impl RemoteDesktopApp {
                     color: session.state.color(),
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(SIDEBAR_WIDTH - 60.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
 
                 cy += SIDEBAR_ITEM_HEIGHT;
@@ -2158,6 +2177,7 @@ impl RemoteDesktopApp {
                     color: TEXT_COLOR,
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(pw),
+                    overflow: TextOverflow::Ellipsis,
                 });
                 cy += 28.0;
 
@@ -2197,6 +2217,7 @@ impl RemoteDesktopApp {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(400.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }
@@ -2214,6 +2235,7 @@ impl RemoteDesktopApp {
             color: TEXT_COLOR,
             font_weight: FontWeightHint::Bold,
             max_width: Some(pw),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Action buttons
@@ -2239,6 +2261,7 @@ impl RemoteDesktopApp {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(pw - 80.0),
+                overflow: TextOverflow::Ellipsis,
             });
         } else {
             let mut ty = list_y;
@@ -2286,6 +2309,7 @@ impl RemoteDesktopApp {
             color: arrow_color,
             font_weight: FontWeightHint::Bold,
             max_width: Some(20.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Filename
@@ -2297,6 +2321,7 @@ impl RemoteDesktopApp {
             color: TEXT_COLOR,
             font_weight: FontWeightHint::Regular,
             max_width: Some(pw - 200.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Size and status
@@ -2313,6 +2338,7 @@ impl RemoteDesktopApp {
             color: transfer.state.color(),
             font_weight: FontWeightHint::Regular,
             max_width: Some(pw - 200.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Progress bar
@@ -2354,6 +2380,7 @@ impl RemoteDesktopApp {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(40.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -2370,6 +2397,7 @@ impl RemoteDesktopApp {
             color: TEXT_COLOR,
             font_weight: FontWeightHint::Bold,
             max_width: Some(pw),
+            overflow: TextOverflow::Ellipsis,
         });
 
         render_button(
@@ -2399,6 +2427,7 @@ impl RemoteDesktopApp {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(pw - 80.0),
+                overflow: TextOverflow::Ellipsis,
             });
         } else {
             let mut hy = list_y;
@@ -2456,6 +2485,7 @@ impl RemoteDesktopApp {
             color: CRUST,
             font_weight: FontWeightHint::Bold,
             max_width: Some(28.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Name and host
@@ -2467,6 +2497,7 @@ impl RemoteDesktopApp {
             color: TEXT_COLOR,
             font_weight: FontWeightHint::Regular,
             max_width: Some(300.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         cmds.push(RenderCommand::Text {
@@ -2477,6 +2508,7 @@ impl RemoteDesktopApp {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(300.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Quick connect button
@@ -2527,6 +2559,7 @@ impl RemoteDesktopApp {
             color: if active_count > 0 { GREEN } else { OVERLAY0 },
             font_weight: FontWeightHint::Regular,
             max_width: Some(100.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Profile count
@@ -2538,6 +2571,7 @@ impl RemoteDesktopApp {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(100.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Transfer count
@@ -2555,6 +2589,7 @@ impl RemoteDesktopApp {
                 color: BLUE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(100.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -2568,6 +2603,7 @@ impl RemoteDesktopApp {
                 color: YELLOW,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(300.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -2580,6 +2616,7 @@ impl RemoteDesktopApp {
             color: latency_color(self.perf_metrics.latency_ms),
             font_weight: FontWeightHint::Regular,
             max_width: Some(60.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // FPS
@@ -2591,6 +2628,7 @@ impl RemoteDesktopApp {
             color: fps_color(self.perf_metrics.frame_rate),
             font_weight: FontWeightHint::Regular,
             max_width: Some(60.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -2642,6 +2680,7 @@ impl RemoteDesktopApp {
             color: LAVENDER,
             font_weight: FontWeightHint::Bold,
             max_width: Some(ow - 20.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         let metrics: Vec<(&str, String, Color)> = vec![
@@ -2690,6 +2729,7 @@ impl RemoteDesktopApp {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(90.0),
+                overflow: TextOverflow::Ellipsis,
             });
             cmds.push(RenderCommand::Text {
                 x: ox + 100.0,
@@ -2699,6 +2739,7 @@ impl RemoteDesktopApp {
                 color: *color,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(ow - 110.0),
+                overflow: TextOverflow::Ellipsis,
             });
             my += 20.0;
         }
@@ -2726,6 +2767,7 @@ fn render_field_row(
         color: SUBTEXT0,
         font_weight: FontWeightHint::Regular,
         max_width: Some(FIELD_LABEL_WIDTH),
+        overflow: TextOverflow::Ellipsis,
     });
     cmds.push(RenderCommand::FillRect {
         x: x + FIELD_LABEL_WIDTH,
@@ -2743,6 +2785,7 @@ fn render_field_row(
         color: TEXT_COLOR,
         font_weight: FontWeightHint::Regular,
         max_width: Some(244.0),
+        overflow: TextOverflow::Ellipsis,
     });
 }
 
@@ -2781,6 +2824,7 @@ fn render_button(
         color,
         font_weight: FontWeightHint::Bold,
         max_width: Some(w - 20.0),
+        overflow: TextOverflow::Ellipsis,
     });
 }
 

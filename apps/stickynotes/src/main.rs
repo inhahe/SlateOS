@@ -21,7 +21,7 @@
 #[allow(unused_imports)]
 use guitk::color::Color;
 #[allow(unused_imports)]
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
 use guitk::text;
@@ -1302,6 +1302,7 @@ pub fn render_note(note: &Note, is_active: bool) -> Vec<RenderCommand> {
         font_size: title_font,
         font_weight: FontWeightHint::Bold,
         max_width: Some(note.width - 40.0),
+        overflow: TextOverflow::Ellipsis,
     });
 
     // Close button (X) in title bar.
@@ -1313,6 +1314,7 @@ pub fn render_note(note: &Note, is_active: bool) -> Vec<RenderCommand> {
         font_size: 14.0,
         font_weight: FontWeightHint::Bold,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
 
     // Body text — render each line.
@@ -1355,6 +1357,7 @@ pub fn render_note(note: &Note, is_active: bool) -> Vec<RenderCommand> {
             font_size: font,
             font_weight: weight,
             max_width: Some(note.width - 16.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -1430,6 +1433,7 @@ pub fn render_sidebar(store: &NoteStore, viewport_height: f32) -> Vec<RenderComm
         font_size: 13.0,
         font_weight: FontWeightHint::Regular,
         max_width: Some(SIDEBAR_WIDTH - 20.0),
+        overflow: TextOverflow::Ellipsis,
     });
 
     // Note list.
@@ -1485,6 +1489,7 @@ pub fn render_sidebar(store: &NoteStore, viewport_height: f32) -> Vec<RenderComm
             font_size: SIDEBAR_TITLE_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(text_room),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Preview.
@@ -1502,6 +1507,7 @@ pub fn render_sidebar(store: &NoteStore, viewport_height: f32) -> Vec<RenderComm
             font_size: SIDEBAR_PREVIEW_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(text_room),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Separator line.
@@ -1600,6 +1606,7 @@ fn render_toolbar(
         font_size: 13.0,
         font_weight: FontWeightHint::Bold,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
 
     // Note count.
@@ -1616,6 +1623,7 @@ fn render_toolbar(
         font_size: 12.0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
 
     // Snap-to-grid indicator.
@@ -1636,6 +1644,7 @@ fn render_toolbar(
         font_size: 12.0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
 
     // Sidebar toggle.
@@ -1656,6 +1665,7 @@ fn render_toolbar(
         font_size: 12.0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
 
     cmds

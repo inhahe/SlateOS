@@ -21,7 +21,7 @@
 
 use guitk::color::Color;
 use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
 // ── Catppuccin Mocha palette ────────────────────────────────────────
@@ -707,6 +707,7 @@ impl Yahtzee {
             font_size: TITLE_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Turn and roll info.
@@ -729,6 +730,7 @@ impl Yahtzee {
             font_size: HEADER_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // High score.
@@ -740,6 +742,7 @@ impl Yahtzee {
             font_size: HEADER_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Render dice.
@@ -813,6 +816,7 @@ impl Yahtzee {
                     font_size: DICE_LABEL_FONT_SIZE,
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
             }
 
@@ -825,6 +829,7 @@ impl Yahtzee {
                 font_size: DICE_LABEL_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
     }
@@ -914,6 +919,7 @@ impl Yahtzee {
             font_size: BUTTON_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -936,6 +942,7 @@ impl Yahtzee {
                 font_size: INFO_FONT_SIZE - 2.0,
                 font_weight: FontWeightHint::Light,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
     }
@@ -973,6 +980,7 @@ impl Yahtzee {
             font_size: SCORE_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         cmds.push(RenderCommand::Text {
             x: sc_x + SCORECARD_WIDTH - 80.0,
@@ -982,6 +990,7 @@ impl Yahtzee {
             font_size: SCORE_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         let mut row_y = sc_y + SCORECARD_ROW_HEIGHT;
@@ -1009,6 +1018,7 @@ impl Yahtzee {
             font_size: SCORE_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         cmds.push(RenderCommand::Text {
             x: sc_x + SCORECARD_WIDTH - 80.0,
@@ -1022,6 +1032,7 @@ impl Yahtzee {
             font_size: SCORE_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         row_y += SCORECARD_ROW_HEIGHT;
 
@@ -1042,6 +1053,7 @@ impl Yahtzee {
             font_size: SCORE_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         cmds.push(RenderCommand::Text {
             x: sc_x + SCORECARD_WIDTH - 80.0,
@@ -1055,6 +1067,7 @@ impl Yahtzee {
             font_size: SCORE_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         row_y += SCORECARD_ROW_HEIGHT;
 
@@ -1093,6 +1106,7 @@ impl Yahtzee {
                 font_size: SCORE_FONT_SIZE,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             cmds.push(RenderCommand::Text {
                 x: sc_x + SCORECARD_WIDTH - 80.0,
@@ -1102,6 +1116,7 @@ impl Yahtzee {
                 font_size: SCORE_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
     }
@@ -1160,6 +1175,7 @@ impl Yahtzee {
                 FontWeightHint::Regular
             },
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Score value.
@@ -1186,6 +1202,7 @@ impl Yahtzee {
             font_size: SCORE_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -1213,6 +1230,7 @@ impl Yahtzee {
             font_size: SCORE_FONT_SIZE + 2.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         cmds.push(RenderCommand::Text {
@@ -1223,6 +1241,7 @@ impl Yahtzee {
             font_size: SCORE_FONT_SIZE + 2.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 

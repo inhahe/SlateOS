@@ -16,7 +16,7 @@
 
 use crate::color::Color;
 use crate::event::{Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
-use crate::render::{FontWeightHint, RenderCommand};
+use crate::render::{FontWeightHint, RenderCommand, TextOverflow};
 use crate::style::CornerRadii;
 
 // ============================================================================
@@ -746,6 +746,7 @@ impl ColorPicker {
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Current color swatch
@@ -775,6 +776,7 @@ impl ColorPicker {
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         render_checkerboard(cmds, x, orig_y, PREVIEW_SIZE, PREVIEW_SIZE / 2.0);
         cmds.push(RenderCommand::FillRect {
@@ -1108,6 +1110,7 @@ impl ColorPickerDialog {
             font_size: 13.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         let content_y = 36.0;
@@ -1224,6 +1227,7 @@ impl ColorPickerDialog {
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -1237,6 +1241,7 @@ impl ColorPickerDialog {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Input field
@@ -1275,6 +1280,7 @@ impl ColorPickerDialog {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         // Hex value
         cmds.push(RenderCommand::Text {
@@ -1285,6 +1291,7 @@ impl ColorPickerDialog {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(input_width - 20.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -1313,6 +1320,7 @@ impl ColorPickerDialog {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -1344,6 +1352,7 @@ impl ColorPickerDialog {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // HSV tab
@@ -1373,6 +1382,7 @@ impl ColorPickerDialog {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -1460,6 +1470,7 @@ impl ColorPickerDialog {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Track background
@@ -1514,6 +1525,7 @@ impl ColorPickerDialog {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -1540,6 +1552,7 @@ impl ColorPickerDialog {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Rainbow gradient track
@@ -1605,6 +1618,7 @@ impl ColorPickerDialog {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -1624,6 +1638,7 @@ impl ColorPickerDialog {
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         let swatch_y = y + 14.0;
@@ -1680,6 +1695,7 @@ impl ColorPickerDialog {
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         let swatch_y = y + 14.0;
@@ -1718,6 +1734,7 @@ impl ColorPickerDialog {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Cancel button
@@ -1738,6 +1755,7 @@ impl ColorPickerDialog {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 

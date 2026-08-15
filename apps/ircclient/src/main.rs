@@ -4,7 +4,7 @@
 //! user tracking, message history, and a multi-panel chat UI.
 
 use guitk::color::Color;
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
 // ============================================================================
@@ -1272,6 +1272,7 @@ impl IrcClientApp {
             text: format!("{} - {}", self.server_config.display_address(), self.connection.label()),
             font_size: 12.0, color: TEXT, font_weight: FontWeightHint::Regular,
             max_width: Some(300.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Nick display
@@ -1280,6 +1281,7 @@ impl IrcClientApp {
             text: format!("Nick: {}", self.my_nick),
             font_size: 12.0, color: BLUE, font_weight: FontWeightHint::Bold,
             max_width: Some(180.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Topic (if in channel)
@@ -1290,6 +1292,7 @@ impl IrcClientApp {
                     text: ch.topic.clone(),
                     font_size: 11.0, color: SUBTEXT0, font_weight: FontWeightHint::Regular,
                     max_width: Some(self.width - 600.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
 
@@ -1322,6 +1325,7 @@ impl IrcClientApp {
             font_size: 12.0,
             color: if is_active { TEXT } else { SUBTEXT0 },
             font_weight: FontWeightHint::Bold, max_width: Some(sidebar_w - 24.0),
+overflow: TextOverflow::Ellipsis,
         });
 
         row_y += 30.0;
@@ -1332,6 +1336,7 @@ impl IrcClientApp {
             text: "CHANNELS".to_string(),
             font_size: 9.0, color: OVERLAY0, font_weight: FontWeightHint::Bold,
             max_width: Some(sidebar_w - 24.0),
+            overflow: TextOverflow::Ellipsis,
         });
         row_y += 16.0;
 
@@ -1356,6 +1361,7 @@ impl IrcClientApp {
                 font_size: 11.0, color: name_color,
                 font_weight: if ch.has_unread() { FontWeightHint::Bold } else { FontWeightHint::Regular },
                 max_width: Some(sidebar_w - 50.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Unread badge
@@ -1376,6 +1382,7 @@ impl IrcClientApp {
                     text: badge_text, font_size: 9.0,
                     color: if ch.unread_mentions > 0 { CRUST } else { TEXT },
                     font_weight: FontWeightHint::Bold, max_width: Some(20.0),
+overflow: TextOverflow::Ellipsis,
                 });
             }
 
@@ -1389,6 +1396,7 @@ impl IrcClientApp {
             text: "DIRECT MESSAGES".to_string(),
             font_size: 9.0, color: OVERLAY0, font_weight: FontWeightHint::Bold,
             max_width: Some(sidebar_w - 24.0),
+            overflow: TextOverflow::Ellipsis,
         });
         row_y += 16.0;
 
@@ -1408,6 +1416,7 @@ impl IrcClientApp {
                 color: if pm.unread_count > 0 { TEXT } else if is_active { BLUE } else { SUBTEXT0 },
                 font_weight: if pm.unread_count > 0 { FontWeightHint::Bold } else { FontWeightHint::Regular },
                 max_width: Some(sidebar_w - 24.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             row_y += 26.0;
@@ -1448,6 +1457,7 @@ impl IrcClientApp {
                 text: "No messages".to_string(),
                 font_size: 14.0, color: OVERLAY0, font_weight: FontWeightHint::Regular,
                 max_width: Some(200.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -1472,6 +1482,7 @@ impl IrcClientApp {
                 text: msg.timestamp.clone(),
                 font_size: 10.0, color: OVERLAY0, font_weight: FontWeightHint::Regular,
                 max_width: Some(60.0),
+                overflow: TextOverflow::Ellipsis,
             });
             tx += 60.0;
         }
@@ -1484,6 +1495,7 @@ impl IrcClientApp {
                     text: format!("<{}>", msg.sender),
                     font_size: 11.0, color: nick_color, font_weight: FontWeightHint::Bold,
                     max_width: Some(120.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
                 tx += 100.0;
                 cmds.push(RenderCommand::Text {
@@ -1491,6 +1503,7 @@ impl IrcClientApp {
                     text: msg.text.clone(),
                     font_size: 11.0, color: TEXT, font_weight: FontWeightHint::Regular,
                     max_width: Some(_w - tx + x),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
             ChatMessageKind::Action => {
@@ -1499,6 +1512,7 @@ impl IrcClientApp {
                     text: format!("* {} {}", msg.sender, msg.text),
                     font_size: 11.0, color: MAUVE, font_weight: FontWeightHint::Regular,
                     max_width: Some(_w - tx + x),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
             ChatMessageKind::Notice => {
@@ -1507,6 +1521,7 @@ impl IrcClientApp {
                     text: format!("-{}- {}", msg.sender, msg.text),
                     font_size: 11.0, color: PEACH, font_weight: FontWeightHint::Regular,
                     max_width: Some(_w - tx + x),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
             ChatMessageKind::Join => {
@@ -1515,6 +1530,7 @@ impl IrcClientApp {
                     text: format!("--> {} has joined", msg.sender),
                     font_size: 10.0, color: GREEN, font_weight: FontWeightHint::Regular,
                     max_width: Some(_w - tx + x),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
             ChatMessageKind::Part { reason } => {
@@ -1524,6 +1540,7 @@ impl IrcClientApp {
                     text: format!("<-- {} has left{reason_str}", msg.sender),
                     font_size: 10.0, color: RED, font_weight: FontWeightHint::Regular,
                     max_width: Some(_w - tx + x),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
             ChatMessageKind::Quit { reason } => {
@@ -1533,6 +1550,7 @@ impl IrcClientApp {
                     text: format!("<-- {} has quit{reason_str}", msg.sender),
                     font_size: 10.0, color: RED, font_weight: FontWeightHint::Regular,
                     max_width: Some(_w - tx + x),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
             ChatMessageKind::Kick { by, reason } => {
@@ -1541,6 +1559,7 @@ impl IrcClientApp {
                     text: format!("*** {} was kicked by {} ({})", msg.sender, by, reason),
                     font_size: 10.0, color: RED, font_weight: FontWeightHint::Bold,
                     max_width: Some(_w - tx + x),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
             ChatMessageKind::Nick { old } => {
@@ -1549,6 +1568,7 @@ impl IrcClientApp {
                     text: format!("*** {old} is now known as {}", msg.sender),
                     font_size: 10.0, color: TEAL, font_weight: FontWeightHint::Regular,
                     max_width: Some(_w - tx + x),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
             ChatMessageKind::Topic { by } => {
@@ -1557,6 +1577,7 @@ impl IrcClientApp {
                     text: format!("*** {by} changed the topic to: {}", msg.text),
                     font_size: 10.0, color: YELLOW, font_weight: FontWeightHint::Regular,
                     max_width: Some(_w - tx + x),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
             ChatMessageKind::Mode { by, mode } => {
@@ -1565,6 +1586,7 @@ impl IrcClientApp {
                     text: format!("*** {by} sets mode {mode}"),
                     font_size: 10.0, color: TEAL, font_weight: FontWeightHint::Regular,
                     max_width: Some(_w - tx + x),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
             ChatMessageKind::System => {
@@ -1573,6 +1595,7 @@ impl IrcClientApp {
                     text: msg.text.clone(),
                     font_size: 10.0, color: SUBTEXT0, font_weight: FontWeightHint::Regular,
                     max_width: Some(_w - tx + x),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
         }
@@ -1595,6 +1618,7 @@ impl IrcClientApp {
                 text: format!("Users ({})", ch.user_count()),
                 font_size: 10.0, color: SUBTEXT0, font_weight: FontWeightHint::Bold,
                 max_width: Some(w - 16.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             let sorted = ch.sorted_users();
@@ -1609,6 +1633,7 @@ impl IrcClientApp {
                         text: user.prefix.label().to_string(),
                         font_size: 9.0, color: OVERLAY0, font_weight: FontWeightHint::Bold,
                         max_width: Some(w - 16.0),
+                        overflow: TextOverflow::Ellipsis,
                     });
                     row_y += 14.0;
                     current_prefix = Some(user.prefix);
@@ -1620,6 +1645,7 @@ impl IrcClientApp {
                     text: user.display_nick(),
                     font_size: 11.0, color,
                     font_weight: FontWeightHint::Regular, max_width: Some(w - 24.0),
+overflow: TextOverflow::Ellipsis,
                 });
                 row_y += 18.0;
             }
@@ -1655,6 +1681,7 @@ impl IrcClientApp {
             x: x + 16.0, y: y + 12.0,
             text: display_text, font_size: 12.0, color: text_color,
             font_weight: FontWeightHint::Regular, max_width: Some(w - 32.0),
+overflow: TextOverflow::Ellipsis,
         });
     }
 }

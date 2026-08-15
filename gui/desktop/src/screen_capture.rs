@@ -14,7 +14,7 @@
 //! - Recording indicator overlay
 
 use guitk::color::Color;
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
 // ============================================================================
@@ -674,6 +674,7 @@ pub fn render_recording_indicator(recorder: &ScreenRecorder, x: f32, y: f32) -> 
         color: MOCHA_TEXT,
         font_weight: FontWeightHint::Bold,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
 
     // State label.
@@ -686,6 +687,7 @@ pub fn render_recording_indicator(recorder: &ScreenRecorder, x: f32, y: f32) -> 
         color: MOCHA_SUBTEXT0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
 
     cmds
@@ -720,6 +722,7 @@ pub fn render_recording_controls(
         color: MOCHA_TEXT,
         font_weight: FontWeightHint::Bold,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
 
     let btn_y = y + 28.0;
@@ -744,6 +747,7 @@ pub fn render_recording_controls(
                 color: MOCHA_BASE,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
         RecordingState::Recording => {
@@ -764,6 +768,7 @@ pub fn render_recording_controls(
                 color: MOCHA_BASE,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             // Stop button.
@@ -783,6 +788,7 @@ pub fn render_recording_controls(
                 color: MOCHA_TEXT,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
         RecordingState::Paused => {
@@ -803,6 +809,7 @@ pub fn render_recording_controls(
                 color: MOCHA_BASE,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             // Stop button.
@@ -822,6 +829,7 @@ pub fn render_recording_controls(
                 color: MOCHA_TEXT,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
         _ => {
@@ -833,6 +841,7 @@ pub fn render_recording_controls(
                 color: MOCHA_PEACH,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
     }
@@ -852,6 +861,7 @@ pub fn render_recording_controls(
             color: MOCHA_SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         cmds.push(RenderCommand::Text {
             x: stats_x,
@@ -865,6 +875,7 @@ pub fn render_recording_controls(
             color: MOCHA_SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         cmds.push(RenderCommand::Text {
             x: stats_x,
@@ -874,6 +885,7 @@ pub fn render_recording_controls(
             color: MOCHA_SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 

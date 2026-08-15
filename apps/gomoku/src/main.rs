@@ -23,7 +23,7 @@
 
 use guitk::color::Color;
 use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
 // ── Catppuccin Mocha palette ────────────────────────────────────────
@@ -842,6 +842,7 @@ impl GomokuApp {
             font_size: TITLE_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // ── Turn indicator next to title ────────────────────────────
@@ -873,6 +874,7 @@ impl GomokuApp {
             font_size: INFO_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // ── Board background (wooden color) ─────────────────────────
@@ -951,6 +953,7 @@ impl GomokuApp {
                 font_size: SMALL_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             cmds.push(RenderCommand::Text {
                 x,
@@ -960,6 +963,7 @@ impl GomokuApp {
                 font_size: SMALL_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
         // Row labels (1-15, bottom to top like Go convention)
@@ -975,6 +979,7 @@ impl GomokuApp {
                 font_size: SMALL_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             cmds.push(RenderCommand::Text {
                 x: BOARD_OFFSET_X + board_pixel_size + board_margin - 16.0,
@@ -984,6 +989,7 @@ impl GomokuApp {
                 font_size: SMALL_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 
@@ -1103,6 +1109,7 @@ impl GomokuApp {
             font_size: INFO_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Separator line
@@ -1124,6 +1131,7 @@ impl GomokuApp {
             font_size: LABEL_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Current turn
@@ -1140,6 +1148,7 @@ impl GomokuApp {
             font_size: LABEL_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Scores section
@@ -1151,6 +1160,7 @@ impl GomokuApp {
             font_size: INFO_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         cmds.push(RenderCommand::Line {
@@ -1170,6 +1180,7 @@ impl GomokuApp {
             font_size: LABEL_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         cmds.push(RenderCommand::Text {
@@ -1180,6 +1191,7 @@ impl GomokuApp {
             font_size: LABEL_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         cmds.push(RenderCommand::Text {
@@ -1190,6 +1202,7 @@ impl GomokuApp {
             font_size: LABEL_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Controls section
@@ -1201,6 +1214,7 @@ impl GomokuApp {
             font_size: INFO_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         cmds.push(RenderCommand::Line {
@@ -1229,6 +1243,7 @@ impl GomokuApp {
                 font_size: SMALL_FONT_SIZE,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             cmds.push(RenderCommand::Text {
                 x: px + 100.0,
@@ -1238,6 +1253,7 @@ impl GomokuApp {
                 font_size: SMALL_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 
@@ -1272,6 +1288,7 @@ impl GomokuApp {
                 font_size: INFO_FONT_SIZE,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 

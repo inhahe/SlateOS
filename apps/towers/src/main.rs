@@ -19,7 +19,7 @@
 
 use guitk::color::Color;
 use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
 // ── Catppuccin Mocha palette ──
@@ -276,6 +276,7 @@ impl TowersOfHanoi {
             font_size: 24.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Disk count and moves
@@ -293,6 +294,7 @@ impl TowersOfHanoi {
             font_size: 14.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Pegs area
@@ -322,6 +324,7 @@ impl TowersOfHanoi {
                     FontWeightHint::Regular
                 },
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             // Peg rod
@@ -394,6 +397,7 @@ impl TowersOfHanoi {
                     font_size: 12.0,
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
             }
         }
@@ -432,6 +436,7 @@ impl TowersOfHanoi {
                 font_size: 12.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 
@@ -455,6 +460,7 @@ impl TowersOfHanoi {
                 font_size: 18.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             cmds.push(RenderCommand::Text {
                 x: 50.0,
@@ -464,6 +470,7 @@ impl TowersOfHanoi {
                 font_size: 13.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 
@@ -488,6 +495,7 @@ impl TowersOfHanoi {
             font_size: 15.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         for i in 0..6 {
@@ -517,6 +525,7 @@ impl TowersOfHanoi {
                     FontWeightHint::Regular
                 },
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 
@@ -542,6 +551,7 @@ impl TowersOfHanoi {
                 font_size: 15.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             let controls = [
@@ -563,6 +573,7 @@ impl TowersOfHanoi {
                     font_size: 11.0,
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
                 cmds.push(RenderCommand::Text {
                     x: help_x + 85.0,
@@ -572,6 +583,7 @@ impl TowersOfHanoi {
                     font_size: 11.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
             }
         } else {
@@ -583,6 +595,7 @@ impl TowersOfHanoi {
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 

@@ -11,7 +11,7 @@
 //! - Account activity log
 
 use guitk::color::Color;
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
 // ============================================================================
@@ -703,6 +703,7 @@ impl AccountSettingsUI {
             color: MOCHA_TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width - 32.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Tab bar
@@ -738,6 +739,7 @@ impl AccountSettingsUI {
                     FontWeightHint::Regular
                 },
                 max_width: Some(110.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -784,6 +786,7 @@ impl AccountSettingsUI {
                 color: MOCHA_YELLOW,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 48.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -820,6 +823,7 @@ impl AccountSettingsUI {
                 color: MOCHA_MANTLE,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(avatar_size),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Name and username
@@ -832,6 +836,7 @@ impl AccountSettingsUI {
                 color: MOCHA_TEXT,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(width - avatar_size - 32.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             cmds.push(RenderCommand::Text {
@@ -842,6 +847,7 @@ impl AccountSettingsUI {
                 color: MOCHA_SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - avatar_size - 32.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Account type badge
@@ -862,6 +868,7 @@ impl AccountSettingsUI {
                 color: MOCHA_MANTLE,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(80.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Info rows
@@ -898,6 +905,7 @@ impl AccountSettingsUI {
             color: MOCHA_TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
+            overflow: TextOverflow::Ellipsis,
         });
 
         let mut row_y = y + 28.0;
@@ -940,6 +948,7 @@ impl AccountSettingsUI {
                 color: MOCHA_MANTLE,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(av_size),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Name
@@ -951,6 +960,7 @@ impl AccountSettingsUI {
                 color: MOCHA_TEXT,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 180.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Type badge
@@ -962,6 +972,7 @@ impl AccountSettingsUI {
                 color: acct.account_type.badge_color(),
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(100.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Login status
@@ -983,6 +994,7 @@ impl AccountSettingsUI {
                 color: status_color,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(75.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             row_y += 40.0;
@@ -1005,6 +1017,7 @@ impl AccountSettingsUI {
             color: MOCHA_MANTLE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(120.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -1025,6 +1038,7 @@ impl AccountSettingsUI {
                 color: MOCHA_TEXT,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(width),
+                overflow: TextOverflow::Ellipsis,
             });
 
             let mut row_y = y + 28.0;
@@ -1083,6 +1097,7 @@ impl AccountSettingsUI {
                 color: MOCHA_TEXT,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(140.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }
@@ -1103,6 +1118,7 @@ impl AccountSettingsUI {
             color: MOCHA_TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
+            overflow: TextOverflow::Ellipsis,
         });
 
         let mut row_y = y + 28.0;
@@ -1117,6 +1133,7 @@ impl AccountSettingsUI {
                 color: MOCHA_OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width),
+                overflow: TextOverflow::Ellipsis,
             });
             return;
         }
@@ -1136,6 +1153,7 @@ impl AccountSettingsUI {
                 color: MOCHA_SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width),
+                overflow: TextOverflow::Ellipsis,
             });
 
             row_y += 20.0;
@@ -1159,6 +1177,7 @@ impl AccountSettingsUI {
             color: MOCHA_SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width * 0.4),
+            overflow: TextOverflow::Ellipsis,
         });
         cmds.push(RenderCommand::Text {
             x: x + width * 0.42,
@@ -1168,6 +1187,7 @@ impl AccountSettingsUI {
             color: MOCHA_TEXT,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width * 0.55),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -1188,6 +1208,7 @@ impl AccountSettingsUI {
             color: MOCHA_TEXT,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - 60.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Toggle switch

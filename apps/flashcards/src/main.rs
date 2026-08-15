@@ -22,7 +22,7 @@
 
 use guitk::color::Color;
 use guitk::kv;
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::table::{Column, Fit, Table};
 use guitk::text;
@@ -1289,6 +1289,7 @@ impl FlashcardsApp {
             color: BLUE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(160.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // View indicator
@@ -1307,6 +1308,7 @@ impl FlashcardsApp {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(100.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Day counter
@@ -1318,6 +1320,7 @@ impl FlashcardsApp {
             color: TEAL,
             font_weight: FontWeightHint::Regular,
             max_width: Some(100.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Header separator
@@ -1349,6 +1352,7 @@ impl FlashcardsApp {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(self.width - 32.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -1364,6 +1368,7 @@ impl FlashcardsApp {
             color: TEXT_COLOR,
             font_weight: FontWeightHint::Bold,
             max_width: Some(200.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         cmds.push(RenderCommand::Text {
@@ -1374,6 +1379,7 @@ impl FlashcardsApp {
             color: OVERLAY0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(content_w),
+            overflow: TextOverflow::Ellipsis,
         });
 
         let list_top = top + 52.0;
@@ -1413,6 +1419,7 @@ impl FlashcardsApp {
                 color: TEXT_COLOR,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(content_w - 200.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             cmds.push(RenderCommand::Text {
@@ -1428,6 +1435,7 @@ impl FlashcardsApp {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(content_w - 48.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Due count badge
@@ -1450,6 +1458,7 @@ impl FlashcardsApp {
                     color: CRUST,
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(60.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
 
@@ -1462,6 +1471,7 @@ impl FlashcardsApp {
                     color: OVERLAY0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(content_w - 48.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
         }
@@ -1485,6 +1495,7 @@ impl FlashcardsApp {
             color: TEXT_COLOR,
             font_weight: FontWeightHint::Bold,
             max_width: Some(400.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Shortcuts
@@ -1496,6 +1507,7 @@ impl FlashcardsApp {
             color: OVERLAY0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(content_w),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Search bar
@@ -1526,6 +1538,7 @@ impl FlashcardsApp {
             color: search_color,
             font_weight: FontWeightHint::Regular,
             max_width: Some(content_w * 0.6 - 16.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Tag filter pill. The pill used to be a flat 100px at a proportional
@@ -1575,6 +1588,7 @@ impl FlashcardsApp {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(content_w),
+                overflow: TextOverflow::Ellipsis,
             });
             return;
         }
@@ -1701,6 +1715,7 @@ impl FlashcardsApp {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(150.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }
@@ -1723,6 +1738,7 @@ impl FlashcardsApp {
             color: TEXT_COLOR,
             font_weight: FontWeightHint::Bold,
             max_width: Some(200.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         cmds.push(RenderCommand::Text {
@@ -1733,6 +1749,7 @@ impl FlashcardsApp {
             color: OVERLAY0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(300.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Front field
@@ -1745,6 +1762,7 @@ impl FlashcardsApp {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(200.0),
+            overflow: TextOverflow::Ellipsis,
         });
         cmds.push(RenderCommand::FillRect {
             x: Self::PADDING + 16.0,
@@ -1770,6 +1788,7 @@ impl FlashcardsApp {
             },
             font_weight: FontWeightHint::Regular,
             max_width: Some(field_w - 16.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Back field
@@ -1782,6 +1801,7 @@ impl FlashcardsApp {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(200.0),
+            overflow: TextOverflow::Ellipsis,
         });
         cmds.push(RenderCommand::FillRect {
             x: Self::PADDING + 16.0,
@@ -1807,6 +1827,7 @@ impl FlashcardsApp {
             },
             font_weight: FontWeightHint::Regular,
             max_width: Some(field_w - 16.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Tags field
@@ -1819,6 +1840,7 @@ impl FlashcardsApp {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(200.0),
+            overflow: TextOverflow::Ellipsis,
         });
         cmds.push(RenderCommand::FillRect {
             x: Self::PADDING + 16.0,
@@ -1844,6 +1866,7 @@ impl FlashcardsApp {
             },
             font_weight: FontWeightHint::Regular,
             max_width: Some(field_w - 16.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -1902,6 +1925,7 @@ impl FlashcardsApp {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(content_w),
+            overflow: TextOverflow::Ellipsis,
         });
 
         if session.is_complete() {
@@ -1956,6 +1980,7 @@ impl FlashcardsApp {
             color: side_color,
             font_weight: FontWeightHint::Bold,
             max_width: Some(100.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Card text
@@ -1972,6 +1997,7 @@ impl FlashcardsApp {
             color: TEXT_COLOR,
             font_weight: FontWeightHint::Regular,
             max_width: Some(content_w - 160.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Tags on card
@@ -1984,6 +2010,7 @@ impl FlashcardsApp {
                 color: MAUVE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(content_w - 160.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -2014,6 +2041,7 @@ impl FlashcardsApp {
                     color: CRUST,
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(btn_w - 20.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
         } else {
@@ -2036,6 +2064,7 @@ impl FlashcardsApp {
                 color: CRUST,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(prompt_w - 40.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }
@@ -2066,6 +2095,7 @@ impl FlashcardsApp {
             color: GREEN,
             font_weight: FontWeightHint::Bold,
             max_width: Some(200.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         cmds.push(RenderCommand::Text {
@@ -2076,6 +2106,7 @@ impl FlashcardsApp {
             color: TEXT_COLOR,
             font_weight: FontWeightHint::Regular,
             max_width: Some(200.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         cmds.push(RenderCommand::Text {
@@ -2086,6 +2117,7 @@ impl FlashcardsApp {
             color: TEXT_COLOR,
             font_weight: FontWeightHint::Regular,
             max_width: Some(200.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Rating breakdown
@@ -2101,6 +2133,7 @@ impl FlashcardsApp {
                 color: *color,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(150.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -2112,6 +2145,7 @@ impl FlashcardsApp {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(200.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -2132,6 +2166,7 @@ impl FlashcardsApp {
             color: TEXT_COLOR,
             font_weight: FontWeightHint::Bold,
             max_width: Some(400.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         cmds.push(RenderCommand::Text {
@@ -2142,6 +2177,7 @@ impl FlashcardsApp {
             color: OVERLAY0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(100.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         let stats_y = top + 56.0;
@@ -2176,6 +2212,7 @@ impl FlashcardsApp {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(col_w - 24.0),
+                overflow: TextOverflow::Ellipsis,
             });
             cmds.push(RenderCommand::Text {
                 x: x + 12.0,
@@ -2185,6 +2222,7 @@ impl FlashcardsApp {
                 color: *color,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(col_w - 24.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -2228,6 +2266,7 @@ impl FlashcardsApp {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(col_w - 24.0),
+                overflow: TextOverflow::Ellipsis,
             });
             cmds.push(RenderCommand::Text {
                 x: x + 12.0,
@@ -2237,6 +2276,7 @@ impl FlashcardsApp {
                 color: *color,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(col_w - 24.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -2250,6 +2290,7 @@ impl FlashcardsApp {
             color: TEXT_COLOR,
             font_weight: FontWeightHint::Bold,
             max_width: Some(200.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         cmds.push(RenderCommand::Line {
@@ -2303,6 +2344,7 @@ impl FlashcardsApp {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(180.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             let w = (*count as f32 / max_count as f32) * bar_max_w;
@@ -2325,6 +2367,7 @@ impl FlashcardsApp {
                 color: TEXT_COLOR,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(40.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }

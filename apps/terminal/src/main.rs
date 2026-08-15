@@ -25,7 +25,7 @@ use guitk::color::Color;
 #[allow(unused_imports)]
 use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
 #[allow(unused_imports)]
-use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 
 use std::collections::VecDeque;
 
@@ -2027,6 +2027,7 @@ impl TerminalState {
                         font_size: self.config.font_size,
                         font_weight,
                         max_width: Some(cw),
+                        overflow: TextOverflow::Ellipsis,
                     });
                 }
 
@@ -2081,6 +2082,7 @@ impl TerminalState {
                                     font_size: self.config.font_size,
                                     font_weight: FontWeightHint::Regular,
                                     max_width: Some(cw),
+                                    overflow: TextOverflow::Ellipsis,
                                 });
                             }
                 }

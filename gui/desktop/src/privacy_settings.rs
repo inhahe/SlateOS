@@ -5,7 +5,7 @@
 //! telemetry opt-out, and app background access controls.
 
 use guitk::color::Color;
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
 // ============================================================================
@@ -467,6 +467,7 @@ impl PrivacySettingsUI {
             color: TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: Some(inner),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 32.0;
 
@@ -495,6 +496,7 @@ impl PrivacySettingsUI {
                     FontWeightHint::Regular
                 },
                 max_width: Some(tab_w - 16.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
         cy += 38.0;
@@ -527,6 +529,7 @@ impl PrivacySettingsUI {
                 color: LAVENDER,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(width),
+                overflow: TextOverflow::Ellipsis,
             });
             y += 24.0;
             cmds.push(RenderCommand::Text {
@@ -537,6 +540,7 @@ impl PrivacySettingsUI {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 8.0),
+                overflow: TextOverflow::Ellipsis,
             });
             y += 20.0;
 
@@ -556,6 +560,7 @@ impl PrivacySettingsUI {
                     color: OVERLAY0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(width),
+                    overflow: TextOverflow::Ellipsis,
                 });
             } else {
                 for app in &apps {
@@ -575,6 +580,7 @@ impl PrivacySettingsUI {
                         color: TEXT,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(width * 0.5),
+                        overflow: TextOverflow::Ellipsis,
                     });
                     cmds.push(RenderCommand::Text {
                         x: x + width * 0.55,
@@ -584,6 +590,7 @@ impl PrivacySettingsUI {
                         color: app.state.color(),
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(width * 0.2),
+                        overflow: TextOverflow::Ellipsis,
                     });
                     cmds.push(RenderCommand::Text {
                         x: x + width * 0.78,
@@ -593,6 +600,7 @@ impl PrivacySettingsUI {
                         color: OVERLAY0,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(width * 0.2),
+                        overflow: TextOverflow::Ellipsis,
                     });
                     y += 36.0;
                 }
@@ -618,6 +626,7 @@ impl PrivacySettingsUI {
                     color: TEXT,
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(width * 0.5),
+                    overflow: TextOverflow::Ellipsis,
                 });
 
                 let status = if !enabled {
@@ -635,6 +644,7 @@ impl PrivacySettingsUI {
                     color: if enabled { GREEN } else { RED },
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(width * 0.4),
+                    overflow: TextOverflow::Ellipsis,
                 });
                 cmds.push(RenderCommand::Text {
                     x: x + 8.0,
@@ -644,6 +654,7 @@ impl PrivacySettingsUI {
                     color: OVERLAY0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(width - 16.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
 
                 let _ = i; // used in hit-test
@@ -663,6 +674,7 @@ impl PrivacySettingsUI {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width),
+                overflow: TextOverflow::Ellipsis,
             });
             return;
         }
@@ -675,6 +687,7 @@ impl PrivacySettingsUI {
             color: TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
+            overflow: TextOverflow::Ellipsis,
         });
         y += 24.0;
 
@@ -706,6 +719,7 @@ impl PrivacySettingsUI {
                 color,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 16.0),
+                overflow: TextOverflow::Ellipsis,
             });
             y += 32.0;
         }
@@ -720,6 +734,7 @@ impl PrivacySettingsUI {
             color: LAVENDER,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
+            overflow: TextOverflow::Ellipsis,
         });
         y += 24.0;
 
@@ -746,6 +761,7 @@ impl PrivacySettingsUI {
                     FontWeightHint::Regular
                 },
                 max_width: Some(width - 16.0),
+                overflow: TextOverflow::Ellipsis,
             });
             y += 32.0;
         }
@@ -759,6 +775,7 @@ impl PrivacySettingsUI {
             color: LAVENDER,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
+            overflow: TextOverflow::Ellipsis,
         });
         y += 24.0;
 
@@ -806,6 +823,7 @@ impl PrivacySettingsUI {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width * 0.65),
+            overflow: TextOverflow::Ellipsis,
         });
         let tx = x + width - 48.0;
         let bg = if on { GREEN } else { SURFACE1 };

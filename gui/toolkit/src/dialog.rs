@@ -23,7 +23,7 @@
 
 use crate::color::Color;
 use crate::event::{Key, KeyEvent};
-use crate::render::{FontWeightHint, RenderCommand};
+use crate::render::{FontWeightHint, RenderCommand, TextOverflow};
 use crate::style::CornerRadii;
 
 // --- Catppuccin Mocha palette ---
@@ -661,6 +661,7 @@ impl FileDialog {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         x += 24.0;
 
@@ -678,6 +679,7 @@ impl FileDialog {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         x += 24.0;
 
@@ -690,6 +692,7 @@ impl FileDialog {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         x += 28.0;
 
@@ -711,6 +714,7 @@ impl FileDialog {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(addr_width - 12.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -735,6 +739,7 @@ impl FileDialog {
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(SIDEBAR_WIDTH - PADDING * 2.0 - 4.0),
+                overflow: TextOverflow::Ellipsis,
             });
             y += ROW_HEIGHT;
         }
@@ -780,6 +785,7 @@ impl FileDialog {
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         cmds.push(RenderCommand::Text {
             x: size_col_x,
@@ -789,6 +795,7 @@ impl FileDialog {
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         cmds.push(RenderCommand::Text {
             x: date_col_x,
@@ -798,6 +805,7 @@ impl FileDialog {
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Sort indicator on active column
@@ -815,6 +823,7 @@ impl FileDialog {
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // File entries
@@ -854,6 +863,7 @@ impl FileDialog {
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             // Name
@@ -871,6 +881,7 @@ impl FileDialog {
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(max_name_width),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Size (human-readable, only for files)
@@ -883,6 +894,7 @@ impl FileDialog {
                     font_size: FONT_SIZE_SMALL,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
             }
 
@@ -895,6 +907,7 @@ impl FileDialog {
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 
@@ -958,6 +971,7 @@ impl FileDialog {
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(input_width - 12.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -997,6 +1011,7 @@ impl FileDialog {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Cancel button
@@ -1016,6 +1031,7 @@ impl FileDialog {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 }

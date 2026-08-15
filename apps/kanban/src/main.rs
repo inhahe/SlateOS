@@ -8,7 +8,7 @@
 use guitk::color::Color;
 use guitk::event::{Key, KeyEvent};
 use guitk::layout::FlexDirection;
-use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
 use guitk::widget::{Widget, WidgetTree};
@@ -1109,6 +1109,7 @@ fn render_toolbar(tree: &mut RenderTree, app: &KanbanApp, width: f32) {
         font_size: 16.0,
         font_weight: FontWeightHint::Bold,
         max_width: Some(200.0),
+        overflow: TextOverflow::Ellipsis,
     });
 
     // Board name
@@ -1121,6 +1122,7 @@ fn render_toolbar(tree: &mut RenderTree, app: &KanbanApp, width: f32) {
         font_size: 13.0,
         font_weight: FontWeightHint::Regular,
         max_width: Some(200.0),
+        overflow: TextOverflow::Ellipsis,
     });
 
     // Toolbar buttons
@@ -1252,6 +1254,7 @@ fn render_toolbar_button(
         font_size: 12.0,
         font_weight: FontWeightHint::Regular,
         max_width: Some(w - 16.0),
+        overflow: TextOverflow::Ellipsis,
     });
 }
 
@@ -1281,6 +1284,7 @@ fn render_filter_bar(tree: &mut RenderTree, app: &KanbanApp, width: f32, y_offse
         font_size: 12.0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
 
     // Search input
@@ -1310,6 +1314,7 @@ fn render_filter_bar(tree: &mut RenderTree, app: &KanbanApp, width: f32, y_offse
         font_size: 12.0,
         font_weight: FontWeightHint::Regular,
         max_width: Some(164.0),
+        overflow: TextOverflow::Ellipsis,
     });
 
     // Priority filter
@@ -1321,6 +1326,7 @@ fn render_filter_bar(tree: &mut RenderTree, app: &KanbanApp, width: f32, y_offse
         font_size: 12.0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
 
     let priority_label = app.filter.priority_filter.map_or("All", |p| p.label());
@@ -1340,6 +1346,7 @@ fn render_filter_bar(tree: &mut RenderTree, app: &KanbanApp, width: f32, y_offse
         font_size: 12.0,
         font_weight: FontWeightHint::Regular,
         max_width: Some(54.0),
+        overflow: TextOverflow::Ellipsis,
     });
 
     // Clear button
@@ -1406,6 +1413,7 @@ fn render_card(
         font_size: 13.0,
         font_weight: FontWeightHint::Bold,
         max_width: Some(card_width - padding * 2.0),
+        overflow: TextOverflow::Ellipsis,
     });
     card_h += 18.0;
 
@@ -1431,6 +1439,7 @@ fn render_card(
                     font_size: 10.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(lw - 10.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
                 label_x += lw + 4.0;
             }
@@ -1456,6 +1465,7 @@ fn render_card(
             font_size: 10.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(card_width - padding * 2.0),
+            overflow: TextOverflow::Ellipsis,
         });
         card_h += 14.0;
     }
@@ -1476,6 +1486,7 @@ fn render_card(
             font_size: 10.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         card_h += 14.0;
     }
@@ -1491,6 +1502,7 @@ fn render_card(
             font_size: 10.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         card_h += 14.0;
     }
@@ -1568,6 +1580,7 @@ fn render_column_header(
         font_size: 13.0,
         font_weight: FontWeightHint::Bold,
         max_width: Some(col_width - 80.0),
+        overflow: TextOverflow::Ellipsis,
     });
 
     // Card count badge
@@ -1597,6 +1610,7 @@ fn render_column_header(
         font_size: 11.0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
 
     // WIP limit indicator
@@ -1614,6 +1628,7 @@ fn render_column_header(
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 }
@@ -1637,6 +1652,7 @@ fn render_board_view(
             font_size: 14.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         return;
     }
@@ -1791,6 +1807,7 @@ fn render_card_detail(tree: &mut RenderTree, app: &KanbanApp, width: f32, height
         font_size: 18.0,
         font_weight: FontWeightHint::Bold,
         max_width: Some(content_w - 60.0),
+        overflow: TextOverflow::Ellipsis,
     });
 
     // Close button
@@ -1825,6 +1842,7 @@ fn render_card_detail(tree: &mut RenderTree, app: &KanbanApp, width: f32, height
         font_size: 11.0,
         font_weight: FontWeightHint::Bold,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
 
     // Assignee
@@ -1837,6 +1855,7 @@ fn render_card_detail(tree: &mut RenderTree, app: &KanbanApp, width: f32, height
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -1850,6 +1869,7 @@ fn render_card_detail(tree: &mut RenderTree, app: &KanbanApp, width: f32, height
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -1865,6 +1885,7 @@ fn render_card_detail(tree: &mut RenderTree, app: &KanbanApp, width: f32, height
             font_size: 12.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         let mut label_x = content_x + 60.0;
         for label_id in &card.labels {
@@ -1886,6 +1907,7 @@ fn render_card_detail(tree: &mut RenderTree, app: &KanbanApp, width: f32, height
                     font_size: 11.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(lw - 12.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
                 label_x += lw + 6.0;
             }
@@ -1913,6 +1935,7 @@ fn render_card_detail(tree: &mut RenderTree, app: &KanbanApp, width: f32, height
         font_size: 13.0,
         font_weight: FontWeightHint::Bold,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
     cy += 18.0;
 
@@ -1951,6 +1974,7 @@ fn render_card_detail(tree: &mut RenderTree, app: &KanbanApp, width: f32, height
             font_size: 13.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         cy += 20.0;
 
@@ -1992,6 +2016,7 @@ fn render_card_detail(tree: &mut RenderTree, app: &KanbanApp, width: f32, height
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(content_w - 8.0),
+                overflow: TextOverflow::Ellipsis,
             });
             cy += 18.0;
         }
@@ -2008,6 +2033,7 @@ fn render_card_detail(tree: &mut RenderTree, app: &KanbanApp, width: f32, height
             font_size: 13.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         cy += 20.0;
 
@@ -2040,6 +2066,7 @@ fn render_card_detail(tree: &mut RenderTree, app: &KanbanApp, width: f32, height
                 font_size: 11.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             body.draw(tree);
             cy += card_h + COMMENT_GAP;
@@ -2059,6 +2086,7 @@ fn render_archive_view(tree: &mut RenderTree, app: &KanbanApp, width: f32, y_sta
         font_size: 16.0,
         font_weight: FontWeightHint::Bold,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
 
     if board.archived_card_ids.is_empty() {
@@ -2070,6 +2098,7 @@ fn render_archive_view(tree: &mut RenderTree, app: &KanbanApp, width: f32, y_sta
             font_size: 13.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         return;
     }
@@ -2093,6 +2122,7 @@ fn render_archive_view(tree: &mut RenderTree, app: &KanbanApp, width: f32, y_sta
                 font_size: 13.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 200.0),
+                overflow: TextOverflow::Ellipsis,
             });
             tree.push(RenderCommand::Text {
                 x: 32.0,
@@ -2102,6 +2132,7 @@ fn render_archive_view(tree: &mut RenderTree, app: &KanbanApp, width: f32, y_sta
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             // Restore button
             render_toolbar_button(
@@ -2133,6 +2164,7 @@ fn render_stats_view(tree: &mut RenderTree, app: &KanbanApp, _width: f32, y_star
         font_size: 16.0,
         font_weight: FontWeightHint::Bold,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
 
     let mut cy = y_start + 48.0;
@@ -2147,6 +2179,7 @@ fn render_stats_view(tree: &mut RenderTree, app: &KanbanApp, _width: f32, y_star
         font_size: 14.0,
         font_weight: FontWeightHint::Bold,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
     cy += 28.0;
 
@@ -2183,6 +2216,7 @@ fn render_stats_view(tree: &mut RenderTree, app: &KanbanApp, _width: f32, y_star
         font_size: 13.0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
     cy += 32.0;
 
@@ -2195,6 +2229,7 @@ fn render_stats_view(tree: &mut RenderTree, app: &KanbanApp, _width: f32, y_star
         font_size: 14.0,
         font_weight: FontWeightHint::Bold,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
     cy += 24.0;
 
@@ -2212,6 +2247,7 @@ fn render_stats_view(tree: &mut RenderTree, app: &KanbanApp, _width: f32, y_star
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(120.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         tree.push(RenderCommand::FillRect {
@@ -2251,6 +2287,7 @@ fn render_stats_view(tree: &mut RenderTree, app: &KanbanApp, _width: f32, y_star
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         cy += 24.0;
@@ -2267,6 +2304,7 @@ fn render_board_list(tree: &mut RenderTree, app: &KanbanApp, width: f32, y_start
         font_size: 16.0,
         font_weight: FontWeightHint::Bold,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
 
     let mut cy = y_start + 50.0;
@@ -2307,6 +2345,7 @@ fn render_board_list(tree: &mut RenderTree, app: &KanbanApp, width: f32, y_start
             font_size: 14.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width - 120.0),
+            overflow: TextOverflow::Ellipsis,
         });
         tree.push(RenderCommand::Text {
             x: 36.0,
@@ -2320,6 +2359,7 @@ fn render_board_list(tree: &mut RenderTree, app: &KanbanApp, width: f32, y_start
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         cy += 58.0;
@@ -2402,6 +2442,7 @@ fn render_input_overlay(tree: &mut RenderTree, app: &KanbanApp, width: f32, heig
         font_size: 14.0,
         font_weight: FontWeightHint::Bold,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
 
     // Input field
@@ -2421,6 +2462,7 @@ fn render_input_overlay(tree: &mut RenderTree, app: &KanbanApp, width: f32, heig
         font_size: 13.0,
         font_weight: FontWeightHint::Regular,
         max_width: Some(dlg_w - 48.0),
+        overflow: TextOverflow::Ellipsis,
     });
 
     // Hint
@@ -2432,6 +2474,7 @@ fn render_input_overlay(tree: &mut RenderTree, app: &KanbanApp, width: f32, heig
         font_size: 11.0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
 }
 

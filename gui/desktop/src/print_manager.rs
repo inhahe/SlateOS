@@ -11,7 +11,7 @@
 //! - Print history / job log
 
 use guitk::color::Color;
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
 // ============================================================================
@@ -731,6 +731,7 @@ impl PrintDialog {
             color: MOCHA_TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Document name.
@@ -742,6 +743,7 @@ impl PrintDialog {
             color: MOCHA_SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Printer selector.
@@ -753,6 +755,7 @@ impl PrintDialog {
             color: MOCHA_TEXT,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         let printer_name = printers
             .get(self.selected_printer_idx)
@@ -774,6 +777,7 @@ impl PrintDialog {
             color: MOCHA_BLUE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Settings rows.
@@ -821,6 +825,7 @@ impl PrintDialog {
                 color: MOCHA_TEXT,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             cmds.push(RenderCommand::Text {
                 x: dx + 120.0,
@@ -830,6 +835,7 @@ impl PrintDialog {
                 color: MOCHA_SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             cy += 24.0;
         }
@@ -844,6 +850,7 @@ impl PrintDialog {
                 color: MOCHA_RED,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             cy += 18.0;
         }
@@ -866,6 +873,7 @@ impl PrintDialog {
             color: MOCHA_BASE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         cmds.push(RenderCommand::FillRect {
             x: dx + dw - 100.0,
@@ -883,6 +891,7 @@ impl PrintDialog {
             color: MOCHA_TEXT,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         cmds

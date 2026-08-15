@@ -348,7 +348,7 @@ pub fn apply_scene_frame(
 mod tests {
     use super::*;
     use guitk::color::Color;
-    use guitk::render::{FontWeightHint, RenderCommand};
+    use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
     use guitk::style::CornerRadii;
 
     fn sample_tree() -> RenderTree {
@@ -370,6 +370,7 @@ mod tests {
                     font_size: 14.0,
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(120.0),
+                    overflow: TextOverflow::Ellipsis,
                 },
             ],
         }

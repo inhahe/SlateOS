@@ -15,7 +15,7 @@
 //! - Station search
 
 use guitk::color::Color;
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
 // ── Catppuccin Mocha palette ───────────────────────────────────────────────
@@ -801,6 +801,7 @@ impl RadioApp {
             text: "Internet Radio".into(), font_size: 14.0,
             color: BLUE, font_weight: FontWeightHint::Bold,
             max_width: Some(w - 24.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Tabs
@@ -824,6 +825,7 @@ impl RadioApp {
                 color: if active { TEXT_COLOR } else { SUBTEXT0 },
                 font_weight: if active { FontWeightHint::Bold } else { FontWeightHint::Regular },
                 max_width: Some(w - 24.0),
+                overflow: TextOverflow::Ellipsis,
             });
             ty += 24.0;
         }
@@ -837,6 +839,7 @@ impl RadioApp {
                 text: "Genres [Left/Right]".into(), font_size: 10.0,
                 color: OVERLAY0, font_weight: FontWeightHint::Bold,
                 max_width: Some(w - 24.0),
+                overflow: TextOverflow::Ellipsis,
             });
             ty += 16.0;
 
@@ -854,6 +857,7 @@ impl RadioApp {
                 color: if all_active { TEXT_COLOR } else { SUBTEXT0 },
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(w - 28.0),
+                overflow: TextOverflow::Ellipsis,
             });
             ty += 20.0;
 
@@ -879,6 +883,7 @@ impl RadioApp {
                     color: if active { TEXT_COLOR } else { SUBTEXT0 },
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(w - 36.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
                 ty += 20.0;
             }
@@ -890,6 +895,7 @@ impl RadioApp {
             text: "[/] Search".into(), font_size: 9.0,
             color: OVERLAY0, font_weight: FontWeightHint::Regular,
             max_width: Some(w - 24.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Separator
@@ -916,6 +922,7 @@ impl RadioApp {
             text: title, font_size: 13.0,
             color: TEXT_COLOR, font_weight: FontWeightHint::Bold,
             max_width: Some(w - 24.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         let start_y = y + 30.0;
@@ -928,6 +935,7 @@ impl RadioApp {
                 text: "No stations".into(), font_size: 12.0,
                 color: OVERLAY0, font_weight: FontWeightHint::Regular,
                 max_width: Some(w - 40.0),
+                overflow: TextOverflow::Ellipsis,
             });
             return;
         }
@@ -961,6 +969,7 @@ impl RadioApp {
                     color: if is_playing { GREEN } else if is_sel { TEXT_COLOR } else { SUBTEXT1 },
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(w - 100.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
 
                 // Genre badge
@@ -974,6 +983,7 @@ impl RadioApp {
                     text: station.genre.label().to_string(), font_size: 8.0,
                     color: CRUST, font_weight: FontWeightHint::Bold,
                     max_width: Some(52.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
 
                 // Info line
@@ -984,6 +994,7 @@ impl RadioApp {
                     font_size: 9.0, color: OVERLAY0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(w - 40.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
 
                 // Description
@@ -992,6 +1003,7 @@ impl RadioApp {
                     text: station.description.clone(), font_size: 9.0,
                     color: SUBTEXT0, font_weight: FontWeightHint::Regular,
                     max_width: Some(w - 40.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
         }
@@ -1018,6 +1030,7 @@ impl RadioApp {
                     color: if self.play_state == PlayState::Playing { GREEN } else { TEXT_COLOR },
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(250.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
 
                 // Status
@@ -1033,6 +1046,7 @@ impl RadioApp {
                     font_size: 10.0, color: SUBTEXT0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(250.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
 
                 // Spectrum visualization
@@ -1060,6 +1074,7 @@ impl RadioApp {
                 font_size: 12.0, color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(400.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -1072,6 +1087,7 @@ impl RadioApp {
             color: if self.muted { RED } else { SUBTEXT1 },
             font_weight: FontWeightHint::Regular,
             max_width: Some(80.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Volume bar
@@ -1092,6 +1108,7 @@ impl RadioApp {
             font_size: 8.0, color: OVERLAY0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(170.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Sleep timer
@@ -1102,6 +1119,7 @@ impl RadioApp {
                 font_size: 9.0, color: YELLOW,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(100.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -1117,6 +1135,7 @@ impl RadioApp {
                 font_size: 9.0, color: RED,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(80.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -1126,6 +1145,7 @@ impl RadioApp {
             text: self.status_message.clone(), font_size: 9.0,
             color: SUBTEXT0, font_weight: FontWeightHint::Regular,
             max_width: Some(w - 24.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -1151,6 +1171,7 @@ impl RadioApp {
             color: if self.search_query.is_empty() { OVERLAY0 } else { TEXT_COLOR },
             font_weight: FontWeightHint::Regular,
             max_width: Some(sw - 24.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         if !self.search_results.is_empty() {
@@ -1160,6 +1181,7 @@ impl RadioApp {
                 font_size: 10.0, color: GREEN,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(sw - 24.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }

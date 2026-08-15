@@ -22,7 +22,7 @@ use crate::color::Color;
 use crate::event::{
     Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind,
 };
-use crate::render::{FontWeightHint, RenderCommand, RenderTree};
+use crate::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use crate::style::CornerRadii;
 
 // --- Catppuccin Mocha palette ---
@@ -1392,6 +1392,7 @@ impl GridView {
             font_size: self.config.label_font_size,
             font_weight: FontWeightHint::Regular,
             max_width: Some(cw - 8.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 }

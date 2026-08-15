@@ -4,7 +4,7 @@
 //! currency display, measurement units, and first day of week.
 
 use guitk::color::Color;
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
 
@@ -526,6 +526,7 @@ impl LanguageSettingsUI {
             color: TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width - 48.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Tabs
@@ -559,6 +560,7 @@ impl LanguageSettingsUI {
                     FontWeightHint::Regular
                 },
                 max_width: Some(tw - 20.0),
+                overflow: TextOverflow::Ellipsis,
             });
             tx += tw + 8.0;
         }
@@ -596,6 +598,7 @@ impl LanguageSettingsUI {
                 color: TEXT,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(width - 24.0),
+                overflow: TextOverflow::Ellipsis,
             });
             cmds.push(RenderCommand::Text {
                 x: x + 12.0,
@@ -605,6 +608,7 @@ impl LanguageSettingsUI {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 24.0),
+                overflow: TextOverflow::Ellipsis,
             });
             cy += 60.0;
         }
@@ -635,6 +639,7 @@ impl LanguageSettingsUI {
             },
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - 20.0),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 40.0;
 
@@ -676,6 +681,7 @@ impl LanguageSettingsUI {
                     FontWeightHint::Regular
                 },
                 max_width: Some(width * 0.6),
+                overflow: TextOverflow::Ellipsis,
             });
 
             cmds.push(RenderCommand::Text {
@@ -686,6 +692,7 @@ impl LanguageSettingsUI {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width * 0.4),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Completeness badge
@@ -706,6 +713,7 @@ impl LanguageSettingsUI {
                     color: CRUST,
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(48.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
 
@@ -721,6 +729,7 @@ impl LanguageSettingsUI {
             color: OVERLAY0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -736,6 +745,7 @@ impl LanguageSettingsUI {
             color: LAVENDER,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 26.0;
 
@@ -760,6 +770,7 @@ impl LanguageSettingsUI {
             color: LAVENDER,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 26.0;
 
@@ -784,6 +795,7 @@ impl LanguageSettingsUI {
             color: LAVENDER,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 26.0;
 
@@ -806,6 +818,7 @@ impl LanguageSettingsUI {
             color: LAVENDER,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 26.0;
 
@@ -841,6 +854,7 @@ impl LanguageSettingsUI {
             color: LAVENDER,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 26.0;
 
@@ -863,6 +877,7 @@ impl LanguageSettingsUI {
             color: LAVENDER,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 26.0;
 
@@ -885,6 +900,7 @@ impl LanguageSettingsUI {
             color: LAVENDER,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 26.0;
 
@@ -904,6 +920,7 @@ impl LanguageSettingsUI {
             color: SUBTEXT1,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 22.0;
 
@@ -930,6 +947,7 @@ impl LanguageSettingsUI {
                 color: if is_current { BLUE } else { TEXT },
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 20.0),
+                overflow: TextOverflow::Ellipsis,
             });
             cy += 32.0;
         }
@@ -952,6 +970,7 @@ impl LanguageSettingsUI {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width * 0.4),
+            overflow: TextOverflow::Ellipsis,
         });
         cmds.push(RenderCommand::Text {
             x: x + width * 0.45,
@@ -961,6 +980,7 @@ impl LanguageSettingsUI {
             color: TEXT,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width * 0.55),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 }

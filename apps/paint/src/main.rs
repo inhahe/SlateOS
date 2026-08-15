@@ -21,7 +21,7 @@
 //! Uses the guitk library for UI rendering.
 
 use guitk::color::Color;
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
 use std::collections::VecDeque;
@@ -2715,6 +2715,7 @@ impl PaintApp {
             color: MOCHA_TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         ox += 90.0;
 
@@ -2727,6 +2728,7 @@ impl PaintApp {
             color: MOCHA_SUBTEXT1,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         ox += 80.0;
 
@@ -2739,6 +2741,7 @@ impl PaintApp {
             color: MOCHA_SUBTEXT1,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         ox += 100.0;
 
@@ -2751,6 +2754,7 @@ impl PaintApp {
             color: MOCHA_YELLOW,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         ox += 80.0;
 
@@ -2772,6 +2776,7 @@ impl PaintApp {
                 color: MOCHA_LAVENDER,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             ox += 100.0;
         }
@@ -2785,6 +2790,7 @@ impl PaintApp {
             color: MOCHA_SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         ox += 100.0;
 
@@ -2798,6 +2804,7 @@ impl PaintApp {
                 color: MOCHA_GREEN,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
     }
@@ -2861,6 +2868,7 @@ impl PaintApp {
                     FontWeightHint::Regular
                 },
                 max_width: Some(btn_w - 8.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -2930,6 +2938,7 @@ impl PaintApp {
             color: MOCHA_SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -3381,6 +3390,7 @@ impl PaintApp {
             color: MOCHA_TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Layer buttons
@@ -3405,6 +3415,7 @@ impl PaintApp {
                 color: MOCHA_SUBTEXT1,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(btn_w - 8.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -3456,6 +3467,7 @@ impl PaintApp {
                 color: vis_color,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             // Layer name
@@ -3471,6 +3483,7 @@ impl PaintApp {
                     FontWeightHint::Regular
                 },
                 max_width: Some(LAYERS_PANEL_WIDTH - 70.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Opacity
@@ -3483,6 +3496,7 @@ impl PaintApp {
                 color: MOCHA_SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
     }
@@ -3522,6 +3536,7 @@ impl PaintApp {
             color: MOCHA_SUBTEXT1,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         sx += 120.0;
 
@@ -3545,6 +3560,7 @@ impl PaintApp {
             color: MOCHA_SUBTEXT1,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         sx += 90.0;
 
@@ -3568,6 +3584,7 @@ impl PaintApp {
             color: MOCHA_SUBTEXT1,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         sx += 60.0;
 
@@ -3591,6 +3608,7 @@ impl PaintApp {
             color: MOCHA_BLUE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         sx += 80.0;
 
@@ -3614,6 +3632,7 @@ impl PaintApp {
                 color: MOCHA_PEACH,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             sx += 80.0;
         }
@@ -3641,6 +3660,7 @@ impl PaintApp {
             color: MOCHA_SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -3698,6 +3718,7 @@ impl PaintApp {
             color: MOCHA_TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Color preview
@@ -3732,6 +3753,7 @@ impl PaintApp {
             color: MOCHA_TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // RGBA values
@@ -3749,6 +3771,7 @@ impl PaintApp {
             color: MOCHA_SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Sliders
@@ -3780,6 +3803,7 @@ impl PaintApp {
                 color: MOCHA_TEXT,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             // Slider track
@@ -3835,6 +3859,7 @@ impl PaintApp {
             color: MOCHA_TEXT,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         cmds.push(RenderCommand::FillRect {
@@ -3854,6 +3879,7 @@ impl PaintApp {
             color: MOCHA_TEXT,
             font_weight: FontWeightHint::Regular,
             max_width: Some(92.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // OK / Cancel buttons
@@ -3878,6 +3904,7 @@ impl PaintApp {
                 color: btn_colors[i],
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
     }

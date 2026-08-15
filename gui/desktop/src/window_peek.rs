@@ -14,7 +14,7 @@
 //! - Auto-dismiss when mouse leaves the popup and taskbar button
 
 use guitk::color::Color;
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
 // ============================================================================
@@ -706,6 +706,7 @@ impl PeekPopup {
                 color: Color::rgba(MOCHA_SUBTEXT0.r, MOCHA_SUBTEXT0.g, MOCHA_SUBTEXT0.b, a),
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(slot.width - 8.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -722,6 +723,7 @@ impl PeekPopup {
             color: Color::rgba(MOCHA_TEXT.r, MOCHA_TEXT.g, MOCHA_TEXT.b, a),
             font_weight: FontWeightHint::Regular,
             max_width: Some(slot.width - 4.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Close button (only when hovering this specific thumbnail)

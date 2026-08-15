@@ -12,7 +12,7 @@ use appearance::{
     BASE, BLUE, CRUST, GREEN, LAVENDER, SUBTEXT0, SURFACE0, SURFACE1, SURFACE2, TEXT, YELLOW,
 };
 use guitk::color::Color;
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
 use yamldoc::Document;
@@ -180,6 +180,7 @@ impl AppearanceSettingsUI {
             color: TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width - 48.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Dirty indicator
@@ -200,6 +201,7 @@ impl AppearanceSettingsUI {
                 color: CRUST,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(64.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -238,6 +240,7 @@ impl AppearanceSettingsUI {
                     FontWeightHint::Regular
                 },
                 max_width: Some(tab_w - 20.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             tx += tab_w + 8.0;
@@ -268,6 +271,7 @@ impl AppearanceSettingsUI {
             color: LAVENDER,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 26.0;
 
@@ -300,6 +304,7 @@ impl AppearanceSettingsUI {
                 color: if selected { TEXT } else { SUBTEXT0 },
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(140.0),
+                overflow: TextOverflow::Ellipsis,
             });
             cy += 36.0;
         }
@@ -315,6 +320,7 @@ impl AppearanceSettingsUI {
             color: LAVENDER,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 26.0;
 
@@ -369,6 +375,7 @@ impl AppearanceSettingsUI {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 32.0;
 
@@ -381,6 +388,7 @@ impl AppearanceSettingsUI {
             color: LAVENDER,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 26.0;
 
@@ -412,6 +420,7 @@ impl AppearanceSettingsUI {
             color: TEXT,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - 24.0),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 52.0;
 
@@ -424,6 +433,7 @@ impl AppearanceSettingsUI {
             color: LAVENDER,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 26.0;
 
@@ -450,6 +460,7 @@ impl AppearanceSettingsUI {
             color: LAVENDER,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 26.0;
 
@@ -482,6 +493,7 @@ impl AppearanceSettingsUI {
             color: TEXT,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - 24.0),
+            overflow: TextOverflow::Ellipsis,
         });
         cmds.push(RenderCommand::Text {
             x: x + 12.0,
@@ -491,6 +503,7 @@ impl AppearanceSettingsUI {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width - 24.0),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 60.0;
 
@@ -502,6 +515,7 @@ impl AppearanceSettingsUI {
             color: LAVENDER,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 26.0;
 
@@ -534,6 +548,7 @@ impl AppearanceSettingsUI {
             color: TEXT,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - 24.0),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 48.0;
 
@@ -546,6 +561,7 @@ impl AppearanceSettingsUI {
             color: LAVENDER,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 26.0;
 
@@ -569,6 +585,7 @@ impl AppearanceSettingsUI {
             color: LAVENDER,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 26.0;
 
@@ -600,6 +617,7 @@ impl AppearanceSettingsUI {
             color: LAVENDER,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 26.0;
 
@@ -639,6 +657,7 @@ impl AppearanceSettingsUI {
                 color: if selected { TEXT } else { SUBTEXT0 },
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - preview_w - 24.0),
+                overflow: TextOverflow::Ellipsis,
             });
             cy += 38.0;
         }
@@ -654,6 +673,7 @@ impl AppearanceSettingsUI {
             color: LAVENDER,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 26.0;
 
@@ -709,6 +729,7 @@ impl AppearanceSettingsUI {
             color: LAVENDER,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 26.0;
 
@@ -761,6 +782,7 @@ impl AppearanceSettingsUI {
             color: LAVENDER,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 26.0;
 
@@ -795,6 +817,7 @@ impl AppearanceSettingsUI {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(icon_px),
+                overflow: TextOverflow::Ellipsis,
             });
         }
         let _ = cy;
@@ -819,6 +842,7 @@ impl AppearanceSettingsUI {
             color: TEXT,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - 80.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         let sw_x = x + width - 44.0;
@@ -858,6 +882,7 @@ impl AppearanceSettingsUI {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width * 0.5),
+            overflow: TextOverflow::Ellipsis,
         });
         cmds.push(RenderCommand::Text {
             x: x + width * 0.55,
@@ -867,6 +892,7 @@ impl AppearanceSettingsUI {
             color: TEXT,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width * 0.45),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 }

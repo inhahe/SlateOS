@@ -22,7 +22,7 @@ use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEventKind};
 use guitk::fold;
 #[allow(unused_imports)]
-use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
 
@@ -2099,6 +2099,7 @@ impl SysInfoState {
             font_size: 15.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Separator.
@@ -2164,6 +2165,7 @@ impl SysInfoState {
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(search_w - 12.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Export button.
@@ -2185,6 +2187,7 @@ impl SysInfoState {
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Copy button.
@@ -2205,6 +2208,7 @@ impl SysInfoState {
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Bottom separator.
@@ -2263,6 +2267,7 @@ impl SysInfoState {
                     font_size: 10.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
             }
 
@@ -2284,6 +2289,7 @@ impl SysInfoState {
                     FontWeightHint::Regular
                 },
                 max_width: Some(SIDEBAR_WIDTH - indent - 8.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -2323,6 +2329,7 @@ impl SysInfoState {
             font_size: 15.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width - 32.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Separator below heading.
@@ -2350,6 +2357,7 @@ impl SysInfoState {
             font_size: 12.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(name_col_width - 20.0),
+            overflow: TextOverflow::Ellipsis,
         });
         tree.push(RenderCommand::Text {
             x: left + name_col_width + 8.0,
@@ -2359,6 +2367,7 @@ impl SysInfoState {
             font_size: 12.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width - name_col_width - 24.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Property rows.
@@ -2412,6 +2421,7 @@ impl SysInfoState {
                         FontWeightHint::Regular
                     },
                     max_width: Some(name_col_width - 20.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
 
@@ -2433,6 +2443,7 @@ impl SysInfoState {
                     font_size: 12.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(width - name_col_width - 24.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
         }
@@ -2470,6 +2481,7 @@ impl SysInfoState {
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(self.window_width * 0.5),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Category indicator on the right.
@@ -2482,6 +2494,7 @@ impl SysInfoState {
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(280.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 }

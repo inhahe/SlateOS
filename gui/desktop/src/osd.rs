@@ -6,7 +6,7 @@
 //! after a configurable timeout.
 
 use guitk::color::Color;
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
 // ============================================================================
@@ -668,6 +668,7 @@ impl OsdManager {
             color: Color::rgba(accent.r, accent.g, accent.b, text_alpha),
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Label and percentage.
@@ -680,6 +681,7 @@ impl OsdManager {
             color: Color::rgba(TEXT.r, TEXT.g, TEXT.b, text_alpha),
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Slider track.
@@ -746,6 +748,7 @@ impl OsdManager {
             color: Color::rgba(LAVENDER.r, LAVENDER.g, LAVENDER.b, text_alpha),
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         let text_x = ox + padding + 40.0;
@@ -760,6 +763,7 @@ impl OsdManager {
             color: Color::rgba(TEXT.r, TEXT.g, TEXT.b, text_alpha),
             font_weight: FontWeightHint::Bold,
             max_width: Some(max_text_w),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Artist.
@@ -771,6 +775,7 @@ impl OsdManager {
             color: Color::rgba(SUBTEXT0.r, SUBTEXT0.g, SUBTEXT0.b, text_alpha),
             font_weight: FontWeightHint::Regular,
             max_width: Some(max_text_w),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Album (dimmer).
@@ -783,6 +788,7 @@ impl OsdManager {
                 color: Color::rgba(SUBTEXT0.r, SUBTEXT0.g, SUBTEXT0.b, text_alpha / 2),
                 font_weight: FontWeightHint::Light,
                 max_width: Some(max_text_w),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -825,6 +831,7 @@ impl OsdManager {
             color: Color::rgba(accent.r, accent.g, accent.b, text_alpha),
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Label.
@@ -836,6 +843,7 @@ impl OsdManager {
             color: Color::rgba(TEXT.r, TEXT.g, TEXT.b, text_alpha),
             font_weight: FontWeightHint::Bold,
             max_width: Some(osd_w - padding * 2.0 - 36.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 }
@@ -956,6 +964,7 @@ impl OsdSettingsUI {
             color: TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         cy += 36.0;
 
@@ -990,6 +999,7 @@ impl OsdSettingsUI {
             color: TEXT,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         cy += 36.0;
 
@@ -1002,6 +1012,7 @@ impl OsdSettingsUI {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         cy += 22.0;
 
@@ -1035,6 +1046,7 @@ impl OsdSettingsUI {
                     FontWeightHint::Regular
                 },
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             cy += 22.0;
         }
@@ -1049,6 +1061,7 @@ impl OsdSettingsUI {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         cy += 22.0;
         let timeout_frac = (self.config.timeout_ms as f32 - 500.0) / 4500.0;
@@ -1080,6 +1093,7 @@ impl OsdSettingsUI {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         cy += 22.0;
 
@@ -1108,6 +1122,7 @@ impl OsdSettingsUI {
                     color: BASE,
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
             }
             commands.push(RenderCommand::Text {
@@ -1118,6 +1133,7 @@ impl OsdSettingsUI {
                 color: TEXT,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             cy += 24.0;
         }
@@ -1140,6 +1156,7 @@ impl OsdSettingsUI {
             color: BASE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         commands

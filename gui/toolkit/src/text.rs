@@ -36,7 +36,7 @@ use osfont::system::{Family, FontCache, Weight};
 
 use crate::color::Color;
 use crate::fontdb::FontDb;
-use crate::render::{FontFamily, FontWeightHint, RenderCommand};
+use crate::render::{FontFamily, FontWeightHint, RenderCommand, TextOverflow};
 
 /// The families tried, in order, when nothing has chosen one.
 ///
@@ -700,6 +700,7 @@ impl<'a> Paragraph<'a> {
                 // word) gets a clipped line rather than one running out of its
                 // container.
                 max_width: Some(self.width),
+                overflow: TextOverflow::Ellipsis,
             }
         }));
         lines.len() as f32 * spacing

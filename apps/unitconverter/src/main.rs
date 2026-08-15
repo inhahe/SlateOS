@@ -20,7 +20,7 @@
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEventKind};
 use guitk::layout::FlexDirection;
-use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::widget::{Widget, WidgetTree};
 
@@ -1039,6 +1039,7 @@ impl UnitConverterApp {
             font_size: 16.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(SIDEBAR_WIDTH - 24.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Separator under header.
@@ -1113,6 +1114,7 @@ impl UnitConverterApp {
                 font_size: 10.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(icon_size - 4.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Category name.
@@ -1133,6 +1135,7 @@ impl UnitConverterApp {
                     FontWeightHint::Regular
                 },
                 max_width: Some(SIDEBAR_WIDTH - 60.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }
@@ -1167,6 +1170,7 @@ impl UnitConverterApp {
             font_size: 20.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(main_width - 80.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Favorite star.
@@ -1188,6 +1192,7 @@ impl UnitConverterApp {
             font_size: 22.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // --- From section ---
@@ -1199,6 +1204,7 @@ impl UnitConverterApp {
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // From input field.
@@ -1252,6 +1258,7 @@ impl UnitConverterApp {
             font_size: 16.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // --- To section ---
@@ -1264,6 +1271,7 @@ impl UnitConverterApp {
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // To result display.
@@ -1332,6 +1340,7 @@ impl UnitConverterApp {
             font_size: 14.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(main_width - 64.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         let mut big_result = String::new();
@@ -1344,6 +1353,7 @@ impl UnitConverterApp {
             font_size: 22.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(main_width - 64.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // --- Formula display ---
@@ -1356,6 +1366,7 @@ impl UnitConverterApp {
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         tree.push(RenderCommand::FillRect {
@@ -1375,6 +1386,7 @@ impl UnitConverterApp {
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(main_width - 56.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // --- Favorites toggle button ---
@@ -1405,6 +1417,7 @@ impl UnitConverterApp {
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(fav_btn_w - 20.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // --- Favorites list ---
@@ -1421,6 +1434,7 @@ impl UnitConverterApp {
                     font_size: 11.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(main_width - 56.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
             } else {
                 for (i, fav) in self.favorites.iter().enumerate() {
@@ -1446,6 +1460,7 @@ impl UnitConverterApp {
                         font_size: 12.0,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(main_width - 60.0),
+                        overflow: TextOverflow::Ellipsis,
                     });
                 }
             }
@@ -1461,6 +1476,7 @@ impl UnitConverterApp {
             font_size: 10.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(main_width - 40.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -1514,6 +1530,7 @@ impl UnitConverterApp {
             font_size: 14.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(w - 20.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Cursor for focused input.
@@ -1574,6 +1591,7 @@ impl UnitConverterApp {
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(w - 30.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Dropdown arrow.
@@ -1586,6 +1604,7 @@ impl UnitConverterApp {
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -1672,6 +1691,7 @@ impl UnitConverterApp {
                 font_size: 12.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(40.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Full name.
@@ -1687,6 +1707,7 @@ impl UnitConverterApp {
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(dd_w - 68.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }
@@ -1724,6 +1745,7 @@ impl UnitConverterApp {
             font_size: 14.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(HISTORY_PANEL_WIDTH - 32.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Separator.
@@ -1746,6 +1768,7 @@ impl UnitConverterApp {
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(HISTORY_PANEL_WIDTH - 32.0),
+                overflow: TextOverflow::Ellipsis,
             });
             tree.push(RenderCommand::Text {
                 x: panel_x + 16.0,
@@ -1755,6 +1778,7 @@ impl UnitConverterApp {
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(HISTORY_PANEL_WIDTH - 32.0),
+                overflow: TextOverflow::Ellipsis,
             });
             tree.push(RenderCommand::Text {
                 x: panel_x + 16.0,
@@ -1764,6 +1788,7 @@ impl UnitConverterApp {
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(HISTORY_PANEL_WIDTH - 32.0),
+                overflow: TextOverflow::Ellipsis,
             });
         } else {
             let item_h: f32 = 52.0;
@@ -1815,6 +1840,7 @@ impl UnitConverterApp {
                     font_size: 11.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(HISTORY_PANEL_WIDTH - 50.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
 
                 // Category label.
@@ -1826,6 +1852,7 @@ impl UnitConverterApp {
                     font_size: 9.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(HISTORY_PANEL_WIDTH - 50.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
 

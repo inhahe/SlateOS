@@ -9,7 +9,7 @@
 
 use crate::color::Color;
 use crate::event::{Event, EventResult, Key, KeyEvent, MouseEvent, MouseEventKind};
-use crate::render::{FontFamily, FontWeightHint, RenderCommand, RenderTree};
+use crate::render::{FontFamily, FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use crate::style::CornerRadii;
 
 // ---------------------------------------------------------------------------
@@ -1046,6 +1046,7 @@ impl SimpleTextView {
                     font_size: self.config.font_size,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
             }
 
@@ -1112,6 +1113,7 @@ impl SimpleTextView {
                         font_size: self.config.font_size,
                         font_weight: weight,
                         max_width: None,
+                        overflow: TextOverflow::Clip,
                     });
 
                     // Underline
@@ -2360,6 +2362,7 @@ impl RichTextView {
                     font_size: self.config.font_size,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
             }
 
@@ -2387,6 +2390,7 @@ impl RichTextView {
                     font_size: self.config.font_size,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
             }
 
@@ -2470,6 +2474,7 @@ impl RichTextView {
                     font_size,
                     font_weight: weight,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
 
                 // Underline

@@ -17,7 +17,7 @@
 use guitk::color::Color;
 #[allow(unused_imports)]
 use guitk::event::{Event, Key, KeyEvent, Modifiers};
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
 // ---------------------------------------------------------------------------
@@ -597,6 +597,7 @@ impl TypingTutorApp {
             font_size: 36.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Category filter
@@ -612,6 +613,7 @@ impl TypingTutorApp {
             font_size: 16.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Controls
@@ -623,6 +625,7 @@ impl TypingTutorApp {
             font_size: 13.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Lesson list
@@ -675,6 +678,7 @@ impl TypingTutorApp {
                     FontWeightHint::Regular
                 },
                 max_width: Some(400.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Category label
@@ -686,6 +690,7 @@ impl TypingTutorApp {
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
     }
@@ -706,6 +711,7 @@ impl TypingTutorApp {
             font_size: 24.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Stats bar
@@ -727,6 +733,7 @@ impl TypingTutorApp {
             font_size: 14.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Progress bar
@@ -802,6 +809,7 @@ impl TypingTutorApp {
                 font_size,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             x += char_width;
@@ -824,6 +832,7 @@ impl TypingTutorApp {
                 font_size: 18.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
     }
@@ -843,6 +852,7 @@ impl TypingTutorApp {
             font_size: 36.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         cmds.push(RenderCommand::Text {
@@ -853,6 +863,7 @@ impl TypingTutorApp {
             font_size: 20.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Stats cards
@@ -897,6 +908,7 @@ impl TypingTutorApp {
                 font_size: 13.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             cmds.push(RenderCommand::Text {
@@ -907,6 +919,7 @@ impl TypingTutorApp {
                 font_size: 28.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 
@@ -931,6 +944,7 @@ impl TypingTutorApp {
             font_size: 22.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         cmds.push(RenderCommand::Text {
@@ -941,6 +955,7 @@ impl TypingTutorApp {
             font_size: 14.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -953,6 +968,7 @@ impl TypingTutorApp {
             font_size: 32.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         if self.results.is_empty() {
@@ -964,6 +980,7 @@ impl TypingTutorApp {
                 font_size: 18.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         } else {
             // Summary cards
@@ -1003,6 +1020,7 @@ impl TypingTutorApp {
                     font_size: 12.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
                 cmds.push(RenderCommand::Text {
                     x: sx + 10.0,
@@ -1012,6 +1030,7 @@ impl TypingTutorApp {
                     font_size: 24.0,
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
             }
 
@@ -1025,6 +1044,7 @@ impl TypingTutorApp {
                 font_size: 18.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             let headers = ["Lesson", "WPM", "Accuracy", "Time"];
@@ -1038,6 +1058,7 @@ impl TypingTutorApp {
                     font_size: 13.0,
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
             }
 
@@ -1059,6 +1080,7 @@ impl TypingTutorApp {
                     font_size: 14.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(200.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
                 cmds.push(RenderCommand::Text {
                     x: col_xs[1],
@@ -1068,6 +1090,7 @@ impl TypingTutorApp {
                     font_size: 14.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
                 cmds.push(RenderCommand::Text {
                     x: col_xs[2],
@@ -1077,6 +1100,7 @@ impl TypingTutorApp {
                     font_size: 14.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
                 cmds.push(RenderCommand::Text {
                     x: col_xs[3],
@@ -1086,6 +1110,7 @@ impl TypingTutorApp {
                     font_size: 14.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
             }
         }
@@ -1098,6 +1123,7 @@ impl TypingTutorApp {
             font_size: 13.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 }

@@ -20,7 +20,7 @@ use guitk::color::Color;
 use guitk::event::{Event, Key, KeyEvent};
 #[cfg(test)]
 use guitk::event::Modifiers;
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
 // ── Catppuccin Mocha palette ────────────────────────────────────────
@@ -1089,6 +1089,7 @@ impl TetrisApp {
             font_size: TITLE_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(120.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Score in header
@@ -1101,6 +1102,7 @@ impl TetrisApp {
             font_size: HEADER_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(200.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Level
@@ -1113,6 +1115,7 @@ impl TetrisApp {
             font_size: HEADER_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(120.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Lines
@@ -1125,6 +1128,7 @@ impl TetrisApp {
             font_size: HEADER_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(120.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -1290,6 +1294,7 @@ impl TetrisApp {
             font_size: LABEL_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(SIDEBAR_WIDTH - 20.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         if let Some(kind) = self.hold_piece {
@@ -1316,6 +1321,7 @@ impl TetrisApp {
             font_size: LABEL_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(SIDEBAR_WIDTH - 20.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         let stats: [(&str, String, Color); 5] = [
@@ -1336,6 +1342,7 @@ impl TetrisApp {
                 font_size: LABEL_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(SIDEBAR_WIDTH - 20.0),
+                overflow: TextOverflow::Ellipsis,
             });
             cmds.push(RenderCommand::Text {
                 x: sx + 10.0,
@@ -1345,6 +1352,7 @@ impl TetrisApp {
                 font_size: VALUE_FONT_SIZE,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(SIDEBAR_WIDTH - 20.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }
@@ -1372,6 +1380,7 @@ impl TetrisApp {
             font_size: LABEL_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(SIDEBAR_WIDTH - 20.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         for (i, kind) in self.preview_queue.iter().take(3).enumerate() {
@@ -1398,6 +1407,7 @@ impl TetrisApp {
             font_size: LABEL_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(SIDEBAR_WIDTH - 20.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         let controls = [
@@ -1420,6 +1430,7 @@ impl TetrisApp {
                 font_size: LABEL_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(SIDEBAR_WIDTH - 20.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }
@@ -1503,6 +1514,7 @@ impl TetrisApp {
             font_size: 24.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(box_w - 20.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         cmds.push(RenderCommand::Text {
@@ -1513,6 +1525,7 @@ impl TetrisApp {
             font_size: 14.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(box_w - 20.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 

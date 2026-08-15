@@ -15,7 +15,7 @@ mod features;
 
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEventKind};
-use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::table::{Column, Fit, Table};
 use guitk::text;
 
@@ -2590,6 +2590,7 @@ impl ProcessExplorerState {
             font_size,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 

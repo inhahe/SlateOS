@@ -4,7 +4,7 @@
 //! categories, reminders, ICS import/export, and a mini-calendar sidebar.
 
 use guitk::color::Color;
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
 // ============================================================================
@@ -1258,6 +1258,7 @@ impl CalendarApp {
             color: CRUST,
             font_weight: FontWeightHint::Bold,
             max_width: Some(52.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Current view date header
@@ -1297,6 +1298,7 @@ impl CalendarApp {
             color: TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: Some(300.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // View selector buttons
@@ -1328,6 +1330,7 @@ impl CalendarApp {
                     FontWeightHint::Regular
                 },
                 max_width: Some(52.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -1367,6 +1370,7 @@ impl CalendarApp {
             color: TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -1396,6 +1400,7 @@ impl CalendarApp {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(200.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         for (i, cat) in EventCategory::all().iter().enumerate() {
@@ -1418,6 +1423,7 @@ impl CalendarApp {
                 color: if active { TEXT } else { OVERLAY0 },
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(160.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Event count
@@ -1431,6 +1437,7 @@ impl CalendarApp {
                     color: OVERLAY0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
             }
         }
@@ -1464,6 +1471,7 @@ impl CalendarApp {
             color: TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: Some(w),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Day-of-week headers
@@ -1483,6 +1491,7 @@ impl CalendarApp {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(cell_w),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -1554,6 +1563,7 @@ impl CalendarApp {
                     FontWeightHint::Regular
                 },
                 max_width: Some(cell_w - 4.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Event dot
@@ -1616,6 +1626,7 @@ impl CalendarApp {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(col_w - 12.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -1697,6 +1708,7 @@ impl CalendarApp {
                     FontWeightHint::Regular
                 },
                 max_width: Some(20.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Events for this day
@@ -1728,6 +1740,7 @@ impl CalendarApp {
                     color: CRUST,
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(col_w - 14.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
 
@@ -1740,6 +1753,7 @@ impl CalendarApp {
                     color: OVERLAY0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(col_w - 16.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
         }
@@ -1775,6 +1789,7 @@ impl CalendarApp {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(day_w - 8.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             let day_color = if is_today { BLUE } else { TEXT };
@@ -1790,6 +1805,7 @@ impl CalendarApp {
                     FontWeightHint::Regular
                 },
                 max_width: Some(day_w - 8.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -1812,6 +1828,7 @@ impl CalendarApp {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(time_col_w - 8.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Hour line
@@ -1867,6 +1884,7 @@ impl CalendarApp {
                     color: CRUST,
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(day_w - 10.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
 
                 if eh > 20.0 {
@@ -1878,6 +1896,7 @@ impl CalendarApp {
                         color: CRUST,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(day_w - 10.0),
+                        overflow: TextOverflow::Ellipsis,
                     });
                 }
             }
@@ -1908,6 +1927,7 @@ impl CalendarApp {
             color: if is_today { BLUE } else { TEXT },
             font_weight: FontWeightHint::Bold,
             max_width: Some(w - 32.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // All-day events
@@ -1941,6 +1961,7 @@ impl CalendarApp {
                 color: CRUST,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(w - time_col_w - 32.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -1962,6 +1983,7 @@ impl CalendarApp {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(time_col_w - 8.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             cmds.push(RenderCommand::Line {
@@ -2006,6 +2028,7 @@ impl CalendarApp {
                 color: CRUST,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(event_w - 16.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             if eh > 24.0 {
@@ -2017,6 +2040,7 @@ impl CalendarApp {
                     color: CRUST,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(event_w - 16.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
 
@@ -2030,6 +2054,7 @@ impl CalendarApp {
                         color: CRUST,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(event_w - 16.0),
+                        overflow: TextOverflow::Ellipsis,
                     });
                 }
         }
@@ -2059,6 +2084,7 @@ impl CalendarApp {
                 color: if is_current_month { BLUE } else { TEXT },
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(month_w - 16.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Mini day grid
@@ -2118,6 +2144,7 @@ impl CalendarApp {
                     color: fg,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(cell_w),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
         }
@@ -2134,6 +2161,7 @@ impl CalendarApp {
             color: TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: Some(w - 32.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         let mut row_y = y + 36.0;
@@ -2167,6 +2195,7 @@ impl CalendarApp {
                     color: if is_today { BLUE } else { TEXT },
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(w - 40.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
                 row_y += 26.0;
                 last_date = Some(ev.start.date);
@@ -2190,6 +2219,7 @@ impl CalendarApp {
                 color: TEXT,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(w - 100.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             cmds.push(RenderCommand::Text {
@@ -2205,6 +2235,7 @@ impl CalendarApp {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(w - 60.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             if let Some(loc) = &ev.location {
@@ -2216,6 +2247,7 @@ impl CalendarApp {
                     color: OVERLAY0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(w - 60.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
 
@@ -2231,6 +2263,7 @@ impl CalendarApp {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(200.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }

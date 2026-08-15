@@ -20,7 +20,7 @@
 
 use guitk::color::Color;
 use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
 // ── Catppuccin Mocha palette ────────────────────────────────────────
@@ -1132,6 +1132,7 @@ impl SudokuApp {
             font_size: HEADER_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Difficulty label
@@ -1143,6 +1144,7 @@ impl SudokuApp {
             font_size: STATUS_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Timer
@@ -1157,6 +1159,7 @@ impl SudokuApp {
             font_size: HEADER_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Status indicators
@@ -1177,6 +1180,7 @@ impl SudokuApp {
             font_size: LABEL_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Hints remaining
@@ -1193,6 +1197,7 @@ impl SudokuApp {
             font_size: LABEL_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Progress
@@ -1206,6 +1211,7 @@ impl SudokuApp {
             font_size: LABEL_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Game status text
@@ -1219,6 +1225,7 @@ impl SudokuApp {
                     font_size: LABEL_FONT_SIZE,
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
             }
             GameStatus::Paused => {
@@ -1230,6 +1237,7 @@ impl SudokuApp {
                     font_size: LABEL_FONT_SIZE,
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
             }
             GameStatus::Playing => {}
@@ -1327,6 +1335,7 @@ impl SudokuApp {
                         font_size: CELL_FONT_SIZE,
                         font_weight: weight,
                         max_width: None,
+                        overflow: TextOverflow::Clip,
                     });
                 } else if cell.has_any_note() {
                     // Render pencil marks in a 3x3 grid within the cell
@@ -1377,6 +1386,7 @@ impl SudokuApp {
                     font_size: NOTE_FONT_SIZE,
                     font_weight: FontWeightHint::Light,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
             }
         }
@@ -1405,6 +1415,7 @@ impl SudokuApp {
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(total_width - PADDING * 2.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Stats line
@@ -1422,6 +1433,7 @@ impl SudokuApp {
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(total_width - PADDING * 2.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 }

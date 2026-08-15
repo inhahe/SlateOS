@@ -62039,11 +62039,33 @@ that box's height, and does anything downstream of it move. Where the answer to
 the third is "yes" — a stacked list, a following field — the height and the
 drawn lines must come from one call, not two.
 
-## TD-GUI-CLIPPED-TEXT-IS-NOT-MARKED — `max_width` cuts mid-glyph and says nothing
+## TD-GUI-CLIPPED-TEXT-IS-NOT-MARKED — `max_width` cuts mid-glyph and says nothing — ✅ **RESOLVED 2026-08-15**
 
-**Status.** Open, and deliberately not fixed in the pass that closed
+**Resolution.** `RenderCommand::Text` gained a **required** `overflow:
+TextOverflow` field (`Clip` | `Ellipsis`), and the compositor draws the mark.
+The operator chose "required, no `Default`" from four options precisely so that
+every one of the 4,517 constructions in the tree had to answer the question
+`max_width` had been posing and never answering; see `design-decisions.md` §427
+for the options and §429 for why the commit also had to fill in lane B's 31
+sites. The second measurement the entry complains about below is gone from the
+policy path: the compositor decides about the mark from the run it has already
+shaped, so `text::elide` is no longer the only way to get a cut marked.
+
+Bounded sites default to `Ellipsis` rather than to the behaviour-preserving
+`Clip`, because today's behaviour *is* this entry — a sweep that faithfully
+preserved it at four thousand sites would have done nothing.
+
+Tested at all three layers: the compositor (a mark appears only when earned,
+stays inside the limit, falls back to clipping when the mark itself does not
+fit, and never blanks a field clipping would have filled), the toolkit (each
+helper emits the right policy), and `guiremote` (both policies survive the wire,
+are distinguishable on it, and an unknown byte is a `DecodeError` rather than a
+guess — `PROTOCOL_VERSION` went to 2 for it).
+
+**Status.** ~~Open, and deliberately not fixed in the pass that closed
 `TD-GUI-TEXT-COMMAND-DOES-NOT-WRAP`, because the good fix is a change to
-`RenderCommand::Text` itself and wants a decision rather than a sweep.
+`RenderCommand::Text` itself and wants a decision rather than a sweep.~~
+The decision was asked and answered.
 
 **What it is.** `max_width` clips: the compositor walks glyphs and stops when
 the next one would cross the limit. It draws no ellipsis. So a label that does
@@ -66763,3 +66785,34 @@ the thing the harness reports, so the notification actively misleads.
 Either make the command under test the **last** command in the chain, or chain
 with `&&` so a failure propagates. Do not put a diagnostic after it and then
 believe the notification.
+
+### A trailing `| tail` swallows the exit code too — and hides the log while it runs — 2026-08-15
+
+Follow-up to "A trailing `tail` swallows the exit code the notification
+reports". That entry says to make the command under test the **last** command in
+the chain. That is not enough, because it is satisfied by:
+
+```
+python scripts/run-timeout.py 900 cargo test -p compositor ... 2>&1 | tail -50
+```
+
+`cargo` *is* the last command written, but a pipeline's exit status is the exit
+status of its **last element**, so the notification reported `tail`'s 0. This
+was reintroduced twice in one session by an agent who had written the original
+entry the session before, which is the reason for restating it.
+
+Two things are wrong with the pipe form and only one of them is the exit code:
+
+1. **The status is `tail`'s.** The rule has to be stated as *the process whose
+   status you care about must be the last element of the last pipeline* — not
+   "the last command", which reads as satisfied by the above.
+2. **The output file stays empty until the job ends.** `tail` cannot emit
+   anything until its input closes, so the incremental log — the entire reason
+   `run-timeout.py` streams and heartbeats — shows nothing while the job runs.
+   Checking on a long build mid-flight returns an empty file, which reads as a
+   hang.
+
+Both vanish if the pipe is simply dropped. `run-timeout.py` already writes to
+the harness's output file; use `Read`/`tail` on **that file** afterwards instead
+of filtering in the pipeline. Reserve pipes for foreground commands whose status
+does not matter.

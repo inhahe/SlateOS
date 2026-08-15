@@ -27,7 +27,7 @@
 
 use guitk::color::Color;
 use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
 // ── Catppuccin Mocha palette ────────────────────────────────────────
@@ -571,6 +571,7 @@ impl LifeApp {
             color: COL_TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Status
@@ -584,6 +585,7 @@ impl LifeApp {
             color: status_color,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Generation
@@ -595,6 +597,7 @@ impl LifeApp {
             color: COL_SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Population
@@ -606,6 +609,7 @@ impl LifeApp {
             color: COL_SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Speed
@@ -617,6 +621,7 @@ impl LifeApp {
             color: COL_SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Grid size
@@ -628,6 +633,7 @@ impl LifeApp {
             color: COL_OVERLAY0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Draw grid
@@ -689,6 +695,7 @@ impl LifeApp {
             color: COL_OVERLAY0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Pattern select overlay
@@ -737,6 +744,7 @@ impl LifeApp {
             color: COL_TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         let mut cy = by + 50.0;
@@ -767,6 +775,7 @@ impl LifeApp {
                     FontWeightHint::Regular
                 },
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             cy += 28.0;
         }
@@ -779,6 +788,7 @@ impl LifeApp {
             color: COL_OVERLAY0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -814,6 +824,7 @@ impl LifeApp {
             color: COL_TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         let helps = [
@@ -840,6 +851,7 @@ impl LifeApp {
                 color: COL_BLUE,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             cmds.push(RenderCommand::Text {
                 x: bx + 150.0,
@@ -849,6 +861,7 @@ impl LifeApp {
                 color: COL_SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             cy += 22.0;
         }

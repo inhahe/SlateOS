@@ -17,7 +17,7 @@
 use guitk::color::Color;
 #[allow(unused_imports)]
 use guitk::event::{Event, Key, KeyEvent, Modifiers};
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
 // ---------------------------------------------------------------------------
@@ -452,6 +452,7 @@ impl StopwatchApp {
             font_size: 18.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // State indicator
@@ -476,6 +477,7 @@ impl StopwatchApp {
             font_size: 13.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Large time display
@@ -495,6 +497,7 @@ impl StopwatchApp {
             font_size: 56.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Countdown finished alert
@@ -515,6 +518,7 @@ impl StopwatchApp {
                 font_size: 20.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 
@@ -540,6 +544,7 @@ impl StopwatchApp {
             font_size: 13.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Lap list (stopwatch mode only)
@@ -554,6 +559,7 @@ impl StopwatchApp {
                 font_size: 18.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             // Column headers
@@ -568,6 +574,7 @@ impl StopwatchApp {
                     font_size: 12.0,
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
             }
 
@@ -606,6 +613,7 @@ impl StopwatchApp {
                     font_size: 15.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
                 cmds.push(RenderCommand::Text {
                     x: 120.0,
@@ -615,6 +623,7 @@ impl StopwatchApp {
                     font_size: 15.0,
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
                 cmds.push(RenderCommand::Text {
                     x: 280.0,
@@ -624,6 +633,7 @@ impl StopwatchApp {
                     font_size: 15.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
             }
 
@@ -646,6 +656,7 @@ impl StopwatchApp {
                     font_size: 14.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
             }
         }
@@ -660,6 +671,7 @@ impl StopwatchApp {
             font_size: 24.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         cmds.push(RenderCommand::Text {
@@ -670,6 +682,7 @@ impl StopwatchApp {
             font_size: 13.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         if self.history.is_empty() {
@@ -681,6 +694,7 @@ impl StopwatchApp {
                 font_size: 16.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             return;
         }
@@ -700,6 +714,7 @@ impl StopwatchApp {
                 font_size: 12.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 
@@ -719,6 +734,7 @@ impl StopwatchApp {
                 font_size: 14.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             cmds.push(RenderCommand::Text {
                 x: 140.0,
@@ -728,6 +744,7 @@ impl StopwatchApp {
                 font_size: 14.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             cmds.push(RenderCommand::Text {
                 x: 280.0,
@@ -737,6 +754,7 @@ impl StopwatchApp {
                 font_size: 14.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             let best = rec
                 .best_lap_ms
@@ -749,6 +767,7 @@ impl StopwatchApp {
                 font_size: 14.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
     }
@@ -762,6 +781,7 @@ impl StopwatchApp {
             font_size: 24.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         cmds.push(RenderCommand::Text {
@@ -772,6 +792,7 @@ impl StopwatchApp {
             font_size: 13.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         let labels = ["Hours", "Minutes", "Seconds"];
@@ -814,6 +835,7 @@ impl StopwatchApp {
                 font_size: 13.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             cmds.push(RenderCommand::Text {
@@ -828,6 +850,7 @@ impl StopwatchApp {
                 font_size: 40.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 
@@ -842,6 +865,7 @@ impl StopwatchApp {
             font_size: 18.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 }

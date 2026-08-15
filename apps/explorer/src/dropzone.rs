@@ -16,7 +16,7 @@
 #![allow(dead_code)]
 
 use guitk::color::Color;
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
 
@@ -660,6 +660,7 @@ pub fn render_drop_feedback(
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 

@@ -39,7 +39,7 @@
 #[allow(unused_imports)]
 use guitk::color::Color;
 #[allow(unused_imports)]
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
 use guitk::text;
@@ -1665,6 +1665,7 @@ impl RemindersApp {
                 color: PEACH,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(30.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Message
@@ -1676,6 +1677,7 @@ impl RemindersApp {
                 color: TEXT,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(self.width - 200.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Dismiss button
@@ -1695,6 +1697,7 @@ impl RemindersApp {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(70.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Snooze button
@@ -1714,6 +1717,7 @@ impl RemindersApp {
                 color: BLUE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(70.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -1751,6 +1755,7 @@ impl RemindersApp {
             color: LAVENDER,
             font_weight: FontWeightHint::Bold,
             max_width: Some(150.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Current view label
@@ -1762,6 +1767,7 @@ impl RemindersApp {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(200.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Search box
@@ -1802,6 +1808,7 @@ impl RemindersApp {
             color: search_color,
             font_weight: FontWeightHint::Regular,
             max_width: Some(search_w - 24.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Sort indicator
@@ -1822,6 +1829,7 @@ impl RemindersApp {
             color: SUBTEXT1,
             font_weight: FontWeightHint::Regular,
             max_width: Some(90.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Task count
@@ -1839,6 +1847,7 @@ impl RemindersApp {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(110.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -1875,6 +1884,7 @@ impl RemindersApp {
             color: OVERLAY0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(w - PADDING * 2.0),
+            overflow: TextOverflow::Ellipsis,
         });
         row_y += 20.0;
 
@@ -1901,6 +1911,7 @@ impl RemindersApp {
                 color: text_color,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(30.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Label
@@ -1916,6 +1927,7 @@ impl RemindersApp {
                     FontWeightHint::Regular
                 },
                 max_width: Some(w - PADDING * 2.0 - 60.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Count badge
@@ -1953,6 +1965,7 @@ impl RemindersApp {
                     color: CRUST,
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(badge_w),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
 
@@ -1979,6 +1992,7 @@ impl RemindersApp {
             color: OVERLAY0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(w - PADDING * 2.0),
+            overflow: TextOverflow::Ellipsis,
         });
         row_y += 20.0;
 
@@ -2019,6 +2033,7 @@ impl RemindersApp {
                     FontWeightHint::Regular
                 },
                 max_width: Some(w - PADDING * 2.0 - 50.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Count
@@ -2032,6 +2047,7 @@ impl RemindersApp {
                     color: OVERLAY0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(25.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
 
@@ -2062,6 +2078,7 @@ impl RemindersApp {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(200.0),
+                overflow: TextOverflow::Ellipsis,
             });
             cmds.push(RenderCommand::Text {
                 x: x + w / 2.0 - 100.0,
@@ -2071,6 +2088,7 @@ impl RemindersApp {
                 color: SURFACE2,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(250.0),
+                overflow: TextOverflow::Ellipsis,
             });
             cmds.push(RenderCommand::PopClip);
             return;
@@ -2185,6 +2203,7 @@ impl RemindersApp {
                 color: CRUST,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(16.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -2199,6 +2218,7 @@ impl RemindersApp {
             color: title_color,
             font_weight: FontWeightHint::Bold,
             max_width: Some(w - 100.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Due date label
@@ -2216,6 +2236,7 @@ impl RemindersApp {
             color: due_color,
             font_weight: FontWeightHint::Regular,
             max_width: Some(w - 120.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Category + priority badges
@@ -2242,6 +2263,7 @@ impl RemindersApp {
             color: task.category.color(),
             font_weight: FontWeightHint::Bold,
             max_width: Some(55.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Priority badge
@@ -2267,6 +2289,7 @@ impl RemindersApp {
             color: task.priority.color(),
             font_weight: FontWeightHint::Bold,
             max_width: Some(50.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Recurrence indicator
@@ -2280,6 +2303,7 @@ impl RemindersApp {
                 color: TEAL,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(100.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -2323,6 +2347,7 @@ impl RemindersApp {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(bar_w),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }
@@ -2369,6 +2394,7 @@ impl RemindersApp {
             color: TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: Some(content_w),
+            overflow: TextOverflow::Ellipsis,
         });
         row_y += 28.0;
 
@@ -2395,6 +2421,7 @@ impl RemindersApp {
             color: status_color,
             font_weight: FontWeightHint::Bold,
             max_width: Some(70.0),
+            overflow: TextOverflow::Ellipsis,
         });
         row_y += 32.0;
 
@@ -2422,6 +2449,7 @@ impl RemindersApp {
             color: field_label_color,
             font_weight: FontWeightHint::Bold,
             max_width: Some(content_w),
+            overflow: TextOverflow::Ellipsis,
         });
         row_y += 14.0;
         let due_text = if let Some(due) = task.due {
@@ -2442,6 +2470,7 @@ impl RemindersApp {
             color: due_color,
             font_weight: FontWeightHint::Regular,
             max_width: Some(content_w),
+            overflow: TextOverflow::Ellipsis,
         });
         row_y += 22.0;
 
@@ -2454,6 +2483,7 @@ impl RemindersApp {
             color: field_label_color,
             font_weight: FontWeightHint::Bold,
             max_width: Some(content_w),
+            overflow: TextOverflow::Ellipsis,
         });
         row_y += 14.0;
         cmds.push(RenderCommand::FillRect {
@@ -2472,6 +2502,7 @@ impl RemindersApp {
             color: task.priority.color(),
             font_weight: FontWeightHint::Bold,
             max_width: Some(content_w - 20.0),
+            overflow: TextOverflow::Ellipsis,
         });
         row_y += 22.0;
 
@@ -2484,6 +2515,7 @@ impl RemindersApp {
             color: field_label_color,
             font_weight: FontWeightHint::Bold,
             max_width: Some(content_w),
+            overflow: TextOverflow::Ellipsis,
         });
         row_y += 14.0;
         cmds.push(RenderCommand::FillRect {
@@ -2502,6 +2534,7 @@ impl RemindersApp {
             color: task.category.color(),
             font_weight: FontWeightHint::Bold,
             max_width: Some(content_w - 20.0),
+            overflow: TextOverflow::Ellipsis,
         });
         row_y += 22.0;
 
@@ -2514,6 +2547,7 @@ impl RemindersApp {
             color: field_label_color,
             font_weight: FontWeightHint::Bold,
             max_width: Some(content_w),
+            overflow: TextOverflow::Ellipsis,
         });
         row_y += 14.0;
         cmds.push(RenderCommand::Text {
@@ -2524,6 +2558,7 @@ impl RemindersApp {
             color: field_value_color,
             font_weight: FontWeightHint::Regular,
             max_width: Some(content_w),
+            overflow: TextOverflow::Ellipsis,
         });
         row_y += 22.0;
 
@@ -2547,6 +2582,7 @@ impl RemindersApp {
                 color: field_label_color,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(content_w),
+                overflow: TextOverflow::Ellipsis,
             });
             row_y += 14.0;
             // `RenderCommand::Text` clips at `max_width` rather than wrapping,
@@ -2568,6 +2604,7 @@ impl RemindersApp {
                 color: field_label_color,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(content_w),
+                overflow: TextOverflow::Ellipsis,
             });
             row_y += 14.0;
             row_y += detail_prose(&task.notes, x + pad, row_y, content_w).draw(cmds);
@@ -2595,6 +2632,7 @@ impl RemindersApp {
                 color: field_label_color,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(content_w),
+                overflow: TextOverflow::Ellipsis,
             });
             row_y += 16.0;
 
@@ -2656,6 +2694,7 @@ impl RemindersApp {
                     color: st_color,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(content_w - 24.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
                 row_y += 20.0;
             }
@@ -2682,6 +2721,7 @@ impl RemindersApp {
                 color: field_label_color,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(content_w),
+                overflow: TextOverflow::Ellipsis,
             });
             row_y += 16.0;
 
@@ -2708,6 +2748,7 @@ impl RemindersApp {
                     color: SKY,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(btn_w - 16.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
         }
@@ -2722,6 +2763,7 @@ impl RemindersApp {
             color: OVERLAY0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(content_w),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 }

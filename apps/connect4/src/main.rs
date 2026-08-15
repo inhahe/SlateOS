@@ -19,7 +19,7 @@
 //! Enter/Space to drop a piece, N for new game, Escape to quit.
 
 use guitk::color::Color;
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 #[allow(unused_imports)]
 use guitk::event::{Event, Key, KeyEvent, Modifiers};
@@ -736,6 +736,7 @@ impl Connect4App {
             font_size: TITLE_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Score line
@@ -751,6 +752,7 @@ impl Connect4App {
             font_size: INFO_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Status text
@@ -785,6 +787,7 @@ impl Connect4App {
             font_size: INFO_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Column cursor indicator (arrow above the selected column)
@@ -871,6 +874,7 @@ impl Connect4App {
                 font_size: INFO_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 
@@ -884,6 +888,7 @@ impl Connect4App {
             font_size: 13.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Move history panel (right side)
@@ -897,6 +902,7 @@ impl Connect4App {
             font_size: 14.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         let max_display = 20;
@@ -918,6 +924,7 @@ impl Connect4App {
                 font_size: 13.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 

@@ -26,7 +26,7 @@
 
 use guitk::color::Color;
 use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
 // -- Catppuccin Mocha palette ------------------------------------------------
@@ -1069,6 +1069,7 @@ impl Hearts {
             font_size: TITLE_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Round/phase info
@@ -1086,6 +1087,7 @@ impl Hearts {
             font_size: INFO_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Render table (trick area)
@@ -1113,6 +1115,7 @@ impl Hearts {
                 font_size: SMALL_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 
@@ -1131,6 +1134,7 @@ impl Hearts {
             font_size: SMALL_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         cmds
@@ -1246,6 +1250,7 @@ impl Hearts {
             font_size: LABEL_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // North (player 2)
@@ -1258,6 +1263,7 @@ impl Hearts {
             font_size: LABEL_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // East (player 3)
@@ -1270,6 +1276,7 @@ impl Hearts {
             font_size: LABEL_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Round points display
@@ -1282,6 +1289,7 @@ impl Hearts {
             font_size: SMALL_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         cmds.push(RenderCommand::Text {
             x: TRICK_CENTER_X - 30.0,
@@ -1291,6 +1299,7 @@ impl Hearts {
             font_size: SMALL_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         cmds.push(RenderCommand::Text {
             x: TRICK_CENTER_X + 140.0,
@@ -1300,6 +1309,7 @@ impl Hearts {
             font_size: SMALL_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -1322,6 +1332,7 @@ impl Hearts {
             font_size: INFO_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         for (i, name) in self.names.iter().enumerate() {
@@ -1341,6 +1352,7 @@ impl Hearts {
                 font_size: LABEL_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
     }
@@ -1363,6 +1375,7 @@ impl Hearts {
             font_size: INFO_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 }
@@ -1432,6 +1445,7 @@ fn render_card(
         font_size: CARD_FONT_SIZE,
         font_weight: FontWeightHint::Bold,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
 
     // Suit symbol below rank
@@ -1443,6 +1457,7 @@ fn render_card(
         font_size: CARD_FONT_SIZE,
         font_weight: FontWeightHint::Regular,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
 
     // Large suit in center
@@ -1454,6 +1469,7 @@ fn render_card(
         font_size: CARD_SUIT_SIZE,
         font_weight: FontWeightHint::Regular,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
 }
 

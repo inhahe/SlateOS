@@ -37,7 +37,7 @@
 #![allow(clippy::doc_markdown)]
 
 use guitk::Color;
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
 
@@ -2100,6 +2100,7 @@ impl PhotoApp {
             font_size: 15.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(140.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // View mode buttons
@@ -2131,6 +2132,7 @@ impl PhotoApp {
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(btn_w - 12.0),
+                overflow: TextOverflow::Ellipsis,
             });
             vx += btn_w + 4.0;
         }
@@ -2154,6 +2156,7 @@ impl PhotoApp {
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(100.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Search box
@@ -2185,6 +2188,7 @@ impl PhotoApp {
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(search_w - 16.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Thumb size indicator
@@ -2198,6 +2202,7 @@ impl PhotoApp {
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Slideshow button
@@ -2226,6 +2231,7 @@ impl PhotoApp {
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(70.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Separator
@@ -2274,6 +2280,7 @@ impl PhotoApp {
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - 24.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Show selected photo info on right
@@ -2289,6 +2296,7 @@ impl PhotoApp {
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(280.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }
@@ -2325,6 +2333,7 @@ impl PhotoApp {
             font_size: 10.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(SIDEBAR_WIDTH - 24.0),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 20.0;
 
@@ -2360,6 +2369,7 @@ impl PhotoApp {
                     FontWeightHint::Regular
                 },
                 max_width: Some(SIDEBAR_WIDTH - 32.0),
+                overflow: TextOverflow::Ellipsis,
             });
             cy += ITEM_HEIGHT;
         }
@@ -2375,6 +2385,7 @@ impl PhotoApp {
             font_size: 10.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(SIDEBAR_WIDTH - 24.0),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 20.0;
 
@@ -2400,6 +2411,7 @@ impl PhotoApp {
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(SIDEBAR_WIDTH - 36.0),
+                overflow: TextOverflow::Ellipsis,
             });
             cy += ITEM_HEIGHT;
         }
@@ -2416,6 +2428,7 @@ impl PhotoApp {
                 font_size: 10.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(SIDEBAR_WIDTH - 24.0),
+                overflow: TextOverflow::Ellipsis,
             });
             cy += 20.0;
 
@@ -2440,6 +2453,7 @@ impl PhotoApp {
                     font_size: 12.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(SIDEBAR_WIDTH - 36.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
                 cy += ITEM_HEIGHT;
             }
@@ -2467,6 +2481,7 @@ impl PhotoApp {
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(SIDEBAR_WIDTH - 32.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -2507,6 +2522,7 @@ impl PhotoApp {
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 24.0),
+                overflow: TextOverflow::Ellipsis,
             });
             return;
         };
@@ -2528,6 +2544,7 @@ impl PhotoApp {
             font_size: 13.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(max_w),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 20.0;
 
@@ -2541,6 +2558,7 @@ impl PhotoApp {
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(max_w),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 18.0;
 
@@ -2554,6 +2572,7 @@ impl PhotoApp {
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(max_w),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 18.0;
 
@@ -2575,6 +2594,7 @@ impl PhotoApp {
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(max_w - 20.0),
+                overflow: TextOverflow::Ellipsis,
             });
             cy += 18.0;
         }
@@ -2590,6 +2610,7 @@ impl PhotoApp {
                 font_size: 10.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(max_w),
+                overflow: TextOverflow::Ellipsis,
             });
             cy += 16.0;
             let tags_line = photo.tags.join(", ");
@@ -2601,6 +2622,7 @@ impl PhotoApp {
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(max_w),
+                overflow: TextOverflow::Ellipsis,
             });
             cy += 18.0;
         }
@@ -2615,6 +2637,7 @@ impl PhotoApp {
             font_size: 10.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(max_w),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 16.0;
 
@@ -2628,6 +2651,7 @@ impl PhotoApp {
                 font_size: 10.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(80.0),
+                overflow: TextOverflow::Ellipsis,
             });
             cmds.push(RenderCommand::Text {
                 x: lx + 85.0,
@@ -2637,6 +2661,7 @@ impl PhotoApp {
                 font_size: 10.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(max_w - 90.0),
+                overflow: TextOverflow::Ellipsis,
             });
             cy += 15.0;
         }
@@ -2652,6 +2677,7 @@ impl PhotoApp {
                 font_size: 10.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(max_w),
+                overflow: TextOverflow::Ellipsis,
             });
             cy += 16.0;
 
@@ -2673,6 +2699,7 @@ impl PhotoApp {
                         font_size: 10.0,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(max_w),
+                        overflow: TextOverflow::Ellipsis,
                     });
                     cy += 15.0;
                 }
@@ -2758,6 +2785,7 @@ impl PhotoApp {
                 font_size: 16.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             return;
         }
@@ -2806,6 +2834,7 @@ impl PhotoApp {
                     font_size: 9.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(thumb - 8.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
 
                 // Rating stars in top-left
@@ -2818,6 +2847,7 @@ impl PhotoApp {
                         font_size: 10.0,
                         font_weight: FontWeightHint::Bold,
                         max_width: Some(thumb - 8.0),
+                        overflow: TextOverflow::Ellipsis,
                     });
                 }
 
@@ -2865,6 +2895,7 @@ impl PhotoApp {
                 font_size: 14.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             return;
         };
@@ -2909,6 +2940,7 @@ impl PhotoApp {
             font_size: 14.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(display_w - 40.0),
+            overflow: TextOverflow::Ellipsis,
         });
         cmds.push(RenderCommand::Text {
             x: display_x + display_w / 2.0 - 50.0,
@@ -2918,6 +2950,7 @@ impl PhotoApp {
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(display_w - 40.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Bottom bar with nav hint
@@ -2929,6 +2962,7 @@ impl PhotoApp {
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -2961,6 +2995,7 @@ impl PhotoApp {
                 font_size: 13.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(width - 24.0),
+                overflow: TextOverflow::Ellipsis,
             });
             cy += 24.0;
 
@@ -3011,6 +3046,7 @@ impl PhotoApp {
                 font_size: 16.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
     }
@@ -3063,6 +3099,7 @@ impl PhotoApp {
                 font_size: 16.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(display_w - 40.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -3084,6 +3121,7 @@ impl PhotoApp {
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(300.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 }

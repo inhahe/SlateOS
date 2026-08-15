@@ -25,7 +25,7 @@
 use guitk::color::Color;
 #[allow(unused_imports)]
 use guitk::event::{Event, Key, KeyEvent, Modifiers};
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
 
@@ -741,6 +741,7 @@ impl WordSearchApp {
             color: BLUE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(200.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Category label
@@ -752,6 +753,7 @@ impl WordSearchApp {
             color: self.category.color(),
             font_weight: FontWeightHint::Bold,
             max_width: Some(120.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Difficulty label
@@ -763,6 +765,7 @@ impl WordSearchApp {
             color: self.difficulty.color(),
             font_weight: FontWeightHint::Regular,
             max_width: Some(120.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Timer
@@ -777,6 +780,7 @@ impl WordSearchApp {
             color: LAVENDER,
             font_weight: FontWeightHint::Bold,
             max_width: Some(80.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Hints remaining
@@ -788,6 +792,7 @@ impl WordSearchApp {
             color: if self.hints_remaining > 0 { PEACH } else { OVERLAY0 },
             font_weight: FontWeightHint::Regular,
             max_width: Some(100.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Words found count
@@ -799,6 +804,7 @@ impl WordSearchApp {
             color: GREEN,
             font_weight: FontWeightHint::Regular,
             max_width: Some(100.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Status
@@ -811,6 +817,7 @@ impl WordSearchApp {
                 color: GREEN,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(120.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }
@@ -909,6 +916,7 @@ impl WordSearchApp {
                         color: letter_color,
                         font_weight: weight,
                         max_width: Some(CELL_SIZE),
+                        overflow: TextOverflow::Ellipsis,
                     });
                 }
             }
@@ -929,6 +937,7 @@ impl WordSearchApp {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(160.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Each word
@@ -950,6 +959,7 @@ impl WordSearchApp {
                 color: word_color,
                 font_weight: weight,
                 max_width: Some(WORD_LIST_MAX_WIDTH),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Strikethrough line for found words
@@ -978,6 +988,7 @@ impl WordSearchApp {
                     color: GREEN,
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(20.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
         }
@@ -1004,6 +1015,7 @@ impl WordSearchApp {
             color: OVERLAY0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(700.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 }

@@ -39,7 +39,7 @@
 #![allow(clippy::wildcard_imports)]
 
 use guitk::Color;
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
 use std::collections::VecDeque;
@@ -1350,6 +1350,7 @@ impl SlidesApp {
             font_size: 14.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(200.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Toolbar buttons.
@@ -1383,6 +1384,7 @@ impl SlidesApp {
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         cmds.push(RenderCommand::Text {
             x: 680.0,
@@ -1392,6 +1394,7 @@ impl SlidesApp {
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Theme label.
@@ -1403,6 +1406,7 @@ impl SlidesApp {
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -1434,6 +1438,7 @@ impl SlidesApp {
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(w - 16.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -1471,6 +1476,7 @@ impl SlidesApp {
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         if let Some(slide) = self.slides.get(self.current_index) {
@@ -1483,6 +1489,7 @@ impl SlidesApp {
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             let layout_info = format!("Layout: {}", slide.layout.label());
@@ -1494,6 +1501,7 @@ impl SlidesApp {
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 
@@ -1510,6 +1518,7 @@ impl SlidesApp {
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -1603,6 +1612,7 @@ impl SlidesApp {
                     font_size: 8.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(thumb_w - 8.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
 
@@ -1615,6 +1625,7 @@ impl SlidesApp {
                 font_size: 10.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 
@@ -1719,6 +1730,7 @@ impl SlidesApp {
                 font_size: 10.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
     }
@@ -1766,6 +1778,11 @@ impl SlidesApp {
                     font_size: fs,
                     font_weight: weight,
                     max_width: text_max,
+                    // `text_max` is `Some` on both arms above — slide text is
+                    // always bounded by its box — so the cut is always
+                    // possible, and a slide that silently loses the end of a
+                    // bullet is worse than one that visibly runs out of room.
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
             SlideElement::Shape {
@@ -1905,6 +1922,7 @@ impl SlidesApp {
                     font_size: 14.0 * scale,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(iw * 0.5),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
             SlideElement::BulletList {
@@ -1932,6 +1950,7 @@ impl SlidesApp {
                         font_size: fs,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(bw),
+                        overflow: TextOverflow::Ellipsis,
                     });
                 }
             }
@@ -1977,6 +1996,7 @@ impl SlidesApp {
             font_size: 14.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         y += 24.0;
 
@@ -2029,6 +2049,7 @@ impl SlidesApp {
                         font_size: 13.0,
                         font_weight: FontWeightHint::Bold,
                         max_width: None,
+                        overflow: TextOverflow::Clip,
                     });
                     y += 20.0;
 
@@ -2144,6 +2165,7 @@ impl SlidesApp {
                     font_size: 11.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(val_w),
+                    overflow: TextOverflow::Ellipsis,
                 });
                 y += 24.0;
 
@@ -2156,6 +2178,7 @@ impl SlidesApp {
                     font_size: 12.0,
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
                 y += 20.0;
 
@@ -2187,6 +2210,7 @@ impl SlidesApp {
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(70.0),
+            overflow: TextOverflow::Ellipsis,
         });
         cmds.push(RenderCommand::Text {
             x: x + 75.0,
@@ -2196,6 +2220,7 @@ impl SlidesApp {
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(120.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -2232,6 +2257,7 @@ impl SlidesApp {
             font_size: 11.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         // Notes content.
         let notes_text = self.current_notes();
@@ -2252,6 +2278,7 @@ impl SlidesApp {
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(notes_w - 20.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -2331,6 +2358,7 @@ impl SlidesApp {
                     font_size: 10.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(thumb_w - 16.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
 
@@ -2344,6 +2372,7 @@ impl SlidesApp {
                     font_size: 8.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
             }
 
@@ -2356,6 +2385,7 @@ impl SlidesApp {
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(thumb_w),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 

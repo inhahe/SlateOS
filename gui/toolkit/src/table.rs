@@ -11,10 +11,16 @@
 //! lives in three places, no single place is "the column", so nothing ever asks
 //! whether a cell's text *fits* in it. That question has no home, and the cells
 //! that overflow — nearly always the ones holding a filename, a path, or a
-//! string that arrived over the network — clip silently against whatever is
-//! drawn beside them. `RenderCommand::Text`'s `max_width` is a clip, not a
-//! wrap and not an ellipsis: it stops mid-glyph with no marker that anything
-//! was dropped.
+//! string that arrived over the network — run into whatever is drawn beside
+//! them. `RenderCommand::Text`'s `max_width` is a bound, not a wrap: it stops
+//! between glyphs, and the next column is drawn wherever the cursor said,
+//! knowing nothing about it.
+//!
+//! Since `design-decisions.md` §427 that cut is at least *marked* — the command
+//! carries a [`TextOverflow`](crate::render::TextOverflow) and the compositor
+//! draws the `…`. That fixes the reader being unable to tell a fragment from a
+//! whole value. It does not answer where the column ends, which is the question
+//! below and the reason this module exists.
 //!
 //! [`Table`] gives the width exactly one home. The header and the body both ask
 //! it where a column starts and how wide it is, so they cannot disagree, and
@@ -42,7 +48,7 @@
 //! ```
 
 use crate::color::Color;
-use crate::render::{FontWeightHint, RenderCommand};
+use crate::render::{FontWeightHint, RenderCommand, TextOverflow};
 use crate::text;
 
 /// One column of a table: its heading and its content width in pixels.
@@ -212,6 +218,7 @@ impl<'a> Table<'a> {
                 color,
                 font_weight,
                 max_width: Some(col.width),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }
@@ -319,6 +326,7 @@ impl<'a> Table<'a> {
             color,
             font_weight,
             max_width: Some(width),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 }

@@ -39,7 +39,7 @@
 #![allow(dead_code)]
 
 use guitk::Color;
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
 
@@ -1656,6 +1656,7 @@ impl QrApp {
             font_size: 15.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(200.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Code type toggle
@@ -1684,6 +1685,7 @@ impl QrApp {
                     FontWeightHint::Regular
                 },
                 max_width: Some(btn_w - 16.0),
+                overflow: TextOverflow::Ellipsis,
             });
             tx += btn_w + 4.0;
         }
@@ -1707,6 +1709,7 @@ impl QrApp {
             font_size: 12.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(gen_btn_w - 24.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Divider line
@@ -1766,6 +1769,7 @@ impl QrApp {
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - 24.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -1803,6 +1807,7 @@ impl QrApp {
             font_size: 10.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(max_w),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 18.0;
 
@@ -1834,6 +1839,7 @@ impl QrApp {
                     FontWeightHint::Regular
                 },
                 max_width: Some(btn_w - 12.0),
+                overflow: TextOverflow::Ellipsis,
             });
             mx += btn_w + 4.0;
         }
@@ -1848,6 +1854,7 @@ impl QrApp {
             font_size: 10.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(max_w),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 16.0;
 
@@ -1894,6 +1901,7 @@ impl QrApp {
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(max_w - 16.0),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 72.0;
 
@@ -1918,6 +1926,7 @@ impl QrApp {
             font_size: 10.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(max_w),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 18.0;
 
@@ -1969,6 +1978,7 @@ impl QrApp {
                 font_size: 10.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(max_w - 26.0),
+                overflow: TextOverflow::Ellipsis,
             });
             cy += 28.0;
         }
@@ -1989,6 +1999,7 @@ impl QrApp {
                 font_size: 10.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(max_w),
+                overflow: TextOverflow::Ellipsis,
             });
             *cy += 14.0;
 
@@ -2018,6 +2029,7 @@ impl QrApp {
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(max_w - 16.0),
+                overflow: TextOverflow::Ellipsis,
             });
             *cy += 30.0;
         }
@@ -2031,6 +2043,7 @@ impl QrApp {
             font_size: 10.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(max_w),
+            overflow: TextOverflow::Ellipsis,
         });
         *cy += 18.0;
     }
@@ -2059,6 +2072,7 @@ impl QrApp {
                 font_size: 10.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(max_w),
+                overflow: TextOverflow::Ellipsis,
             });
             *cy += 14.0;
 
@@ -2088,6 +2102,7 @@ impl QrApp {
                 font_size: 10.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(max_w - 16.0),
+                overflow: TextOverflow::Ellipsis,
             });
             *cy += 26.0;
         }
@@ -2113,6 +2128,7 @@ impl QrApp {
             font_size: 10.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(max_w),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 22.0;
 
@@ -2153,6 +2169,7 @@ impl QrApp {
                 font_size: 13.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(placeholder_w - 20.0),
+                overflow: TextOverflow::Ellipsis,
             });
             cmds.push(RenderCommand::Text {
                 x: px + 20.0,
@@ -2162,6 +2179,7 @@ impl QrApp {
                 font_size: 10.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(placeholder_w - 20.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }
@@ -2229,6 +2247,7 @@ impl QrApp {
             font_size: 10.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(panel_w),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -2280,6 +2299,7 @@ impl QrApp {
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(total_w),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Info
@@ -2292,6 +2312,7 @@ impl QrApp {
             font_size: 10.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(panel_w),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -2336,6 +2357,7 @@ impl QrApp {
             font_size: 10.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(max_w),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 18.0;
 
@@ -2361,6 +2383,7 @@ impl QrApp {
                     FontWeightHint::Regular
                 },
                 max_width: Some(max_w - 16.0),
+                overflow: TextOverflow::Ellipsis,
             });
             cy += 26.0;
         }
@@ -2375,6 +2398,7 @@ impl QrApp {
             font_size: 10.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(max_w),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 18.0;
 
@@ -2400,6 +2424,7 @@ impl QrApp {
                     FontWeightHint::Regular
                 },
                 max_width: Some(max_w - 16.0),
+                overflow: TextOverflow::Ellipsis,
             });
             cy += 26.0;
         }
@@ -2414,6 +2439,7 @@ impl QrApp {
             font_size: 10.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(max_w),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 18.0;
 
@@ -2426,6 +2452,7 @@ impl QrApp {
             font_size: 10.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(max_w - 30.0),
+            overflow: TextOverflow::Ellipsis,
         });
         cmds.push(RenderCommand::FillRect {
             x: lx + max_w - 24.0,
@@ -2455,6 +2482,7 @@ impl QrApp {
             font_size: 10.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(max_w - 30.0),
+            overflow: TextOverflow::Ellipsis,
         });
         cmds.push(RenderCommand::FillRect {
             x: lx + max_w - 24.0,
@@ -2485,6 +2513,7 @@ impl QrApp {
             font_size: 10.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(max_w),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 18.0;
 
@@ -2505,6 +2534,7 @@ impl QrApp {
                     font_size: 10.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(max_w),
+                    overflow: TextOverflow::Ellipsis,
                 });
                 cy += 16.0;
             }
@@ -2523,6 +2553,7 @@ impl QrApp {
                     font_size: 10.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(max_w),
+                    overflow: TextOverflow::Ellipsis,
                 });
                 cy += 16.0;
             }
@@ -2535,6 +2566,7 @@ impl QrApp {
                 font_size: 10.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(max_w),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }

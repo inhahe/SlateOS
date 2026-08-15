@@ -20,7 +20,7 @@
 
 use guitk::color::Color;
 use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
 // ── Catppuccin Mocha palette ────────────────────────────────────────
@@ -763,6 +763,7 @@ impl ReversiApp {
             font_size: TITLE_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Score display next to title
@@ -776,6 +777,7 @@ impl ReversiApp {
             font_size: INFO_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         cmds.push(RenderCommand::Text {
             x: BOARD_OFFSET_X + 180.0,
@@ -785,6 +787,7 @@ impl ReversiApp {
             font_size: INFO_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Board border
@@ -905,6 +908,7 @@ impl ReversiApp {
                 font_size: LABEL_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             // Row labels (1-8)
             cmds.push(RenderCommand::Text {
@@ -915,6 +919,7 @@ impl ReversiApp {
                 font_size: LABEL_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 
@@ -930,6 +935,7 @@ impl ReversiApp {
             font_size: INFO_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(CELL_SIZE * 8.0 + 250.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         cmds
@@ -1011,6 +1017,7 @@ impl ReversiApp {
             font_size: INFO_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(190.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Score section
@@ -1022,6 +1029,7 @@ impl ReversiApp {
             font_size: LABEL_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         let black_count = self.board.count(Cell::Black);
@@ -1061,6 +1069,7 @@ impl ReversiApp {
             font_size: 12.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         cmds.push(RenderCommand::Text {
             x: px + 160.0,
@@ -1070,6 +1079,7 @@ impl ReversiApp {
             font_size: 12.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Move count
@@ -1081,6 +1091,7 @@ impl ReversiApp {
             font_size: LABEL_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Empty squares
@@ -1092,6 +1103,7 @@ impl ReversiApp {
             font_size: LABEL_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Last move
@@ -1104,6 +1116,7 @@ impl ReversiApp {
                 font_size: LABEL_FONT_SIZE,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             cmds.push(RenderCommand::Text {
                 x: px + 15.0,
@@ -1113,6 +1126,7 @@ impl ReversiApp {
                 font_size: INFO_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 
@@ -1125,6 +1139,7 @@ impl ReversiApp {
             font_size: LABEL_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         let history_start = if self.move_history.len() > 12 {
@@ -1143,6 +1158,7 @@ impl ReversiApp {
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(190.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -1156,6 +1172,7 @@ impl ReversiApp {
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(190.0),
+            overflow: TextOverflow::Ellipsis,
         });
         cmds.push(RenderCommand::Text {
             x: px + 15.0,
@@ -1165,6 +1182,7 @@ impl ReversiApp {
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(190.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 }

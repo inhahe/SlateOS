@@ -6,7 +6,7 @@
 //! as a sub-page.
 
 use guitk::color::Color;
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
 // ============================================================================
@@ -376,6 +376,7 @@ impl InputSettingsUI {
             color: TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: Some(inner),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 32.0;
 
@@ -401,6 +402,7 @@ impl InputSettingsUI {
                 color: if expanded { BLUE } else { TEXT },
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(inner - 24.0),
+                overflow: TextOverflow::Ellipsis,
             });
             cy += 40.0;
 
@@ -436,6 +438,7 @@ impl InputSettingsUI {
                 color: YELLOW,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(inner - 24.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -642,6 +645,7 @@ impl InputSettingsUI {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width * 0.5),
+            overflow: TextOverflow::Ellipsis,
         });
         cmds.push(RenderCommand::Text {
             x: x + width * 0.55,
@@ -651,6 +655,7 @@ impl InputSettingsUI {
             color: TEXT,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width * 0.4),
+            overflow: TextOverflow::Ellipsis,
         });
         y + 22.0
     }
@@ -672,6 +677,7 @@ impl InputSettingsUI {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width * 0.6),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Toggle pill

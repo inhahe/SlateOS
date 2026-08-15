@@ -26,7 +26,7 @@ use guitk::color::Color;
 use guitk::event::{Event, Key};
 #[cfg(test)]
 use guitk::event::{KeyEvent, Modifiers};
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
 // ── Catppuccin Mocha palette ────────────────────────────────────────
@@ -1016,6 +1016,7 @@ impl AsteroidsApp {
             font_size: HEADER_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Score.
@@ -1027,6 +1028,7 @@ impl AsteroidsApp {
             font_size: HEADER_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // High score.
@@ -1038,6 +1040,7 @@ impl AsteroidsApp {
             font_size: HEADER_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Lives.
@@ -1049,6 +1052,7 @@ impl AsteroidsApp {
             font_size: HEADER_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Wave.
@@ -1060,6 +1064,7 @@ impl AsteroidsApp {
             font_size: HEADER_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Controls hint.
@@ -1071,6 +1076,7 @@ impl AsteroidsApp {
             font_size: SMALL_FONT_SIZE,
             font_weight: FontWeightHint::Light,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -1276,6 +1282,7 @@ impl AsteroidsApp {
             font_size: TITLE_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         cmds.push(RenderCommand::Text {
@@ -1286,6 +1293,7 @@ impl AsteroidsApp {
             font_size: OVERLAY_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         cmds.push(RenderCommand::Text {
@@ -1296,6 +1304,7 @@ impl AsteroidsApp {
             font_size: OVERLAY_FONT_SIZE - 2.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -1343,6 +1352,7 @@ impl AsteroidsApp {
             font_size: TITLE_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         cmds.push(RenderCommand::Text {
@@ -1353,6 +1363,7 @@ impl AsteroidsApp {
             font_size: OVERLAY_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         cmds.push(RenderCommand::Text {
@@ -1363,6 +1374,7 @@ impl AsteroidsApp {
             font_size: OVERLAY_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         cmds.push(RenderCommand::Text {
@@ -1373,6 +1385,7 @@ impl AsteroidsApp {
             font_size: OVERLAY_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         cmds.push(RenderCommand::Text {
@@ -1383,6 +1396,7 @@ impl AsteroidsApp {
             font_size: SMALL_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 

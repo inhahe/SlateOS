@@ -694,6 +694,22 @@ Roadmap:
   shapers (`TD-FONT-HAS-NO-UNIVERSAL-SHAPING-ENGINE`), no language
   selection (`TD-FONT-IGNORES-LANGSYS-OVERRIDES`), and no device tables in
   `ValueRecord`. Vello itself waits on `[A]`'s GPU driver.
+- `[C]` Text overflow policy — **done** (§427, `TD-GUI-CLIPPED-TEXT-IS-NOT-MARKED`
+  closed). `RenderCommand::Text` carries a **required** `overflow: TextOverflow`
+  (`Clip` | `Ellipsis`) and the compositor draws the mark, reserving room for it
+  before drawing so it lands inside `max_width` rather than overrunning in its
+  place. Required, with no `Default`, was the operator's call precisely so that
+  all 4,548 constructions in the workspace had to answer the question
+  `max_width` had always posed and never answered; bounded sites default to
+  `Ellipsis`, because the behaviour-preserving `Clip` *is* the reported bug.
+  `guiremote` went to `PROTOCOL_VERSION = 2` — unlike the `FontFamilyTag`
+  precedent this changes an *existing* tag's payload, so a v1 decoder would
+  desynchronise silently rather than fail. 31 of those sites are in lane B's
+  `init/login`; a required field cannot be added by one lane and filled by
+  another without a red tree in between, so they were filled in the same commit
+  and lane B notified afterwards — see **§429**, which qualifies the `requests/`
+  protocol described above for exactly this case and is attributed to Claude,
+  not the operator, so it is open to being overruled.
 - `[C]` Wayland-inspired compositor: GPU acceleration, currently a software
   rasterizer (lines ~4605, ~4619)
 - `[C]` Video-encoded capture fallback, H.264/VP9 (lines ~4623, ~5060)

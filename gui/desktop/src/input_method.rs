@@ -10,7 +10,7 @@
 //! - Custom layout support
 
 use guitk::color::Color;
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
 // ============================================================================
@@ -391,6 +391,7 @@ impl InputMethodManager {
                 color: MOCHA_TEXT,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(24.0),
+                overflow: TextOverflow::Ellipsis,
             },
         ]
     }
@@ -439,6 +440,7 @@ impl InputMethodManager {
             color: MOCHA_BLUE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width - 24.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Render keyboard rows
@@ -475,6 +477,7 @@ impl InputMethodManager {
                     color: MOCHA_TEXT,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(key_size - 4.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
         }

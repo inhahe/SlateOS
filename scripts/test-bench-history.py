@@ -968,6 +968,241 @@ def test_main_records_end_to_end(bh, tmpdir):
           bh.CANARY_BROKEN)
 
 
+def _record(**kw):
+    """A minimal stored record, with `entries`/`mean_ns` filled to order.
+
+    `stalls=n` builds a record whose first `n` benchmarks have a mean 10x their
+    min (so they trip the dispersion ratio) and whose rest sit at 1.0x.
+    """
+    stalls = kw.pop("stalls", 0)
+    total = kw.pop("total", 10)
+    entries = {f"b{i}": 100 for i in range(total)}
+    means = {f"b{i}": (1000 if i < stalls else 100) for i in range(total)}
+    record = {"host": "H", "profile": "release", "entries": entries,
+              "mean_ns": means}
+    record.update(kw)
+    return record
+
+
+def test_dispersion_count_recomputes_and_admits_ignorance(bh):
+    """`dispersion_count` must recompute, and must say None when it cannot.
+
+    The None case is the one that matters. Records written before the `mean_ns`
+    extension carry no dispersion data at all, and the tempting shortcut --
+    treating a record with no stall data as a record with no stalls -- would
+    quietly pull every one of those runs into the band as a zero and drag it
+    down, making later runs look contaminated by comparison. Absent is unknown,
+    not clean; this file's oldest lesson, one axis over.
+    """
+    check("stalls are counted from the stored measurements",
+          bh.dispersion_count(_record(stalls=3)), 3)
+    check("a quiet record counts zero", bh.dispersion_count(_record()), 0)
+    legacy = _record()
+    del legacy["mean_ns"]
+    check("a pre-mean_ns record is unknown, not zero",
+          bh.dispersion_count(legacy), None)
+    # Recomputation, not retrieval: a stale stored count must not win.
+    lying = _record(stalls=2, dispersion=99)
+    check("the stored count does not override the measurements",
+          bh.dispersion_count(lying), 2)
+
+
+def test_loaded_control_runs_are_never_a_baseline(bh):
+    """A deliberately-poisoned run must not become the thing others are judged against.
+
+    `--host-load=loaded` exists to produce known-contaminated *controls*, which
+    is the only way any of these thresholds will ever be fitted. A control that
+    silently becomes the previous-run baseline is worse than having no control:
+    the next honest run would then report its own recovery as a suite-wide
+    improvement, and the fitting data would be gone into the bargain.
+    """
+    good_old = _record(commit="old")
+    control = _record(commit="poisoned", host_load="loaded")
+    good_new = _record(commit="new")
+    records = [good_old, control, good_new]
+
+    check("a loaded control is excluded from the comparable window",
+          [r["commit"] for r in bh.comparable_records(records, "H", "release")],
+          ["old", "new"])
+    check("the previous-run baseline skips it",
+          bh.previous_for_host(records[:2], "H", "release")["commit"], "old")
+    check("an unlabelled record is still comparable",
+          bh.record_host_load(good_old), bh.HOST_LOAD_UNKNOWN)
+    check("a nonsense label reads as unknown rather than crashing",
+          bh.record_host_load({"host_load": "quiet"}), bh.HOST_LOAD_UNKNOWN)
+
+
+def test_run_verdict_is_the_worst_axis_and_clean_must_be_earned(bh):
+    """The run verdict is the worst of the axes, and defaults to unknown.
+
+    This is the repair for B-CANARY-IS-BLIND-TO-HOST-DESCHEDULING. Before it,
+    the run-level verdict *was* the canary verdict, so a clean canary certified
+    the run -- and the canary is structurally incapable of seeing the host steal
+    the CPU, because it counts guest cycles and the guest's counter does not
+    advance while the host is elsewhere. The two properties asserted here are
+    the two halves of the repair: a clean canary can no longer absolve a run on
+    its own, and any single axis can still condemn one.
+    """
+    quiet = [4, 5, 5, 5, 6, 7, 5, 4]
+    walls = [160, 162, 158, 161, 159, 163, 160, 158]
+
+    verdict, _ = bh.run_verdict(bh.CANARY_CLEAN, 5, quiet, 160, walls)
+    check("all three axes clean -> the run is clean", verdict, bh.RUN_CLEAN)
+
+    verdict, notes = bh.run_verdict(bh.CANARY_CLEAN, 5, quiet, None, walls)
+    check("a clean canary cannot certify a run whose wall time is unrecorded",
+          verdict, bh.RUN_UNKNOWN)
+    check("...and the reason names the axis that abstained",
+          any("wall time: not recorded" in n for n in notes), True)
+
+    # The motivating case: the canary's cleanest possible reading on a run that
+    # took 2.3x as long as its twin. The wall axis must overrule it.
+    verdict, _ = bh.run_verdict(bh.CANARY_CLEAN, 8, quiet, 365, walls)
+    check("wall time overrules a clean canary", verdict, bh.RUN_CONTAMINATED)
+
+    verdict, _ = bh.run_verdict(bh.CANARY_CLEAN, 40, quiet, 160, walls)
+    check("dispersion overrules a clean canary", verdict, bh.RUN_CONTAMINATED)
+
+    verdict, _ = bh.run_verdict(bh.CANARY_CONTAMINATED, 5, quiet, 160, walls)
+    check("a firing canary still condemns on its own",
+          verdict, bh.RUN_CONTAMINATED)
+
+    verdict, _ = bh.run_verdict(bh.CANARY_BROKEN, 5, quiet, 160, walls)
+    check("a broken canary leaves the run unproven, not clean",
+          verdict, bh.RUN_UNKNOWN)
+
+
+def test_bands_refuse_to_judge_on_too_little_history(bh):
+    """A band computed from three numbers is an artefact; it must abstain.
+
+    And the abstention must be `unknown`, not `clean` -- the whole point of the
+    three-valued verdict. A two-valued one would have to guess, and every guess
+    this project has made in that position has been "clean".
+    """
+    check("robust_band abstains below the window floor",
+          bh.robust_band([5, 5, 6]), None)
+    verdict, note = bh.dispersion_axis(9, [5, 5, 6])
+    check("the dispersion axis abstains with it", verdict, bh.RUN_UNKNOWN)
+    check("...and says why", "too few comparable runs" in note, True)
+    verdict, _ = bh.wall_axis(365, [])
+    check("the wall axis abstains with no history at all",
+          verdict, bh.RUN_UNKNOWN)
+
+    # A degenerate MAD must not collapse the band onto the median: eight runs
+    # that all stalled exactly 5 benchmarks would otherwise make 6 an outlier.
+    identical = [5] * 8
+    check("a zero MAD does not make the next integer an outlier",
+          bh.dispersion_axis(6, identical)[0], bh.RUN_CLEAN)
+
+
+def test_dispersion_band_fires_on_the_real_history(bh):
+    """Positive control: the band must actually fire on this project's own data.
+
+    A threshold that never fires is indistinguishable from no threshold, which
+    is the failure this entire module is a response to -- so the band is
+    exercised against the release records genuinely in `bench/history.jsonl`
+    rather than against numbers invented to suit it.
+
+    Note what this test does NOT claim. On that history the band fires on the
+    13-, 13- and 15-stall runs and *not* on the 8-stall run that motivated the
+    axis; the entry that prescribed it expected otherwise. The band is left
+    where a standard robust-outlier rule puts it rather than being lowered
+    until the motivating run fires, because fitting a threshold to a single
+    observation is the mistake this file has had to undo three times. The axis
+    that separates that pair is wall time, not this one.
+    """
+    import json
+    if not os.path.exists(HISTORY):
+        check("history.jsonl exists for the positive control", False, True)
+        return
+    records = [json.loads(l) for l in
+               open(HISTORY, encoding="utf-8").read().splitlines() if l.strip()]
+    counts = [c for c in
+              (bh.dispersion_count(r) for r in records
+               if bh.record_profile(r) == "release")
+              if c is not None]
+    check("the real history has enough release runs to form a band",
+          len(counts) >= bh.MIN_WINDOW_FOR_BAND, True)
+    band = bh.robust_band(counts, mad_floor=1.0)
+    fired = [c for c in counts if c > band]
+    check("the band fires on at least one real run", bool(fired), True)
+    check("...and not on the majority of them", len(fired) < len(counts) / 2,
+          True)
+
+
+def test_main_records_wall_time_and_host_load(bh, tmpdir):
+    """The new fields must survive the full `main()` path onto disk.
+
+    Recording them is the entire point: the wall-clock figure was being
+    computed by `boot-test.sh` for its progress message and discarded, so the
+    most sensitive contamination signal in the harness left no trace, and a run
+    whose cause could not be established retroactively is exactly what
+    prompted this. A field that is printed but not stored cannot settle
+    anything a week later.
+    """
+    import io
+    import json
+    import contextlib
+
+    log = write(tmpdir, "serial.txt", "\n".join([
+        "[bench] SCORE syscall_dispatch 120 200 PASS 130 1000",
+        "[bench] CANARY 8 8 100 8 9 12 11 0 800 900",
+    ]) + "\n")
+    history = os.path.join(tmpdir, "history.jsonl")
+    with contextlib.redirect_stdout(io.StringIO()):
+        rc = bh.main(["--serial", log, "--history", history,
+                      "--profile", "release", "--wall-seconds", "365",
+                      "--host-load", "loaded"])
+    check("main() returns with the new options", rc, 0)
+    record = json.loads(open(history, encoding="utf-8").read().strip())
+    check("wall time was stored", record["wall_seconds"], 365.0)
+    check("the host-load label was stored", record["host_load"], "loaded")
+    check("the stalled-benchmark count was stored", record["dispersion"], 0)
+    check("the run verdict was stored alongside the canary's",
+          record["run_verdict"], bh.RUN_UNKNOWN)
+    check("...and is not the same field as the canary verdict",
+          record["canary_verdict"], bh.CANARY_CLEAN)
+
+    # Omitted, not null, when nobody timed the window -- so a reader cannot
+    # mistake "not measured" for "zero seconds".
+    history2 = os.path.join(tmpdir, "history2.jsonl")
+    with contextlib.redirect_stdout(io.StringIO()):
+        bh.main(["--serial", log, "--history", history2, "--profile", "release"])
+    record2 = json.loads(open(history2, encoding="utf-8").read().strip())
+    check("an untimed run stores no wall_seconds key",
+          "wall_seconds" in record2, False)
+    check("...and defaults its host load to unknown, not idle",
+          record2["host_load"], "unknown")
+
+
+def test_canary_summary_states_its_structural_blindness(bh):
+    """The clean-canary prose must say the canary cannot see host descheduling.
+
+    It already warned that the check is *sampled*, which is true and is the
+    lesser limit -- and stating it alone implies the canary would catch host
+    load if only it sampled more often. It would not: the quantity it measures
+    does not respond to host descheduling at any sampling rate. A reader who
+    acts on the weaker warning draws exactly the wrong conclusion from a clean
+    line, which is what happened.
+    """
+    import io
+    import contextlib
+
+    clean = {"start": 8, "end": 8, "pct": 100, "min": 8, "max": 9,
+             "spread": 12, "samples": 11, "invalid": 0,
+             "min_centi": 800, "max_centi": 900}
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        bh.print_canary_summary(clean)
+    out = buf.getvalue()
+    check("the clean line still warns that it is sampled",
+          "sampled" in out, True)
+    check("...and that it is blind to host descheduling entirely",
+          "descheduling" in out, True)
+    check("...and names the issue that proved it",
+          "B-CANARY-IS-BLIND-TO-HOST-DESCHEDULING" in out, True)
+
+
 def test_baselines_is_valid_toml():
     """`bench/baselines.toml` must actually be TOML, with no duplicate tables.
 

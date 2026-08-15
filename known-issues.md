@@ -71047,3 +71047,77 @@ carry the weight of the second data point. **Left explicitly unattributed**
 pending a re-measurement on a host whose load is actually recorded. It is
 logged here rather than in the P21 entry so that a −79 % headline does not end
 up sitting on top of an unexamined +2× on an unrelated benchmark.
+#### FIXED 2026-08-15 (instrument), with one correction to the prescription above
+
+The run-level verdict no longer rests on the canary. `scripts/bench-history.py`
+now computes a **three-axis** verdict — canary, dispersion, wall clock — and
+takes the **worst** of them, so any one axis can condemn a run and none can
+absolve it alone. The three run-level values are:
+
+| verdict | meaning |
+|---|---|
+| `contaminated` | at least one instrument *measured* interference |
+| `unknown` | nothing fired, but not every instrument could measure |
+| `clean` | every axis actively said clean |
+
+The important half is `unknown`. An axis with no measurement, or with too
+little history to have a band, returns `unknown` — never `clean` — so "clean"
+has to be earned by all three. Replaying the committed history through it, **no
+record in the entire 24-run history grades `clean`**, which is the correct
+answer: none of those runs was ever shown to be quiet, and one of them
+demonstrably was not.
+
+Wall clock is now measured (`QEMU_START_EPOCH`/`QEMU_END_EPOCH` around the QEMU
+window only, stamped at the first `kill_qemu` so the harness's own log
+processing is not counted as guest time) and stored as `wall_seconds`.
+`--host-load=idle|loaded|unknown` is recorded as `host_load`, defaulting to
+`unknown` — and `loaded` runs are excluded from every baseline and band by
+`comparable_records()`, because a deliberately-poisoned control that silently
+becomes a baseline would make the next honest run report its own recovery as a
+suite-wide improvement.
+
+**Deviation from the fix as written above, item 3:** the plan called for a
+separate `bench/history-loaded.jsonl`. One labelled file was implemented
+instead. A second file means every reader has to open two and any that forgets
+silently drops the controls; a label in the one append-only file cannot be
+missed, and `previous_for_host`/`report_run_position` now share a single filter
+so the exclusion cannot be applied to one and not the other.
+
+**CORRECTION to item 1 of the prescription above.** It said "a run with a
+materially elevated stall count is CONTAMINATED regardless of the canary", on
+the strength of the 3 → 8 move across the two boots. Implementing it against
+the full history showed that does not hold. The 18 release records carry stall
+counts of 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 5, 7, 7, 8, 9, 9, 13, 13, 15 — median
+5, MAD 2 — so **8 sits at roughly the 75th percentile and is not
+distinguishable from this host's ordinary behaviour**. A `median + 3·MAD` band
+fires on the 13-, 13- and 15-stall runs and would *not* have fired on the run
+that motivated the axis.
+
+The band was left where the standard robust-outlier rule puts it rather than
+lowered until the motivating run fires. Fitting a threshold to a single
+observation is the mistake this file has had to undo three times
+(`CANARY_TOLERANCE_PCT`, `DISPERSION_SUSPECT_RATIO`, the absolute A/B cycle
+budget). The honest reading of the data is that dispersion is a *graded* and
+rather noisy signal on this host — its floor is ~3 stalls, never 0 — and that
+**the axis which actually separates that pair of boots is wall clock (160 s vs
+365 s), not dispersion.** That is now recorded, which it was not, and it is why
+recording it mattered more than tightening the dispersion band.
+
+Consequences worth carrying forward:
+
+- The wall-clock band cannot fire yet: no stored record carries `wall_seconds`,
+  so the axis correctly reports `unknown` and will stay there until
+  `MIN_WINDOW_FOR_BAND` (6) comparable runs have one. This is a check that
+  *cannot* fire today — the condition this file treats as equivalent to a check
+  that passes — so it is called out rather than left to be discovered: until
+  six timed runs exist, the wall axis is a recorder, not a detector.
+- The dispersion band *can* fire and provably does: `test-bench-history.py`
+  exercises it against the real `bench/history.jsonl` and asserts both that it
+  fires on at least one genuine run and that it does not fire on the majority.
+  That positive control is the fourth time in this project a freshly-written
+  check has needed proof it can fire at all.
+- The `--bench` header's "The canary reports it as CONTAMINATED — believe it"
+  now carries the one-sided reading in `boot-test.sh` itself, and the clean-
+  canary line in the tool states the structural blindness rather than only the
+  weaker sampling caveat. Stating the sampling limit alone implies the canary
+  would catch host load if it sampled more often; it would not, at any rate.

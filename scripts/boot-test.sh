@@ -53,6 +53,32 @@
 #                                       # way.  The canary reports it as
 #                                       # CONTAMINATED -- believe it.  See
 #                                       # known-issues.md P19.
+#
+#                                       # READ THAT ONE WAY ONLY.  When the
+#                                       # canary FIRES it is right; when it does
+#                                       # not fire it has certified nothing.  It
+#                                       # counts *guest* cycles, which do not
+#                                       # advance while the host is running
+#                                       # something else, so it is structurally
+#                                       # blind to the host stealing the CPU --
+#                                       # the dominant contamination mode here.
+#                                       # It read 0% spread, its cleanest
+#                                       # possible verdict, on a run that took
+#                                       # 2.3x as long as its own twin.  Read
+#                                       # the "RUN CONTAMINATED/UNPROVEN/CLEAN"
+#                                       # line from bench-history.py instead;
+#                                       # see known-issues.md
+#                                       # B-CANARY-IS-BLIND-TO-HOST-DESCHEDULING.
+#   ./scripts/boot-test.sh --bench --host-load=idle
+#                                       # assert that nothing else was running
+#                                       # on this machine during the QEMU window
+#                                       # (idle|loaded|unknown; default
+#                                       # unknown).  It is an assertion by you,
+#                                       # not a measurement, and it is recorded
+#                                       # as such.  --host-load=loaded marks a
+#                                       # deliberately-poisoned control run, and
+#                                       # such runs are then excluded from every
+#                                       # baseline and band the comparator uses.
 #   ./scripts/boot-test.sh --hard-lockup-watchdog
 #                                       # attach a QEMU i6300esb PCI watchdog set
 #                                       # to inject an NMI on timeout. OFF by
@@ -274,6 +300,15 @@ PIDFILE_WIN="$(to_win_path "$PIDFILE")"
 # image name only if the pidfile is missing (should not happen).  Idempotent.
 kill_qemu() {
     local cyg_pid="${1:-}"
+    # Stamp the end of the QEMU window at the FIRST teardown, not the last.
+    # kill_qemu is idempotent and is called again from the EXIT trap, so an
+    # unconditional stamp here would measure the harness's own post-run log
+    # processing as if it were guest time.  Every exit path funnels through
+    # this function, which is why the stamp lives here rather than being
+    # repeated at each of them (one of which would eventually be missed).
+    if [ -z "${QEMU_END_EPOCH:-}" ] && [ -n "${QEMU_START_EPOCH:-}" ]; then
+        QEMU_END_EPOCH=$(date +%s)
+    fi
     # Best-effort Cygwin-side signal first (harmless if it does nothing).
     [ -n "$cyg_pid" ] && kill "$cyg_pid" 2>/dev/null || true
     # Authoritative kill via the OS PID qemu recorded in its pidfile.
@@ -344,6 +379,12 @@ HARD_LOCKUP_WATCHDOG=0
 # BOOT_OK (the fast path); --bench switches it to BENCH_OK so we wait for the
 # deferred micro-benchmark task to finish and can scrape its numbers.
 WAIT_MARKER="BOOT_OK"
+# What the caller asserts the host was doing during the QEMU window.  Default
+# "unknown" deliberately: "nobody said" must never be silently upgraded to "the
+# host was quiet", which is the error that let a run taking 2.3x as long as its
+# own twin be written up as the cleanest run the instruments could describe.
+# See known-issues.md B-CANARY-IS-BLIND-TO-HOST-DESCHEDULING.
+HOST_LOAD="unknown"
 
 # Parse args
 for arg in "$@"; do
@@ -360,8 +401,20 @@ for arg in "$@"; do
         --timeout=*) TIMEOUT="${arg#*=}"; TIMEOUT_EXPLICIT=1 ;;
         --stall-secs=*) STALL_SECS="${arg#*=}" ;;
         --hard-lockup-watchdog) HARD_LOCKUP_WATCHDOG=1 ;;
+        --host-load=*) HOST_LOAD="${arg#*=}" ;;
     esac
 done
+
+# Validated here rather than passed through, so a typo ("--host-load=quiet")
+# fails the run outright instead of being silently recorded as an unknown value
+# by bench-history.py.  A mislabelled control is worse than an unlabelled one.
+case "$HOST_LOAD" in
+    idle|loaded|unknown) ;;
+    *)
+        echo "ERROR: --host-load must be idle, loaded or unknown (got '$HOST_LOAD')" >&2
+        exit 1
+        ;;
+esac
 
 # --bench waits for a marker that is emitted long after BOOT_OK, so it needs a
 # correspondingly longer budget.  Applied only if the caller did not pick a
@@ -639,11 +692,30 @@ print_bench_results() {
     # Note this invocation passes no --fail-on-regression, so the tool has no
     # legitimate non-zero exit here: any non-zero status is a fault in the tool
     # itself.  See the docstring on bench-history.py's print_canary_summary.
+    #
+    # --wall-seconds and --host-load feed the run-level verdict, which is the
+    # worst of the canary, dispersion and wall-clock axes rather than the canary
+    # alone.  The wall figure is omitted entirely (not passed as 0) when the
+    # QEMU window was never timed, because bench-history.py's whole discipline
+    # is that an absent measurement is unknown, not clean.
+    local bench_args=(--serial "$file" --profile "$BENCH_PROFILE"
+                      --host-load "$HOST_LOAD")
+    if [ -n "${QEMU_START_EPOCH:-}" ]; then
+        local wall=$(( ${QEMU_END_EPOCH:-$(date +%s)} - QEMU_START_EPOCH ))
+        # Spelt as a full `if` rather than `[ ... ] && ...`: under `set -e` a
+        # bare AND-list whose test fails takes the script's exit status with it,
+        # so a clock that stepped backwards mid-run would abort the harness
+        # instead of merely declining to record a nonsense duration.
+        if [ "$wall" -ge 0 ]; then
+            bench_args+=(--wall-seconds "$wall")
+        fi
+    fi
+
     local rc=0
     if command -v python &>/dev/null; then
-        python "$SCRIPT_DIR/bench-history.py" --serial "$file" --profile "$BENCH_PROFILE" || rc=$?
+        python "$SCRIPT_DIR/bench-history.py" "${bench_args[@]}" || rc=$?
     elif command -v python3 &>/dev/null; then
-        python3 "$SCRIPT_DIR/bench-history.py" --serial "$file" --profile "$BENCH_PROFILE" || rc=$?
+        python3 "$SCRIPT_DIR/bench-history.py" "${bench_args[@]}" || rc=$?
     else
         echo "(python not found; skipping benchmark history diff)"
         return 0
@@ -978,6 +1050,23 @@ rm -f "$SERIAL_FILE"
 
 OVMF_WIN="$(to_win_path "$OVMF")"
 rm -f "$PIDFILE"
+# Wall clock across the QEMU window only — not the build, which runs at full
+# parallelism and says nothing about host interference.
+#
+# This is the most sensitive contamination signal the harness has, and until
+# 2026-08-15 it was computed (as ELAPSED, for the progress message) and thrown
+# away.  TCG is pure emulation, CPU-bound and single-threaded, so for a fixed
+# amount of guest work the wall time is guest-work divided by the share of a
+# core the emulator actually got: a run descheduled half the time simply takes
+# twice as long, and there is nowhere for that time to hide because it is
+# measured on the host's clock, outside the guest.  That is exactly the frame
+# the in-guest canary cannot reach.  Two boots of one binary minutes apart read
+# 160s and 365s while the canary called the 365s run its cleanest ever.
+#
+# A separate epoch stamp rather than reusing ELAPSED: ELAPSED counts `sleep 1`
+# iterations plus the loop body's own work, so it drifts upward on exactly the
+# busy hosts whose measurement matters most.
+QEMU_START_EPOCH=$(date +%s)
 "$QEMU" \
     -drive "if=pflash,format=raw,readonly=on,file=$OVMF_WIN" \
     -drive "format=raw,file=fat:rw:$ESP_DIR_WIN" \

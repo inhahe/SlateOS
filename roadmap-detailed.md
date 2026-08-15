@@ -180,6 +180,64 @@ our POSIX layer is mature enough that a lot of upstream software builds
 unmodified against `toolchain/sysroot/lib/libc.a`. Establish that it does or
 doesn't *before* committing to a reimplementation, not after.
 
+##### When the port *fails*, that is usually a bug report against our libc — not a verdict on the port
+
+A failed link is the most valuable output this process produces, and the
+default response is **fix the libc and re-try the port**, not "fall back to
+reimplementing". A real port is the only honest coverage test a libc has: you
+cannot guess which of thousands of symbols matter, but real software tells you,
+weighted by actual usage. And the fix compounds — every later port inherits it,
+whereas a rewrite helps exactly one program and then needs maintaining forever.
+The cost asymmetry says the same thing: implementing a missing libc function is
+minutes to an hour; reimplementing the application is hours to days.
+
+_Precedent (`scripts/bash-spike/README.md`): our `libc.a` defined 2,900 symbols,
+bash referenced 2,030, and the first SlateOS link resolved all but **three**.
+Those three — `killpg`, `eaccess`/`euidaccess`, `__fpurge` — were implemented
+for real in `posix/src` rather than shimmed, so the relink now carries no shim
+at all. One port attempt, converted into permanent coverage._
+
+**Triage the failure. Only the first two categories mean "improve the libc":**
+
+1. **Missing standard POSIX/C function** → implement it in `posix/`. Highest
+   leverage and the common case. This is the answer the rule wants you to
+   reach for.
+2. **Missing non-standard extension** (glibc/BSD-isms) → usually implement it;
+   it is normally cheap. But check first whether upstream's `configure`
+   already has a fallback path for its absence, in which case the gap is
+   imaginary and the right fix is to let autoconf find the fallback.
+3. **Architectural mismatch → do *not* grow the libc into it.** If the program
+   needs something SlateOS deliberately rejects — Unix signals as native
+   process control, 4 KiB page assumptions, ambient-authority fds, `/proc`
+   special nodes — the "Linux Compatibility Boundary (non-negotiable)" section
+   below governs: the answer is `ENOSYS` (or emulation *inside* the compat
+   layer), never a hack into native code to satisfy a Linux quirk. This is the
+   one case where a failed port is genuinely telling you to stop.
+4. **Not a libc gap at all** → build-system friction: cross-compile detection,
+   `configure` assumptions, sysroot plumbing. Fix the build, not the libc. Real
+   example from the bash spike: `$CC` cannot contain spaces (autotools
+   word-splits it) and this repo lives under `D:\visual studio projects\`, so
+   the first attempt died with a thoroughly misleading "C compiler cannot
+   create executables".
+
+**Two refinements, both learned from that spike:**
+
+- **A kernel gap can masquerade as a libc gap.** `killpg` exists now but still
+  returns `ENOSYS`, because process groups do not exist in the kernel — yet the
+  symbol had to exist regardless, since bash references it from job-control code
+  and the *link* needs it even on a build where job control cannot work. So:
+  implement the symbol honestly, and file the underlying gap against the kernel
+  (cross-lane, that means a `requests/` entry, not an edit outside your lane).
+- **Whatever you add must actually work.** The "never accept-without-honoring"
+  rule applies at full force: a stub that returns success is *worse* than
+  `ENOSYS`, because the port links, appears to work, and fails subtly later.
+  `killpg` reporting `ENOSYS` truthfully is the correct shape.
+
+**Where this flips:** the argument is leverage, so it evaporates when there is
+none. If one port needs a large, exotic subsystem nothing else will ever use,
+that is cost without reuse — weigh it like any other feature rather than
+treating "it improves the libc" as automatically decisive.
+
 **Worked example — the expensive lesson (see `design-decisions.md` §305).** A
 session spent roughly 25 days reimplementing bash in Rust (`userspace/oils`)
 chasing byte-for-byte parity. It then turned out that **GNU bash 5.2

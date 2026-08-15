@@ -22,6 +22,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use textfmt::kv;
 
 // ============================================================================
 // Constants
@@ -61,72 +62,25 @@ enum ListKey {
     ExcludeExtension,
 }
 
-/// Escape a value so it survives being written as one config line and read
-/// back through the parser's `trim`.
-///
-/// Note what `\s` is for. The parser trims the value, which is the right
-/// leniency for a hand-edited file, but it means an escape may not *end* in
-/// whitespace: writing a trailing space as `\ ` would leave the file ending
-/// `...\` once trimmed, decoding to a stray backslash. Spelling the space as a
-/// letter sidesteps that entirely. Only leading and trailing spaces need it —
-/// interior ones survive the trim untouched, and escaping them would make an
-/// ordinary path unreadable.
-fn escape_value(s: &str) -> String {
-    let lead = s.len().saturating_sub(s.trim_start().len());
-    let trail_start = s.trim_end().len();
-    let mut out = String::with_capacity(s.len());
-    for (i, c) in s.char_indices() {
-        let edge = i < lead || i >= trail_start;
-        match c {
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            ' ' if edge => out.push_str("\\s"),
-            _ => out.push(c),
-        }
-    }
-    out
-}
-
-/// Decode a value written by [`escape_value`], in one left-to-right pass.
-///
-/// A chain of `replace` calls cannot do this: decoding `\n` before `\\` turns
-/// the two-character text `\n` — which is a perfectly legal filename here —
-/// into a real newline. A single pass never re-examines what it has produced,
-/// so it structurally cannot make that mistake.
-///
-/// An unrecognised escape yields the character after the backslash, so a
-/// hand-written path degrades predictably rather than being rejected.
-fn unescape_value(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut chars = s.chars();
-    while let Some(c) = chars.next() {
-        if c == '\\' {
-            match chars.next() {
-                Some('n') => out.push('\n'),
-                Some('r') => out.push('\r'),
-                Some('t') => out.push('\t'),
-                Some('s') => out.push(' '),
-                Some(other) => out.push(other),
-                None => out.push('\\'),
-            }
-        } else {
-            out.push(c);
-        }
-    }
-    out
-}
-
 /// Write a list as one `key = value` line per entry, or as the empty plural
 /// form when there is nothing to write.
+///
+/// The escaping is [`textfmt::kv`]'s, not this file's: a path here may contain
+/// any byte but `/` and NUL, so it can hold a newline, a tab or an edge space,
+/// and the two ways of getting that wrong (a `replace`-chain decoder; escaping
+/// a trailing space as backslash-space, which the parser's trim then eats) had
+/// each already been written more than once in this tree.
+///
+/// No `extra` separators are passed. The keys here are fixed identifiers, so
+/// the `=` on the key's side is never user data and the first one on a line is
+/// always the real separator.
 fn push_list(out: &mut String, key: &str, plural_key: &str, values: &[String]) {
     if values.is_empty() {
         out.push_str(&format!("{plural_key} = \n"));
         return;
     }
     for value in values {
-        out.push_str(&format!("{key} = {}\n", escape_value(value)));
+        out.push_str(&format!("{key} = {}\n", kv::escape(value, &[])));
     }
 }
 
@@ -230,7 +184,7 @@ impl Config {
         let Some(which) = Self::list_for_key(key) else {
             return;
         };
-        let decoded = unescape_value(value);
+        let decoded = kv::unescape(value);
         let list = match which {
             ListKey::IndexPath => &mut self.index_paths,
             ListKey::ExcludePath => &mut self.exclude_paths,
@@ -286,7 +240,7 @@ impl Config {
     fn parse_list(value: &str) -> Vec<String> {
         value
             .split(',')
-            .map(|s| unescape_value(s.trim()))
+            .map(|s| kv::unescape(s.trim()))
             .filter(|s| !s.is_empty())
             .collect()
     }
@@ -1859,7 +1813,7 @@ exclude_extensions = .o, .tmp
         // The replace-chain decoder's signature failure, and `\n` is a legal
         // directory name here.
         for text in [r"\n", r"\\n", r"\s", r"\\", "real\nnewline", "  pad  "] {
-            assert_eq!(unescape_value(&escape_value(text)), text, "{text:?}");
+            assert_eq!(kv::unescape(&kv::escape(text, &[])), text, "{text:?}");
         }
     }
 

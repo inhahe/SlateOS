@@ -15,6 +15,7 @@ use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
 
+use guitk::kv;
 use std::collections::BTreeMap;
 
 // ============================================================================
@@ -240,6 +241,10 @@ pub struct Association {
 }
 
 impl Association {
+    /// The characters the config grammar treats as structure: the separator
+    /// and the comment marker.
+    const CONFIG_META: &'static [char] = &['=', '#'];
+
     /// Create a new association.
     pub fn new(extension: &str, app_id: &str) -> Self {
         Self {
@@ -249,11 +254,23 @@ impl Association {
     }
 
     /// Serialize to a config line: `extension=app_id`.
+    ///
+    /// Both halves are escaped, and the reader below undoes exactly this. The
+    /// unescaped version was wrong in a way that produced no error: because
+    /// [`Self::from_config_line`] trims, an extension registered as `"txt "`
+    /// wrote the line `txt =gedit` and read back as `txt`, silently
+    /// reassigning a *different* extension's default application. Nothing in
+    /// the path catches that — [`AssocRegistry::register_file_type`] does not
+    /// validate the extension string, so `"txt "` is a registerable file type
+    /// and the two are genuinely distinct entries in the registry.
+    ///
+    /// `#` is escaped along with the separator because a line beginning with
+    /// one is a comment: an extension of `#txt` would otherwise export to a
+    /// line the importer skips, losing the association without a word.
     pub fn to_config_line(&self) -> String {
-        let mut buf = String::new();
-        buf.push_str(&self.extension);
+        let mut buf = kv::escape(&self.extension, Self::CONFIG_META);
         buf.push('=');
-        buf.push_str(&self.app_id);
+        buf.push_str(&kv::escape(&self.app_id, Self::CONFIG_META));
         buf
     }
 
@@ -264,13 +281,14 @@ impl Association {
         if trimmed.is_empty() || trimmed.starts_with('#') {
             return None;
         }
-        let (ext, app) = trimmed.split_once('=')?;
-        let ext = ext.trim();
-        let app = app.trim();
+        // Split at the first *unescaped* `=`: a `\=` belongs to the extension,
+        // and `split_once` cannot tell the two apart because it does not know
+        // what escaped it.
+        let (ext, app) = kv::split_once_unescaped(trimmed, '=')?;
         if ext.is_empty() || app.is_empty() {
             return None;
         }
-        Some(Self::new(ext, app))
+        Some(Self::new(&kv::unescape(ext), &kv::unescape(app)))
     }
 }
 
@@ -555,12 +573,14 @@ impl AssociationRegistry {
 
     /// Export all associations to a line-based config string.
     /// Format: `extension=app_id` per line, with a header comment.
+    /// The writer is [`Association::to_config_line`] rather than a second copy
+    /// of it inline. Having two was how the halves drifted apart: the reader
+    /// grew a `trim` and an escape-aware split while the writer here stayed a
+    /// bare `push_str`, so what came out was not what went back in.
     pub fn export_config(&self) -> String {
         let mut out = String::from("# Slate OS File Associations\n");
-        for (ext, assoc) in &self.associations {
-            out.push_str(ext);
-            out.push('=');
-            out.push_str(&assoc.app_id);
+        for assoc in self.associations.values() {
+            out.push_str(&assoc.to_config_line());
             out.push('\n');
         }
         out
@@ -2515,6 +2535,118 @@ mod tests {
             );
             assert_eq!(restored.map(|a| a.id.as_str()), Some(assoc.app_id.as_str()),);
         }
+    }
+
+    /// Extensions that are legal here -- a filename may contain any byte but
+    /// `/` and NUL -- and that the unescaped config format mangled. None of
+    /// these is a crafted payload; each is just a name someone could type.
+    const HOSTILE_EXTENSIONS: &[&str] = &[
+        "txt ",
+        " txt",
+        "a=b",
+        "#txt",
+        "back\\slash",
+        r"\n",
+        "two words",
+    ];
+
+    /// Build a registry in which every name in `exts` is a registered file
+    /// type with its own dedicated application.
+    fn registry_over(exts: &[&str]) -> AssociationRegistry {
+        let mut reg = AssociationRegistry::new();
+        for (i, ext) in exts.iter().enumerate() {
+            reg.register_file_type(
+                FileType::new(ext, "application/octet-stream", "Thing"),
+                FileCategory::Documents,
+            );
+            reg.register_app(AppInfo::new(
+                &format!("app{i}"),
+                "App",
+                "/bin/app",
+                &[ext],
+                1,
+            ));
+        }
+        reg
+    }
+
+    #[test]
+    fn an_extension_with_an_edge_space_keeps_its_own_association() {
+        // The specific silent-wrong-result the escaping was added for. Both
+        // names are registerable: `register_file_type` does not validate the
+        // extension string, and `set_default_app` only lowercases it, so
+        // `"txt"` and `"txt "` are two distinct entries in the registry.
+        // Unescaped, the second exported as `txt =app1`, and the reader's
+        // `trim` turned it back into `txt` -- reassigning the *first*
+        // extension's default application, with no error reported anywhere.
+        let mut reg = registry_over(&["txt", "txt "]);
+        reg.set_default_app("txt", "app0").expect("plain txt");
+        reg.set_default_app("txt ", "app1").expect("padded txt");
+
+        let mut reg2 = registry_over(&["txt", "txt "]);
+        let errors = reg2.import_config(&reg.export_config());
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(
+            reg2.get_default_app("txt").map(|a| a.id.as_str()),
+            Some("app0"),
+            "the padded extension overwrote the plain one"
+        );
+        assert_eq!(
+            reg2.get_default_app("txt ").map(|a| a.id.as_str()),
+            Some("app1")
+        );
+    }
+
+    #[test]
+    fn every_hostile_extension_survives_the_config_round_trip() {
+        let mut reg = registry_over(HOSTILE_EXTENSIONS);
+        for (i, ext) in HOSTILE_EXTENSIONS.iter().enumerate() {
+            reg.set_default_app(ext, &format!("app{i}"))
+                .unwrap_or_else(|e| panic!("could not associate {ext:?}: {e:?}"));
+        }
+
+        let mut reg2 = registry_over(HOSTILE_EXTENSIONS);
+        let errors = reg2.import_config(&reg.export_config());
+        assert!(errors.is_empty(), "{errors:?}");
+        for (i, ext) in HOSTILE_EXTENSIONS.iter().enumerate() {
+            assert_eq!(
+                reg2.get_default_app(ext).map(|a| a.id.as_str()),
+                Some(format!("app{i}").as_str()),
+                "association for {ext:?} was not restored"
+            );
+        }
+    }
+
+    #[test]
+    fn an_extension_starting_with_a_hash_is_not_exported_as_a_comment() {
+        // A comment line is skipped in full, so an unescaped `#txt=app0` would
+        // lose the association silently rather than misreport it.
+        let assoc = Association::new("#txt", "app0");
+        let line = assoc.to_config_line();
+        assert!(
+            !line.starts_with('#'),
+            "exported line reads as a comment: {line:?}"
+        );
+        assert_eq!(Association::from_config_line(&line), Some(assoc));
+    }
+
+    #[test]
+    fn an_extension_containing_the_separator_stays_one_extension() {
+        let assoc = Association::new("a=b", "app0");
+        assert_eq!(
+            Association::from_config_line(&assoc.to_config_line()),
+            Some(assoc)
+        );
+    }
+
+    #[test]
+    fn a_hand_written_line_still_parses_without_escapes() {
+        // The leniency the reader has always had, kept deliberately: these
+        // files are hand-edited, and an unrecognised `\c` decodes to `c`, so
+        // an ordinary line means what it looks like it means.
+        let a = Association::from_config_line("  pdf = pdfviewer  ").expect("a parse");
+        assert_eq!(a.extension, "pdf");
+        assert_eq!(a.app_id, "pdfviewer");
     }
 
     // -- UI state tests ------------------------------------------------------

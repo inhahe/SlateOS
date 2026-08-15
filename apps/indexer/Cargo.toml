@@ -3,3 +3,8 @@ name = "indexer-app"
 version = "0.1.0"
 edition = "2024"
 description = "SlateOS Background File Indexer — builds and maintains a searchable filesystem index"
+
+# `textfmt`, not `guitk`: the indexer is a headless service, and the escaping
+# it needs for `/etc/indexer.conf` is not a reason to link a widget library.
+[dependencies]
+textfmt = { path = "../../textfmt" }

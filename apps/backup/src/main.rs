@@ -36,24 +36,22 @@ struct Sha256 {
 }
 
 const SHA256_K: [u32; 64] = [
-    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
-    0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
-    0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
-    0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
-    0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
-    0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
-    0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
-    0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
-    0xc67178f2,
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
 ];
 
 impl Sha256 {
     fn new() -> Self {
         Self {
             state: [
-                0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c,
-                0x1f83d9ab, 0x5be0cd19,
+                0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
+                0x5be0cd19,
             ],
             buffer: [0; 64],
             buffer_len: 0,
@@ -231,10 +229,10 @@ fn glob_match_recursive(pattern: &[u8], text: &[u8]) -> bool {
 
         // Try matching rest against every suffix of text starting at path boundaries
         for i in 0..=text.len() {
-            if (i == 0 || (i > 0 && text[i - 1] == b'/'))
-                && glob_match_recursive(rest, &text[i..]) {
-                    return true;
-                }
+            if (i == 0 || (i > 0 && text[i - 1] == b'/')) && glob_match_recursive(rest, &text[i..])
+            {
+                return true;
+            }
         }
         // Also try without consuming any leading slash
         return glob_match_recursive(rest, text);
@@ -295,9 +293,10 @@ fn is_excluded(path: &str, patterns: &[String]) -> bool {
         }
         // Also check just the filename component
         if let Some(name) = path.rsplit('/').next()
-            && glob_matches(pattern, name) {
-                return true;
-            }
+            && glob_matches(pattern, name)
+        {
+            return true;
+        }
     }
     false
 }
@@ -474,7 +473,10 @@ fn json_parse(input: &str) -> Result<JsonValue, String> {
     }
     let (val, rest) = parse_value(trimmed)?;
     if !rest.trim().is_empty() {
-        return Err(format!("trailing characters: {:?}", &rest[..rest.len().min(20)]));
+        return Err(format!(
+            "trailing characters: {:?}",
+            &rest[..rest.len().min(20)]
+        ));
     }
     Ok(val)
 }
@@ -719,8 +721,14 @@ impl FileEntry {
         let size = val.get("size")?.as_u64()?;
         let mtime = val.get("mtime")?.as_u64()?;
         let hash = val.get("hash")?.as_str()?.to_string();
-        let is_symlink = val.get("is_symlink").and_then(|v| v.as_bool()).unwrap_or(false);
-        let link_target = val.get("link_target").and_then(|v| v.as_str()).map(String::from);
+        let is_symlink = val
+            .get("is_symlink")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let link_target = val
+            .get("link_target")
+            .and_then(|v| v.as_str())
+            .map(String::from);
         Some(FileEntry {
             path,
             size,
@@ -1164,7 +1172,14 @@ fn scan_directory(
     progress: &mut Progress,
 ) -> io::Result<Vec<FileEntry>> {
     let mut entries = Vec::new();
-    scan_dir_recursive(source, source, exclude_patterns, follow_symlinks, &mut entries, progress)?;
+    scan_dir_recursive(
+        source,
+        source,
+        exclude_patterns,
+        follow_symlinks,
+        &mut entries,
+        progress,
+    )?;
     Ok(entries)
 }
 
@@ -1283,7 +1298,13 @@ fn estimate_scan(source: &Path, excludes: &[String]) -> (u64, u64) {
     (files, bytes)
 }
 
-fn estimate_recursive(root: &Path, dir: &Path, excludes: &[String], files: &mut u64, bytes: &mut u64) {
+fn estimate_recursive(
+    root: &Path,
+    dir: &Path,
+    excludes: &[String],
+    files: &mut u64,
+    bytes: &mut u64,
+) {
     let read_dir = match fs::read_dir(dir) {
         Ok(rd) => rd,
         Err(_) => return,
@@ -1317,10 +1338,8 @@ fn detect_changes(current: &[FileEntry], previous: &Manifest) -> DiffResult {
         .map(|f| (f.path.as_str(), f))
         .collect();
 
-    let curr_map: BTreeMap<&str, &FileEntry> = current
-        .iter()
-        .map(|f| (f.path.as_str(), f))
-        .collect();
+    let curr_map: BTreeMap<&str, &FileEntry> =
+        current.iter().map(|f| (f.path.as_str(), f)).collect();
 
     let mut added = Vec::new();
     let mut modified = Vec::new();
@@ -1354,9 +1373,10 @@ fn detect_changes(current: &[FileEntry], previous: &Manifest) -> DiffResult {
     let mut modified_tuples = Vec::new();
     for entry in current {
         if let Some(prev_entry) = prev_map.get(entry.path.as_str())
-            && entry.hash != prev_entry.hash {
-                modified_tuples.push(((*prev_entry).clone(), entry.clone()));
-            }
+            && entry.hash != prev_entry.hash
+        {
+            modified_tuples.push(((*prev_entry).clone(), entry.clone()));
+        }
     }
 
     // Find deleted files
@@ -1414,7 +1434,10 @@ fn list_backups(dest: &Path) -> io::Result<Vec<BackupMeta>> {
 }
 
 /// Find the most recent backup of a given type (or any type if None).
-fn find_latest_backup(dest: &Path, backup_type: Option<BackupType>) -> io::Result<Option<BackupMeta>> {
+fn find_latest_backup(
+    dest: &Path,
+    backup_type: Option<BackupType>,
+) -> io::Result<Option<BackupMeta>> {
     let metas = list_backups(dest)?;
     Ok(metas
         .into_iter()
@@ -1506,7 +1529,11 @@ fn cmd_create(opts: CreateOptions) -> io::Result<()> {
     // Estimate for progress
     eprintln!("Scanning directory tree...");
     let (est_files, est_bytes) = estimate_scan(&source, &opts.exclude);
-    eprintln!("  Estimated: {} files, {}", est_files, format_size(est_bytes));
+    eprintln!(
+        "  Estimated: {} files, {}",
+        est_files,
+        format_size(est_bytes)
+    );
 
     let mut progress = Progress::new();
     progress.total_files = est_files;
@@ -1607,7 +1634,7 @@ fn cmd_create(opts: CreateOptions) -> io::Result<()> {
 
 struct RestoreOptions {
     backup_id: String,
-    backup_dest: PathBuf, // Where backups are stored
+    backup_dest: PathBuf,  // Where backups are stored
     restore_dest: PathBuf, // Where to restore files to
     file_pattern: Option<String>,
 }
@@ -1617,7 +1644,10 @@ fn cmd_restore(opts: RestoreOptions) -> io::Result<()> {
     let meta = load_meta(&opts.backup_dest, &opts.backup_id)?;
     let store = ContentStore::new(&opts.backup_dest);
 
-    println!("Restoring backup {} to {:?}", opts.backup_id, opts.restore_dest);
+    println!(
+        "Restoring backup {} to {:?}",
+        opts.backup_id, opts.restore_dest
+    );
     println!("  Type: {}", meta.backup_type);
     println!("  Files in manifest: {}", manifest.files.len());
 
@@ -1867,7 +1897,12 @@ fn cmd_prune(opts: PruneOptions) -> io::Result<()> {
 
     println!("Pruning {} backups:", to_remove.len());
     for meta in &to_remove {
-        println!("  - {} ({}, {})", meta.id, meta.backup_type, format_timestamp(meta.timestamp));
+        println!(
+            "  - {} ({}, {})",
+            meta.id,
+            meta.backup_type,
+            format_timestamp(meta.timestamp)
+        );
     }
 
     // Remove backup directories
@@ -1907,7 +1942,10 @@ fn cmd_prune(opts: PruneOptions) -> io::Result<()> {
 }
 
 /// Compute which backup IDs to keep based on retention policy.
-fn compute_retention(metas: &[BackupMeta], opts: &PruneOptions) -> std::collections::HashSet<String> {
+fn compute_retention(
+    metas: &[BackupMeta],
+    opts: &PruneOptions,
+) -> std::collections::HashSet<String> {
     let mut keep = std::collections::HashSet::new();
 
     // Keep last N
@@ -1989,8 +2027,14 @@ fn cmd_schedule(dest: &Path, source: &str, interval: &str) -> io::Result<()> {
     match interval {
         "daily" | "weekly" | "monthly" => {}
         _ => {
-            eprintln!("error: invalid interval '{}'. Must be daily, weekly, or monthly.", interval);
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid interval"));
+            eprintln!(
+                "error: invalid interval '{}'. Must be daily, weekly, or monthly.",
+                interval
+            );
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid interval",
+            ));
         }
     }
 
@@ -2009,7 +2053,12 @@ fn cmd_schedule(dest: &Path, source: &str, interval: &str) -> io::Result<()> {
     fs::create_dir_all(dest)?;
     fs::write(&sched_path, json_pretty(&json_arr, 2))?;
 
-    println!("Schedule saved: {} -> {} ({})", source, dest.display(), interval);
+    println!(
+        "Schedule saved: {} -> {} ({})",
+        source,
+        dest.display(),
+        interval
+    );
     Ok(())
 }
 
@@ -2068,13 +2117,22 @@ fn cmd_diff(dest: &Path, id1: &str, id2: &str) -> io::Result<()> {
     let modified_old_size: u64 = diff.modified.iter().map(|(o, _)| o.size).sum();
 
     println!("Summary:");
-    println!("  Added: {} files (+{})", diff.added.len(), format_size(added_size));
-    println!("  Modified: {} files (was {}, now {})",
+    println!(
+        "  Added: {} files (+{})",
+        diff.added.len(),
+        format_size(added_size)
+    );
+    println!(
+        "  Modified: {} files (was {}, now {})",
         diff.modified.len(),
         format_size(modified_old_size),
         format_size(modified_new_size),
     );
-    println!("  Deleted: {} files (-{})", diff.deleted.len(), format_size(deleted_size));
+    println!(
+        "  Deleted: {} files (-{})",
+        diff.deleted.len(),
+        format_size(deleted_size)
+    );
 
     Ok(())
 }
@@ -2091,7 +2149,10 @@ fn cmd_info(dest: &Path, backup_id: &str) -> io::Result<()> {
     println!("  Type:       {}", meta.backup_type);
     println!("  Created:    {}", format_timestamp(meta.timestamp));
     println!("  Source:     {}", meta.source);
-    println!("  Parent:     {}", meta.parent_id.as_deref().unwrap_or("(none)"));
+    println!(
+        "  Parent:     {}",
+        meta.parent_id.as_deref().unwrap_or("(none)")
+    );
     println!("  Files:      {}", meta.file_count);
     println!("  Total size: {}", format_size(meta.total_size));
     println!("  New blobs:  {}", meta.new_blobs);
@@ -2115,9 +2176,14 @@ fn cmd_info(dest: &Path, backup_id: &str) -> io::Result<()> {
     if !by_ext.is_empty() {
         println!("  File types:");
         let mut sorted: Vec<_> = by_ext.into_iter().collect();
-        sorted.sort_by_key(|item| std::cmp::Reverse(item.1 .1));
+        sorted.sort_by_key(|item| std::cmp::Reverse(item.1.1));
         for (ext, (count, size)) in sorted.iter().take(10) {
-            println!("    .{:<12} {:>6} files  {:>12}", ext, count, format_size(*size));
+            println!(
+                "    .{:<12} {:>6} files  {:>12}",
+                ext,
+                count,
+                format_size(*size)
+            );
         }
         if sorted.len() > 10 {
             println!("    ... and {} more types", sorted.len() - 10);
@@ -2197,7 +2263,9 @@ fn parse_create_args(args: &[String]) -> Result<Command, String> {
             "--follow-symlinks" => follow_symlinks = true,
             "--source" => {
                 i += 1;
-                source = Some(PathBuf::from(args.get(i).ok_or("--source requires a path")?));
+                source = Some(PathBuf::from(
+                    args.get(i).ok_or("--source requires a path")?,
+                ));
             }
             "--dest" => {
                 i += 1;
@@ -2535,7 +2603,9 @@ fn print_help() {
     println!();
     println!("EXAMPLES:");
     println!("  backup create --full --source /home/user --dest /mnt/backup");
-    println!("  backup create --incremental --source /home/user --dest /mnt/backup --exclude '*.tmp'");
+    println!(
+        "  backup create --incremental --source /home/user --dest /mnt/backup --exclude '*.tmp'"
+    );
     println!("  backup list --dest /mnt/backup");
     println!("  backup restore 1700000000-full --from /mnt/backup --dest /tmp/restore");
     println!("  backup verify 1700000000-full --dest /mnt/backup");
@@ -2926,10 +2996,7 @@ mod tests {
         let deserialized = BackupMeta::deserialize(&serialized).unwrap();
 
         assert_eq!(deserialized.backup_type, BackupType::Incremental);
-        assert_eq!(
-            deserialized.parent_id.as_deref(),
-            Some("1700000000-full")
-        );
+        assert_eq!(deserialized.parent_id.as_deref(), Some("1700000000-full"));
     }
 
     // --- Pruning Retention Policy Tests ---

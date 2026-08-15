@@ -981,6 +981,103 @@ fn set_file_mtime(path: &Path, _mtime: SystemTime) -> io::Result<()> {
 // Recycle bin
 // ============================================================================
 
+/// Marker on the first line of a `meta.txt` whose path line is escaped.
+///
+/// Entries written before this existed begin with the raw path, so the marker
+/// is what tells the two formats apart.
+const META_VERSION: &str = "slate-recycle-v2";
+
+/// Escape a path into a single line of printable ASCII, losslessly.
+///
+/// Paths on this OS may contain any byte except `/` and NUL, so they are not
+/// necessarily UTF-8 and cannot be written with `Display` — that substitutes
+/// U+FFFD and the original bytes are gone. `OsStr::as_encoded_bytes` gives the
+/// exact bytes back; everything outside printable ASCII, plus `%` itself, is
+/// percent-encoded so the metadata file stays line-oriented text.
+fn encode_path(path: &Path) -> String {
+    let bytes = path.as_os_str().as_encoded_bytes();
+    let mut out = String::with_capacity(bytes.len());
+    for &b in bytes {
+        if b == b'%' || !(0x20..0x7f).contains(&b) {
+            out.push_str(&format!("%{b:02X}"));
+        } else {
+            out.push(b as char); // guarded: printable ASCII only
+        }
+    }
+    out
+}
+
+/// Reverse of [`encode_path`].
+fn decode_path(encoded: &str) -> PathBuf {
+    let bytes = encoded.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while let Some(&b) = bytes.get(i) {
+        if b == b'%'
+            && let Some(hex) = encoded.get(i.saturating_add(1)..i.saturating_add(3))
+            && let Ok(v) = u8::from_str_radix(hex, 16)
+        {
+            out.push(v);
+            i = i.saturating_add(3);
+            continue;
+        }
+        out.push(b);
+        i = i.saturating_add(1);
+    }
+    // SAFETY: `out` is either bytes produced by `OsStr::as_encoded_bytes` (the
+    // only writer of this field is `encode_path`) or, for a hand-edited or
+    // truncated file, an arbitrary byte string. `from_encoded_bytes_unchecked`
+    // requires the latter to be valid for the platform's `OsStr`
+    // representation; on the platforms this program targets every byte string
+    // is, and the value is only ever used as a path, never re-decoded as UTF-8.
+    let os = unsafe { std::ffi::OsStr::from_encoded_bytes_unchecked(&out) };
+    PathBuf::from(os)
+}
+
+/// Move `src` to `dest`, falling back to copy-then-remove across devices.
+///
+/// `fs::rename` cannot cross a mount point — it fails with `EXDEV`. The recycle
+/// bin lives under the user's home directory, so recycling anything from a
+/// separate data partition hit exactly that and simply reported an error.
+/// (`same_device` exists for this check but is a first-component heuristic;
+/// attempting the rename and reacting to its failure is both cheaper in the
+/// common case and correct in the cases the heuristic gets wrong.)
+fn move_path(src: &Path, dest: &Path) -> io::Result<()> {
+    match fs::rename(src, dest) {
+        Ok(()) => return Ok(()),
+        Err(e) => {
+            // A missing source, or a destination whose parent does not exist,
+            // will not be fixed by copying either — report it as-is.
+            if e.kind() == io::ErrorKind::NotFound {
+                return Err(e);
+            }
+        }
+    }
+
+    if src.is_dir() {
+        copy_tree(src, dest)?;
+        fs::remove_dir_all(src)
+    } else {
+        fs::copy(src, dest)?;
+        fs::remove_file(src)
+    }
+}
+
+/// Recursively copy a directory tree.
+fn copy_tree(src: &Path, dest: &Path) -> io::Result<()> {
+    fs::create_dir_all(dest)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let child_dest = dest.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_tree(&entry.path(), &child_dest)?;
+        } else {
+            fs::copy(entry.path(), &child_dest)?;
+        }
+    }
+    Ok(())
+}
+
 /// Metadata for a recycled item.
 #[derive(Clone, Debug)]
 pub struct RecycleEntry {
@@ -1032,6 +1129,12 @@ impl RecycleBin {
     }
 
     /// Move `path` into the recycle bin and return the entry id.
+    ///
+    /// The original path is recorded losslessly (see [`encode_path`]) so that a
+    /// file whose name is not valid UTF-8 can still be restored to where it
+    /// came from. Recording it with `Display` would have written U+FFFD in
+    /// place of every undecodable byte, and restore would then have recreated
+    /// the file under a different name.
     pub fn recycle(&self, path: &Path) -> io::Result<String> {
         let id = self.make_id(path);
         let entry_dir = self.root.join(&id);
@@ -1039,10 +1142,13 @@ impl RecycleBin {
 
         fs::create_dir_all(&entry_dir)?;
 
-        // Write metadata.
+        // Write metadata *before* moving the data: if the move fails, the
+        // orphaned metadata is harmless (`read_entry` reports size 0), whereas
+        // moved data with no metadata would be unrestorable.
         let meta_path = entry_dir.join("meta.txt");
         let mut meta_file = fs::File::create(&meta_path)?;
-        writeln!(meta_file, "{}", path.display())?;
+        writeln!(meta_file, "{META_VERSION}")?;
+        writeln!(meta_file, "{}", encode_path(path))?;
         let now = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -1051,7 +1157,12 @@ impl RecycleBin {
         meta_file.flush()?;
 
         // Move the actual data.
-        fs::rename(path, &data_path)?;
+        if let Err(e) = move_path(path, &data_path) {
+            // Do not leave metadata pointing at data that is not there.
+            let _ = fs::remove_file(&meta_path);
+            let _ = fs::remove_dir(&entry_dir);
+            return Err(e);
+        }
 
         Ok(id)
     }
@@ -1066,7 +1177,7 @@ impl RecycleBin {
             fs::create_dir_all(parent)?;
         }
 
-        fs::rename(&data_path, &entry.original_path)?;
+        move_path(&data_path, &entry.original_path)?;
 
         // Clean up the entry directory.
         let entry_dir = self.root.join(entry_id);
@@ -1171,10 +1282,20 @@ impl RecycleBin {
         let content = fs::read_to_string(&meta_path)?;
         let mut lines = content.lines();
 
-        let original_path =
-            PathBuf::from(lines.next().ok_or_else(|| {
+        let first = lines
+            .next()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "empty meta"))?;
+        // A bin written before the path was escaped starts straight in with the
+        // path. Reading those is still worth doing: the alternative is silently
+        // orphaning whatever a user had already deleted.
+        let original_path = if first == META_VERSION {
+            let encoded = lines.next().ok_or_else(|| {
                 io::Error::new(io::ErrorKind::InvalidData, "missing path in meta")
-            })?);
+            })?;
+            decode_path(encoded)
+        } else {
+            PathBuf::from(first)
+        };
         let ts_secs: u64 = lines
             .next()
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing timestamp in meta"))?
@@ -1620,6 +1741,161 @@ mod tests {
         let purged = bin.purge_old().unwrap();
         assert_eq!(purged, 1);
         assert_eq!(bin.list().unwrap().len(), 0);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ----------------------------------------------------------------
+    // Recycle metadata — path escaping
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn a_path_needing_escapes_round_trips_through_the_metadata() {
+        // A percent sign (the escape character itself), a space, a non-ASCII
+        // name, and a control character — the four things a naive text format
+        // gets wrong.
+        for original in [
+            "/home/u/100% done.txt",
+            "/home/u/写真/2024.jpg",
+            "/home/u/a\tb",
+            "/home/u/plain.txt",
+        ] {
+            let path = PathBuf::from(original);
+            let encoded = encode_path(&path);
+            assert!(
+                encoded.bytes().all(|b| (0x20..0x7f).contains(&b)),
+                "the encoding must stay on one line of printable ASCII: {encoded:?}"
+            );
+            assert_eq!(
+                decode_path(&encoded),
+                path,
+                "round trip failed for {original:?} (encoded as {encoded:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn a_path_that_is_not_utf8_survives_the_metadata() {
+        // Paths on this OS allow every byte but `/` and NUL, so the metadata
+        // must carry bytes, not characters. Writing the path with `Display`
+        // replaced undecodable bytes with U+FFFD and the original name was
+        // then unrecoverable.
+        let encoded = "/home/u/caf%E9.txt";
+        let decoded = decode_path(encoded);
+        assert_eq!(
+            decoded.as_os_str().as_encoded_bytes(),
+            b"/home/u/caf\xE9.txt",
+            "a lone 0xE9 must come back as 0xE9, not as U+FFFD"
+        );
+        assert_eq!(
+            encode_path(&decoded),
+            encoded,
+            "and must re-encode to the same text"
+        );
+    }
+
+    #[test]
+    fn a_recycled_non_ascii_name_restores_to_its_original_path() {
+        let dir = temp_dir("recycle_nonascii");
+        let bin = RecycleBin::new(dir.join("bin"), Duration::from_secs(86400));
+
+        let file_path = dir.join("写真 100%.txt");
+        write_file(&file_path, "keep");
+
+        let id = bin.recycle(&file_path).expect("recycle");
+        assert!(!file_path.exists());
+
+        let restored = bin.restore(&id).expect("restore");
+        assert_eq!(
+            restored, file_path,
+            "restore must put the file back under its original name"
+        );
+        assert_eq!(read_file(&file_path), "keep");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_bin_written_in_the_old_format_is_still_readable() {
+        let dir = temp_dir("recycle_legacy");
+        let bin_root = dir.join("bin");
+        let entry_dir = bin_root.join("legacy_0000000000000001");
+        fs::create_dir_all(&entry_dir).expect("entry dir");
+        // The pre-versioning layout: raw path on line 1, timestamp on line 2.
+        write_file(
+            &entry_dir.join("meta.txt"),
+            "/home/u/legacy.txt\n1700000000\n",
+        );
+        write_file(&entry_dir.join("data"), "old contents");
+
+        let bin = RecycleBin::new(bin_root, Duration::from_secs(86400));
+        let listed = bin.list().expect("list");
+        assert_eq!(
+            listed.len(),
+            1,
+            "an already-deleted file must not be orphaned"
+        );
+        assert_eq!(
+            listed.first().expect("one").original_path,
+            PathBuf::from("/home/u/legacy.txt")
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ----------------------------------------------------------------
+    // Recycle failure handling
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn a_recycle_that_could_not_move_the_data_leaves_no_entry_behind() {
+        let dir = temp_dir("recycle_orphan");
+        let bin = RecycleBin::new(dir.join("bin"), Duration::from_secs(86400));
+
+        let err = bin
+            .recycle(&dir.join("never_existed.txt"))
+            .expect_err("recycling a missing file must fail");
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+
+        assert!(
+            bin.list().expect("list").is_empty(),
+            "metadata written before a failed move must be cleaned up, or the \
+             bin lists an entry whose data is not there"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn move_path_relocates_a_whole_directory_tree() {
+        let dir = temp_dir("move_tree");
+        let src = dir.join("src");
+        fs::create_dir_all(src.join("nested")).expect("nested");
+        write_file(&src.join("top.txt"), "top");
+        write_file(&src.join("nested/deep.txt"), "deep");
+
+        let dest = dir.join("dest");
+        move_path(&src, &dest).expect("move");
+
+        assert!(!src.exists(), "the source must be gone");
+        assert_eq!(read_file(&dest.join("top.txt")), "top");
+        assert_eq!(read_file(&dest.join("nested/deep.txt")), "deep");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn copy_tree_reproduces_every_level() {
+        let dir = temp_dir("copy_tree");
+        let src = dir.join("src");
+        fs::create_dir_all(src.join("a/b")).expect("dirs");
+        write_file(&src.join("a/b/leaf.txt"), "leaf");
+
+        let dest = dir.join("dest");
+        copy_tree(&src, &dest).expect("copy");
+
+        assert_eq!(read_file(&dest.join("a/b/leaf.txt")), "leaf");
+        assert!(src.exists(), "a copy must leave the source in place");
 
         let _ = fs::remove_dir_all(&dir);
     }

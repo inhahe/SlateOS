@@ -70951,3 +70951,99 @@ guard on 70 benchmarks. Every false positive spends reader attention and makes
 the next real regression likelier to be waved through as "probably noise again"
 — and this file's standing lesson is that a check nobody trusts is worth about
 as much as a check nobody runs.
+### B-CANARY-IS-BLIND-TO-HOST-DESCHEDULING — it read 0% (its cleanest possible verdict) on the most contaminated run yet measured
+
+**Status:** OPEN, found 2026-08-15 by the repeat boot run for P21. **Severity:
+high** — this is the run-level gate that decides whether *any* benchmark result
+is admissible, and it does not fire on the dominant contamination mode.
+
+#### The observation
+
+Two boots of the **identical binary**, launched the same way, minutes apart:
+
+| | run 2 (`f79aec561`) | run 3 (`c893184fa`) |
+|---|---|---|
+| wall time | 160 s | **365 s (2.3×)** |
+| benchmarks flagged REGRESSED | 4 | **9** |
+| `isr_latency` | 24 360 ns | **49 999 ns (2.05×)** |
+| `page_fault` | 2 215 ns | **4 292 ns (1.94×)** |
+| dispersion stalls (mean/min ≥ 5×) | 3 | **8** |
+| **canary spread** | 12 % | **0 %** |
+
+Run 3 took more than twice as long, doubled two unrelated kernel benchmarks, and
+scattered regressions across nine subsystems with no common mechanism. The
+canary — the instrument whose entire job is to answer *"was this run
+disturbed?"* — reported **0 % spread over 11 samples**, which is the cleanest
+reading it is capable of emitting. It is not merely insensitive here; on this
+pair it is **anti-correlated** with the disturbance.
+
+The dispersion detector, by contrast, tracked it correctly: 3 → 8 stalls.
+
+#### Why it is structurally blind (the mechanism, not a guess)
+
+The canary measures the cost of a **reference memory access** in **guest
+cycles**, sampled between benchmarks. Host descheduling of the QEMU process
+cannot inflate that number: TCG executes the sampling loop as a translated
+block, and the guest's cycle counter advances by the *emulated* amount
+regardless of how long the host took to get round to executing it. The wall-clock
+time the host stole lands **between** guest instructions, where a short
+guest-cycle measurement cannot see it.
+
+So the canary can only detect something that changes the cost of the reference
+access *within the guest* — cache pressure from the guest's own workload, say.
+It is constitutionally incapable of detecting the host stealing the CPU, which
+on this machine is the *dominant* contamination mode and the exact scenario
+`boot-test.sh`'s own header warns about at length.
+
+Benchmarks with a longer span do see it, as a wall-clock excursion inflating
+their **mean** while their **min** survives — which is precisely what the
+mean/min dispersion ratio measures. That is why dispersion moved and the canary
+did not.
+
+#### What this invalidates
+
+**P19's conclusion needs a one-sided reading.** The `--bench` header says *"The
+canary reports it as CONTAMINATED — believe it."* That remains true in the
+direction it was demonstrated: when the canary **fires**, it is right. The
+converse — which is how it has been used ever since, including by me earlier
+today when I called the P21 run "canary clean, 12 % spread" as though that
+certified the run — does not follow. **A clean canary is not evidence of an
+undisturbed run.** Every "canary OK" in this file's history should be read as
+"the canary found nothing", not "nothing was there".
+
+It also explains `B-CANARY-TOLERANCE-CANNOT-BE-FITTED-THE-CONTROLS-ARE-DISCARDED`
+from the other end: the tolerance could not be fitted from the controls because
+the quantity being thresholded largely does not respond to the contamination the
+threshold is meant to catch. Tuning `CANARY_TOLERANCE_PCT` was never going to
+work.
+
+#### Proper fix
+
+The run-level verdict must stop resting on the canary alone. Three signals
+exist, and two of them are already computed and thrown away:
+
+1. **Dispersion count** — already computed and printed; not part of any verdict.
+   It responded correctly here (3 → 8). Promote it: a run with a materially
+   elevated stall count is CONTAMINATED regardless of the canary.
+2. **Wall time** — the single most sensitive signal in this whole episode
+   (160 s vs 365 s, unmissable) and it is not recorded in `history.jsonl` at
+   all. Record it per run; it is free.
+3. **Host load at measurement time** — still unrecorded, which is why run 3's
+   cause cannot be established retroactively. This is the `--host-load` work
+   already queued.
+
+Then the canary keeps its job as a *positive* detector (it fires → contaminated)
+and loses its implied role as a *negative* certificate.
+
+#### What is still unexplained, and must not be quietly attributed
+
+`net_ipv6_parse` reads **80 → 113 → 169 ns** across the pre-Cow baseline and the
+two post-Cow runs. Both post-refactor readings exceed the 16-run historical
+maximum of 96 ns, so unlike `page_alloc_free` (752 → 503, back in range) and
+`http_percent_decode` (785 → 536, back in range) it did **not** revert. That is
+suggestive of a real effect — plausibly code layout, since the refactor shifts
+addresses kernel-wide — but run 3 is now known to be contaminated, so it cannot
+carry the weight of the second data point. **Left explicitly unattributed**
+pending a re-measurement on a host whose load is actually recorded. It is
+logged here rather than in the P21 entry so that a −79 % headline does not end
+up sitting on top of an unexamined +2× on an unrelated benchmark.

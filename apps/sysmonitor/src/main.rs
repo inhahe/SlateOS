@@ -95,6 +95,21 @@ const CONTENT_PAD: f32 = 12.0;
 /// Gap between dashboard cards.
 const CARD_GAP: f32 = 10.0;
 
+/// Height of one row in the overview's alert panel.
+const ALERT_ROW_HEIGHT: f32 = 16.0;
+/// Space the alert panel gives its "Alerts" heading, above the first row.
+const ALERT_PANEL_HEADER: f32 = 26.0;
+/// Space below the alert panel's last row.
+const ALERT_PANEL_FOOTER: f32 = 2.0;
+/// Rows the overview's alert panel will draw, overflow marker included.
+///
+/// The panel is bounded so a machine in trouble cannot push the rest of the
+/// overview off-screen. When there are more alerts than rows, the last row
+/// becomes a `+N more` marker rather than an alert: a hidden alert the user
+/// cannot tell is hidden is worse than one alert fewer, since the whole point
+/// of the panel is to say whether anything is wrong.
+const ALERT_MAX_ROWS: usize = 5;
+
 // ============================================================================
 // Ring buffer for time-series data
 // ============================================================================
@@ -1685,15 +1700,26 @@ impl SysMonitorState {
 
         cur_y += disk_card_h + CARD_GAP;
 
-        // Alert panel
+        // Alert panel. The number of alert rows drawn and the height of the
+        // card behind them are one quantity, so they are derived once, here,
+        // rather than computed separately and left to drift.
         if !self.active_alerts.is_empty() {
-            let alert_h = 16.0f32
-                .mul_add(self.active_alerts.len() as f32, 28.0)
-                .min(120.0);
+            let overflowing = self.active_alerts.len() > ALERT_MAX_ROWS;
+            // An overflow marker costs a row, so it displaces an alert.
+            let shown = if overflowing {
+                ALERT_MAX_ROWS.saturating_sub(1)
+            } else {
+                self.active_alerts.len()
+            };
+            let rows = if overflowing { ALERT_MAX_ROWS } else { shown };
+            let alert_h = ALERT_ROW_HEIGHT.mul_add(
+                rows as f32,
+                ALERT_PANEL_HEADER + ALERT_PANEL_FOOTER,
+            );
             self.render_card(tree, CONTENT_PAD, cur_y, content_w, alert_h);
             render_bold_text(tree, CONTENT_PAD + 12.0, cur_y + 8.0, "Alerts", RED, 13.0);
-            let mut alert_y = cur_y + 26.0;
-            for alert in self.active_alerts.iter().take(5) {
+            let mut alert_y = cur_y + ALERT_PANEL_HEADER;
+            for alert in self.active_alerts.iter().take(shown) {
                 tree.push(RenderCommand::FillRect {
                     x: CONTENT_PAD + 16.0,
                     y: alert_y + 3.0,
@@ -1711,7 +1737,19 @@ impl SysMonitorState {
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(content_w - 48.0),
                 });
-                alert_y += 16.0;
+                alert_y += ALERT_ROW_HEIGHT;
+            }
+            if overflowing {
+                let hidden = self.active_alerts.len().saturating_sub(shown);
+                tree.push(RenderCommand::Text {
+                    x: CONTENT_PAD + 28.0,
+                    y: alert_y,
+                    text: format!("+{hidden} more"),
+                    color: SUBTEXT0,
+                    font_size: 11.0,
+                    font_weight: FontWeightHint::Regular,
+                    max_width: Some(content_w - 48.0),
+                });
             }
         }
     }
@@ -3807,6 +3845,111 @@ mod tests {
         s.active_tab = Tab::Overview;
         let tree = s.render();
         assert!(!tree.is_empty());
+    }
+
+    // --- Overview alert panel ---
+
+    /// The overview tab, rendered with `n` synthetic alerts.
+    ///
+    /// Renders the tab rather than the whole window: the status bar also echoes
+    /// the first active alert, and counting that as a panel row would make the
+    /// panel look one row fuller than it is.
+    fn overview_with_alerts(n: usize) -> RenderTree {
+        let mut s = SysMonitorState::new();
+        s.load_demo_data();
+        s.active_tab = Tab::Overview;
+        s.active_alerts = (0..n)
+            .map(|i| Alert {
+                message: format!("Synthetic alert {i}"),
+                severity: AlertSeverity::Warning,
+            })
+            .collect();
+        let mut tree = RenderTree::new();
+        s.render_overview_tab(&mut tree);
+        tree
+    }
+
+    /// Text drawn by the alert panel, in the order it was emitted.
+    fn alert_panel_rows(tree: &RenderTree) -> Vec<String> {
+        tree.commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. }
+                    if text.starts_with("Synthetic alert ") || text.ends_with(" more") =>
+                {
+                    Some(text.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// With more alerts than the panel has rows, the surplus must be *reported*,
+    /// not silently dropped: a panel that shows five of twelve alerts and says
+    /// nothing tells the user the machine has five problems.
+    #[test]
+    fn surplus_alerts_are_counted_rather_than_silently_dropped() {
+        let rows = alert_panel_rows(&overview_with_alerts(12));
+        assert_eq!(rows.len(), ALERT_MAX_ROWS, "panel should be full: {rows:?}");
+        assert_eq!(
+            rows.last().map(String::as_str),
+            Some("+8 more"),
+            "expected an overflow marker, got {rows:?}",
+        );
+    }
+
+    /// Under the limit, every alert is shown and no marker appears.
+    #[test]
+    fn every_alert_is_shown_when_they_fit() {
+        let rows = alert_panel_rows(&overview_with_alerts(3));
+        assert_eq!(rows.len(), 3, "expected all three alerts: {rows:?}");
+        assert!(
+            !rows.iter().any(|r| r.ends_with(" more")),
+            "no overflow marker should appear: {rows:?}",
+        );
+    }
+
+    /// The panel's card must be exactly as tall as the rows it draws — the two
+    /// used to be computed separately, so an overflowing panel drew a card
+    /// sized for alerts it had decided not to draw.
+    #[test]
+    fn the_alert_card_matches_the_rows_it_holds() {
+        for (alerts, rows) in [(1_usize, 1_usize), (5, 5), (12, ALERT_MAX_ROWS)] {
+            let tree = overview_with_alerts(alerts);
+            let drawn = alert_panel_rows(&tree);
+            assert_eq!(drawn.len(), rows, "{alerts} alerts drew {drawn:?}");
+
+            // The first row's y, plus a row per row drawn, must land inside the
+            // card that starts at ALERT_PANEL_HEADER above it.
+            let first_row_y = tree
+                .commands
+                .iter()
+                .find_map(|c| match c {
+                    RenderCommand::Text { y, text, .. }
+                        if text.starts_with("Synthetic alert ") =>
+                    {
+                        Some(*y)
+                    }
+                    _ => None,
+                })
+                .expect("an alert row");
+            let card_top = first_row_y - ALERT_PANEL_HEADER;
+            let card = tree
+                .commands
+                .iter()
+                .find_map(|c| match c {
+                    RenderCommand::FillRect {
+                        y, height, color, ..
+                    } if (*y - card_top).abs() < 0.5 && *color == MANTLE => Some(*height),
+                    _ => None,
+                })
+                .expect("the alert card");
+            let content = ALERT_ROW_HEIGHT.mul_add(rows as f32, ALERT_PANEL_HEADER);
+            assert!(
+                card >= content && card <= content + ALERT_PANEL_FOOTER,
+                "{alerts} alerts: card is {card} tall for {content} of rows",
+            );
+        }
     }
 
     #[test]

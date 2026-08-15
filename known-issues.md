@@ -1,5 +1,54 @@
 # Known Issues — OS kernel
 
+## Byte-indexed display truncation panics on non-ASCII text (lane C)
+
+**Status: open.** Found 2026-08-15 while surveying app tables for unbounded
+columns. Seven sites across `apps/` and `gui/` truncate a *display* string by
+counting bytes:
+
+```rust
+let display = if title.len() > 20 {
+    format!("{}...", &title[..17])   // panics if byte 17 is inside a character
+} else {
+    title
+};
+```
+
+`str::len` is bytes and `&s[..17]` is a byte index, so any string whose 17th
+byte falls inside a multi-byte character panics with
+`byte index 17 is not a char boundary`. The guard makes it *more* likely, not
+less: a 20-character Japanese title is 60 bytes, so it takes the truncating
+branch and then slices mid-character. This is not an edge case for these
+particular apps — it is their ordinary input.
+
+| Site | String | Exposure |
+|---|---|---|
+| `apps/rssreader/src/main.rs:3256,3260` | `article.summary` / `display_content()` | **Remote.** Straight off an RSS feed; any non-English feed crashes the reader. |
+| `apps/pdfviewer/src/main.rs:1452` | the PDF's own `/Title` | Attacker-supplied file metadata. |
+| `gui/desktop/src/file_drop.rs:65` | dropped text | And our paths are byte strings by design. |
+| `apps/flashcards/src/main.rs:1313,1370` | card front/back | A flashcard app is *the* place for CJK and accented text. |
+| `apps/stickynotes/src/main.rs:973` | the note's first line | The user's own text. |
+| `apps/procexplorer/src/main.rs:2359` | `KEY=value` from the environment | Environment strings are arbitrary bytes. |
+| `gui/toolkit/src/colorpicker.rs:175` | `&s[..6]` on a typed hex string | Any multi-byte character in the field. |
+
+**The proper fix is not to hunt for char boundaries at each site.** Every one of
+these is a *display* truncation, and each already has a box to draw into, so
+each should be `guitk::text::elide` (or a `guitk::table` cell): it measures
+display width, cuts on a character boundary, and marks the cut with `…`. That
+also removes the second, quieter bug present at every site — a truncation
+counted in bytes has no relationship to the width of the box the text is drawn
+in, so `20` characters of a wide font overflow anyway while `20` of a narrow one
+waste half the space.
+
+Grep shape: `&<ident>[..<literal>]` where the receiver is a `String`/`&str`,
+and its `if x.len() > N` guard. Note this is the same root cause as the
+unbounded-column survey below — **counting characters instead of measuring the
+box** — and it is worth treating as one problem.
+
+Violates `CLAUDE.md` self-review item 7 (never force UTF-8 assumptions on
+OS-boundary data) and trips the workspace's `clippy::indexing_slicing` warn.
+
+
 Running list of unsolved bugs and technical debt.  Each entry should
 have enough context to act on later: what the bug or debt is, where in
 the code it lives, how to reproduce it (for bugs), and what the proper
@@ -78,6 +127,28 @@ fresh measurement disagree, the measurement wins.
 ---
 
 ## Active Bugs
+
+### TD-POSIX-TIMES-FLAKE. `posix::sys_times::tests::test_times_increments_each_call` fails intermittently under a full-workspace run — 2026-08-15 — filed to lane B as `requests/c-b-flaky-sys-times-test.md`
+
+**Not lane C's tree** — logged here so the next lane to hit it does not re-triage
+it from scratch. `posix/src/sys_times.rs:583-595` asserts
+`assert_eq!(t, base + i, "each call should increment by 1")` against what the
+module doc itself describes as a **process-wide** monotonic call counter, inside
+a `-p posix --lib` binary that runs **20289 tests across parallel threads**. Any
+concurrent `times()` caller bumps the shared counter between this test's own
+calls, so the exact-delta premise holds only by scheduling accident.
+
+**Symptom.** `cargo test --workspace --target x86_64-pc-windows-gnu` (674 s)
+came back `20288 passed; 1 failed` with `left: 8`. Re-running the same binary
+filtered (`-- sys_times`, 25 tests) passes every time — so it reproduces *only*
+in the full-workspace run, which is precisely the run every lane must make green
+before merging up. It therefore looks like a red tree caused by whoever is
+merging, and costs that lane a triage cycle to prove otherwise.
+
+**Correct fix** (lane B's to make): assert strict monotonicity (`t > prev`),
+which is what the implementation actually guarantees. Serialising the
+`times()`-using tests behind a `Mutex` also works but is more fragile — it holds
+only as long as every future `times()` caller in the crate remembers the lock.
 
 ### TD-FONT-NO-CFF-OUTLINES. `osfont` cannot draw any `.otf` whose outlines are PostScript/CFF rather than TrueType — 2026-08-13 — ✅ FIXED 2026-08-14 (`gui/font/src/cff.rs`, `gui/font/src/sfnt.rs`, `gui/font/src/raster.rs`)
 

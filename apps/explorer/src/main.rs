@@ -23,6 +23,11 @@ mod thumbs;
 use guitk::color::Color;
 use guitk::render::RenderTree;
 
+use fileops::{
+    ConflictPolicy, ErrorPolicy, FileOpEvent, FileOperation, OperationExecutor, OperationPlan,
+    OperationSummary, RecycleBin, UndoStack,
+};
+
 use std::collections::VecDeque;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -71,8 +76,8 @@ impl FileType {
             "zip" | "tar" | "gz" | "bz2" | "xz" | "7z" | "rar" => Self::Archive,
             "exe" | "bin" | "sh" | "cmd" | "bat" => Self::Executable,
             "pdf" | "doc" | "docx" | "odt" | "xls" | "xlsx" => Self::Document,
-            "rs" | "c" | "h" | "cpp" | "py" | "js" | "ts" | "html" | "css" | "java"
-            | "go" | "toml" | "yaml" | "json" | "xml" => Self::Code,
+            "rs" | "c" | "h" | "cpp" | "py" | "js" | "ts" | "html" | "css" | "java" | "go"
+            | "toml" | "yaml" | "json" | "xml" => Self::Code,
             _ => Self::Unknown,
         }
     }
@@ -101,9 +106,9 @@ impl FileType {
 /// How files are displayed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ViewMode {
-    Details,  // Table with columns
-    List,     // Simple list
-    Icons,    // Grid of icons
+    Details, // Table with columns
+    List,    // Simple list
+    Icons,   // Grid of icons
 }
 
 /// Sort criteria.
@@ -163,8 +168,16 @@ pub struct ExplorerState {
     pub address_text: String,
     /// Whether address bar is being edited.
     pub address_editing: bool,
-    /// Status bar message.
+    /// Transient result of the last user-initiated operation.
+    ///
+    /// Kept separate from [`Self::dir_summary`] because every operation ends by
+    /// reloading the directory, and the reload recomputes the summary. When
+    /// both lived in one field the summary overwrote the result one line later,
+    /// so no paste, delete, rename or error message was ever actually seen.
+    /// Empty means "nothing to report"; the status bar then shows the summary.
     pub status_message: String,
+    /// Derived one-line description of the current directory's contents.
+    pub dir_summary: String,
     /// Tree sidebar expanded paths.
     pub tree_expanded: Vec<PathBuf>,
     /// Window dimensions.
@@ -172,6 +185,14 @@ pub struct ExplorerState {
     pub window_height: u32,
     /// Sidebar width.
     pub sidebar_width: f32,
+    /// Undo history for completed file operations.
+    ///
+    /// Every operation that moves or deletes data records how to reverse it.
+    /// Copy/paste and move/paste were previously irreversible because they were
+    /// run by hand rather than through the executor that produces these entries.
+    pub undo: UndoStack,
+    /// Recycle bin used by non-permanent delete.
+    pub recycle: RecycleBin,
 }
 
 impl ExplorerState {
@@ -190,10 +211,13 @@ impl ExplorerState {
             address_text: start_path.to_string_lossy().to_string(),
             address_editing: false,
             status_message: String::new(),
+            dir_summary: String::new(),
             tree_expanded: vec![PathBuf::from("/")],
             window_width: 900,
             window_height: 600,
             sidebar_width: 200.0,
+            undo: UndoStack::new(),
+            recycle: RecycleBin::default_location(),
         };
         state.load_directory();
         state
@@ -216,6 +240,8 @@ impl ExplorerState {
         self.current_path = path.to_path_buf();
         self.address_text = self.current_path.to_string_lossy().to_string();
         self.selected_indices.clear();
+        // The previous directory's operation result no longer applies here.
+        self.status_message.clear();
         self.load_directory();
     }
 
@@ -226,6 +252,7 @@ impl ExplorerState {
             self.current_path = prev;
             self.address_text = self.current_path.to_string_lossy().to_string();
             self.selected_indices.clear();
+            self.status_message.clear();
             self.load_directory();
         }
     }
@@ -237,6 +264,7 @@ impl ExplorerState {
             self.current_path = next;
             self.address_text = self.current_path.to_string_lossy().to_string();
             self.selected_indices.clear();
+            self.status_message.clear();
             self.load_directory();
         }
     }
@@ -352,18 +380,35 @@ impl ExplorerState {
         });
     }
 
-    /// Update the status bar message.
+    /// Recompute the directory summary shown when there is nothing else to say.
     fn update_status(&mut self) {
         let dir_count = self.entries.iter().filter(|e| e.is_dir).count();
-        let file_count = self.entries.len() - dir_count;
-        let total_size: u64 = self.entries.iter().filter(|e| !e.is_dir).map(|e| e.size).sum();
+        let file_count = self.entries.len().saturating_sub(dir_count);
+        let total_size: u64 = self
+            .entries
+            .iter()
+            .filter(|e| !e.is_dir)
+            .map(|e| e.size)
+            .sum();
 
-        self.status_message = format!(
+        self.dir_summary = format!(
             "{} folder(s), {} file(s) — {}",
             dir_count,
             file_count,
             format_size(total_size)
         );
+    }
+
+    /// The text the status bar should display.
+    ///
+    /// An operation result takes precedence over the directory summary until
+    /// the user navigates away.
+    pub fn status_bar_text(&self) -> &str {
+        if self.status_message.is_empty() {
+            &self.dir_summary
+        } else {
+            &self.status_message
+        }
     }
 
     // ======================================================================
@@ -416,11 +461,11 @@ impl ExplorerState {
             .map(|e| e.path.clone())
             .collect();
         if !paths.is_empty() {
+            // Count what was actually collected, not `selected_indices`, which
+            // is a separate list that can fall out of step with `entry.selected`.
+            let n = paths.len();
             self.clipboard = Some(ClipboardOp::Copy(paths));
-            self.status_message = format!(
-                "{} item(s) copied to clipboard",
-                self.selected_indices.len()
-            );
+            self.status_message = format!("{n} item(s) copied to clipboard");
         }
     }
 
@@ -433,15 +478,20 @@ impl ExplorerState {
             .map(|e| e.path.clone())
             .collect();
         if !paths.is_empty() {
+            let n = paths.len();
             self.clipboard = Some(ClipboardOp::Cut(paths));
-            self.status_message = format!(
-                "{} item(s) cut to clipboard",
-                self.selected_indices.len()
-            );
+            self.status_message = format!("{n} item(s) cut to clipboard");
         }
     }
 
     /// Paste clipboard contents into current directory.
+    ///
+    /// Runs through the [`fileops`] executor rather than calling `fs::copy` /
+    /// `fs::rename` directly. That engine is the one that has a conflict
+    /// policy, a crash-recovery journal, per-file error collection and undo
+    /// entries; the hand-rolled loop this replaces had none of them, and in
+    /// particular it overwrote an existing destination file without asking and
+    /// then reported "Paste complete" whether or not anything had worked.
     pub fn paste(&mut self) {
         let op = match self.clipboard.take() {
             Some(op) => op,
@@ -451,34 +501,66 @@ impl ExplorerState {
             }
         };
 
-        match op {
-            ClipboardOp::Copy(paths) => {
-                for src in &paths {
-                    let name = src.file_name().unwrap_or_default();
-                    let dst = self.current_path.join(name);
-                    if src.is_dir() {
-                        let _ = copy_dir_recursive(src, &dst);
-                    } else {
-                        let _ = fs::copy(src, &dst);
-                    }
-                }
-                self.clipboard = Some(ClipboardOp::Copy(paths));
-                self.status_message = "Paste complete".to_string();
+        let (paths, operation) = match &op {
+            ClipboardOp::Copy(paths) => (paths.clone(), FileOperation::Copy),
+            ClipboardOp::Cut(paths) => (paths.clone(), FileOperation::Move),
+        };
+
+        // Rename on conflict: a paste must never silently destroy a file that
+        // is already in the destination. The user can still overwrite by
+        // deleting the old file first, which is an explicit act.
+        let plan = match operation {
+            FileOperation::Move => OperationPlan::plan_move(
+                &paths,
+                &self.current_path,
+                ConflictPolicy::Rename,
+                ErrorPolicy::SkipAndContinue,
+            ),
+            _ => OperationPlan::plan_copy(
+                &paths,
+                &self.current_path,
+                ConflictPolicy::Rename,
+                ErrorPolicy::SkipAndContinue,
+            ),
+        };
+
+        let plan = match plan {
+            Ok(plan) => plan,
+            Err(e) => {
+                self.status_message = format!("Paste failed: {e}");
+                // A plan that could not even be built has changed nothing, so
+                // the clipboard is still valid — keep it.
+                self.clipboard = Some(op);
+                return;
             }
-            ClipboardOp::Cut(paths) => {
-                for src in &paths {
-                    let name = src.file_name().unwrap_or_default();
-                    let dst = self.current_path.join(name);
-                    let _ = fs::rename(src, &dst);
-                }
-                self.status_message = "Move complete".to_string();
-            }
+        };
+
+        let mut executor = OperationExecutor::new(plan);
+        let events = executor.execute();
+        self.status_message = Self::describe_outcome(&events, "Pasted");
+
+        let (undo_op, entries) = executor.into_undo_entries();
+        if !entries.is_empty() {
+            self.undo.push(undo_op, entries);
+        }
+
+        // A copy leaves the sources in place, so the clipboard stays usable for
+        // a second paste. A cut consumed them, so it must not.
+        if matches!(op, ClipboardOp::Copy(_)) {
+            self.clipboard = Some(op);
         }
 
         self.load_directory();
     }
 
     /// Delete selected files (move to recycle bin or permanent delete).
+    ///
+    /// Non-permanent delete goes through [`RecycleBin`], which records the
+    /// original path alongside the data so the item can be restored and so two
+    /// files of the same name from different directories do not collide. The
+    /// previous implementation renamed the file into a flat `/var/recycle`
+    /// directory with no metadata: nothing there could be restored or even
+    /// listed, and a second `notes.txt` silently destroyed the first.
     pub fn delete_selected(&mut self, permanent: bool) {
         let paths: Vec<PathBuf> = self
             .entries
@@ -487,26 +569,94 @@ impl ExplorerState {
             .map(|e| e.path.clone())
             .collect();
 
-        for path in &paths {
-            if permanent {
-                if path.is_dir() {
-                    let _ = fs::remove_dir_all(path);
-                } else {
-                    let _ = fs::remove_file(path);
-                }
-            } else {
-                // Move to recycle bin (/var/recycle or ~/.local/share/Trash)
-                let trash_dir = PathBuf::from("/var/recycle");
-                let _ = fs::create_dir_all(&trash_dir);
-                if let Some(name) = path.file_name() {
-                    let dst = trash_dir.join(name);
-                    let _ = fs::rename(path, &dst);
-                }
-            }
+        if paths.is_empty() {
+            self.status_message = "Nothing selected".to_string();
+            return;
         }
 
-        self.status_message = format!("{} item(s) deleted", paths.len());
+        if permanent {
+            self.status_message =
+                match OperationPlan::plan_delete(&paths, ErrorPolicy::SkipAndContinue) {
+                    Ok(plan) => {
+                        let mut executor = OperationExecutor::new(plan);
+                        let events = executor.execute();
+                        Self::describe_outcome(&events, "Deleted")
+                    }
+                    Err(e) => format!("Delete failed: {e}"),
+                };
+        } else {
+            let mut recycled = Vec::new();
+            let mut first_error = None;
+            for path in &paths {
+                match self.recycle.recycle(path) {
+                    // The recycle bin owns the moved data, so there is no new
+                    // location to record here; restore is by entry id.
+                    Ok(_) => recycled.push((path.clone(), None)),
+                    Err(e) => {
+                        if first_error.is_none() {
+                            first_error = Some(format!("{}: {e}", path.display()));
+                        }
+                    }
+                }
+            }
+            let moved = recycled.len();
+            if !recycled.is_empty() {
+                self.undo.push(FileOperation::Recycle, recycled);
+            }
+            self.status_message = match first_error {
+                None => format!("{moved} item(s) moved to recycle bin"),
+                Some(err) => format!(
+                    "{moved} of {} item(s) moved to recycle bin — {err}",
+                    paths.len()
+                ),
+            };
+        }
+
         self.load_directory();
+    }
+
+    /// Turn an executor's event stream into a one-line status message.
+    ///
+    /// Reports what actually happened. The counts come from the executor's own
+    /// summary, so a failed or skipped file is visible to the user instead of
+    /// being folded into an unconditional "complete".
+    fn describe_outcome(events: &[FileOpEvent], verb: &str) -> String {
+        let summary = events.iter().find_map(|e| match e {
+            FileOpEvent::Complete { summary } => Some(summary),
+            _ => None,
+        });
+
+        let Some(OperationSummary {
+            succeeded,
+            skipped,
+            failed,
+            errors,
+            ..
+        }) = summary
+        else {
+            // No Complete event means the operation aborted before running —
+            // the executor emits an Error event in that case.
+            let reason = events
+                .iter()
+                .find_map(|e| match e {
+                    FileOpEvent::Error { error, .. } => Some(error.clone()),
+                    _ => None,
+                })
+                .unwrap_or_else(|| "operation did not complete".to_string());
+            return format!("{verb} nothing — {reason}");
+        };
+
+        let mut msg = format!("{verb} {succeeded} item(s)");
+        if *skipped > 0 {
+            msg.push_str(&format!(", {skipped} skipped"));
+        }
+        if *failed > 0 {
+            msg.push_str(&format!(", {failed} failed"));
+            if let Some(first) = errors.first() {
+                msg.push_str(&format!(" — {}: {}", first.path.display(), first.message));
+            }
+        }
+        msg
     }
 
     /// Create a new folder.
@@ -573,10 +723,24 @@ impl ExplorerState {
 
     fn render_toolbar(&self, tree: &mut RenderTree) {
         let toolbar_h = 36.0;
-        tree.fill_rect(0.0, 0.0, self.window_width as f32, toolbar_h, Color::from_hex(0xE8E8E8));
+        tree.fill_rect(
+            0.0,
+            0.0,
+            self.window_width as f32,
+            toolbar_h,
+            Color::from_hex(0xE8E8E8),
+        );
 
         // Navigation buttons
-        let buttons = ["\u{2190}", "\u{2192}", "\u{2191}", "|", "\u{1F4C1}+", "\u{2702}", "\u{1F4CB}"];
+        let buttons = [
+            "\u{2190}",
+            "\u{2192}",
+            "\u{2191}",
+            "|",
+            "\u{1F4C1}+",
+            "\u{2702}",
+            "\u{1F4CB}",
+        ];
         let mut x = 8.0;
         for btn_text in &buttons {
             if *btn_text == "|" {
@@ -597,7 +761,14 @@ impl ExplorerState {
         let w = self.window_width as f32;
 
         tree.fill_rect(0.0, bar_y, w, bar_h, Color::WHITE);
-        tree.stroke_rect(4.0, bar_y + 2.0, w - 8.0, bar_h - 4.0, Color::from_hex(0xC0C0C0), 1.0);
+        tree.stroke_rect(
+            4.0,
+            bar_y + 2.0,
+            w - 8.0,
+            bar_h - 4.0,
+            Color::from_hex(0xC0C0C0),
+            1.0,
+        );
         tree.text(12.0, bar_y + 7.0, &self.address_text, Color::BLACK, 13.0);
     }
 
@@ -607,7 +778,14 @@ impl ExplorerState {
         let sw = self.sidebar_width;
 
         tree.fill_rect(0.0, sidebar_y, sw, sidebar_h, Color::from_hex(0xF0F0F0));
-        tree.stroke_rect(sw - 1.0, sidebar_y, 1.0, sidebar_h, Color::from_hex(0xD0D0D0), 1.0);
+        tree.stroke_rect(
+            sw - 1.0,
+            sidebar_y,
+            1.0,
+            sidebar_h,
+            Color::from_hex(0xD0D0D0),
+            1.0,
+        );
 
         // Quick access items
         let items = ["/ (Root)", "/home", "/tmp", "/var", "/usr"];
@@ -627,9 +805,27 @@ impl ExplorerState {
         if self.view_mode == ViewMode::Details {
             let header_h = 22.0;
             tree.fill_rect(list_x, list_y, list_w, header_h, Color::from_hex(0xE0E0E0));
-            tree.text(list_x + 32.0, list_y + 4.0, "Name", Color::from_hex(0x333333), 11.0);
-            tree.text(list_x + list_w - 200.0, list_y + 4.0, "Size", Color::from_hex(0x333333), 11.0);
-            tree.text(list_x + list_w - 100.0, list_y + 4.0, "Modified", Color::from_hex(0x333333), 11.0);
+            tree.text(
+                list_x + 32.0,
+                list_y + 4.0,
+                "Name",
+                Color::from_hex(0x333333),
+                11.0,
+            );
+            tree.text(
+                list_x + list_w - 200.0,
+                list_y + 4.0,
+                "Size",
+                Color::from_hex(0x333333),
+                11.0,
+            );
+            tree.text(
+                list_x + list_w - 100.0,
+                list_y + 4.0,
+                "Modified",
+                Color::from_hex(0x333333),
+                11.0,
+            );
 
             // Entries
             let row_h = 22.0;
@@ -647,7 +843,11 @@ impl ExplorerState {
                 }
 
                 // Icon
-                let icon = if entry.is_dir { "\u{1F4C1}" } else { "\u{1F4C4}" };
+                let icon = if entry.is_dir {
+                    "\u{1F4C1}"
+                } else {
+                    "\u{1F4C4}"
+                };
                 tree.text(list_x + 8.0, ey + 3.0, icon, Color::BLACK, 12.0);
 
                 // Name
@@ -677,7 +877,13 @@ impl ExplorerState {
         let w = self.window_width as f32;
 
         tree.fill_rect(0.0, bar_y, w, 24.0, Color::from_hex(0xE8E8E8));
-        tree.text(8.0, bar_y + 5.0, &self.status_message, Color::from_hex(0x555555), 11.0);
+        tree.text(
+            8.0,
+            bar_y + 5.0,
+            self.status_bar_text(),
+            Color::from_hex(0x555555),
+            11.0,
+        );
     }
 
     // ======================================================================
@@ -724,19 +930,11 @@ fn format_size(bytes: u64) -> String {
     }
 }
 
-fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
-    fs::create_dir_all(dst)?;
-    for entry in fs::read_dir(src)? {
-        let entry = entry?;
-        let entry_dst = dst.join(entry.file_name());
-        if entry.path().is_dir() {
-            copy_dir_recursive(&entry.path(), &entry_dst)?;
-        } else {
-            fs::copy(entry.path(), &entry_dst)?;
-        }
-    }
-    Ok(())
-}
+// `copy_dir_recursive` used to live here. It was a second, weaker
+// implementation of what `fileops::OperationPlan::plan_copy` plus
+// `OperationExecutor` already do — with no conflict policy, no journal, no undo
+// and no error reporting. Deleted rather than patched: two implementations of
+// the same operation is how the weaker one ends up on the user-facing path.
 
 // ============================================================================
 // Main
@@ -752,28 +950,339 @@ fn main() {
 
     // Render initial view
     let render = explorer.render();
-    println!("File Explorer initialized at: {}", explorer.current_path.display());
+    println!(
+        "File Explorer initialized at: {}",
+        explorer.current_path.display()
+    );
     println!("  {} entries loaded", explorer.entries.len());
     println!("  {} render commands", render.len());
-    println!("  Status: {}", explorer.status_message);
+    println!("  Status: {}", explorer.status_bar_text());
 
     // Demonstrate navigation
     if explorer.entries.iter().any(|e| e.is_dir) {
         let first_dir_idx = explorer.entries.iter().position(|e| e.is_dir).unwrap_or(0);
         explorer.open_entry(first_dir_idx);
-        println!(
-            "\nNavigated to: {}",
-            explorer.current_path.display()
-        );
+        println!("\nNavigated to: {}", explorer.current_path.display());
         println!("  {} entries", explorer.entries.len());
 
         // Go back
         explorer.go_back();
-        println!(
-            "Back to: {}",
-            explorer.current_path.display()
-        );
+        println!("Back to: {}", explorer.current_path.display());
     }
 
     println!("\nFile Explorer ready.");
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, UNIX_EPOCH};
+
+    /// A unique scratch directory for one test.
+    fn temp_dir(label: &str) -> PathBuf {
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!("explorer_test_{label}_{ts}"));
+        fs::create_dir_all(&dir).expect("create scratch dir");
+        dir
+    }
+
+    fn write(path: &Path, content: &str) {
+        fs::write(path, content).expect("write test file");
+    }
+
+    /// Build a state rooted at `dir` without touching the real home directory,
+    /// and with a recycle bin that also lives under `dir`.
+    fn state_at(dir: &Path) -> ExplorerState {
+        let mut state = ExplorerState::new(dir);
+        state.recycle = RecycleBin::new(dir.join(".recycle"), Duration::from_secs(3600));
+        state
+    }
+
+    fn select_named(state: &mut ExplorerState, name: &str) {
+        for entry in &mut state.entries {
+            entry.selected = entry.name == name;
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Paste
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn pasting_over_an_existing_file_does_not_destroy_it() {
+        let root = temp_dir("paste_conflict");
+        let src_dir = root.join("src");
+        let dst_dir = root.join("dst");
+        fs::create_dir_all(&src_dir).expect("src");
+        fs::create_dir_all(&dst_dir).expect("dst");
+        write(&src_dir.join("notes.txt"), "new");
+        write(&dst_dir.join("notes.txt"), "OLD AND IRREPLACEABLE");
+
+        let mut state = state_at(&dst_dir);
+        state.clipboard = Some(ClipboardOp::Copy(vec![src_dir.join("notes.txt")]));
+        state.paste();
+
+        assert_eq!(
+            fs::read_to_string(dst_dir.join("notes.txt")).expect("original must survive"),
+            "OLD AND IRREPLACEABLE",
+            "a paste must never silently overwrite an existing file"
+        );
+        let renamed: Vec<_> = fs::read_dir(&dst_dir)
+            .expect("list dst")
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n != "notes.txt")
+            .collect();
+        assert_eq!(
+            renamed.len(),
+            1,
+            "the pasted copy should land beside the original, got {renamed:?}"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_paste_that_could_not_copy_anything_says_so() {
+        let root = temp_dir("paste_missing");
+        let dst_dir = root.join("dst");
+        fs::create_dir_all(&dst_dir).expect("dst");
+
+        let mut state = state_at(&dst_dir);
+        // A source that does not exist: planning fails, nothing is copied.
+        state.clipboard = Some(ClipboardOp::Copy(vec![root.join("does_not_exist.txt")]));
+        state.paste();
+
+        assert!(
+            !state.status_message.starts_with("Pasted 1"),
+            "a paste that copied nothing must not claim it copied something: {}",
+            state.status_message
+        );
+        assert!(
+            state.clipboard.is_some(),
+            "a paste that changed nothing should leave the clipboard usable"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_cut_clears_the_clipboard_but_a_copy_does_not() {
+        let root = temp_dir("paste_clipboard");
+        let src_dir = root.join("src");
+        let dst_dir = root.join("dst");
+        fs::create_dir_all(&src_dir).expect("src");
+        fs::create_dir_all(&dst_dir).expect("dst");
+        write(&src_dir.join("a.txt"), "a");
+        write(&src_dir.join("b.txt"), "b");
+
+        let mut state = state_at(&dst_dir);
+        state.clipboard = Some(ClipboardOp::Copy(vec![src_dir.join("a.txt")]));
+        state.paste();
+        assert!(
+            state.clipboard.is_some(),
+            "the sources of a copy are still there, so a second paste is meaningful"
+        );
+
+        state.clipboard = Some(ClipboardOp::Cut(vec![src_dir.join("b.txt")]));
+        state.paste();
+        assert!(
+            state.clipboard.is_none(),
+            "a cut consumed its sources; pasting again would find nothing"
+        );
+        assert!(
+            !src_dir.join("b.txt").exists(),
+            "a cut should have moved the source away"
+        );
+        assert!(dst_dir.join("b.txt").exists(), "and into the destination");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    // ------------------------------------------------------------------
+    // Delete
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn a_recycled_file_can_be_restored() {
+        let root = temp_dir("delete_restore");
+        write(&root.join("notes.txt"), "keep me");
+
+        let mut state = state_at(&root);
+        select_named(&mut state, "notes.txt");
+        state.delete_selected(false);
+
+        assert!(!root.join("notes.txt").exists(), "the file should be gone");
+        let listed = state.recycle.list().expect("the bin must be listable");
+        assert_eq!(
+            listed.len(),
+            1,
+            "a recycled file must appear in the bin, not vanish into a flat directory"
+        );
+        let id = listed.first().expect("one entry").id.clone();
+        state.recycle.restore(&id).expect("restore must work");
+        assert_eq!(
+            fs::read_to_string(root.join("notes.txt")).expect("restored"),
+            "keep me"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn two_recycled_files_of_the_same_name_do_not_collide() {
+        let root = temp_dir("delete_collision");
+        let a = root.join("a");
+        let b = root.join("b");
+        fs::create_dir_all(&a).expect("a");
+        fs::create_dir_all(&b).expect("b");
+        write(&a.join("notes.txt"), "from a");
+        write(&b.join("notes.txt"), "from b");
+
+        let mut state = state_at(&a);
+        select_named(&mut state, "notes.txt");
+        state.delete_selected(false);
+
+        state.navigate_to(&b);
+        select_named(&mut state, "notes.txt");
+        state.delete_selected(false);
+
+        let listed = state.recycle.list().expect("list");
+        assert_eq!(
+            listed.len(),
+            2,
+            "deleting a second file of the same name must not destroy the first"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_delete_that_failed_does_not_report_success() {
+        let root = temp_dir("delete_failure");
+        write(&root.join("gone.txt"), "x");
+
+        let mut state = state_at(&root);
+        select_named(&mut state, "gone.txt");
+        // Remove it behind the explorer's back, so the recycle attempt fails
+        // on a path the UI still believes exists.
+        fs::remove_file(root.join("gone.txt")).expect("remove");
+        state.delete_selected(false);
+
+        assert!(
+            state.status_message.contains("0 of 1"),
+            "a delete that moved nothing must say so, got: {}",
+            state.status_message
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn deleting_with_nothing_selected_reports_nothing_selected() {
+        let root = temp_dir("delete_empty");
+        let mut state = state_at(&root);
+        state.delete_selected(false);
+        assert_eq!(state.status_message, "Nothing selected");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    // ------------------------------------------------------------------
+    // Status bar
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn an_operation_result_survives_the_directory_reload_that_follows_it() {
+        let root = temp_dir("status_survives");
+        write(&root.join("gone.txt"), "x");
+
+        let mut state = state_at(&root);
+        select_named(&mut state, "gone.txt");
+        state.delete_selected(false);
+
+        // Every operation ends with `load_directory`, which recomputes the
+        // folder/file summary. That must not erase what just happened.
+        assert!(
+            state.status_bar_text().contains("recycle bin"),
+            "the status bar should still show the operation result, got: {}",
+            state.status_bar_text()
+        );
+        assert!(
+            state.dir_summary.contains("folder(s)"),
+            "and the summary should have been recomputed alongside it"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn navigating_away_drops_the_previous_directorys_message() {
+        let root = temp_dir("status_navigate");
+        let sub = root.join("sub");
+        fs::create_dir_all(&sub).expect("sub");
+        write(&root.join("gone.txt"), "x");
+
+        let mut state = state_at(&root);
+        select_named(&mut state, "gone.txt");
+        state.delete_selected(false);
+        assert!(state.status_bar_text().contains("recycle bin"));
+
+        state.navigate_to(&sub);
+        assert_eq!(
+            state.status_bar_text(),
+            state.dir_summary,
+            "a message about another directory should not follow the user around"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_unreadable_directory_reports_the_error_rather_than_an_empty_listing() {
+        let root = temp_dir("status_unreadable");
+        let mut state = state_at(&root);
+        // A path that is not a directory at all: `read_dir` fails.
+        write(&root.join("plain.txt"), "x");
+        state.current_path = root.join("plain.txt");
+        state.status_message.clear();
+        state.load_directory();
+
+        assert!(
+            state.status_bar_text().starts_with("Error:"),
+            "a listing that failed must say so rather than claim zero files, got: {}",
+            state.status_bar_text()
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    // ------------------------------------------------------------------
+    // Clipboard counts
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn the_copied_count_matches_what_was_actually_copied() {
+        let root = temp_dir("copy_count");
+        write(&root.join("a.txt"), "a");
+        write(&root.join("b.txt"), "b");
+
+        let mut state = state_at(&root);
+        for entry in &mut state.entries {
+            entry.selected = true;
+        }
+        // Deliberately out of step with `entry.selected`, which is what the
+        // status line used to count.
+        state.selected_indices = vec![0];
+        state.copy_selected();
+        assert_eq!(state.status_message, "2 item(s) copied to clipboard");
+
+        let _ = fs::remove_dir_all(&root);
+    }
 }

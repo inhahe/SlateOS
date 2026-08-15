@@ -59107,6 +59107,77 @@ conjunct still does not form. That needs the Universal Shaping Engine pass,
 which is the substantially larger of the two and is what this entry now
 tracks.
 
+**Resolved — the Indic half (2026-08-14).** Not the USE pass this entry
+proposed, but HarfBuzz's own Indic shaper, which is what HarfBuzz actually runs
+for the nine Indic scripts: `hb-ot-shaper-indic` is a separate module from
+`hb-ot-shaper-use` precisely because the Indic scripts predate the universal
+model and their reordering is specified against Uniscribe rather than against
+USE's cluster grammar. Writing USE and pointing Devanagari at it would have
+matched neither.
+
+* `gui/font/src/indic.rs` — the character categories and positions, and
+  `Syllable`, the cluster kinds.
+* `gui/font/src/indic_machine.rs` — the syllable grammar, transcribed from
+  HarfBuzz's Ragel machine.
+* `gui/font/src/indic_shape.rs` — the shaper: `Plan` (what the face declares,
+  probed once per run), the initial reordering (base finding, position
+  assignment, the sort, the feature masks), the thirteen substitution stages,
+  and the final reordering (matras, reph, pre-base forms).
+* `gui/font/src/gsub.rs` — `apply_stages`, which runs a lookup set per stage
+  and confines the shaper's own features to one syllable.
+
+Measured on the sweep: `हिन्दी` went from 5 disagreeing faces to 0, and the
+whole `misplaced` bucket to **0** across 556 faces × 23 strings, once the face —
+not the character — was allowed to call the shaper off
+(`TD-FONT-GATES-THE-MARK-FALLBACK-ON-THE-CHARACTERS-SCRIPT-NOT-THE-FONTS`).
+The design is recorded in `design-decisions.md` §421, and why the shaper is
+chosen by the *face* rather than by the character in §422.
+
+**Still open — everything that is neither Arabic nor Indic.** Khmer, Myanmar,
+Thai/Lao and the ~90 USE scripts still reach the default shaper: their
+positional and reordering features are never asked for. No string in the sweep
+corpus exercises them, so the cost is unmeasured rather than zero. USE is the
+next shaper to write, and `indic_shape.rs`'s stage driver, syllable stamping
+and `Plan` probing are the reusable parts of it. Filed on as
+`TD-FONT-HAS-NO-UNIVERSAL-SHAPING-ENGINE`.
+
+## TD-FONT-HAS-NO-UNIVERSAL-SHAPING-ENGINE
+
+**What.** Of HarfBuzz's six complex shapers we have two: Arabic (joining) and
+Indic (reordering). The other four — Khmer, Myanmar, Thai/Lao, and the
+Universal Shaping Engine that covers roughly ninety further scripts — are not
+written, so a run in any of those scripts gets the default shaper: `ccmp`,
+`locl`, the ligature features, and nothing positional or reordering.
+
+**Symptom.** Unmeasured. No string in the sweep corpus is Khmer, Myanmar, Thai
+(as *shaped* text — the Thai string in the corpus exercises mark fallback on
+faces that do not cover it), Tibetan, Javanese or any other USE script, so the
+sweep reports zero disagreement for them because it never asks. The expected
+failure is the same shape as Devanagari's was before the Indic shaper: pre-base
+vowels drawn after their consonant, conjuncts not forming, and in Khmer the
+coeng-joined subscripts drawn as full-size letters on the baseline.
+
+**Why it is filed rather than fixed.** It is the largest single piece of
+shaping left and it wants its own measurement first. The sweep's corpus has to
+gain strings for each family before the work can be checked, and the host's 556
+faces have to be surveyed for which of them cover those scripts at all — on a
+Windows development host that is likely to be very few, which is itself an
+argument for doing it after the things the host *can* measure.
+
+**Proper fix.** USE first, since it subsumes the most scripts: the cluster
+grammar from the Unicode Shaping Engine spec, the same stage driver
+`indic_shape.rs` already has, and `Plan`'s probing of what the face declares.
+Khmer and Myanmar are variants of the Indic model and can reuse
+`initial_reordering_syllable`'s base-finding. Thai/Lao is not a reordering
+shaper at all — it is the PUA fallback for Thai fonts with no `GSUB`, plus a
+`ccmp`-like normalization of the vowel/tone order — and is the smallest of the
+four.
+
+**Where.** `gui/font/src/sfnt.rs` — `Face::substitute`, which dispatches on
+`Script::shaping` and would gain the other families; `gui/font/src/indic.rs`
+and `indic_machine.rs` — the models to copy; `gui/font/tools/harfbuzz_sweep.py`
+— `CORPUS`, which needs a string per family before any of this is measurable.
+
 ## TD-FONT-DOES-NOT-REORDER-RIGHT-TO-LEFT-TEXT
 
 **What.** `ScaledFont::shape` returns glyphs in logical order for every

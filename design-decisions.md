@@ -11471,3 +11471,128 @@ version of the first option and costs no reimplementation.
 
 **Where.** `gui/font/tools/harfbuzz_sweep.py` — the `MIXED` set, the branch on
 it in `main`, and the `mixed` line in the report.
+
+## §421 — Transcribe HarfBuzz's Indic shaper, not the Universal Shaping Engine it superseded
+
+**Date:** 2026-08-14
+**Decided by:** Claude (autonomous)
+
+`TD-FONT-HAS-NO-JOINING-OR-REORDERING-SHAPER` proposed "a Universal Shaping
+Engine pass for Indic and South-East Asian" as the second of its two shapers.
+That is the shape the Unicode spec suggests — USE was written to be the one
+shaper every complex script could share, and the Indic scripts are complex
+scripts — and it is what a reading of the standards would produce. It is
+nevertheless the wrong target here, and the reason is a fact about the oracle
+rather than about the spec.
+
+**HarfBuzz does not run USE for Devanagari.** `hb-ot-shaper-indic.cc` and
+`hb-ot-shaper-use.cc` are separate modules, and `hb_ot_shaper_categorize`
+sends the nine Indic scripts to the first one. The split is not an accident of
+history that USE will eventually absorb: the Indic scripts' reordering is
+specified against **Uniscribe**, whose behaviour predates USE and whose quirks
+Microsoft's fonts were built around — the `dev2`/`deva` tag revision, the
+old-spec halant move, the reph position table, Malayalam's zero-context
+exception. USE's cluster grammar deliberately does not reproduce them.
+
+So the two options were not "USE or a narrower USE".
+
+**Write USE and point Devanagari at it.** One shaper instead of two, covering
+~90 further scripts as a side effect, and the standards-blessed model. But it
+would have matched neither oracle: not HarfBuzz, which runs the Indic shaper,
+and not the fonts, which were built for Uniscribe. Every disagreement it
+produced would have needed a judgement about whether HarfBuzz or the spec was
+right, which is exactly the diagnosis cost the sweep exists to avoid. And it
+would not have fixed the measured symptom, since the sweep's only complex-script
+strings are Arabic and Devanagari.
+
+**Transcribe the Indic shaper.** More total code — USE still has to be written
+afterwards for the scripts it covers, and is now filed as
+`TD-FONT-HAS-NO-UNIVERSAL-SHAPING-ENGINE` — and a second syllable grammar to
+maintain. In exchange every disagreement is a bug in the transcription and can
+be diagnosed by reading one file of HarfBuzz beside one file of ours, which is
+the property that took `हिन्दी` from 5 disagreeing faces to 0 and the whole
+`misplaced` bucket to 0.
+
+The second is what was done. The parts that are *not* Indic-specific were
+written to be reused: `apply_stages` (a lookup set per stage, the shaper's own
+features confined to one syllable), the syllable stamping in `setup_syllables`
+(a byte per glyph rather than a range, so a `ccmp` ligature cannot invalidate a
+boundary), and `Plan`'s once-per-run probing of what the face declares. USE
+needs all three and none of them assumes Indic.
+
+**Where.** `gui/font/src/indic.rs`, `indic_machine.rs`, `indic_shape.rs`;
+`gui/font/src/gsub.rs` — `apply_stages`; `gui/font/src/sfnt.rs` —
+`Face::substitute`, which dispatches on `Script::shaping`.
+
+## §422 — The face chooses the shaper, not the character
+
+**Date:** 2026-08-14
+**Decided by:** Claude (autonomous)
+
+Which shaper a run gets looked like a property of the text: Devanagari
+characters want the Indic shaper, Arabic characters the joining one. That is
+what `fallback::positions_marks` and `Face::substitute` both assumed, and it is
+wrong. `hb_ot_shaper_categorize(script, direction, gsub_script)` takes a third
+argument, and for most complex scripts the **font** gets a veto: a Devanagari
+run in a face that files its `GSUB` features under `DFLT` or `latn` is shaped
+by the *default* shaper, which places marks by measurement and zeroes their
+advances where the Indic shaper withholds both. `Hack` rendering `हिन्दी` is
+that face and that string, and it was the last 13 cases in the sweep's
+`misplaced` bucket.
+
+The veto is not uniform, which is the awkward part: Thai, Lao and Khmer reach
+their shapers unconditionally, Myanmar treats a third tag (`mymr`, which
+predates the Myanmar shaping spec) as a veto alongside `DFLT` and `latn`, and
+Arabic inverts the test (`gsub_script != DFLT`). There is no stated principle
+behind the asymmetry — the Thai shaper predates the check, Khmer was split out
+of Indic after it — so it is transcribed rather than tidied, in
+`fallback::ALWAYS_COMPLEX` and the `mymr` arm of `shaped_as_default`.
+
+**Two options for where the answer lives.**
+
+*A `Shaper` enum resolved once per run*, mirroring HarfBuzz's struct: each
+variant carrying `fallback_position`, `zero_width_marks` and the substitution
+entry point, with every consumer reading fields off it. Structurally the right
+shape, and it makes the "three questions, one answer" property unforgeable.
+But `COMPLEX_SCRIPTS` and `NO_ZERO_WIDTH_MARKS` are *measured* lists — probed
+against real faces, not read off the source — and folding them into an enum
+means rederiving both from the shaper table by hand, with 11,834 agreeing runs
+riding on getting it right. The rewrite risked more than it bought.
+
+*A predicate beside the lists that already exist.* `shaped_as_default(tags,
+gsub)` answers "did the face call this run's shaper off", and the three
+consumers take it as a parameter. Less tidy — the shaper is still implicit,
+spread across three lists and a predicate — but every existing measurement
+survives untouched, and the one new claim is small enough to test directly.
+
+The second was chosen. The discipline that replaces the enum is that
+`scaled.rs` resolves the answer **once per run** and feeds all three consumers
+from that one binding: whether the Indic shaper runs, whether marks may be
+placed by measurement, and whether their advances are zeroed are three fields
+of one HarfBuzz struct, and the failure mode of the predicate form is letting
+them disagree.
+
+**One correction the implementation forced.** The chosen tag has to be read
+from the raw `GSUB` ScriptList, not from `Substitutions`. `Substitutions`
+records only the scripts that reached a lookup this crate can apply, and
+`ByScript::parse` returns `None` outright when none does — so `Hack`, with 16
+`GSUB` lookups and both `DFLT` and `latn` registered, appears to name no script
+at all, and routing the question through it left the sweep stuck at
+`misplaced 5`. `Face` now holds `gsub_scripts` and `otl::chosen_from` walks
+HarfBuzz's `hb_ot_layout_table_select_script` chain over that. `None` is
+`HB_TAG_NONE`, which equals neither `DFLT` nor `latn`, so a face with **no**
+`GSUB` keeps its complex shaper — which is exactly the kind of face
+`NO_ZERO_WIDTH_MARKS` was measured against.
+
+**Known divergence, deliberate.** Arabic's inverted test would demote a Syriac
+run in a `latn`-only face to the default shaper and so suppress
+`init/medi/fina/isol`. It is not modelled, because both the Arabic and the
+default shaper set `fallback_position = true` and `zero_width_marks =
+BY_GDEF_LATE` — the divergence is in joining only, and is recorded under
+`TD-FONT-GATES-THE-MARK-FALLBACK-ON-THE-CHARACTERS-SCRIPT-NOT-THE-FONTS`.
+
+**Where.** `gui/font/src/fallback.rs` — `shaped_as_default`, `ALWAYS_COMPLEX`,
+and the `simple` parameter on `positions_marks`/`zeroes_mark_advances`;
+`gui/font/src/sfnt.rs` — `gsub_scripts`, `shapes_as_default`,
+`gsub_chosen_script`; `gui/font/src/otl.rs` — `chosen_from`;
+`gui/font/src/scaled.rs` — the per-run `simple` binding in `shape`.

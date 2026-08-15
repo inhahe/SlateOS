@@ -472,9 +472,21 @@ Roadmap:
   Arabic buckets were the itemizer, not the shaper, and each had cost a
   diagnosis to dismiss (design-decisions §420). `misplaced` 19 → 13, and all
   13 are the one Devanagari string.
-  Next unblocked step is the rest of shaping: no Indic reordering
-  (`TD-FONT-HAS-NO-JOINING-OR-REORDERING-SHAPER`), no language selection
-  (`TD-FONT-IGNORES-LANGSYS-OVERRIDES`), and no device tables in
+  Those 13 are now 0: the Indic shaper is written — HarfBuzz's, not the
+  Universal Shaping Engine, since HarfBuzz runs a separate `-indic` module
+  for the nine Uniscribe-era scripts (design-decisions §421) — and the
+  shaper a run gets is chosen by the **face**, not by the character, so a
+  Devanagari run in a `latn`-only face like `Hack` takes the default
+  shaper's mark handling as HarfBuzz's does (§422). `misplaced` 13 → **0**,
+  and `reordered` is 0 too, so every one of 556 faces × 23 strings that we
+  and HarfBuzz both draw is now drawn identically. The remaining 892
+  `differ` cases are all normalization on faces that lack the glyph
+  entirely — Hangul jamo (553) and composed Latin diacritics (339) — where
+  HarfBuzz decomposes and recomposes per font coverage and we normalize to
+  NFC first.
+  Next unblocked step is the rest of shaping: no Khmer/Myanmar/Thai/USE
+  shapers (`TD-FONT-HAS-NO-UNIVERSAL-SHAPING-ENGINE`), no language
+  selection (`TD-FONT-IGNORES-LANGSYS-OVERRIDES`), and no device tables in
   `ValueRecord`. Vello itself waits on `[A]`'s GPU driver.
 - `[C]` Wayland-inspired compositor: GPU acceleration, currently a software
   rasterizer (lines ~4605, ~4619)

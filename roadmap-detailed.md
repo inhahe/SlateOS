@@ -80,6 +80,86 @@ Every performance-critical subsystem has a measured baseline and a concrete targ
 - **No AI features in the OS** (exceptions: speech I/O, opt-in ML image/video indexer). **No ads.**
 - **YAML for all configuration files**, processed with a library that preserves user comments and formatting (e.g., ruamel.yaml or Rust equivalent).
 - **No binary logs** — text-based (JSON-lines) structured logging.
+- **Python (fastpy) is the default implementation language for everything that is not kernel-space or hot-path.** See the policy immediately below. This is a *default*, not a preference to be re-litigated per component: writing a new userspace tool, service, or app in Rust requires a reason from the exclusion list.
+
+#### Implementation Language Policy (operator-directed)
+
+**Default to Python, compiled with fastpy.** Rust is for the kernel, drivers,
+and the measured hot paths. Everything else — userspace tools, services,
+system utilities, settings/config UIs, the package manager, the installer, the
+file indexer, build and maintenance scripts, and the desktop applications — is
+**Python by default**, AOT-compiled to a native binary by fastpy. Agents
+picking up a new userspace component should reach for Python first and justify
+Rust, not the other way around. (This restates and sharpens the rule already
+in `CLAUDE.md` → "Coding Conventions"; it is repeated here because
+`roadmap-detailed.md` is where components get specified, and the choice was
+being made ad-hoc per component.)
+
+**There is no interpreter and no CPython in a shipped SlateOS binary, so the
+usual "Python is heavy" objection does not apply here.** fastpy on SlateOS
+builds in **pure mode**: the program is compiled to machine code and statically
+linked against fastpy's small C runtime (7 translation units — `runtime`,
+`objects`, `threading`, `gc`, `bigint`, `bridge_stub`, `pathlib_pure`) plus our
+own `libc.a`. `libpython` is *not* linked; `cpython_bridge.c` is replaced by
+`bridge_stub.c`. Concretely:
+
+- **Memory:** a fastpy binary's footprint is that of a static C program, not of
+  CPython. There is no ~10–30 MB interpreter image, no import machinery, no
+  `.pyc` cache, no per-process module dictionaries. A real fastpy program
+  (lists/iteration/print) links to a **~2.9 MB static ET_EXEC**, and runtime
+  memory is just its own heap plus the refcount/GC bookkeeping. This is the
+  answer to "does fastpy cost memory like CPython does?" — **no**, because
+  pure-mode fastpy does not contain CPython at all.
+- **Speed:** C++-class, not interpreter-class. On fastpy's own benchmark set it
+  runs at **0.2×–2.3× of MSVC /O2 C++** — *faster* than C++ on tight loops
+  (0.5×), function calls (0.2×), recursion (0.6×) and attribute access (0.5×);
+  ~2× slower on allocation-heavy pointer chasing (linked-list traversal 2.3×,
+  object creation 2.2×). Against CPython it is **3×–173×** faster. So the
+  performance argument for choosing Rust over Python is a real but *narrow*
+  one — it bites where the slowdown would actually be noticed (see exclusion 2
+  below), not across userspace in general.
+
+**Choose Rust (or C) only for one of these reasons — and say which one:**
+
+1. **Kernel space or `no_std`** — anything in `kernel/**`, or a component that
+   must run without a heap or before the runtime exists.
+2. **Python would noticeably slow it down.** Two cases:
+   - **A subsystem in the performance-critical table** (`CLAUDE.md` →
+     "Performance-Critical Subsystems"): syscall dispatch, IPC, context switch,
+     page fault, allocators, scheduler, futex, io_uring/IOCP, interrupt
+     dispatch, VFS lookup, FS read/write, compositor frame path.
+   - **Anywhere the slowdown would be *perceptible*** — a user-visible latency
+     budget (input→paint, window open, app launch), a throughput path
+     (compositing, codecs, checksums, compression, indexing a large tree), or
+     an inner loop run enough times for a 2× to matter. The shape of fastpy's
+     remaining gap is known and specific: it loses to C++ mainly on
+     **allocation-heavy pointer chasing** (linked-list traversal 2.3×, object
+     creation 2.2×, tree recursion 2.0×) and wins on scalar loops, calls and
+     attribute access. So the honest test is "does this component churn objects
+     in a hot loop?", not "is this component important?".
+
+   In both cases: **measure, don't assume, in whichever direction.** "It feels
+   like it should be fast" is not a reason to pick Rust, and "Python is the
+   default" is not a reason to keep it after a profile shows it costing real
+   time. A component that turns out to be hot can be moved to Rust, or — often
+   better and much cheaper — have just its hot function moved, since the rest
+   of the program does not have to follow.
+3. **Early boot / init ordering** — a component that must run before the
+   filesystem or the fastpy runtime's dependencies are available.
+4. **Porting existing C/C++** (ext4, Mesa, Chromium, FFmpeg) — port, don't
+   rewrite.
+5. **A binding gap** — the component needs a native SlateOS API that fastpy
+   has no binding for *and* the binding is not worth adding yet. Prefer adding
+   the binding (Phase 0 → "fastpy language bindings"); if you take this exit,
+   record it in `todo.txt` so the gap is visible.
+
+Memory-constrained contexts are a real consideration but a narrow one: the
+~2.9 MB floor is *binary size*, mostly demand-paged text, and it is a floor per
+*distinct program*, not per process. Where many tiny instances of the same tool
+run concurrently this is cheaper than it looks. If a component genuinely cannot
+afford the floor (an early-boot shim, a per-process helper spawned in the
+thousands), that is reason 3 or a measured reason 2 — not a general licence to
+default back to Rust.
 
 ### Linux Compatibility Boundary (non-negotiable)
 
@@ -208,7 +288,8 @@ batches must hold to the same discipline.
 - [ ] Later (pre-release): GRUB menu entry support for dual-boot installs
 - [x] Write CLAUDE.md / coding standards
 - [x] Set up benchmark infrastructure (`criterion`, `bench/` directory, `bench/baselines.toml`)
-- [ ] Integrate fastpy compiler into build system
+- [-] Integrate fastpy compiler into build system — **in progress** ("initiative F"; status authority is `roadmap.md`, which tracks the increments in detail). Verified done: the `x86_64-slateos` codegen target, the `rust-lld` link step, the cross-compiled pure-mode C runtime, full program link with the `posix` crt, and **on-target ring-3 execution** under the SlateOS kernel. 60+ fastpy-built binaries now live in `services/fastpy-*`, each paired with a false-pass-proof kernel self-test. Strategy per `design-decisions.md` §80 (Q29): **pure mode first** (AOT-compile, no embedded CPython), CPython bridge later as a superset once CPython is ported.
+
 - [ ] Porting automation toolkit: rule-based source code transformers for large-scale ports
   - [ ] **Coccinelle** (semantic patching for C): preferred tool for pure-C codebases
     - Understands C semantics (types, control flow, macros) — not just text substitution
@@ -238,6 +319,51 @@ batches must hold to the same discipline.
     - Header remapping, ifdef cleanup, simple renames → **comby** (quick, language-agnostic)
     - Large ports often use all three: comby for bulk header/ifdef cleanup first, then Coccinelle or LibTooling for semantic API translation
 
+#### fastpy language bindings for OS APIs
+
+_Python is only the default userspace language (see "Implementation Language
+Policy") to the extent it can actually call the OS. These are the bindings that
+make that true. Each `os.*` lowering is native and bridge-free: codegen emits a
+call to a `fastpy_os_*` runtime function in `runtime/objects.c`, which calls our
+POSIX libc, which dispatches to the kernel `SYS_*` syscalls. No CPython is
+involved on any of these paths._
+
+- [x] **POSIX `os.*` surface (native, pure-mode)** — ~56 functions implemented
+  and on-target tested. Process/identity (`getpid`, `getppid`, `gettid`,
+  `getuid`/`setuid`, `getgid`/`setgid`, `getcwd`, `getenv`, `umask`,
+  `nice`/`getpriority`/`setpriority`); raw-fd I/O (`open`, `read`, `write`,
+  `close`, `dup`, `dup2`, `lseek`, `pread`/`pwrite`, `ftruncate`); pipes
+  (`pipe`); process lifecycle (`fork`, `execv`, `waitpid`, `wifexited`,
+  `wexitstatus`); filesystem (`stat`, `statvfs`, `listdir`, `mkdir`, `rmdir`,
+  `remove`/`unlink`, `rename`, `link`, `symlink`, `readlink`, `truncate`,
+  `chmod`, `chown`, `utime`, `access`); and the `os.path.*` predicates and
+  helpers.
+- [x] **Built-in `open()` / file objects** — native `FILE*`-backed file object
+  over the `SYS_FS_*` VFS syscalls, with `with`-statement and iteration support.
+  Known slice-1 limits: text mode only (no `'rb'`/`bytes`), no `read(n)` size
+  argument, `FileNotFoundError` not yet in the `OSError` hierarchy.
+- [x] **`pathlib.Path`** — CPython-free implementation (`runtime/pathlib_pure.c`).
+- [ ] **Bindings for the *native* (non-POSIX) SlateOS API — the real gap.**
+  SlateOS is a capability/channel microkernel; POSIX is the compatibility
+  surface, not the native one. Python currently has **no** binding for any of
+  it, which is why native-side components still have to be Rust. Needed:
+  - [ ] Capability handles — acquire/inspect/derive/drop, `has_capability()`
+  - [ ] Channel IPC — create, `send`/`send_transfer`/`recv`, capability transfer
+  - [ ] The IOCP-style completion event loop and io_uring submission
+  - [ ] Service discovery / RPC (Cap'n Proto structured messages)
+  - [ ] Shared memory and futexes
+  - [ ] Structured (JSON-lines) logging and the hooks/tracing subsystem
+- [ ] **Remaining POSIX gaps blocking specific components** — add on demand,
+  each with its own ring-3 self-test, in roughly this order of usefulness:
+  - [ ] `socket` / `select` / `selectors` (network tools, service discovery)
+  - [ ] `termios` / `pty` / terminal control (shell, terminal emulator)
+  - [ ] `mmap`
+  - [ ] `posix_spawn` / `subprocess` (higher-level than the raw `fork`+`execv`)
+  - [ ] `threading` on-target (the runtime TU exists; not yet exercised at ring 3)
+- [ ] **GUI toolkit bindings** — the widget API (Phase 3.5) exposed to Python, so
+  the desktop apps specified as Python/fastpy (text editor, music player,
+  Event Viewer, calendar/reminders, settings UI, file explorer) can actually be
+  written in it. Blocked on the toolkit itself.
 _Bootloader: Limine for development (Phases 0-5). For release: GRUB for dual-boot (installer adds menu entry) + minimal custom EFI stub for standalone UEFI boot with Secure Boot._
 
 ---
@@ -2096,7 +2222,7 @@ _Chromium first (required for web app framework + VS Code). Firefox later via Li
 - [ ] gcc, cmake, make, pkg-config (via POSIX layer)
 - [ ] Rust toolchain (for kernel recompilation)
 - [ ] CPython (latest, for ecosystem compatibility and fastpy bootstrapping)
-- [ ] fastpy compiler (AOT Python compiler — first-class language for OS userspace)
+- [ ] fastpy compiler **hosted on SlateOS** (AOT Python compiler — first-class language for OS userspace). Note the distinction: *cross*-compiling Python to SlateOS binaries from the dev machine already works and is in use (60+ `services/fastpy-*` binaries — see Phase 0 → "Integrate fastpy compiler into build system"). This item is the compiler **running on the OS itself**, which needs CPython ported first (fastpy is written in Python and bridges to the CPython runtime for binary-extension imports — `design-decisions.md` §9).
 - [ ] Custom Rust target for the OS
 - [ ] Port Rust std library to native syscalls
 - [ ] Port a debugger (gdb/lldb) — both live attach (`debug.*` capabilities) and **postmortem dump-file loading** (opens the crash dumps from §1.5 → Crash Dumps & Postmortem Debugging, re-symbolicates against recorded store paths). Dump format chosen to match what the ported debugger understands (minidump/ELF-core-compatible) so minimal porting is needed.
@@ -2114,6 +2240,13 @@ _Chromium first (required for web app framework + VS Code). Firefox later via Li
 - [ ] Zig (self-hosted compiler, minimal runtime)
 
 _Goal: a developer should be able to use any mainstream language on this OS. Languages with JIT compilers require the `mem.jit` capability for full performance; they can fall back to interpreter mode without it._
+
+_This list is about what **users** of the OS can write software in. It says
+nothing about what **the OS itself** is written in — for that, see "Design
+Principles → Implementation Language Policy": Rust for kernel/drivers/hot
+paths, **Python (fastpy) by default for everything else**. fastpy binaries are
+AOT-compiled and contain no interpreter, so choosing Python for an OS component
+costs neither the CPython memory footprint nor interpreter-speed execution._
 
 ### 4.9 Remote Desktop
 

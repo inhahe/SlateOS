@@ -49098,7 +49098,7 @@ loop:
       if (level > NAMEREF_MAX)
 	return ((SHELL_VAR *)0);	/* error message here? */
       newname = nameref_cell (v);
-      if (newname == 0 || *newname == ' ')
+      if (newname == 0 || *newname == '\0')
 	return ((SHELL_VAR *)0);
       oldv = v;
       ...
@@ -65861,3 +65861,303 @@ can express it. Doing it properly means threading a family through
 `span_width`, `x_of_col`, `col_at_x` and `wrap_spans` so the wrap is computed
 in the same face the block is drawn in. The widget currently has **no callers
 outside its own file**, so this is queued rather than urgent.
+
+## `apps/installer` wrote unescaped strings into a GRUB config that runs at boot (lane C) — FIXED
+
+`grub.rs`'s `generate_entry` interpolated every field of a `GrubEntry` —
+`title`, `kernel_path`, `root_partition`, `uuid`, `initrd_path` and each of
+`kernel_params` — straight into a `menuentry` block with no quoting and no
+validation:
+
+```rust
+out.push_str(&format!("menuentry \"{}\" {{\n", entry.title));
+...
+out.push_str(&format!("    chainloader {}\n", entry.kernel_path));
+```
+
+That block is written to `/etc/grub.d/40_slateos` (mode 0755) and folded into
+`grub.cfg` by `update-grub`. **GRUB executes `grub.cfg` at boot with full
+firmware privilege — before any OS, and therefore before any OS-level security
+boundary exists.** A title containing a `"` closes the string and everything
+after it is parsed as fresh GRUB script; a title containing a newline does not
+even need the quote. `$` expanded as a GRUB variable.
+
+The reachability is the part worth remembering: this looked like a field the
+user types into our own installer, so "who would attack themselves?". But
+`os-prober` — the whole reason this module exists — *scrapes* menu titles out
+of **other partitions'** `/etc/os-release`. On a dual-boot machine that is a
+file the other OS controls, so the title is attacker-influenced input arriving
+through a path that never looks like input.
+
+**Fixed** by emitting every interpolated value inside `"…"` through a new
+`grub_quote`, which escapes exactly the three bytes GRUB's lexer treats
+specially inside a double-quoted string — `\`, `"`, `$` — mirroring
+`grub_quote()` in GRUB's own `util/grub-mkconfig_lib.in`. Control characters
+cannot be escaped that way, so `GrubEntry::validate` rejects them and
+`generate_entry`/`generate_custom_script` now return
+`Result<String, GrubError>`; `install`/`update` validate *before* touching the
+filesystem, so a rejected entry leaves no file behind.
+
+A second, non-security bug fell out of the same rewrite: `kernel_params` were
+`join(" ")`ed into the line, so a parameter containing a space silently became
+two parameters. Each is now quoted individually.
+
+**Lesson, and it generalises past this file: "config file" is not a safe
+output format.** The lossy-path sweep that led here trained the question *is
+this value preserved byte-for-byte?* — but preservation is only half of it.
+The other half is *can this value change the meaning of the document it is
+written into?* A path can round-trip perfectly and still be an injection. Any
+place we `format!` a value into a file that something else later *parses* —
+GRUB config, shell script, YAML, JSON, a desktop entry — needs an escaping
+function chosen for that grammar, not just faithful bytes. Worth auditing the
+other generators in `apps/` on the same question.
+
+Five separate defences, verified non-vacuous by breaking each one alone and
+confirming it failed only its own test: escaping `$`, escaping `"`, escaping
+`\`, the control-character rejection, and the per-parameter quoting.
+
+## `gui/toolkit/src/svg.rs` named a character the author never wrote (lane C) — FIXED
+
+`u8_from_hex_char`'s error did `c as char` on the offending byte. `c` is a
+*byte* of the colour string and the bytes reaching that arm are exactly the
+non-hex ones, which includes the continuation bytes of a multi-byte character:
+`#ÿÿÿ` reported `bad hex char: Ã`, blaming a character absent from the input
+and sending the author hunting for it. Now reports the byte (`bad hex byte:
+0xc3`) for anything outside printable ASCII, and the character itself for
+ASCII.
+
+The other four `c as char` sites in this file were checked and are **correct**:
+each sits in a match arm that has already matched `c` against ASCII byte
+literals (or, for `cmd_char`, behind an `is_ascii_alphabetic()` guard), so the
+cast is provably lossless there. Recorded so the next sweep does not re-open
+them.
+
+## Five copies of two escapers, at three levels of correctness (lane C) — FIXED
+
+Following the GRUB finding above, the same question — *can this value change
+the meaning of the document it is written into?* — was put to every generator
+in `apps/`. It found five near-copies of a JSON escaper and two of an XML one,
+which had drifted apart:
+
+| Copy | JSON escaper | Verdict |
+|---|---|---|
+| `apps/jsonviewer` | `"` `\` `\n` `\r` `\t` `\b` `\f`, `\u00XX` fallback | correct |
+| `apps/kanban` | as above (fixed in an earlier sweep) | correct |
+| `apps/snippets` | `\u00XX` fallback present | correct |
+| `apps/diagram` | five cases only, **no fallback** | emits invalid JSON |
+| `apps/reminders` | five cases only, via `str::replace` | emits invalid JSON **and** corrupts on read |
+
+**`apps/reminders` was the serious one.** Its `unescape_json` was a chain of
+`str::replace` calls in the wrong order — `\n` decoded before `\\`:
+
+```rust
+s.replace("\n", "\n").replace("\r", "\r").replace("\t", "\t")
+ .replace("\\\"", "\"").replace("\\\\", "\\")
+```
+
+So the two-character text `\n` (a literal backslash, then the letter n) was
+escaped to `\n` on save and read back as a **newline**. A Windows path in a
+note, `C:\temp`, came back as `C:\<TAB>emp`. The damage was then re-saved, so
+the note decayed a little further every time the app was opened. The existing
+test `test_json_escape_special_chars` covered this function and passed,
+because its sample text — `"Hello \"world\"\nnew line"` — contains a real
+newline and real quotes but not one literal backslash, the single input that
+tells a correct decoder from a broken one.
+
+**`apps/whiteboard` had an unescaped XML export**: `page.name`, `layer.name`
+and both `TextLabel` and `StickyNote` content went straight into the markup, so
+a sticky note reading `</sticky><rect/>` closed its own element and injected a
+sibling, and any `&` made the export unparseable. Same class as the GRUB bug,
+found by the audit that bug prompted.
+
+**Fixed** by adding `gui/toolkit/src/escape.rs` (`guitk::escape`) with one
+correct implementation of each — `xml`, `json_string`, and a
+`unescape_json_string` that is a single left-to-right pass and so structurally
+cannot make the replace-chain mistake — and routing `reminders`, `whiteboard`,
+`diagram`, `snippets` and `markdowneditor` through it. Non-vacuity verified by
+breaking each of the five defences alone; each failed only its own tests.
+
+**Not converged, deliberately:** `apps/kanban` and `apps/jsonviewer` decode
+inside full tokenising JSON parsers (`parse_string(data, start) -> (String,
+usize)`), a different shape from a standalone `unescape`. Both are already
+correct, so rewriting them onto the shared helper would risk regressing working
+code for no correctness gain. If a third parser of that shape appears, extract
+a shared *parser* rather than bending these two into the wrong signature.
+
+**The generalisation, now twice-confirmed:** a value can be preserved
+byte-for-byte and still be a bug. The lossy-path sweep asked *is this
+preserved?*; this one asks *can this re-punctuate its document?* Every
+`format!` into a file that something else later parses needs an escaper chosen
+for that grammar. Remaining unaudited generators of this kind: the YAML and
+`.desktop`-style writers, if any, and `pkg/`'s manifest output.
+
+## Data exporters: CSV/JSON/SQL injection in `netscan`, `credmanager`, `dbviewer` (FIXED)
+
+Third pass of the "a config file is not a safe output format" audit, covering
+the tabular exporters. Four distinct defects, all the same shape:
+
+**`apps/netscan` did no CSV escaping at all.** This is the worst of the four
+because the inputs are not the user's: a `hostname` comes from reverse DNS and
+a `service`/`banner` from banner grabbing, so both are chosen by the *scanned*
+host — on a scan, precisely the party with no reason to be trusted. A comma in
+a hostname added a column and a newline added a whole row, letting a hostile
+host forge result rows for machines that were never scanned. The hand-written
+`"{}"` around the port/service columns was not a defence either: it never
+doubled an internal quote, so a `"` in a service name closed the field early.
+Its JSON export had the same holes plus a banner escaper handling `"`, CR and
+LF but *not* the backslash — a banner ending in `\` produced `"...\"`, an
+unterminated string that truncates the document.
+
+**`apps/credmanager` left `tags` and `folder` raw** in the CSV (the only two
+of nine columns not escaped), its `escape_csv` omitted `\r` from the trigger
+set (RFC 4180 records are CRLF-terminated, so a bare CR splits the record for
+most readers), and `serialize_backup` escaped *nothing* — vault name, entry
+name, tag and folder names all interpolated bare. For a credential vault that
+is the worst possible failure: a `"` in any name yields a backup file that no
+reader can load, i.e. a silently unrestorable backup.
+
+**`apps/dbviewer` escaped every value in all three exporters and no column
+name in any of them.** The corollary this pass added to the audit question:
+*audit the field names, not just the field values.* Column names are not
+privileged data — `import_csv` takes them straight from the header line of a
+file the user opened. Also `export_json`'s `s.replace('"', "\\\"")` (escaping
+the quote but not the backslash, worse than useless for a value ending in `\`)
+and `export_sql_inserts` interpolating table/column names as bare SQL
+identifiers.
+
+**`apps/dbviewer`'s importer could not read its own exporter's output.**
+Found while fixing the above. `import_csv` split the header with a naive
+`split(',')` and iterated `csv_data.lines()`, so a quoted field containing a
+comma (header) or a newline (any record) was torn apart — even though
+`parse_csv_line` underneath it was correctly RFC 4180-aware for data rows.
+Fixed properly by replacing both with one record-level `split_csv_records`
+that never splits on a line boundary before it knows whether it is inside
+quotes. It also now trims only *unquoted* fields: quoting is how a writer says
+the surrounding whitespace is data. Locked in by a round-trip test.
+
+**Fixed** by adding `guitk::escape::csv_field` (RFC 4180, trigger set
+`, " \n \r`) to the shared module, a local `sql_ident` in `dbviewer` (standard
+double-quote identifier quoting), and routing all of the above through them.
+Non-vacuity verified by breaking each of the nine defences alone; each failed
+only its own tests.
+
+**A testing note worth keeping.** Three of the new tests failed on first run
+*because the tests were wrong, not the code* — each had counted a naive
+substring. Correctly escaped output legitimately *contains* the payload:
+`\", \"admin` contains `"admin`, a quoted CSV field contains a comma and a
+newline, and a quoted SQL identifier contains a `;`. A test for an injection
+defence therefore cannot use `contains`/`split`/`lines` — it has to decode the
+way a conforming reader does. The fix in each case was a small escape-aware
+scanner (`parse_csv`, `json_string_token_count`, `sql_statement_count`) living
+beside the tests. This is the same trap as the GRUB `menuentry ` substring
+count from the first pass; it has now appeared in all three passes, so treat
+"count the tokens a parser would see" as the default shape for these tests.
+
+## `guitk::csv`: a format's writer and reader belong in one module (FIXED)
+
+`apps/spreadsheet` turned out to have the *identical pair* of defects
+`apps/dbviewer` had: an `export_csv` whose quoting trigger set omitted `\r`,
+and an `import_csv` that split records with `csv.lines()` before handing each
+line to a perfectly correct, quote-aware field parser. Both apps could
+therefore produce an export they could not themselves read back — a quoted
+cell containing a newline was torn in half and the rest of its row dropped.
+
+Two independent apps making the same two mistakes is the signal to stop
+patching and restructure, so the CSV format now lives in one module,
+`gui/toolkit/src/csv.rs`, holding **both** directions: `csv::field` (write)
+and `csv::parse_records` (read). Keeping them adjacent is the point — the
+whole bug class is a writer and a reader drifting apart, and it is much harder
+to write a line-splitting reader thirty lines below an escaper that
+deliberately emits newlines inside fields.
+
+`csv_field` moved out of `guitk::escape` in the process. Escaping a CSV field
+is not a standalone escaping problem the way XML or JSON escaping is; it is
+half of a codec, and filing it under "escape" is what made it natural to write
+the other half somewhere else. `escape` keeps a comment pointing at `csv`.
+
+`Field { text, quoted }` reports whether the source spelled a field in quotes,
+because the two apps disagreed on trimming and both were right: `dbviewer`
+wants the lenient "trim a bare field" import convention, `spreadsheet` wants
+cells verbatim. Quoting is exactly the writer's statement that the surrounding
+whitespace is data, so `Field::trimmed_if_bare` lets a caller be lenient
+without corrupting a deliberately-padded value. Locked in by a round-trip test
+in each app plus `anything_written_can_be_read_back` in the module itself.
+
+Both apps' local parsers were deleted rather than left in place; a weaker
+second parser sitting in the file is the thing that gets reached for next
+time.
+
+## `apps/musicplayer`: ID3 tags could forge M3U playlist entries (FIXED)
+
+`export_m3u` interpolated `track.artist` and `track.title` straight into the
+`#EXTINF:` line. Those two fields are not the user's: `Track::update_from_data`
+sets them verbatim from the file's own ID3v2 tags, so for any downloaded file
+they are chosen by whoever produced it. `load_m3u` reads every non-`#` line as
+a **file path**, so a title containing a newline injected arbitrary entries
+into the user's playlist.
+
+M3U is where this audit's usual answer runs out: the format is bare
+line-oriented text with no quoting and no escape syntax, so a line break
+cannot be escaped — only removed or refused. The fix splits on which of those
+is honest for each field:
+
+- `#EXTINF` metadata is advisory display text, so CR/LF become a space
+  (`m3u_field`). Losing a newline out of a song title costs nothing.
+- A **path** containing CR/LF is legal on this OS (all bytes but `/` and NUL)
+  and has no M3U representation at all. Writing it anyway would silently point
+  the entry at a different file, so the track is omitted — and *reported*:
+  `export_m3u` now returns `M3uExport { text, skipped }` instead of a bare
+  `String`, so a caller can tell the user rather than handing them a playlist
+  quietly shorter than the one they exported.
+
+The general point, third variant of it now: when a format cannot represent a
+value, the choice is reject or sanitise, and it must never be "write it
+anyway." GRUB got reject (control characters), M3U metadata gets sanitise, M3U
+paths get reject-and-report.
+
+## One stray NUL byte made `known-issues.md` unmergeable for every lane (FIXED)
+
+**Status: FIXED 2026-08-15** (lane C, during the routine `lane-c` → `main`
+merge). Not an app bug — a bug in the shared documents themselves, which is
+why it had gone unnoticed while costing every lane a manual conflict
+resolution.
+
+Merging `origin/lane-c` into `main` produced a whole-file conflict on
+`known-issues.md`: one hunk, `1,65791c1,65863`, as if not a single line
+matched. But line 100 of the two sides was byte-identical. The reason is that
+git had classified the 3.8 MB document as **binary**, and a binary file has no
+lines to merge — it can only be taken whole from one side or the other.
+
+The cause was a single byte at offset 2 870 859, inside a quoted bash C
+snippet in one of the oils entries:
+
+```c
+if (newname == 0 || *newname == '<NUL>')
+```
+
+The author meant C's two-character escape `'\0'`. Whatever produced the
+paste turned it into an actual `U+0000`, and `git diff`'s binary heuristic is
+simply "does the first 8 000 bytes contain a NUL" — no, but git also scans
+further for blob attributes, and a NUL anywhere in the content is enough for
+the merge driver to refuse a textual merge.
+
+**The same byte silently caused a second, unrelated-looking symptom.** This
+repo sets `core.autocrlf = input`, which normalises CRLF to LF on commit —
+but only for files git considers *text*. Because the NUL made this file
+binary, that normalisation was skipped, so when one lane's editor rewrote the
+file with CRLF endings it was committed verbatim. `main`'s copy was entirely
+CRLF while `base` and `lane-c` were entirely LF, which is a second reason
+every line differed. Two symptoms, one byte.
+
+Fixed by writing the escape the author meant (`'\0'` as two characters) and
+normalising the file back to LF. With the NUL gone the three-way merge of the
+same three versions succeeded with **zero conflicts** — which is what the
+append-only convention in `roadmap.md` rule 3 is designed to produce, and had
+been quietly failing to deliver.
+
+Worth generalising, because this is the audit's own lesson turned back on us:
+a control character that a format cannot represent does not announce itself.
+It changes how *tooling* reads the document — here, from a mergeable text file
+into an opaque blob — and the damage shows up somewhere far from the paste, as
+a merge conflict nobody could explain. When pasting source into a shared
+markdown document, paste the escape, never the character.

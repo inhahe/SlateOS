@@ -1867,16 +1867,25 @@ pub fn export_csv(result: &ScanResult) -> String {
             .filter(|p| p.state == PortState::Open)
             .filter_map(|p| p.service.clone())
             .collect();
+        // Hostnames come from reverse DNS and service names from banner
+        // grabbing, so both are supplied by the scanned host -- i.e. by
+        // whoever controls the far end, which on a scan is exactly the party
+        // we have no reason to trust. Unescaped, a comma in either one adds a
+        // column and a newline adds a whole row, letting a hostile host forge
+        // result rows for machines that were never scanned. The previous
+        // hand-rolled `"{}"` wrapping around the port/service columns was not
+        // a fix either: it never doubled an internal quote, so a `"` in a
+        // service name closed the field early.
         csv.push_str(&format!(
-            "{},{},{},{},{},{:.1},\"{}\",\"{}\"\n",
-            host.ip.display(),
-            hostname,
-            mac_str,
-            host.os_guess.label(),
+            "{},{},{},{},{},{:.1},{},{}\n",
+            guitk::csv::field(&host.ip.display()),
+            guitk::csv::field(&hostname),
+            guitk::csv::field(&mac_str),
+            guitk::csv::field(host.os_guess.label()),
             if host.is_up { "Up" } else { "Down" },
             host.latency_ms,
-            open_ports.join(";"),
-            services.join(";"),
+            guitk::csv::field(&open_ports.join(";")),
+            guitk::csv::field(&services.join(";")),
         ));
     }
     csv
@@ -1889,7 +1898,7 @@ pub fn export_json(result: &ScanResult) -> String {
     json.push_str(&format!("  \"timestamp\": \"{}\",\n", result.timestamp));
     json.push_str(&format!(
         "  \"target\": \"{}\",\n",
-        result.target_description
+        guitk::escape::json_string(&result.target_description)
     ));
     json.push_str(&format!("  \"profile\": \"{}\",\n", result.profile.label()));
     json.push_str(&format!(
@@ -1906,7 +1915,10 @@ pub fn export_json(result: &ScanResult) -> String {
         json.push_str("    {\n");
         json.push_str(&format!("      \"ip\": \"{}\",\n", host.ip.display()));
         if let Some(ref hn) = host.hostname {
-            json.push_str(&format!("      \"hostname\": \"{}\",\n", hn));
+            json.push_str(&format!(
+                "      \"hostname\": \"{}\",\n",
+                guitk::escape::json_string(hn)
+            ));
         }
         if let Some(mac) = host.mac {
             json.push_str(&format!("      \"mac\": \"{}\",\n", mac.display()));
@@ -1924,14 +1936,22 @@ pub fn export_json(result: &ScanResult) -> String {
                 port.state.label()
             ));
             if let Some(ref svc) = port.service {
-                json.push_str(&format!("          \"service\": \"{}\",\n", svc));
+                json.push_str(&format!(
+                    "          \"service\": \"{}\",\n",
+                    guitk::escape::json_string(svc)
+                ));
             }
             if let Some(ref banner) = port.banner {
-                let escaped = banner
-                    .replace('\"', "\\\"")
-                    .replace('\r', "\\r")
-                    .replace('\n', "\\n");
-                json.push_str(&format!("          \"banner\": \"{}\",\n", escaped));
+                // A banner is raw bytes echoed back by the remote host. The
+                // old escaper here handled `"`, CR and LF but *not* the
+                // backslash, so a banner ending in `\` produced `"...\"` --
+                // an unterminated string that breaks the whole document. Nor
+                // did it escape the other C0 controls, which RFC 8259 forbids
+                // unescaped inside a string.
+                json.push_str(&format!(
+                    "          \"banner\": \"{}\",\n",
+                    guitk::escape::json_string(banner)
+                ));
             }
             json.push_str(&format!(
                 "          \"response_ms\": {:.1}\n",
@@ -4594,6 +4614,167 @@ mod tests {
         let json = export_json(&result);
         assert!(json.contains("\"scan_id\": 42"));
         assert!(json.contains("\"hosts\": ["));
+    }
+
+    /// One scanned host whose attacker-controlled strings are supplied by the
+    /// caller: `hostname` arrives via reverse DNS and `service`/`banner` via
+    /// banner grabbing, so all three are chosen by the far end, not by us.
+    fn hostile_result(hostname: &str, service: &str, banner: Option<&str>) -> ScanResult {
+        ScanResult {
+            id: 1,
+            timestamp: "2026-05-18".to_string(),
+            target_description: "10.0.0.1".to_string(),
+            profile: ScanProfile::Quick,
+            hosts: vec![HostResult {
+                ip: Ipv4Addr::new(10, 0, 0, 1),
+                hostname: Some(hostname.to_string()),
+                mac: None,
+                os_guess: OsGuess::Linux,
+                ports: vec![PortResult {
+                    port: 22,
+                    state: PortState::Open,
+                    service: Some(service.to_string()),
+                    banner: banner.map(str::to_string),
+                    response_ms: 1.5,
+                }],
+                latency_ms: 1.2,
+                is_up: true,
+                ttl: 64,
+                vendor: None,
+            }],
+            total_ips_scanned: 1,
+            total_ports_scanned: 20,
+            duration_secs: 0.5,
+        }
+    }
+
+    /// Parse CSV per RFC 4180 into records of decoded fields.
+    ///
+    /// Neither `text.lines()` nor `line.split(',')` can be used to check this
+    /// export: a quoted field is *allowed* to contain both a comma and a
+    /// newline, so the naive versions report correctly-escaped output as
+    /// broken. The question the tests actually need answered is what a
+    /// conforming reader sees, which means decoding the way one does.
+    fn parse_csv(text: &str) -> Vec<Vec<String>> {
+        let mut records = Vec::new();
+        let mut record = Vec::new();
+        let mut field = String::new();
+        let mut in_quotes = false;
+        let mut chars = text.chars().peekable();
+        while let Some(c) = chars.next() {
+            if in_quotes {
+                if c == '"' {
+                    if chars.peek() == Some(&'"') {
+                        chars.next();
+                        field.push('"');
+                    } else {
+                        in_quotes = false;
+                    }
+                } else {
+                    field.push(c);
+                }
+                continue;
+            }
+            match c {
+                '"' => in_quotes = true,
+                ',' => record.push(std::mem::take(&mut field)),
+                '\n' => {
+                    record.push(std::mem::take(&mut field));
+                    records.push(std::mem::take(&mut record));
+                }
+                '\r' => {}
+                _ => field.push(c),
+            }
+        }
+        if !field.is_empty() || !record.is_empty() {
+            record.push(field);
+            records.push(record);
+        }
+        records
+    }
+
+    #[test]
+    fn a_hostile_hostname_cannot_forge_a_csv_row_or_column() {
+        let hostile = "evil,192.168.1.99,fake-host,Windows,Up,0.1,,\nspoofed";
+        let csv = export_csv(&hostile_result(hostile, "ssh", None));
+        let records = parse_csv(&csv);
+        assert_eq!(
+            records.len(),
+            2,
+            "a newline in a hostname forged an extra record: {csv}"
+        );
+        assert_eq!(
+            records[1].len(),
+            8,
+            "a comma in a hostname forged an extra column: {:?}",
+            records[1]
+        );
+        // ...and the payload still round-trips as one opaque field.
+        assert_eq!(records[1][1], hostile);
+    }
+
+    #[test]
+    fn a_quote_in_a_service_name_cannot_close_the_field_early() {
+        let csv = export_csv(&hostile_result("host", "ss\"h,extra", None));
+        let records = parse_csv(&csv);
+        assert_eq!(records.len(), 2, "record count changed: {csv}");
+        assert_eq!(records[1].len(), 8, "field count changed: {:?}", records[1]);
+        assert_eq!(records[1][7], "ss\"h,extra", "quote not round-tripped");
+        // Doubled on the wire, per RFC 4180.
+        assert!(csv.contains("ss\"\"h"), "quote not doubled: {csv}");
+    }
+
+    #[test]
+    fn a_banner_ending_in_a_backslash_does_not_break_the_json() {
+        let json = export_json(&hostile_result("host", "ssh", Some("SSH-2.0-x\\")));
+        // The value must be terminated by a real closing quote, not by one the
+        // trailing backslash has escaped.
+        assert!(
+            json.contains("\"banner\": \"SSH-2.0-x\\\\\","),
+            "backslash not escaped: {json}"
+        );
+    }
+
+    #[test]
+    fn a_control_character_in_a_banner_is_escaped() {
+        let benign = export_json(&hostile_result("host", "ssh", Some("ab")));
+        let benign_lines = benign.lines().count();
+        for byte in 0u8..0x20 {
+            let banner = format!("a{}b", byte as char);
+            let json = export_json(&hostile_result("host", "ssh", Some(&banner)));
+            // A raw U+000A would split the banner across two lines, which the
+            // per-line control-character check below could not see.
+            assert_eq!(
+                json.lines().count(),
+                benign_lines,
+                "U+{byte:04X} changed the document's line structure"
+            );
+            // Look at the banner's own line only: the document is *formatted*
+            // with newlines, so scanning the whole string for U+000A would
+            // flag the pretty-printing rather than the payload.
+            let line = json
+                .lines()
+                .find(|l| l.contains("\"banner\":"))
+                .unwrap_or_else(|| panic!("banner line missing for U+{byte:04X}: {json}"));
+            assert!(
+                !line.chars().any(char::is_control),
+                "raw control U+{byte:04X} reached the JSON document: {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_hostile_hostname_cannot_inject_a_json_key() {
+        let json = export_json(&hostile_result(
+            "h\",\"is_up\": false,\"x\": \"",
+            "ssh",
+            None,
+        ));
+        assert_eq!(
+            json.matches("\"is_up\"").count(),
+            1,
+            "hostname forged a second is_up key: {json}"
+        );
     }
 
     // --- Diff ---

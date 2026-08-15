@@ -132,10 +132,17 @@ fn u8_from_hex_char(c: u8) -> Result<u8, SvgError> {
         b'0'..=b'9' => Ok(c - b'0'),
         b'a'..=b'f' => Ok(c - b'a' + 10),
         b'A'..=b'F' => Ok(c - b'A' + 10),
-        _ => Err(SvgError::InvalidColor(format!(
-            "bad hex char: {}",
-            c as char
-        ))),
+        // `c` is a *byte* of the colour string, and the bytes that reach this
+        // arm are by definition the non-hex ones — including the continuation
+        // bytes of a multi-byte character.  `c as char` would reinterpret such
+        // a byte as Latin-1 and name a character the author never wrote (the
+        // first byte of "ÿ" would be reported as "Ã"), so report the byte value
+        // for anything outside printable ASCII.
+        _ => Err(SvgError::InvalidColor(if c.is_ascii_graphic() {
+            format!("bad hex char: {}", c as char)
+        } else {
+            format!("bad hex byte: {c:#04x}")
+        })),
     }
 }
 
@@ -2943,6 +2950,34 @@ mod tests {
     #[test]
     fn test_color_current_color() {
         assert_eq!(parse_color("currentColor").unwrap(), SvgPaint::CurrentColor);
+    }
+
+    /// A hex colour is scanned byte-wise, so a multi-byte character in it lands
+    /// in the error path one byte at a time.  The message must not name a
+    /// character that is not in the input: "ÿ" is 0xC3 0xBF, and reporting the
+    /// lead byte as Latin-1 would blame "Ã", sending the author looking for a
+    /// character they never typed.
+    #[test]
+    fn a_multibyte_char_in_a_hex_colour_is_not_reported_as_latin1() {
+        let err = parse_color("#ÿÿÿ").expect_err("not a hex colour");
+        let SvgError::InvalidColor(msg) = err else {
+            panic!("expected InvalidColor, got {err:?}");
+        };
+        assert!(
+            !msg.contains('Ã'),
+            "error names a character absent from the input: {msg}"
+        );
+        assert!(msg.contains("0xc3"), "error should name the byte: {msg}");
+    }
+
+    /// The ASCII case still reads naturally.
+    #[test]
+    fn a_bad_ascii_hex_digit_is_reported_as_itself() {
+        let err = parse_color("#zzz").expect_err("not a hex colour");
+        let SvgError::InvalidColor(msg) = err else {
+            panic!("expected InvalidColor, got {err:?}");
+        };
+        assert!(msg.contains('z'), "{msg}");
     }
 
     // --- Transform parsing tests ---

@@ -60788,10 +60788,9 @@ text fits in it — the question has no home. Collapsing the copies to one
 its column?" a question a test could ask, which is how the six real overruns
 became visible at all. The remaining hand-drawn tables from the survey
 (~~`apps/filesearch`~~, ~~`apps/logviewer`~~, ~~`apps/renamer`~~,
-`apps/systemrestore`) should be assumed to be hiding the same thing until a
-counted test says otherwise. That prediction has now paid out three times, and
-each time the hidden bug found was worse than the clipping it was predicted
-from.
+~~`apps/systemrestore`~~) should be assumed to be hiding the same thing until a
+counted test says otherwise. That prediction paid out on all four, and every
+time the hidden bug found was worse than the clipping it was predicted from.
 
 **The abstraction now exists: `guitk::table`** (`gui/toolkit/src/table.rs`,
 `528a01aba`…`1311d3e0a`). `Table::new(&[Column], x)` owns the geometry;
@@ -60839,8 +60838,32 @@ proved it out.
   dotless name but still accepts a **leading** dot, so `.bashrc` was given
   extension `bashrc` — shown as its type and swept up by a `bashrc` extension
   filter alongside real `x.bashrc` files. Same root fix.
+- ~~`apps/systemrestore`~~ **done**. The survey entry was stale — the ancestry
+  chain's per-link elide-and-advance had already been fixed in an earlier pass
+  — but that fix was one level too low. **Capping each link said nothing about
+  the chain.** Every link was capped at 150px and the cursor advanced by what
+  was drawn, correctly, once per ancestor, with *no reference to the panel's
+  right edge at all*. Twelve long-named ancestors cost `12x154 + 11x20 =
+  2068px` against a 986px budget; the regression test finds link **5 of 12**
+  already ending at x=1059.8 past the 1038px edge, so seven links — **including
+  the selected snapshot itself, the one the whole panel exists to describe** —
+  were drawn off-window. Fixed with `ancestry_first_visible`, a free function
+  (so a test can ask it directly) that drops links from the *front* and
+  reserves the cost of the leading `...` marker it forces the caller to draw.
+  Front, not back, because the tail is the selected snapshot and its near
+  ancestors say where it came from; the distant root is the least informative
+  part.
 
-The pattern to take forward: wherever a cursor-laid-out row draws a cell
+The lesson that generalises past the cursor pattern: **a per-element bound is
+not a bound on the row.** Eliding each cell to its own width makes every cell
+individually correct and still lets the row as a whole run off the panel, and
+because each element passes its own local check, nothing in the code reads as
+wrong. Any layout that repeats an element a data-dependent number of times —
+ancestry chains, tag pills, breadcrumbs, filter chips — needs a budget against
+the container's edge as well as a cap per element, and a test that renders a
+deep case rather than one element.
+
+The other pattern to take forward: wherever a cursor-laid-out row draws a cell
 clipped to one width and advances by another, the advance is the bug, and its
 blast radius is everything drawn *after* it on that row — not just the cell
 that overflowed. Grep for `cx +=` near a `max_width:` that is not the same

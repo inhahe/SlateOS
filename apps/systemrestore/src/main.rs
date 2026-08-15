@@ -91,6 +91,15 @@ const DESCRIPTION_ROW_HEIGHT: f32 = 20.0;
 /// does not read as a complete sentence.
 const DESCRIPTION_MAX_LINES: usize = 2;
 
+/// How wide one link of the ancestry chain may be drawn.
+const CHAIN_LINK_WIDTH: f32 = 150.0;
+/// The `" > "` between two links, and the space it advances the cursor by.
+const CHAIN_SEPARATOR_WIDTH: f32 = 20.0;
+/// The gap after each link, so two links never touch.
+const CHAIN_LINK_GAP: f32 = 4.0;
+/// Marks a link that was cut, and the head of a chain that did not all fit.
+const CHAIN_ELLIPSIS: &str = "...";
+
 const TREE_INDENT: f32 = 24.0;
 const TREE_ROW_HEIGHT: f32 = 36.0;
 const TIMELINE_ENTRY_HEIGHT: f32 = 48.0;
@@ -2980,7 +2989,8 @@ impl SystemRestoreUI {
         if !snap.tags.is_empty() {
             let mut tag_x = col1_x;
             for tag in &snap.tags {
-                let tag_width = text::padded_width(tag, 8.0, FONT_SIZE_SMALL, FontWeightHint::Regular);
+                let tag_width =
+                    text::padded_width(tag, 8.0, FONT_SIZE_SMALL, FontWeightHint::Regular);
                 rt.push(RenderCommand::FillRect {
                     x: tag_x,
                     y,
@@ -3017,49 +3027,89 @@ impl SystemRestoreUI {
                 max_width: Some(40.0),
             });
             cx += 40.0;
-            for (i, &ancestor_id) in chain.iter().enumerate() {
-                if let Some(ancestor) = self.manager.tree.get_snapshot(ancestor_id) {
-                    if i > 0 {
-                        rt.push(RenderCommand::Text {
-                            x: cx,
-                            y: chain_y,
-                            text: " > ".to_string(),
-                            color: COLOR_OVERLAY0,
-                            font_size: FONT_SIZE_SMALL,
-                            font_weight: FontWeightHint::Regular,
-                            max_width: Some(20.0),
-                        });
-                        cx += 20.0;
-                    }
-                    let name_color = if ancestor_id == snap.id {
-                        COLOR_BLUE
-                    } else {
-                        COLOR_SUBTEXT0
-                    };
-                    // The name is capped at 150 px, so the chain has to
-                    // advance by what was *drawn*, not by the full name: a
-                    // long name used to push the next link off past the clip
-                    // and a short accented one used to collide with it. Elide
-                    // rather than clip, so the reader can see it was cut.
+
+            // Each name is capped at CHAIN_LINK_WIDTH, so the chain advances by
+            // what was *drawn*, not by the full name: a long name used to push
+            // the next link off past the clip and a short accented one used to
+            // collide with it. Elide rather than clip, so the reader can see it
+            // was cut.
+            let links: Vec<(u64, String, f32)> = chain
+                .iter()
+                .filter_map(|&id| self.manager.tree.get_snapshot(id).map(|a| (id, &a.name)))
+                .map(|(id, name)| {
                     let shown = text::elide(
-                        &ancestor.name,
-                        150.0,
-                        "...",
+                        name,
+                        CHAIN_LINK_WIDTH,
+                        CHAIN_ELLIPSIS,
                         FONT_SIZE_SMALL,
                         FontWeightHint::Regular,
                     );
-                    let shown_w = text::measure(&shown, FONT_SIZE_SMALL, FontWeightHint::Regular);
+                    let w = text::measure(&shown, FONT_SIZE_SMALL, FontWeightHint::Regular);
+                    (id, shown, w)
+                })
+                .collect();
+
+            // Capping each link said nothing about the chain: the cursor
+            // advanced once per ancestor with no reference to the panel's right
+            // edge, so a deep history ran off the side of the window. Keep the
+            // links nearest the selected snapshot and mark the dropped head.
+            let widths: Vec<f32> = links.iter().map(|&(_, _, w)| w).collect();
+            let budget = WINDOW_WIDTH - PADDING - cx;
+            let first = ancestry_first_visible(&widths, budget);
+
+            if first > 0 {
+                let marker_w =
+                    text::measure(CHAIN_ELLIPSIS, FONT_SIZE_SMALL, FontWeightHint::Regular);
+                rt.push(RenderCommand::Text {
+                    x: cx,
+                    y: chain_y,
+                    text: CHAIN_ELLIPSIS.to_string(),
+                    color: COLOR_OVERLAY0,
+                    font_size: FONT_SIZE_SMALL,
+                    font_weight: FontWeightHint::Regular,
+                    max_width: Some(marker_w),
+                });
+                cx += marker_w + CHAIN_LINK_GAP;
+                rt.push(RenderCommand::Text {
+                    x: cx,
+                    y: chain_y,
+                    text: " > ".to_string(),
+                    color: COLOR_OVERLAY0,
+                    font_size: FONT_SIZE_SMALL,
+                    font_weight: FontWeightHint::Regular,
+                    max_width: Some(CHAIN_SEPARATOR_WIDTH),
+                });
+                cx += CHAIN_SEPARATOR_WIDTH;
+            }
+
+            for (i, (ancestor_id, shown, shown_w)) in links.iter().enumerate().skip(first) {
+                if i > first {
                     rt.push(RenderCommand::Text {
                         x: cx,
                         y: chain_y,
-                        text: shown,
-                        color: name_color,
+                        text: " > ".to_string(),
+                        color: COLOR_OVERLAY0,
                         font_size: FONT_SIZE_SMALL,
                         font_weight: FontWeightHint::Regular,
-                        max_width: Some(150.0),
+                        max_width: Some(CHAIN_SEPARATOR_WIDTH),
                     });
-                    cx += shown_w + 4.0;
+                    cx += CHAIN_SEPARATOR_WIDTH;
                 }
+                let name_color = if *ancestor_id == snap.id {
+                    COLOR_BLUE
+                } else {
+                    COLOR_SUBTEXT0
+                };
+                rt.push(RenderCommand::Text {
+                    x: cx,
+                    y: chain_y,
+                    text: shown.clone(),
+                    color: name_color,
+                    font_size: FONT_SIZE_SMALL,
+                    font_weight: FontWeightHint::Regular,
+                    max_width: Some(CHAIN_LINK_WIDTH),
+                });
+                cx += shown_w + CHAIN_LINK_GAP;
             }
         }
     }
@@ -4024,6 +4074,65 @@ fn format_timestamp_short(ts: u64) -> String {
     format!("D{}", day)
 }
 
+/// The width one ancestry link occupies, given the width of its drawn name and
+/// whether a `" > "` separator precedes it.
+fn chain_link_cost(name_width: f32, preceded: bool) -> f32 {
+    let sep = if preceded { CHAIN_SEPARATOR_WIDTH } else { 0.0 };
+    name_width + CHAIN_LINK_GAP + sep
+}
+
+/// Choose the first ancestry link to draw so the whole chain fits in `budget`.
+///
+/// Each link was individually capped at [`CHAIN_LINK_WIDTH`], but nothing
+/// capped the *chain*: the cursor advanced once per ancestor with no reference
+/// to the panel's right edge, so a deep enough history simply ran off the side
+/// of the window. Twelve long-named ancestors cost 2068px against a 986px
+/// budget.
+///
+/// Links are dropped from the **front**. The tail of the chain is the selected
+/// snapshot — the one the whole panel is describing — and the links nearest it
+/// are the ones that say where it came from; the distant root is the least
+/// informative part. When anything is dropped the caller draws a leading
+/// [`CHAIN_ELLIPSIS`], and its cost is reserved here so the marker cannot
+/// itself push the chain over the edge.
+///
+/// The last link is always kept even if it alone exceeds the budget: it is
+/// already capped at [`CHAIN_LINK_WIDTH`], and a panel that silently drew no
+/// path at all would be worse than one that is a few pixels tight.
+fn ancestry_first_visible(name_widths: &[f32], budget: f32) -> usize {
+    let Some(last) = name_widths.len().checked_sub(1) else {
+        return 0;
+    };
+
+    let total: f32 = name_widths
+        .iter()
+        .enumerate()
+        .map(|(i, w)| chain_link_cost(*w, i > 0))
+        .sum();
+    if total <= budget {
+        return 0;
+    }
+
+    // The chain will be cut, so the leading marker is going to be drawn and
+    // has to be paid for out of the same budget.
+    let marker = chain_link_cost(
+        text::measure(CHAIN_ELLIPSIS, FONT_SIZE_SMALL, FontWeightHint::Regular),
+        false,
+    ) + CHAIN_SEPARATOR_WIDTH;
+
+    let mut used = marker;
+    let mut first = last;
+    for i in (0..=last).rev() {
+        let cost = chain_link_cost(*name_widths.get(i).unwrap_or(&0.0), i < last);
+        if i < last && used + cost > budget {
+            break;
+        }
+        used += cost;
+        first = i;
+    }
+    first
+}
+
 // ============================================================================
 // main
 // ============================================================================
@@ -4070,8 +4179,44 @@ mod tests {
 
         // A name that fits is left alone and advances by its own width.
         let short = "base";
-        let shown = text::elide(short, 150.0, "...", FONT_SIZE_SMALL, FontWeightHint::Regular);
+        let shown = text::elide(
+            short,
+            150.0,
+            "...",
+            FONT_SIZE_SMALL,
+            FontWeightHint::Regular,
+        );
         assert_eq!(shown, short);
+    }
+
+    #[test]
+    fn an_ancestry_chain_that_fits_is_drawn_whole() {
+        assert_eq!(ancestry_first_visible(&[50.0, 50.0, 50.0], 986.0), 0);
+    }
+
+    #[test]
+    fn an_ancestry_chain_that_does_not_fit_is_cut_from_the_front() {
+        // Three 150px links cost 150+4 + 3x2 separators; only the last two fit
+        // in 400px once the leading marker is paid for.
+        let first = ancestry_first_visible(&[150.0, 150.0, 150.0], 400.0);
+        assert!(first > 0, "a chain over budget was not cut at all");
+        assert!(
+            first < 3,
+            "the chain was cut past its end, leaving nothing to draw"
+        );
+    }
+
+    #[test]
+    fn the_last_ancestry_link_is_kept_even_when_it_alone_overflows() {
+        // The selected snapshot is what the panel is describing. Drawing no
+        // path at all would be worse than one tight link, which is itself
+        // already capped at CHAIN_LINK_WIDTH.
+        assert_eq!(ancestry_first_visible(&[150.0, 150.0], 10.0), 1);
+    }
+
+    #[test]
+    fn an_empty_ancestry_chain_has_no_first_link() {
+        assert_eq!(ancestry_first_visible(&[], 100.0), 0);
     }
 
     // --- SnapshotType tests ---
@@ -5456,6 +5601,142 @@ mod tests {
         rt.commands
     }
 
+    /// The details panel for a snapshot `depth` links deep in its own root's
+    /// history, every ancestor named too long to fit one link.
+    fn details_panel_with_deep_ancestry(depth: usize) -> Vec<RenderCommand> {
+        let mut ui = SystemRestoreUI::new();
+        let mut parent = None;
+        let mut last = 0;
+        for i in 0..depth {
+            // The index leads the name: a link is elided from its end, so a
+            // trailing index would be the first thing cut and the test could
+            // not tell the links apart.
+            let id = ui
+                .manager
+                .tree
+                .add_snapshot(
+                    &format!("{i}-a-very-long-snapshot-name-that-will-not-fit-in-one-link"),
+                    "",
+                    1_000 + i as u64,
+                    SnapshotType::Manual,
+                    Vec::new(),
+                    parent,
+                )
+                .expect("the parent was created on the previous iteration");
+            parent = Some(id);
+            last = id;
+        }
+        ui.selected_id = Some(last);
+        let snap = ui
+            .manager
+            .tree
+            .get_snapshot(last)
+            .expect("the snapshot was just created")
+            .clone();
+        let mut rt = RenderTree::new();
+        ui.render_snapshot_details(
+            &mut rt,
+            &snap,
+            WINDOW_HEIGHT - DETAILS_PANEL_HEIGHT - STATUS_BAR_HEIGHT,
+        );
+        rt.commands
+    }
+
+    /// The y the ancestry chain is anchored to.
+    fn ancestry_row_y() -> f32 {
+        WINDOW_HEIGHT - DETAILS_PANEL_HEIGHT - STATUS_BAR_HEIGHT + DETAILS_PANEL_HEIGHT - 22.0
+    }
+
+    /// The text commands on the ancestry row, left to right.
+    fn ancestry_row(cmds: &[RenderCommand]) -> Vec<(f32, String, f32, FontWeightHint)> {
+        let chain_y = ancestry_row_y();
+        let mut row: Vec<(f32, String, f32, FontWeightHint)> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text {
+                    x,
+                    y,
+                    text,
+                    font_size,
+                    font_weight,
+                    ..
+                } if (y - chain_y).abs() < 0.5 => {
+                    Some((*x, text.clone(), *font_size, *font_weight))
+                }
+                _ => None,
+            })
+            .collect();
+        row.sort_by(|a, b| a.0.total_cmp(&b.0));
+        row
+    }
+
+    /// Capping each link said nothing about the chain: the cursor advanced once
+    /// per ancestor with no reference to the panel's right edge, so a deep
+    /// history ran clean off the side of the window.
+    #[test]
+    fn a_deep_ancestry_chain_stays_inside_the_panel() {
+        let cmds = details_panel_with_deep_ancestry(12);
+        let right = WINDOW_WIDTH - PADDING;
+        let row = ancestry_row(&cmds);
+        let mut checked = 0usize;
+        for (x, text, size, weight) in &row {
+            let end = x + text::measure(text, *size, *weight);
+            assert!(
+                end <= right + 0.5,
+                "chain element {text:?} starts at {x} and ends at {end}, \
+                 past the panel's right edge {right}",
+            );
+            checked = checked.saturating_add(1);
+        }
+        assert!(
+            checked >= 4,
+            "expected the Path label and several links on the chain row, checked {checked}",
+        );
+    }
+
+    /// The tail of the chain is the snapshot the panel is describing, so the
+    /// links nearest it are the ones worth keeping — and the reader has to be
+    /// told the path shown is partial.
+    #[test]
+    fn a_cut_ancestry_chain_keeps_the_selected_snapshot_and_marks_the_cut() {
+        let cmds = details_panel_with_deep_ancestry(12);
+        let row = ancestry_row(&cmds);
+        let texts: Vec<&String> = row.iter().map(|(_, t, _, _)| t).collect();
+
+        assert!(
+            texts.iter().any(|t| t.as_str() == CHAIN_ELLIPSIS),
+            "the dropped head of the chain is not marked, got {texts:?}",
+        );
+        let last = texts
+            .last()
+            .unwrap_or_else(|| panic!("the chain row should not be empty"));
+        assert!(
+            last.starts_with("11-"),
+            "the selected snapshot must be the last link drawn, got {last:?}",
+        );
+        assert!(
+            !texts.iter().any(|t| t.starts_with("0-")),
+            "the distant root should have been dropped, got {texts:?}",
+        );
+    }
+
+    /// A chain short enough to fit is drawn in full, with no marker — the fix
+    /// must not make the common case look truncated.
+    #[test]
+    fn a_short_ancestry_chain_is_drawn_whole() {
+        let cmds = details_panel_with_deep_ancestry(3);
+        let row = ancestry_row(&cmds);
+        let texts: Vec<&String> = row.iter().map(|(_, t, _, _)| t).collect();
+        assert!(
+            texts.iter().any(|t| t.starts_with("0-")),
+            "the root of a chain that fits must still be drawn, got {texts:?}",
+        );
+        assert!(
+            !texts.iter().any(|t| t.as_str() == CHAIN_ELLIPSIS),
+            "a chain that fits must not be marked as cut, got {texts:?}",
+        );
+    }
+
     /// Text commands in the details panel, as `(y, text)`, top-down.
     fn details_panel_text(cmds: &[RenderCommand]) -> Vec<(f32, String)> {
         let mut rows: Vec<(f32, String)> = cmds
@@ -5523,8 +5804,8 @@ mod tests {
         let rows = details_panel_text(&details_panel_with_description("Short."));
         let panel_y = WINDOW_HEIGHT - DETAILS_PANEL_HEIGHT - STATUS_BAR_HEIGHT;
         assert!(
-            rows.iter().any(|(y, t)| t == "Short."
-                && (*y - (panel_y + PADDING + 24.0)).abs() < 0.5),
+            rows.iter()
+                .any(|(y, t)| t == "Short." && (*y - (panel_y + PADDING + 24.0)).abs() < 0.5),
             "expected the description on the description row, got {rows:?}",
         );
         assert!(

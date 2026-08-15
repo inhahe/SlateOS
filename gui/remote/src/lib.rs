@@ -810,6 +810,18 @@ mod tests {
         });
         t.commands.push(RenderCommand::PushTranslate { dx: 10.0, dy: -5.0 });
         t.commands.push(RenderCommand::PopTranslate);
+        // Both families, so `each_command_kind_roundtrips_individually` covers
+        // the payload byte and not merely the tag. `Ui` is the default, which
+        // is exactly the value a dropped byte could lose while still looking
+        // plausible on the far side.
+        t.commands.push(RenderCommand::PushFont {
+            family: FontFamily::Mono,
+        });
+        t.commands.push(RenderCommand::PopFont);
+        t.commands.push(RenderCommand::PushFont {
+            family: FontFamily::Ui,
+        });
+        t.commands.push(RenderCommand::PopFont);
         t.commands.push(RenderCommand::PopClip);
         t.commands.push(RenderCommand::BoxShadow {
             x: 0.0,
@@ -951,6 +963,35 @@ mod tests {
         // Header is 10 bytes; the next byte is the tag. Flip it to invalid.
         bytes[HEADER_LEN] = 0xFE;
         assert!(matches!(decode_frame(&bytes), Err(DecodeError::BadTag(0xFE))));
+    }
+
+    /// An unknown family byte must be rejected, not silently read as `Ui`.
+    /// Defaulting would render a terminal in a proportional face and look like
+    /// a layout bug rather than the protocol mismatch it is.
+    #[test]
+    fn unknown_font_family_is_rejected() {
+        let mut t = RenderTree::new();
+        t.commands.push(RenderCommand::PushFont {
+            family: FontFamily::Mono,
+        });
+        let mut bytes = encode_frame_to_vec(&t);
+        // Header, then the tag, then the one-byte family.
+        bytes[HEADER_LEN + 1] = 0x7F;
+        assert!(matches!(
+            decode_frame(&bytes),
+            Err(DecodeError::BadFontFamily(0x7F))
+        ));
+    }
+
+    /// The family tags are wire constants: changing one silently reinterprets
+    /// every frame an older peer already sent. Pinned so a reorder of the enum
+    /// cannot do it by accident.
+    #[test]
+    fn font_family_wire_values_are_fixed() {
+        assert_eq!(FontFamilyTag::Ui as u8, 0x00);
+        assert_eq!(FontFamilyTag::Mono as u8, 0x01);
+        assert_eq!(Tag::PushFont as u8, 0x0B);
+        assert_eq!(Tag::PopFont as u8, 0x0C);
     }
 
     #[test]

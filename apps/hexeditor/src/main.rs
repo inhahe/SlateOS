@@ -29,7 +29,7 @@ use guitk::event::{
 #[allow(unused_imports)]
 use guitk::layout::{FlexAlign, FlexDirection, FlexItem, FlexJustify, SizeConstraint};
 #[allow(unused_imports)]
-use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
+use guitk::render::{FontFamily, FontWeightHint, RenderCommand, RenderTree};
 #[allow(unused_imports)]
 use guitk::style::{Borders, CornerRadii, Edges, FontWeight, Style, TextAlign};
 use guitk::text;
@@ -78,11 +78,18 @@ const DEFAULT_BYTES_PER_LINE: usize = 16;
 /// `font_size * 0.6`, a guess that put the caret on the wrong byte as soon as
 /// the face's digit advance was anything but exactly six tenths of an em.
 ///
-/// Digits, specifically: every glyph the grid is built for is a hex digit, and
-/// a face that advances digits uniformly (all of them do, so columns of figures
-/// line up) gives a cell that is right for the content by construction.
+/// It was then `text::digit_advance`, on the reasoning that every glyph the
+/// grid is built for is a hex digit. That reasoning covered the hex column and
+/// forgot the one beside it: the **ASCII column** draws whatever the bytes
+/// happen to spell, and `'W'` in the proportional UI face is nearly twice a
+/// digit. So `'W'` spilled into its neighbour's cell, `'i'` left a gap, and
+/// `hit_test`'s `(ascii_x / char_w)` — this same arithmetic run backwards —
+/// resolved a click to the wrong byte, further wrong the further right it fell.
+///
+/// A grid needs a face in which *every* glyph advances the same distance,
+/// which is what `text::cell_advance` asks for.
 fn cell_width(font_size: f32) -> f32 {
-    text::digit_advance(font_size, FontWeightHint::Regular)
+    text::cell_advance(font_size, FontWeightHint::Regular)
 }
 
 /// The text drawn on `doc`'s tab, modified marker included.
@@ -2342,6 +2349,14 @@ impl HexEditor {
             height: self.window_height - content_y - STATUS_BAR_HEIGHT,
         });
 
+        // The offset, hex and ASCII columns are all stepped by `char_w`, which
+        // came from the mono face — so draw them in it. Laying a grid out on
+        // one face's advances and filling it from another's is what put `'W'`
+        // over its neighbour in the ASCII column.
+        tree.push(RenderCommand::PushFont {
+            family: FontFamily::Mono,
+        });
+
         for line_idx in 0..vis {
             let absolute_line = doc.view.scroll_offset.saturating_add(line_idx);
             let line_offset = absolute_line.saturating_mul(bpl);
@@ -2504,6 +2519,7 @@ impl HexEditor {
             }
         }
 
+        tree.push(RenderCommand::PopFont);
         tree.push(RenderCommand::PopClip);
     }
 
@@ -3257,17 +3273,71 @@ mod tests {
     #[test]
     fn the_hex_cell_is_derived_from_the_face() {
         // Not a hardcoded fraction of the em: the grid has to match what the
-        // face actually advances a digit by, or the caret lands on the wrong
-        // byte. All that is asserted here is the derivation, since the value
-        // is the face's business.
+        // face actually advances by, or the caret lands on the wrong byte.
+        // All that is asserted here is the derivation, since the value is the
+        // face's business.
         let cell = cell_width(HEX_FONT_SIZE);
         assert!(cell > 0.0, "a hex cell has to have a width");
         assert_eq!(
             cell,
-            text::digit_advance(HEX_FONT_SIZE, FontWeightHint::Regular)
+            text::cell_advance(HEX_FONT_SIZE, FontWeightHint::Regular)
         );
         // And it scales with the size, because it is measured at the size.
         assert!(cell_width(HEX_FONT_SIZE * 2.0) > cell);
+    }
+
+    /// The ASCII column draws whatever the bytes spell, so the cell has to fit
+    /// the *widest* printable glyph, not just a digit. A proportional face
+    /// fails this by construction — which is how `'W'` came to spill into its
+    /// neighbour's cell and how a click resolved to the wrong byte.
+    #[test]
+    fn every_byte_the_ascii_column_can_draw_fits_its_cell() {
+        let cell = cell_width(HEX_FONT_SIZE);
+        for b in 0u8..=255 {
+            let ch = byte_to_ascii_char(b);
+            let w = text::measure_in(
+                &ch.to_string(),
+                HEX_FONT_SIZE,
+                FontWeightHint::Regular,
+                FontFamily::Mono,
+            );
+            assert!(
+                w <= cell + 0.01,
+                "byte {b:#04x} draws as {ch:?}, which measures {w} in a {cell} cell",
+            );
+        }
+    }
+
+    /// The dump is placed on a mono cell, so it must be drawn in the mono
+    /// face. Positions alone cannot catch the mismatch.
+    #[test]
+    fn the_dump_is_drawn_in_the_family_it_was_measured_in() {
+        let mut app = HexEditor::new(1200.0, 800.0);
+        app.documents[0] = HexDocument::from_data((0u8..=255).collect());
+
+        let tree = app.render();
+
+        let mut depth = 0_i32;
+        let mut deepest = 0_i32;
+        let mut inside = 0_usize;
+        for cmd in &tree.commands {
+            match cmd {
+                RenderCommand::PushFont { family } => {
+                    assert_eq!(family, &FontFamily::Mono, "only the dump pushes a family");
+                    depth += 1;
+                    deepest = deepest.max(depth);
+                }
+                RenderCommand::PopFont => {
+                    depth -= 1;
+                    assert!(depth >= 0, "a PopFont without a matching PushFont");
+                }
+                RenderCommand::Text { .. } if depth > 0 => inside += 1,
+                _ => {}
+            }
+        }
+        assert_eq!(depth, 0, "the font scopes do not balance");
+        assert_eq!(deepest, 1, "the dump's scope was never opened");
+        assert!(inside > 0, "no dump glyph was drawn inside the mono scope");
     }
 
     #[test]

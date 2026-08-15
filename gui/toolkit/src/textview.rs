@@ -9,7 +9,7 @@
 
 use crate::color::Color;
 use crate::event::{Event, EventResult, Key, KeyEvent, MouseEvent, MouseEventKind};
-use crate::render::{FontWeightHint, RenderCommand, RenderTree};
+use crate::render::{FontFamily, FontWeightHint, RenderCommand, RenderTree};
 use crate::style::CornerRadii;
 
 // ---------------------------------------------------------------------------
@@ -56,12 +56,42 @@ const DEFAULT_FONT_SIZE: f32 = 14.0;
 /// which happened to match the built-in face at 14 px and nothing else, so a
 /// caller who raised `font_size` got a grid that drifted further out of
 /// alignment with every column.
+///
+/// It was then `text::digit_advance` — right about the size being the font's
+/// business, wrong about *which* font. A digit's advance in the proportional
+/// UI face is a cell that only digits fit: at 14 px it is 8.1 px while `'W'`
+/// is 14.1 px, so a log line of ordinary prose overran its own selection band
+/// and every column after the first drifted. A grid needs a face where every
+/// glyph advances the same distance, which is what [`text::cell_advance`]
+/// asks for.
+///
+/// [`text::cell_advance`]: crate::text::cell_advance
 fn default_char_width(font_size: f32) -> f32 {
-    crate::text::digit_advance(font_size, FontWeightHint::Regular)
+    crate::text::cell_advance(font_size, FontWeightHint::Regular)
 }
 
 /// Baseline-to-baseline distance at `font_size`, from the font's own metrics.
+///
+/// Measured in the mono face, since that is the face the grid is drawn in and
+/// its line spacing is not in general the UI face's.
 fn default_line_height(font_size: f32) -> f32 {
+    crate::text::line_height_in(font_size, FontWeightHint::Regular, FontFamily::Mono)
+}
+
+/// The horizontal unit [`RichTextView`] indents by, at `font_size`.
+///
+/// Deliberately *not* [`default_char_width`]. A rich view is not a grid: its
+/// spans are measured individually with `text::measure` and drawn in the
+/// proportional UI face, and `char_width` survives only as the width of a
+/// gutter digit and as the quantum a list indents by. Both of those are UI-face
+/// quantities, so asking for a mono cell here would indent prose by a face it
+/// never draws in.
+fn default_indent_unit(font_size: f32) -> f32 {
+    crate::text::digit_advance(font_size, FontWeightHint::Regular)
+}
+
+/// Baseline-to-baseline distance for [`RichTextView`], in the UI face it draws.
+fn default_rich_line_height(font_size: f32) -> f32 {
     crate::text::line_height(font_size, FontWeightHint::Regular)
 }
 
@@ -985,6 +1015,14 @@ impl SimpleTextView {
         // Clip to widget bounds
         tree.clip(0.0, 0.0, self.width, self.height);
 
+        // Everything below is placed on a character grid whose cell came from
+        // `default_char_width`, i.e. from the mono face. Draw it in that face
+        // too, or the layout is computed against one set of advances and
+        // filled with another.
+        tree.push(RenderCommand::PushFont {
+            family: FontFamily::Mono,
+        });
+
         let gutter_w = self.gutter_width();
         let visible = self.visible_lines();
         let _end_line = (self.scroll_offset + visible).min(self.lines.len());
@@ -1104,6 +1142,7 @@ impl SimpleTextView {
             }
         }
 
+        tree.push(RenderCommand::PopFont);
         tree.unclip();
     }
 }
@@ -1374,7 +1413,12 @@ struct WrappedLine {
 /// Configuration for RichTextView.
 #[derive(Clone, Debug)]
 pub struct RichTextViewConfig {
-    /// Base character width in pixels (monospace).
+    /// The horizontal unit the view indents by, in pixels.
+    ///
+    /// Named for what it once was — a monospace cell, back when this view laid
+    /// prose out on a grid. It no longer does: spans are measured with
+    /// `text::measure` and drawn proportionally, and this survives as the width
+    /// of a gutter digit and the quantum a list indents by.
     pub char_width: f32,
     /// Base line height in pixels.
     pub line_height: f32,
@@ -1395,8 +1439,8 @@ pub struct RichTextViewConfig {
 impl Default for RichTextViewConfig {
     fn default() -> Self {
         Self {
-            char_width: default_char_width(DEFAULT_FONT_SIZE),
-            line_height: default_line_height(DEFAULT_FONT_SIZE),
+            char_width: default_indent_unit(DEFAULT_FONT_SIZE),
+            line_height: default_rich_line_height(DEFAULT_FONT_SIZE),
             font_size: DEFAULT_FONT_SIZE,
             show_line_numbers: false,
             selectable: true,
@@ -2991,6 +3035,74 @@ mod tests {
             .collect();
         // At least 3 line numbers + 3 lines of text
         assert!(text_cmds.len() >= 6);
+    }
+
+    /// The grid is placed on `config.char_width`, which comes from the mono
+    /// face — so it has to be *drawn* in the mono face too. Measuring in one
+    /// face and drawing in another is the defect this scope exists to prevent,
+    /// and it is invisible in any assertion about positions alone.
+    #[test]
+    fn the_simple_grid_is_drawn_in_the_family_it_was_measured_in() {
+        let mut view = simple_view(400.0, 160.0);
+        view.config.show_line_numbers = true;
+        view.set_text("wide WWWW\nnarrow iiii\nmixed Wi0#");
+
+        let mut tree = RenderTree::new();
+        view.render(&mut tree);
+
+        let mut depth = 0_i32;
+        let mut deepest = 0_i32;
+        let mut inside = 0_usize;
+        for cmd in &tree.commands {
+            match cmd {
+                RenderCommand::PushFont { family } => {
+                    assert_eq!(family, &FontFamily::Mono, "only the grid pushes a family");
+                    depth += 1;
+                    deepest = deepest.max(depth);
+                }
+                RenderCommand::PopFont => {
+                    depth -= 1;
+                    assert!(depth >= 0, "a PopFont without a matching PushFont");
+                }
+                RenderCommand::Text { .. } if depth > 0 => inside += 1,
+                _ => {}
+            }
+        }
+        assert_eq!(depth, 0, "the font scopes do not balance");
+        assert_eq!(deepest, 1, "the grid's scope was never opened");
+        // Three lines of content plus three gutter numbers, all on the grid.
+        assert!(inside >= 6, "only {inside} glyph runs landed in the mono scope");
+    }
+
+    /// Every glyph a log line can contain has to fit the cell the grid steps
+    /// by. In a proportional face this is false by construction — `'W'` is
+    /// nearly twice a digit — which is exactly how spans came to overrun their
+    /// own selection bands.
+    #[test]
+    fn a_character_fits_a_simple_view_cell() {
+        let cell = default_char_width(DEFAULT_FONT_SIZE);
+        for ch in ['0', 'W', 'i', '#', 'é', 'M', '@', ' '] {
+            let w = crate::text::measure_in(
+                &ch.to_string(),
+                DEFAULT_FONT_SIZE,
+                FontWeightHint::Regular,
+                FontFamily::Mono,
+            );
+            assert!(
+                w <= cell + 0.01,
+                "{ch:?} measures {w} in a {cell} cell",
+            );
+        }
+    }
+
+    /// A rich view is not a grid, so its indent unit must not be taken from
+    /// the mono face — it indents prose that is drawn proportionally.
+    #[test]
+    fn a_rich_view_indents_by_the_face_it_draws_in() {
+        assert_eq!(
+            RichTextViewConfig::default().char_width,
+            crate::text::digit_advance(DEFAULT_FONT_SIZE, FontWeightHint::Regular),
+        );
     }
 
     #[test]

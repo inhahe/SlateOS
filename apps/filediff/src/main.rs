@@ -36,7 +36,7 @@ use guitk::event::{
 #[allow(unused_imports)]
 use guitk::layout::{FlexAlign, FlexDirection, FlexItem, FlexJustify, SizeConstraint};
 #[allow(unused_imports)]
-use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
+use guitk::render::{FontFamily, FontWeightHint, RenderCommand, RenderTree};
 #[allow(unused_imports)]
 use guitk::style::{Borders, CornerRadii, Edges, FontWeight, Style, TextAlign};
 use guitk::text;
@@ -120,8 +120,16 @@ const STATUS_BAR_HEIGHT: f32 = 26.0;
 ///
 /// Only the *content* panels are a grid. Toolbar labels and status text are
 /// proportional UI text and are measured with `text::width`.
+///
+/// The cell was then `text::digit_advance` — the right idea, the wrong face.
+/// A digit's advance *in the proportional UI face* is a cell only digits fit,
+/// and source code is not digits: `'W'` is nearly twice as wide, `'i'` barely
+/// half. The inline view showed it worst, since its highlight rectangle is
+/// placed at `columns(span) * char_width()` and so slid off the very change it
+/// was drawn to mark. A grid needs a face where every glyph advances the same
+/// distance, which is what `text::cell_advance` asks for.
 fn char_width() -> f32 {
-    text::digit_advance(CONTENT_FONT_SIZE, FontWeightHint::Regular)
+    text::cell_advance(CONTENT_FONT_SIZE, FontWeightHint::Regular)
 }
 
 /// How many grid cells `text` occupies. Characters, not bytes.
@@ -1400,6 +1408,13 @@ impl FileDiffApp {
         // Render visible lines
         let pairs = build_side_by_side_pairs(&diff.edits);
 
+        // File content only. The panel headers above and the scrollbars below
+        // are proportional chrome; the lines between them are a grid stepped
+        // by `char_width()`, and have to be drawn in the face that measured it.
+        tree.push(RenderCommand::PushFont {
+            family: FontFamily::Mono,
+        });
+
         let end = (first_visible.saturating_add(visible_count)).min(pairs.len());
         for (vi, pair_idx) in (first_visible..end).enumerate() {
             let y = lines_y + vi as f32 * LINE_HEIGHT;
@@ -1431,6 +1446,8 @@ impl FileDiffApp {
             }
         }
 
+        tree.push(RenderCommand::PopFont);
+
         // Scrollbars
         self.render_scrollbar(
             tree,
@@ -1461,6 +1478,12 @@ impl FileDiffApp {
         let first_visible = self.scroll_left as usize;
         let visible_count = (content_height / LINE_HEIGHT) as usize + 2;
 
+        // File content is a grid stepped by `char_width()`; the scrollbar below
+        // is not, so the scope closes before it.
+        tree.push(RenderCommand::PushFont {
+            family: FontFamily::Mono,
+        });
+
         let end = (first_visible.saturating_add(visible_count)).min(diff.edits.len());
         for (vi, edit_idx) in (first_visible..end).enumerate() {
             let y = content_y + vi as f32 * LINE_HEIGHT;
@@ -1468,6 +1491,8 @@ impl FileDiffApp {
                 self.render_unified_line(tree, y, edit);
             }
         }
+
+        tree.push(RenderCommand::PopFont);
 
         // Scrollbar
         self.render_scrollbar(
@@ -1564,6 +1589,14 @@ impl FileDiffApp {
 
         let inline_rows = build_inline_rows(&diff.edits);
 
+        // The character-level highlight rectangles are placed at
+        // `columns(span) * char_width()`, so the run they sit behind has to be
+        // drawn with that same advance or the highlight slides off the change
+        // it marks — the whole point of the inline view.
+        tree.push(RenderCommand::PushFont {
+            family: FontFamily::Mono,
+        });
+
         let end = (first_visible.saturating_add(visible_count)).min(inline_rows.len());
         for (vi, row_idx) in (first_visible..end).enumerate() {
             let y = content_y + vi as f32 * LINE_HEIGHT;
@@ -1571,6 +1604,8 @@ impl FileDiffApp {
                 self.render_inline_row(tree, y, row);
             }
         }
+
+        tree.push(RenderCommand::PopFont);
 
         // Scrollbar
         self.render_scrollbar(
@@ -3029,6 +3064,79 @@ mod tests {
             "three characters are three cells wide however many bytes they take"
         );
         assert!(char_width() > 0.0, "a zero cell would collapse every column");
+    }
+
+    /// A cell counted in characters is only right if a character actually fits
+    /// one. Source code is not digits, so the cell has to hold the widest
+    /// glyph a line can contain — otherwise the highlight rectangle placed at
+    /// `columns(span) * char_width()` ends up narrower than the run it marks.
+    #[test]
+    fn a_source_character_fits_a_content_cell() {
+        let cell = char_width();
+        for ch in ['0', 'W', 'i', '#', 'é', 'M', '@', '_', ' '] {
+            let w = text::measure_in(
+                &ch.to_string(),
+                CONTENT_FONT_SIZE,
+                FontWeightHint::Regular,
+                FontFamily::Mono,
+            );
+            assert!(w <= cell + 0.01, "{ch:?} measures {w} in a {cell} cell");
+        }
+    }
+
+    /// Bold marks a changed span in the inline view. It sits on the same grid
+    /// as the regular text around it, so it has to fit the same cell.
+    #[test]
+    fn a_bold_source_character_fits_the_same_cell() {
+        let cell = char_width();
+        for ch in ['0', 'W', 'M', '@'] {
+            let w = text::measure_in(
+                &ch.to_string(),
+                CONTENT_FONT_SIZE,
+                FontWeightHint::Bold,
+                FontFamily::Mono,
+            );
+            assert!(w <= cell + 0.01, "bold {ch:?} measures {w} in a {cell} cell");
+        }
+    }
+
+    /// Content is placed on a mono cell, so it must be drawn in the mono face.
+    /// Chrome — toolbar, headers, status bar, scrollbars — must not be.
+    #[test]
+    fn content_is_drawn_in_the_family_it_was_measured_in() {
+        for mode in [ViewMode::SideBySide, ViewMode::Unified, ViewMode::Inline] {
+            let mut app = FileDiffApp::new();
+            app.view_mode = mode;
+            app.load_files(
+                "a",
+                "alpha\nbravo WWWW\ncharlie",
+                "b",
+                "alpha\nbravo iiii\ndelta",
+            );
+            let tree = app.render();
+
+            let mut depth = 0_i32;
+            let mut deepest = 0_i32;
+            let mut inside = 0_usize;
+            for cmd in &tree.commands {
+                match cmd {
+                    RenderCommand::PushFont { family } => {
+                        assert_eq!(family, &FontFamily::Mono, "only content pushes a family");
+                        depth += 1;
+                        deepest = deepest.max(depth);
+                    }
+                    RenderCommand::PopFont => {
+                        depth -= 1;
+                        assert!(depth >= 0, "{mode:?}: a PopFont without a PushFont");
+                    }
+                    RenderCommand::Text { .. } if depth > 0 => inside += 1,
+                    _ => {}
+                }
+            }
+            assert_eq!(depth, 0, "{mode:?}: the font scopes do not balance");
+            assert_eq!(deepest, 1, "{mode:?}: the content scope was never opened");
+            assert!(inside > 0, "{mode:?}: no content drawn inside the mono scope");
+        }
     }
 
     /// The gutter right-aligns line numbers, so even the widest one still has

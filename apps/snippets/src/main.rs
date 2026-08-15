@@ -42,7 +42,7 @@
 )]
 
 use guitk::Color;
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontFamily, FontWeightHint, RenderCommand};
 use guitk::style::CornerRadii;
 use guitk::text;
 
@@ -95,8 +95,16 @@ const BADGE_TEXT: f32 = 10.0;
 /// from the face keeps the grid true if the face or the size changes; the old
 /// fixed 8.0 was a guess that drifted the moment either did. Everything else
 /// in this app is proportional UI text and is measured, not gridded.
+///
+/// The cell was then `text::digit_advance` — right that the face should decide
+/// it, wrong about which face. A digit's advance *in the proportional UI face*
+/// is a cell only digits fit, and code is not digits. Since the token pen
+/// advances by `columns(token) * char_width()`, a line of real source stepped
+/// short of where its glyphs actually ended, so consecutive tokens overlapped
+/// and indentation stopped lining up between rows. A grid needs a face where
+/// every glyph advances the same distance — `text::cell_advance`.
 fn char_width() -> f32 {
-    text::digit_advance(NORMAL_TEXT, FontWeightHint::Regular)
+    text::cell_advance(NORMAL_TEXT, FontWeightHint::Regular)
 }
 
 /// How many grid cells `text` occupies. Characters, not bytes — `str::len()`
@@ -1907,6 +1915,17 @@ impl App {
             let max_lines = ((code_h - 16.0) / LINE_HEIGHT) as usize;
             let scroll = (self.scroll_offset / LINE_HEIGHT) as usize;
 
+            // The code area only. Its pen advances by `columns * char_width()`
+            // from one token to the next, so the tokens have to be drawn in
+            // the face that cell came from — otherwise consecutive tokens on a
+            // line overlap or leave gaps, and indentation stops lining up
+            // between rows, which is the whole reason this panel is a grid.
+            // The header, tag pills and status bar around it are proportional
+            // chrome and stay outside.
+            cmds.push(RenderCommand::PushFont {
+                family: FontFamily::Mono,
+            });
+
             for (li, line_tokens) in tokens.iter().enumerate().skip(scroll).take(max_lines) {
                 let ly = code_y + 8.0 + ((li - scroll) as f32) * LINE_HEIGHT;
 
@@ -1941,6 +1960,8 @@ impl App {
                     tx += tw;
                 }
             }
+
+            cmds.push(RenderCommand::PopFont);
 
             // Tags bar at bottom
             let tags_y = y + height - 28.0;
@@ -2651,6 +2672,76 @@ mod tests {
             cell <= NORMAL_TEXT,
             "a cell wider than the em box would space the code out absurdly"
         );
+    }
+
+    /// Advancing one cell per character is only right if a character fits one.
+    /// Code is not digits, so the cell has to hold the widest glyph a token
+    /// can contain — otherwise the pen steps short and the next token is drawn
+    /// over the tail of the one before it.
+    #[test]
+    fn a_code_character_fits_a_cell() {
+        let cell = char_width();
+        for ch in ['0', 'W', 'i', '#', 'é', 'M', '@', '_', '{', ' '] {
+            let w = text::measure_in(
+                &ch.to_string(),
+                NORMAL_TEXT,
+                FontWeightHint::Regular,
+                FontFamily::Mono,
+            );
+            assert!(w <= cell + 0.01, "{ch:?} measures {w} in a {cell} cell");
+        }
+    }
+
+    /// Keywords are drawn bold on the same grid as everything else, so bold
+    /// has to fit the same cell.
+    #[test]
+    fn a_bold_keyword_character_fits_the_same_cell() {
+        let cell = char_width();
+        for ch in ['0', 'W', 'M', 'f', 'n'] {
+            let w = text::measure_in(
+                &ch.to_string(),
+                NORMAL_TEXT,
+                FontWeightHint::Bold,
+                FontFamily::Mono,
+            );
+            assert!(w <= cell + 0.01, "bold {ch:?} measures {w} in a {cell} cell");
+        }
+    }
+
+    /// The code area is placed on a mono cell, so it must be drawn in the mono
+    /// face. Everything around it — toolbar, sidebar, list, tags — must not be.
+    #[test]
+    fn the_code_area_is_drawn_in_the_family_it_was_measured_in() {
+        let mut app = App::new();
+        let id = app.create_snippet(
+            "Wide",
+            "fn main() {\n    let WWWW = iiii;\n}\n",
+            Language::Rust,
+        );
+        app.selected_snippet_id = Some(id);
+        let cmds = app.render();
+
+        let mut depth = 0_i32;
+        let mut deepest = 0_i32;
+        let mut inside = 0_usize;
+        for cmd in &cmds {
+            match cmd {
+                RenderCommand::PushFont { family } => {
+                    assert_eq!(family, &FontFamily::Mono, "only the code area pushes");
+                    depth += 1;
+                    deepest = deepest.max(depth);
+                }
+                RenderCommand::PopFont => {
+                    depth -= 1;
+                    assert!(depth >= 0, "a PopFont without a matching PushFont");
+                }
+                RenderCommand::Text { .. } if depth > 0 => inside += 1,
+                _ => {}
+            }
+        }
+        assert_eq!(depth, 0, "the font scopes do not balance");
+        assert_eq!(deepest, 1, "the code area's scope was never opened");
+        assert!(inside > 0, "no code was drawn inside the mono scope");
     }
 
     /// Toolbar labels are drawn bold, so they are measured bold — measuring a

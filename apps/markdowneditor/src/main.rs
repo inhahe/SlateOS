@@ -29,7 +29,7 @@
 //! Uses the guitk library for UI rendering.
 
 use guitk::color::Color;
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontFamily, FontWeightHint, RenderCommand};
 use guitk::style::CornerRadii;
 use guitk::text;
 
@@ -114,8 +114,16 @@ const PREVIEW_PADDING: f32 = 16.0;
 /// drifted away from the text they mark.
 ///
 /// The *preview* pane is prose, not a grid, and measures each run instead.
+///
+/// The cell was then `text::digit_advance` — right that the face should decide
+/// it, wrong about which face. A digit's advance in the proportional UI face is
+/// a cell only digits fit, and the source pane holds prose and Markdown syntax:
+/// at 14 px a digit is 8.1 px while `'W'` is 14.1 px, so the caret placed by
+/// `col_x` drifted further left of its character with every wide glyph on the
+/// line, and the selection band drifted with it. A grid needs a face where
+/// every glyph advances the same distance — `text::cell_advance`.
 fn char_width() -> f32 {
-    text::digit_advance(EDITOR_FONT_SIZE, FontWeightHint::Regular)
+    text::cell_advance(EDITOR_FONT_SIZE, FontWeightHint::Regular)
 }
 
 /// x of byte offset `col` within `line`, given the pane's left edge `text_x`.
@@ -2663,37 +2671,44 @@ pub fn render_editor(
     height: f32,
     find_state: &FindReplaceState,
 ) -> Vec<RenderCommand> {
-    let mut cmds = Vec::new();
-
-    // Background.
-    cmds.push(RenderCommand::FillRect {
-        x,
-        y,
-        width,
-        height,
-        color: BASE,
-        corner_radii: CornerRadii::ZERO,
-    });
-
-    // Gutter background.
-    cmds.push(RenderCommand::FillRect {
-        x,
-        y,
-        width: GUTTER_WIDTH,
-        height,
-        color: MANTLE,
-        corner_radii: CornerRadii::ZERO,
-    });
-
-    // Gutter separator line.
-    cmds.push(RenderCommand::Line {
-        x1: x + GUTTER_WIDTH,
-        y1: y,
-        x2: x + GUTTER_WIDTH,
-        y2: y + height,
-        color: SURFACE0,
-        width: 1.0,
-    });
+    let mut cmds = vec![
+        // The source pane is a grid: `col_x` places the caret, the selection
+        // band and the find highlights at `chars * char_width()`, which came
+        // from the mono face. Everything this function draws has to be drawn
+        // in that face, or the marks land beside the characters they mark.
+        // The preview pane — rendered separately, as prose — is deliberately
+        // outside this scope.
+        RenderCommand::PushFont {
+            family: FontFamily::Mono,
+        },
+        // Background.
+        RenderCommand::FillRect {
+            x,
+            y,
+            width,
+            height,
+            color: BASE,
+            corner_radii: CornerRadii::ZERO,
+        },
+        // Gutter background.
+        RenderCommand::FillRect {
+            x,
+            y,
+            width: GUTTER_WIDTH,
+            height,
+            color: MANTLE,
+            corner_radii: CornerRadii::ZERO,
+        },
+        // Gutter separator line.
+        RenderCommand::Line {
+            x1: x + GUTTER_WIDTH,
+            y1: y,
+            x2: x + GUTTER_WIDTH,
+            y2: y + height,
+            color: SURFACE0,
+            width: 1.0,
+        },
+    ];
 
     let visible_lines = (height / LINE_HEIGHT) as usize;
     let text_x = x + GUTTER_WIDTH + EDITOR_PADDING;
@@ -2888,6 +2903,7 @@ pub fn render_editor(
         }
     }
 
+    cmds.push(RenderCommand::PopFont);
     cmds
 }
 
@@ -6972,6 +6988,78 @@ mod tests {
         assert!((col_x("ax", 1, 0.0) - cell).abs() < 0.01);
         // Same text, same cell count, whatever the encoding costs.
         assert!((col_x("ééé", 6, 0.0) - col_x("aaa", 3, 0.0)).abs() < 0.01);
+    }
+
+    /// Counting cells is only right if a character actually fits one. The
+    /// source pane holds prose and Markdown syntax, not digits, so the cell
+    /// has to hold the widest glyph a line can contain — otherwise `col_x`
+    /// under-counts and the caret drifts left of its character.
+    #[test]
+    fn a_source_character_fits_a_cell() {
+        let cell = char_width();
+        for ch in ['0', 'W', 'i', '#', 'é', 'M', '@', '*', '_', ' '] {
+            let w = text::measure_in(
+                &ch.to_string(),
+                EDITOR_FONT_SIZE,
+                FontWeightHint::Regular,
+                FontFamily::Mono,
+            );
+            assert!(w <= cell + 0.01, "{ch:?} measures {w} in a {cell} cell");
+        }
+    }
+
+    /// Syntax highlighting draws headings and emphasis bold on the same grid,
+    /// so bold has to fit the same cell as regular.
+    #[test]
+    fn a_bold_source_character_fits_the_same_cell() {
+        let cell = char_width();
+        for ch in ['0', 'W', 'M', '#', '*'] {
+            let w = text::measure_in(
+                &ch.to_string(),
+                EDITOR_FONT_SIZE,
+                FontWeightHint::Bold,
+                FontFamily::Mono,
+            );
+            assert!(w <= cell + 0.01, "bold {ch:?} measures {w} in a {cell} cell");
+        }
+    }
+
+    /// The source pane is placed on a mono cell, so it must be drawn in the
+    /// mono face — a mismatch is invisible in any assertion about positions.
+    #[test]
+    fn the_source_pane_is_drawn_in_the_family_it_was_measured_in() {
+        let mut doc = Document::new();
+        doc.insert_text("# Heading WWWW\n\nBody text with iiii and *emphasis*.\n");
+        let cmds = render_editor(
+            &doc,
+            0.0,
+            0.0,
+            600.0,
+            400.0,
+            &FindReplaceState::default(),
+        );
+
+        let mut depth = 0_i32;
+        let mut deepest = 0_i32;
+        let mut inside = 0_usize;
+        for cmd in &cmds {
+            match cmd {
+                RenderCommand::PushFont { family } => {
+                    assert_eq!(family, &FontFamily::Mono, "only the source pane pushes");
+                    depth += 1;
+                    deepest = deepest.max(depth);
+                }
+                RenderCommand::PopFont => {
+                    depth -= 1;
+                    assert!(depth >= 0, "a PopFont without a matching PushFont");
+                }
+                RenderCommand::Text { .. } if depth > 0 => inside += 1,
+                _ => {}
+            }
+        }
+        assert_eq!(depth, 0, "the font scopes do not balance");
+        assert_eq!(deepest, 1, "the source pane's scope was never opened");
+        assert!(inside > 0, "no source glyph was drawn inside the mono scope");
     }
 
     /// A byte offset past the end (or off a character boundary, which the

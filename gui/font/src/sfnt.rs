@@ -484,6 +484,22 @@ pub struct Face {
     /// is a narrower set and the wrong one for the one caller here. See
     /// [`gpos_names_script`](Face::gpos_names_script).
     gpos_scripts: Vec<[u8; 4]>,
+    /// Every script tag the `GSUB` ScriptList names, sorted. Empty for a face
+    /// with no `GSUB`.
+    ///
+    /// Held for the same reason as [`gpos_scripts`](Self::gpos_scripts) and
+    /// with more at stake. Two things read *which* of these tags a run is
+    /// shaped under — whether the Indic shaper follows the old Uniscribe spec
+    /// or the revised one, and whether it runs at all — and both are answered
+    /// wrongly by asking [`substitutions`](Self::substitutions), which records
+    /// only the scripts that reached a lookup this crate can apply. `Hack` is
+    /// the face that proves it: its `GSUB` registers `DFLT` and `latn`, and
+    /// neither one's default language system selects a single feature this
+    /// crate asks for, so `substitutions` is `None` outright and the face
+    /// appears to name no script at all. HarfBuzz's
+    /// `hb_ot_layout_table_select_script` reads the ScriptList and nothing
+    /// else, and so does this.
+    gsub_scripts: Vec<[u8; 4]>,
 }
 
 /// Where a face sits within its family — the axes a font picker selects on.
@@ -715,6 +731,11 @@ impl Face {
             .unwrap_or_default();
         gpos_scripts.sort_unstable();
         gpos_scripts.dedup();
+        let mut gsub_scripts = gsub
+            .and_then(|span| otl::script_tags(&data, span.off))
+            .unwrap_or_default();
+        gsub_scripts.sort_unstable();
+        gsub_scripts.dedup();
 
         Ok(Self {
             metrics: FaceMetrics {
@@ -737,6 +758,7 @@ impl Face {
             positioning,
             has_positioning: gpos.is_some(),
             gpos_scripts,
+            gsub_scripts,
             data,
         })
     }
@@ -1192,13 +1214,54 @@ impl Face {
     /// of its consonant is this crate's job rather than the font's.
     pub fn substitute(&self, script: Option<ScriptTags>, glyphs: &mut Vec<SubGlyph>) {
         let subs = self.substitutions.as_ref();
-        if let Some(indic) = Script::shaping(script) {
-            indic_shape::shape(&self.data, subs, script, indic, glyphs, |ch| {
-                self.glyph_index(ch)
-            });
-        } else if let Some(subs) = subs {
-            subs.apply(&self.data, script, glyphs);
+        let chosen = self.gsub_chosen_script(script);
+        match Script::shaping(script)
+            .filter(|_| !crate::fallback::shaped_as_default(script, chosen))
+        {
+            Some(indic) => {
+                indic_shape::shape(&self.data, subs, script, chosen, indic, glyphs, |ch| {
+                    self.glyph_index(ch)
+                });
+            }
+            None => {
+                if let Some(subs) = subs {
+                    subs.apply(&self.data, script, glyphs);
+                }
+            }
         }
+    }
+
+    /// Whether a run of `script` is shaped by the default shaper even though
+    /// its script asks for a complex one, because this face files its `GSUB`
+    /// features under `DFLT` or `latn`.
+    ///
+    /// The face's half of [`fallback::shaped_as_default`](crate::fallback::shaped_as_default),
+    /// which is where the reasoning is. Three callers, and they have to agree:
+    /// whether the Indic shaper runs at all, whether the run's marks may be
+    /// placed by measurement, and whether their advances are zeroed are three
+    /// fields of one HarfBuzz shaper struct, so answering them from different
+    /// premises would produce a combination no shaper implements.
+    ///
+    /// Asked per run rather than cached for the same reason as
+    /// [`applies_gpos`](crate::scaled::ScaledFont): the answer depends on the
+    /// run, so the face has nowhere to put it, and it costs a walk of a
+    /// five-tag fallback chain against a sorted script list.
+    #[must_use]
+    pub fn shapes_as_default(&self, script: Option<ScriptTags>) -> bool {
+        crate::fallback::shaped_as_default(script, self.gsub_chosen_script(script))
+    }
+
+    /// Which of this face's `GSUB` script tags a run of `script` is shaped
+    /// under, or `None` when the face names none of the ones it would accept.
+    ///
+    /// Two callers, and both ask because the *tag* carries meaning beyond which
+    /// features it selects: [`shapes_as_default`](Self::shapes_as_default),
+    /// where `DFLT` or `latn` says the designer wrote no complex shaping, and
+    /// the Indic shaper, where `deva` and `dev2` are two different specs. See
+    /// [`otl::chosen_from`](crate::otl::chosen_from).
+    #[must_use]
+    pub(crate) fn gsub_chosen_script(&self, script: Option<ScriptTags>) -> Option<[u8; 4]> {
+        otl::chosen_from(&self.gsub_scripts, script)
     }
 
     /// Whether this face carries any `GSUB` substitution this can apply.
@@ -2268,7 +2331,7 @@ pub(crate) mod tests {
     pub(crate) fn build_test_font_with_layout(scripts: &[[u8; 4]], classes: &[u16]) -> Vec<u8> {
         let mut tables = build_test_tables(TRUE_LSB_3);
         if !scripts.is_empty() {
-            tables.push((*b"GPOS", empty_gpos(scripts)));
+            tables.push((*b"GPOS", empty_layout_table(scripts)));
         }
         if !classes.is_empty() {
             tables.push((*b"GDEF", glyph_classes(classes)));
@@ -2297,8 +2360,25 @@ pub(crate) mod tests {
         gdef
     }
 
-    /// A `GPOS` whose ScriptList names `scripts` and which positions nothing.
-    fn empty_gpos(scripts: &[[u8; 4]]) -> Vec<u8> {
+    /// The fixture plus a `GSUB` that registers exactly `scripts` and
+    /// substitutes nothing.
+    ///
+    /// The shape of `Hack`, which is the face that made the difference between
+    /// "the ScriptList names this tag" and "a run under this tag reaches a
+    /// lookup" observable: its `GSUB` registers `DFLT` and `latn` and neither
+    /// one's default language system selects a feature this crate asks for, so
+    /// [`Substitutions`] is `None` outright and the only record that the face
+    /// named those scripts is [`Face::gsub_scripts`].
+    pub(crate) fn build_test_font_with_gsub_scripts(scripts: &[[u8; 4]]) -> Vec<u8> {
+        let mut tables = build_test_tables(TRUE_LSB_3);
+        tables.push((*b"GSUB", empty_layout_table(scripts)));
+        tables.sort_unstable_by_key(|&(tag, _)| tag);
+        assemble(&tables)
+    }
+
+    /// A `GPOS` or `GSUB` whose ScriptList names `scripts` and which does
+    /// nothing. The two tables share a header, so one builder serves both.
+    fn empty_layout_table(scripts: &[[u8; 4]]) -> Vec<u8> {
         let n = u16::try_from(scripts.len()).expect("a test may not register 65536 scripts");
         // The ScriptList begins right after the five-field header, each
         // ScriptRecord is six bytes, and each of the (identical, empty) script
@@ -2372,6 +2452,65 @@ pub(crate) mod tests {
         for tag in [b"hebr", b"thai", b"dflt"] {
             assert!(!f.gpos_names_script(tag), "{} is not", tag_text(tag));
         }
+    }
+
+    /// The whole point of holding the `GSUB` ScriptList separately: this face's
+    /// `GSUB` selects no lookup this crate can apply, so its `Substitutions` is
+    /// `None` and asking *that* which script was chosen answers "none" — which
+    /// would leave a Devanagari run on the Indic shaper in a face that has said
+    /// as plainly as a font can that it does no Indic shaping. `Hack` is the
+    /// shipping face this describes; before the ScriptList was read directly,
+    /// its `हिन्दी` was the last string in the HarfBuzz sweep placed wrongly.
+    #[test]
+    fn a_latin_only_face_calls_off_the_indic_shaper_even_with_no_usable_lookups() {
+        let bytes = build_test_font_with_gsub_scripts(&[*b"latn", *b"DFLT"]);
+        let f = Face::parse(bytes).expect("a font with a GSUB must parse");
+        assert!(
+            !f.has_substitutions(),
+            "the fixture's GSUB reaches no lookup this crate applies"
+        );
+        let deva = Some(ScriptTags::exactly(*b"dev2"));
+        assert_eq!(f.gsub_chosen_script(deva), Some(*b"DFLT"));
+        assert!(f.shapes_as_default(deva));
+        // And a run of Latin, which was on the default shaper to begin with,
+        // is not reported as having lost anything.
+        assert!(!f.shapes_as_default(Some(ScriptTags::exactly(*b"latn"))));
+    }
+
+    /// The other half: a face that names the run's own script keeps its
+    /// shaper, and names the *tag it registered* — which is what tells the
+    /// Indic shaper whether to follow the old spec or the revised one.
+    ///
+    /// The run's tags come from a real character rather than from
+    /// [`ScriptTags::exactly`], which sets the fallback equal to the preferred
+    /// tag and so could never reach the pre-revision `deva` half of this loop.
+    #[test]
+    fn a_face_naming_an_indic_script_keeps_the_indic_shaper() {
+        // U+0939 DEVANAGARI LETTER HA: preferred `dev2`, fallback `deva`.
+        let deva = ScriptTags::of('\u{0939}');
+        assert!(deva.is_some(), "Devanagari must have script tags");
+        for (registered, chosen) in [(*b"dev2", *b"dev2"), (*b"deva", *b"deva")] {
+            let bytes = build_test_font_with_gsub_scripts(&[registered]);
+            let f = Face::parse(bytes).expect("a font with a GSUB must parse");
+            assert_eq!(
+                f.gsub_chosen_script(deva),
+                Some(chosen),
+                "{} must be chosen",
+                tag_text(&registered)
+            );
+            assert!(!f.shapes_as_default(deva), "{}", tag_text(&registered));
+        }
+    }
+
+    /// A face with no `GSUB` at all has not said "no complex shaping"; it has
+    /// said nothing, and its Devanagari keeps the Indic shaper — which is the
+    /// face `NO_ZERO_WIDTH_MARKS` was measured against.
+    #[test]
+    fn a_face_with_no_gsub_keeps_the_indic_shaper() {
+        let f = face();
+        let deva = Some(ScriptTags::exactly(*b"dev2"));
+        assert_eq!(f.gsub_chosen_script(deva), None);
+        assert!(!f.shapes_as_default(deva));
     }
 
     #[test]

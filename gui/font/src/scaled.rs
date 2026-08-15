@@ -530,28 +530,41 @@ impl ScaledFont {
         // where we charged them a full missing-glyph box each.
         let by_category = !self.face.classifies_glyphs();
         let mut run = 0usize;
+        // Which shaper the run reaches, which the last three all read: a
+        // complex script in a face that files its features under `DFLT` or
+        // `latn` is shaped by the default shaper, and that shaper places marks
+        // by measurement, zeroes their advances, and does no reordering. See
+        // [`Face::shapes_as_default`](crate::sfnt::Face::shapes_as_default).
+        let mut simple = runs.first().is_some_and(|&(_, t)| self.face.shapes_as_default(t));
         let mut synth = runs.first().is_none_or(|&(_, t)| !self.applies_gpos(t));
-        let mut placeable = runs.first().is_none_or(|&(_, t)| fallback::positions_marks(t));
+        let mut placeable = runs
+            .first()
+            .is_none_or(|&(_, t)| fallback::positions_marks(t, simple));
         let mut zeroed = runs
             .first()
-            .is_none_or(|&(_, t)| fallback::zeroes_mark_advances(t));
+            .is_none_or(|&(_, t)| fallback::zeroes_mark_advances(t, simple));
         // And whether this run is one the Indic shaper will lay out, which
         // decides whether the two facts it reads off the *character* are worth
         // deriving. Neither is free — one is a binary search of the Indic
         // table, the other of the bidi table — and neither is read anywhere
         // else, so a line of Latin pays for neither.
-        let mut indic = runs.first().is_some_and(|&(_, t)| Script::shaping(t).is_some());
+        let mut indic =
+            !simple && runs.first().is_some_and(|&(_, t)| Script::shaping(t).is_some());
         for (i, &(ch, cluster)) in pieces.iter().enumerate() {
             while runs.get(run).is_some_and(|&(end, _)| end <= i) {
                 run = run.saturating_add(1);
+                simple = runs
+                    .get(run)
+                    .is_some_and(|&(_, t)| self.face.shapes_as_default(t));
                 synth = runs.get(run).is_none_or(|&(_, t)| !self.applies_gpos(t));
                 placeable = runs
                     .get(run)
-                    .is_none_or(|&(_, t)| fallback::positions_marks(t));
+                    .is_none_or(|&(_, t)| fallback::positions_marks(t, simple));
                 zeroed = runs
                     .get(run)
-                    .is_none_or(|&(_, t)| fallback::zeroes_mark_advances(t));
-                indic = runs.get(run).is_some_and(|&(_, t)| Script::shaping(t).is_some());
+                    .is_none_or(|&(_, t)| fallback::zeroes_mark_advances(t, simple));
+                indic = !simple
+                    && runs.get(run).is_some_and(|&(_, t)| Script::shaping(t).is_some());
             }
             // A tab has no glyph. Drawn through `cmap` it comes out as the
             // missing-glyph box, one space wide; the width every caller wants

@@ -769,17 +769,6 @@ impl Substitutions {
         }
     }
 
-    /// Which script tag this face's features for `script` were taken from.
-    ///
-    /// Forwarded rather than reached through, because the Indic shaper holds a
-    /// `Substitutions` and has no business knowing that the script index
-    /// inside it is an [`otl::ByScript`](crate::otl::ByScript). See
-    /// [`ByScript::chosen_script`](crate::otl::ByScript::chosen_script) for why
-    /// the tag is a question worth asking.
-    pub(crate) fn chosen_script(&self, script: Option<ScriptTags>) -> Option<[u8; 4]> {
-        self.lookups.chosen_script(script)
-    }
-
     /// The bit that selects `tag`'s lookups on a run of `script`, or `0` if
     /// this face reaches none.
     ///

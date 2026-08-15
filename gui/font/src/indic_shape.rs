@@ -252,17 +252,32 @@ pub(crate) struct Probe<'a> {
     subs: Option<&'a Substitutions>,
     /// The script to look features up under.
     tags: Option<ScriptTags>,
+    /// Which script tag the face's `GSUB` ScriptList was chosen under, or
+    /// `None` when it names none of the ones this run would accept.
+    ///
+    /// Passed in rather than derived from [`subs`](Self::subs), because it is a
+    /// question about the ScriptList and `subs` records only the scripts that
+    /// reached a lookup this crate can apply. See
+    /// [`Face::gsub_chosen_script`](crate::sfnt::Face::gsub_chosen_script).
+    chosen: Option<[u8; 4]>,
 }
 
 impl<'a> Probe<'a> {
-    /// A probe over `subs`, asking about a run of `tags`.
+    /// A probe over `subs`, asking about a run of `tags` in a face whose
+    /// `GSUB` was chosen under `chosen`.
     #[must_use]
     pub(crate) fn new(
         data: &'a [u8],
         subs: Option<&'a Substitutions>,
         tags: Option<ScriptTags>,
+        chosen: Option<[u8; 4]>,
     ) -> Self {
-        Self { data, subs, tags }
+        Self {
+            data,
+            subs,
+            tags,
+            chosen,
+        }
     }
 }
 
@@ -337,8 +352,7 @@ impl<'a> Plan<'a> {
         // the same answer by the same route, its script selection reporting
         // `DFLT` rather than nothing when it finds no script it asked for.
         let old_spec = probe
-            .subs
-            .and_then(|subs| subs.chosen_script(probe.tags))
+            .chosen
             .is_none_or(|tag| tag.get(3) != Some(&b'2'));
         let mask = |tag: &[u8; 4]| {
             probe
@@ -1562,6 +1576,7 @@ pub(crate) fn shape(
     data: &[u8],
     subs: Option<&Substitutions>,
     tags: Option<ScriptTags>,
+    chosen: Option<[u8; 4]>,
     script: Script,
     glyphs: &mut Vec<SubGlyph>,
     glyph: impl Fn(char) -> Option<u16>,
@@ -1569,7 +1584,7 @@ pub(crate) fn shape(
     if glyphs.is_empty() {
         return;
     }
-    let plan = Plan::new(script, Probe::new(data, subs, tags), &glyph);
+    let plan = Plan::new(script, Probe::new(data, subs, tags, chosen), &glyph);
     let global = feature_bits(&GLOBAL);
     for g in glyphs.iter_mut() {
         g.mask |= global;
@@ -1917,11 +1932,27 @@ mod tests {
     /// A consonant to ask about.
     const CONSONANT: u16 = 2;
 
+    /// Which tag the test face in `data` is chosen under for a run of `tags`.
+    ///
+    /// The same walk [`Face`](crate::sfnt::Face) does, over the same
+    /// ScriptList, rather than a literal repeated from whatever the face was
+    /// built with — so a test that registers `deva` and asks about `dev2` gets
+    /// the answer the shipping code would give it and not the one the test
+    /// author expected.
+    fn chosen(data: &[u8], tags: Option<ScriptTags>) -> Option<[u8; 4]> {
+        let mut names = crate::otl::script_tags(data, 0).unwrap_or_default();
+        names.sort_unstable();
+        crate::otl::chosen_from(&names, tags)
+    }
+
     /// A plan over `data`, for `script`, with `VIRAMA` as the virama glyph.
     fn plan<'a>(data: &'a [u8], subs: &'a Substitutions, script: Script) -> Plan<'a> {
-        Plan::new(script, Probe::new(data, Some(subs), Some(tags(script))), |_| {
-            Some(VIRAMA)
-        })
+        let run = Some(tags(script));
+        Plan::new(
+            script,
+            Probe::new(data, Some(subs), run, chosen(data, run)),
+            |_| Some(VIRAMA),
+        )
     }
 
     /// Both of `script`'s spellings, as a run of its text would carry them.
@@ -2001,9 +2032,10 @@ mod tests {
     fn a_face_without_a_virama_calls_every_consonant_a_base() {
         let data = face(b"dev2", &[b"blwf"], &[VIRAMA, CONSONANT]);
         let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
+        let run = Some(tags(Script::Devanagari));
         let plan = Plan::new(
             Script::Devanagari,
-            Probe::new(&data, Some(&subs), Some(tags(Script::Devanagari))),
+            Probe::new(&data, Some(&subs), run, chosen(&data, run)),
             |_| None,
         );
         assert_eq!(plan.consonant_position(CONSONANT), Position::BaseC);
@@ -2089,9 +2121,10 @@ mod tests {
             first + 1,
         ]);
         let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
+        let run = Some(ScriptTags::exactly(*tag));
         let plan = Plan::new(
             script,
-            Probe::new(&data, Some(&subs), Some(ScriptTags::exactly(*tag))),
+            Probe::new(&data, Some(&subs), run, chosen(&data, run)),
             |_| Some(VIRAMA),
         );
         f(&plan);

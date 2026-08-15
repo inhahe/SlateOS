@@ -102,16 +102,9 @@ use class::{
 /// an obviously unshaped one, which is both more honest and, in practice,
 /// closer to legible.
 ///
-/// Matched on the *preferred* tag only. That is the tag a character's script
-/// maps to, not one resolved against the font's `GSUB`, so it differs from
-/// HarfBuzz in one corner: HarfBuzz sends Devanagari to its default shaper —
-/// and so does run the fallback — when the font registers its features under
-/// `DFLT` or `latn` rather than under `dev2`/`deva`, and likewise sends
-/// Myanmar there for a font tagged `mymr`. Following that would mean asking
-/// the font which scripts it declares before deciding how to place a mark,
-/// which is a coupling this crate does not want for the sake of faces that
-/// carry Devanagari glyphs, no `GPOS`, and no Devanagari `GSUB` script
-/// record. Noted in `known-issues.md`.
+/// Matched on the *preferred* tag only, which is half the question: the script
+/// picks a complex shaper and the *face* may then call it off. See
+/// [`shaped_as_default`].
 static COMPLEX_SCRIPTS: [[u8; 4]; 101] = [
     *b"adlm", *b"ahom", *b"bali", *b"batk", *b"berf", *b"bhks", *b"bng2", *b"brah", *b"bugi",
     *b"buhd", *b"cakm", *b"cham", *b"chrs", *b"cpmn", *b"dev2", *b"diak", *b"dogr", *b"dupl",
@@ -127,15 +120,82 @@ static COMPLEX_SCRIPTS: [[u8; 4]; 101] = [
     *b"yezi", *b"zanb",
 ];
 
+/// The three complex scripts a face cannot call off, sorted.
+///
+/// Every other entry of [`COMPLEX_SCRIPTS`] reaches its shaper through an arm
+/// of `hb_ot_shaper_categorize` that first checks what the font declares; Thai,
+/// Lao and Khmer reach theirs unconditionally. There is no stated reason for
+/// the asymmetry beyond history — the Thai shaper predates the check and the
+/// Khmer one was split out of the Indic shaper after it — but it is observable,
+/// so it is transcribed rather than tidied.
+static ALWAYS_COMPLEX: [[u8; 4]; 3] = [*b"khmr", *b"lao ", *b"thai"];
+
+/// Whether a run of `tags` is shaped by the *default* shaper despite its script
+/// asking for a complex one, because of what the face declares.
+///
+/// `gsub` is the script tag the face's `GSUB` features were actually taken
+/// from — [`Substitutions::chosen_script`](crate::gsub::Substitutions::chosen_script) —
+/// which is the run's own tag if the face registers it, and otherwise whatever
+/// the fallback chain reached. HarfBuzz asks the same question of the same
+/// value, in `hb_ot_shaper_categorize`:
+///
+/// ```c
+/// /* If the designer designed the font for the 'DFLT' script,
+///  * (or we ended up arbitrarily pick 'latn'), use the default shaper.
+///  * Otherwise, use the specific shaper. */
+/// if (gsub_script == HB_TAG ('D','F','L','T') ||
+///     gsub_script == HB_TAG ('l','a','t','n'))
+///   return &_hb_ot_shaper_default;
+/// ```
+///
+/// with a third tag, `mymr`, in the Myanmar arm: that is the tag from before
+/// the Myanmar shaping spec existed, so a face using it is asking for the
+/// pre-spec behaviour, which is no shaping at all.
+///
+/// The point is that a complex shaper is a contract with the font. Devanagari
+/// reordering only produces something legible if the face has half forms, reph
+/// forms and a `pref` feature to move a matra into; a face that files every
+/// feature it has under `latn` has none of them and has said so. Shaping its
+/// Devanagari as if it did means running a reordering nothing implements and
+/// withholding the mark handling that would at least stack the vowel signs on
+/// the consonant.
+///
+/// Note what is *not* here: a face with no `GSUB` at all, or one whose
+/// `GSUB` names neither the run's script nor any default, gives `None` and
+/// keeps its complex shaper. HarfBuzz reaches the same answer by a different
+/// road — `hb_ot_layout_table_select_script` leaves `chosen_script` at
+/// `HB_TAG_NONE`, which equals neither `DFLT` nor `latn`. It matters, because
+/// that is exactly the face [`NO_ZERO_WIDTH_MARKS`] was measured against.
+///
+/// One divergence, and it cannot arise here: HarfBuzz sends an Indic run to its
+/// USE shaper when the chosen tag's last byte is `'3'`. No such tag is in this
+/// crate's fallback chain, so no face can be chosen under one.
+pub(crate) fn shaped_as_default(tags: Option<ScriptTags>, gsub: Option<[u8; 4]>) -> bool {
+    // A run with no script, or with a simple one, is already on the default
+    // shaper; there is nothing for the face to call off.
+    let Some(tags) = tags else { return false };
+    if COMPLEX_SCRIPTS.binary_search(&tags.preferred).is_err()
+        || ALWAYS_COMPLEX.binary_search(&tags.preferred).is_ok()
+    {
+        return false;
+    }
+    gsub.is_some_and(|tag| {
+        tag == *b"DFLT" || tag == *b"latn" || (tag == *b"mymr" && tags.preferred == *b"mym2")
+    })
+}
+
 /// Whether a run of this script may have its marks placed by measurement.
 ///
 /// `None` — a run with no script of its own, which is what an entirely
 /// scriptless string like `"123"` or a lone combining mark produces — is
-/// allowed: that is HarfBuzz's default shaper, and its fallback is on.
+/// allowed: that is HarfBuzz's default shaper, and its fallback is on. So is a
+/// complex script the face called off, for the same reason: `simple` is
+/// [`shaped_as_default`], and the shaper it names is the one with
+/// `fallback_position = true`.
 ///
 /// See [`COMPLEX_SCRIPTS`] for what is excluded and why.
-pub(crate) fn positions_marks(tags: Option<ScriptTags>) -> bool {
-    tags.is_none_or(|tags| COMPLEX_SCRIPTS.binary_search(&tags.preferred).is_err())
+pub(crate) fn positions_marks(tags: Option<ScriptTags>, simple: bool) -> bool {
+    simple || tags.is_none_or(|tags| COMPLEX_SCRIPTS.binary_search(&tags.preferred).is_err())
 }
 
 /// The scripts whose marks keep their advance even so.
@@ -155,6 +215,10 @@ pub(crate) fn positions_marks(tags: Option<ScriptTags>) -> bool {
 /// Bengali, Gurmukhi, Gujarati, Oriya, Tamil, Telugu, Kannada, Malayalam and
 /// Khmer keep the advance; Sinhala, Myanmar, Tibetan, Mongolian, Cham,
 /// Balinese, Thai, Lao and Hebrew zero it.
+///
+/// "Declares nothing" is load-bearing: the same ten in a face that files its
+/// features under `DFLT` or `latn` *do* have their advances zeroed, because
+/// that face has called the shaper off. See [`shaped_as_default`].
 static NO_ZERO_WIDTH_MARKS: [[u8; 4]; 10] = [
     *b"bng2", *b"dev2", *b"gjr2", *b"gur2", *b"khmr", *b"knd2", *b"mlm2", *b"ory2", *b"tel2",
     *b"tml2",
@@ -164,9 +228,10 @@ static NO_ZERO_WIDTH_MARKS: [[u8; 4]; 10] = [
 ///
 /// Separate from [`positions_marks`], and true for nearly everything: a
 /// combining mark takes no room whether or not anything is willing to work
-/// out where to draw it. See [`NO_ZERO_WIDTH_MARKS`] for the ten that differ.
-pub(crate) fn zeroes_mark_advances(tags: Option<ScriptTags>) -> bool {
-    tags.is_none_or(|tags| NO_ZERO_WIDTH_MARKS.binary_search(&tags.preferred).is_err())
+/// out where to draw it. See [`NO_ZERO_WIDTH_MARKS`] for the ten that differ,
+/// and [`shaped_as_default`] for `simple`, which puts nine of those ten back.
+pub(crate) fn zeroes_mark_advances(tags: Option<ScriptTags>, simple: bool) -> bool {
+    simple || tags.is_none_or(|tags| NO_ZERO_WIDTH_MARKS.binary_search(&tags.preferred).is_err())
 }
 
 /// The script tag a run of `tags` insists the face's `GPOS` name before it will
@@ -424,7 +489,7 @@ mod tests {
     fn only_the_simple_scripts_get_their_marks_placed() {
         for tag in [*b"latn", *b"grek", *b"cyrl", *b"hebr", *b"arab", *b"syrc", *b"hang"] {
             assert!(
-                positions_marks(Some(ScriptTags::exactly(tag))),
+                positions_marks(Some(ScriptTags::exactly(tag)), false),
                 "{:?} should be placed",
                 core::str::from_utf8(&tag)
             );
@@ -433,7 +498,7 @@ mod tests {
         // Khmer, Myanmar, Thai and a USE script.
         for tag in [*b"dev2", *b"bng2", *b"khmr", *b"mym2", *b"thai", *b"lao ", *b"tibt"] {
             assert!(
-                !positions_marks(Some(ScriptTags::exactly(tag))),
+                !positions_marks(Some(ScriptTags::exactly(tag)), false),
                 "{:?} should be left alone",
                 core::str::from_utf8(&tag)
             );
@@ -444,7 +509,7 @@ mod tests {
     /// nothing before it — is HarfBuzz's default shaper, whose fallback is on.
     #[test]
     fn scriptless_text_still_gets_the_fallback() {
-        assert!(positions_marks(None));
+        assert!(positions_marks(None, false));
     }
 
     #[test]
@@ -464,19 +529,115 @@ mod tests {
     fn declining_to_place_a_mark_is_not_declining_to_zero_it() {
         for tag in [*b"thai", *b"mym2", *b"tibt", *b"latn", *b"hebr", *b"arab"] {
             assert!(
-                zeroes_mark_advances(Some(ScriptTags::exactly(tag))),
+                zeroes_mark_advances(Some(ScriptTags::exactly(tag)), false),
                 "{:?} should be zeroed",
                 core::str::from_utf8(&tag)
             );
         }
         for tag in [*b"dev2", *b"bng2", *b"khmr", *b"tml2", *b"ory2"] {
             assert!(
-                !zeroes_mark_advances(Some(ScriptTags::exactly(tag))),
+                !zeroes_mark_advances(Some(ScriptTags::exactly(tag)), false),
                 "{:?} should keep its advances",
                 core::str::from_utf8(&tag)
             );
         }
-        assert!(zeroes_mark_advances(None));
+        assert!(zeroes_mark_advances(None, false));
+    }
+
+    #[test]
+    fn the_scripts_a_face_cannot_call_off_are_sorted() {
+        assert!(ALWAYS_COMPLEX.is_sorted(), "ALWAYS_COMPLEX is out of order");
+    }
+
+    /// A face that files every feature it has under `DFLT` or `latn` has said
+    /// it does no complex shaping, and that is the answer whatever the run's
+    /// characters are.
+    #[test]
+    fn a_face_declaring_no_indic_script_calls_the_indic_shaper_off() {
+        for tag in [*b"dev2", *b"bng2", *b"tml2", *b"mym2", *b"tibt", *b"java"] {
+            for gsub in [*b"DFLT", *b"latn"] {
+                assert!(
+                    shaped_as_default(Some(ScriptTags::exactly(tag)), Some(gsub)),
+                    "{:?} under {:?} should be shaped by the default shaper",
+                    core::str::from_utf8(&tag),
+                    core::str::from_utf8(&gsub)
+                );
+            }
+        }
+    }
+
+    /// `mymr` is the tag from before the Myanmar shaping spec existed, so a
+    /// face using it is asking for the behaviour that predates the shaper —
+    /// and only a Myanmar run may read it that way.
+    #[test]
+    fn only_myanmar_reads_mymr_as_calling_its_shaper_off() {
+        assert!(shaped_as_default(
+            Some(ScriptTags::exactly(*b"mym2")),
+            Some(*b"mymr")
+        ));
+        assert!(!shaped_as_default(
+            Some(ScriptTags::exactly(*b"dev2")),
+            Some(*b"mymr")
+        ));
+    }
+
+    /// Thai, Lao and Khmer reach their shapers through an arm of HarfBuzz's
+    /// categorizer that never looks at the font, so no face can call them off.
+    #[test]
+    fn three_scripts_keep_their_shaper_whatever_the_face_says() {
+        for tag in [*b"thai", *b"lao ", *b"khmr"] {
+            for gsub in [*b"DFLT", *b"latn"] {
+                assert!(
+                    !shaped_as_default(Some(ScriptTags::exactly(tag)), Some(gsub)),
+                    "{:?} keeps its shaper",
+                    core::str::from_utf8(&tag)
+                );
+            }
+        }
+    }
+
+    /// A face that names *nothing* in the run's fallback chain — one with no
+    /// `GSUB` at all, most often — has not said "no complex shaping"; it has
+    /// said nothing. HarfBuzz reads its `HB_TAG_NONE` the same way, and it is
+    /// the case [`NO_ZERO_WIDTH_MARKS`] was measured against.
+    #[test]
+    fn a_face_that_names_no_script_calls_nothing_off() {
+        for tag in [*b"dev2", *b"mym2", *b"tibt"] {
+            assert!(
+                !shaped_as_default(Some(ScriptTags::exactly(tag)), None),
+                "{:?} keeps its shaper in a face that declares nothing",
+                core::str::from_utf8(&tag)
+            );
+        }
+    }
+
+    /// There is no complex shaper to call off for a simple script, or for a
+    /// run with no script at all — both are already on the default shaper, and
+    /// answering `true` would be a claim that something changed.
+    #[test]
+    fn a_simple_script_is_not_called_off() {
+        for tag in [*b"latn", *b"cyrl", *b"arab", *b"hebr", *b"hang"] {
+            assert!(
+                !shaped_as_default(Some(ScriptTags::exactly(tag)), Some(*b"DFLT")),
+                "{:?} has no complex shaper to lose",
+                core::str::from_utf8(&tag)
+            );
+        }
+        assert!(!shaped_as_default(None, Some(*b"DFLT")));
+    }
+
+    /// The point of the whole exercise: a Devanagari run in a face that
+    /// declares only `latn` gets the default shaper's mark handling, which is
+    /// both halves — placed by measurement *and* zero-width — where the Indic
+    /// shaper would have withheld both. `Hack` on `हिन्दी` is the face and the
+    /// string that found this.
+    #[test]
+    fn calling_the_shaper_off_restores_both_halves_of_the_mark_handling() {
+        let deva = Some(ScriptTags::exactly(*b"dev2"));
+        assert!(!positions_marks(deva, false));
+        assert!(!zeroes_mark_advances(deva, false));
+        assert!(positions_marks(deva, true));
+        assert!(zeroes_mark_advances(deva, true));
     }
 
     /// Hebrew is the whole of the list, and the negative half is what makes it
@@ -574,7 +735,7 @@ mod tests {
     fn the_scripts_the_class_map_omits_are_scripts_it_is_never_asked_about() {
         for tag in [*b"thai", *b"lao ", *b"tibt"] {
             assert!(
-                !positions_marks(Some(ScriptTags::exactly(tag))),
+                !positions_marks(Some(ScriptTags::exactly(tag)), false),
                 "{:?} reaches attach_class, which has no classes for it",
                 core::str::from_utf8(&tag)
             );

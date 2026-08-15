@@ -464,25 +464,40 @@ impl ByScript {
             .filter_map(|&(at, mask)| Some((self.lookups.get(usize::from(at))?, mask)))
     }
 
-    /// Which script tag [`for_script`](Self::for_script) actually took its
-    /// lookups from, or `None` when the face registers no tag in the chain.
-    ///
-    /// The Indic shaper needs it, and needs the *chosen* tag rather than the
-    /// run's: OpenType revised the Indic script tags, and the two spellings
-    /// select different behaviour from the shaper, not merely different
-    /// features. A face filing Devanagari under `deva` is asking to be shaped
-    /// by the rules Uniscribe applied before the revision — reph and half-form
-    /// classification done by the engine rather than by the font — and one
-    /// filing it under `dev2` is asking for the opposite. Only the face can
-    /// say which, and this is where it says it. See
-    /// [`indic_shape`](crate::indic_shape).
-    pub(crate) fn chosen_script(&self, script: Option<ScriptTags>) -> Option<[u8; 4]> {
-        fallback_chain(script).find(|want| {
-            self.scripts
-                .binary_search_by_key(want, |&(tag, _)| tag)
-                .is_ok()
-        })
-    }
+}
+
+/// The tag a table whose ScriptList names `names` is chosen under for a run of
+/// `script`, or `None` when it names nothing in the chain.
+///
+/// `names` must be sorted. This is HarfBuzz's
+/// `hb_ot_layout_table_select_script` — the same chain
+/// [`for_script`](ByScript::for_script) walks, but asked of the *ScriptList*
+/// rather than of the scripts that reached a usable lookup. Two things need the
+/// *chosen* tag rather than the run's.
+///
+/// OpenType revised the Indic script tags, and the two spellings select
+/// different behaviour from the shaper, not merely different features. A face
+/// filing Devanagari under `deva` is asking to be shaped by the rules Uniscribe
+/// applied before the revision — reph and half-form classification done by the
+/// engine rather than by the font — and one filing it under `dev2` is asking
+/// for the opposite. Only the face can say which, and this is where it says it.
+/// See [`indic_shape`](crate::indic_shape).
+///
+/// And a face that files everything under `DFLT` or `latn` has said it does no
+/// complex shaping at all, which calls the complex shaper off entirely. See
+/// [`fallback::shaped_as_default`](crate::fallback::shaped_as_default).
+///
+/// Asked of the ScriptList and not of the selections because a face whose
+/// script tables select nothing this crate can apply still *named* those tags,
+/// and naming them is the whole of the question. `Hack` is the face that made
+/// the distinction observable — see
+/// [`Face::gsub_scripts`](crate::sfnt::Face).
+///
+/// `None` is HarfBuzz's `HB_TAG_NONE`, which its shaper categorizer compares
+/// against `DFLT` and `latn` and finds unequal — so a face that names nothing
+/// keeps whatever complex shaper its run's script asked for.
+pub(crate) fn chosen_from(names: &[[u8; 4]], script: Option<ScriptTags>) -> Option<[u8; 4]> {
+    fallback_chain(script).find(|want| names.binary_search(want).is_ok())
 }
 
 /// Every script tag the table's ScriptList registers, in file order.

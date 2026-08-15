@@ -60961,6 +60961,34 @@ proved it out.
   than at each call site precisely because the call site's arithmetic is
   `column_width - decoration`, which is the expression that already went
   negative once in `apps/defrag`.
+- ~~`apps/diskanalyzer`~~ **done**. The header loop was literally
+  `for (label, cx, _cw)` — the column width was in scope, bound, and
+  **explicitly discarded**, with the heading then drawn `max_width: None`. Of
+  the four body cells only Name had any bound; Size, % and Type had none. This
+  is the clearest instance of the general point: a width that exists but is
+  not the *thing the cell is measured against* is not a column, and a `_`
+  binding is the shape to grep for.
+  Two bugs fell out that the table itself did not cause. First, the columns
+  ended at x=660 in a 960px window — a third of every row was blank while the
+  one column holding variable-length data, and the only one that ever clipped,
+  was the narrowest it could be. Name now takes the slack and a test asserts
+  the table's right edge mirrors its left inset.
+  Second, and worse: the Name cell's bound was `360.0 - indent - PADDING`
+  where `indent = depth * 20.0`. **Tree depth is data and has no bound.** Past
+  depth 33 that expression is negative, and an elide to a negative width is
+  the empty string — so a deeply nested row would render with *no name at
+  all*, not a short one. The test finds −24px at depth 33 with the cap removed.
+  The indent is now capped so a name always keeps 120px, i.e. deep rows stop
+  indenting rather than stop existing. Generalising: **any layout quantity
+  derived from tree depth, list length or nesting is unbounded input**, and
+  subtracting it from a fixed width needs a floor, not just a `.max(0.0)` —
+  clamping to zero merely converts "negative, blanks" into "zero, blanks".
+  The expand/collapse chevron is now drawn in its own box rather than
+  prepended to the name (`format!("{prefix}{}", row.name)`). Prepended it
+  shares the name's fate, and the name wants a front cut — so the chevron, the
+  only thing on the row saying whether it opens, would be the first thing
+  removed. A decoration that must survive cannot be concatenated onto text
+  that will be cut; give it its own box.
 
 The lesson that generalises past the cursor pattern: **a per-element bound is
 not a bound on the row.** Eliding each cell to its own width makes every cell

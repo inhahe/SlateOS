@@ -80,7 +80,7 @@ Every performance-critical subsystem has a measured baseline and a concrete targ
 - **No AI features in the OS** (exceptions: speech I/O, opt-in ML image/video indexer). **No ads.**
 - **YAML for all configuration files**, processed with a library that preserves user comments and formatting (e.g., ruamel.yaml or Rust equivalent).
 - **No binary logs** — text-based (JSON-lines) structured logging.
-- **Python (fastpy) is the default implementation language for everything that is not kernel-space or hot-path.** See the policy immediately below. This is a *default*, not a preference to be re-litigated per component: writing a new userspace tool, service, or app in Rust requires a reason from the exclusion list.
+- **Python (fastpy) is the default implementation language for every part of the OS that is not kernel-space and not somewhere Python would noticeably slow things down.** See the policy immediately below. This is a *default*, not a preference to be re-litigated per component: writing a new userspace tool, service, or app in Rust requires a reason from the exclusion list. The performance caveat is a real constraint, not a formality — but it is about *measured, noticeable* cost (a latency budget, a throughput path, an inner loop run enough times for a 2× to matter), not a general presumption that Python is slow: fastpy is AOT-compiled to native code and the shipped binary contains no interpreter.
 
 #### Implementation Language Policy (operator-directed)
 

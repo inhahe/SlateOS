@@ -1595,6 +1595,7 @@ _2D library: Vello (Rust-native, GPU compute shaders) + HarfBuzz FFI for complex
 - [ ] Can drag and drop icons into and out of system tray
 - [ ] Apps can start in system tray or minimize to system tray
 - [ ] User can override any app: always start in system tray, always in taskbar, or neither
+- [ ] **Parked consoles** — a program's activity console can live in the tray instead of on screen, tooltip showing its title and what it is currently doing. Off by default and opt-in per program; see §4.14 for the facility this is a view onto.
 - [ ] **Volume icon popup (click on system-tray volume icon).** Lightweight Aero-styled flyout — opens instantly without launching the full Settings app. Contents:
   - [ ] **Main volume slider** at top with current level, and a mute toggle next to it. Adjusting the slider takes effect immediately (no Apply button).
   - [ ] **Output device selector** — dropdown or radio list of available audio output devices (speakers, headphones, HDMI sinks, Bluetooth devices, USB DACs, virtual outputs). Selecting one switches the system default output. Currently active device shown highlighted; unavailable devices (unplugged, asleep) shown disabled with reason. Refreshes live as devices appear/disappear.
@@ -2132,6 +2133,7 @@ below and read the same kernel views, so the two can never disagree._
 - [ ] Show: capabilities, running user, priority levels, app name, what launched it, is it a service, what's blocking it, what's waiting on its locks, running/paused status, full path
 - [ ] **Launch provenance (command line + who/when started it).** Each process row must surface the full launch context: (a) the *command line* it was launched with — the executable path plus every argument (argv), and if any, the parameters/flags it was passed — shown verbatim when available, and clearly marked "(no arguments)" or "(command line unavailable)" when the process was spawned without a recorded argv or has since cleared it; (b) the *originating process or thread* that launched it — the parent process (and specific thread, when the kernel records launcher thread id) resolved to a clickable identity so the user can jump straight to the launcher's row, with graceful "(launcher exited)" / "(launched by init)" fallbacks; and (c) the *launch timestamp* (wall-clock time the process was created), shown both absolutely and as an elapsed "started N ago" so the user can correlate a process with something they just did. This is read-only informational metadata; the command line is captured by the kernel at `exec`/spawn time (the same argv/envp the loader already stores) and exposed through the `proc.inspect` process-query capability (§1.5), never self-declared by the process (so it can't lie about how it was invoked). Long command lines are truncated in the row with full text on hover / in the detail pane, and are copyable.
 - [ ] Switch to any window or terminal a process owns
+- [ ] **Live activity — what the process is doing right now.** An "Activity" column carrying each process's current-activity one-liner, and a per-process pane tailing its activity stream. The facility, its capability gating and the tray-parked-console alternative are §4.14; this bullet is the Process Explorer half of it.
 - [ ] System resource graphs (CPU, RAM, disk, network over time)
 - [ ] **Service-mediated resource attribution.** When a program's resource use flows through an OS service process — e.g., the program writes to a TCP socket and the network stack runs in a separate daemon, or the program opens a file and the disk I/O is performed by a filesystem service, or the program asks the audio service to mix samples — Process Explorer must attribute the resource consumption back to the *originating* program, not to the service. So a user sees "Firefox is using 4 MB/s of network" and "Slack is using 12% disk I/O" even though the kernel-visible network/disk traffic actually flows through the network/storage daemons.
   - [ ] **Mechanism.** Every service-mediated request carries the originator's identity through the IPC chain as a kernel-stamped tag (not a self-declared field — services can't lie). The service processes' accounting layer attributes bytes/cycles/I/O back to that tag. Process Explorer queries the kernel for a flattened "if I look through every service, who's actually using this resource" view alongside the raw "which process holds the syscall" view.
@@ -2825,6 +2827,109 @@ Automation support is opt-in, but we want it to be the norm rather than the exce
 - [ ] Automation API coverage is part of the quality checklist for programs in the official package repository
 
 _The automation framework uses the same channel IPC + RPC serialization (Cap'n Proto/FlatBuffers) as the rest of the OS. `libautomation` is a thin layer on top of the service registry — no new kernel primitives required. Programs that don't opt in are simply not automatable. The standard naming conventions ensure that scripts written for one chat client work with any chat client, one media player work with any media player, etc._
+
+---
+
+### 4.14 Program Activity Streams (what is this program doing right now?)
+
+_Operator's idea, 2026-08-14._
+
+On every existing desktop OS, a program that wants to narrate what it is doing
+writes to stdout — and to read stdout you need a console window. Nobody wants a
+console window per GUI app, so in practice GUI programs say nothing at all, and
+when one hangs or misbehaves the user has no way to find out what it was in the
+middle of. The diagnostic chatter either does not exist, or it exists in a log
+file nobody knows the path of.
+
+The fix is to **decouple "the program narrates" from "there is a console window
+on screen."** Every process gets a running activity stream whether or not
+anything is watching it; the OS buffers it; and it is read through the system
+tray, through Process Explorer (§4.3), or through the CLI. Because emitting is
+free and reading is easy, programs can be *encouraged* to narrate — which is the
+whole point, and the reason this has to be an OS facility rather than a
+convention each app reinvents.
+
+**This is deliberately not the event log (§2.6).** The event log is the
+low-volume, high-value, persisted, rotated, queried-months-later record:
+"service X crashed", "auth failed 3 times". An activity stream is the
+high-volume, low-value-per-line, in-memory, seconds-to-minutes record: "loading
+config", "decoding frame 4127", "waiting on DNS for api.example.com". Merging
+the two drowns the event log, which is exactly what makes Windows' Event Viewer
+useless. They stay separate, with one bridge in each direction (promotion on
+crash, below).
+
+#### Core facility
+
+- [ ] **Every process has an activity ring**, created at spawn, whether or not the process ever writes to it and whether or not anyone ever reads it. Bounded (default 256 KB, configurable per-process and by policy), lock-free, overwriting oldest-first. Freed at exit unless promoted.
+- [ ] **Backed by shared memory mapped into the writing process**, so the common case — a program appending a line nobody is currently reading — costs an atomic bump and a memcpy, with **no syscall**. This is a hard requirement, not an optimization: if narrating costs a syscall per line, programs will do it behind a `#[cfg(debug)]` and the feature dies.
+- [ ] **Verbosity levels** per stream (`trace`, `debug`, `info`, `notice`) with the current subscriber-demanded level published back into the shared page, so a program can cheaply test "is anyone asking for trace?" and skip formatting entirely when not. Formatting cost, not I/O cost, is what actually deters instrumentation.
+- [ ] **Automatic stdout/stderr capture.** A process with no controlling terminal has its stdout and stderr wired into its activity ring by default. Every already-written and every ported POSIX program therefore gains an inspectable activity stream with **zero code changes** — this is what makes the feature useful on day one instead of after an ecosystem-wide adoption campaign.
+  - [ ] A process *with* a terminal behaves normally (writes go to the terminal) and additionally tees into the ring, so `pstail` works on terminal programs too.
+  - [ ] Interleaving of stdout and stderr is preserved, with each line tagged by which stream it came from so a viewer can colour or filter them apart.
+- [ ] **Optional structured records** for programs that want to do better than flat text: `enter(fn)` / `exit(fn, outcome)`, `phase(name)`, `progress(done, total)`, `waiting_on(what)`. A viewer renders these as a collapsible call tree or a timeline rather than a scrolling wall, and they are what make "which function is it stuck in" answerable at a glance.
+  - [ ] `libactivity` (Rust crate + Python package via fastpy) with a derive macro / decorator that instruments a function's entry and exit in one annotation.
+  - [ ] Records carry a monotonic timestamp, so a stalled `enter` with no matching `exit` is directly visible as "in `parse_manifest` for 40 s".
+- [ ] **The current-activity one-liner.** Separate from the scrolling stream, a process publishes a single short "what I am doing right now" string, overwritten in place. This is what appears in the Process Explorer row and the tray tooltip. It is far more useful per pixel than any log, and costs one store.
+  - [ ] Derived automatically from the innermost open `phase`/`enter` record when the program has not set one explicitly.
+- [ ] **Promotion on crash.** When a process dies abnormally, the tail of its ring (last N KB, configurable) is captured into the crash report and a `process.crashed` event in the event log references it. This is the bridge that makes the ring worth writing to: the chatter that was worthless a second before the crash becomes the most valuable thing in the postmortem.
+- [ ] **Promotion on demand.** A user watching a stream can hit "keep this" to spill the current ring contents to a file, so an interesting trace survives the ring wrapping.
+
+#### Surface A — inspection tool (Process Explorer, §4.3)
+
+- [ ] **Activity column** in the main process list showing each process's current-activity one-liner, live-updating. Sortable and filterable; a fleet of otherwise-identical worker processes becomes readable at a glance.
+- [ ] **Activity pane** in the per-process detail view: live tail of that process's stream, with pause-on-scroll-up, text search, level filter, and stdout/stderr filter.
+- [ ] **Call-tree / timeline view** for processes emitting structured records, with open-but-not-yet-closed frames highlighted — the "it is stuck here" view.
+- [ ] **"Why is this program not responding?"** — when a window stops pumping events, the hung-app dialog (§4.1/§3.4) shows the program's current activity and the tail of its stream inline, instead of the contentless "This program is not responding" every other OS shows.
+- [ ] Cross-reference: the same kernel-stamped originator tag that powers §4.3's service-mediated resource attribution lets a *service's* activity lines be attributed back to the program that caused them — so "what is the filesystem service doing?" can answer "reading 2 GB for Backup.app".
+
+#### Surface B — tray-parked consoles (§3.4 System Tray)
+
+- [ ] **A program's console can exist without being on screen**, parked as a system-tray icon. Hovering shows a tooltip with the program's title and its current-activity one-liner; clicking opens the console window; closing the window parks it again rather than terminating the program.
+- [ ] **Off by default, opt-in per program** — the tray is finite and 40 tray consoles is worse than none. Enabled from the program's tray/taskbar override settings (§3.4), from Process Explorer's context menu ("show console in tray"), or requested by the program itself at launch for the cases where narration is the point (build tools, backup runs, long imports).
+- [ ] **Badge on the icon** when the stream has produced warnings or errors since it was last looked at, so a parked console can get attention without stealing focus.
+- [ ] **Consoles are views, not owners.** Opening, closing, or never opening a console does not change the program's behaviour or its output — the ring is being written either way. This is the difference from a real terminal, where closing the window kills the child and a program with no reader can block on a full pipe. An activity ring never blocks its writer; it overwrites.
+- [ ] A parked console can be dragged out of the tray into a real window and back, per the existing tray drag-and-drop item.
+
+#### CLI counterpart
+
+_Same rule as §2.7's `pslist`/`psinfo`/`psblame`: the text tools read the same
+kernel views as the GUI so the two can never disagree._
+
+- [ ] `pstail <pid|name>` — tail a process's activity stream (`-f` to follow, `-n` for backlog, level and stream filters). The `journalctl -f` of live process activity.
+- [ ] `psdoing [pid|name]` — print the current-activity one-liner for one process or all of them; one line each, greppable.
+- [ ] `pstree --doing` — the process tree annotated with what each node is currently doing.
+
+#### Capability gating and privacy
+
+- [ ] **Reading another process's activity stream is gated by a distinct capability** (`proc.trace`), *not* folded into the existing `proc.inspect`. Inspecting metadata — name, PID, CPU, memory — is a much weaker thing than reading a live text stream from inside a program, which can contain file paths, URLs, query strings, user names, and anything else the program happened to narrate. A process explorer wants both; a resource-graph widget wants only the first.
+- [ ] A process can always read its own stream without any capability.
+- [ ] **`sensitive` marking** on individual records: redacted in any view the owning user is not entitled to, and never promoted into a crash report that might be shared.
+- [ ] **AMBIGUITY:** whether `proc.trace` should be grantable per-target-process rather than as one blanket grant. Per-target is obviously safer and obviously more annoying; the same tension as every other capability in §1.5, and it should be resolved the same way that one is rather than separately here.
+- [ ] Activity streams are exempt from the "no binary logs" rule only in the sense that the ring's in-memory representation may be framed binary for speed; **everything that leaves the ring — spilled files, promoted crash tails, `pstail` output — is text (JSON-lines for structured records).**
+
+#### Settings
+
+- [ ] Per-program: activity stream on/off, ring size, default verbosity, tray console on/off/auto.
+- [ ] Global: default ring size, global cap on memory spent across all rings, whether stdout capture is on by default, retention of promoted/spilled traces.
+- [ ] A "programs that are narrating" list, so a user can see which programs support structured activity records and which are only being captured from stdout.
+
+#### Making it something programs actually do
+
+_The facility is worthless if no program narrates. The adoption levers, in
+descending order of effect:_
+
+- [ ] **It is free and automatic.** stdout capture means every program has a stream before its author has heard of the feature. Nothing else on this list matters as much.
+- [ ] **It is one annotation.** `libactivity`'s derive macro / decorator turns a function into an instrumented one at the cost of a single line, per §4.13's "~10 lines to add full automation support" precedent.
+- [ ] **The payoff is the crash report.** "Your program crashed and here is exactly what it was doing" is the argument that makes a developer instrument their code; it is a debugging win, not a charity donation to users.
+- [ ] Developer docs treat narration as normal practice, and the SDK's example programs all narrate.
+- [ ] The package repository's quality checklist counts structured activity records, as it does automation coverage.
+
+_Dependencies and lane split: the ring itself and the per-process shared page are
+kernel/runtime work (**A**), the stdout wiring and `libactivity`'s service side
+sit with the userspace runtime (**B**), and both viewing surfaces plus the CLI
+tools' presentation are **C**. The event-log bridge is §2.6 (**B**). This entry
+is filed whole so the shape is visible in one place; the individual tasks belong
+to their owning lanes' backlogs in `roadmap.md`._
 
 ---
 

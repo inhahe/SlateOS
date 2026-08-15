@@ -60742,6 +60742,37 @@ the bodies beneath them were already converted).
 Confirm each against the three questions above before changing it — the point
 of the list is to make the triage cheap, not to pre-judge it.
 
+**Next thread from this one, and it is bigger than the list above:
+`RenderTree::text` cannot bound anything.** The whole triage above searched for
+`max_width: Some(`, i.e. for callers that construct `RenderCommand::Text`
+literally. But most drawing goes through the `RenderTree` helper, and its
+signature is `text(&mut self, x, y, text, color, font_size)` — it hardcodes
+`max_width: None` (`gui/toolkit/src/render.rs:272`). **There are ~249 `.text(`
+call sites across `apps/` and `gui/`, and not one of them can express a
+bound.** Most draw static labels and are fine; the ones that draw
+variable-length content into a column are unbounded text running into whatever
+is drawn next, with no clip and no marker — the `window_rules.rs` failure mode,
+except the callers cannot fix it locally because the API has no width
+parameter.
+
+Confirmed instance: `apps/procexplorer`'s per-process thread table
+(`:1907`) draws `thread.name` — a *process-supplied* string — with
+`tree.text(...)` into a 200 px column, straight over the Status column beside
+it. The fix is structural: `RenderTree` needs a width-taking variant, and the
+dynamic-content call sites move to it. Do not convert all 249 — convert the
+sites whose text is variable-length and has a neighbour.
+
+Also queued from the same survey, `apps/torrent`'s three hand-drawn tables
+(peers `:3054`, files `:3212`, trackers `:3301`): every column width is written
+**three** times — in the `headers` array, in the row cell's `max_width`, and
+again as a literal in the row's `cx +=` (300.0 / `Some(300.0)` / `308.0`). They
+agree today and nothing keeps them agreeing. Same
+two-calculations-for-one-quantity shape as `window_rules.rs`, one copy worse.
+The cells are also wire-supplied — peer client names, torrent file paths,
+tracker URLs — so they clip unmarked, and the file path clips from the *end*,
+losing the filename that identifies it (`text::elide_start`, as used for
+`undelete`'s `Original Path`).
+
 **What it is.** `RenderCommand::Text` carries a `max_width`, and the obvious
 reading is that the compositor wraps to it. It does not. `Compositor::draw_text`
 walks the string one glyph at a time and `break`s at the limit:

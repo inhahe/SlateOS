@@ -43,23 +43,11 @@
 //! there reads "DON'T TOUCH OTHERWISE", and this is a transcription of it
 //! rather than a derivation.
 
-// Nothing outside this module builds a plan yet: `scaled` still shapes Indic
-// runs as if they were Latin. Not under `cfg(test)`, where this module's own
-// tests exercise all of it and the expectation would go unfulfilled. `expect`
-// rather than `allow` on purpose — the moment the shaper is wired in this goes
-// unfulfilled and the compiler asks for the line back.
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the shaper that builds this plan is not wired in yet"
-    )
-)]
-
 use alloc::vec::Vec;
 
-use crate::gsub::{SubGlyph, Substitutions};
-use crate::indic::{Category, Position, Syllable};
+use crate::bidi::{self, Class};
+use crate::gsub::{ALL_FEATURES, SubGlyph, Substitutions, feature_bit, feature_bits};
+use crate::indic::{Category, Char, Position, Syllable, syllables};
 use crate::script::ScriptTags;
 
 /// One of the nine scripts this shaper shapes.
@@ -113,6 +101,17 @@ impl Script {
             b"mlm2" => Self::Malayalam,
             _ => return None,
         })
+    }
+
+    /// The Indic script a run of `tags` is in, or `None` for a run this shaper
+    /// does not shape — including one with no script at all.
+    ///
+    /// The `Option`-taking form of [`of`](Self::of), because that is the shape
+    /// every caller has: a run's script is optional, since a run of digits and
+    /// punctuation belongs to none.
+    #[must_use]
+    pub(crate) fn shaping(tags: Option<ScriptTags>) -> Option<Self> {
+        tags.and_then(Self::of)
     }
 
     /// This script's configuration.
@@ -241,8 +240,16 @@ struct Config {
 pub(crate) struct Probe<'a> {
     /// The font's bytes.
     data: &'a [u8],
-    /// Its `GSUB`.
-    subs: &'a Substitutions,
+    /// Its `GSUB`, or `None` in a face that has none — or has one this crate
+    /// can apply nothing from, which comes to the same thing.
+    ///
+    /// Optional because reordering is not conditional on the font having
+    /// substitutions: a left matra is written before its consonant and drawn
+    /// before it, and moving it there is this shaper's job whether or not
+    /// anything else happens to the syllable. A face with no `GSUB` simply
+    /// answers "no" to every question the plan asks it, which is what the
+    /// forwarding methods below return.
+    subs: Option<&'a Substitutions>,
     /// The script to look features up under.
     tags: Option<ScriptTags>,
 }
@@ -250,7 +257,11 @@ pub(crate) struct Probe<'a> {
 impl<'a> Probe<'a> {
     /// A probe over `subs`, asking about a run of `tags`.
     #[must_use]
-    pub(crate) fn new(data: &'a [u8], subs: &'a Substitutions, tags: Option<ScriptTags>) -> Self {
+    pub(crate) fn new(
+        data: &'a [u8],
+        subs: Option<&'a Substitutions>,
+        tags: Option<ScriptTags>,
+    ) -> Self {
         Self { data, subs, tags }
     }
 }
@@ -327,9 +338,13 @@ impl<'a> Plan<'a> {
         // `DFLT` rather than nothing when it finds no script it asked for.
         let old_spec = probe
             .subs
-            .chosen_script(probe.tags)
+            .and_then(|subs| subs.chosen_script(probe.tags))
             .is_none_or(|tag| tag.get(3) != Some(&b'2'));
-        let mask = |tag: &[u8; 4]| probe.subs.feature_mask(probe.tags, tag);
+        let mask = |tag: &[u8; 4]| {
+            probe
+                .subs
+                .map_or(0, |subs| subs.feature_mask(probe.tags, tag))
+        };
         Self {
             probe,
             script,
@@ -370,13 +385,15 @@ impl<'a> Plan<'a> {
     /// Would the feature `tag` substitute `glyphs`, on this run's script?
     #[must_use]
     pub(crate) fn would(&self, tag: &[u8; 4], glyphs: &[u16]) -> bool {
-        self.probe.subs.would_substitute(
-            self.probe.data,
-            self.probe.tags,
-            tag,
-            glyphs,
-            self.zero_context,
-        )
+        self.probe.subs.is_some_and(|subs| {
+            subs.would_substitute(
+                self.probe.data,
+                self.probe.tags,
+                tag,
+                glyphs,
+                self.zero_context,
+            )
+        })
     }
 
     /// Where this face draws `consonant` when it stands beside a virama.
@@ -1461,6 +1478,286 @@ fn reorder_pre_base(plan: &Plan, glyphs: &mut [SubGlyph], base: &mut usize, try_
     }
 }
 
+/// The two features that run before any reordering.
+///
+/// `locl` because a face may spell a character differently for one language,
+/// and every question asked below is about the glyph it ends up as. `ccmp` is
+/// not in the Indic specification at all; HarfBuzz applies it here anyway, on
+/// the grounds that a face that uses it uses it at the start.
+const BEFORE: [&[u8; 4]; 2] = [b"locl", b"ccmp"];
+
+/// The eleven basic features, applied one at a time between the two
+/// reorderings, in this order.
+///
+/// One stage each rather than one pass over all eleven, because a later one is
+/// written to match glyphs an earlier one built: `rphf` makes the reph, and
+/// `abvs` — in the last stage — positions it. Running them together would have
+/// the second look at the run before the first rewrote it.
+const BASIC: [&[u8; 4]; 11] = [
+    b"nukt", b"akhn", b"rphf", b"rkrf", b"pref", b"blwf", b"abvf", b"half", b"pstf", b"vatu",
+    b"cjct",
+];
+
+/// The six features that run after final reordering, together.
+///
+/// Together and not one at a time because they do not feed each other, and
+/// because fonts in the field intermix their lookups: HarfBuzz's comment names
+/// the default Bengali font on Windows, whose `init`, `pres`, `abvs` and `blws`
+/// lookups are interleaved in the LookupList and only come out right applied in
+/// LookupList order.
+const AFTER: [&[u8; 4]; 6] = [b"init", b"pres", b"abvs", b"blws", b"psts", b"haln"];
+
+/// The Indic features every glyph in the run is eligible for.
+///
+/// The rest — `rphf`, `pref`, `blwf`, `abvf`, `half`, `pstf`, `init` — are
+/// handed out per glyph by the reordering, which is the whole mechanism by
+/// which a font is told *which* consonant to draw as a half form. These seven
+/// are absent here for that reason and not by oversight; HarfBuzz's flag is
+/// `F_GLOBAL` and the split is exactly the same one.
+const GLOBAL: [&[u8; 4]; 10] = [
+    b"nukt", b"akhn", b"rkrf", b"vatu", b"cjct", b"pres", b"abvs", b"blws", b"psts", b"haln",
+];
+
+/// Does `ch` *continue* a word — so that whatever follows it does not begin
+/// one?
+///
+/// HarfBuzz answers with the Unicode general category, counting a word as
+/// continuing through `Cf`, `Cn`, `Co`, `Cs`, every letter and every mark, and
+/// breaking on numbers, punctuation, symbols, separators and controls. This
+/// crate has no general-category table and answers with the `Bidi_Class`
+/// instead, which it does have and which draws very nearly the same line:
+/// letters are `L`, `R` or `Al`, marks are `Nsm`, and the format characters
+/// that matter here — the two joiners — are `Bn`. Digits (`En`, `An`), spaces
+/// (`Ws`), punctuation and symbols (`On`, `Cs`, `Es`, `Et`) break a word under
+/// both readings.
+///
+/// The two disagree on the explicit bidi controls, which HarfBuzz continues a
+/// word through and this breaks on, and on the C0 controls, the other way
+/// about. Read by exactly one thing — whether a left matra takes the `init`
+/// form — so a disagreement costs one glyph variant on text that puts a bidi
+/// override in the middle of a Devanagari word.
+#[must_use]
+pub(crate) fn continues_word(ch: char) -> bool {
+    matches!(
+        bidi::class(ch),
+        Class::L | Class::R | Class::Al | Class::Nsm | Class::Bn
+    )
+}
+
+/// Shape one run of Indic text: HarfBuzz's Indic shaper, end to end.
+///
+/// `glyphs` is one script run, one glyph per character, as `cmap` produced it
+/// and with [`SubGlyph::indic`] already set from the character. It comes back
+/// reordered and substituted, and may be a different length: a broken cluster
+/// gains a dotted circle and a conjunct loses glyphs to a ligature.
+///
+/// `subs` may be `None`. Reordering is not conditional on the font having
+/// substitutions — a left matra is written before its consonant and drawn
+/// before it whatever the font does — so a face with no `GSUB` still gets the
+/// two reorderings, with every question it is asked answered "no".
+///
+/// `glyph` maps a character to a glyph: the face's `cmap`. It is asked about
+/// exactly two characters, the virama and the dotted circle.
+pub(crate) fn shape(
+    data: &[u8],
+    subs: Option<&Substitutions>,
+    tags: Option<ScriptTags>,
+    script: Script,
+    glyphs: &mut Vec<SubGlyph>,
+    glyph: impl Fn(char) -> Option<u16>,
+) {
+    if glyphs.is_empty() {
+        return;
+    }
+    let plan = Plan::new(script, Probe::new(data, subs, tags), &glyph);
+    let global = feature_bits(&GLOBAL);
+    for g in glyphs.iter_mut() {
+        g.mask |= global;
+    }
+    setup_syllables(glyphs);
+
+    // Thirteen stages: the two openers together, the eleven basic ones one
+    // each, then everything else at once. "Everything else" is every feature
+    // this crate knows rather than just the six of `AFTER`, because the
+    // ordinary features — `rlig`, `calt`, `clig`, `rclt`, and the positioning
+    // ones a face may have filed under `GSUB` — belong to that last stage too:
+    // HarfBuzz adds them after the shaper's own and they land in whatever stage
+    // is open, which is this one. `liga` is the exception, switched off for
+    // Indic outright, because a standard-ligature lookup written for Latin has
+    // no business joining two Devanagari letters.
+    let mut stages = [0u64; 13];
+    if let Some(first) = stages.first_mut() {
+        *first = feature_bits(&BEFORE);
+    }
+    for (slot, tag) in stages.iter_mut().skip(1).zip(BASIC) {
+        *slot = feature_bit(tag);
+    }
+    if let Some(last) = stages.last_mut() {
+        *last = ALL_FEATURES & !feature_bit(b"liga");
+    }
+    // Everything the shaper itself asked for is confined to one syllable; the
+    // ordinary features sharing the last stage with `AFTER` are not.
+    let per_syllable = feature_bits(&BEFORE) | feature_bits(&BASIC) | feature_bits(&AFTER);
+
+    let dotted = glyph('\u{25CC}');
+    let mut order: Vec<u8> = Vec::new();
+    let Some(subs) = subs else {
+        // No lookups to run, so no stages either — but both reorderings still
+        // happen, back to back, which is what they would do with every stage
+        // between them substituting nothing.
+        initial_reordering(&plan, glyphs, dotted, &mut order);
+        final_reordering(&plan, glyphs);
+        return;
+    };
+    subs.apply_stages(data, tags, &stages, per_syllable, glyphs, |stage, glyphs| {
+        if stage == 0 {
+            initial_reordering(&plan, glyphs, dotted, &mut order);
+        } else if stage == BASIC.len() {
+            final_reordering(&plan, glyphs);
+        }
+    });
+}
+
+/// Cut the run into syllables and stamp each glyph with the one it is in.
+///
+/// The ranges are deliberately *not* kept: `locl` and `ccmp` run before the
+/// first reordering and are free to ligate, after which every index past the
+/// join is wrong. Stamping each glyph instead makes the boundaries survive
+/// anything a lookup does, since a ligature keeps its first component's stamp
+/// and a decomposition gives every piece the whole's.
+fn setup_syllables(glyphs: &mut [SubGlyph]) {
+    let mut cats: Vec<Category> = Vec::with_capacity(glyphs.len());
+    cats.extend(glyphs.iter().map(|g| g.indic.category));
+    let mut ranges: Vec<(usize, usize, Syllable)> = Vec::new();
+    syllables(&cats, &mut ranges);
+    // The serial lives in the high nibble and is stored pre-shifted, so that
+    // stamping is an `|` and stepping is an add. It cycles through fifteen
+    // values and never takes zero, which is what a glyph no syllable covers
+    // keeps — HarfBuzz numbers from one for the same reason.
+    let mut serial = 0x10u8;
+    for &(start, end, kind) in &ranges {
+        let stamp = serial | kind.code();
+        for g in glyphs.get_mut(start..end).unwrap_or_default() {
+            g.syllable = stamp;
+        }
+        serial = serial.wrapping_add(0x10);
+        if serial == 0 {
+            serial = 0x10;
+        }
+    }
+}
+
+/// Call `f` on each syllable of `glyphs` in turn.
+///
+/// The syllable is the maximal run of glyphs sharing a stamp, re-derived every
+/// time rather than remembered, for the reason [`setup_syllables`] gives. `f`
+/// is handed the kind the stamp records, whether the syllable begins a word,
+/// and the syllable itself as a slice it may permute but not resize.
+fn for_each_syllable(glyphs: &mut [SubGlyph], mut f: impl FnMut(Syllable, bool, &mut [SubGlyph])) {
+    let mut at = 0usize;
+    while at < glyphs.len() {
+        let Some(&first) = glyphs.get(at) else { break };
+        let end = glyphs
+            .iter()
+            .enumerate()
+            .skip(at)
+            .find(|&(_, g)| g.syllable != first.syllable)
+            .map_or(glyphs.len(), |(j, _)| j);
+        // A syllable begins a word when nothing that continues one precedes
+        // it. See [`SubGlyph::word`].
+        let word_start = at
+            .checked_sub(1)
+            .and_then(|prev| glyphs.get(prev))
+            .is_none_or(|g| !g.word);
+        if let Some(syllable) = glyphs.get_mut(at..end) {
+            f(Syllable::from_code(first.syllable), word_start, syllable);
+        }
+        // The floor of one is unreachable — a syllable is never empty — and is
+        // here so the walk terminates without relying on that.
+        at = end.max(at.saturating_add(1));
+    }
+}
+
+/// Everything that happens between `ccmp` and the first basic feature.
+fn initial_reordering(
+    plan: &Plan,
+    glyphs: &mut Vec<SubGlyph>,
+    dotted: Option<u16>,
+    order: &mut Vec<u8>,
+) {
+    plan.update_consonant_positions(glyphs);
+    insert_dotted_circles(glyphs, dotted);
+    for_each_syllable(glyphs, |kind, _, syllable| {
+        initial_reordering_syllable(plan, kind, syllable, order);
+    });
+}
+
+/// Everything that happens between the last basic feature and the rest.
+fn final_reordering(plan: &Plan, glyphs: &mut [SubGlyph]) {
+    for_each_syllable(glyphs, |_, word_start, syllable| {
+        final_reordering_syllable(plan, syllable, word_start);
+    });
+}
+
+/// Give every broken cluster something to hang its marks on.
+///
+/// A broken cluster is a matra or a virama with no consonant — text that is not
+/// a syllable. Drawing it as written would stack the marks on whatever happened
+/// to precede them; the convention every shaper follows is to show them on a
+/// dotted circle instead, so that what appears on screen says "these marks
+/// belong to nothing" rather than silently corrupting the word before.
+///
+/// Nothing happens in a face with no U+25CC, which is the honest answer there:
+/// there is no circle to draw.
+fn insert_dotted_circles(glyphs: &mut Vec<SubGlyph>, dotted: Option<u16>) {
+    let Some(gid) = dotted else { return };
+    if !glyphs
+        .iter()
+        .any(|g| Syllable::from_code(g.syllable) == Syllable::Broken)
+    {
+        return;
+    }
+    let mut out: Vec<SubGlyph> = Vec::with_capacity(glyphs.len().saturating_add(1));
+    // No stamp is ever zero, so the first glyph of the run always compares
+    // unequal and a broken cluster starting at index zero is not missed.
+    let mut last = 0u8;
+    let mut i = 0usize;
+    while let Some(&g) = glyphs.get(i) {
+        if g.syllable == last || Syllable::from_code(g.syllable) != Syllable::Broken {
+            out.push(g);
+            i = i.saturating_add(1);
+            continue;
+        }
+        last = g.syllable;
+        // The circle goes *after* a repha, not before it: a repha is drawn
+        // above the letter that follows, and the letter that follows is the
+        // circle.
+        while let Some(&repha) = glyphs.get(i) {
+            if repha.syllable != last || repha.indic.category != Category::Repha {
+                break;
+            }
+            out.push(repha);
+            i = i.saturating_add(1);
+        }
+        // Cluster, mask and stamp are the *cluster's own* — taken from the
+        // glyph the circle is being inserted in front of, before the repha
+        // skip, so that the circle belongs to the same cluster and is eligible
+        // for the same features as the marks it is about to carry.
+        out.push(SubGlyph {
+            gid,
+            cluster: g.cluster,
+            mask: g.mask,
+            syllable: g.syllable,
+            indic: Char {
+                category: Category::DottedCircle,
+                position: Position::End,
+            },
+            ..SubGlyph::cursive(gid, g.cluster, None)
+        });
+    }
+    *glyphs = out;
+}
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -1472,8 +1769,7 @@ fn reorder_pre_base(plan: &Plan, glyphs: &mut [SubGlyph], base: &mut usize, try_
 mod tests {
     use super::*;
     use crate::fixture::{gsub_from_scripts, ligature, ligature_set, ligature_subst, script_list, span};
-    use crate::gsub::{LOOKUP_LIGATURE, Lig, feature_bit};
-    use crate::indic::Char;
+    use crate::gsub::{LOOKUP_LIGATURE, Lig};
     use alloc::vec::Vec;
 
     /// Every script, so a table change cannot be tested against only the one
@@ -1623,7 +1919,7 @@ mod tests {
 
     /// A plan over `data`, for `script`, with `VIRAMA` as the virama glyph.
     fn plan<'a>(data: &'a [u8], subs: &'a Substitutions, script: Script) -> Plan<'a> {
-        Plan::new(script, Probe::new(data, subs, Some(tags(script))), |_| {
+        Plan::new(script, Probe::new(data, Some(subs), Some(tags(script))), |_| {
             Some(VIRAMA)
         })
     }
@@ -1707,7 +2003,7 @@ mod tests {
         let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
         let plan = Plan::new(
             Script::Devanagari,
-            Probe::new(&data, &subs, Some(tags(Script::Devanagari))),
+            Probe::new(&data, Some(&subs), Some(tags(Script::Devanagari))),
             |_| None,
         );
         assert_eq!(plan.consonant_position(CONSONANT), Position::BaseC);
@@ -1795,7 +2091,7 @@ mod tests {
         let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
         let plan = Plan::new(
             script,
-            Probe::new(&data, &subs, Some(ScriptTags::exactly(*tag))),
+            Probe::new(&data, Some(&subs), Some(ScriptTags::exactly(*tag))),
             |_| Some(VIRAMA),
         );
         f(&plan);

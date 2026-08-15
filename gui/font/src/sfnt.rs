@@ -63,6 +63,7 @@ use core::fmt;
 
 use crate::gpos::{Adjust, Positioning, Run};
 use crate::gsub::{SubGlyph, Substitutions};
+use crate::indic_shape::{self, Script};
 use crate::kern::Kerning;
 use crate::mark::MarkPositioning;
 use crate::otl;
@@ -1183,8 +1184,19 @@ impl Face {
     /// another writing system. `None` asks for the face's default features,
     /// which is the right answer for a run of digits and punctuation and the
     /// only one available for a caller holding bare glyph ids.
+    ///
+    /// An Indic run is not substituted but *shaped*: the same lookups run, but
+    /// in thirteen stages with a reordering between two of them, because the
+    /// order Indic text is stored in is not the order it is drawn in. That path
+    /// runs even in a face with no `GSUB`, since moving a left matra in front
+    /// of its consonant is this crate's job rather than the font's.
     pub fn substitute(&self, script: Option<ScriptTags>, glyphs: &mut Vec<SubGlyph>) {
-        if let Some(subs) = self.substitutions.as_ref() {
+        let subs = self.substitutions.as_ref();
+        if let Some(indic) = Script::shaping(script) {
+            indic_shape::shape(&self.data, subs, script, indic, glyphs, |ch| {
+                self.glyph_index(ch)
+            });
+        } else if let Some(subs) = subs {
             subs.apply(&self.data, script, glyphs);
         }
     }

@@ -187,7 +187,7 @@ const FINA: u64 = 0b10_0000_0000_0000_0000;
 /// stage is intersected with each lookup's own mask, and a bit no feature
 /// occupies is a bit no lookup carries — so the extra ones select nothing and
 /// the constant needs no maintenance when the list grows.
-const ALL_FEATURES: u64 = u64::MAX;
+pub(crate) const ALL_FEATURES: u64 = u64::MAX;
 
 /// The mask bit of the feature tagged `tag`, or `0` for a tag this crate never
 /// asks a face for.
@@ -205,6 +205,14 @@ pub(crate) fn feature_bit(tag: &[u8; 4]) -> u64 {
         .and_then(|i| u32::try_from(i).ok())
         .and_then(|i| 1u64.checked_shl(i))
         .unwrap_or(0)
+}
+
+/// The mask selecting every feature in `tags` at once.
+///
+/// A tag this crate never asks a face for contributes nothing, for the reason
+/// [`feature_bit`] gives.
+pub(crate) fn feature_bits(tags: &[&[u8; 4]]) -> u64 {
+    tags.iter().fold(0, |mask, tag| mask | feature_bit(tag))
 }
 
 /// The mask for a glyph whose cursive form is `form`.
@@ -352,6 +360,20 @@ pub struct SubGlyph {
     /// because a lookup cannot join glyphs from two syllables in the first
     /// place.
     pub(crate) syllable: u8,
+    /// Whether this glyph's character *continues* a word — so that the glyph
+    /// after it does not begin one.
+    ///
+    /// HarfBuzz asks the preceding character's Unicode general category and
+    /// counts a word as continuing through `Cf`, `Cn`, `Co`, `Cs`, every letter
+    /// and every mark. The question is asked of the *character*, so like
+    /// [`indic`](Self::indic) it has to be answered while there is still a
+    /// character to ask, and carried here.
+    ///
+    /// Read by exactly one thing: the Indic shaper's `init` feature, which is
+    /// for a left matra that begins a word. So it is only computed on runs an
+    /// Indic shaper will see, and left `false` — "everything begins a word" —
+    /// everywhere else, where nothing reads it.
+    pub(crate) word: bool,
     /// What the Indic shaper thinks this glyph is and where it belongs.
     ///
     /// Set from the *character* `cmap` looked the glyph up from, because that
@@ -573,6 +595,7 @@ impl SubGlyph {
             lig: Lig::default(),
             indic: Char::DEFAULT,
             syllable: 0,
+            word: false,
         }
     }
 
@@ -591,6 +614,7 @@ impl SubGlyph {
             lig: Lig::default(),
             indic: Char::DEFAULT,
             syllable: 0,
+            word: false,
         }
     }
 
@@ -612,6 +636,7 @@ impl SubGlyph {
             lig: Lig::default(),
             indic: Char::DEFAULT,
             syllable: 0,
+            word: false,
         }
     }
 }
@@ -670,7 +695,7 @@ impl Substitutions {
         script: Option<ScriptTags>,
         glyphs: &mut Vec<SubGlyph>,
     ) {
-        self.apply_stages(data, script, &[ALL_FEATURES], false, glyphs, |_, _| {});
+        self.apply_stages(data, script, &[ALL_FEATURES], 0, glyphs, |_, _| {});
     }
 
     /// Apply the lookups in several passes, one per entry of `stages`.
@@ -693,17 +718,25 @@ impl Substitutions {
     /// reordering that has to happen at a particular point in the sequence
     /// rather than before or after all of it.
     ///
-    /// `per_syllable` confines every match to one syllable — a lookup is
-    /// offered each maximal run of glyphs sharing a [`SubGlyph::syllable`]
-    /// separately, so no rule can see across a boundary. Indic features are
-    /// all declared that way: a ligature spanning two syllables is never what
-    /// the font meant, whatever its coverage says.
+    /// `per_syllable` is the set of features that may not match across a
+    /// syllable boundary: a lookup some feature in it reaches is offered each
+    /// maximal run of glyphs sharing a [`SubGlyph::syllable`] separately, so no
+    /// rule inside it can see beyond one. Indic features are all declared that
+    /// way — a ligature spanning two syllables is never what the font meant,
+    /// whatever its coverage says — but the general ones the Indic shaper runs
+    /// alongside them in its last stage are not.
+    ///
+    /// A *set* and not a flag because that is the granularity the confinement
+    /// really has: one lookup can be reached by both a per-syllable feature and
+    /// an unconstrained one, and HarfBuzz resolves the clash by confining it —
+    /// its `per_syllable |= ` when it merges two entries for one lookup, which
+    /// is what the intersection below reproduces.
     pub(crate) fn apply_stages(
         &self,
         data: &[u8],
         script: Option<ScriptTags>,
         stages: &[u64],
-        per_syllable: bool,
+        per_syllable: u64,
         glyphs: &mut Vec<SubGlyph>,
         mut between: impl FnMut(usize, &mut Vec<SubGlyph>),
     ) {
@@ -726,7 +759,7 @@ impl Substitutions {
                     continue;
                 }
                 ctx.mask = mask;
-                if per_syllable {
+                if mask & per_syllable != 0 {
                     apply_per_syllable(data, lookup, glyphs, &mut ctx, &mut piece);
                 } else {
                     apply_lookup(data, lookup, glyphs, &mut ctx);
@@ -2137,7 +2170,14 @@ mod tests {
                 ..SubGlyph::new(gid, i)
             })
             .collect();
-        subs.apply_stages(data, None, &[ALL_FEATURES], true, &mut glyphs, |_, _| {});
+        subs.apply_stages(
+            data,
+            None,
+            &[ALL_FEATURES],
+            ALL_FEATURES,
+            &mut glyphs,
+            |_, _| {},
+        );
         glyphs.iter().map(|g| g.gid).collect()
     }
 
@@ -2195,7 +2235,7 @@ mod tests {
             .enumerate()
             .map(|(i, &gid)| SubGlyph::new(gid, i))
             .collect();
-        subs.apply_stages(&data, None, &[0], false, &mut glyphs, |_, _| {});
+        subs.apply_stages(&data, None, &[0], 0, &mut glyphs, |_, _| {});
         assert_eq!(glyphs.iter().map(|g| g.gid).collect::<Vec<_>>(), [10, 11]);
     }
 
@@ -2215,7 +2255,7 @@ mod tests {
             &data,
             None,
             &[0, ALL_FEATURES],
-            false,
+            0,
             &mut glyphs,
             |i, glyphs| seen.push((i, glyphs.len())),
         );

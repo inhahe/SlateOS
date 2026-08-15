@@ -53,18 +53,6 @@
 //!   replaced writing a shaper per script. It is a larger piece of work and
 //!   is tracked separately.
 
-// The syllable scanner and the table behind it are read only by the pass that
-// cuts a run into syllables, and that pass is not wired into `scaled.rs` yet;
-// `indic_shape` reads the categories and positions but never builds a `Char`.
-// Not under `cfg(test)`, where this module's own tests exercise all of it and
-// the expectation would go unfulfilled. `expect` rather than `allow` on
-// purpose: the moment the shaper is wired in the compiler asks for this line
-// back.
-#![cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the pass that reads this table is not wired in yet")
-)]
-
 use alloc::vec::Vec;
 
 use crate::indic_machine::{ACCEPTS, TRANSITIONS};
@@ -276,6 +264,50 @@ pub(crate) enum Syllable {
     Broken,
     /// Not Indic at all, or a stray syllable modifier. Never reordered.
     NonIndic,
+}
+
+impl Syllable {
+    /// This kind as the low nibble of a [`SubGlyph::syllable`] byte.
+    ///
+    /// The syllable ranges cannot be remembered as indices: `locl` and `ccmp`
+    /// run before the first reordering and are free to ligate, after which
+    /// every index past the join is wrong. So the kind rides on each glyph
+    /// instead and the ranges are re-derived from the run whenever they are
+    /// wanted — which is what the byte is for, and why a kind has to fit in
+    /// four bits of it.
+    ///
+    /// The numbering is HarfBuzz's `indic_syllable_type_t`, so that a value
+    /// read out of one of its traces means the same thing here.
+    ///
+    /// [`SubGlyph::syllable`]: crate::gsub::SubGlyph
+    #[must_use]
+    pub(crate) fn code(self) -> u8 {
+        match self {
+            Self::Consonant => 0,
+            Self::Vowel => 1,
+            Self::Standalone => 2,
+            Self::Symbol => 3,
+            Self::Broken => 4,
+            Self::NonIndic => 5,
+        }
+    }
+
+    /// The kind [`code`](Self::code) writes as `code`'s low nibble.
+    ///
+    /// A nibble no kind uses reads back as [`NonIndic`](Self::NonIndic), which
+    /// is the kind that does nothing: a glyph whose syllable byte was never
+    /// written is not part of any syllable this shaper laid out.
+    #[must_use]
+    pub(crate) fn from_code(code: u8) -> Self {
+        match code & 0x0F {
+            0 => Self::Consonant,
+            1 => Self::Vowel,
+            2 => Self::Standalone,
+            3 => Self::Symbol,
+            4 => Self::Broken,
+            _ => Self::NonIndic,
+        }
+    }
 }
 
 /// Cut `cats` into syllables, appending `(start, end, kind)` to `out`.

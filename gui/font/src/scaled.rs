@@ -33,6 +33,8 @@ use crate::bidi::{self, Base, Level};
 use crate::fallback::{self, Extents};
 use crate::gpos::{Adjust, Run};
 use crate::gsub::SubGlyph;
+use crate::indic::Char;
+use crate::indic_shape::{Script, continues_word};
 use crate::joining::{self, Form};
 use crate::norm;
 use crate::raster::{GlyphMask, rasterize};
@@ -533,6 +535,12 @@ impl ScaledFont {
         let mut zeroed = runs
             .first()
             .is_none_or(|&(_, t)| fallback::zeroes_mark_advances(t));
+        // And whether this run is one the Indic shaper will lay out, which
+        // decides whether the two facts it reads off the *character* are worth
+        // deriving. Neither is free — one is a binary search of the Indic
+        // table, the other of the bidi table — and neither is read anywhere
+        // else, so a line of Latin pays for neither.
+        let mut indic = runs.first().is_some_and(|&(_, t)| Script::shaping(t).is_some());
         for (i, &(ch, cluster)) in pieces.iter().enumerate() {
             while runs.get(run).is_some_and(|&(end, _)| end <= i) {
                 run = run.saturating_add(1);
@@ -543,6 +551,7 @@ impl ScaledFont {
                 zeroed = runs
                     .get(run)
                     .is_none_or(|&(_, t)| fallback::zeroes_mark_advances(t));
+                indic = runs.get(run).is_some_and(|&(_, t)| Script::shaping(t).is_some());
             }
             // A tab has no glyph. Drawn through `cmap` it comes out as the
             // missing-glyph box, one space wide; the width every caller wants
@@ -567,6 +576,16 @@ impl ScaledFont {
                 mark: !tab
                     && norm::is_mark(ch)
                     && ((synth && placeable) || (by_category && zeroed)),
+                // What the Indic shaper needs and cannot recover later: both
+                // are properties of the character, and by the time it runs
+                // there may be no character left to ask — a conjunct is one
+                // glyph standing for four of them.
+                indic: if indic && !tab {
+                    Char::of(ch)
+                } else {
+                    Char::DEFAULT
+                },
+                word: indic && !tab && continues_word(ch),
                 ..SubGlyph::cursive(gid, cluster, forms.get(i).copied().flatten())
             });
             tabs.push(tab);

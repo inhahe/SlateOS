@@ -5609,7 +5609,7 @@ _This is the biggest single porting effort. Unlocks browser, web apps, and VS Co
 - [ ] `[C]` Port Thunderbird (email client)
 
 ### 4.4 Development tools
-- [ ] `[B]` gcc, cmake, make, pkg-config (via POSIX layer)
+- [-] `[B]` gcc, cmake, make, pkg-config (via POSIX layer) — **pkg-config half is proven at link level**: upstream pkgconf 2.3.0 cross-compiles and links against `toolchain/sysroot/lib/libc.a` with zero source changes, zero shims and **zero missing symbols** on the first attempt (53 distinct libc symbols, all already present, including the BSD-isms `strlcpy`/`strlcat`/`reallocarray`). See `scripts/pkgconf-spike/`. Deliberately *not* `[x]`: linking is not running — the binary has never executed under the kernel, so `realpath`/`lstat`/`opendir` behaviour on our VFS and the 0x1000/0x2000 segment alignment vs our 16 KiB pages are unverified. Next step is an on-target ring-3 self-test in the `services/fastpy-*` shape. gcc/cmake/make remain untouched.
 - [ ] `[B]` Rust toolchain (for kernel recompilation)
 - [ ] `[B]` CPython (latest, for ecosystem compatibility and fastpy bootstrapping)
 - [ ] `[B]` fastpy compiler (Python AOT compiler — first-class language for OS userspace components)

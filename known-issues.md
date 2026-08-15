@@ -4,9 +4,9 @@
 
 **Status: FIXED 2026-08-15** (lane C, commits `f508f76cf`, `f53562a09`,
 `feb695bbd`, `8208fad9d`, `83dfaff21`, `5750232c5`, `a8d659199`, `ffbdec410`,
-`54fd94f2b`, `5305d139f`, `b3373ad17`, `db06a8c3c`, `de378bab6`, and the dbviewer/indexer commit following
-it). Found while surveying app tables for unbounded columns. Seventeen sites
-across `apps/` and `gui/` confused a byte count with a character count, usually
+`54fd94f2b`, `5305d139f`, `b3373ad17`, `db06a8c3c`, `de378bab6`, `37ee779ae`,
+`10db32f9c`). Found while surveying app tables for unbounded columns. Eighteen
+sites across `apps/` and `gui/` confused a byte count with a character count, usually
 while truncating a *display* string:
 
 ```rust
@@ -43,6 +43,7 @@ particular apps — it is their ordinary input.
 | `apps/dbviewer/src/main.rs:895` | SQL `LIKE`'s `_` wildcard | `LIKE '_'` was false for a one-character CJK cell and `LIKE '___'` was true for it. |
 | `apps/indexer/src/main.rs:709` | the `?` wildcard and `[...]` classes of a third glob matcher | Same as filesearch's, in the file indexer. |
 | `apps/indexer/src/main.rs:826` | `levenshtein_bounded`, the fuzzy-match edit distance | One substituted kanji cost 3 of a budget the user reads as "a couple of typos", so near-exact CJK matches were rejected. |
+| `apps/jsonviewer/src/main.rs:304` | the parser's `col`, shown as "Ln 3, Col 17" | Not a panic and not a wrong result — a wrong *report*. The caret pointed up to two columns per preceding character too far right. |
 
 The last ten were found while fixing the first seven and were not in the
 original count. `gui/clipboard/src/main.rs:183` looked like another but is not:
@@ -282,8 +283,115 @@ a full-workspace test run is in flight. A workspace gate launched earlier picked
 up `renamer` mid-verification and reported two failures that were the
 scaffolding, not the tree.
 
+**Site eighteen shows the class reaches things that neither panic nor compute a
+wrong answer.** `apps/jsonviewer`'s parser counted `col` once per byte. Nothing
+downstream indexes with it — it is used only to *tell the user where the error
+is*, in the status bar and the error list. So the parse was right, the error was
+right, and the caret pointed at the wrong character: a document whose string
+value is `日本語` rather than `xxx` reported column 20 where the ASCII one
+reported 14. That makes it the least dangerous instance and the easiest to
+overlook, because there is no crash and no bad data to notice — just a number
+that quietly stops meaning what its label says. The fix is one line: skip the
+increment for continuation bytes (`b & 0xC0 == 0x80`), which are the tail of a
+character its leading byte already counted.
+
+**A caution about how these are found.** The same grep that turned up kanban's
+real corruption (next section) also flagged `apps/jsonviewer`'s `parse_string`,
+which does `result.push(b as char)` on the very next line — and *that* one is
+correct, because it sits under `if b < 0x80` and the non-ASCII branch rewinds
+into a real UTF-8 decoder with proper surrogate handling. Two functions, the
+same six-token expression, opposite verdicts. No pattern distinguishes them;
+only reading the enclosing guard does. Treat a grep hit in this class as a
+question, never as a finding.
+
 Violates `CLAUDE.md` self-review item 7 (never force UTF-8 assumptions on
 OS-boundary data) and trips the workspace's `clippy::indexing_slicing` warn.
+
+## Byte-at-a-time JSON string import reinterpreted UTF-8 as Latin-1 (lane C)
+
+**Status: FIXED 2026-08-15** (lane C, commit `237636350`). Found while sweeping
+for byte-at-a-time text walkers, and it is a *different* class from the
+byte/character-count confusion above — worth keeping separate, because the
+symptom, the detection method and the fix all differ.
+
+`apps/kanban`'s `JsonImporter::parse_string` built its result one byte at a
+time:
+
+```rust
+} else {
+    result.push(b as char);   // b: u8
+}
+```
+
+`b as char` maps a **byte value** to the Unicode scalar with that value. That is
+a Latin-1 decode. There is no count involved, nothing is truncated, and nothing
+panics: an imported card titled `日本語` (E6 97 A5 ...) simply comes back as
+`æ\u{97}¥...`. It is `String::from_utf8_lossy`'s failure mode reached by a
+different route, and it is worse than a panic in one specific way — **the damage
+persists.** The mojibake becomes the card's title in memory, and the very next
+save writes it to disk as the new truth. Import a board, glance away, and the
+original text is gone.
+
+Why the count-confusion sweep would not have found it: there is no `len()`, no
+slice, no guard, no wildcard. The tell is the cast itself. The generalisation
+worth carrying forward is that **`u8 as char` is almost always a bug on text**;
+it is sound only where the byte is already known to be ASCII — which is exactly
+the distinction that made `apps/jsonviewer`'s identical-looking line correct.
+
+The fix copies unescaped runs out as whole `&str` slices instead. That is sound
+precisely because the two bytes that terminate a run — `"` and `\` — are ASCII,
+and an ASCII byte can never occur inside a multi-byte UTF-8 sequence, so the cut
+is always on a character boundary. (This is the same self-synchronisation
+property that cleared so many near-misses in the sweep above; here it is what
+makes the fix work rather than what made the bug absent.) It is also faster than
+pushing char by char.
+
+Fixing the function properly turned up two further defects in it:
+
+- **`\uXXXX` was never decoded.** It fell through to the unknown-escape arm and
+  came back as a literal backslash, `u`, and four digits. This was not
+  hypothetical: our own `JsonExporter::escape_json` emits exactly that form for
+  every character below U+0020, so **export followed by import did not
+  round-trip** for any card whose text contained a control character. Now
+  decoded, including leading/trailing surrogate pairs — which is how JSON spells
+  anything outside the BMP, so emoji in a board exported by any other tool were
+  equally unreadable. An unpaired surrogate degrades to U+FFFD rather than
+  failing the whole import.
+- **The unknown-escape arm had the same cast** (`result.push(esc as char)`) on a
+  single byte, so a backslash followed by a multi-byte character both corrupted
+  that character and left the scan stranded mid-sequence. It now consumes a
+  whole character.
+
+Non-vacuity was checked by reinstating the byte-at-a-time parser: all four new
+tests fail under it while the ASCII control test and both pre-existing parser
+tests keep passing — the profile that shows the new tests discriminate *and*
+that the rewrite changed nothing for ASCII.
+
+Violates `CLAUDE.md` self-review item 7 in its strongest form: this is not an
+assumption about encoding, it is an actual re-encoding.
+
+## Almost no `apps/` crate opts into the workspace lints (lane C)
+
+**Status: OPEN 2026-08-15** (lane C). Noticed while checking whether
+`clippy::arithmetic_side_effects` applied to a fix in `apps/kanban`. It does
+not — because `apps/kanban/Cargo.toml` has no `[lints] workspace = true`.
+
+Nor do 124 of the ~126 crates under `apps/`. `apps/jsonviewer` has it;
+essentially nothing else does. So the workspace's `clippy::all = deny`,
+`pedantic = warn`, and the four correctness lints `CLAUDE.md` specifically asks
+for (`unwrap_used`, `expect_used`, `indexing_slicing`, `arithmetic_side_effects`)
+are silently not enforced across the entire application tree — which is, not
+coincidentally, where every one of the eighteen byte/character sites above
+lived. `indexing_slicing` in particular would have flagged a good number of them
+at the moment they were written.
+
+The fix is mechanical (add two lines to each `Cargo.toml`) but not free: it will
+surface a large backlog of warnings, and `clippy::all` at `deny` will outright
+break crates that currently build clean. The right shape is to land the opt-in
+crate by crate, fixing each crate's fallout as it goes, rather than as one
+tree-wide commit that has to be reverted the moment anything is red. Worth
+doing: a lint that is configured but not applied is worse than no lint, because
+the workspace config reads as though the guarantee is in force.
 
 ## `apps/editor`'s syntax highlighter is complete, tested, and not connected (lane C)
 

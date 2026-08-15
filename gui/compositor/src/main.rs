@@ -43,11 +43,11 @@ use std::time::{Duration, Instant};
 #[allow(unused_imports)]
 use guitk::color::Color;
 #[allow(unused_imports)]
-use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
+use guitk::render::{FontFamily, FontWeightHint, RenderCommand, RenderTree};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
 use osfont::raster::GlyphMask;
-use osfont::system::{FontCache, Weight};
+use osfont::system::{Family, FontCache, Weight};
 
 mod buffer;
 pub use buffer::{BufferFormat, SharedBuffer};
@@ -1446,6 +1446,14 @@ fn weight_of(hint: FontWeightHint) -> Weight {
     }
 }
 
+/// Translates the toolkit's family into the one `osfont` understands.
+fn family_of(family: FontFamily) -> Family {
+    match family {
+        FontFamily::Ui => Family::Ui,
+        FontFamily::Mono => Family::Mono,
+    }
+}
+
 /// Blend one glyph's coverage into the framebuffer.
 ///
 /// Free rather than a method so it can run while a `&mut SystemFont` borrowed
@@ -1517,6 +1525,13 @@ struct RenderEngine {
     /// because this process only ever draws: it would take that cache's lock
     /// for every glyph run and never once measure anything.
     fonts: FontCache,
+    /// The families pushed by [`RenderCommand::PushFont`], innermost last.
+    ///
+    /// A stack rather than a single value so the scopes nest the way the clip
+    /// and translate ones do: a terminal pane inside a UI window pushes `Mono`,
+    /// and the status bar drawn after it must get the UI face back rather than
+    /// whatever the last push happened to be.
+    font_stack: Vec<FontFamily>,
 }
 
 impl RenderEngine {
@@ -1531,10 +1546,21 @@ impl RenderEngine {
                 "compositor: no system UI font found, falling back to the built-in bitmap face"
             ),
         }
+        // Resolved here for the same reason as the UI face: the process that
+        // measured a terminal's grid picked its family from this same list, so
+        // resolving it the same way is what keeps the cells the app laid out
+        // and the glyphs drawn into them the same width.
+        match guitk::text::install_mono_faces(&mut fonts) {
+            Some(family) => eprintln!("compositor: monospace font: {family}"),
+            None => eprintln!(
+                "compositor: no monospace font found, falling back to the built-in bitmap face"
+            ),
+        }
         Self {
             clip_stack: ClipStack::default(),
             translate_stack: TranslateStack::default(),
             fonts,
+            font_stack: Vec::new(),
         }
     }
 
@@ -1553,6 +1579,7 @@ impl RenderEngine {
         // Set up initial clip to the window's client area.
         self.clip_stack.clear();
         self.translate_stack.clear();
+        self.font_stack.clear();
         self.clip_stack.push(Rect::new(
             window_x,
             window_y,
@@ -1569,6 +1596,10 @@ impl RenderEngine {
 
         self.clip_stack.clear();
         self.translate_stack.clear();
+        // Cleared rather than asserted empty: the command list came from
+        // another process, so an unbalanced push is that process's bug and
+        // must not leak into the next window this engine draws.
+        self.font_stack.clear();
     }
 
     fn execute_command(&mut self, fb: &mut Framebuffer, cmd: &RenderCommand, opacity: f32) {
@@ -1662,6 +1693,12 @@ impl RenderEngine {
             }
             RenderCommand::PopTranslate => {
                 self.translate_stack.pop();
+            }
+            RenderCommand::PushFont { family } => {
+                self.font_stack.push(*family);
+            }
+            RenderCommand::PopFont => {
+                self.font_stack.pop();
             }
             RenderCommand::Image { .. } => {
                 // Image rendering requires an asset store — stub for now.
@@ -1798,7 +1835,8 @@ impl RenderEngine {
         weight: FontWeightHint,
     ) {
         let clip = self.clip_stack.current().copied();
-        let font = self.fonts.get(size, weight_of(weight));
+        let family = self.font_stack.last().copied().unwrap_or_default();
+        let font = self.fonts.get(size, weight_of(weight), family_of(family));
         let baseline = y as f32 + font.metrics().ascent;
         let max_x = max_width.map(|w| x.saturating_add(w as i32));
         let mut pen = x as f32;
@@ -3337,7 +3375,7 @@ impl Compositor {
         let line_height = self
             .render_engine
             .fonts
-            .get(DEFAULT_FONT_SIZE, Weight::Regular)
+            .get(DEFAULT_FONT_SIZE, Weight::Regular, Family::Ui)
             .line_height();
         let text_y = tb_y + (TITLE_BAR_HEIGHT as i32 - line_height as i32) / 2;
         let max_text_width = tb_width.saturating_sub(

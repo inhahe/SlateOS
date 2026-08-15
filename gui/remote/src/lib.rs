@@ -55,7 +55,7 @@
 )]
 
 use guitk::color::Color;
-use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
+use guitk::render::{FontFamily, FontWeightHint, RenderCommand, RenderTree};
 use guitk::style::CornerRadii;
 
 pub mod scene;
@@ -105,6 +105,8 @@ enum Tag {
     PushTranslate = 0x08,
     PopTranslate = 0x09,
     BoxShadow = 0x0A,
+    PushFont = 0x0B,
+    PopFont = 0x0C,
 }
 
 impl Tag {
@@ -120,7 +122,49 @@ impl Tag {
             0x08 => Some(Self::PushTranslate),
             0x09 => Some(Self::PopTranslate),
             0x0A => Some(Self::BoxShadow),
+            0x0B => Some(Self::PushFont),
+            0x0C => Some(Self::PopFont),
             _ => None,
+        }
+    }
+}
+
+/// Wire encoding of [`FontFamily`].
+///
+/// Added after `PROTOCOL_VERSION` was set to 1, without bumping it: the two
+/// tags it belongs to are *new* tag bytes, so every frame a version-1 encoder
+/// could produce still decodes identically. A newer encoder talking to an
+/// older decoder is the only mismatch, and that one already fails cleanly with
+/// [`DecodeError::BadTag`] naming the byte it did not know. Bumping the
+/// version instead would additionally reject old encoders whose frames are
+/// perfectly decodable, which trades a clear error for a broader outage.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FontFamilyTag {
+    Ui = 0x00,
+    Mono = 0x01,
+}
+
+impl FontFamilyTag {
+    fn from_byte(b: u8) -> Option<Self> {
+        match b {
+            0x00 => Some(Self::Ui),
+            0x01 => Some(Self::Mono),
+            _ => None,
+        }
+    }
+
+    fn to_family(self) -> FontFamily {
+        match self {
+            Self::Ui => FontFamily::Ui,
+            Self::Mono => FontFamily::Mono,
+        }
+    }
+
+    fn from_family(f: FontFamily) -> Self {
+        match f {
+            FontFamily::Ui => Self::Ui,
+            FontFamily::Mono => Self::Mono,
         }
     }
 }
@@ -183,6 +227,8 @@ pub enum DecodeError {
     BadTag(u8),
     /// A `FontWeightHint` tag byte was unknown.
     BadFontWeight(u8),
+    /// A `FontFamily` tag byte was unknown.
+    BadFontFamily(u8),
     /// A string field was not valid UTF-8.
     BadUtf8,
     /// A scene frame's window or removed-id count exceeds [`scene::MAX_WINDOWS_PER_FRAME`].
@@ -204,6 +250,7 @@ impl core::fmt::Display for DecodeError {
             }
             Self::BadTag(b) => write!(f, "unknown command tag {b:#04x}"),
             Self::BadFontWeight(b) => write!(f, "unknown font-weight tag {b:#04x}"),
+            Self::BadFontFamily(b) => write!(f, "unknown font-family tag {b:#04x}"),
             Self::BadUtf8 => write!(f, "string field was not valid UTF-8"),
             Self::TooManyWindows(n) => {
                 write!(
@@ -323,6 +370,13 @@ fn encode_command(cmd: &RenderCommand, out: &mut Vec<u8>) {
         }
         RenderCommand::PopTranslate => {
             out.push(Tag::PopTranslate as u8);
+        }
+        RenderCommand::PushFont { family } => {
+            out.push(Tag::PushFont as u8);
+            out.push(FontFamilyTag::from_family(*family) as u8);
+        }
+        RenderCommand::PopFont => {
+            out.push(Tag::PopFont as u8);
         }
         RenderCommand::BoxShadow {
             x,
@@ -637,6 +691,15 @@ fn decode_command(r: &mut Reader<'_>) -> Result<RenderCommand, DecodeError> {
             dy: r.read_f32()?,
         },
         Tag::PopTranslate => RenderCommand::PopTranslate,
+        Tag::PushFont => {
+            let byte = r.read_u8()?;
+            RenderCommand::PushFont {
+                family: FontFamilyTag::from_byte(byte)
+                    .ok_or(DecodeError::BadFontFamily(byte))?
+                    .to_family(),
+            }
+        }
+        Tag::PopFont => RenderCommand::PopFont,
         Tag::BoxShadow => RenderCommand::BoxShadow {
             x: r.read_f32()?,
             y: r.read_f32()?,

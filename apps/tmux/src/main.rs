@@ -37,7 +37,7 @@
 #![allow(dead_code)]
 
 use guitk::Color;
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontFamily, FontWeightHint, RenderCommand};
 use guitk::style::CornerRadii;
 use guitk::text;
 
@@ -82,18 +82,29 @@ const CELL_FONT_SIZE: f32 = 14.0;
 ///
 /// A terminal really is a grid — the whole point is that column 40 of row 3
 /// sits above column 40 of row 4 — so the cell is a single number rather than
-/// a per-string measurement. But it has to be *the face's* number: this was a
-/// hardcoded 8.0, which matched the built-in face at 14 px and nothing else,
-/// so any other face drew glyphs that overhung the cell background behind
-/// them and the block cursor landed beside the character it marks.
+/// a per-string measurement. Two things have to be true for that to work, and
+/// each was wrong here in turn:
+///
+/// * The number must be *the face's*, not a constant. It was a hardcoded 8.0,
+///   which matched the built-in bitmap face at 14 px and nothing else.
+/// * The face must be **fixed-pitch**, or there is no single number to take.
+///   It was then `text::digit_advance`, a digit's advance in the proportional
+///   UI face — under which a `W` measured 13.1 px in a 7.5 px cell, so every
+///   wide glyph overhung its neighbour's background and the block cursor
+///   landed beside the character it marks.
+///
+/// [`text::cell_advance`] asks for [`FontFamily::Mono`], where one character's
+/// advance is every character's. The pane's glyphs are drawn inside a matching
+/// [`RenderCommand::PushFont`] scope, so what is measured here is what the
+/// compositor puts on the screen.
 fn char_width() -> f32 {
-    text::digit_advance(CELL_FONT_SIZE, FontWeightHint::Regular)
+    text::cell_advance(CELL_FONT_SIZE, FontWeightHint::Regular)
 }
 
-/// Height of one terminal cell, likewise taken from the face rather than
-/// assumed, so tall faces do not overlap into the row below.
+/// Height of one terminal cell, likewise taken from the fixed-pitch face
+/// rather than assumed, so tall faces do not overlap into the row below.
 fn char_height() -> f32 {
-    text::line_height(CELL_FONT_SIZE, FontWeightHint::Regular)
+    text::line_height_in(CELL_FONT_SIZE, FontWeightHint::Regular, FontFamily::Mono)
 }
 const PADDING: f32 = 4.0;
 const SMALL_TEXT: f32 = 11.0;
@@ -1831,6 +1842,15 @@ impl Multiplexer {
             let visible_rows = ((height - 4.0) / cell_h) as usize;
             let visible_cols = ((width - 4.0) / cell_w) as usize;
 
+            // The grid, and only the grid, is drawn fixed-pitch: `char_width`
+            // measured in this family, so the glyphs have to be drawn in it
+            // too or the cells the app laid out and the glyphs the compositor
+            // puts in them are different widths. The indicators below sit
+            // outside the scope because they are UI labels, not cells.
+            cmds.push(RenderCommand::PushFont {
+                family: FontFamily::Mono,
+            });
+
             for row_idx in 0..visible_rows.min(pane.buffer.rows) {
                 if let Some(row) = pane.buffer.cells.get(row_idx) {
                     for col_idx in 0..visible_cols.min(row.len()) {
@@ -1881,6 +1901,8 @@ impl Multiplexer {
                     corner_radii: CornerRadii::ZERO,
                 });
             }
+
+            cmds.push(RenderCommand::PopFont);
 
             // Copy mode indicator
             if pane.copy_mode {
@@ -2926,17 +2948,44 @@ mod tests {
     }
     // --- Cell metrics ---
 
-    /// A character has to fit the cell drawn behind it. When the cell was a
-    /// hardcoded 8.0 this held only for the built-in face; any wider face put
-    /// each glyph over its neighbour's background.
+    /// A character has to fit the cell drawn behind it. Measured in the
+    /// family the glyphs are actually drawn in — with the proportional UI
+    /// face a `W` came out 13.1 px wide in a 7.5 px cell, over its
+    /// neighbour's background and beside the block cursor meant to mark it.
     #[test]
     fn a_character_fits_its_cell() {
         let w = char_width();
-        for ch in ['0', 'W', 'i', '#', 'é'] {
-            let drawn = text::width(&ch.to_string(), CELL_FONT_SIZE);
+        for ch in ['0', 'W', 'i', '#', 'é', 'M', '@'] {
+            let drawn = text::measure_in(
+                &ch.to_string(),
+                CELL_FONT_SIZE,
+                FontWeightHint::Regular,
+                FontFamily::Mono,
+            );
             assert!(
                 drawn <= w + 0.01,
                 "{ch:?} draws {drawn} px wide in a {w} px cell"
+            );
+        }
+    }
+
+    /// Bold cells share the grid with regular ones, so a bold glyph has to
+    /// fit the same cell — a fixed-pitch family's bold face is the same
+    /// pitch, and this is where that assumption is checked rather than
+    /// assumed.
+    #[test]
+    fn a_bold_character_fits_the_same_cell() {
+        let w = char_width();
+        for ch in ['0', 'W', 'M', '@'] {
+            let drawn = text::measure_in(
+                &ch.to_string(),
+                CELL_FONT_SIZE,
+                FontWeightHint::Bold,
+                FontFamily::Mono,
+            );
+            assert!(
+                drawn <= w + 0.01,
+                "bold {ch:?} draws {drawn} px wide in a {w} px cell"
             );
         }
     }
@@ -2945,8 +2994,52 @@ mod tests {
     /// in the row below.
     #[test]
     fn rows_do_not_overlap() {
-        assert!(char_height() >= text::ascent(CELL_FONT_SIZE, FontWeightHint::Regular));
+        assert!(
+            char_height()
+                >= text::ascent_in(CELL_FONT_SIZE, FontWeightHint::Regular, FontFamily::Mono)
+        );
         assert!(char_height() > 0.0 && char_width() > 0.0);
+    }
+
+    /// Whatever the pane draws its cells with, the compositor has to be told
+    /// to use the same family — otherwise the grid is laid out in one face
+    /// and filled in another, which is the bug the cell width alone cannot
+    /// catch.
+    #[test]
+    fn the_grid_is_drawn_in_the_family_it_was_measured_in() {
+        let mut app = Multiplexer::new();
+        // A fresh multiplexer's buffer is all spaces, and the cell loop skips
+        // a space on the default background — so with no content the scope
+        // would open and close over nothing and the test would pass vacuously.
+        for pane in &mut app.panes {
+            pane.buffer.write_str("cell content\n");
+        }
+        let cmds = app.render();
+        let mut depth = 0_i32;
+        let mut deepest = 0_i32;
+        let mut cell_glyphs = 0_usize;
+        for cmd in &cmds {
+            match cmd {
+                RenderCommand::PushFont { family } => {
+                    assert_eq!(family, &FontFamily::Mono, "only the grid pushes a family");
+                    depth += 1;
+                    deepest = deepest.max(depth);
+                }
+                RenderCommand::PopFont => {
+                    depth -= 1;
+                    assert!(depth >= 0, "a PopFont without a matching PushFont");
+                }
+                RenderCommand::Text { font_size, .. }
+                    if depth > 0 && (font_size - CELL_FONT_SIZE).abs() < 0.01 =>
+                {
+                    cell_glyphs += 1;
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(depth, 0, "the font scopes do not balance");
+        assert_eq!(deepest, 1, "the grid's scope was never opened");
+        assert!(cell_glyphs > 0, "no cell was drawn inside the mono scope");
     }
 
     /// Window tabs are chrome, not grid: the label is proportional text and

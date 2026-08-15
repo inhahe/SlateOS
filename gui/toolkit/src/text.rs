@@ -32,11 +32,11 @@
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use osfont::select::Query;
-use osfont::system::{FontCache, Weight};
+use osfont::system::{Family, FontCache, Weight};
 
 use crate::color::Color;
 use crate::fontdb::FontDb;
-use crate::render::{FontWeightHint, RenderCommand};
+use crate::render::{FontFamily, FontWeightHint, RenderCommand};
 
 /// The families tried, in order, when nothing has chosen one.
 ///
@@ -58,6 +58,26 @@ pub const DEFAULT_UI_FAMILIES: &[&str] = &[
     "Arial",
 ];
 
+/// The fixed-pitch families tried, in order, when nothing has chosen one.
+///
+/// Same shape as [`DEFAULT_UI_FAMILIES`] and same reason, but the stakes are
+/// higher: a terminal drawn in a proportional face is not merely off-brand,
+/// it is *wrong* — glyphs overhang the cell background behind them and the
+/// block cursor lands beside the character it marks. When none of these
+/// resolve the built-in 8x16 bitmap face answers, and that one really is
+/// fixed-pitch, so the grid holds either way.
+pub const DEFAULT_MONO_FAMILIES: &[&str] = &[
+    "JetBrains Mono",
+    "Cascadia Mono",
+    "Cascadia Code",
+    "Consolas",
+    "DejaVu Sans Mono",
+    "Liberation Mono",
+    "Noto Sans Mono",
+    "Menlo",
+    "Courier New",
+];
+
 /// The index of installed fonts, built once per process.
 ///
 /// Separate from the cache so that changing the UI font later does not
@@ -72,10 +92,12 @@ fn font_db() -> &'static FontDb {
 #[derive(Debug)]
 struct Fonts {
     cache: FontCache,
-    /// The family currently installed, or `None` while the built-in bitmap
+    /// The UI family currently installed, or `None` while the built-in bitmap
     /// face is in use. Held here rather than in a second static so it cannot
     /// disagree with what the cache actually holds.
     family: Option<String>,
+    /// The fixed-pitch family currently installed, likewise.
+    mono_family: Option<String>,
 }
 
 /// The process-wide font cache.
@@ -107,7 +129,12 @@ fn cache() -> &'static Mutex<Fonts> {
     CACHE.get_or_init(|| {
         let mut cache = FontCache::new();
         let family = install_ui_faces(&mut cache).map(str::to_string);
-        Mutex::new(Fonts { cache, family })
+        let mono_family = install_mono_faces(&mut cache).map(str::to_string);
+        Mutex::new(Fonts {
+            cache,
+            family,
+            mono_family,
+        })
     })
 }
 
@@ -131,22 +158,46 @@ pub fn install_ui_faces(cache: &mut FontCache) -> Option<&'static str> {
         .find(|family| install_family(cache, family))
 }
 
-/// Load `family`'s regular and bold faces into `cache`, reporting success.
+/// Load the default fixed-pitch font into `cache`, returning the family that
+/// won.
+///
+/// The counterpart of [`install_ui_faces`], and public for the same reason: a
+/// second cache — the compositor's — has to resolve the family the same way
+/// the measuring process did, or a terminal is measured in one face and drawn
+/// in another and its grid comes apart.
+///
+/// Returns `None`, having changed nothing, if no family on the list resolves;
+/// [`FontFamily::Mono`] then falls back to the built-in bitmap face, which is
+/// itself fixed-pitch.
+pub fn install_mono_faces(cache: &mut FontCache) -> Option<&'static str> {
+    DEFAULT_MONO_FAMILIES
+        .iter()
+        .copied()
+        .find(|family| install_family_as(cache, FontFamily::Mono, family))
+}
+
+/// Load `family`'s regular and bold faces into `cache` as the UI font.
+pub fn install_family(cache: &mut FontCache, family: &str) -> bool {
+    install_family_as(cache, FontFamily::Ui, family)
+}
+
+/// Load `name`'s regular and bold faces into `cache` as `family`.
 ///
 /// Both weights must load, and the cache is only touched once both have: a
 /// half-installed family would draw bold text in the old face and regular in
 /// the new one, which looks like a rendering fault rather than a missing
 /// font.
-pub fn install_family(cache: &mut FontCache, family: &str) -> bool {
+pub fn install_family_as(cache: &mut FontCache, family: FontFamily, name: &str) -> bool {
     let db = font_db();
     let (Ok(regular), Ok(bold)) = (
-        db.load(family, Query::regular()),
-        db.load(family, Query::bold()),
+        db.load(name, Query::regular()),
+        db.load(name, Query::bold()),
     ) else {
         return false;
     };
-    cache.set_face(Weight::Regular, Arc::new(regular));
-    cache.set_face(Weight::Bold, Arc::new(bold));
+    let family = family_of(family);
+    cache.set_face(family, Weight::Regular, Arc::new(regular));
+    cache.set_face(family, Weight::Bold, Arc::new(bold));
     true
 }
 
@@ -168,6 +219,23 @@ pub fn set_font_family(family: &str) -> bool {
     true
 }
 
+/// Draw all fixed-pitch text in `family` from now on.
+///
+/// The [`set_font_family`] of the terminal font. Returns `false` and changes
+/// nothing if the family is not installed or cannot be read.
+///
+/// Note that nothing checks that the named family *is* fixed-pitch: a caller
+/// that points this at a proportional face gets a terminal with a broken grid,
+/// and that is the caller's decision to have made.
+pub fn set_mono_family(family: &str) -> bool {
+    let mut fonts = cache().lock().unwrap_or_else(PoisonError::into_inner);
+    if !install_family_as(&mut fonts.cache, FontFamily::Mono, family) {
+        return false;
+    }
+    fonts.mono_family = Some(family.to_string());
+    true
+}
+
 /// The family UI text is currently drawn in, or `None` if no installed font
 /// could be found and the built-in bitmap face is in use.
 #[must_use]
@@ -176,6 +244,17 @@ pub fn font_family() -> Option<String> {
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .family
+        .clone()
+}
+
+/// The family fixed-pitch text is currently drawn in, or `None` if none
+/// resolved and the built-in bitmap face is in use.
+#[must_use]
+pub fn mono_family() -> Option<String> {
+    cache()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .mono_family
         .clone()
 }
 
@@ -196,10 +275,11 @@ pub fn available_families() -> Vec<String> {
 fn with_font<R>(
     size: f32,
     weight: FontWeightHint,
+    family: FontFamily,
     f: impl FnOnce(&mut osfont::system::SystemFont) -> R,
 ) -> R {
     let mut fonts = cache().lock().unwrap_or_else(PoisonError::into_inner);
-    f(fonts.cache.get(size, weight_of(weight)))
+    f(fonts.cache.get(size, weight_of(weight), family_of(family)))
 }
 
 /// Translates the toolkit's weight hint into the one `osfont` understands.
@@ -213,9 +293,49 @@ fn weight_of(hint: FontWeightHint) -> Weight {
     }
 }
 
+/// Translates the toolkit's family into the one `osfont` understands.
+fn family_of(family: FontFamily) -> Family {
+    match family {
+        FontFamily::Ui => Family::Ui,
+        FontFamily::Mono => Family::Mono,
+    }
+}
+
 /// Width of `text` in pixels, as the compositor will actually draw it.
 pub fn measure(text: &str, size: f32, weight: FontWeightHint) -> f32 {
-    with_font(size, weight, |font| font.measure(text))
+    measure_in(text, size, weight, FontFamily::Ui)
+}
+
+/// Width of `text` in pixels in `family`.
+///
+/// The family-aware form of [`measure`]. A caller drawing inside a
+/// [`RenderCommand::PushFont`] scope must measure with the same family it
+/// pushed, or its layout and the compositor's drawing disagree — which is the
+/// one class of bug this whole module exists to remove.
+pub fn measure_in(text: &str, size: f32, weight: FontWeightHint, family: FontFamily) -> f32 {
+    with_font(size, weight, family, |font| font.measure(text))
+}
+
+/// The advance of one fixed-pitch cell: the width every glyph occupies in
+/// [`FontFamily::Mono`].
+///
+/// This is the number a terminal lays its grid out on. It replaces
+/// [`digit_advance`] for that purpose — a digit's advance is only the cell
+/// width if the face is monospace, and the UI face is not, so a terminal
+/// measured that way drew a `W` almost twice as wide as the cell it was
+/// supposed to sit in.
+pub fn cell_advance(size: f32, weight: FontWeightHint) -> f32 {
+    measure_in("0", size, weight, FontFamily::Mono)
+}
+
+/// Baseline-to-baseline distance in pixels in `family`.
+pub fn line_height_in(size: f32, weight: FontWeightHint, family: FontFamily) -> f32 {
+    with_font(size, weight, family, |font| font.line_height())
+}
+
+/// Distance from the top of a line down to its baseline in `family`.
+pub fn ascent_in(size: f32, weight: FontWeightHint, family: FontFamily) -> f32 {
+    with_font(size, weight, family, |font| font.metrics().ascent)
 }
 
 /// Width of `text` in pixels at the default weight.
@@ -225,7 +345,7 @@ pub fn width(text: &str, size: f32) -> f32 {
 
 /// Baseline-to-baseline distance in pixels.
 pub fn line_height(size: f32, weight: FontWeightHint) -> f32 {
-    with_font(size, weight, |font| font.line_height())
+    line_height_in(size, weight, FontFamily::Ui)
 }
 
 /// Distance from the top of a line down to its baseline, in pixels.
@@ -233,7 +353,7 @@ pub fn line_height(size: f32, weight: FontWeightHint) -> f32 {
 /// Needed by callers that position text by its top edge, which is most of
 /// them, since layout works in boxes.
 pub fn ascent(size: f32, weight: FontWeightHint) -> f32 {
-    with_font(size, weight, |font| font.metrics().ascent)
+    ascent_in(size, weight, FontFamily::Ui)
 }
 
 /// The x at which to draw `text` so that it is centred on `center`.
@@ -280,9 +400,13 @@ pub fn padded_width_any_weight(text: &str, padding: f32, size: f32) -> f32 {
 /// treating text as a grid.
 ///
 /// A grid is the wrong model for proportional text, so this is a stopgap for
-/// widgets that have not yet been converted to measure real substrings — the
-/// terminal-style views where a character grid is genuinely the right model
-/// should keep using it.
+/// widgets that have not yet been converted to measure real substrings.
+///
+/// It is **not** the right call for a terminal-style view, even though a grid
+/// is genuinely the right model there: a digit's advance is only every glyph's
+/// advance if the face is fixed-pitch, and the UI face is not. Those callers
+/// want [`cell_advance`], which asks for a fixed-pitch face and so gets a
+/// number that is true of every character.
 pub fn digit_advance(size: f32, weight: FontWeightHint) -> f32 {
     measure("0", size, weight)
 }
@@ -302,7 +426,9 @@ pub fn fit(text: &str, max_width: f32, size: f32, weight: FontWeightHint) -> usi
     // do — is what makes the cut agree with `measure`: an unkerned sum drifts
     // from the width the text is actually drawn at, so an ellipsis appeared a
     // few pixels from where the string really ended.
-    with_font(size, weight, |font| font.shape(text).fit(max_width, text.len()))
+    with_font(size, weight, FontFamily::Ui, |font| {
+        font.shape(text).fit(max_width, text.len())
+    })
 }
 
 /// The longest *suffix* of `text` that fits in `max_width`, as the byte index
@@ -317,7 +443,7 @@ pub fn fit_end(text: &str, max_width: f32, size: f32, weight: FontWeightHint) ->
     if max_width <= 0.0 {
         return text.len();
     }
-    with_font(size, weight, |font| {
+    with_font(size, weight, FontFamily::Ui, |font| {
         font.shape(text).fit_end(max_width, text.len())
     })
 }
@@ -398,7 +524,7 @@ pub fn wrap(text: &str, max_width: f32, size: f32, weight: FontWeightHint) -> Ve
         // Reporting the paragraphs unwrapped keeps the line count meaningful.
         return text.split('\n').map(str::to_string).collect();
     }
-    with_font(size, weight, |font| font.wrap(text, max_width))
+    with_font(size, weight, FontFamily::Ui, |font| font.wrap(text, max_width))
 }
 
 /// A block of prose, drawn as one [`RenderCommand::Text`] per wrapped line.
@@ -598,7 +724,7 @@ pub fn char_index_at(text: &str, offset: f32, size: f32, weight: FontWeightHint)
     // every character boundary. This converts because the callers still count
     // characters; the conversion is where a caret inside a ligature gets
     // rounded to the ligature's start rather than into the middle of it.
-    let at = with_font(size, weight, |font| {
+    let at = with_font(size, weight, FontFamily::Ui, |font| {
         font.shape(text).offset_at(offset, text.len())
     });
     text.get(..at).map_or_else(

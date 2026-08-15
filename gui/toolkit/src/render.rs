@@ -80,6 +80,23 @@ pub enum RenderCommand {
     /// Remove the most recent transform.
     PopTranslate,
 
+    /// Draw subsequent [`Text`](RenderCommand::Text) in `family`.
+    ///
+    /// Scoped rather than carried on each `Text` command for the same reason
+    /// the clip and the translate are: a family is a property of a *region* of
+    /// the tree — a terminal pane, a code block — not of each individual
+    /// string in it, and the alternative would have put a field on the ~2500
+    /// places in this tree that build a `Text` command so that a handful of
+    /// them could set it to something other than the default.
+    ///
+    /// A backend that does not understand this command draws everything in the
+    /// UI face, which is what it did before the command existed.
+    PushFont { family: FontFamily },
+
+    /// Return to the family in force before the matching
+    /// [`PushFont`](RenderCommand::PushFont).
+    PopFont,
+
     /// Draw a box shadow.
     BoxShadow {
         x: f32,
@@ -102,6 +119,27 @@ pub enum FontWeightHint {
     Regular,
     Bold,
     Light,
+}
+
+/// Which kind of face to draw text with.
+///
+/// The toolkit's mirror of [`osfont::system::Family`], kept separate for the
+/// same reason [`FontWeightHint`] is kept separate from `osfont`'s `Weight`:
+/// the render tree is the interface between an app and whatever draws it, and
+/// it should not oblige every app to name the font crate.
+///
+/// [`Mono`](FontFamily::Mono) is a promise about the *metrics*, not about the
+/// look: every glyph advances the same distance, so a caller may treat text as
+/// a grid. A terminal is the case that needs it — with a proportional face,
+/// column 40 of row 3 does not sit above column 40 of row 4.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FontFamily {
+    /// The system UI face. Proportional; what everything is drawn in unless
+    /// it says otherwise.
+    #[default]
+    Ui,
+    /// A fixed-pitch face.
+    Mono,
 }
 
 /// Collected render output from a frame.

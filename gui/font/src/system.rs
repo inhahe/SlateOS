@@ -319,7 +319,33 @@ pub enum Weight {
     Bold,
 }
 
-/// The fonts a UI draws with, one per distinct size and weight.
+/// Which kind of face a caller is asking for.
+///
+/// Not a family *name*: the cache holds parsed faces and has no opinion about
+/// what they are called. This is the distinction that changes what the caller
+/// may assume about the answer — [`Mono`](Family::Mono) promises every glyph
+/// has the same advance, and [`Ui`](Family::Ui) promises nothing of the kind.
+///
+/// It exists because a terminal is a grid: column 40 of row 3 must sit above
+/// column 40 of row 4, which is only true if the face is fixed-pitch. Drawing
+/// a terminal in the proportional UI face means a `W` overhangs its cell and
+/// the block cursor lands beside the character it marks. There is no way to
+/// ask for a grid-safe face without saying which kind of face you want, so
+/// this is that question.
+///
+/// When no face is installed for a family the built-in 8x16 bitmap font
+/// answers, and that face *is* monospace — so a `Mono` request is grid-safe
+/// even on a host with no fixed-pitch font at all.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Family {
+    /// The system's UI face: proportional, what labels are drawn in.
+    #[default]
+    Ui,
+    /// A fixed-pitch face, where every glyph advances the same distance.
+    Mono,
+}
+
+/// The fonts a UI draws with, one per distinct size, weight and family.
 ///
 /// Exists because measuring and drawing must agree. A widget asks "how wide is
 /// this label" while laying out, and the compositor asks "what glyphs does this
@@ -337,11 +363,11 @@ pub enum Weight {
 /// and why a UI that never calls [`FontCache::set_face`] still draws.
 #[derive(Debug, Default)]
 pub struct FontCache {
-    fonts: BTreeMap<(u32, Weight), SystemFont>,
-    /// The installed face per weight, if any. Shared rather than owned per
-    /// size: a UI asks for the same family at a handful of sizes, and a face
-    /// is the whole font file.
-    faces: BTreeMap<Weight, Arc<Face>>,
+    fonts: BTreeMap<(u32, Weight, Family), SystemFont>,
+    /// The installed face per family and weight, if any. Shared rather than
+    /// owned per size: a UI asks for the same family at a handful of sizes,
+    /// and a face is the whole font file.
+    faces: BTreeMap<(Family, Weight), Arc<Face>>,
 }
 
 impl FontCache {
@@ -351,23 +377,23 @@ impl FontCache {
         Self::default()
     }
 
-    /// Draw `weight` with `face` from now on.
+    /// Draw `family` at `weight` with `face` from now on.
     ///
-    /// Every font already built at this weight is dropped, because a cached
-    /// `SystemFont` holds glyphs rasterized from the *previous* face: keeping
-    /// them would make the size a UI happened to ask for first decide which
-    /// face it gets. The glyphs are rebuilt lazily on the next `get`.
+    /// Every font already built at this family and weight is dropped, because
+    /// a cached `SystemFont` holds glyphs rasterized from the *previous* face:
+    /// keeping them would make the size a UI happened to ask for first decide
+    /// which face it gets. The glyphs are rebuilt lazily on the next `get`.
     ///
     /// Installing only a regular face is normal and supported — bold text then
     /// falls back to the built-in bold bitmap face rather than to a synthesised
     /// emboldening of the real one, which is the honest answer until there is a
     /// bold face to use.
-    pub fn set_face(&mut self, weight: Weight, face: Arc<Face>) {
-        self.faces.insert(weight, face);
-        self.fonts.retain(|(_, w), _| *w != weight);
+    pub fn set_face(&mut self, family: Family, weight: Weight, face: Arc<Face>) {
+        self.faces.insert((family, weight), face);
+        self.fonts.retain(|(_, w, f), _| (*f, *w) != (family, weight));
     }
 
-    /// Parse `data` and install it for `weight`.
+    /// Parse `data` and install it for `family` at `weight`.
     ///
     /// The convenience form of [`FontCache::set_face`] for a caller that has
     /// just read a file and has no other use for the parsed face.
@@ -377,30 +403,42 @@ impl FontCache {
     /// Whatever [`Face::parse`] rejects the file with. The cache is left
     /// untouched on failure, so a bad file downgrades to the built-in face
     /// rather than leaving the UI without one.
-    pub fn install_face(&mut self, weight: Weight, data: Vec<u8>) -> Result<(), SfntError> {
-        self.set_face(weight, Arc::new(Face::parse(data)?));
+    pub fn install_face(
+        &mut self,
+        family: Family,
+        weight: Weight,
+        data: Vec<u8>,
+    ) -> Result<(), SfntError> {
+        self.set_face(family, weight, Arc::new(Face::parse(data)?));
         Ok(())
     }
 
-    /// Whether a real face is installed for `weight`.
+    /// Whether a real face is installed for `family` at `weight`.
     #[must_use]
-    pub fn has_face(&self, weight: Weight) -> bool {
-        self.faces.contains_key(&weight)
+    pub fn has_face(&self, family: Family, weight: Weight) -> bool {
+        self.faces.contains_key(&(family, weight))
     }
 
-    /// The font for `px` and `weight`, building it on first use.
-    pub fn get(&mut self, px: f32, weight: Weight) -> &mut SystemFont {
-        let face = self.faces.get(&weight).map(Arc::clone);
-        self.fonts.entry((round_px(px), weight)).or_insert_with(|| {
-            // An installed face that will not scale to this size is a
-            // per-size failure, not a reason to stop using the face: fall
-            // back for this entry and leave the face installed.
-            face.and_then(|f| SystemFont::from_shared(f, px).ok())
-                .unwrap_or_else(|| match weight {
-                    Weight::Regular => SystemFont::builtin(px),
-                    Weight::Bold => SystemFont::builtin_bold(px),
-                })
-        })
+    /// The font for `px`, `weight` and `family`, building it on first use.
+    ///
+    /// A family with no face installed falls back to the built-in bitmap face
+    /// rather than to another family's: a terminal that asked for
+    /// [`Family::Mono`] and silently got the proportional UI face would draw a
+    /// broken grid, which is worse than drawing an unfashionable one.
+    pub fn get(&mut self, px: f32, weight: Weight, family: Family) -> &mut SystemFont {
+        let face = self.faces.get(&(family, weight)).map(Arc::clone);
+        self.fonts
+            .entry((round_px(px), weight, family))
+            .or_insert_with(|| {
+                // An installed face that will not scale to this size is a
+                // per-size failure, not a reason to stop using the face: fall
+                // back for this entry and leave the face installed.
+                face.and_then(|f| SystemFont::from_shared(f, px).ok())
+                    .unwrap_or_else(|| match weight {
+                        Weight::Regular => SystemFont::builtin(px),
+                        Weight::Bold => SystemFont::builtin_bold(px),
+                    })
+            })
     }
 
     /// How many distinct fonts have been built.
@@ -602,12 +640,66 @@ mod tests {
     fn the_cache_keys_on_rounded_size_and_weight() {
         let mut cache = FontCache::new();
         assert!(cache.is_empty());
-        cache.get(16.0, Weight::Regular);
-        cache.get(16.4, Weight::Regular); // rounds to the same key
+        cache.get(16.0, Weight::Regular, Family::Ui);
+        cache.get(16.4, Weight::Regular, Family::Ui); // rounds to the same key
         assert_eq!(cache.len(), 1, "16.0 and 16.4 must share a font");
-        cache.get(16.0, Weight::Bold);
-        cache.get(32.0, Weight::Regular);
+        cache.get(16.0, Weight::Bold, Family::Ui);
+        cache.get(32.0, Weight::Regular, Family::Ui);
         assert_eq!(cache.len(), 3, "size and weight each key the cache");
+        cache.get(16.0, Weight::Regular, Family::Mono);
+        assert_eq!(cache.len(), 4, "the family keys the cache too");
+    }
+
+    #[test]
+    fn a_family_with_no_face_falls_back_to_the_builtin_not_to_the_other_family() {
+        // The rule a terminal depends on. Serving the proportional UI face to
+        // a `Mono` request would draw a grid whose columns do not line up,
+        // which is worse than serving the plain bitmap face: that one at least
+        // really is fixed-pitch.
+        let mut cache = FontCache::new();
+        cache
+            .install_face(Family::Ui, Weight::Regular, build_test_font())
+            .unwrap();
+        assert!(cache.get(16.0, Weight::Regular, Family::Ui).is_scalable());
+        assert!(
+            !cache.get(16.0, Weight::Regular, Family::Mono).is_scalable(),
+            "a Mono request took the Ui family's face"
+        );
+    }
+
+    #[test]
+    fn every_glyph_of_the_fallback_mono_face_has_one_advance() {
+        // What `Family::Mono` promises: a caller may take one character's
+        // advance as the cell width. If that is false the block cursor lands
+        // beside the character it marks.
+        let mut cache = FontCache::new();
+        let font = cache.get(14.0, Weight::Regular, Family::Mono);
+        let cell = font.measure("0");
+        assert!(cell > 0.0);
+        for ch in ['W', 'i', '#', '\u{e9}', 'M', '.'] {
+            let mut buf = [0u8; 4];
+            let w = font.measure(ch.encode_utf8(&mut buf));
+            assert_eq!(w, cell, "{ch:?} advances {w}, not the cell's {cell}");
+        }
+    }
+
+    #[test]
+    fn installing_one_family_does_not_drop_the_other_ones_glyphs() {
+        // `set_face` throws away the fonts built from the face it replaces.
+        // Throwing away the *other* family's too would re-rasterize the
+        // alphabet every time a second family is installed at startup.
+        let mut cache = FontCache::new();
+        cache.get(16.0, Weight::Regular, Family::Ui);
+        cache.get(16.0, Weight::Regular, Family::Mono);
+        assert_eq!(cache.len(), 2);
+        cache
+            .install_face(Family::Mono, Weight::Regular, build_test_font())
+            .unwrap();
+        assert_eq!(cache.len(), 1, "only the Mono entry should have been dropped");
+        assert!(
+            cache.get(16.0, Weight::Regular, Family::Mono).is_scalable(),
+            "the newly installed Mono face was not picked up"
+        );
     }
 
     #[test]
@@ -617,20 +709,21 @@ mod tests {
         // unreachable from the compositor and the toolkit — the two callers
         // that hold a `FontCache`.
         let mut cache = FontCache::new();
-        assert!(!cache.has_face(Weight::Regular));
+        assert!(!cache.has_face(Family::Ui, Weight::Regular));
         assert!(
-            !cache.get(16.0, Weight::Regular).is_scalable(),
+            !cache.get(16.0, Weight::Regular, Family::Ui).is_scalable(),
             "an empty cache must serve the built-in face"
         );
 
-        cache.install_face(Weight::Regular, build_test_font()).unwrap();
-        assert!(cache.has_face(Weight::Regular));
+        cache.install_face(Family::Ui, Weight::Regular, build_test_font())
+            .unwrap();
+        assert!(cache.has_face(Family::Ui, Weight::Regular));
         assert!(
-            cache.get(16.0, Weight::Regular).is_scalable(),
+            cache.get(16.0, Weight::Regular, Family::Ui).is_scalable(),
             "installing a face must replace the font already built at that size"
         );
         assert!(
-            !cache.get(16.0, Weight::Bold).is_scalable(),
+            !cache.get(16.0, Weight::Bold, Family::Ui).is_scalable(),
             "a weight with no face installed must still fall back"
         );
     }
@@ -641,11 +734,12 @@ mod tests {
         // copy of a megabyte-scale file per size and re-parse the tables to get
         // it, which is what `Arc` in the cache is for.
         let mut cache = FontCache::new();
-        cache.install_face(Weight::Regular, build_test_font()).unwrap();
+        cache.install_face(Family::Ui, Weight::Regular, build_test_font())
+            .unwrap();
         let mut faces = Vec::new();
         for px in [11.0, 16.0, 24.0, 48.0] {
             let scaled = cache
-                .get(px, Weight::Regular)
+                .get(px, Weight::Regular, Family::Ui)
                 .as_scaled()
                 .expect("installed face must scale")
                 .shared_face();
@@ -667,11 +761,11 @@ mod tests {
         let mut cache = FontCache::new();
         assert!(
             cache
-                .install_face(Weight::Regular, alloc::vec![0u8; 32])
+                .install_face(Family::Ui, Weight::Regular, alloc::vec![0u8; 32])
                 .is_err()
         );
-        assert!(!cache.has_face(Weight::Regular));
-        assert!(cache.get(16.0, Weight::Regular).measure("x") > 0.0);
+        assert!(!cache.has_face(Family::Ui, Weight::Regular));
+        assert!(cache.get(16.0, Weight::Regular, Family::Ui).measure("x") > 0.0);
     }
 
     #[test]
@@ -680,7 +774,7 @@ mod tests {
         // a number at all -- and a 1e30-pixel face would be a memory bomb.
         let mut cache = FontCache::new();
         for px in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, -1.0, 0.0, 1e30] {
-            let font = cache.get(px, Weight::Regular);
+            let font = cache.get(px, Weight::Regular, Family::Ui);
             assert!(font.line_height() > 0.0, "px = {px} gave an unusable font");
             assert!(font.measure("x") > 0.0, "px = {px} measures to nothing");
         }
@@ -693,7 +787,7 @@ mod tests {
         // overflows. `measure` must equal the pen distance `draw_text` covers.
         let mut cache = FontCache::new();
         for (px, weight) in [(16.0, Weight::Regular), (48.0, Weight::Bold)] {
-            let font = cache.get(px, weight);
+            let font = cache.get(px, weight, Family::Ui);
             let expected = font.measure("Hamburgefonstiv");
             let mut buf = surface(4096, 128);
             let mut target = Target {

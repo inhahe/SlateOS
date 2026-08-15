@@ -165,24 +165,47 @@ pub fn color_to_hex_string_alpha(color: Color) -> String {
 /// Parse a hex color string (with or without `#`, 6 or 8 hex digits).
 /// Returns `None` if the input is invalid.
 pub fn parse_hex_color(input: &str) -> Option<Color> {
-    let s = input.trim().strip_prefix('#').unwrap_or(input.trim());
+    let trimmed = input.trim();
+    let s = trimmed.strip_prefix('#').unwrap_or(trimmed);
+
+    // Everything below reads `s.len()` as a *digit count* and slices it at byte
+    // offsets. Both hold only for ASCII, and this function is reachable from a
+    // text field, so neither could be assumed:
+    //
+    // - `"ab\u{65e5}\u{672c}"` is 8 bytes, so it took the 8-digit branch, where
+    //   `&s[..6]` cut the first kanji in half and aborted the process.
+    // - `"a\u{e9}"` is 3 bytes but 2 chars, so it took the shorthand branch and
+    //   indexed `chars[2]`. That one never actually fired, but only by
+    //   accident: `hex_char_to_u8` rejects a multi-byte char, so the `?` on the
+    //   second digit returned first. A bounds check that holds only because an
+    //   unrelated function happens to reject one step earlier is not a bounds
+    //   check, so the branch now takes its digits from an iterator instead.
+    //
+    // Requiring hex digits up front makes the length a digit count and every
+    // offset a character boundary, so the rest of the function is sound by
+    // construction. It also rejects the sign `u32::from_str_radix` accepts,
+    // which used to let `"+FFFFF"` through as a colour.
+    if !s.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+
     match s.len() {
         6 => {
             let val = u32::from_str_radix(s, 16).ok()?;
             Some(Color::from_hex(val))
         }
         8 => {
-            let val = u32::from_str_radix(&s[..6], 16).ok()?;
-            let a = u8::from_str_radix(&s[6..8], 16).ok()?;
+            let val = u32::from_str_radix(s.get(..6)?, 16).ok()?;
+            let a = u8::from_str_radix(s.get(6..8)?, 16).ok()?;
             let base = Color::from_hex(val);
             Some(Color::rgba(base.r, base.g, base.b, a))
         }
         // Support 3-digit shorthand (#RGB → #RRGGBB)
         3 => {
-            let chars: Vec<char> = s.chars().collect();
-            let r = hex_char_to_u8(chars[0])?;
-            let g = hex_char_to_u8(chars[1])?;
-            let b = hex_char_to_u8(chars[2])?;
+            let mut digits = s.chars();
+            let r = hex_char_to_u8(digits.next()?)?;
+            let g = hex_char_to_u8(digits.next()?)?;
+            let b = hex_char_to_u8(digits.next()?)?;
             Some(Color::rgb(r << 4 | r, g << 4 | g, b << 4 | b))
         }
         _ => None,
@@ -2324,5 +2347,87 @@ mod tests {
     #[test]
     fn test_preset_colors_count() {
         assert_eq!(PRESET_COLORS.len(), 48);
+    }
+
+    // -- parse_hex_color rejects non-hex instead of aborting on it ------------
+
+    /// Strings whose *byte* length picks a branch their *character* length
+    /// cannot satisfy. Every one of these aborted the process before the hex
+    /// digit check went in — and the field this parser sits behind accepts
+    /// arbitrary typed text, so all of them are reachable.
+    #[test]
+    fn a_non_ascii_hex_field_is_rejected_not_fatal() {
+        let cases = [
+            // 8 bytes, 4 chars: `&s[..6]` used to cut U+65E5 in half.
+            "ab\u{65e5}\u{672c}",
+            "\u{65e5}\u{672c}ab",
+            // 8 bytes, 5 chars.
+            "a\u{e9}\u{e9}bcd",
+            // 3 bytes, 2 chars, so the shorthand branch indexed `chars[2]`.
+            // These never aborted -- `hex_char_to_u8` rejected the multi-byte
+            // char one digit earlier -- but they are here so the branch stays
+            // safe on its own terms rather than on that coincidence.
+            "a\u{e9}",
+            "\u{e9}a",
+            // 3 bytes, 1 char.
+            "\u{65e5}",
+            // 6 bytes, 3 chars — the branch that happened not to slice, but
+            // which must still not be read as three digits.
+            "\u{65e5}\u{672c}\u{8a9e}",
+            // A 4-byte emoji, so 8 bytes over two chars.
+            "\u{1f4cc}\u{1f4dd}",
+        ];
+        for case in cases {
+            assert_eq!(parse_hex_color(case), None, "accepted {case:?}");
+            // The `#` prefix is stripped before the length is taken, so the
+            // prefixed form reaches the same branch and must also be safe.
+            assert_eq!(
+                parse_hex_color(&format!("#{case}")),
+                None,
+                "accepted #{case:?}"
+            );
+        }
+    }
+
+    /// `u32::from_str_radix` accepts a leading sign, so a signed string of the
+    /// right length parsed as a colour. A hex field has no signs in it.
+    #[test]
+    fn a_signed_hex_field_is_rejected() {
+        assert_eq!(parse_hex_color("+FFFFF"), None);
+        assert_eq!(parse_hex_color("-FFFFF"), None);
+        assert_eq!(parse_hex_color("+FFFFFFF"), None);
+        assert_eq!(parse_hex_color("#+00FF00"), None);
+    }
+
+    /// Whitespace and the empty string are not colours either, and must be
+    /// rejected rather than reaching a length branch.
+    #[test]
+    fn a_blank_hex_field_is_rejected() {
+        assert_eq!(parse_hex_color(""), None);
+        assert_eq!(parse_hex_color("   "), None);
+        assert_eq!(parse_hex_color("#"), None);
+        assert_eq!(parse_hex_color("# FFF"), None);
+        assert_eq!(parse_hex_color("FF FFFF"), None);
+    }
+
+    /// The rejections above must not have cost any valid input: every form the
+    /// parser is documented to take still parses to the same colour.
+    #[test]
+    fn every_valid_hex_form_still_parses() {
+        assert_eq!(parse_hex_color("FF8000"), Some(Color::rgb(255, 128, 0)));
+        assert_eq!(parse_hex_color("#00FF00"), Some(Color::rgb(0, 255, 0)));
+        assert_eq!(parse_hex_color("ff8040"), Some(Color::rgb(255, 128, 64)));
+        assert_eq!(
+            parse_hex_color("  #AABBCC  "),
+            Some(Color::rgb(170, 187, 204))
+        );
+        assert_eq!(
+            parse_hex_color("#FF000080"),
+            Some(Color::rgba(255, 0, 0, 128))
+        );
+        assert_eq!(parse_hex_color("F00"), Some(Color::rgb(255, 0, 0)));
+        assert_eq!(parse_hex_color("#888"), Some(Color::rgb(136, 136, 136)));
+        assert_eq!(parse_hex_color("000000"), Some(Color::rgb(0, 0, 0)));
+        assert_eq!(parse_hex_color("FFFFFF"), Some(Color::rgb(255, 255, 255)));
     }
 }

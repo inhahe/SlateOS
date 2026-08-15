@@ -6210,6 +6210,17 @@ fn cmd_taskdump() {
 ///
 /// Terminates the specified task.  Cannot kill the current task (the
 /// shell itself) or idle tasks.  Use `ps` to find task IDs.
+///
+/// Goes through [`proc::thread::kill_thread`] rather than
+/// [`sched::kill_task`]: the scheduler call alone stops the task but leaves
+/// the thread→process mapping registered forever, leaves any parked
+/// `join()`er parked forever, and records no involuntary-death marker, so a
+/// joiner that *did* get woken would read a bogus normal return instead of
+/// [`KernelError::Cancelled`].
+///
+/// [`proc::thread::kill_thread`]: crate::proc::thread::kill_thread
+/// [`sched::kill_task`]: crate::sched::kill_task
+/// [`KernelError::Cancelled`]: crate::error::KernelError::Cancelled
 fn cmd_kill(args: &str) {
     let args = args.trim();
     if args.is_empty() {
@@ -6228,11 +6239,6 @@ fn cmd_kill(args: &str) {
         return;
     }
 
-    // Go through `proc::thread::kill_thread`, not `sched::kill_task`:
-    // the latter only marks the scheduler task Dead, leaving the
-    // thread→process mapping registered, IRQ registrations dangling, and
-    // any `join()` on the victim parked forever — and, once woken,
-    // reporting a bogus normal return instead of "cancelled".
     if crate::proc::thread::kill_thread(task_id) {
         shell_println!("Killed task {}.", task_id);
     } else {

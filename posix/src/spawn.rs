@@ -277,6 +277,23 @@ impl FileActionSlot {
     }
 }
 
+/// Is `fd` acceptable to a `posix_spawn_file_actions_add*` call?
+///
+/// glibc's `__spawn_valid_fd` (posix/spawn_valid_fd.c) is
+/// `fd >= 0 && (maxfd < 0 || fd < maxfd)` where `maxfd` is
+/// `sysconf (_SC_OPEN_MAX)`.  Two things follow that our earlier code got
+/// wrong: the rejection is `EBADF`, not `EINVAL`, and it also covers a
+/// *too-large* fd, not just a negative one.
+///
+/// It matters that this runs before the object and the path are touched —
+/// every `add*` that takes an fd calls it as its first statement, ahead of
+/// `__strdup (path)` and ahead of any read of `file_actions->__used`.  See
+/// design-decisions.md §303 for why that ordering is the ABI.
+fn spawn_valid_fd(fd: Fd) -> bool {
+    let maxfd = crate::unistd::sysconf(crate::unistd::_SC_OPEN_MAX);
+    fd >= 0 && (maxfd < 0 || i64::from(fd) < maxfd)
+}
+
 /// Initialize a file actions object.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn posix_spawn_file_actions_init(acts: *mut PosixSpawnFileActionsT) -> i32 {
@@ -315,16 +332,21 @@ pub extern "C" fn posix_spawn_file_actions_destroy(acts: *mut PosixSpawnFileActi
 /// Add a close action.
 ///
 /// The fd will be closed in the child before exec.
+///
+/// `__posix_spawn_file_actions_addclose` (posix/spawn_faction_addclose.c)
+/// opens with `if (!__spawn_valid_fd (fd)) return EBADF;` — before it reads
+/// `file_actions->__used` — so the descriptor verdict outranks the (absent in
+/// glibc, `EFAULT` here) NULL check on the object.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn posix_spawn_file_actions_addclose(
     acts: *mut PosixSpawnFileActionsT,
     fd: Fd,
 ) -> i32 {
+    if !spawn_valid_fd(fd) {
+        return errno::EBADF;
+    }
     if acts.is_null() {
         return errno::EFAULT;
-    }
-    if fd < 0 {
-        return errno::EINVAL;
     }
     // SAFETY: acts is non-null (checked above).
     let a = unsafe { &mut *acts };
@@ -345,17 +367,21 @@ pub extern "C" fn posix_spawn_file_actions_addclose(
 /// Add a dup2 action.
 ///
 /// In the child, `dup2(fd, newfd)` will be called before exec.
+///
+/// `__posix_spawn_file_actions_adddup2` (posix/spawn_faction_adddup2.c:32)
+/// tests `!__spawn_valid_fd (fd) || !__spawn_valid_fd (newfd)` first and
+/// returns `EBADF` for either.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn posix_spawn_file_actions_adddup2(
     acts: *mut PosixSpawnFileActionsT,
     fd: Fd,
     newfd: Fd,
 ) -> i32 {
+    if !spawn_valid_fd(fd) || !spawn_valid_fd(newfd) {
+        return errno::EBADF;
+    }
     if acts.is_null() {
         return errno::EFAULT;
-    }
-    if fd < 0 || newfd < 0 {
-        return errno::EINVAL;
     }
     // SAFETY: acts is non-null (checked above).
     let a = unsafe { &mut *acts };
@@ -378,6 +404,10 @@ pub extern "C" fn posix_spawn_file_actions_adddup2(
 ///
 /// In the child, the file at `path` will be opened with `oflag`/`mode`
 /// and the resulting fd will be dup2'd to `fd`.
+///
+/// `__posix_spawn_file_actions_addopen` (posix/spawn_faction_addopen.c) is
+/// `if (!__spawn_valid_fd (fd)) return EBADF;` and only then
+/// `__strdup (path)`, so a bad descriptor outranks a NULL path.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn posix_spawn_file_actions_addopen(
     acts: *mut PosixSpawnFileActionsT,
@@ -386,11 +416,11 @@ pub extern "C" fn posix_spawn_file_actions_addopen(
     oflag: i32,
     mode: ModeT,
 ) -> i32 {
+    if !spawn_valid_fd(fd) {
+        return errno::EBADF;
+    }
     if acts.is_null() || path.is_null() {
         return errno::EFAULT;
-    }
-    if fd < 0 {
-        return errno::EINVAL;
     }
     // SAFETY: acts and path are non-null (checked above).
     let a = unsafe { &mut *acts };
@@ -485,11 +515,13 @@ pub extern "C" fn posix_spawn_file_actions_addclosefrom_np(
     acts: *mut PosixSpawnFileActionsT,
     lowfd: i32,
 ) -> i32 {
+    // `__posix_spawn_file_actions_addclosefrom` (posix/spawn_faction_addclosefrom.c:31)
+    // is `if (!__spawn_valid_fd (from)) return EBADF;` before anything else.
+    if !spawn_valid_fd(lowfd) {
+        return errno::EBADF;
+    }
     if acts.is_null() {
         return errno::EFAULT;
-    }
-    if lowfd < 0 {
-        return errno::EBADF;
     }
     let a = unsafe { &mut *acts };
     if a.count >= MAX_FILE_ACTIONS {
@@ -587,26 +619,31 @@ pub extern "C" fn posix_spawnattr_destroy(_attr: *mut PosixSpawnattrT) -> i32 {
 
 /// Set flags on a spawn attributes object.
 ///
-/// Returns `EFAULT` if `attr` is null, or `EINVAL` if any bit outside
-/// `POSIX_SPAWN_VALID_FLAGS` is set in `flags`.  This matches POSIX:
+/// Returns `EINVAL` if any bit outside `POSIX_SPAWN_VALID_FLAGS` is set in
+/// `flags`, or `EFAULT` if `attr` is null.  This matches POSIX:
 ///
 /// > If the value of the attribute being set is not valid,
 /// > posix_spawnattr_setflags() shall return [EINVAL].
 ///
-/// and glibc's `__POSIX_SPAWN_MASK` validation.  We validate the null
-/// pointer first so a caller passing a junk attribute alongside a
-/// bogus flag word still gets the more informative `EFAULT` for
-/// `attr` rather than silently storing into garbage memory.
+/// **In that order.** `__posix_spawnattr_setflags`
+/// (posix/spawnattr_setflags.c) is exactly two statements: the
+/// `flags & ~ALL_FLAGS` rejection, then `attr->__flags = flags`.  It has no
+/// NULL check at all — a NULL `attr` faults on the store — so the flag word
+/// is decided while the pointer is still untouched.  An earlier version of
+/// this function checked `attr` first and justified it as giving the caller
+/// "the more informative EFAULT"; that reasoning was invented, and it made a
+/// bogus flag word on a NULL attribute report the wrong argument.  See
+/// design-decisions.md §303.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn posix_spawnattr_setflags(attr: *mut PosixSpawnattrT, flags: i16) -> i32 {
-    if attr.is_null() {
-        return errno::EFAULT;
-    }
     // Reject any bit outside the accepted mask.  Using bitwise-AND
     // against the inverted mask avoids assumptions about sign — the
     // i16 cast preserves the bit pattern.
     if (flags & !POSIX_SPAWN_VALID_FLAGS) != 0 {
         return errno::EINVAL;
+    }
+    if attr.is_null() {
+        return errno::EFAULT;
     }
     // SAFETY: attr is non-null (checked above).
     unsafe {
@@ -1803,12 +1840,36 @@ mod tests {
         assert_eq!(ret, errno::EFAULT);
     }
 
+    /// glibc rejects a bad fd with `EBADF`, not `EINVAL`:
+    /// `__posix_spawn_file_actions_addclose` (posix/spawn_faction_addclose.c)
+    /// opens with `if (!__spawn_valid_fd (fd)) return EBADF;`.
     #[test]
     fn test_file_actions_addclose_negative_fd() {
         let mut acts = unsafe { core::mem::zeroed::<PosixSpawnFileActionsT>() };
         posix_spawn_file_actions_init(&raw mut acts);
         let ret = posix_spawn_file_actions_addclose(&raw mut acts, -1);
-        assert_eq!(ret, errno::EINVAL);
+        assert_eq!(ret, errno::EBADF);
+    }
+
+    /// `__spawn_valid_fd` (posix/spawn_valid_fd.c) is
+    /// `fd >= 0 && (maxfd < 0 || fd < maxfd)` — so it also rejects an fd at or
+    /// above `sysconf (_SC_OPEN_MAX)`, which a `fd < 0` test misses entirely.
+    #[test]
+    fn test_file_actions_addclose_fd_at_open_max_is_ebadf() {
+        let mut acts = unsafe { core::mem::zeroed::<PosixSpawnFileActionsT>() };
+        posix_spawn_file_actions_init(&raw mut acts);
+        let maxfd = crate::unistd::sysconf(crate::unistd::_SC_OPEN_MAX);
+        assert!(maxfd > 0, "this test needs a finite _SC_OPEN_MAX");
+        let ret = posix_spawn_file_actions_addclose(&raw mut acts, maxfd as Fd);
+        assert_eq!(ret, errno::EBADF);
+    }
+
+    /// And the descriptor verdict outranks the NULL-object one: glibc reaches
+    /// `__spawn_valid_fd` before it reads `file_actions->__used`.
+    #[test]
+    fn test_file_actions_addclose_bad_fd_outranks_a_null_object() {
+        let ret = posix_spawn_file_actions_addclose(core::ptr::null_mut(), -1);
+        assert_eq!(ret, errno::EBADF);
     }
 
     #[test]
@@ -1846,12 +1907,15 @@ mod tests {
         assert_eq!(ret, errno::EFAULT);
     }
 
+    /// `spawn_faction_adddup2.c:32` tests
+    /// `!__spawn_valid_fd (fd) || !__spawn_valid_fd (newfd)` and returns
+    /// `EBADF` for either.
     #[test]
     fn test_file_actions_adddup2_negative_fd() {
         let mut acts = unsafe { core::mem::zeroed::<PosixSpawnFileActionsT>() };
         posix_spawn_file_actions_init(&raw mut acts);
         let ret = posix_spawn_file_actions_adddup2(&raw mut acts, -1, 1);
-        assert_eq!(ret, errno::EINVAL);
+        assert_eq!(ret, errno::EBADF);
     }
 
     #[test]
@@ -1859,7 +1923,19 @@ mod tests {
         let mut acts = unsafe { core::mem::zeroed::<PosixSpawnFileActionsT>() };
         posix_spawn_file_actions_init(&raw mut acts);
         let ret = posix_spawn_file_actions_adddup2(&raw mut acts, 1, -1);
-        assert_eq!(ret, errno::EINVAL);
+        assert_eq!(ret, errno::EBADF);
+    }
+
+    /// `newfd` is checked in the same expression as `fd`, so an out-of-range
+    /// `newfd` is `EBADF` too — not just a negative one.
+    #[test]
+    fn test_file_actions_adddup2_newfd_at_open_max_is_ebadf() {
+        let mut acts = unsafe { core::mem::zeroed::<PosixSpawnFileActionsT>() };
+        posix_spawn_file_actions_init(&raw mut acts);
+        let maxfd = crate::unistd::sysconf(crate::unistd::_SC_OPEN_MAX);
+        assert!(maxfd > 0, "this test needs a finite _SC_OPEN_MAX");
+        let ret = posix_spawn_file_actions_adddup2(&raw mut acts, 1, maxfd as Fd);
+        assert_eq!(ret, errno::EBADF);
     }
 
     // -- posix_spawn_file_actions_addopen --
@@ -1894,13 +1970,25 @@ mod tests {
         assert_eq!(ret, errno::EFAULT);
     }
 
+    /// `spawn_faction_addopen.c` is `if (!__spawn_valid_fd (fd)) return EBADF;`
+    /// before `__strdup (path)`.
     #[test]
     fn test_file_actions_addopen_negative_fd() {
         let mut acts = unsafe { core::mem::zeroed::<PosixSpawnFileActionsT>() };
         posix_spawn_file_actions_init(&raw mut acts);
         let path = b"/dev/null\0";
         let ret = posix_spawn_file_actions_addopen(&raw mut acts, -1, path.as_ptr(), 0, 0);
-        assert_eq!(ret, errno::EINVAL);
+        assert_eq!(ret, errno::EBADF);
+    }
+
+    /// Because that check precedes the `__strdup`, a bad fd outranks a NULL
+    /// path — glibc never reaches the string at all.
+    #[test]
+    fn test_file_actions_addopen_bad_fd_outranks_a_null_path() {
+        let mut acts = unsafe { core::mem::zeroed::<PosixSpawnFileActionsT>() };
+        posix_spawn_file_actions_init(&raw mut acts);
+        let ret = posix_spawn_file_actions_addopen(&raw mut acts, -1, core::ptr::null(), 0, 0);
+        assert_eq!(ret, errno::EBADF);
     }
 
     // -- posix_spawn_file_actions ordering --
@@ -2827,11 +2915,27 @@ mod tests {
 
     // ---- (d) Validation order -------------------------------------------
 
+    /// Both errors apply (NULL attr AND a bad flag bit), and the *flag* wins.
+    ///
+    /// `__posix_spawnattr_setflags` (posix/spawnattr_setflags.c) is two
+    /// statements — `if (flags & ~ALL_FLAGS) return EINVAL;` then
+    /// `attr->__flags = flags;` — with no NULL check whatever, so the flag
+    /// word is decided while the pointer is still untouched.
+    ///
+    /// This test previously asserted the opposite, under the name
+    /// `test_setflags_null_attr_precedes_flag_check`, on the reasoning that
+    /// `EFAULT` was "more informative". That reasoning was invented rather
+    /// than read off upstream. See design-decisions.md §303.
     #[test]
-    fn test_setflags_null_attr_precedes_flag_check() {
-        // Both errors apply (null attr AND bad flag); EFAULT for the
-        // null pointer takes priority over EINVAL for the bad flag.
+    fn test_setflags_bad_flag_precedes_the_null_attr_check() {
         let ret = posix_spawnattr_setflags(core::ptr::null_mut(), 0x4000);
+        assert_eq!(ret, errno::EINVAL);
+    }
+
+    /// With a valid flag word the NULL pointer is still reached and reported.
+    #[test]
+    fn test_setflags_null_attr_with_a_valid_flag_is_efault() {
+        let ret = posix_spawnattr_setflags(core::ptr::null_mut(), 0);
         assert_eq!(ret, errno::EFAULT);
     }
 

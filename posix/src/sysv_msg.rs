@@ -95,7 +95,6 @@
 //!   accessor that's deferred.
 
 use crate::errno;
-use core::sync::atomic::{AtomicBool, Ordering};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -235,32 +234,18 @@ impl Queue {
 // Static state
 // ---------------------------------------------------------------------------
 
-static MSG_LOCK: AtomicBool = AtomicBool::new(false);
+/// Serialises every scan of `MSG_QUEUES`.
+///
+/// A plain `static`, matching `MSG_QUEUES`'s plain `static mut`: the lock must
+/// have the same scope as the table it guards.  See
+/// [`crate::perprocess::PoolLock`].
+static MSG_LOCK: crate::perprocess::PoolLock = crate::perprocess::PoolLock::new();
 static mut MSG_QUEUES: [Queue; MAX_QUEUES] = [const { Queue::EMPTY }; MAX_QUEUES];
 
-fn lock_acquire() {
-    while MSG_LOCK
-        .compare_exchange_weak(false, true, Ordering::AcqRel, Ordering::Relaxed)
-        .is_err()
-    {
-        core::hint::spin_loop();
-    }
-}
-
-fn lock_release() {
-    MSG_LOCK.store(false, Ordering::Release);
-}
-
-struct Guard;
-impl Drop for Guard {
-    fn drop(&mut self) {
-        lock_release();
-    }
-}
-
-fn lock() -> Guard {
-    lock_acquire();
-    Guard
+/// Take `MSG_LOCK` for the duration of a queue-table scan.
+fn lock() -> crate::perprocess::PoolGuard<'static> {
+    // SAFETY: `MSG_LOCK` is a `static`, so it outlives the guard.
+    unsafe { crate::perprocess::lock_pool((&raw const MSG_LOCK).cast_mut()) }
 }
 
 // ---------------------------------------------------------------------------

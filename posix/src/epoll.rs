@@ -162,11 +162,26 @@ process_global! {
     /// host test thread would name another thread's instance.
     fn instances_ptr() -> [EpollInstance; MAX_EPOLL_INSTANCES] =
         [EPOLL_INSTANCE_INIT; MAX_EPOLL_INSTANCES];
+
+    /// Serialises the `in_use` scans of [`instances_ptr`].
+    ///
+    /// Declared here, beside the table, so the two can never drift apart in
+    /// scope — see [`crate::perprocess::PoolLock`].  It covers *allocation
+    /// and release only*; `with_instance`/`with_instance_mut` reach a slot
+    /// the caller already names by index and stay unlocked.
+    fn instances_lock() -> crate::perprocess::PoolLock = crate::perprocess::PoolLock::new();
 }
 
 /// Allocate a free instance slot and return its index.
+///
+/// Under [`instances_lock`], so two threads calling `epoll_create` at once
+/// cannot be handed the same instance — which, since the index becomes the
+/// epoll fd's `handle`, would hand them the same epoll fd.
 fn allocate_instance() -> Option<usize> {
-    // SAFETY: Single-threaded posix layer; no concurrent access.
+    // SAFETY: `instances_lock()` is this context's lock, valid as long as the
+    // table it guards.
+    let _guard = unsafe { crate::perprocess::lock_pool(instances_lock()) };
+    // SAFETY: the guard is held, and every scan of the table takes it.
     unsafe {
         let table = &mut *instances_ptr();
         for (i, inst) in table.iter_mut().enumerate() {
@@ -180,12 +195,20 @@ fn allocate_instance() -> Option<usize> {
     None
 }
 
+/// Run `f` on the instance the caller already names by index.
+///
+/// Deliberately *not* under [`instances_lock`].  The lock exists to make the
+/// `in_use` scan atomic; reaching a slot the caller already owns is a
+/// different question, and POSIX makes concurrent use of one fd by two
+/// threads the caller's problem.  Locking here would serialise every
+/// `epoll_ctl` in the process against every unrelated one for no gain.
 fn with_instance_mut<R>(idx: u64, f: impl FnOnce(&mut EpollInstance) -> R) -> Option<R> {
     let i = usize::try_from(idx).ok()?;
     if i >= MAX_EPOLL_INSTANCES {
         return None;
     }
-    // SAFETY: single-threaded.
+    // SAFETY: the caller names one slot by index and only this fd's owner
+    // reaches it; see the doc comment for why no lock is taken.
     unsafe {
         let table = &mut *instances_ptr();
         let inst = table.get_mut(i)?;
@@ -196,12 +219,14 @@ fn with_instance_mut<R>(idx: u64, f: impl FnOnce(&mut EpollInstance) -> R) -> Op
     }
 }
 
+/// Shared-reference twin of [`with_instance_mut`]; unlocked for the same
+/// reason.
 fn with_instance<R>(idx: u64, f: impl FnOnce(&EpollInstance) -> R) -> Option<R> {
     let i = usize::try_from(idx).ok()?;
     if i >= MAX_EPOLL_INSTANCES {
         return None;
     }
-    // SAFETY: single-threaded.
+    // SAFETY: the caller names one slot by index; see [`with_instance_mut`].
     unsafe {
         let table = &*instances_ptr();
         let inst = table.get(i)?;
@@ -216,7 +241,15 @@ fn with_instance<R>(idx: u64, f: impl FnOnce(&EpollInstance) -> R) -> Option<R> 
 /// referencing the instance is closed.
 ///
 /// Idempotent on already-freed slots.
+///
+/// Takes [`instances_lock`] even though `with_instance_mut` does not: this is
+/// the one path that *writes* `in_use`, and writing it outside the lock would
+/// be a data race with [`allocate_instance`] reading it — and could let the
+/// slot be reissued before the entry table was cleared.
 pub fn epoll_instance_close(idx: u64) {
+    // SAFETY: `instances_lock()` is this context's lock, valid as long as the
+    // table it guards.
+    let _guard = unsafe { crate::perprocess::lock_pool(instances_lock()) };
     let _ = with_instance_mut(idx, |inst| {
         inst.in_use = false;
         inst.entries = [None; MAX_EPOLL_ENTRIES];
@@ -1121,10 +1154,19 @@ process_global! {
     /// `handle`; see [`instances_ptr`] for why the scope matters.
     fn timerfd_table_ptr() -> [TimerfdInstance; MAX_TIMERFD_INSTANCES] =
         [TIMERFD_INSTANCE_INIT; MAX_TIMERFD_INSTANCES];
+
+    /// Serialises the `in_use` scans of [`timerfd_table_ptr`]; see
+    /// [`instances_lock`].
+    fn timerfd_table_lock() -> crate::perprocess::PoolLock = crate::perprocess::PoolLock::new();
 }
 
+/// Claim a free timerfd instance, under [`timerfd_table_lock`] so that two
+/// concurrent `timerfd_create` calls cannot claim the same one.
 fn allocate_timerfd_instance() -> Option<usize> {
-    // SAFETY: Single-threaded posix layer; no concurrent access.
+    // SAFETY: `timerfd_table_lock()` is this context's lock, valid as long as
+    // the table it guards.
+    let _guard = unsafe { crate::perprocess::lock_pool(timerfd_table_lock()) };
+    // SAFETY: the guard is held, and every scan of the table takes it.
     unsafe {
         let table = &mut *timerfd_table_ptr();
         for (i, inst) in table.iter_mut().enumerate() {
@@ -1138,12 +1180,13 @@ fn allocate_timerfd_instance() -> Option<usize> {
     None
 }
 
+/// By-index accessor; unlocked for the reason given on [`with_instance_mut`].
 fn with_timerfd_mut<R>(idx: u64, f: impl FnOnce(&mut TimerfdInstance) -> R) -> Option<R> {
     let i = usize::try_from(idx).ok()?;
     if i >= MAX_TIMERFD_INSTANCES {
         return None;
     }
-    // SAFETY: single-threaded.
+    // SAFETY: the caller names one slot by index; see [`with_instance_mut`].
     unsafe {
         let table = &mut *timerfd_table_ptr();
         let inst = table.get_mut(i)?;
@@ -1154,12 +1197,13 @@ fn with_timerfd_mut<R>(idx: u64, f: impl FnOnce(&mut TimerfdInstance) -> R) -> O
     }
 }
 
+/// By-index accessor; unlocked for the reason given on [`with_instance_mut`].
 fn with_timerfd<R>(idx: u64, f: impl FnOnce(&TimerfdInstance) -> R) -> Option<R> {
     let i = usize::try_from(idx).ok()?;
     if i >= MAX_TIMERFD_INSTANCES {
         return None;
     }
-    // SAFETY: single-threaded.
+    // SAFETY: the caller names one slot by index; see [`with_instance_mut`].
     unsafe {
         let table = &*timerfd_table_ptr();
         let inst = table.get(i)?;
@@ -1172,7 +1216,13 @@ fn with_timerfd<R>(idx: u64, f: impl FnOnce(&TimerfdInstance) -> R) -> Option<R>
 
 /// Free a timerfd instance.  Called by `close()` when the last fd
 /// referencing the instance is closed.  Idempotent.
+///
+/// Under [`timerfd_table_lock`] because it clears `in_use`, which
+/// [`allocate_timerfd_instance`] reads; see [`epoll_instance_close`].
 pub fn timerfd_instance_close(idx: u64) {
+    // SAFETY: `timerfd_table_lock()` is this context's lock, valid as long as
+    // the table it guards.
+    let _guard = unsafe { crate::perprocess::lock_pool(timerfd_table_lock()) };
     let _ = with_timerfd_mut(idx, |inst| {
         *inst = TIMERFD_INSTANCE_INIT;
     });
@@ -1819,10 +1869,19 @@ process_global! {
     /// `handle`; see [`instances_ptr`] for why the scope matters.
     fn inotify_table_ptr() -> [InotifyInstance; MAX_INOTIFY_INSTANCES] =
         [INOTIFY_INSTANCE_INIT; MAX_INOTIFY_INSTANCES];
+
+    /// Serialises the `in_use` scans of [`inotify_table_ptr`]; see
+    /// [`instances_lock`].
+    fn inotify_table_lock() -> crate::perprocess::PoolLock = crate::perprocess::PoolLock::new();
 }
 
+/// Claim a free inotify instance, under [`inotify_table_lock`] so that two
+/// concurrent `inotify_init` calls cannot claim the same one.
 fn allocate_inotify_instance() -> Option<usize> {
-    // SAFETY: Single-threaded posix layer; no concurrent access.
+    // SAFETY: `inotify_table_lock()` is this context's lock, valid as long as
+    // the table it guards.
+    let _guard = unsafe { crate::perprocess::lock_pool(inotify_table_lock()) };
+    // SAFETY: the guard is held, and every scan of the table takes it.
     unsafe {
         let table = &mut *inotify_table_ptr();
         for (i, inst) in table.iter_mut().enumerate() {
@@ -1836,12 +1895,13 @@ fn allocate_inotify_instance() -> Option<usize> {
     None
 }
 
+/// By-index accessor; unlocked for the reason given on [`with_instance_mut`].
 fn with_inotify_mut<R>(idx: u64, f: impl FnOnce(&mut InotifyInstance) -> R) -> Option<R> {
     let i = usize::try_from(idx).ok()?;
     if i >= MAX_INOTIFY_INSTANCES {
         return None;
     }
-    // SAFETY: single-threaded.
+    // SAFETY: the caller names one slot by index; see [`with_instance_mut`].
     unsafe {
         let table = &mut *inotify_table_ptr();
         let inst = table.get_mut(i)?;
@@ -1855,17 +1915,28 @@ fn with_inotify_mut<R>(idx: u64, f: impl FnOnce(&mut InotifyInstance) -> R) -> O
 /// Free an inotify instance.  Called by `close()` when the last fd
 /// referencing the instance is closed.  Closes every backing kernel
 /// watch so they aren't leaked.  Idempotent.
+///
+/// Under [`inotify_table_lock`] because it clears `in_use`, which
+/// [`allocate_inotify_instance`] reads; see [`epoll_instance_close`].  The
+/// guard is dropped before the `kwatch_close` syscalls: the kernel ids have
+/// already been copied out and the slot already released, so holding the lock
+/// across those calls would only stall unrelated `inotify_init`s.
 pub fn inotify_instance_close(idx: u64) {
     let mut to_close = [0u64; MAX_INOTIFY_WATCHES];
-    let _ = with_inotify_mut(idx, |inst| {
-        for (i, w) in inst.watches.iter().enumerate() {
-            if w.in_use && w.kernel_id != 0
-                && let Some(slot) = to_close.get_mut(i) {
-                    *slot = w.kernel_id;
-                }
-        }
-        *inst = INOTIFY_INSTANCE_INIT;
-    });
+    {
+        // SAFETY: `inotify_table_lock()` is this context's lock, valid as long
+        // as the table it guards.
+        let _guard = unsafe { crate::perprocess::lock_pool(inotify_table_lock()) };
+        let _ = with_inotify_mut(idx, |inst| {
+            for (i, w) in inst.watches.iter().enumerate() {
+                if w.in_use && w.kernel_id != 0
+                    && let Some(slot) = to_close.get_mut(i) {
+                        *slot = w.kernel_id;
+                    }
+            }
+            *inst = INOTIFY_INSTANCE_INIT;
+        });
+    }
     for &kid in &to_close {
         if kid != 0 {
             kwatch_close(kid);
@@ -1908,11 +1979,20 @@ const KWATCH_READ_BATCH: usize = 16;
 
 process_global! {
     /// Scratch buffer for draining kernel watch events, reused across all
-    /// watches.  Safe to share within a process because the posix layer is
-    /// single-threaded; per-thread on host builds so two concurrently
-    /// draining tests do not overwrite each other's batch.
+    /// watches.  It is ~8 KiB, too big to put on the stack of every
+    /// `pump_one_watch` frame, so it is shared and serialised by
+    /// [`event_scratch_lock`] instead.
     fn event_scratch_ptr() -> [u8; KWATCH_READ_BATCH * crate::syscall::FS_WATCH_EVENT_SIZE] =
         [0u8; KWATCH_READ_BATCH * crate::syscall::FS_WATCH_EVENT_SIZE];
+
+    /// Serialises use of [`event_scratch_ptr`].
+    ///
+    /// Unlike the instance-table locks this one guards a *buffer*, not a slot
+    /// scan, and it is held across the `SYS_FS_WATCH_READ` syscall — it has
+    /// to be, because the syscall is what fills the buffer and the records
+    /// are parsed straight out of it.  Two threads draining two different
+    /// inotify fds would otherwise overwrite each other's batch mid-parse.
+    fn event_scratch_lock() -> crate::perprocess::PoolLock = crate::perprocess::PoolLock::new();
 }
 
 /// Monotonic cookie source for pairing `IN_MOVED_FROM`/`IN_MOVED_TO`.
@@ -2269,9 +2349,16 @@ fn stat_self(path: &[u8]) -> (bool, u64, bool) {
 /// (and closes its kernel watch) on a self-delete.
 fn pump_one_watch(idx: u64, wd: i32, kernel_id: u64, mask: u32, watched: &[u8]) {
     loop {
-        // Read a batch of kernel records into the shared scratch buffer.
-        // SAFETY: single-threaded posix layer; the &mut borrow does not
-        // escape the call.
+        // Read a batch of kernel records into the shared scratch buffer.  The
+        // guard covers the fill *and* the parse below: the records are read
+        // straight out of the buffer, so releasing it after `kwatch_read`
+        // would let another thread refill it mid-parse.  It is re-taken each
+        // iteration so a long drain does not monopolise the buffer.
+        // SAFETY: `event_scratch_lock()` is this context's lock, valid as
+        // long as the buffer it guards.
+        let _guard = unsafe { crate::perprocess::lock_pool(event_scratch_lock()) };
+        // SAFETY: the guard is held, and every use of the buffer takes it;
+        // the &mut borrow does not escape the call.
         let ret = {
             let scratch = unsafe { &mut *event_scratch_ptr() };
             kwatch_read(kernel_id, scratch, KWATCH_READ_BATCH)
@@ -2281,8 +2368,8 @@ fn pump_one_watch(idx: u64, wd: i32, kernel_id: u64, mask: u32, watched: &[u8]) 
         }
         let count = usize::try_from(ret).unwrap_or(0).min(KWATCH_READ_BATCH);
         let mut disarmed = false;
-        // SAFETY: single-threaded; no concurrent &mut to scratch while we
-        // read the records back out.
+        // SAFETY: the guard is still held, so no concurrent &mut to scratch
+        // while we read the records back out.
         let scratch = unsafe { &*event_scratch_ptr() };
         for rec in scratch
             .chunks_exact(crate::syscall::FS_WATCH_EVENT_SIZE)
@@ -2351,7 +2438,7 @@ fn pump_instance(idx: u64) {
     // the instance table across `pump_one_watch` (which re-borrows it).
     let mut snap: [(bool, i32, u64, u32, [u8; INOTIFY_PATH_MAX], usize); MAX_INOTIFY_WATCHES] =
         [(false, 0, 0, 0, [0u8; INOTIFY_PATH_MAX], 0); MAX_INOTIFY_WATCHES];
-    // SAFETY: single-threaded.
+    // SAFETY: the caller names one slot by index; see [`with_instance_mut`].
     unsafe {
         let table = &*inotify_table_ptr();
         let Some(inst) = table.get(inst_id) else {

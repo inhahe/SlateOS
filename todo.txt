@@ -53968,7 +53968,84 @@ FAILs).  Reversible (pure translator change; no PCB/state).
 ## ############################################################################
 ## Lane B — POSIX & userland
 ## ############################################################################
-(no lane-B-specific entries yet; see the pre-split entries above)
+## OPEN (2026-08-14, operator decision — design-decisions.md §305):
+## osh's bash-fidelity scope is FROZEN. READ §305 BEFORE ANY osh PARITY WORK.
+##   GNU bash 5.2 cross-compiles and runs on SlateOS (since 2026-07-22; proven
+##   by kernel/src/proc/spawn.rs::self_test_bash_on_slateos_libc). So
+##   byte-for-byte osh<->bash parity is no longer a goal. Fix an osh divergence
+##   ONLY if (a) something we ship or run actually hits it, (b) it is a
+##   crash/hang/data-loss/security/wrong-exit-status bug, or (c) it is a
+##   regression against an already-green corpus case. Do NOT fix and do NOT add
+##   a corpus case for: diagnostic wording or the exact substring a message
+##   echoes; artifacts of bash being 40-year-old C; constructs reachable only by
+##   adversarial input whose only difference is the error text. Out-of-scope
+##   divergences get "SCOPE: out of frozen scope (S305)" in their TD-OILS-*
+##   entry and stay unfixed. The corpus does not grow for its own sake.
+##   The ~325 open TD-OILS-* entries are NOT a burn-down list.
+##
+## OPEN (2026-08-14) — recurring audit: design decisions with expiry conditions
+##   S305's root cause was procedural: S72 rejected cross-compiling bash because
+##   no C->slateos toolchain existed, wrote its own "How to reverse" clause, the
+##   clause fired 4 days later (2026-07-22, zig cc + libc.a), and nobody checked
+##   for 25 days -- ~1,100 of oils' 1,210 commits landed on a dead premise.
+##   THE STANDING RULE (S305): a decision whose rationale rests on a missing
+##   prerequisite must have its reversing condition tracked HERE, as live work,
+##   not only in the entry's prose. And: WHEN YOU LAND A NEW CAPABILITY, grep
+##   design-decisions.md for entries that were rejected for lack of it --
+##     grep -nE "no C/C\+\+|cross-toolchain|prerequisite|How to reverse" design-decisions.md
+##   Whoever landed zig cc was best placed to notice, and didn't.
+##   ACTION: periodically re-read every "How to reverse"/"revisit if..." clause
+##   in design-decisions.md and confirm its premise still holds. Known clauses
+##   of this shape today: S72 (SPENT -- superseded by S305), S73 (YSH: "once a
+##   C++/slateos toolchain exists" -- the C half has fired, the C++ half has
+##   NOT; YSH is genuine Oils C++, so this one is still correctly blocked -- but
+##   re-check it whenever C++ cross-compilation lands).
+
+## DONE (2026-08-14, design-decisions.md S306): the shared docs stay per-branch;
+##   the fix is a fetch/merge CADENCE, now in roadmap.md S5.5 and CLAUDE.md.
+##   START of every task:  git fetch origin && git merge origin/main
+##   END of every green one: push the lane, then merge the lane up into main.
+##   WHY: requests/a-b-init-conflates-syscall-error-with-exit-code.md sat on
+##   origin/main UNREAD FOR A DAY because lane-b had never fetched (55 ahead,
+##   72 behind). The dropbox was not broken; nobody emptied it. Separately, I
+##   read the shared docs in D:\visual studio projects\os -- which is a
+##   CHECKOUT of main, 67 commits stale -- and concluded from them that no lane
+##   had ever merged. Wrong; lane-a had (6d69d308e). origin/main is the trunk;
+##   the os directory is a view of it that must be pulled before it is trusted.
+##   ALSO CORRECTED: roadmap.md rule 5 said "rebase on main, never merge". The
+##   lane branches are PUBLISHED, so rebasing one needs a force-push, which the
+##   very next bullet of the same rule forbids. It now says merge.
+
+## OPEN (2026-08-14): Lane A filed
+##   requests/a-b-init-conflates-syscall-error-with-exit-code.md against MY
+##   lane and it is now visible to me. services/init/src/main.rs (~line 1252)
+##   prints and acts on process_try_wait(pid)'s return as if it were a child
+##   exit code, but it may be a NEGATIVE KERNEL ERROR. Only ERR_WOULD_BLOCK
+##   (-4) is distinguished, so PermissionDenied (-400) was read as "exited 400"
+##   and init restarted `ticker` nine times. FIX: separate the error domain
+##   from the status domain at the call site -- any negative return other than
+##   ERR_WOULD_BLOCK is a syscall failure, not an exit status, and must be
+##   logged as such and must not drive the restart policy.
+
+## ACTION FOR LANES A AND C (2026-08-14, filed by Lane B): add `/todo2.txt` to
+##   your branch's .gitignore. todo2.txt is the operator's private instruction
+##   queue and must not be published; I untracked it on all five branches, but
+##   only main and lane-b got the .gitignore rule. Verified against origin on
+##   2026-08-14: lane-a and lane-c have no rule. It arrives automatically on
+##   your next `git fetch origin && git merge origin/main` -- this note is for
+##   the window before that merge, during which todo2.txt sits untracked in
+##   your worktree and a `git add -A` would re-track it. Details, including why
+##   I deliberately did NOT push the .gitignore edit to your branches (it would
+##   have handed you an end-of-file merge conflict with main for no benefit):
+##   requests/b-a-todo2-untracked.md and requests/b-c-todo2-untracked.md.
+##   RELATED, ALL LANES: a `pre-push` hook now refuses any push whose new
+##   commits add or touch todo2.txt, so the file can be committed locally but
+##   cannot reach GitHub. Ordinary pushes are unaffected. Source is tracked at
+##   scripts/hooks/pre-push; hooks live in the shared .git that all four
+##   worktrees use, so it is already armed -- re-arm after a fresh clone with
+##   ./scripts/install-hooks.sh. Local version history for the file lives on
+##   the orphan branch `private/todo2` (never pushed), updated by
+##   ./scripts/snapshot-todo2.sh. Do not merge that branch into anything.
 
 ## ############################################################################
 ## Lane C — graphics, apps & net

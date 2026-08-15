@@ -80,6 +80,207 @@ Every performance-critical subsystem has a measured baseline and a concrete targ
 - **No AI features in the OS** (exceptions: speech I/O, opt-in ML image/video indexer). **No ads.**
 - **YAML for all configuration files**, processed with a library that preserves user comments and formatting (e.g., ruamel.yaml or Rust equivalent).
 - **No binary logs** — text-based (JSON-lines) structured logging.
+- **Python (fastpy) is the default implementation language for every part of the OS that is not kernel-space and not somewhere Python would noticeably slow things down.** See the policy immediately below. This is a *default*, not a preference to be re-litigated per component: writing a new userspace tool, service, or app in Rust requires a reason from the exclusion list. The performance caveat is a real constraint, not a formality — but it is about *measured, noticeable* cost (a latency budget, a throughput path, an inner loop run enough times for a 2× to matter), not a general presumption that Python is slow: fastpy is AOT-compiled to native code and the shipped binary contains no interpreter.
+
+#### Implementation Language Policy (operator-directed)
+
+**Default to Python, compiled with fastpy.** Rust is for the kernel, drivers,
+and the measured hot paths. Everything else — userspace tools, services,
+system utilities, settings/config UIs, the package manager, the installer, the
+file indexer, build and maintenance scripts, and the desktop applications — is
+**Python by default**, AOT-compiled to a native binary by fastpy. Agents
+picking up a new userspace component should reach for Python first and justify
+Rust, not the other way around. (This restates and sharpens the rule already
+in `CLAUDE.md` → "Coding Conventions"; it is repeated here because
+`roadmap-detailed.md` is where components get specified, and the choice was
+being made ad-hoc per component.)
+
+**This is a rule about what we write, not about what we replace.** It does not
+license rewriting software that already exists in C, C++ or Rust — see
+"Porting vs. Reimplementing" below, which is the other half of this policy and
+should be read with it.
+
+**There is no interpreter and no CPython in a shipped SlateOS binary, so the
+usual "Python is heavy" objection does not apply here.** fastpy on SlateOS
+builds in **pure mode**: the program is compiled to machine code and statically
+linked against fastpy's small C runtime (7 translation units — `runtime`,
+`objects`, `threading`, `gc`, `bigint`, `bridge_stub`, `pathlib_pure`) plus our
+own `libc.a`. `libpython` is *not* linked; `cpython_bridge.c` is replaced by
+`bridge_stub.c`. Concretely:
+
+- **Memory:** a fastpy binary's footprint is that of a static C program, not of
+  CPython. There is no ~10–30 MB interpreter image, no import machinery, no
+  `.pyc` cache, no per-process module dictionaries. A real fastpy program
+  (lists/iteration/print) links to a **~2.9 MB static ET_EXEC**, and runtime
+  memory is just its own heap plus the refcount/GC bookkeeping. This is the
+  answer to "does fastpy cost memory like CPython does?" — **no**, because
+  pure-mode fastpy does not contain CPython at all.
+- **Speed:** C++-class, not interpreter-class. On fastpy's own benchmark set it
+  runs at **0.2×–2.3× of MSVC /O2 C++** — *faster* than C++ on tight loops
+  (0.5×), function calls (0.2×), recursion (0.6×) and attribute access (0.5×);
+  ~2× slower on allocation-heavy pointer chasing (linked-list traversal 2.3×,
+  object creation 2.2×). Against CPython it is **3×–173×** faster. So the
+  performance argument for choosing Rust over Python is a real but *narrow*
+  one — it bites where the slowdown would actually be noticed (see exclusion 2
+  below), not across userspace in general.
+
+**Choose Rust (or C) only for one of these reasons — and say which one:**
+
+1. **Kernel space or `no_std`** — anything in `kernel/**`, or a component that
+   must run without a heap or before the runtime exists.
+2. **Python would noticeably slow it down.** Two cases:
+   - **A subsystem in the performance-critical table** (`CLAUDE.md` →
+     "Performance-Critical Subsystems"): syscall dispatch, IPC, context switch,
+     page fault, allocators, scheduler, futex, io_uring/IOCP, interrupt
+     dispatch, VFS lookup, FS read/write, compositor frame path.
+   - **Anywhere the slowdown would be *perceptible*** — a user-visible latency
+     budget (input→paint, window open, app launch), a throughput path
+     (compositing, codecs, checksums, compression, indexing a large tree), or
+     an inner loop run enough times for a 2× to matter. The shape of fastpy's
+     remaining gap is known and specific: it loses to C++ mainly on
+     **allocation-heavy pointer chasing** (linked-list traversal 2.3×, object
+     creation 2.2×, tree recursion 2.0×) and wins on scalar loops, calls and
+     attribute access. So the honest test is "does this component churn objects
+     in a hot loop?", not "is this component important?".
+
+   In both cases: **measure, don't assume, in whichever direction.** "It feels
+   like it should be fast" is not a reason to pick Rust, and "Python is the
+   default" is not a reason to keep it after a profile shows it costing real
+   time. A component that turns out to be hot can be moved to Rust, or — often
+   better and much cheaper — have just its hot function moved, since the rest
+   of the program does not have to follow.
+3. **Early boot / init ordering** — a component that must run before the
+   filesystem or the fastpy runtime's dependencies are available.
+4. **Porting existing C/C++** (ext4, Mesa, Chromium, FFmpeg) — port, don't
+   rewrite.
+5. **A binding gap** — the component needs a native SlateOS API that fastpy
+   has no binding for *and* the binding is not worth adding yet. Prefer adding
+   the binding (Phase 0 → "fastpy language bindings"); if you take this exit,
+   record it in `todo.txt` so the gap is visible.
+
+Memory-constrained contexts are a real consideration but a narrow one: the
+~2.9 MB floor is *binary size*, mostly demand-paged text, and it is a floor per
+*distinct program*, not per process. Where many tiny instances of the same tool
+run concurrently this is cheaper than it looks. If a component genuinely cannot
+afford the floor (an early-boot shim, a per-process helper spawned in the
+thousands), that is reason 3 or a measured reason 2 — not a general licence to
+default back to Rust.
+
+#### Porting vs. Reimplementing (read together with the language policy)
+
+**The language policy above governs code we are going to write. It is not a
+mandate to rewrite code that already exists.** If a mature implementation of
+something already exists in C, C++ or Rust — Linux CLI tools, libraries,
+daemons, compilers, codecs — the default is to **use it**, not to reimplement it
+in Python (or in Rust). "Python is our default language" is an answer to *"what
+should I write this in?"*, never an answer to *"should I write this?"*.
+
+**Try cross-compiling before you write a line.** The cheapest port is no port:
+our POSIX layer is mature enough that a lot of upstream software builds
+unmodified against `toolchain/sysroot/lib/libc.a`. Establish that it does or
+doesn't *before* committing to a reimplementation, not after.
+
+##### When the port *fails*, that is usually a bug report against our libc — not a verdict on the port
+
+A failed link is the most valuable output this process produces, and the
+default response is **fix the libc and re-try the port**, not "fall back to
+reimplementing". A real port is the only honest coverage test a libc has: you
+cannot guess which of thousands of symbols matter, but real software tells you,
+weighted by actual usage. And the fix compounds — every later port inherits it,
+whereas a rewrite helps exactly one program and then needs maintaining forever.
+The cost asymmetry says the same thing: implementing a missing libc function is
+minutes to an hour; reimplementing the application is hours to days.
+
+_Precedent (`scripts/bash-spike/README.md`): our `libc.a` defined 2,900 symbols,
+bash referenced 2,030, and the first SlateOS link resolved all but **three**.
+Those three — `killpg`, `eaccess`/`euidaccess`, `__fpurge` — were implemented
+for real in `posix/src` rather than shimmed, so the relink now carries no shim
+at all. One port attempt, converted into permanent coverage._
+
+**Triage the failure. Only the first two categories mean "improve the libc":**
+
+1. **Missing standard POSIX/C function** → implement it in `posix/`. Highest
+   leverage and the common case. This is the answer the rule wants you to
+   reach for.
+2. **Missing non-standard extension** (glibc/BSD-isms) → usually implement it;
+   it is normally cheap. But check first whether upstream's `configure`
+   already has a fallback path for its absence, in which case the gap is
+   imaginary and the right fix is to let autoconf find the fallback.
+3. **Architectural mismatch → do *not* grow the libc into it.** If the program
+   needs something SlateOS deliberately rejects — Unix signals as native
+   process control, 4 KiB page assumptions, ambient-authority fds, `/proc`
+   special nodes — the "Linux Compatibility Boundary (non-negotiable)" section
+   below governs: the answer is `ENOSYS` (or emulation *inside* the compat
+   layer), never a hack into native code to satisfy a Linux quirk. This is the
+   one case where a failed port is genuinely telling you to stop.
+4. **Not a libc gap at all** → build-system friction: cross-compile detection,
+   `configure` assumptions, sysroot plumbing. Fix the build, not the libc. Real
+   example from the bash spike: `$CC` cannot contain spaces (autotools
+   word-splits it) and this repo lives under `D:\visual studio projects\`, so
+   the first attempt died with a thoroughly misleading "C compiler cannot
+   create executables".
+
+**Two refinements, both learned from that spike:**
+
+- **A kernel gap can masquerade as a libc gap.** `killpg` exists now but still
+  returns `ENOSYS`, because process groups do not exist in the kernel — yet the
+  symbol had to exist regardless, since bash references it from job-control code
+  and the *link* needs it even on a build where job control cannot work. So:
+  implement the symbol honestly, and file the underlying gap against the kernel
+  (cross-lane, that means a `requests/` entry, not an edit outside your lane).
+- **Whatever you add must actually work.** The "never accept-without-honoring"
+  rule applies at full force: a stub that returns success is *worse* than
+  `ENOSYS`, because the port links, appears to work, and fails subtly later.
+  `killpg` reporting `ENOSYS` truthfully is the correct shape.
+
+**Where this flips:** the argument is leverage, so it evaporates when there is
+none. If one port needs a large, exotic subsystem nothing else will ever use,
+that is cost without reuse — weigh it like any other feature rather than
+treating "it improves the libc" as automatically decisive.
+
+**Worked example — the expensive lesson (see `design-decisions.md` §305).** A
+session spent roughly 25 days reimplementing bash in Rust (`userspace/oils`)
+chasing byte-for-byte parity. It then turned out that **GNU bash 5.2
+cross-compiles to SlateOS as-is** — a 5.3 MB static ELF against our own libc,
+zero undefined symbols, no shims, done in about a day (`scripts/bash-spike/`).
+osh's bash-fidelity scope is now frozen and the real bash ships beside it. The
+failure was not the rewrite being badly done; it was that nobody spent the one
+day on "does the original just build?" before spending the 25 on the
+alternative. This is the single most costly mistake made on this project so far.
+
+**Reasons that *do* justify writing our own — state which one applies:**
+
+1. **The native API is genuinely richer and the existing tool cannot express
+   it.** The worked example is §2.7's Native Process Tools: `ps` has no columns
+   for capability sets, service-attributed resource use, kernel-captured launch
+   provenance or blocked-on chains, because Linux has no such concepts. Note
+   what that section does — it ships the native tools **alongside** ported
+   `ps`/`kill`/`top`, never instead of them.
+2. **A deliberate superset**, where the point is the added behaviour and
+   compatibility is a floor rather than the goal.
+3. **The security model requires it** — e.g. a handle-based, TOCTOU-free API
+   that the C original structurally cannot use. (The corrode.dev analysis cited
+   under "API Design Principles" found the largest CVE cluster in Rust coreutils
+   was path-resolution races; a rewrite that doesn't fix the class is a rewrite
+   that bought nothing.)
+4. **Upstream is unportable, unmaintained, or licence-incompatible.**
+5. **It is genuinely trivial** — small enough that the port machinery, build
+   plumbing and patch maintenance cost more than the code does.
+
+**Reasons that do not justify it:** it's in a language we'd rather not use; it
+would be "cleaner" in Rust or Python; we want to understand it; the port looks
+fiddly; Rust is memory-safe. A working, battle-tested implementation carries
+years of bug fixes and edge-case handling that a rewrite silently discards, and
+the rewrite ships *new* bugs into a system where we are the only tester.
+
+**Prefer additive over replacement.** Where we do build our own, ship the ported
+original too, because scripts depend on it byte-for-byte. This is already the
+pattern for bash/osh and for `ps`/`pslist`.
+
+**If you take the reimplementation exit, record it** — a one-line note in the
+roadmap item saying which of the five reasons applies, so the next session does
+not have to re-derive the decision (or worse, re-litigate it after the work is
+done).
 
 ### Linux Compatibility Boundary (non-negotiable)
 
@@ -208,7 +409,8 @@ batches must hold to the same discipline.
 - [ ] Later (pre-release): GRUB menu entry support for dual-boot installs
 - [x] Write CLAUDE.md / coding standards
 - [x] Set up benchmark infrastructure (`criterion`, `bench/` directory, `bench/baselines.toml`)
-- [ ] Integrate fastpy compiler into build system
+- [-] Integrate fastpy compiler into build system — **in progress** ("initiative F"; status authority is `roadmap.md`, which tracks the increments in detail). Verified done: the `x86_64-slateos` codegen target, the `rust-lld` link step, the cross-compiled pure-mode C runtime, full program link with the `posix` crt, and **on-target ring-3 execution** under the SlateOS kernel. 60+ fastpy-built binaries now live in `services/fastpy-*`, each paired with a false-pass-proof kernel self-test. Strategy per `design-decisions.md` §80 (Q29): **pure mode first** (AOT-compile, no embedded CPython), CPython bridge later as a superset once CPython is ported.
+
 - [ ] Porting automation toolkit: rule-based source code transformers for large-scale ports
   - [ ] **Coccinelle** (semantic patching for C): preferred tool for pure-C codebases
     - Understands C semantics (types, control flow, macros) — not just text substitution
@@ -238,6 +440,51 @@ batches must hold to the same discipline.
     - Header remapping, ifdef cleanup, simple renames → **comby** (quick, language-agnostic)
     - Large ports often use all three: comby for bulk header/ifdef cleanup first, then Coccinelle or LibTooling for semantic API translation
 
+#### fastpy language bindings for OS APIs
+
+_Python is only the default userspace language (see "Implementation Language
+Policy") to the extent it can actually call the OS. These are the bindings that
+make that true. Each `os.*` lowering is native and bridge-free: codegen emits a
+call to a `fastpy_os_*` runtime function in `runtime/objects.c`, which calls our
+POSIX libc, which dispatches to the kernel `SYS_*` syscalls. No CPython is
+involved on any of these paths._
+
+- [x] **POSIX `os.*` surface (native, pure-mode)** — ~56 functions implemented
+  and on-target tested. Process/identity (`getpid`, `getppid`, `gettid`,
+  `getuid`/`setuid`, `getgid`/`setgid`, `getcwd`, `getenv`, `umask`,
+  `nice`/`getpriority`/`setpriority`); raw-fd I/O (`open`, `read`, `write`,
+  `close`, `dup`, `dup2`, `lseek`, `pread`/`pwrite`, `ftruncate`); pipes
+  (`pipe`); process lifecycle (`fork`, `execv`, `waitpid`, `wifexited`,
+  `wexitstatus`); filesystem (`stat`, `statvfs`, `listdir`, `mkdir`, `rmdir`,
+  `remove`/`unlink`, `rename`, `link`, `symlink`, `readlink`, `truncate`,
+  `chmod`, `chown`, `utime`, `access`); and the `os.path.*` predicates and
+  helpers.
+- [x] **Built-in `open()` / file objects** — native `FILE*`-backed file object
+  over the `SYS_FS_*` VFS syscalls, with `with`-statement and iteration support.
+  Known slice-1 limits: text mode only (no `'rb'`/`bytes`), no `read(n)` size
+  argument, `FileNotFoundError` not yet in the `OSError` hierarchy.
+- [x] **`pathlib.Path`** — CPython-free implementation (`runtime/pathlib_pure.c`).
+- [ ] **Bindings for the *native* (non-POSIX) SlateOS API — the real gap.**
+  SlateOS is a capability/channel microkernel; POSIX is the compatibility
+  surface, not the native one. Python currently has **no** binding for any of
+  it, which is why native-side components still have to be Rust. Needed:
+  - [ ] Capability handles — acquire/inspect/derive/drop, `has_capability()`
+  - [ ] Channel IPC — create, `send`/`send_transfer`/`recv`, capability transfer
+  - [ ] The IOCP-style completion event loop and io_uring submission
+  - [ ] Service discovery / RPC (Cap'n Proto structured messages)
+  - [ ] Shared memory and futexes
+  - [ ] Structured (JSON-lines) logging and the hooks/tracing subsystem
+- [ ] **Remaining POSIX gaps blocking specific components** — add on demand,
+  each with its own ring-3 self-test, in roughly this order of usefulness:
+  - [ ] `socket` / `select` / `selectors` (network tools, service discovery)
+  - [ ] `termios` / `pty` / terminal control (shell, terminal emulator)
+  - [ ] `mmap`
+  - [ ] `posix_spawn` / `subprocess` (higher-level than the raw `fork`+`execv`)
+  - [ ] `threading` on-target (the runtime TU exists; not yet exercised at ring 3)
+- [ ] **GUI toolkit bindings** — the widget API (Phase 3.5) exposed to Python, so
+  the desktop apps specified as Python/fastpy (text editor, music player,
+  Event Viewer, calendar/reminders, settings UI, file explorer) can actually be
+  written in it. Blocked on the toolkit itself.
 _Bootloader: Limine for development (Phases 0-5). For release: GRUB for dual-boot (installer adds menu entry) + minimal custom EFI stub for standalone UEFI boot with Secure Boot._
 
 ---
@@ -1127,7 +1374,20 @@ a direct user gesture and needs none of them._
 ### 2.7 Shell and Basic Userspace Tools
 
 #### Shells
-- [ ] Port Oils (bash-compatible, replaces bash for POSIX compatibility)
+- [-] Port Oils (bash-compatible, replaces bash for POSIX compatibility) — **in
+  progress as `userspace/oils` (binary `osh`), and its bash-fidelity scope is
+  FROZEN as of 2026-08-14: see design-decisions.md §305 before doing any parity
+  work.** GNU bash 5.2 itself cross-compiles and runs on SlateOS, so byte-for-byte
+  osh↔bash parity is no longer a goal; osh divergences are fixed only when
+  something we ship or run hits them, when they are crash/hang/data-loss/security
+  bugs, or when they are regressions. The `TD-OILS-*` family in `known-issues.md`
+  is gated by that criterion and is not a burn-down list.
+- [x] Cross-compile **GNU bash 5.2** for SlateOS — done 2026-08-12
+  (`scripts/bash-spike/`). 5,349,720-byte static ELF against
+  `toolchain/sysroot/lib/libc.a`, zero undefined symbols, no shims; proven each
+  boot by `kernel/src/proc/spawn.rs::self_test_bash_on_slateos_libc`. Ships beside
+  osh as the exact-bash escape hatch and the intended on-device differential
+  oracle (§305).
 - [ ] Port Nushell as default interactive shell (Rust, structured data piping)
 - [ ] **Windows-shell familiarity layer: a `cmd.exe` emulator (and, stretch, a PowerShell emulator).** For users migrating from Windows, provide a shell that accepts classic `cmd.exe` syntax — the builtin commands (`dir`, `copy`, `move`, `del`, `ren`, `type`, `cd`/`chdir`, `md`/`mkdir`, `rd`/`rmdir`, `cls`, `echo`, `set`, `path`, `where`, `for`, `if`, `goto`, `call`, `start`, `title`, `%VAR%`/`%ERRORLEVEL%` expansion, `&`/`&&`/`||`/`|` operators, `.bat`/`.cmd` batch-file execution) — mapping them onto native filesystem/process/env syscalls so muscle-memory and existing `.bat` scripts work. It is an *emulation/compat layer*, not the default shell (Nushell stays default); it lives alongside Oils the same way. **Stretch goal: a PowerShell emulator** — much larger scope (a real object pipeline, cmdlets, .NET-esque type system). Two realistic paths, to be decided when tackled: (a) port PowerShell Core (open-source, MIT) via the .NET/CoreCLR runtime once that's available on the OS — the faithful option; or (b) a *subset* emulator covering the most common cmdlets (`Get-ChildItem`/`gci`, `Get-Content`, `Set-Location`, `Copy-Item`, `Where-Object`, `ForEach-Object`, `Select-Object`, `$_`, object pipeline basics) mapped onto Nushell's already-structured pipeline where semantics align. Record as an open question which path to take before starting PowerShell specifically; the `cmd.exe` emulator is the committed near-term deliverable and does not depend on it.
 
@@ -1139,7 +1399,7 @@ _Nushell as default interactive shell (structured data, Rust-native). Oils for P
 - [ ] Port curl
 - [ ] Port ssh / sshd
 - [ ] Port find (compatible with Linux find)
-- [ ] Build custom grep in Rust (with Python grep's unique features + standard grep features)
+- [ ] Build custom grep (with Python grep's unique features + standard grep features). **Revisit before starting** — this item predates both the language policy and the porting policy in "Design Principles", and as written it contradicts each: it specifies Rust with no stated performance reason, and a from-scratch build with no stated porting reason. The superset motive (reason 2) is plausible but has never been written down, and it is not obvious it needs a rewrite rather than ripgrep/GNU grep plus a wrapper. Before writing any code: check whether GNU grep and/or ripgrep cross-compile as-is (they very likely do), then decide whether the extra features justify our own implementation, and if so record which exclusion applies and why the language is what it is. Ship the ported original alongside regardless — scripts depend on grep byte-for-byte.
 - [ ] Filename sanitizer utility
 - [ ] Monitor-off utility (like nircmd monitor off)
 
@@ -2083,7 +2343,7 @@ _Chromium first (required for web app framework + VS Code). Firefox later via Li
 - [ ] gcc, cmake, make, pkg-config (via POSIX layer)
 - [ ] Rust toolchain (for kernel recompilation)
 - [ ] CPython (latest, for ecosystem compatibility and fastpy bootstrapping)
-- [ ] fastpy compiler (AOT Python compiler — first-class language for OS userspace)
+- [ ] fastpy compiler **hosted on SlateOS** (AOT Python compiler — first-class language for OS userspace). Note the distinction: *cross*-compiling Python to SlateOS binaries from the dev machine already works and is in use (60+ `services/fastpy-*` binaries — see Phase 0 → "Integrate fastpy compiler into build system"). This item is the compiler **running on the OS itself**, which needs CPython ported first (fastpy is written in Python and bridges to the CPython runtime for binary-extension imports — `design-decisions.md` §9).
 - [ ] Custom Rust target for the OS
 - [ ] Port Rust std library to native syscalls
 - [ ] Port a debugger (gdb/lldb) — both live attach (`debug.*` capabilities) and **postmortem dump-file loading** (opens the crash dumps from §1.5 → Crash Dumps & Postmortem Debugging, re-symbolicates against recorded store paths). Dump format chosen to match what the ported debugger understands (minidump/ELF-core-compatible) so minimal porting is needed.
@@ -2101,6 +2361,13 @@ _Chromium first (required for web app framework + VS Code). Firefox later via Li
 - [ ] Zig (self-hosted compiler, minimal runtime)
 
 _Goal: a developer should be able to use any mainstream language on this OS. Languages with JIT compilers require the `mem.jit` capability for full performance; they can fall back to interpreter mode without it._
+
+_This list is about what **users** of the OS can write software in. It says
+nothing about what **the OS itself** is written in — for that, see "Design
+Principles → Implementation Language Policy": Rust for kernel/drivers/hot
+paths, **Python (fastpy) by default for everything else**. fastpy binaries are
+AOT-compiled and contain no interpreter, so choosing Python for an OS component
+costs neither the CPython memory footprint nor interpreter-speed execution._
 
 ### 4.9 Remote Desktop
 

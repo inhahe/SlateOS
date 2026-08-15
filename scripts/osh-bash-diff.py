@@ -7,6 +7,20 @@ have actually been found so far is by hand: write a snippet, run it under real
 bash, run it under osh, eyeball the difference. This automates exactly that loop
 so the same comparison can be replayed after every change instead of once.
 
+SCOPE CAP -- read design-decisions.md §305 before adding a case
+--------------------------------------------------------------
+As of 2026-08-14 (operator decision) **this corpus does not grow for its own
+sake.** osh's bash-fidelity scope is frozen: GNU bash 5.2 itself cross-compiles
+and runs on SlateOS, so byte-for-byte parity is no longer a goal. The existing
+cases are a **regression floor to protect, not a number to raise.**
+
+Add a case only when the divergence it pins passes §305's criterion -- something
+we ship or run actually hits it, or it is a crash/hang/data-loss/security/
+wrong-exit-status bug, or it is a regression. Do **not** add cases for
+diagnostic wording, for the exact substring a message echoes, or for artifacts
+of bash being 40-year-old C. Use this harness freely to prove you have not
+*broken* anything; do not use it to hunt for new differences to fix.
+
 Corpus
 ------
 Cases live in `userspace/oils/tests/corpus/*.sh`; one case per file, run with

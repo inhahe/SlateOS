@@ -1,0 +1,104 @@
+#!/bin/sh
+# Refuse to push anything that would publish the operator's private files.
+#
+# Why this exists
+# ---------------
+# The operator wants `todo2.txt` — their raw instruction queue for the agents —
+# to be committable to the *local* repository but never to reach GitHub
+# (2026-08-14). Git has no per-file push filter: a pushed branch carries every
+# file its commits contain. So the only way to have both is a gate at the push
+# boundary, which is what this is.
+#
+# It is not a blanket block on pushing. It rejects a push only when the commits
+# being sent actually add or modify a guarded path, so ordinary lane pushes are
+# untouched. That is the difference between this and gitignoring the file: the
+# file may be tracked and committed locally, and the hook is what keeps it off
+# the remote.
+#
+# Three autonomous agents push freely and often on this repo, and any of them
+# could commit the file by accident (a `git add -A`, a merge that carries it in
+# from another branch). A convention would not survive that; a hook does,
+# because all three lane worktrees share one `.git`, so one install covers all
+# of them.
+#
+# Install (or reinstall after a fresh clone) with:
+#
+#     ./scripts/install-hooks.sh
+#
+# Bypass, when the operator explicitly asks for the file to go public:
+#
+#     ALLOW_PRIVATE_PUSH=1 git push origin <branch>
+#
+# Exit 0 = allow the push, non-zero = abort it.
+
+set -u
+
+# Paths that must never leave this machine. Matched exactly against the paths
+# git reports, so these are repo-root-relative with no leading slash.
+GUARDED="todo2.txt"
+
+if [ "${ALLOW_PRIVATE_PUSH:-0}" = "1" ]; then
+    echo "pre-push: ALLOW_PRIVATE_PUSH=1 set — private-file check skipped." >&2
+    exit 0
+fi
+
+z40=0000000000000000000000000000000000000000
+remote_name="${1:-origin}"
+violations=""
+
+# stdin gets one line per ref being pushed:
+#   <local ref> <local sha> <remote ref> <remote sha>
+while read -r local_ref local_sha remote_ref remote_sha; do
+    # A branch deletion has no content to inspect.
+    [ "$local_sha" = "$z40" ] && continue
+    [ -z "$local_ref" ] && continue
+
+    for path in $GUARDED; do
+        # 1. Is the guarded path present in the tip we are about to publish?
+        #    This catches the common case regardless of how it got there
+        #    (direct commit, merge, cherry-pick).
+        if git cat-file -e "$local_sha:$path" 2>/dev/null; then
+            violations="$violations
+  $remote_ref: '$path' exists in the tree at $(git rev-parse --short "$local_sha")"
+            continue
+        fi
+
+        # 2. Even if the tip is clean, a commit *in between* may have added it
+        #    and a later one removed it — the file would still be readable in
+        #    the published history. Scan only the commits this push would
+        #    actually add (everything not already on a remote-tracking branch),
+        #    so this stays cheap.
+        touched=$(git rev-list "$local_sha" --not --remotes="$remote_name" \
+                      -- "$path" 2>/dev/null | head -n 3)
+        if [ -n "$touched" ]; then
+            for c in $touched; do
+                violations="$violations
+  $remote_ref: commit $(git rev-parse --short "$c") touches '$path'"
+            done
+        fi
+    done
+done
+
+if [ -n "$violations" ]; then
+    cat >&2 <<EOF
+
+pre-push: REFUSING to push — this would publish a private file.
+$violations
+
+'todo2.txt' is the operator's private instruction queue. It may be committed
+locally, but it must not reach GitHub. See scripts/hooks/pre-push.
+
+To fix, pick one:
+  * Push a branch that does not contain it.
+  * Remove it from the offending commits, e.g.
+        git rm --cached todo2.txt && git commit -m "untrack todo2.txt"
+    (keeps the file on disk) — but note that only helps if it was added in
+    commits you have not pushed yet.
+  * If the operator has explicitly approved publishing it:
+        ALLOW_PRIVATE_PUSH=1 git push $remote_name ...
+
+EOF
+    exit 1
+fi
+
+exit 0

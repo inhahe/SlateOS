@@ -13,6 +13,19 @@ symbols and no shims**, and runs on SlateOS. This does not by itself decide
 Q41 — that is a scope call for the operator — but it removes feasibility from
 the argument.
 
+## ✅ Decided — 2026-08-14, `design-decisions.md` §305
+
+The operator settled it as the **hybrid**: osh remains the shell, **this bash
+ships beside it** as the exact-bash escape hatch and the intended *on-device*
+differential oracle (which is how `scripts/osh-bash-diff.py` eventually stops
+needing a host reference bash), and **osh's byte-for-byte fidelity scope is
+frozen** behind the stopping criterion in §305.
+
+So these scripts are not a one-off spike any more — **keep them working.** They
+are the build recipe for a shipped artifact, and
+`kernel/src/proc/spawn.rs::self_test_bash_on_slateos_libc` guards the result on
+every boot. Q41 is closed; read §305 before doing any osh parity work.
+
 ## Run order
 
 | Script | What it does |

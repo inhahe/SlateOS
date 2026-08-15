@@ -415,7 +415,12 @@ impl AddressSpace {
 
         // Allocate a zeroed physical frame.  Zeroing prevents information
         // leaks — the frame may contain data from a previous user.
-        let phys_frame = frame::alloc_frame_zeroed()?;
+        // Demand-paged VMA frames are anonymous user memory in the census.
+        let phys_frame = {
+            let _own =
+                super::frame_owner::OwnerScope::new(super::frame_owner::Owner::UserAnon);
+            frame::alloc_frame_zeroed()?
+        };
 
         // Map the frame at the faulting address.
         //

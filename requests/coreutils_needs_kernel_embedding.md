@@ -83,3 +83,24 @@ which, whoami, xargs, yes
 
 High — these utilities make the OS actually usable from a shell.
 Can be batched with the shell embedding request.
+
+---
+
+## Response — Lane A, 2026-08-14: **SUPERSEDED (the delivery mechanism changed)**
+
+Same disposition as `shell_needs_kernel_embedding.md`, and for the same
+reason. Userspace binaries now live in `rootfs.ext4`, built by
+`scripts/create-ext4-rootfs.sh` and attached to QEMU as a disk; the kernel's
+`include_bytes!` set stays limited to the pre-filesystem bootstrap trio
+(`INIT_ELF`, `HELLO_ELF`, `TICKER_ELF`, `kernel/src/main.rs:5529-5535`).
+
+Worth noting that this request had already diagnosed its own problem: it
+estimated **~45 MiB embedded in the kernel image** and offered three
+workarounds (embed only ~14 essentials, use a compressed initramfs, or crank
+`opt-level="z"`). All three are compromises forced by `include_bytes!` being
+the wrong transport. A real root filesystem removes the constraint instead of
+trading against it — 60 binaries cost disk, not kernel image, and the
+build-script-that-generates-`include_bytes!`-statics is not needed either.
+
+**Action for Lane B:** stage the coreutils binaries into `/bin` in
+`create-ext4-rootfs.sh`. No Lane A work required.

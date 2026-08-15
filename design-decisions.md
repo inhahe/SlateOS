@@ -4802,6 +4802,22 @@ the whole question.
 
 ## 72. Oils (OSH) port strategy (Q25-A) — **Rust reimplementation of the OSH language in-tree**, not a C++ `oils-for-unix` cross-compile
 
+> ## ⛔ SUPERSEDED IN PART — 2026-08-14, by **§305**. Read §305 before doing any osh parity work.
+>
+> **Do not read this entry's rationale as current, and do not treat its "How to
+> reverse" clause as live — it already fired, on 2026-07-22, and went unchecked
+> for 25 days.** The operator settled the resulting question (Q41) on
+> 2026-08-14 with the **hybrid**: osh remains the shell, the cross-compiled GNU
+> bash ships beside it as the escape hatch and future on-device differential
+> oracle, and **osh's bash-fidelity scope is frozen** behind a written stopping
+> criterion. §305 carries that criterion and is binding on all `TD-OILS-*` work
+> and on `userspace/oils/tests/corpus/`.
+>
+> What survives here: the *choice* of a Rust reimplementation, which stands.
+> What does not: the "no C/C++ → `x86_64-slateos` cross-toolchain" premise
+> (false since 2026-07-22 — bash now boots and runs on SlateOS) and the
+> open-ended byte-for-byte parity goal that grew out of it.
+
 **Decided by:** Claude (operator-approved scope) — the operator committed to "port
 Oils (OSH), a bash-*superset* shell (NOT bash itself)" as the first large
 initiative (§69, Q25→A). *How* to port it (faithful C++ cross-compile vs. Rust
@@ -4881,6 +4897,9 @@ Tracking: open-questions.md Q26.
 > **feasibility is settled and is no longer an input to Q41**, which is now
 > purely a scope/ownership question — keep osh, switch to bash, or keep both
 > and use bash as a differential oracle running on SlateOS itself.
+>
+> **Answered 2026-08-14 — the third option, and osh's scope is now frozen.
+> See §305.**
 
 ## 73. YSH port strategy — **defer YSH; obtain it by cross-compiling genuine Oils once a C++/slateos toolchain exists, NOT by hand-porting or auto-translating**
 
@@ -11596,3 +11615,870 @@ and the `simple` parameter on `positions_marks`/`zeroes_mark_advances`;
 `gui/font/src/sfnt.rs` — `gsub_scripts`, `shapes_as_default`,
 `gsub_chosen_script`; `gui/font/src/otl.rs` — `chosen_from`;
 `gui/font/src/scaled.rs` — the per-run `simple` binding in `shape`.
+## §301 — Slot pools are serialised by one shared spin lock over the whole scan, not by a per-slot atomic, and the lock is scoped exactly like the table
+
+**Date:** 2026-08-13
+**Decided by:** Claude (autonomous)
+**Lane:** B (POSIX & userland)
+**Affects:** `posix/src/perprocess.rs` (the primitive), `posix/src/{dirent,stdio,aio,epoll,mqueue,semaphore,sysv_msg,sysv_sem,sysv_shm}.rs` (the pools)
+
+### The problem
+
+The POSIX layer keeps about fifteen fixed-size slot pools — `DIR` handles,
+`FILE` handles, `popen` children, `aiocb` records, epoll/timerfd/inotify
+instances, the getdents caches, POSIX message queues and their descriptors,
+named semaphores, and the three System V tables. Ten of them claimed a slot
+like this:
+
+```rust
+for (i, slot) in table.iter_mut().enumerate() {
+    if !slot.in_use {       // check ...
+        slot.in_use = true; // ... then set, with nothing held
+        return Some(i);
+    }
+}
+```
+
+Check-then-set with nothing held is correct in a single-threaded process, and
+every one of these modules carried a `// SAFETY: single-threaded posix layer`
+comment saying so. That comment stopped being true when this crate grew a
+`pthread_create`. Two threads calling `opendir` at the same instant can both
+read `in_use == false` for slot 3 and both be handed slot 3, after which each
+silently scribbles on the other's directory stream. Nothing in the type system
+or the test suite catches it: single-threaded tests pass forever.
+
+The remaining five modules (`mqueue`, `semaphore`, and the three System V
+ones) already locked correctly — but each with its own hand-rolled
+`AtomicBool` + `lock_acquire`/`lock_release`/`struct Guard`, five near-identical
+copies of the same twenty lines.
+
+### Decision 1 — one lock over the whole scan, not a per-slot `compare_exchange`
+
+`PoolLock` is a spin lock; `lock_pool()` returns a `PoolGuard` that releases on
+`Drop`; the entire scan-and-claim runs inside one critical section.
+
+The obvious cheaper alternative is a `compare_exchange` on each slot's `in_use`
+flag: no lock, no contention between threads claiming *different* slots, and it
+makes the simple pools correct. It was rejected because it does not cover the
+*compound* pools. `sysv_msg::alloc_queue(key)`, `sysv_sem::alloc_set(key, …)`
+and `sysv_shm::alloc_segment(key, …)` first scan for an existing entry with a
+matching key and allocate only if there is none. A per-slot atomic claim keeps
+two threads from taking the same *slot*, but does nothing to stop them each
+creating a *separate* segment for the same key — the lookup and the claim have
+to be one indivisible step, and a per-slot CAS cannot express that. The
+getdents cache has the same find-or-create shape.
+
+So the choice was between one primitive that covers every pool, or two
+primitives where the weaker one silently does not apply to a third of them and
+the next person to add a pool has to work out which. Allocation is not a hot
+path — once per `opendir`, per `epoll_create`, per `mq_open` — the critical
+section is a bounded scan of a small array, and the crate is `no_std` on the
+target with no blocking primitive available. Uniformity wins; the contention
+cost is not measurable at these call rates.
+
+### Decision 2 — the lock covers *scans*, not the objects in the pool
+
+Only allocate, release, and find-by-key take the lock. Once a caller holds the
+`DIR *`, `mqd_t`, or instance index that names its own slot, it reaches that
+slot unlocked: `with_instance_mut`, `readdir`, `epoll_ctl` and friends stay
+lock-free.
+
+This is a real boundary, not laziness. POSIX already makes concurrent use of a
+single `DIR *` or `FILE *` by two threads the caller's problem, so there is no
+contract to uphold; and taking a process-wide lock on every `readdir` would
+serialise unrelated directory streams for nothing. The lock is on the *pool*,
+not on the objects in it — and each unlocked accessor now says so in place of
+the old "single-threaded" comment, so the boundary is documented where someone
+would otherwise "fix" it.
+
+Two consequences are accepted rather than solved:
+
+- **Releases take the lock too.** Clearing `in_use` outside it is a plain data
+  race against a concurrent claim reading it, and could let a slot be reissued
+  before the release is visible. Every `*_close` therefore takes the guard even
+  though it, too, names its slot by index.
+- **The getdents cache can still end up with two slots for one fd.** Its
+  `SYS_FS_LIST_DIR` snapshot is far too slow to hold a process-wide lock
+  across, so the pool uses claim-then-publish: `claim_getdents_cache()` takes
+  the slot with `fd = -1` (so no concurrent `find_getdents_cache` can match it)
+  and `publish_getdents_cache(slot, fd)` sets the real fd once the buffer is
+  filled. Two threads calling `getdents64` on the *same* fd simultaneously can
+  therefore each get their own cache slot, each with its own position. That is
+  concurrent use of one fd — already the caller's problem — and it is
+  memory-safe, which is what the lock is for.
+
+### Decision 3 — the lock's scope must match its table's scope
+
+The pools are declared two ways, and the lock has to follow:
+
+| the table is | the lock must be | why |
+|---|---|---|
+| `process_global!` (`epoll`, `mqueue`, `semaphore`, `aio`, `stdio`'s popen store) | `process_global!`, declared in the same block | on the host each test thread owns its own table, so a shared lock serialises threads that cannot collide |
+| a plain `static mut` (`dirent`, `stdio`'s `FILE` pool, the three System V tables) | a plain `static` | the table really is shared on both builds, so a per-thread lock would guard nothing |
+
+Getting this backwards is silent — a too-narrow lock compiles, passes every
+single-threaded test, and protects nothing. `mqueue` and `semaphore` were both
+found with the *other* mismatch: a plain `static` lock over a `process_global!`
+table. That direction is safe (over-broad, not under-broad) and correct on the
+target, where `process_global!` is itself a `static mut`. It was still fixed,
+because a spin lock has no poisoning and no unwinding path: one host test that
+panics inside the critical section of a *shared* lock hangs every later test
+that touches the pool, including tests that share no data with it. Declaring
+the lock inside the `process_global!` block, beside its table, is what keeps
+the two from drifting apart later.
+
+The one deliberate exception is `epoll`'s `event_scratch_lock`, which guards a
+~8 KiB *buffer* rather than a slot table and is held across the
+`SYS_FS_WATCH_READ` syscall. It has to be: the syscall is what fills the
+buffer, and the records are parsed straight out of it, so releasing the lock in
+between would let another thread refill it mid-parse. It is re-taken per batch
+so a long drain does not monopolise the buffer.
+
+### Alternatives considered
+
+**Leave it single-threaded and document the restriction.** The pools predate
+`pthread_create`; one could declare that the POSIX layer's allocators are
+simply not thread-safe. Rejected: the whole point of this layer is that
+unmodified Linux binaries behave as they do on Linux, and on Linux `opendir`
+from two threads is ordinary, unremarkable code. A documented restriction that
+real programs violate by default is not a restriction, it is a latent bug.
+
+**A `Mutex`-like type with poisoning.** No `std` on the target, and poisoning
+implies unwinding, which the kernel-side build does not have. The spin lock's
+failure mode under a panic is a hang rather than a poisoned error — which is
+exactly why Decision 3 pushes every lock to the narrowest scope its table
+allows.
+
+**Keep the five hand-rolled locks.** They worked. But five copies of the same
+twenty lines is five places for the next fix to be applied to four of them, and
+the copies had already drifted (`AcqRel` vs `Acquire` on the exchange, differing
+guard names, and the two scope mismatches above). Collapsing them onto the
+shared primitive is what surfaced the mismatches in the first place.
+
+### How the test has teeth
+
+`a_scan_and_claim_under_the_lock_never_hands_out_a_slot_twice` is worth
+describing, because its *first* version proved nothing: it passed with
+`lock_pool` deliberately removed. The `Mutex<Vec<usize>>` used to collect the
+claimed indices was serialising the worker threads all by itself, so they never
+actually raced. The version in the tree fixes that three ways — a
+`std::sync::Barrier` so all eight threads enter the claim loop together, a
+`yield_now()` between the read of `in_use` and the write to widen the window,
+and per-thread private `Vec`s merged only after `join`. With the lock removed
+it now fails as `left: 20, right: 64`. A concurrency test that has never been
+observed to fail is not evidence of anything.
+
+### How to reverse
+
+`PoolLock` is a private crate primitive with no ABI surface; the guard is
+acquired at the top of each allocator. Reverting means deleting the
+`let _guard = …` lines and the lock statics. The claim/publish split in
+`dirent`'s getdents cache is the one structural change that would need undoing
+separately.
+
+---
+
+## §302 — A zoneinfo zone is a borrowed view over the file's bytes, and the POSIX rule engine is its *tail*, not its alternative
+
+**Date:** 2026-08-13
+**Decided by:** Claude (autonomous)
+**Lane:** B (POSIX & userland)
+**Affects:** `tzrules/src/tzif.rs` (the reader), `posix/src/tz.rs` (`Zone`, `ZONE_FILE`), `userspace/oils/src/interp.rs` (`ShellZone`, `Zone<'a>`)
+
+### The problem
+
+`tzrules` already understood the POSIX `TZ` grammar. To make
+`TZ=America/New_York` work, both the libc and osh had to learn to read TZif
+(RFC 8536) binary zoneinfo files. Three things had to be decided along the way,
+each with a real trade-off.
+
+### Decision 1 — the reader borrows the file's bytes rather than owning a table
+
+`TzFile<'a>` holds four slices into the caller's buffer (transition times,
+transition types, ttinfo records, designations) and decodes an entry on each
+lookup. It does not copy the transition table into a struct.
+
+**For:** `tzrules` is `no_std` with no allocator — it is linked into the libc,
+where `localtime()` must not allocate. The alternatives are a fixed inline
+array, which either wastes kilobytes in every `Tz` or caps the transition count
+at some arbitrary number (`America/New_York` has 236 transitions; some zones
+have over 1 000), or requiring an allocator, which the libc cannot provide on
+this path.
+
+**Against:** it pushes the lifetime problem onto every consumer — the bytes
+must outlive the zone. In the libc that meant a `static mut ZONE_FILE` buffer
+and `TzFile<'static>`; in osh it meant an owning `ShellZone` holding an
+`Rc<[u8]>` with a `view()` that borrows it. Two different answers to the same
+question is a smell, but they are genuinely different situations: the libc has
+one process-wide zone and no allocator, osh has an allocator and wants a
+snapshot per prompt.
+
+**Also against:** decoding per lookup is a few big-endian loads and a binary
+search rather than a single indexed read. Measured against the cost of the
+`open`/`read` that precedes it, this is noise.
+
+### Decision 2 — the footer rule governs at and after the last transition
+
+A TZif v2+ file ends with a POSIX `TZ` string. `TzFile::lookup` consults the
+existing `Tz` engine for any instant at or past the last recorded transition
+(and for *every* instant in a file with no transitions at all), and the
+transition table only before that.
+
+**For:** this is what the format means. `zic -b slim` — the default in modern
+tzdata — stops emitting transitions as soon as the footer describes them, so a
+reader that ignored the footer would freeze every zone at its last recorded
+entry and report the wrong offset for every future date. Treating the rule
+engine as the *tail* of the file engine also means the two paths share one
+implementation of DST arithmetic and can never disagree about a future date,
+which is the property the whole shared-crate arrangement exists to guarantee.
+
+**Against:** it means a lookup can take either of two quite different code
+paths depending on the instant, so a bug in one is invisible from the other.
+Mitigated by testing both sides of the boundary in the same fixture.
+
+### Decision 3 — the v2+ footer is mandatory
+
+`parse` returns `None` for a v2+ file with no `\n<rule>\n` footer, even though
+the data block before it is complete and self-consistent.
+
+**For:** RFC 8536 §3.3 requires it, and it is the *only* structural check that
+catches a file truncated exactly at the end of its data block — every count
+still adds up, every index is in range, and the file looks perfectly valid. A
+truncated zoneinfo file that silently becomes a zone with a plausible-looking
+history is exactly the failure that is hardest to notice.
+
+**Against:** a hand-written or unusual file with an empty footer is refused
+where a more permissive reader would accept it. Judged the right trade: `TZ` is
+attacker-shaped input (any libc will open the path you give it), so refusing
+the ambiguous case is worth more than accepting the odd one.
+
+### Decision 4 — `standard()`/`daylight()` prefer the tail over the history
+
+The summary accessors that back `tzname[]`, `timezone` and `daylight` report
+the footer rule's two halves when there is a footer, and fall back to the most
+recent matching type in the table only when there is not.
+
+**For:** it matches glibc, and it matches what a user means. Europe/Moscow has
+decades of DST transitions on record and abandoned DST in 2011; São Paulo did
+the same in 2019. A "does this zone have DST?" that answers from the history
+says yes for both, and `daylight = 1` on a machine in Moscow is simply wrong.
+
+**Against:** it makes the accessors disagree with `lookup()` for a historical
+instant — `daylight()` says "no DST half" for a zone that was in DST in 1985.
+That is the same thing glibc does, and the POSIX globals are documented as
+describing the *current* zone, so the disagreement is in the spec rather than
+in us.
+
+### Reversibility
+
+Decision 1 is the structural one: undoing it means giving `TzFile` an owned
+table and an allocator, which would change every consumer's type. Decisions 2,
+3 and 4 are each a handful of lines in `tzrules/src/tzif.rs` (`lookup`,
+`footer_body`, `standard`/`daylight`) with tests naming the behaviour they pin,
+so each can be revisited on its own.
+
+## §303 — NPTL validates its scalar argument before it touches the pointer, so an out-of-domain scalar outranks a NULL pointer
+
+**Date:** 2026-08-13
+**Decided by:** Claude (autonomous)
+**Lane:** B
+
+### The problem
+
+§300 established the rule for *which* errno a NULL pointer produces, and its
+Consequences section asked for a per-function audit of the ~330 remaining
+`is_null() -> EFAULT` sites. `known-issues.md`'s
+`D-POSIX-NULL-POINTER-ERRNO-NEEDS-A-PER-FUNCTION-AUDIT` singled out
+`posix/src/pthread.rs` (47 sites) as "the one that still needs a decision
+rather than a lookup", because glibc's NPTL contains **no NULL checks at
+all** — every one of these functions simply dereferences and faults. There is
+no upstream errno to copy, so the audit appeared to be blocked on a judgement
+call about what to substitute.
+
+That framing was wrong. §300's own closing instruction says to "check the
+*order* of the validations too, not only the constant — that is what
+`ptsname_r` actually got wrong", and ordering is exactly what `pthread.rs` had
+wrong, nine times over. The question is answerable from the source without any
+judgement at all.
+
+### What the source says
+
+NPTL has one consistent shape. Every entry point that takes both an attribute
+pointer and a scalar validates the **scalar first**, returns `EINVAL`/`ERANGE`
+from that test, and dereferences the pointer only afterwards:
+
+| Function | glibc source | first test |
+|---|---|---|
+| `pthread_attr_setstacksize` | `nptl/pthread_attr_setstacksize.c` | `int ret = check_stacksize_attr (stacksize); if (ret) return ret;` |
+| `pthread_attr_setstack` | `nptl/pthread_attr_setstack.c` | same `check_stacksize_attr` prologue |
+| `pthread_attr_setdetachstate` | `nptl/pthread_attr_setdetachstate.c` | `/* Catch invalid values.  */` on `detachstate` |
+| `pthread_mutexattr_settype` | `nptl/pthread_mutexattr_settype.c` | `if (kind < PTHREAD_MUTEX_NORMAL \|\| kind > PTHREAD_MUTEX_ERRORCHECK) return EINVAL;` |
+| `pthread_condattr_setclock` | `nptl/pthread_condattr_setclock.c` | full `clock_id` validation |
+| `pthread_rwlockattr_setpshared` | `nptl/pthread_rwlockattr_setpshared.c` | `futex_supports_pshared (pshared)` |
+| `pthread_barrier_init` | `nptl/pthread_barrier_init.c` | `if (count == 0 \|\| count >= BARRIER_IN_THRESHOLD) return EINVAL;` |
+| `pthread_getname_np` | `nptl/pthread_getname.c` | `if (len < TASK_COMM_LEN) return ERANGE;` |
+
+So on Linux, a call that is bad in *both* ways — a NULL pointer **and** an
+out-of-domain scalar — returns the scalar's errno, and never faults. Our code
+checked the pointer first in every one of these, so it returned `EFAULT` where
+Linux returns `EINVAL` or `ERANGE`.
+
+The affinity pair is the interesting case, because the two halves order their
+checks *oppositely*, and the asymmetry is the kernel's rather than glibc's
+(both glibc wrappers are bare `INTERNAL_SYSCALL_CALL`s):
+
+- `sched_getaffinity` (`kernel/sched/core.c:8506-8509`) has two `EINVAL`
+  tests — `len < cpumask_size()` and `len & (sizeof (unsigned long) - 1)` —
+  and both sit **above** the `copy_to_user` that would fault. Length wins.
+- `sched_setaffinity`'s `get_user_cpu_mask` (`kernel/sched/core.c:8429`) has
+  **no** size rejection at all; a short `len` merely leaves the top of the
+  mask clear. `copy_from_user` runs first, so the NULL pointer wins. (A short
+  `len` still reaches `EINVAL` there, but the long way round: the cleared mask
+  is empty, and `__sched_setaffinity` rejects an empty CPU set.)
+
+### The decision
+
+1. **Order our checks the way NPTL and the kernel order theirs.** Scalar
+   first in the eight table rows above and in `pthread_getaffinity_np`;
+   pointer first in `pthread_setaffinity_np` alone.
+
+2. **Keep `EFAULT` for the pointer itself**, when every scalar is valid. glibc
+   segfaults there, which is not an errno we can return, so a substitute is
+   unavoidable. `EFAULT` is the right substitute because on the two paths where
+   the pointer genuinely does reach a syscall — the affinity pair, and
+   `pthread_setname_np`'s `prctl` — `EFAULT` is precisely what Linux gives; a
+   caller who checks for it is never surprised by the ones that don't syscall.
+
+The alternative to (2) was to fault as glibc does, on the grounds that
+returning *any* errno invents behaviour no Linux program can observe. Rejected:
+we are a hosted libc whose callers include our own test suite and our own
+userland, and a diagnosable errno is worth more than bug-compatibility with a
+segfault. The alternative to (1) was to leave the order alone and document the
+divergence. Rejected because the order is part of the ABI — a program that
+passes a stack size of 8192 and a null attribute expects `EINVAL`, and getting
+`EFAULT` sends it down an error path that was written for a different bug.
+
+### Three latent bugs the audit turned up
+
+Reordering the checks was not the whole of it. Reading the glibc source
+line-by-line exposed three cases where our *constants* were wrong too:
+
+- **`PTHREAD_STACK_MIN` was hardcoded as `4096`** in `pthread_attr_setstacksize`
+  and `pthread_attr_setstack`, while the crate's own
+  `linux_pthread_key_types::PTHREAD_STACK_MIN` is `16384` (glibc's
+  `check_stacksize_attr`, `sysdeps/nptl/pthreadP.h:704`, on x86-64). We
+  accepted three stack sizes glibc rejects, and contradicted ourselves. The
+  setters now use the shared constant.
+
+- **`pthread_getname_np` applied `ERANGE` only when the stored name did not
+  fit.** glibc compares `len` against `TASK_COMM_LEN` (16) *unconditionally*,
+  never against the name's actual length, so `pthread_getname_np(t, buf, 4)`
+  is `ERANGE` even for a two-character name — a call we used to accept. With
+  the entry test corrected, the second length test becomes dead and is gone;
+  glibc has no second test either.
+
+- **`pthread_barrier_init` accepted `count == u32::MAX`.** That was a latent
+  hang: our arrival counter is an `AtomicI32`, so a count above `i32::MAX`
+  can never be reached and every waiter would block forever. glibc caps
+  `count` at `BARRIER_IN_THRESHOLD` (`UINT_MAX / 2`,
+  `sysdeps/nptl/internaltypes.h:119`) for its own reset protocol; we adopt the
+  same bound for our own reason, and the constant is now named in the code.
+
+And one errno was simply the wrong constant:
+**`pthread_rwlockattr_setpshared` returned `ENOTSUP` for any non-`PRIVATE`
+value**, conflating "we don't support cross-process rwlocks" with "that isn't
+a pshared value". glibc gates on `futex_supports_pshared`
+(`sysdeps/nptl/futex-internal.h:102`), which accepts *both* POSIX values and
+returns `EINVAL` for anything else. `ENOTSUP` is our own verdict on
+`PTHREAD_PROCESS_SHARED` — which glibc accepts and we do not — and must not
+swallow out-of-domain values with it.
+
+### Consequences
+
+Nine functions changed behaviour, all in the direction of matching Linux.
+Callers that passed a bad scalar *and* a null pointer see a different errno;
+callers that passed only one of the two are unaffected, except for the three
+constant fixes above, which reject inputs we previously accepted (an 8 KiB
+stack, a short `getname` buffer, a `u32::MAX` barrier). Each is a case where
+the old acceptance was itself the bug.
+
+Every changed site carries the glibc (or kernel) file name and the actual
+check in a comment, at both the code and the test, per §300's rule that "a test
+that encodes an errno with no upstream citation is only evidence that the code
+and the test were written by the same pass."
+
+The audit's remaining clusters — `file.rs` (28), `spawn.rs` (16), `socket.rs`
+(15), `unistd.rs` (13), `xattr.rs` (11) — are unaffected by this entry's
+reasoning, which is specific to NPTL's shape. They are ordinary §300 lookups:
+does the pointer reach a syscall or not.
+
+## §304 — A timed wait validates its deadline where *its own* upstream validates it, even though they all share one predicate
+
+**Date:** 2026-08-14
+**Decided by:** Claude (autonomous)
+**Lane:** B
+
+### The problem
+
+None of `pthread_cond_timedwait`, `pthread_mutex_timedlock` or
+`sem_timedwait` checked `abstime->tv_nsec` at all. Adding the check is not the
+decision; *where* to add it is. glibc calls one shared inline predicate,
+`valid_nanoseconds` (`include/time.h:517`), from all three — which makes it
+look as though the natural port is one helper called from one place in each
+function, namely the top. That port would be wrong in two of the three.
+
+### What the source says
+
+| Function | glibc source | position of the check |
+|---|---|---|
+| `pthread_cond_timedwait` | `nptl/pthread_cond_wait.c:635` | **first statement**, above the mutex release |
+| `sem_timedwait` | `nptl/sem_timedwait.c:28` | **above** `__new_sem_wait_fast` |
+| `pthread_mutex_timedlock` | `nptl/pthread_mutex_timedlock.c:221` | **inside the contended branch**, under the comment "We are about to block; check whether the timeout is invalid" |
+| `pthread_rwlock_{rd,wr}lock_full64` | `nptl/pthread_rwlock_common.c:292` | **first statement**, with a comment recording that this was *changed* from lazy to eager |
+
+The observable consequence: `pthread_mutex_timedlock` on an **uncontended**
+mutex with `tv_nsec = 1e9` returns 0, while `sem_timedwait` on a semaphore
+with a **positive count** and the same timespec returns `EINVAL`. Same
+predicate, same class of caller error, opposite answers.
+
+POSIX permits both — "the validity of the abstime parameter need not be
+checked if the lock can be immediately acquired" — which is precisely why the
+implementations diverged and why the rwlock comment exists: glibc took the
+allowance for mutexes, declined it for rwlocks and semaphores, and documented
+the switch.
+
+The fourth site is a different predicate entirely. `mq_timedsend` and
+`mq_timedreceive` are bare syscalls, so the kernel validates: `prepare_timeout`
+(`ipc/mqueue.c`) → `timespec64_valid` (`include/linux/time64.h`), which
+rejects `tv_sec < 0` as well as an out-of-range `tv_nsec`. glibc's predicate
+never inspects `tv_sec`, so for the pthread and semaphore waits a negative
+`tv_sec` is a deadline in the past — `ETIMEDOUT`, not `EINVAL`.
+
+### The decision
+
+1. **Port the predicate once** (`time::valid_nanoseconds`, glibc's definition
+   verbatim) but **place each call where its own upstream places it** —
+   eagerly in `pthread_cond_timedwait` and `sem_timedwait`, lazily in
+   `pthread_mutex_timedlock`.
+
+2. **Do not share the predicate with `mqueue`.** `deadline_from_timespec`
+   keeps its own `tv_sec < 0` test on top of `valid_nanoseconds`, because it
+   is implementing `timespec64_valid`, not `valid_nanoseconds`.
+
+The alternative to (1) was to check eagerly everywhere: one rule, simpler to
+state, and arguably *better* — a caller who passes a malformed timespec has a
+bug whether or not the lock happened to be free, and the lazy version makes
+that bug appear only under contention, i.e. intermittently. Rejected anyway.
+The whole point of this layer is that a program built against glibc behaves
+the same here, and a real program does depend on the lazy behaviour by
+accident: an uncontended `pthread_mutex_timedlock` with a sloppily-computed
+deadline is a common pattern that works on Linux, and failing it would be a
+regression visible only to us. The eager version is a defensible libc design
+and not the one we are implementing. (§303 made the same call for a different
+reason: the order of validations is part of the ABI.)
+
+The alternative to (2) was one predicate for everything, taking the union or
+the intersection. Rejected: the union breaks `sem_timedwait` with a
+past deadline (`EINVAL` instead of `ETIMEDOUT`), the intersection breaks
+`mq_timedsend` with `tv_sec = -1` (a very long wait instead of `EINVAL`).
+Two rules that differ by one line and cannot be merged.
+
+### Consequences
+
+Anyone adding `pthread_cond_clockwait`, `sem_clockwait` or the
+`pthread_rwlock_{timed,clock}{rd,wr}lock` family must look up that function's
+own placement rather than copying a neighbour's. The rwlocks are **eager**,
+and the clock-taking variants additionally reject an unsupported `clockid`
+(`futex_abstimed_supported_clockid`) *before* the nanoseconds check.
+
+The general form of the rule, which outlives this entry: a shared helper
+upstream is evidence about the *predicate*, not about the *control flow*.
+§303's "port the upstream helper rather than the check" is necessary and not
+sufficient.
+
+
+## §305 — osh ships as the shell, cross-compiled bash ships beside it, and osh's bash-fidelity scope is **frozen**
+
+**Date:** 2026-08-14
+**Decided by:** Operator (Claude recommended this option; the operator asked the
+question that exposed the problem in the first place — see the history below)
+
+### The question
+
+Should SlateOS's POSIX shell be `userspace/oils` (osh — a 141,899-line Rust
+reimplementation, 1,210 commits, 662/662 corpus cases byte-exact against bash
+5.2.37), or the genuine GNU bash 5.2 that we can now cross-compile and which
+**already boots and runs on this OS**? Tracked as open-questions **Q41**, now
+closed by this entry.
+
+### Decision — the hybrid, with a stopping criterion
+
+Three parts, and the third is the one that actually changes day-to-day work:
+
+1. **osh remains the shell.** It works today, it is ours to debug and extend,
+   it needs no dynamic linker, and 141k lines of it are already correct. No
+   rewrite, no deletion, no migration project.
+2. **The cross-compiled bash stays and is a first-class artifact.** It is the
+   escape hatch (a script that genuinely needs exact bash can run exact bash)
+   and, longer term, the differential oracle *running on SlateOS itself* —
+   which is the path to dropping `scripts/osh-bash-diff.py`'s dependency on a
+   host Linux/MSYS reference bash. Keep `scripts/bash-spike/` reproducible and
+   keep `self_test_bash_on_slateos_libc` green.
+3. **osh's fidelity scope is frozen.** Byte-for-byte parity with bash is no
+   longer an open-ended goal. The corpus stops growing for its own sake. The
+   stopping criterion is written out below, and it is binding.
+
+### The stopping criterion (read this before opening a `TD-OILS-*` entry)
+
+**Fix an osh divergence when at least one of these is true:**
+
+- **Something on SlateOS actually hits it.** A real script, service, init file,
+  build step, package recipe, test harness or interactive session that we ship
+  or run. "A user might type this" does not qualify; "our own `create-ext4-rootfs.sh`
+  types this" does.
+- **It is a crash, hang, wrong-exit-status-that-propagates, data-loss or
+  security bug.** These are bugs on their own terms, independent of bash.
+- **It is a regression** against a corpus case that is already green. The 662
+  existing cases stay green; that is a floor, not a ceiling.
+
+**Do not fix — and do not write a corpus case for:**
+
+- **Diagnostic wording, spelling, and the exact substring a message echoes.**
+  Two of the last three sessions' fixes were of exactly this kind: which of
+  bash's two messages an unterminated `${` takes when its *name* scan runs off
+  the text, and the precise `%s` slice in ``bad substitution: no closing "`" in
+  …`` when an unmated backquote sits inside a single-quoted run in an array
+  subscript. Both are now correct, both were verified byte-exact, and neither
+  will ever matter to anything running on this OS.
+- **Artifacts of bash being a 40-year-old C program.** The canonical example,
+  already in the corpus: `OPTIND=4294967297` wraps to the first argument
+  because bash stores it in a C `int`. That is a fact about `int`, not about
+  shells.
+- **Constructs only reachable by adversarial or nonsense input** whose only
+  observable difference is which error text appears.
+
+**When a divergence is real but out of scope**, the answer is now bash: note it
+in the `TD-OILS-*` entry as `SCOPE: out of frozen scope (§305)` and move on.
+Do not open a fidelity investigation.
+
+### Why this and not the alternatives
+
+- **B — keep osh, close Q41 permanently.** Rejected as stated, because it
+  answers the feasibility question that was already settled and leaves the
+  *actual* problem — that byte-for-byte fidelity has no stopping criterion —
+  exactly where it was. This entry is B plus the missing stopping criterion,
+  which is why it supersedes rather than contradicts it.
+- **C — switch to cross-compiling bash, retire osh.** Rejected: it discards
+  141k lines of working, byte-exact, dependency-free Rust in exchange for
+  maintaining a fork of 40-year-old C, and osh's independence from a C
+  toolchain has value on an OS whose toolchain story is still moving. Note
+  that this rejection is *not* on feasibility grounds — bash demonstrably runs.
+- **The hybrid (chosen).** Gets C's benefit (fidelity is available exactly,
+  for free, when something actually needs it) without C's cost (no rewrite, no
+  fork to maintain), and converts the unbounded chase into a bounded job.
+
+### The history this entry exists to prevent repeating
+
+This is the part a future session must read. **§72 chose the Rust
+reimplementation on one decisive fact — "there is no C/C++ → `x86_64-slateos`
+cross-toolchain in this repo" — and wrote its own reversal condition. The
+condition fired four days later and nobody checked for twenty-five days.**
+
+| Date | Event |
+|---|---|
+| 2026-07-18 | `userspace/oils` begins; §72 rejects the cross-compile as prerequisite-blocked |
+| 2026-07-21 | `x86_64-slateos` C cross-target lands (fastpy, initiative F) |
+| 2026-07-22 | `zig cc` wired in; `toolchain/sysroot/lib/libc.a` exists — **§72's premise is now false** |
+| 2026-08-12 | The operator asks the question. Spike measures it: **bash 5.2 boots and runs on SlateOS**, 5,349,720-byte static ELF against our own `libc.a`, zero undefined symbols, no shims, three small `posix/src` additions (`killpg`, `eaccess`/`euidaccess`, `__fpurge`) |
+| 2026-08-14 | This entry |
+
+Roughly 1,100 of oils' 1,210 commits postdate the moment §72's stated blocker
+ceased to exist. The original call was correctly reasoned **on the facts of its
+day**; the failure was procedural, not analytical — a decision carrying an
+explicit expiry condition was never re-audited, and a large initiative kept
+compounding on a premise that had quietly become false.
+
+### The general rule this establishes
+
+**A decision whose rationale rests on a stated prerequisite being absent must
+name the condition that reverses it, and that condition must be *checked*, not
+merely recorded.** Concretely, for this repo:
+
+- When a `design-decisions.md` entry contains a "How to reverse" / "revisit if
+  …" clause, the reversing condition belongs in `todo.txt` as a live item, not
+  only in the entry's prose. A clause nobody is scheduled to evaluate is a
+  comment, not a control.
+- **When you build a capability, grep the design decisions for entries that
+  were rejected for lack of it.** The `zig cc` work of 2026-07-21/22 was the
+  moment to re-read §72, and the person best placed to notice was whoever
+  landed the toolchain. `grep -n "no C/C++\|cross-toolchain\|prerequisite"
+  design-decisions.md` would have found it.
+- Prefer rationales that rest on *tradeoffs*, which age slowly, over rationales
+  that rest on a *missing prerequisite*, which can evaporate overnight.
+
+### Where it bites
+
+`design-decisions.md` §72 (superseded in part — its prerequisite claim and its
+"How to reverse" clause are both spent; see the pointer added there),
+`open-questions.md` Q41 (closed by this entry), `roadmap.md` §2.7 and the Lane B
+backlog summary, `roadmap-detailed.md` §2.7, `todo.txt`, `known-issues.md` (the
+whole `TD-OILS-*` family is now scope-gated by the criterion above),
+`userspace/oils/` (all of it), `scripts/osh-bash-diff.py` and
+`userspace/oils/tests/corpus/` (the corpus no longer grows for its own sake),
+`scripts/bash-spike/`, `scripts/create-ext4-rootfs.sh` (stages `/bin/bash`) and
+`kernel/src/proc/spawn.rs::self_test_bash_on_slateos_libc`.
+
+
+## §306 — The shared documents stay per-branch; a fetch/merge cadence is what keeps them current
+
+**Date:** 2026-08-14
+**Decided by:** Claude (operator-approved scope — the operator was offered
+three options and delegated the choice: "do whichever one you think is best")
+
+**The question.** `roadmap.md`, `known-issues.md`, `design-decisions.md`,
+`open-questions.md`, `todo.txt` and `requests/` are ordinary tracked files, so
+each lane branch carries **its own copy** of every one of them. Should they
+instead live in one place — on `main` only — so that all three lanes read the
+same bytes?
+
+**What prompted it.** Two failures on the same day, both mine:
+
+1. `requests/a-b-init-conflates-syscall-error-with-exit-code.md` — Lane A's
+   report that `services/init/src/main.rs` treats `process_try_wait`'s negative
+   kernel error as a child exit code — sat on `origin/main` **unread for a
+   day**. It was never in my worktree, because `lane-b` had never once fetched
+   or merged since the split (55 ahead, 72 behind).
+2. I then diagnosed the repo's integration state by reading the shared docs in
+   `D:\visual studio projects\os`, and concluded that no lane had ever merged
+   to `main`. That was **wrong**: the `os` directory is a checkout of `main`
+   sitting **67 commits behind `origin/main`**, and Lane A had in fact merged
+   (`6d69d308e`). I recommended an architecture change to the operator on the
+   strength of it, then had to retract the reasoning before it was acted on.
+3. **A third surfaced while writing this entry, and it is the cleanest
+   illustration of the three.** The first boot test after the merge failed on
+   a missing `limine/BOOTX64.EFI`, and before that on six missing service ELFs
+   that `kernel/src/main.rs` `include_bytes!`es. Every one of them is
+   provisioned by `scripts/bootstrap-worktree.sh` — a script that exists *for
+   exactly this purpose*, that landed on `main` on 2026-08-13 (`0d013beb1`,
+   `60dab49d5`), and that `lane-b` had never seen. I was one `git merge` away
+   from a provisioned worktree for a day, and instead diagnosed it as a
+   sequence of unrelated build failures.
+
+**The decision.** Keep the per-branch copies. Add an explicit **sync cadence**
+instead, recorded in `roadmap.md` §5.5 and mirrored into `CLAUDE.md`:
+
+- `git fetch origin && git merge origin/main` at the **start** of every task;
+- push the lane and **merge the lane up into `main`** at the **end** of every
+  green one;
+- `origin/main` is the trunk — the `os` directory is a *view* of it that may
+  be arbitrarily stale, and must be pulled before it is read as authoritative;
+- **merge, never rebase**, when integrating `origin/main` into a lane (see
+  below).
+
+**The alternative, and why not.** Option B was to move the shared docs to
+`main` only. It buys freshness by construction and would have prevented failure
+(1) outright. It was rejected because:
+
+- **It trades away worktree isolation — the one property the three-lane
+  arrangement exists to provide.** Editing a doc that lives only on `main`
+  means three agents writing the same file in the same checkout, which is
+  precisely the clobbering failure mode the lanes were drawn to prevent. It
+  would reintroduce it for exactly the files that are hardest to reconstruct
+  from memory.
+- **The per-lane conventions demonstrably work.** The merge that closed the
+  72-commit gap produced **zero** conflicts in `design-decisions.md` — the
+  §200/§300/§400 numbering split doing its job across two lanes appending
+  simultaneously — and five elsewhere, every one of them the trivial "both
+  lanes appended at the same spot" shape. Total resolution: minutes.
+- **The failure was not structural.** The dropbox was not broken; nobody
+  emptied it. A problem that regular fetching solves does not justify
+  surrendering a safety property.
+
+A narrower slice of B — make `requests/` alone main-only — was also considered
+and dropped: a lane cannot write to the `os` worktree (the rule forbidding it
+is not negotiable), so filing a request would still require getting a commit
+onto `main`, which is the same merge-up step the cadence already mandates. It
+would add a mechanism without removing one.
+
+**A correction that came out of this.** `roadmap.md` rule 5 said "**Rebase on
+`main`, never merge**". That is unsafe now: the lane branches are *published*
+at `origin/lane-<x>`, so rebasing one requires a force-push — which the very
+next bullet of the same rule forbids outright, because it destroys the other
+lanes' work. The rule contradicted itself, and following its first half is what
+would have stranded `lane-b`. It now reads: merge `origin/main` in; rebase
+remains fine only for commits never pushed.
+
+**Where it bites:** `roadmap.md` §5 and the new §5.5, `CLAUDE.md` ("Three
+Sessions", "Branch Strategy", "When You Start a Task" step 1, "When You Finish
+a Task" step 11, and the push bullet under Autonomous Work), and
+`requests/b-a-fetch-and-merge-main-every-task.md` /
+`requests/b-c-fetch-and-merge-main-every-task.md`, which carry the rule to the
+other two lanes — since the only correct way to change their copy of a shared
+document is to land it on `main` and let them merge it down.
+
+---
+
+## §307 — A failed port is a bug report against our libc; the default is to fix the libc and re-try, not to reimplement
+
+**Date:** 2026-08-14
+**Decided by:** Operator (Claude proposed the framing, the four-way triage and
+the two refinements; the operator raised the question — "if upstream pkgconf
+doesn't build against our libc, could that be taken as a suggestion to improve
+our libc for it and for future apps instead?" — and made the call)
+
+**The question.** `roadmap-detailed.md` now tells you to try cross-compiling an
+existing C/C++/Rust program before writing a replacement for it. That rule only
+covered the *success* branch. What is the correct response when the port does
+**not** build against `toolchain/sysroot/lib/libc.a`?
+
+**The decision.** A failed link is treated as a **defect report against the
+libc**, and the default action is to implement the missing surface in `posix/`
+and re-try the port. "Fall back to reimplementing the application" is not the
+default and now requires a reason from the triage below.
+
+**Why the operator's framing is right, stated as reasons rather than assertion:**
+
+- **A real port is the only honest coverage test a libc has.** You cannot guess
+  which of several thousand symbols matter; real software tells you, weighted by
+  actual usage rather than by what looked important when the header was written.
+- **The fix compounds; a rewrite does not.** A libc function added for one port
+  is inherited free by every later port. A reimplementation helps exactly one
+  program, and then has to be maintained forever against upstream's bug fixes.
+- **The cost asymmetry points the same way.** Implementing a missing libc
+  function is minutes to an hour. Reimplementing the application is hours to
+  days — and §305 is the measured proof of how far that can run (~25 days on a
+  bash reimplementation, against ~a day for cross-compiling GNU bash as-is).
+- **Precedent, not theory.** In `scripts/bash-spike/`, `libc.a` defined 2,900
+  symbols, bash referenced 2,030, and the first SlateOS link resolved all but
+  **three** — `killpg`, `eaccess`/`euidaccess`, `__fpurge`. All three were
+  implemented for real in `posix/src` rather than shimmed. One port attempt
+  converted into permanent coverage for everything that follows.
+
+**The nuance that makes it a decision rather than a slogan — triage.** Only the
+first two categories mean "improve the libc":
+
+1. **Missing standard POSIX/C function** → implement it in `posix/`. Highest
+   leverage, and the common case.
+2. **Missing non-standard extension** (glibc/BSD-isms) → usually implement, but
+   check first whether upstream's `configure` already has a fallback path, in
+   which case the gap is imaginary and the fix is to let autoconf find it.
+3. **Architectural mismatch → do *not* grow the libc into it.** If the program
+   needs something SlateOS deliberately rejects — Unix signals as native process
+   control, 4 KiB page assumptions, ambient-authority fds, `/proc` special nodes
+   — the Linux Compatibility Boundary governs: `ENOSYS`, or emulation *inside*
+   the compat layer, never a hack into native code to satisfy a Linux quirk.
+   This is the one case where a failed port genuinely says stop.
+4. **Not a libc gap at all** → build-system friction (cross-compile detection,
+   sysroot plumbing). Fix the build. The bash spike's own example: `$CC` cannot
+   contain spaces because autotools word-splits it, and this repo lives under
+   `D:\visual studio projects\`, so the first attempt died with a thoroughly
+   misleading "C compiler cannot create executables".
+
+**Two refinements, both learned from that spike:**
+
+- **A kernel gap can masquerade as a libc gap.** `killpg` exists now and still
+  returns `ENOSYS`, because process groups do not exist in the kernel — yet the
+  symbol had to exist, since bash references it from job-control code and the
+  *link* needs it even where job control cannot work. Implement the symbol
+  honestly; file the underlying gap against the kernel (cross-lane: a
+  `requests/` entry, not an edit outside your lane).
+- **Whatever you add must actually work.** "Never accept-without-honoring"
+  applies at full force: a stub returning success is *worse* than `ENOSYS`,
+  because the port links, appears to work, and fails subtly later. `killpg`
+  reporting `ENOSYS` truthfully is the correct shape.
+
+**Where it flips.** The argument is leverage, so it evaporates when there is
+none. If one port needs a large, exotic subsystem nothing else will ever use,
+that is cost without reuse — weigh it like any other feature rather than
+treating "it improves the libc" as automatically decisive.
+
+**The alternative that was rejected**, and why it is tempting: treat a failed
+build as evidence that the program is "not portable to SlateOS" and write our
+own. It is tempting because it is *unblocking* — reimplementation never fails to
+link, so it always feels like progress, and the failure it replaces is concrete
+and immediate while the compounding benefit is diffuse and deferred. That is
+precisely the bias this entry exists to counter: the cheap-feeling path is the
+one that costs 25 days.
+
+**Where it bites:** `roadmap-detailed.md` §"Porting vs. Reimplementing" (the
+sub-block "When the port *fails*, that is usually a bug report against our libc
+— not a verdict on the port"), the whole of `posix/`, and — immediately —
+`userspace/pkgconf/`, whose in-progress Rust rewrite prompted the question and
+whose fate now depends on whether upstream pkgconf cross-compiles.
+
+
+## §308 — A private file stays out of GitHub via a pre-push hook plus an orphan branch, not by being untracked
+
+**Date:** 2026-08-14
+**Decided by:** Claude (operator-approved scope) — the operator set the
+requirement verbatim ("todo2.txt can be committed to the local git, but i don't
+want it on github"); the mechanism below is my call and is mine to revisit.
+
+**The requirement, and why it is not trivially satisfiable.** Git has no
+per-file push filter. A pushed branch carries every file its commits contain,
+and every earlier version of that file that its history contains. So "tracked
+locally but never published" is not a property you can attach to a *file* — it
+has to be enforced at the boundary where publication actually happens.
+
+That matters more here than in a normal repo, because three autonomous agents
+push freely and often, under a standing instruction to "push often, on your own
+volition". Anything tracked on a shared branch reaches GitHub within minutes,
+by design. A convention would not survive that.
+
+**Decision — three parts, each covering a gap the others leave:**
+
+1. **`/todo2.txt` stays in `.gitignore` on the shared branches.** This is the
+   cheap guard: it stops the file being swept up by a `git add -A`, which is
+   how it would realistically get committed by accident.
+2. **A `pre-push` hook (`scripts/hooks/pre-push`) refuses any push whose new
+   commits add or touch a guarded path.** This is the guard that actually
+   implements the operator's requirement, because it holds even when the file
+   *is* committed. It is deliberately not a blanket block: it inspects the tip
+   tree of each ref being pushed and the commits not yet on any remote-tracking
+   branch, so ordinary lane pushes are untouched and only an actual leak is
+   stopped. `ALLOW_PRIVATE_PUSH=1` bypasses it for the day the operator changes
+   their mind.
+3. **Local history lives on the orphan branch `private/todo2`,** appended to by
+   `scripts/snapshot-todo2.sh` using plumbing (`hash-object` / `mktree` /
+   `commit-tree` / `update-ref`) so no worktree HEAD ever moves. This is the
+   part that delivers "can be committed to the local git" for real — the file
+   gets genuine version history and diffs — without that history riding on a
+   branch anyone pushes.
+
+**Why the file cannot simply be committed on `main` or a lane branch.** This is
+the option that first looks right and is in fact the worst one. Those branches
+are pushed constantly; with the hook in place, committing `todo2.txt` on `main`
+would make *every subsequent push of `main` by any of the three lanes* fail
+until someone removed it. The requirement would be met and the project would be
+bricked. An orphan branch shares no commits with the project, so it can never be
+dragged along by a merge or a push of something else.
+
+**Alternative considered: a separate local-only repository** (a bare repo
+outside the tree, driven with `--git-dir`/`--work-tree`). Strictly safer — there
+is no remote at all, so no hook to forget. Rejected because it puts the
+operator's file under a second VCS with its own path incantations for every
+read, and because the failure it prevents (a hook lost to a fresh clone) is
+already handled: the hook source is *tracked* at `scripts/hooks/pre-push` and
+`scripts/install-hooks.sh` re-arms it in one command. Worth revisiting if the
+set of private files ever grows beyond one.
+
+**Alternative considered: rely on `.gitignore` alone** (the status quo before
+this entry). Rejected because it answers a different question. Ignoring a file
+prevents it being *staged*; it does nothing once the file is tracked — and the
+file *was* tracked on all five branches until 2026-08-14, which is exactly how
+it reached GitHub in the first place. `.gitignore` guards the input; the hook
+guards the output; the operator asked about the output.
+
+**Limits, stated plainly.** The hook stops *future* publication. It does not
+remove `todo2.txt` from history already on GitHub — every revision pushed
+before 2026-08-14 is still reachable there, and purging it would require
+rewriting published history and force-pushing, which this project forbids and
+which would break all three lanes. Hooks are also per-clone and not carried by
+`clone`/`fetch`; all four worktrees share one `.git`, so one install covers
+every lane today, but a fresh clone starts unarmed.
+
+**Where it bites:** `.gitignore`, `scripts/hooks/pre-push`,
+`scripts/install-hooks.sh`, `scripts/snapshot-todo2.sh`, the orphan branch
+`private/todo2` (never merge it into anything), and
+`requests/b-a-todo2-untracked.md` / `requests/b-c-todo2-untracked.md`, which
+tell lanes A and C why a push of theirs might be refused.

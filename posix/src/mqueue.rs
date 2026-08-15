@@ -70,7 +70,6 @@
 use crate::errno;
 use crate::perprocess::process_global;
 use crate::stat::Timespec;
-use core::sync::atomic::{AtomicBool, Ordering};
 
 // ---------------------------------------------------------------------------
 // Public types & constants
@@ -183,11 +182,10 @@ impl Descriptor {
 // Static state
 // ---------------------------------------------------------------------------
 
-static MQ_LOCK: AtomicBool = AtomicBool::new(false);
 process_global! {
     /// This process's POSIX message queues, keyed by name.
     ///
-    /// `MQ_LOCK` already makes concurrent access memory-safe; the per-thread
+    /// [`mq_lock`] already makes concurrent access memory-safe; the per-thread
     /// host storage is about test isolation.  A test that fills all
     /// `MAX_QUEUES` and asserts the next `mq_open` fails is broken by any
     /// concurrent `mq_unlink`, and no amount of locking fixes that.
@@ -197,32 +195,23 @@ process_global! {
     /// table, so it shares the queue table's scope.
     fn mq_descs_storage() -> [Descriptor; MAX_DESCRIPTORS] =
         [const { Descriptor::EMPTY }; MAX_DESCRIPTORS];
+
+    /// Serialises every scan of both tables above.
+    ///
+    /// Declared *inside* the `process_global!` block on purpose: it used to be
+    /// a plain `static AtomicBool`, which on the host is one shared lock over
+    /// per-thread tables — harmless in isolation, but it couples every test
+    /// thread to every other one, so a panic while holding it would wedge
+    /// threads that share no data.  A lock must have the same scope as the
+    /// table it guards; see [`crate::perprocess::PoolLock`].
+    fn mq_lock() -> crate::perprocess::PoolLock = crate::perprocess::PoolLock::new();
 }
 
-fn lock_acquire() {
-    while MQ_LOCK
-        .compare_exchange_weak(false, true, Ordering::AcqRel, Ordering::Relaxed)
-        .is_err()
-    {
-        core::hint::spin_loop();
-    }
-}
-
-fn lock_release() {
-    MQ_LOCK.store(false, Ordering::Release);
-}
-
-/// RAII guard that releases the global mqueue lock on drop.
-struct Guard;
-impl Drop for Guard {
-    fn drop(&mut self) {
-        lock_release();
-    }
-}
-
-fn lock() -> Guard {
-    lock_acquire();
-    Guard
+/// Take [`mq_lock`] for the duration of a queue- or descriptor-table scan.
+fn lock() -> crate::perprocess::PoolGuard<'static> {
+    // SAFETY: `mq_lock()` is this context's lock, valid as long as the tables
+    // it guards.
+    unsafe { crate::perprocess::lock_pool(mq_lock()) }
 }
 
 // ---------------------------------------------------------------------------
@@ -985,7 +974,16 @@ fn deadline_from_timespec(p: *const Timespec) -> Result<u64, ()> {
     }
     // SAFETY: caller contract.
     let ts = unsafe { *p };
-    if ts.tv_nsec < 0 || ts.tv_nsec >= 1_000_000_000 {
+    // The kernel's rule, not glibc's: `mq_timedsend`/`mq_timedreceive` are
+    // bare syscalls, so the deadline is vetted by `prepare_timeout`
+    // (ipc/mqueue.c) → `timespec64_valid` (include/linux/time64.h), which
+    // rejects `tv_sec < 0` outright ("Dates before 1970 are bogus") as well
+    // as an out-of-range `tv_nsec`.  That is stricter than glibc's
+    // `valid_nanoseconds`, which the pthread and semaphore timed waits use
+    // and which treats a negative `tv_sec` as a deadline in the past rather
+    // than a malformed timespec.  Both rules are right for their own
+    // callers; do not share one predicate between them.
+    if ts.tv_sec < 0 || !crate::time::valid_nanoseconds(ts.tv_nsec) {
         errno::set_errno(errno::EINVAL);
         return Err(());
     }
@@ -1525,6 +1523,32 @@ mod tests {
             tv_nsec: 2_000_000_000,
         };
         let r = mq_timedsend(fd, b"x".as_ptr(), 1, 0, &raw const bad);
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+        assert_eq!(mq_close(fd), 0);
+    }
+
+    /// The mq_* deadline is vetted by the kernel, not by glibc:
+    /// `prepare_timeout` (ipc/mqueue.c) calls `timespec64_valid`, which
+    /// rejects `tv_sec < 0` ("Dates before 1970 are bogus").  glibc's
+    /// `valid_nanoseconds` — used by the pthread and semaphore timed waits —
+    /// does not, and there a negative `tv_sec` merely times out.  The two
+    /// families follow different rules on purpose.
+    #[test]
+    fn test_timedsend_negative_tv_sec_einval() {
+        let fd = open_default(b"/qtnegsec\0", O_NONBLOCK);
+        assert!(fd > 0);
+        let bad = Timespec {
+            tv_sec: -1,
+            tv_nsec: 0,
+        };
+        let r = mq_timedsend(fd, b"x".as_ptr(), 1, 0, &raw const bad);
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+        // Same rule on the receive side; both go through
+        // `deadline_from_timespec`.
+        let mut buf = [0u8; 64];
+        let r = mq_timedreceive(fd, buf.as_mut_ptr(), 64, core::ptr::null_mut(), &raw const bad);
         assert_eq!(r, -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
         assert_eq!(mq_close(fd), 0);

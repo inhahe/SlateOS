@@ -661,8 +661,13 @@ impl HeapInner {
     fn refill(&mut self, class_idx: usize) -> bool {
         let class_size = SIZE_CLASSES[class_idx];
 
-        // Allocate a physical frame.
-        let Ok(frame) = frame::alloc_frame() else {
+        // Allocate a physical frame.  Attribute it to the slab heap in the
+        // owner census — the allocator cannot tell who is asking.
+        let Ok(frame) = ({
+            let _own =
+                super::frame_owner::OwnerScope::new(super::frame_owner::Owner::HeapSlab);
+            frame::alloc_frame()
+        }) else {
             return false;
         };
         super::memtype::charge(super::memtype::MemType::SlabHeap, 1);
@@ -784,6 +789,9 @@ impl HeapInner {
     /// Allocate directly from the buddy allocator (for large requests).
     fn large_alloc(&self, layout: &Layout) -> *mut u8 {
         let order = Self::large_order(layout);
+        // Large kernel allocations are still heap storage for census purposes.
+        let _own =
+            super::frame_owner::OwnerScope::new(super::frame_owner::Owner::HeapSlab);
         match frame::alloc_order(order) {
             Ok(f) => {
                 super::memtype::charge(

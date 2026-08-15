@@ -12,9 +12,45 @@ work that should be done now."
 
 ---
 
+## ⛔ The `TD-OILS-*` family is scope-gated — read this before picking one up
+
+**design-decisions.md §305 (operator, 2026-08-14) froze osh's bash-fidelity
+scope.** There are ~325 open `TD-OILS-*` entries in this file. **They are not a
+backlog to burn down**, and the general "fix bugs immediately" rule above does
+**not** apply to them by default.
+
+GNU bash 5.2 itself cross-compiles and runs on SlateOS (since 2026-07-22 —
+`scripts/bash-spike/`, `kernel/src/proc/spawn.rs::self_test_bash_on_slateos_libc`),
+so byte-for-byte osh↔bash parity stopped being a goal. **Fix an osh divergence
+only if:**
+
+- something we actually ship or run hits it; **or**
+- it is a crash, hang, data-loss, security, or wrong-exit-status-that-propagates
+  bug — i.e. a bug on its own terms, independent of bash; **or**
+- it is a regression against an already-green corpus case.
+
+**Do not fix, and do not add a corpus case for:** diagnostic wording or the exact
+substring a message echoes; artifacts of bash being a 40-year-old C program
+(`OPTIND=4294967297` wrapping through an `int`); constructs reachable only by
+adversarial input whose only observable difference is the error text.
+
+When a divergence is real but out of scope, annotate its entry
+`SCOPE: out of frozen scope (§305)` and leave it unfixed. If something genuinely
+needs exact bash, **run bash**. Read §305 in full before doing any osh parity
+work — it also records *why* this cap exists, which is a 25-day misdirection
+worth not repeating.
+
+---
+
 ## Reference Material
 
 ### TOOLING-BASH-5.2.37-SOURCE. A local copy of the reference shell's own source, at `D:\refsrc\bash-5.2`
+
+⚠️ **Scope note (2026-08-14, §305):** the parity goal described below is now
+**capped** — see the banner at the top of this file. This source tree remains the
+right way to *answer* a parity question, but the question should only be asked
+for a divergence that passes §305's criterion. Historically, it was asked for
+everything.
 
 The oils work is driven toward byte-exact parity with the bash on this machine,
 `C:\Program Files\Git\usr\bin\bash.exe`, which reports
@@ -94,6 +130,80 @@ drawing a plausible wrong glyph:
 * **The Type 2 arithmetic operators** (`add`, `div`, `random`, the transient
   array, …). No shipping font uses them for outlines; they exist for
   procedural effects.
+### TD-PKGCONF-THE-RUST-REWRITE-IS-UNFINISHED-AND-SUPERSEDED-BY-THE-UPSTREAM-PORT. 34 of upstream's 62 options, clippy-red, never run on target — kept as reference only — 2026-08-14
+
+**Where:** `userspace/pkgconf/src/` — `main.rs` (1,075 lines), `flags.rs` (454),
+`pcfile.rs` (667), `store.rs` (646), `version.rs` (301); 3,143 lines total.
+Archived complete on branch `wip/pkgconf-rust-parked`.
+
+**⚠️ Do not "finish" this without asking the operator first.** It is not a
+half-done task waiting to be completed — it is work that was **superseded while
+in progress**, and completing it would spend hours re-solving a problem that is
+already solved. Read `design-decisions.md` §307 and `scripts/pkgconf-spike/`
+before touching it.
+
+**What happened.** This crate was a from-scratch Rust reimplementation of
+pkgconf, started without first checking whether upstream pkgconf builds for
+SlateOS. It does. Upstream pkgconf 2.3.0 cross-compiles and links against
+`toolchain/sysroot/lib/libc.a` with zero source changes, zero shims and **zero
+missing symbols** on the first attempt (`scripts/pkgconf-spike/`). Per §307 and
+`roadmap-detailed.md`'s "Porting vs. Reimplementing" policy, the port wins.
+
+**What actually works** (all measured 2026-08-14, not assumed):
+
+- **112/112 unit tests pass.** `cargo +nightly test -p pkgconf --target
+  x86_64-pc-windows-gnu` **from the repo root** — 112 passed, 0 failed, 0.09s.
+- **It builds and links for the real target.** `cargo +nightly build-slateos -p
+  pkgconf` produces a 21 MB static `ET_EXEC` for `x86_64-slateos`. An earlier
+  note in the wip commit message claiming it was "never built for the
+  x86_64-slateos target" was wrong; it builds.
+- The `rpmvercmp` implementation in `version.rs` is genuinely complete and
+  well-tested, including the `~` pre-release rule that pkg-config 0.29 itself
+  gets wrong. If any part of this is worth salvaging, it is that file.
+
+**What does not work:**
+
+- **34 of upstream's 62 long options are implemented.** Missing: `about`,
+  `define-prefix`, `digraph`, `dont-relocate-paths`, `dump-personality`, `env`,
+  `env-only`, `exists-cflags`, `fragment-filter`, `ignore-conflicts`,
+  `internal-cflags`, `license`, `list-package-names`, `log-file`,
+  `maximum-traverse-depth`, `msvc-syntax`, `no-cache`, `no-provides`,
+  `no-uninstalled`, `path`, `personality`, `prefix-variable`, `pure`,
+  `relocate`, `shared`, `simulate`, `solution`, `verbose` — 28 in all.
+  (`--frobnicate` and `--weird-name` appear in the source but are test
+  fixtures for the unknown-option and `--` paths, not features.)
+- **Clippy is red: 9 errors, 2 warnings**, so the crate violates CLAUDE.md's
+  "clippy clean" bar. The errors are all cosmetic-grade
+  (`format!` appended to a `String` ×3, missing doc backticks ×2, collapsible
+  `if`, identical match arms, >3 bools in a struct, case-sensitive extension
+  compare).
+- **The 2 warnings are the real tell that it is unfinished**, not style noise:
+  `PcFile::path` is never read even though its doc comment says "`--validate`
+  and error messages quote this", and `Store::dirs()` is never called. Both are
+  scaffolding for features that were never wired up.
+- **It has never been executed under the SlateOS kernel.** No on-target
+  self-test exists.
+
+**A hazard in the working tree.** `main.rs` is *tracked and modified*, while
+`flags.rs`, `pcfile.rs`, `store.rs` and `version.rs` are *untracked*. The
+committed `main.rs` is the older ~200-line standalone version with no `mod`
+declarations. So committing `main.rs` alone would break the crate — it would
+reference four modules that do not exist in the index. Commit all five or none.
+The `wip/pkgconf-rust-parked` branch holds a consistent snapshot of all five.
+
+**The proper fix, in the operator's preferred order:**
+
+1. Ship upstream pkgconf. Needs the on-target ring-3 self-test described in
+   `scripts/pkgconf-spike/README.md` ("What this spike does *not* establish") —
+   `realpath`/`lstat`/`opendir` behaviour on our VFS and the 0x1000/0x2000
+   segment alignment against our 16 KiB pages are the open questions.
+2. Delete this crate, keeping `wip/pkgconf-rust-parked` as the archive, and
+   drop `roadmap.md`'s `[x] pkgconf/pkg-config … ~200 lines` claim to point at
+   the port instead.
+3. Only if the operator wants a native Rust pkgconf for a reason the port
+   cannot serve: finish the 28 options, clear clippy, wire up `path`/`dirs`,
+   and add the on-target test. Record the reason under §307's "Where it flips".
+
 
 ### B-MOUNT-ACCEPTS-UNREACHABLE-MOUNT-POINTS. `Vfs::mount` succeeds when the mount point's parent does not exist, producing a filesystem nothing can reach — 2026-08-13 — ✅ FIXED 2026-08-13 (`kernel/src/fs/vfs.rs`, `kernel/src/fs/overlay.rs`)
 
@@ -153,6 +263,152 @@ one-boot diagnosis.
 same day: an operation that cannot do what was asked reports success, and the
 damage surfaces later somewhere unrelated. Worth auditing other registration
 APIs that take a path and validate only its syntax.
+
+---
+
+### [A] TD-BENCHMARKS-ARE-NEVER-ACTUALLY-RUN-BY-THE-BOOT-GATE. The whole performance suite — baselines, targets, scorecard — is spawned and then killed mid-run on every boot test — 2026-08-14 — OPEN
+
+**Where:** `kernel/src/main.rs` (`deferred_bench_task`, spawn site ~5505),
+`kernel/src/bench.rs` (`run_all`, `score`, `SCORECARD`),
+`scripts/boot-test.sh` (`WAIT_MARKER`, default `BOOT_OK`),
+`bench/baselines.toml`.
+
+**The shape of it.** Benchmarks run in a deferred low-priority kernel task that
+prints `BENCH_OK` *after* `BOOT_OK`. That deferral is itself correct and well
+reasoned — the comment explains it gets init to a prompt in ~1 s instead of
+~20 s under TCG. The problem is the other half: the routine boot test waits for
+`BOOT_OK` and tears QEMU down at once, so the bench task is killed before it
+produces numbers.
+
+**Evidence.** In the clean 26094-line KASAN boot
+(`build/serial-kasan-pass.txt`), `[bench] === Kernel micro-benchmarks ===` is
+line 26092 — the **second-to-last line in the file**. The task got just far
+enough to print its own header before QEMU died. In an ordinary boot log the
+header does not appear at all. Neither log contains a single benchmark result
+or a `BENCH_OK`.
+
+**Why it matters.** This is the reason
+`B-FAST-CPU-INDEX-FELL-BACK-TO-AN-APIC-MMIO-READ-ON-EVERY-ALLOC` shipped
+unnoticed: CLAUDE.md requires benchmarking after any change to a
+performance-critical subsystem, `page_alloc_free` has a recorded QEMU baseline
+of 198 ns / 736 cycles to compare against, `score()` computes a pass/fail
+verdict — and none of that machinery has executed in the harness. A suite that
+is never run is worse than no suite, because its existence is taken as
+coverage.
+
+**Same class as `B-PATHZ-PREREQUISITE-SKIPS-ARE-SILENT`** (above): a check that
+silently did not run while the boot reported PASSED. That one was fixed by
+making the skip *loud*. The same principle applies here.
+
+**Proper fix.** `scripts/boot-test.sh --bench` already exists and does the right
+thing — it switches `WAIT_MARKER` to `BENCH_OK` and surfaces `ABOVE TARGET`
+verdicts — it simply is not part of any routine gate. Options, in preference
+order:
+
+1. Make the *absence* of benchmark results loud rather than silent, mirroring
+   the Path-Z fix: have the boot test note when it terminated with the bench
+   task still pending, so "no numbers" is visible instead of assumed-fine.
+2. Run `--bench` on a schedule rather than every boot (it roughly doubles the
+   ~405 s cycle under TCG, which is why making it the unconditional default is
+   unattractive), specifically after any change touching `mm/`, `sched/` or
+   `ipc/`.
+3. Record the scorecard to a file the harness can diff across runs, so a
+   regression is a *comparison* rather than a threshold — thresholds as loose
+   as these (1000 ns against a 198 ns baseline) would not have caught a 3-4x
+   allocator regression anyway.
+
+Note that (3) is the one that would actually have caught the bug that motivated
+this entry: a 736 → ~2500 cycle regression still passes a 3700-cycle target.
+The targets are sized against Linux, not against our own last-known-good.
+
+**Progress 2026-08-14 — (3) is DONE; (1) and (2) remain open.**
+*(Superseded later the same day: (1) and (2) are now done too — see
+"Closed 2026-08-14" at the end of this entry.)*
+
+`print_scorecard` now emits a machine-readable line for **every** entry, not
+just the failures:
+
+```text
+[bench] SCORE <name> <measured_ns> <target_ns> <PASS|OVER>
+```
+
+`scripts/bench-history.py` parses those out of the serial log, appends a
+JSON-lines record (timestamp, host, git commit, all measurements) to
+`bench/history.jsonl`, and diffs the run against the previous record **from the
+same host**, reporting anything that moved more than a threshold (default 25%)
+plus benchmarks that appeared or vanished. `boot-test.sh::print_bench_results`
+invokes it automatically, non-fatally.
+
+Three things about the design are deliberate:
+
+* **Passing entries are recorded too.** The old failure-only list was blind to
+  precisely the bug that motivated this entry — a benchmark that doubles while
+  still beating a Linux-sized target never appeared in the output at all.
+* **Diffs are same-host only.** A different machine or QEMU build moves every
+  number at once; reporting "no baseline" beats reporting a hardware difference
+  as a regression.
+* **Over-target is no longer phrased as a failure**, in the kernel output or in
+  `boot-test.sh`. It is labelled reference. That follows directly from
+  `TD-BENCH-OWNER-AB-BUDGET-WAS-AN-ABSOLUTE-CYCLE-COUNT`: under TCG the
+  hardware targets are unreachable by construction, so treating them as
+  verdicts trains the reader to ignore the whole suite — which is how a real
+  regression hid in it.
+
+`boot-test.sh` previously advised "compare against prior runs rather than
+treating this as a hard regression" while nothing stored prior runs, making the
+advice unfollowable. It is now followable.
+
+Still open: (1) making the *absence* of benchmark results loud on a routine
+non-`--bench` boot, and (2) deciding when `--bench` runs, since it roughly
+doubles the boot cycle under TCG.
+
+**Closed 2026-08-14 — (1) and (2) landed together, because (2) turned out to
+be answerable by (1) rather than by a schedule.**
+
+(1) is `report_bench_absence()` in `scripts/boot-test.sh`, called on both PASS
+paths whenever `--bench` was *not* given. It prints a `=== NO BENCHMARK
+RESULTS THIS RUN ===` block and never changes the exit code — a routine boot
+is *allowed* to skip the suite. The point is only that `PASSED` must not be
+readable as "performance was checked". It distinguishes the two states the log
+can be in: the deferred task started and was killed at `BOOT_OK`, or it never
+reached its first result.
+
+(2) as written — "run `--bench` on a schedule … after any change touching
+`mm/`, `sched/` or `ipc/`" — assumes a scheduler that does not exist here, and
+assumes someone remembers the rule at the right moment. That is the same
+failure mode as the original bug: coverage that depends on being remembered.
+Since `bench-history.py` already stamps every recorded run with its git
+commit, the harness can just *compute* the answer instead:
+
+```sh
+git diff --name-only <last_benchmarked_commit> HEAD -- kernel/src/{mm,sched,ipc,syscall} kernel/src/smp.rs
+```
+
+Non-empty ⇒ this boot contains unbenchmarked changes to code CLAUDE.md
+requires benchmarking, and the block escalates to `!! Performance-critical
+code changed since the last benchmarked commit`, naming the files. Empty ⇒ it
+says skipping the suite is reasonable here. So the nag is targeted and
+automatic rather than periodic, and it cannot be forgotten.
+
+Degenerate cases are handled explicitly rather than by silence, since the
+whole entry is about silence: no `history.jsonl` yet ⇒ "no baseline for this
+host"; a recorded commit absent from the repo (rebased away, or not fetched)
+⇒ say so rather than diffing against nothing and reporting a false all-clear.
+
+**Verified** by exercising all six branches against real and synthetic serial
+logs: suite-started-then-killed, suite-never-started, perf-critical files
+changed, nothing changed, missing history, unknown commit. On the current tree
+it correctly reports `kernel/src/syscall/{handlers,number}.rs` as changed
+since `bf26aabdb`.
+
+**Not fixed by this, and deliberately so:** the kernel still spawns the
+deferred bench task on every boot and still has it killed at `BOOT_OK`. That
+wasted work is cheap (the task prints a header and dies), and suppressing the
+spawn on non-`--bench` boots would need a kernel cmdline flag for no real
+gain. The defect was never the wasted work — it was that nobody could tell it
+had happened.
+
+---
 
 ### B-PATHZ-PREREQUISITE-SKIPS-ARE-SILENT. 26 Path-Z self-test rungs (every `tcc` rung, Parts 35–60) have been no-opping on every boot while the boot test reported PASSED — 2026-08-13 — ✅ FIXED 2026-08-13 (`kernel/src/proc/spawn.rs`, `kernel/src/main.rs`, `scripts/boot-test.sh`)
 
@@ -1526,7 +1782,7 @@ Without the stub `cld`, the first assertion is the only visible failure; the
 real symptom is silent corruption somewhere else entirely, which is why a direct
 test earns its keep here.
 
-### B-KASAN-INSTRUMENTED-BOOT-WEDGES-MID-PRINT-ON-A-PAGE-FAULT. The instrumented kernel spins forever with a half-printed `#PF` line, and the report path has no way to say anything more — 2026-08-12 — OPEN
+### B-KASAN-INSTRUMENTED-BOOT-WEDGES-MID-PRINT-ON-A-PAGE-FAULT. The instrumented kernel spins forever with a half-printed `#PF` line, and the report path has no way to say anything more — 2026-08-12 — WATCHLIST (did not reproduce 2026-08-14; harness now armed to capture the RIP)
 
 **Reproduce.** `./scripts/kasan-build.sh --boot`. Observed once so far, at the
 same place; not yet known whether it is deterministic.
@@ -1564,16 +1820,48 @@ got printed, and the wedge then prevents any later mechanism from reporting it.
 
 **Two separable fixes:**
 
-- **(a) Give the serial printer a re-entrancy escape.** If the lock is already
-  held by this CPU, fall back to the unlocked/polled emergency writer
-  (`emergency_println!` already exists for the hard-lockup path) instead of
-  spinning. Turns an evidence-free wedge into an interleaved-but-complete
-  report. This is the one worth doing regardless of the underlying fault, since
-  it is a diagnosis multiplier for every future wedge, not just this one.
-- **(b) Find the actual fault.** Blocked on capture: `scripts/boot-test.sh`
+- **(a) Give the serial printer a re-entrancy escape.** ✅ **DONE 2026-08-12**
+  (`58102abca`). If the lock is already held by this CPU, fall back to the
+  unlocked/polled emergency writer (`emergency_println!` already exists for the
+  hard-lockup path) instead of spinning. Turns an evidence-free wedge into an
+  interleaved-but-complete report. This is the one worth doing regardless of the
+  underlying fault, since it is a diagnosis multiplier for every future wedge,
+  not just this one. `serial::_print` now keeps a per-CPU `IN_PRINT` flag,
+  claimed *before* the lock is taken (so the window in which this CPU is merely
+  *waiting* for the lock is also covered), and a nested call from the same CPU
+  writes through `SerialPort::emergency()`. `serial::reentrancy_self_test()`
+  guards it at every boot by raising `#BP` from inside a `Display::fmt` — the
+  faithful reproduction of the failure, since the fault is taken *during the
+  formatting of an argument*, not merely during the write.
+- **(b) Find the actual fault.** Was blocked on capture: `scripts/boot-test.sh`
   attaches the HMP monitor and `capture_guest_state()` **only** when
-  `HARD_LOCKUP_WATCHDOG=1`, and this run was launched without it, so no live RIP
-  could be read from the wedged guest. Re-run with `HARD_LOCKUP_WATCHDOG=1`.
+  `HARD_LOCKUP_WATCHDOG=1`, and the original run was launched without it, so no
+  live RIP could be read from the wedged guest.
+
+  **The re-run was not merely forgotten — it was unrequestable.**
+  `kasan-build.sh --boot` `exec`'d `boot-test.sh --no-build` with a fixed,
+  empty argument list, so the instrumented profile — the one most likely to
+  wedge, and therefore the one that most needs the diagnostic options — was the
+  only profile that could not ask for them. Fixed 2026-08-14 (`2db09232a`):
+  everything after `--` is forwarded verbatim, so the capture run is now
+
+  ```bash
+  ./scripts/kasan-build.sh --boot -- --hard-lockup-watchdog --stall-secs=240
+  ```
+
+  `--stall-secs` matters as much as the watchdog here. A wedge is defined by
+  serial output *stopping*, and an instrumented boot is legitimately ~20x
+  slower, so waiting for the outer timeout to distinguish "wedged" from "slow"
+  wastes the whole budget; the stall detector calls it after 240 s of silence
+  and captures the frozen RIP on that path (`boot-test.sh:739-753`) rather than
+  only on timeout.
+
+  Note that fix (a) landed *after* the only observed occurrence, so the wedge
+  may no longer reproduce in its original evidence-destroying form: if the
+  nested print now escapes to the emergency port, the run should emit the
+  complete `#PF` line — the faulting RIP included — and then either recover or
+  fail in some new, legible way. Either outcome is progress; a silent
+  half-printed line is the one result that is now unexpected.
 
 **Not the same bug as B-KASAN-INSTRUMENTED-BUILD-PANICS-ON-ITS-OWN-REDZONE-CHECKS.**
 That one flooded `[kasan] CRITICAL` reports and panicked; this run reached 5560
@@ -1583,6 +1871,60 @@ wedge is a distinct, later failure.
 **Not caused by `mm::rawmem`.** An ordinary (uninstrumented) boot of the same
 tree — which compiles and exercises `rawmem` identically — reached `BOOT_OK` in
 273 s.
+
+---
+
+**Capture run 2026-08-14 — DID NOT REPRODUCE. Downgraded OPEN → WATCHLIST.**
+
+The re-run fix (b) asked for was finally *requestable* once `2db09232a` taught
+`kasan-build.sh` to forward flags, and it was run as:
+
+```bash
+./scripts/kasan-build.sh --boot -- --hard-lockup-watchdog --stall-secs=180
+```
+
+**Result: the instrumented kernel booted clean, end to end.** `BOOT_OK` after
+**1938 s**, 26094 lines of serial (`build/serial-kasan-pass.txt`), exit 0. This
+is, as far as the logs show, the **first complete KASAN-instrumented boot this
+project has achieved** — the shadow was live for the entire run, and the `[kasan]`
+self-test battery passed all five checks with `violations=7, shadow_frames=3,
+poisoned=112B, unpoisoned=60B, map_lock_giveups=0` (all seven violations are the
+self-test's own deliberate probes; there was not one unexpected shadow report in
+the whole boot). The instrumented kernel binary is preserved at
+`build/kernel-kasan-capture.elf` for symbolizing any future recurrence.
+
+The decisive detail is **where** it got past. The original wedge died at ~line
+5560, mid-print, inside the `ftype` test. This run printed that same test's
+result complete at line **5562** and continued for another twenty thousand
+lines.
+
+**Fix (a) did not rescue it — the fault simply did not happen.** This matters,
+because "the fix worked" and "the bug is nondeterministic" predict different
+logs and only the second one matches. Had a nested fault occurred and been
+caught by the `IN_PRINT` fallback, the emergency port would have emitted the
+*complete* `EXCEPTION: Page Fault` line; that is the entire purpose of fix (a).
+No such line exists anywhere in the 26094. The only `#PF` in the log is line
+1258, the intentional ring-3 fault-handling self-test. So the page fault that
+truncated the original run never occurred here at all.
+
+That answers the entry's own open question — *"not yet known whether it is
+deterministic"* — with **nondeterministic**, and it answers it without yielding
+a root cause. A one-in-N fault under a profile that takes ~32 min per attempt is
+not something to chase blind.
+
+**Why WATCHLIST rather than FIXED.** Nothing was diagnosed. What changed is that
+the failure is now *survivable evidence* instead of a dead end: the harness is
+armed (watchdog + `--stall-secs`), fix (a) guarantees a nested fault escapes to
+the emergency port with its RIP intact, and the matching instrumented binary is
+kept. If it recurs, one run yields the faulting instruction. Until then there is
+nothing actionable, and re-running a 32-minute boot hoping to lose a coin flip
+is not a use of the boot lock.
+
+**Secondary result — the KASAN profile is now a usable routine tool.** It had
+never survived a full boot before, so it could only ever be pointed at a
+suspected bug and hoped at. A clean 26094-line baseline means a future KASAN run
+can be *diffed* against this one, which is a categorically better instrument
+than "did it crash".
 
 ### TD-HARNESS-RUN-TIMEOUT-COULD-NOT-LAUNCH-A-SHELL-SCRIPT-AND-BARE-BASH-MEANT-WSL. The documented boot-test invocation never ran the boot test — 2026-08-12 — ✅ FIXED 2026-08-12 (`scripts/proctree.py`)
 
@@ -2477,7 +2819,7 @@ Corpus:
 `every_builtin_has_a_help_topic` — the third-list check that would catch a
 builtin with no `HELP_TABLE` entry to answer from.
 
-### TD-OILS-THE-SHAPE-AND-FOLD-LETTERS-ARE-APPLIED-BY-THE-LITERALS-HALF-ONLY-AND-NOT-BY-THE-BUILTIN-AFTER-IT. `declare -gGa g=(1 2)` left the frame's own `g` a scalar — 2026-08-12
+### TD-OILS-THE-SHAPE-AND-FOLD-LETTERS-ARE-APPLIED-BY-THE-LITERALS-HALF-ONLY-AND-NOT-BY-THE-BUILTIN-AFTER-IT. `declare -gGa g=(1 2)` left the frame's own `g` a scalar — 2026-08-12 — ✅ FIXED 2026-08-14
 
 **Where:** `userspace/oils/src/interp.rs`,
 [`Shell::declare_compounds_scoped`] (which reads `-a`/`-A`/`-i`/`-l`/`-u`/`-c`/`-I`
@@ -2540,26 +2882,51 @@ having `apply_bound_compound` set them — would close these two rows, but it
 would be a fifth mark bolted to the reduced path and would leave
 `make_empty_global` standing. Do the structural one.
 
-**Why it is not done yet.** The operand loop is ~1950 lines
-(interp.rs:45133-47081) and every one of its steps was written on the stated
-assumption that a compound operand never enters it — the local shadow above all,
-which phase 1 already made under a *different* `-g` swap than the builtin half
-runs under, so redoing it could leave two shadows of one name. Reconciling that
-is a real piece of work against 635 corpus cases, and the observable payoff is
-two matrix rows. Deferred deliberately, not by oversight: no band-aid has been
-applied in the meantime, and the entry above is the whole of the debt.
-Do it when the next divergence in the same place raises the payoff — most
-likely alongside
-TD-OILS-A-COMPOUND-LITERAL-REFUSES-A-KIND-CHANGE-THE-BUILTIN-BEFORE-IT-HAS-ALREADY-MADE
-below, which is the same asymmetry seen from the refusal side and would be
-fixed by the same change.
+**Fixed 2026-08-14** — the structural one, as prescribed. Four changes:
+
+* [`Shell::builtin_declare_scoped`]'s operand loop takes a `DeclOperand::Bound`
+  as the **bare name** rather than as four replayed marks: `name_val` is the
+  operand truncated at the `=`, so it carries no value, `value` is `None` of its
+  own accord, and the whole assignment arm is skipped without a flag to say so.
+  `BoundCompound` keeps only what genuinely happened earlier — the phase-1 local
+  refusal, the nameref refusal — and lost its `target` field, the loop now
+  resolving the name for itself.
+* [`Shell::apply_bound_compound`] and `BoundCompoundFlags` are gone (90 lines).
+* [`Shell::in_declare_global_scope`] sorts a compound operand into `names`
+  rather than `compound` for the `declare` family's builtin half: there it is
+  bash's step 3, an ordinary bare-name operand of `declare_internal`, and
+  resolves as step 1 did. `export`/`readonly` are excepted — their third command
+  is their own operand loop, not `declare_internal`.
+* [`Shell::enter_global_scope`] asks `chklocal` of the name the **restart**
+  arrived at (`nameref_cell (refvar)`, i.e. the end of
+  [`Shell::global_chain_path`]) rather than of the name as written, which is
+  what declare.def:735-774 does and what makes `declare -gGa g=(1 2)` under
+  `declare -n g=z` leave the frame's own `g` alone. And
+  [`Shell::global_bind_names`] now makes **no swap** where the global walk and
+  the live walk land on the same variable through a global reference:
+  `find_global_variable` reads only its first link from the global table, so a
+  chain that re-enters a name a local holds runs *through* that local, and
+  un-shadowing it would splice the local out of the middle and leave a cycle
+  that warns twice where bash warns not at all.
+
+`make_empty_global` did **not** disappear: it is still what step 1 leaves behind
+for `export`/`readonly`, whose third command makes no such variable. For the
+`declare` family it is now unreachable, the swap having put step 3 on the name
+itself.
+
+Verified against bash 5.2.37: the two matrix rows above, the `-i`/`-l`/`-u`
+rows, and the whole 642-case corpus (`scripts/osh-bash-diff.py`, 642 matched, 0
+failed). Tests:
+[`interp::tests::the_letters_of_a_compound_declaration_land_a_third_time_where_the_builtin_resolves`];
+corpus
+`the-letters-of-a-compound-declaration-land-a-third-time-where-the-builtin-resolves.sh`.
 
 **How it was found:** the 240-shape kind-letter matrix, while fixing
 TD-OILS-AN-UPPERCASE-G-WAS-READ-BY-THE-HALF-OF-THE-COMMAND-THAT-ONLY-EVER-READS-THE-LOWERCASE-ONE.
 
 ---
 
-### TD-OILS-A-COMPOUND-LITERAL-REFUSES-A-KIND-CHANGE-THE-BUILTIN-BEFORE-IT-HAS-ALREADY-MADE. `readonly -A g=([k]=v)` over a frame-local indexed array refuses where bash converts — 2026-08-12
+### TD-OILS-A-COMPOUND-LITERAL-REFUSES-A-KIND-CHANGE-THE-BUILTIN-BEFORE-IT-HAS-ALREADY-MADE. `readonly -A g=([k]=v)` over a frame-local indexed array refuses where bash converts — 2026-08-12 — ✅ FIXED 2026-08-14
 
 **Where:** `userspace/oils/src/interp.rs`, [`Shell::array_kind_conflict`] /
 [`Shell::compound_kind_refusal`] and their caller in
@@ -2594,9 +2961,126 @@ and top-level declarations), which is the `find_or_make_array_variable` one.
 
 **Affected:** 4 shapes of the 240-shape kind matrix (`/tmp/kind_matrix.sh`).
 
+**Narrowed 2026-08-14** to `readonly`/`export` alone. Fixing
+TD-OILS-THE-SHAPE-AND-FOLD-LETTERS-ARE-APPLIED-BY-THE-LITERALS-HALF-ONLY-AND-NOT-BY-THE-BUILTIN-AFTER-IT
+put the `declare` family's step 3 back on the operand loop and its own restart,
+so the same shape spelled with `declare` now agrees:
+
+```sh
+( declare -n g=z; f() { local -a g=(9); declare -gGA g=([k]=v); declare -p g; }; f
+  declare -p z )
+# declare -a g=([0]="9")  /  declare -A z=([k]="v" )   — osh and bash alike
+```
+
+`readonly`/`export` still diverge because their step 3 is *not*
+`declare_internal` and so is deliberately excepted from that routing; their step
+1 still has no voice of its own here. Measured ground truth for the fix (bash
+5.2.37) — the refusal is asked of **step 1's** name, and the answer turns on
+what that name already holds:
+
+```sh
+declare -n g=z;                  f() { local -a g=(9); readonly -A g=([k]=v); }; f
+# declare -Ar g=([k]="v" ) and declare -A z    — `z` unset, so no conflict
+declare -n g=z; declare -a z=(7); f() { local -a g=(9); readonly -A g=([k]=v); }; f
+# g: cannot convert indexed to associative array — `z` is indexed, so it refuses
+```
+
+Note the second row: the refusal must be raised *before*
+[`Shell::make_empty_global`] runs, since that would otherwise put an empty
+associative entry beside the indexed `z` it was asked to refuse.
+
+**Fixed 2026-08-14.** The refusal is asked of step 1's name, and the literal
+converts rather than refuses:
+
+* [`Shell::in_declare_global_scope`] records, for each compound operand, the
+  name **step 1** resolved to — `global_chain_path(name).last()`, the
+  `nameref_cell (refvar)` of declare.def:735-741, falling back on the name
+  where that walk found no reference at all. It is read *before*
+  [`Shell::enter_global_scope`], because the swap is about to rewrite the chain
+  it is read from, and stashed in the new `Shell::declare_step1_names` for the
+  length of the expansion half. `None` there means no swap, which is exactly
+  when the literal takes `do_compound_assignment`'s unscoped `else` branch and
+  so does own the refusal.
+* [`Shell::declare_compounds_scoped`] asks [`Shell::array_kind_conflict`] of
+  that name instead of the literal's target. The *lookup* still happens after
+  the swap, which is what puts the global binding of a name step 1 read
+  globally in reach; only the name is carried across. The
+  `make_empty_global` ordering worry above turns out not to arise — the empty
+  variable step 1 makes is made in the kind that was asked for, so it can never
+  be the conflict — but it is moot either way, since a `carried` name is only
+  produced where the chain reached *nothing*, and a name nothing answers to has
+  no kind to conflict with.
+* Past the refusal with the other kind still in the table is a road only the
+  swap opens, and there the literal *converts*: `convert_var_to_assoc` /
+  `convert_var_to_array` (subst.c:3520-3527) replace the storage rather than
+  reinterpret it, so `declare_compounds_scoped` now drops the other kind's
+  entry before [`Shell::array_kind_apply`] runs. Nothing is carried in as
+  element 0 — that is what `declare -a` over a *scalar* does, not this.
+
+Corpus: `the-kind-of-an-array-is-refused-by-the-command-that-would-convert-it.sh`;
+test `the_kind_of_an_array_is_refused_by_the_command_that_would_convert_it`.
+The one shape still diverging is split out below as
+TD-OILS-AN-ASSOCIATIVE-LITERALS-WORDS-ARE-NOT-REQUOTED-WHEN-THE-CONVERSION-GOES-THE-OTHER-WAY.
+
 **How it was found:** writing the corpus case
 `the-restart-happens-before-chklocal-so-step-one-outlives-the-frames-own-binding.sh`;
 the `local -a g=(9)` section had to be dropped from it.
+
+---
+
+### TD-OILS-AN-ASSOCIATIVE-LITERALS-WORDS-ARE-NOT-REQUOTED-WHEN-THE-CONVERSION-GOES-THE-OTHER-WAY. bash expands a compound literal in the shape of the variable it *found* and assigns it in the shape it converted to — 2026-08-14 — ⚠️ OPEN
+
+**Where:** `userspace/oils/src/interp.rs`, [`Shell::declare_compounds_scoped`],
+which applies the array kind and only then expands the literal. bash does it the
+other way round, and the seam shows.
+
+`do_compound_assignment`'s scoped branches call `expand_compound_array_assignment
+(v, value, flags)` with the variable **as found**, convert it, and only then
+`assign_compound_array_list`. Where `v` is associative the expansion runs
+`quote_compound_array_list`, which single-quotes each word's subscript and value
+separately so a `[k]=v` survives re-parsing. If the command asked for `-a`, those
+already-quoted words are then assigned to an *indexed* array, quotes and all:
+
+```sh
+declare -n g=z                                        # so step 1 goes to `z`
+f() { local -A g=([j]=9); readonly -a g=(x "a b"); declare -p g; }; f
+# bash: declare -ar g=([0]="'x'" [1]="'a b'")
+# osh : declare -ar g=([0]="x"   [1]="a b")
+```
+
+and a subscript in the literal becomes an arithmetic error, the indexed
+assignment being handed `['5']=`:
+
+```sh
+declare -n g=z
+f() { local -A g=([j]=9); readonly -a g=([5]=q w); }; f
+# bash: '5': syntax error: operand expected (error token is "'5'")
+# osh : (assigns element 5)
+```
+
+The reverse direction is clean, `quote_compound_array_list` being called only for
+an associative `v`: an indexed local converted to associative by `readonly -A`
+matches already.
+
+**Proper fix.** Split the compound literal's *expansion shape* from its
+*assignment shape*: expand in the kind the target held when the operand was
+reached, requote the resulting words when that kind was associative and the
+command asked for the other one, then convert and assign the requoted words in
+the asked kind.
+
+**Why it is not done yet.** The road is only reachable through a `declare -n`
+restart that parts step 1's name from the literal's, over a frame-local
+associative array, with `-a` and a globally-scoped assignment builtin — and what
+it reproduces is a self-evident bash bug (values that grow quotes, subscripts
+that become arithmetic errors). Inverting the expand/convert order in
+`declare_compounds_scoped` touches every compound operand of every declaration
+builtin, which is a great deal of risk for four shapes of the 240-shape kind
+matrix. The substantive half — *which* variable is refused, and that the
+conversion happens at all — is fixed above.
+
+**How it was found:** fixing
+TD-OILS-A-COMPOUND-LITERAL-REFUSES-A-KIND-CHANGE-THE-BUILTIN-BEFORE-IT-HAS-ALREADY-MADE
+opened the conversion road that the old refusal had kept shut.
 
 ---
 
@@ -4097,7 +4581,7 @@ the array being non-empty.
 
 Corpus: `a-compound-assignment-binds-up-to-the-subscript-that-fails.sh`.
 
-### TD-OILS-A-BACKQUOTE-BODY-INSIDE-DOUBLE-QUOTES-IS-NOT-GOBBLED. A backquote body inside `" … "` is run where bash only scanned it — 2026-08-10
+### TD-OILS-A-BACKQUOTE-BODY-INSIDE-DOUBLE-QUOTES-IS-NOT-GOBBLED. A backquote body inside `" … "` is run where bash only scanned it — 2026-08-10 — ✅ FIXED 2026-08-14
 
 **Where:** `userspace/oils/src/interp.rs`, `Shell::gobbled_subs` — the walk that
 lists the substitutions `brace_gobbler` reads. It is structural, over
@@ -4131,13 +4615,325 @@ treated like `\{`, the `'` is not a quote, and the `$( … )` is handed to
 then no `$(` row is reached, so the body is skipped; leaving backquotes out of
 the walk is right there and wrong only inside double quotes.
 
-**The fix.** Give a backquote body parts — or a lazily-parsed view of them — so
-`gobbled_subs` can walk into one when the enclosing state is `"`. Descending
-must stay off at the top level, which is where the current `gobbler_reads`
-answer (`false` for every `CmdSubBody::Backtick`) is already correct.
+**The fix — done 2026-08-14.** `Shell::gobbled_subs` now lexes a backquote body
+as the double-quoted text the scan takes it for — `parser::dquote_word_from_
+source`, then `unparse::gobbler_word` to re-scope it — and walks the result,
+but only when `dquoted`. Descending stays off at the top level, where
+`gobbler_reads`'s `false` for every `CmdSubBody::Backtick` was already right.
+
+Two things came with it:
+
+* **The remainder a diagnostic quotes.** The lexed body's tails stop at its
+  end; the gobbler's do not, because it was handed the whole word. So
+  `CmdSubBody::Backtick` gained a `tail` field, filled by `gobbler_word` alone
+  (no parser wants it — a backquote body is `string_extract`'s byte hunt for
+  the closer), and each substitution the body contributes gets
+  `body tail` + `` ` `` + that. Measured: ``echo "p`echo "$(fi)"`q{,}"`` quotes
+  ``fi)"`q{,}"``.
+* **The `{` gate.** `gobble_scan` had relied on "a `${` carries its own `{`" to
+  subsume `brace_expand_word_list`'s `mbschr (…, LBRACE)` (subst.c:9905). A
+  backquote body carries no `{`, so the gate is now tested for real against the
+  word's source — ``echo "p`echo $(fi)`q"`` reaches no scanner where the same
+  word with a `{,}` on the end does.
+
+Corpus: `a-backquote-body-inside-double-quotes-is-read-by-the-brace-scanner.sh`.
 
 Note the same walk reaches nothing inside a `<( … )` / `>( … )` body either,
 because `crate::unparse::nested_parts` returns no scope for a `ProcSub`.
+
+### TD-OILS-AN-UNPARSEABLE-SUBSTITUTION-IN-AN-UNTERMINATED-DQUOTE-LOSES-TO-THE-EOF. bash blames the `$( … )`, osh blames the quote — 2026-08-14 — ✅ FIXED 2026-08-14
+
+**Where:** `userspace/oils/src/lexer.rs`, `Lexer::read_double_quote_until` — it
+scans a `" … "` for its closing quote and raises the unterminated-quote error at
+end of input, having lexed the `$( … )` inside it as an *unread* body that no
+one ever parses. bash's `parse_matched_pair` instead calls `parse_comsub` the
+moment it meets `$(` (parse.y), so the substitution's own syntax error is raised
+first and the missing `"` is never reached.
+
+**Reproduce.**
+
+```sh
+( eval 'echo " $(fi)' ) 2>&1; echo "rc=$?"
+```
+
+| | bash 5.2.37 | osh |
+|---|---|---|
+| stderr | ``syntax error near unexpected token `fi'`` + ``` `echo " $(fi)' ``` | ``unexpected EOF while looking for matching `"'`` |
+| `$?` | 1 | 2 |
+
+The same with a `'` in the way (`echo " ' $(fi)`) — the `'` is inside the quotes,
+so it is an ordinary character to both, and the disagreement is unchanged.
+
+A backquote is *not* affected: `` echo `x $(fi) `` gives both shells
+``unexpected EOF while looking for matching ``'`` and `$?` 2, because a
+backquote body is read as text to its mate and nothing inside it is parsed on
+the way.
+
+**Why the difference matters beyond the message.** The exit status differs too —
+2 (a lexer-level unterminated construct) against 1 (a parse error) — so a script
+branching on `$?` from an `eval` of untrusted text sees a different value.
+
+**The fix.** Parse a `$( … )` met inside a double-quoted body as bash does,
+where its error is raised as it is met rather than deferred to an unread body.
+The care needed is that `$( … )` bodies are deliberately left *unread* in many
+places (`CmdSubBody::Unread` exists because a body that will not parse must not
+be a parse error when nobody reads it — see
+TD-OILS-A-QUOTE-RUN-IN-A-PATTERN-OPERAND-IS-NOT-GOBBLED); this is the one case
+where the enclosing construct never closes, so there is no word to defer to and
+bash's own reader has already committed to the substitution.
+
+**Fixed 2026-08-14, along exactly the [`SubstBail`] line one construct further
+out.** The bodies are still lexed where they were, and are carried *out on the
+error* to be parsed by the one place that has `ParseOpts` in hand.
+
+**The scope is the whole word, not the quote.** The quote is not what makes the
+body eager — the *word* is, because a word that never finished yields no token
+at all, so its bodies would otherwise be parsed by nobody. Measured:
+`echo $(fi)x$(`, `echo $(fi)x${y`, `echo $(fi)x$((1+`, `echo $(fi)x"y`,
+`echo $(fi)x'y` and ``echo $(fi)x`y`` all name `fi`, with no quote in sight. An
+*earlier* word needs none of this — it finished, so it is a token the parser
+reaches on its own (`echo a$(fi) b$(`, `echo a$(fi); echo b$(`).
+
+- `LexError::eager_bodies: Option<Box<Vec<EagerBody>>>` — the substitution
+  bodies the word already read *and parsed where it met them*, in reading order.
+  `EagerBody { src, line, procsub }`: `procsub` picks the reference line, since
+  a `$( … )` body is numbered from its `)` (`parse_cmdsub_body`) while a
+  `<( … )` / `>( … )` body is numbered from its *opening* delimiter
+  (`parse_procsub_body`), a procsub being a child command. Both land on the line
+  the offending token is physically written on.
+- Filled by `lexer::eager_bodies_in`, which walks the finished segments for
+  `Seg::CmdSub(_, _, SubBody::Eager)`, for `Seg::ProcSub` (measured:
+  `echo <(fi)x$(` and `echo >(fi)x$(` both name `fi`), and for the spans a
+  `Seg::ParamBraced`/`Seg::Arith` stepped over (`echo " ${x:-$(fi)}`,
+  `echo " $(( $(fi) ))`), recursing into a closed `Seg::Dq` (`echo "a$(fi)"x$(`).
+  A `SubBody::Backtick` is deliberately *not* collected: that body is read as
+  text now and parsed only at expansion time, which is exactly why the backquote
+  rows disagree with nothing (``echo " `fi` ``, ``echo `fi`x$(``).
+- Attached by the `read_word_inner` wrapper, which was split so that
+  `read_word_segs` writes into the caller's `segs` — a word that gives up part
+  way therefore still leaves behind what it read. `read_double_quote_until`
+  attaches at all three of its failing exits too, not just the end-of-input one,
+  because the scan can run out *inside* a later substitution and the bodies read
+  before that one still win: `echo " $(fi) $(done` names `fi`.
+- `parser::eager_body_error`, consulted by `resolve_subst_bail` *before* the
+  `bail` path for the same reason, returns the first body error that is not
+  `is_incomplete()` — a body that merely ran out said nothing (bash's
+  `EOF_Reached` path), which is where `echo " $(a |` keeps its
+  `` matching `)' ``.
+
+Verified by
+`userspace/oils/tests/corpus/a-substitution-inside-an-unfinished-word-is-parsed-before-the-word-gives-up.sh`
+(27 rows, all matching bash 5.2.37 in message *and* rc) and the unit test
+`parser::tests::a_body_read_inside_a_word_that_ran_out_is_parsed_anyway`. That
+test cannot cover the *earlier-word* rows: its `parse` helper goes through
+`tokenize_spanned`, which fails hard, where the shell uses `tokenize_deferred`,
+which keeps a failing line's completed tokens. Those rows are corpus-only.
+
+The same change closed the last two shapes of
+TD-OILS-A-COMSUB-THAT-NEVER-CLOSES-HIDES-THE-ERROR-INSIDE-IT below.
+
+**Found by** the flat-state gobbler fix below: the repro there
+(``echo "p`echo " ' $(fi)`q{,}"``) agrees on the *scan* now, and what is left of
+its divergence is entirely this.
+
+### TD-OILS-A-QUOTE-INSIDE-A-GOBBLED-BACKQUOTE-BODY-DOES-NOT-END-THE-RUN. `brace_gobbler`'s quoting state is flat, and osh's is nested — 2026-08-14 — ✅ FIXED 2026-08-14
+
+**Where:** `userspace/oils/src/interp.rs`, `Shell::gobbled_backtick_subs`. It
+lexes a backquote body as **one** double-quoted run, so `quoted` stays `"` for
+the whole of it. bash's scan is a flat character loop, and a `"` inside the body
+is `c == quoted` — it sets `quoted = 0`, after which a `'` opens a skip, a
+`` ` `` opens another, and a `<(`/`>(` starts reading.
+
+**Reproduce.** With `z` unset:
+
+```sh
+echo "p`echo " ' $(fi)`q{,}"
+```
+
+| | bash 5.2.37 | osh |
+|---|---|---|
+| stdout | `pq{,}` | — |
+| stderr | the backquote's own run: ``` `echo " ' $(fi)' ``` | the scanner's: ``` `fi)`q{,}"' ``` |
+| `$?` | 0 | 1 |
+
+The `"` closes the gobbler's state, the `'` then opens a single-quote skip, and
+the `$(` inside it is never read — so the word brace-expands and the backquote
+runs. osh reads the `$(fi)` and drops the command.
+
+**What bash does.** braces.c:637-682, in order: `\` passes the next character
+over unless `quoted == '\''`; `${` is treated like `\{`; then `if (quoted) { if
+(c == quoted) quoted = 0; if (quoted == '"' && c == '$' && text[i+1] == '(')
+goto comsub; … }`; then the unquoted `"`/`'`/`` ` `` row; then the unquoted
+`($|<|>)(` row. Nothing about it nests.
+
+**The fix.** Split the body on the gobbler's own state machine before lexing:
+run the flat loop over the verbatim text, cut it into runs by whether `quoted`
+is one the `$(` row can fire in (`0` or `"`) or one it cannot (`'` or `` ` ``),
+lex only the former and leave the latter as literals. The catch is the comsub
+row itself — `extract_command_subst` skips a whole `$( … )` extent, and a
+quote inside *that* must not flip the state either, so the split needs an extent
+count of its own rather than a byte scan. That is the only reason this was not
+done with the fix above.
+
+Reaching this needs a `"` (or a `` ` ``) inside a backquote body inside `" … "`
+inside a word with a `{`, so it is not on any ordinary road. All 24 other cases
+of the probe matrix that produced it agree with bash.
+
+**Second site, added 2026-08-14 — and this one is a regression.**
+`unparse::fill_quoted_runs` (from
+TD-OILS-A-QUOTE-RUN-IN-A-PATTERN-OPERAND-IS-NOT-GOBBLED) lexes a `' … '` run
+inside `" … "` the same way — one double-quoted word, `quoted` pinned at `"` —
+so a `"` inside *that* run has the same unmodelled effect. Measured against
+bash 5.2.37, with `z` unset:
+
+```sh
+echo "A[${z#'a"`$(fi)`'}]"
+```
+
+| | bash 5.2.37 | osh |
+|---|---|---|
+| stdout | `A[]` | — |
+| stderr | — | ``command substitution: … `fi)`'}]"' `` |
+| `$?` | 0 | 1 |
+
+bash's `"` closes `quoted`, the `` ` `` then opens a backquote skip, and the
+`$(fi)` inside it is never read. osh keeps `quoted` at `"` for the whole run, so
+the backquote is not a skip, `gobbled_backtick_subs` walks into its body, and
+the `$(fi)` is read. Before the fill, osh did not enter the run at all and
+agreed with bash by accident — so this word matched before and does not now.
+That is the cost of the fill, taken knowingly: it is one narrow shape, against a
+common one that was wrong for every word.
+
+The fix above is one fix for both sites: a helper that runs the flat loop over
+verbatim text from a given starting `quoted` and hands back the stretches the
+`$(` row can fire in, used by `Shell::gobbled_backtick_subs` and
+`fill_quoted_runs` alike. For the latter the unreadable stretches go back in as
+`WordPart::Literal`, which keeps the run re-printing to its own bytes — the
+property every tail measured against it depends on.
+
+**Fixed 2026-08-14, both sites, exactly that way.**
+`crate::wordscan::gobbler_readable(text, dquoted)` is the flat loop itself —
+braces.c:637-682 transcribed, `skip_matched` for the `extract_command_subst`
+row so a quote inside a `$( … )` extent flips nothing — answering with the
+stretches in which `quoted` is `0` or `"`. Its ranges are in order, disjoint,
+and cover the text; a stretch may be empty, and an empty text answers with one
+empty stretch rather than none.
+
+Both readers then lex per stretch instead of whole:
+
+* `unparse::gobbler_reading` (used by `fill_quoted_runs`) lexes each readable
+  stretch with `dquote_word_from_source` and puts each skipped one back as a
+  `WordPart::Literal` of its own bytes, so the filled run still re-prints to its
+  source and every tail measured against it lands where it did. It declines the
+  whole run if that does not hold.
+* `Shell::gobbled_backtick_subs` lexes each readable stretch of the body and
+  glues `rest-of-body` + `` ` `` + the word's own remainder onto every
+  substitution the stretch contributes — the scan was handed the whole word, so
+  a diagnostic raised inside a stretch still quotes everything after it.
+
+The regression above is gone with it: `echo "A[${z#'a"`$(fi)`'}]"` gives `A[]`
+and `$?` 0 as bash does, while `'a"`x`$(fi)'` — where the backquote closes again
+and reading resumes — reports, also as bash does. Covered by
+`tests/corpus/the-brace-gobblers-quoting-is-flat-so-it-reads-inside-a-quote-run.sh`
+(12 rows) and
+`tests/corpus/a-backquote-body-inside-double-quotes-is-gobbled-in-stretches.sh`
+(9 rows), both matching bash 5.2.37 exactly.
+
+**Residual, and it is a different bug.** The original repro's *scan* now agrees
+— `pq{,}`, `$?` 0, no diagnostic from the gobbler — but its stderr still
+differs, because the backquote then runs and its body (`echo " ' $(fi)`) has an
+unterminated `"` around an unparseable `$( … )`. bash reports the substitution's
+own syntax error; osh reports the unterminated quote. That is
+TD-OILS-AN-UNPARSEABLE-SUBSTITUTION-IN-AN-UNTERMINATED-DQUOTE-LOSES-TO-THE-EOF,
+which has nothing to do with brace expansion. Fixed the same day; with both in,
+the original repro agrees end to end — same two diagnostic lines, same `pq{,}`,
+same `$?` 0.
+
+### TD-OILS-A-QUOTE-RUN-IN-A-PATTERN-OPERAND-IS-NOT-GOBBLED. `"${z#'$(fi)'}"` runs where bash drops the command — 2026-08-14 — ✅ FIXED 2026-08-14
+
+**Where:** `userspace/oils/src/interp.rs`, `Shell::has_gobbled_sub` (~27065) and
+`Shell::gobbled_subs`. Both descend into a `WordPart::SingleQuoted` only through
+its `parts` — the run's *second* reading, which is filled in for a subscript and
+a substring bound (`word_subscript_from_source_at`) and nowhere else. A pattern
+and a replacement carry `parts: None`, so whatever the run hides is invisible to
+the scan.
+
+**What is wrong.** Inside `" … "` the gobbler's `quoted` is `"`, so its `'` row
+(braces.c:670) is never reached and the run is *not* a quote to it: the `$(` row
+of the `quoted == '"'` branch fires on what is inside. bash's parser, meanwhile,
+did read the run as a quote — under `DOLBRACE_QUOTE` a `'` quotes (parse.y:3836,
+3840) — which is why the diagnostic's remainder still shows the `'`. So the two
+readers disagree by design, and only one of them is modelled here.
+
+This is the same disagreement as
+TD-OILS-A-SINGLE-QUOTED-RUN-IN-A-BARE-SUB-WORD-OF-A-BRACE-IS-A-QUOTE (fixed) and
+TD-OILS-A-QUOTE-INSIDE-A-GOBBLED-BACKQUOTE-BODY-DOES-NOT-END-THE-RUN (fixed), in
+a third place.
+
+**Reproduce.** With `z` unset:
+
+```sh
+echo "1[${z#'$(fi)'}]";     echo "1 rc=$?"
+echo "2[${z//x/'$(fi)'}]";  echo "2 rc=$?"
+echo "3[${z%'$(fi)'}]";     echo "3 rc=$?"
+echo "4[${z:-'$(fi)'}]";    echo "4 rc=$?"   # already agrees
+```
+
+| | bash 5.2.37 | osh |
+|---|---|---|
+| 1–3 stdout | — | `1[]` / `2[]` / `3[]` |
+| 1–3 stderr | ``command substitution: … `fi)'}]"' `` | — |
+| 1–3 `$?` | 1 | 0 |
+| 4 | agrees (`$?` 1, same remainder) | agrees |
+
+Row 4 agrees because a `:-`-style operand keeps its `'` as a *character* and the
+substitution stays a part of the word, which the walk already finds.
+
+**Fixed 2026-08-14.** Not new machinery — the same second reading the subscript
+case already carries, filled in one more place. `unparse::fill_quoted_runs`
+runs first thing in `gobbler_word`, the copy `gobble_scan` makes for the scan,
+and gives every `SingleQuoted` inside `" … "` a `parts: Some(…)` lexed from its
+text with `crate::parser::dquote_word_from_source` — which is what the run *is*
+to the gobbler (more double-quoted text) and which builds none but
+`CmdSubBody::Unread` bodies, so a body that will not parse stays a runtime
+diagnostic and not a parse error.
+
+Everything downstream then works unchanged: `unparse::part_src` already prints
+such a run from its parts rather than its text, so `attach_tails_by`'s sentinel
+shows through the quotes and the tails come out measured against the *whole
+word*, `walk_parts_in` already descends through a filled run, and
+`gobbled_subs`'s existing `SingleQuoted` arm collects what is inside. The one
+other change is in `has_gobbled_sub`, which runs *before* the fill and so has to
+answer from the text: inside `" … "` the only gobbler row that fires between the
+quotes is `$(`, so a run whose text holds `$(` is answered yes — wide on
+purpose, exactly as a backquote inside `" … "` already is, since a scan that
+finds nothing reports nothing.
+
+Two runs are deliberately left alone, both because filling them would move every
+tail after them: a backslash-escaped character (`a\*b`, which is a
+`SingleQuoted` with `escaped`), whose source is not a quoted run at all; and one
+whose reading does not re-print to the very same bytes, which `fill_quoted_runs`
+checks for and declines.
+
+**Carried the same flat-state limitation as the backquote fix, for one commit.**
+The run's text was lexed as *one* double-quoted word, so `quoted` stayed `"` for
+the whole of it — where bash's loop lets a `"` **inside** the run set
+`quoted = 0`, after which a following `'` or `` ` `` opens a skip the `$(` row
+cannot fire in. That was
+TD-OILS-A-QUOTE-INSIDE-A-GOBBLED-BACKQUOTE-BODY-DOES-NOT-END-THE-RUN reached
+through a second construct, and it is fixed there (2026-08-14) for both places
+at once: `wordscan::gobbler_readable` runs the flat loop over the verbatim text
+and names the stretches the `$(` row can fire in, `unparse::gobbler_reading`
+lexes those and keeps the rest as `WordPart::Literal`, and the run still
+re-prints to its own bytes.
+
+**Found by** the `$' … '` bare-splice work
+(TD-OILS-A-SINGLE-QUOTED-COMMAND-SUBSTITUTION-IN-A-BRACE-OPERAND-IS-PARSED): the
+`#`/`//` rows of its corpus case are exactly this, since a translation written
+past a `#` is re-quoted (parse.y:3866) into such a run. Those two rows were held
+out of
+`tests/corpus/an-ansi-c-translation-spliced-bare-into-a-brace-operand-was-never-read.sh`
+and are back in it now (rows 5 and 6).
 
 ### TD-OILS-A-REDIRECTION-TARGET-IS-NOT-BRACE-EXPANDED. `> f{1,2}` writes a file called `f{1,2}` where bash calls it ambiguous — 2026-08-10 — ✅ FIXED 2026-08-10
 
@@ -5540,7 +6336,7 @@ stage and a background job. Unit tests
 
 ---
 
-### TD-OILS-A-BRACE-SCAN-THAT-NEVER-FINISHES-LOSES-THE-READS-IT-ALREADY-DID. A word whose `${` or `$(` is never closed reports nothing from the extent scan — 2026-08-10
+### TD-OILS-A-BRACE-SCAN-THAT-NEVER-FINISHES-LOSES-THE-READS-IT-ALREADY-DID. A word whose `${` or `$(` is never closed reports nothing from the extent scan — 2026-08-10 — ✅ FIXED 2026-08-14 (`userspace/oils/src/lexer.rs`, `userspace/oils/src/interp.rs`)
 
 **Where:** `userspace/oils/src/interp.rs` — `Shell::brace_extent_scan` and the
 `extent_read_of*` family it drives, and the parser that has to produce a `Word`
@@ -5612,6 +6408,102 @@ unterminated body stop being executed.
 
 **Not urgent:** both shapes need `@P` to be visible at all (any other context
 takes the `longjmp` on the first failure), and both are malformed input.
+
+**Re-measured 2026-08-14, and the framing above is wrong in a way that makes
+the fix smaller — read this before the text above.** "A word that never parses
+runs no reads at all" is not what happens, and the two shapes are not two
+faults. Taken apart one read at a time (`build/pgV.sh`), osh is **exact** on
+everything except one shape:
+
+| word (inside `v='…'`, shown via `"${v@P}"`) | bash | osh |
+|---|---|---|
+| `A$(for⏎sB` — no brace at all | reports, runs `fo`, `[Apr⏎sB]` | **same** |
+| `A${z:-pr$(for⏎s)q}B` — brace, `$(` closes | reports, `[AZZB]` | **same** |
+| `A${z:-pr⏎sB` — unclosed brace, no `$(` | `bad substitution`, raw text | **same** |
+| `A${z:-P1$(for⏎S1}B` | reports, `[AZZB]` | reports, **runs `fo`**, `[A⏎S1}B]` |
+| `A${z:-P1$(echo hi⏎S1}B` | reports EOF, `bad substitution`, raw text | reports EOF, **runs `echo hi` *and* `S1}`**, `[Ahi]` |
+| `A${z:-P1$(for⏎S1B` | reports, `bad substitution`, raw text | reports, **runs `fo`**, `[A⏎S1B]` |
+
+So the fault is exactly one thing: **a `$( … )` inside a `${ … }` that never
+closes**. There osh applies the *string-level* rule — `failed_extent_split` /
+`run_abandoned_extent`, "run what was read less a byte and splice the rest" —
+where the brace-level rule applies. The lost `fi` report of shape (a) is a
+*consequence* of that, not a separate lost-report bug: each read reports
+correctly on its own, and the first one's report is lost only because the
+second one drags the word onto the string-level path.
+
+**This is worse than "a diagnostic is missing".** Row 5 runs `echo hi` — a real
+side effect — and then `S1}` as a command, where bash runs nothing at all and
+answers `bad substitution`. Malformed input in a *prompt* is attacker-adjacent
+(`PS1`, `${x@P}`), so treat this as the reason to fix it rather than as a
+formatting nicety.
+
+**Both halves of the correct behaviour are already written; neither is
+reached.** bash's `extract_dollar_brace_string` hands a nested `$(` to
+`extract_command_subst`, i.e. a *real parse*, and the two rows above are its
+two outcomes — which osh already distinguishes, in
+`Shell::brace_extent_scan`'s `ExtentRead::Abandoned` arms
+(`userspace/oils/src/interp.rs`):
+
+- the parse **errors part way** (`for⏎`), so `si` stops at that line, the brace
+  scan resumes after it and finds the `}` — `Abandoned { rest, .. } if
+  !rest.is_empty() => false`, the brace closes and expands, `[AZZB]`;
+- the parse **runs the string out** (`echo hi⏎…`), so `si` is past the end and
+  the brace has no `}` left — `Abandoned { .. }` with an empty rest, which sets
+  `extent_consumed` and emits `bad substitution`.
+
+`wordscan::edbs` independently models the *second* outcome on pure source text
+(its `$(` arm at `wordscan.rs:458` paren-counts and `break`s to `Err` on
+overrun, which `begin_word` turns into the diagnostic). It gets row 5 right for
+the wrong reason and would get row 4 wrong, because a paren count is not the
+parse: `$(for⏎S1}B` has no `)` at all, so the count overruns where bash's parse
+stops early and lets the brace close.
+
+**✅ FIXED 2026-08-14, in two halves.** Routing alone could not work, and that
+is the one thing the paragraph this replaces had wrong: *where the scan
+resumes is only knowable from a real parse*, so the lexer has to ask for one.
+
+**Half one — the lexer stops swallowing the string** (`lexer.rs`). A new
+`Lexer::unread_comsub_stop` runs `crate::parser::comsub_unclosed_error` — the
+pure model of `xparse_dolparen` — over the rest of the text **for its stopping
+point only**, keeps the consumed text as raw bytes, and leaves the enclosing
+scan looking for its own delimiter. The cut it makes in char space is
+`Shell::failed_extent_split`'s in byte space: past the stop-th newline, then
+back over the whole trailing run of newlines. Three call sites converted from
+`?` to a match on `Lexer::unread_comsub`: `read_dollar_brace_body`'s `$(` arm
+and its `<(`/`>(` arm.
+
+`read_opaque_span`'s arithmetic `$(` arm was converted too and then **reverted**
+before landing. `build/pgX.sh` had suggested the `$((` spelling was affected
+identically, but the corpus case
+`an-unterminated-construct-in-text-no-parser-read-is-a-runtime-failure`
+disagrees: an arithmetic span in unread text is reached only where the first
+failure takes the jump — a here-document body sets no
+`no_longjmp_on_fatal_error` — so the read's diagnostic is the whole report and
+there is no second act for a resumption to reach. Condemning the `$((` instead
+regressed that case. What `$((` needs is half *two*, not half one; see
+`TD-OILS-AN-ARITHMETIC-SCAN-REPORTS-NONE-OF-THE-READS-IT-MAKES` below.
+
+**Half two — the reads are emitted before the condemnation** (`interp.rs`). A
+scan that ran the text out reported everything it read *on the way*; only then
+is there a brace with nothing to close on. `Shell::unclosed_brace_reads` runs
+`extent_read_of_rest` over the undecoded body from the top of
+`expand_unclosed`'s `Unclosed::BadSubst` arm, gated on `close == '}'` because
+`$[`'s `extract_arithmetic_subst` passes flags `0` (subst.c:1299) and makes no
+reads at all. An `ExtentRead::Aborted` returns early — the jump stands and the
+brace's own ending is never reached.
+
+**Measured after: `build/pgW.sh`'s seven rows are byte-identical to bash
+5.2.37**, stderr included — including shape (b) above, whose lost `fi` report
+half two restores. Every spurious command execution is gone: rows that used to
+run `echo hi`, `S1}` and `fo` now run nothing, as bash does.
+
+**Still open, and logged separately below:** the `$((` spelling reports none of
+its reads (`TD-OILS-AN-ARITHMETIC-SCAN-REPORTS-NONE-OF-THE-READS-IT-MAKES`); a
+`<(` in an undecoded brace body is not read
+(`TD-OILS-AN-UNDECODED-BRACE-BODY-IS-RE-LEXED-AS-A-DOUBLE-QUOTED-RUN`); and
+`$[ … ]` bounds do not perform their `$( … )`
+(`TD-OILS-A-DOLLAR-BRACKET-BOUND-DOES-NOT-PERFORM-ITS-COMMAND-SUBSTITUTION`).
 
 ---
 
@@ -5829,10 +6721,41 @@ carries its arithmetic reading beside its text, and the scan follows that readin
 when it is inside `" … "`:
 TD-OILS-A-SINGLE-QUOTED-RUN-IN-A-BARE-SUB-WORD-OF-A-BRACE-IS-A-QUOTE.)
 
-The `$' … '` splice named above is a further one: bash stores the *translation* and
-the gobbler meets a bare `$( … )` in it, echoing `` `fi)}]"' `` with no `'`. osh
-sets `bare_splice` when it reads one but the spliced text is not given
-`CmdSubBody::Unread` bodies, so `"${z:-$'$(fi)'}"` is still a parse error.
+The `$' … '` splice named above was a further one: bash stores the *translation*
+and the gobbler meets a bare `$( … )` in it, echoing `` `fi)}]"' `` with no `'`,
+where osh raised only a `bare_splice` flag and parsed the spliced text like any
+other — so `"${z:-$'$(fi)'}"` was a script syntax error.
+
+**Fixed 2026-08-14.** The flag became a *list of ranges*,
+`Lexer::bare_splices`: where in the body the third row (parse.y:3887) wrote
+without reading. They ride `Seg::ParamBraced`'s fourth field, are shifted by
+`shift_ranges` at every site that splices one buffer into a longer one (the same
+rule `CmdSubSpan::range` follows), are clipped into the operand's own
+coordinates by `parser::operand_splices`, and reach
+`Lexer::read_word_verbatim` through `lex_operand_in_dquote` as *unread windows*
+— inside one, `here_text` is set exactly as a `' … '` run sets it, so a
+`$( … )` there is `CmdSubBody::Unread` and is met by the scan that reads the
+stored word rather than by a parser.
+Corpus: `tests/corpus/an-ansi-c-translation-spliced-bare-into-a-brace-operand-was-never-read.sh`.
+
+Rows 5 and 6 of that case were held back at first, and they are *not* the
+splice's: written past a `#` or `//` the translation is re-quoted
+(parse.y:3866), and reaching bash's answer for `"${z#$'$(fi)'}"` needed the run
+the re-quoting made to be gobbled — TD-OILS-A-QUOTE-RUN-IN-A-PATTERN-OPERAND-IS-NOT-GOBBLED,
+which the same probe found, which is not about `$' … '` at all
+(`"${z#'$(fi)'}"` diverges on its own), and which is now fixed. Both rows are
+back in the case.
+
+**Residual — the splice that never closes.** `echo "15[${z:-$'$(fi'}]"` splices
+`$(fi` with no `)`, so the scan runs off the end of the word. bash's reader is
+still looking for the `)` and then for the `"`, and says
+`command substitution: line N: unexpected EOF while looking for matching `"'`;
+osh's `expansion_body_len` answers `Unclosed` first and the body is deferred as
+text, which the runtime reports as
+``bad substitution: no closing `}' in "15[${z:-$(fi}]"``. `$?` is 1 either way
+and the shell carries on either way, so only the wording differs. Reaching bash's
+is the unclosed-`$( … )`-inside-an-unread-word shape, not the splice's — see
+TD-OILS-A-COMSUB-THAT-NEVER-CLOSES-HIDES-THE-ERROR-INSIDE-IT.
 
 ---
 
@@ -5969,7 +6892,7 @@ cannot simply stop pinning" worry below.
 Tests (`interp.rs`): `printf_time_renders_in_the_exported_zone`,
 `printf_time_percent_s_is_zone_independent`,
 `printf_time_ignores_an_unexported_tz`,
-`printf_time_falls_back_to_utc_for_a_zone_it_cannot_parse`,
+`printf_time_falls_back_to_utc_for_a_zone_it_cannot_resolve`,
 `prompt_time_escapes_render_in_the_exported_zone` — the last uses the DST-less
 `NPT-5:45` because a prompt renders *now*, so a DST zone's `%Z` would assert one
 thing in July and another in January.
@@ -5978,7 +6901,9 @@ thing in July and another in January.
 unset `TZ`, and a zoneinfo name like `America/New_York` (which is not a POSIX
 `TZ` string), still resolve to UTC — in the libc and the shell alike. That is
 now a *consistent* gap rather than a disagreement, and closing it needs tzdata
-on the machine.
+on the machine. *(Update 2026-08-13: the reader and the `/etc/localtime`
+default now exist on both sides; only shipping tzdata remains — see that
+entry.)*
 
 The original report follows.
 
@@ -6031,7 +6956,43 @@ comment now points at `Shell::shell_tz` and describes the real rule.)*
 
 ---
 
-### TD-NO-SYSTEM-DEFAULT-ZONE-WITHOUT-TZ. With `TZ` unset — or set to a zoneinfo name — local time is UTC — 2026-08-13 — OPEN
+### TD-NO-SYSTEM-DEFAULT-ZONE-WITHOUT-TZ. With `TZ` unset — or set to a zoneinfo name — local time is UTC — 2026-08-13 — MOSTLY FIXED 2026-08-13; residual is a packaging decision, `open-questions.md` `B-Q1`
+
+**Fixed 2026-08-13** in three commits — `tzrules: read TZif (RFC 8536) binary
+zoneinfo files`, `posix: resolve TZ through zoneinfo files, and follow
+/etc/localtime`, and `oils: resolve TZ through zoneinfo files, like the libc
+does`. Two of the three parts of the proper fix below are done:
+
+* **The reader exists.** `tzrules::TzFile` parses TZif v1/v2/v3 with no
+  allocator: a zero-copy borrowed view over the file's bytes, every structural
+  invariant checked once at parse (bounds, counts, designation indices, sorted
+  transition times, `isdst ∈ {0,1}`) so the lookup path is total and a
+  hostile `TZ=/path/to/anything` cannot steer a binary search off an array. The
+  v2+ footer is **mandatory**, which is the only check that catches a file
+  truncated exactly at the end of its data block. As predicted, the existing
+  POSIX-string engine became the *tail* rather than being replaced: `zic -b
+  slim` stops emitting transitions once the footer describes them, so `Tz`
+  governs everything at or past the last recorded transition and the file path
+  and the rule path can never disagree about a future date. 42 tests.
+* **The system default exists.** With no `TZ`, the libc now reads
+  `/etc/localtime`, and so does an osh that really imported a process
+  environment. `TZ` naming a zone is resolved under `TZDIR` (default
+  `/usr/share/zoneinfo`) with glibc's search order — rule first, file second, a
+  leading `:` forcing the file, because `EST5EDT` is both — and a `..`
+  *component* refused so an inherited `TZ` cannot walk out of the tree.
+
+**Residual: no tzdata ships.** `TZ=America/New_York` is now *looked up* rather
+than rejected outright, but there is nothing on disk to find, so it still falls
+back to UTC. Which files, from where, and how they are updated is a packaging
+decision (`pkg/`) — a full tzdata is ~450 KiB of the base image and a stale one
+is a wrong clock — so it is now `open-questions.md` `B-Q1` rather than work
+anyone should start unasked. The tests that pinned the old behaviour were
+renamed to say what they now pin (the fallback when the *lookup* finds nothing,
+not "a name is never a zone"): libc
+`test_zoneinfo_names_resolve_to_utc_until_tzdata_is_shipped`, oils
+`printf_time_falls_back_to_utc_for_a_zone_it_cannot_resolve`.
+
+The original report follows.
 
 **Where:** `posix/src/tz.rs` `read_env_tz` (the `None`/unparseable arms) and
 `userspace/oils/src/interp.rs` `Shell::shell_tz`. Both funnel into
@@ -6065,13 +7026,15 @@ The gap is one of coverage, not of consistency, and a POSIX `TZ` string
   consumers need it and neither may allocate on the parse path. TZif v2+ files
   carry a POSIX `TZ` string in their footer for times past the last recorded
   transition, so the existing engine becomes the *tail* of the new one rather
-  than being replaced.
+  than being replaced. *(Done.)*
 * Ship tzdata: which files, from where, and how they are updated is a packaging
   decision (`pkg/`) and belongs in `open-questions.md` before it is coded — a
   full tzdata is ~450 KiB of the base image, and a stale one is a wrong clock.
+  *(Filed as `open-questions.md` `B-Q1`.)*
 * A system-wide default: `/etc/localtime` (a TZif file or a symlink into the
   zoneinfo tree) is the portable spelling and is what any ported program will
-  look for, so prefer it over inventing a YAML setting.
+  look for, so prefer it over inventing a YAML setting. *(Done — `/etc/localtime`
+  it is.)*
 
 **Found and fixed while writing this warning: the taskbar clock had exactly the
 shape being warned against.** `gui/desktop/src/calendar.rs`'s
@@ -9745,11 +10708,15 @@ rest as ordinary word text. Modelled as:
   *expansion's* scan over `${body}` and answers `Same`, `Early(len)` (the
   expansion closes at `len`; `body[len+1..]` plus the parser's `}` is word text)
   or `Unclosed` (a spliced quote swallowed the `}`).
-- `Lexer::bare_splice`, a flag `read_dollar_brace_body` raises only on the third
-  row and `read_dollar` scopes to one `${ … }` (cleared going in, taken coming
-  out), landing as the fourth field of `Seg::ParamBraced`. A splice at any depth
-  inside is that segment's, because it is that segment's raw text a leftover has
-  to be carved out of.
+- `Lexer::bare_splices`, the ranges of the body `read_dollar_brace_body` wrote on
+  the third row and never read back, which `read_dollar_brace` scopes to one
+  `${ … }` (taken going in, restored coming out) and `shift_ranges` moves
+  whenever a buffer is spliced into a longer one. They land as the fourth field
+  of `Seg::ParamBraced`. A splice at any depth inside is that segment's, because
+  it is that segment's raw text a leftover has to be carved out of. (Started as a
+  `bare_splice` **flag**; it became a list when the operand needed to tell the
+  spliced bytes from the read ones — see the `$' … '` splice paragraph under
+  TD-OILS-A-SINGLE-QUOTED-COMMAND-SUBSTITUTION-IN-A-BRACE-OPERAND-IS-PARSED.)
 - `parser::seg_to_parts` — one segment, one part, except where the flag is up and
   `expansion_body_len` says anything but `Same`. Then nothing about the body's
   *shape* can be asked (`"${x:-$'a"b'}"` is the word `"${x:-a"b}"`, whose `"`
@@ -11376,6 +12343,29 @@ recurs: for the compgen case that measurement is what refuted the reaping
 theory outright (osh notices completion 20–30 ms *earlier* than bash in every
 job shape), and the same is likely true here.
 
+**Sighting 2026-08-14, and the detail was lost — read this before the next
+one.** One full-suite run came back `1490 passed; 1 failed` while a full
+`osh-bash-diff.py` sweep was running alongside it, i.e. with several hundred
+`osh`/`bash` processes being spawned on the same host. Three re-runs
+immediately after, still under the same sweep, were clean (`1491 passed`). The
+failing test's **name was not captured**, so this cannot be attributed to this
+entry or to any other — and that is the avoidable part: the run went through
+`run-timeout.py … | tail -5`, which keeps the summary line and throws away the
+`failures:` block above it, and a second attempt to re-read it with `grep` hit
+`Binary file (standard input) matches` because a corpus test writes NUL bytes
+to stdout. **Redirect to a file** (`cargo test … > /tmp/lt.txt 2>&1`) and grep
+the file, rather than piping, so a one-in-many failure is not thrown away the
+moment it finally happens.
+
+**Follow-up 2026-08-14.** The advice above was taken and it worked: a corpus
+case flaked under a sweep later the same day and the whole divergence *was*
+captured, so it is written up on its own evidence rather than guessed at — see
+TD-OILS-THE-WAIT-NO-OPERANDS-CORPUS-CASE-IS-FLAKY-UNDER-A-FULL-SWEEP. That one
+is a **different** fault from this entry (a corpus case's `wait -n`, not this
+lib test's `jobs` listing) and, unlike the compgen case, is *not* a thin margin
+— so do not merge the three. What they share is only the discipline: keep the
+saved `corpus-failures/` report, and record which loads failed to reproduce.
+
 ### TD-OILS-THE-PIPELINE-STAGE-ORDER-TEST-ASSERTS-A-PREFERENCE-AS-A-GUARANTEE — 2026-08-08 — OPEN (accepted)
 
 **Where:** the test `a_pipelines_stages_begin_in_pipeline_order`
@@ -12505,7 +13495,7 @@ which measures all four halves of the rule: the thirteen command positions,
 the six word positions, the four quoted spellings, and that `[[ … ]]` still
 closes.
 
-### TD-OILS-A-COMSUB-THAT-NEVER-CLOSES-HIDES-THE-ERROR-INSIDE-IT. bash parses a `$( … )` body as it reads it; osh scans for the `)` first — 2026-08-06 — ✅ MOSTLY FIXED 2026-08-07 (two shapes left, below)
+### TD-OILS-A-COMSUB-THAT-NEVER-CLOSES-HIDES-THE-ERROR-INSIDE-IT. bash parses a `$( … )` body as it reads it; osh scans for the `)` first — 2026-08-06 — ✅ FIXED 2026-08-07, last two shapes 2026-08-14
 
 **Where:** `userspace/oils/src/lexer.rs` — the command-substitution scanner
 (the balanced-paren scan that raises ``unexpected EOF while looking for
@@ -12604,10 +13594,11 @@ stands. Three details that are not obvious and that the tests pin:
 **Pinned by** `parser.rs::an_unterminated_substitutions_body_is_parsed_anyway`
 and `tests/corpus/a-substitution-body-is-read-before-its-closing-paren-is-missed.sh`.
 
-**What is left (two shapes), 2026-08-07.** Both want the same thing: a
-`$( … )` body parsed at the moment the `$(` is *scanned*, closed or not.
+**The last two shapes, 2026-08-07 — ✅ fixed 2026-08-14.** Both wanted the
+same thing: a `$( … )` body parsed at the moment the `$(` is *scanned*, closed
+or not.
 
-| script | bash | osh |
+| script | bash | osh before |
 |---|---|---|
 | `echo "$(fi)` | `` near `fi' `` | ``EOF matching `"' `` |
 | `echo $(fi)x$(` | `` near `fi' `` | ``EOF matching `)' `` L2 |
@@ -12616,10 +13607,15 @@ In both the substitution bash blames **closes**, so no `SubstBail` is raised
 for it, and it sits inside a word the outer scan never finished — an unclosed
 `"` in the first, an unclosed `$(` in the second — so the word yields no token
 and the eager body parse the parser does per word never happens either. bash
-has already run its nested `yyparse` over `fi` by then. Reaching it means
-lifting that parse out of the parser and into the scan: every `$( … )`,
-`<( … )` and `>( … )` body parsed left to right as it is read, its error raised
-there and then, instead of after the enclosing word is complete.
+has already run its nested `yyparse` over `fi` by then.
+
+Both now agree, by the same carry-out-on-the-error device one construct further
+out rather than by lifting the parse into the scan: a word that gives up leaves
+its already-read eager bodies behind, and they ride out on the `LexError` to be
+parsed by `parser::eager_body_error` ahead of whatever the word finally ran out
+inside. See TD-OILS-AN-UNPARSEABLE-SUBSTITUTION-IN-AN-UNTERMINATED-DQUOTE-
+LOSES-TO-THE-EOF for the design, the procsub and `Seg::Dq` details, and the
+27-row corpus that pins it.
 
 `echo $(fi) $(done` — previously listed here as a third shape — was fixed by
 the `tokenize_deferred` change under
@@ -12629,14 +13625,15 @@ parser to reach it and raise `` near `fi' `` before the parked error is due.
 The same change fixed `fi; $(done`, which was the proof that half of this
 entry was never really about substitutions.
 
-**Proper fix for the residue:** move the eager body parse out of the parser
-and into the scan. `read_balanced_body` already knows where each nested
-`$( … )` / `<( … )` / `>( … )` body begins and ends; parsing each one as the
-scan closes it — and raising its error there, before the enclosing word is
-finished, let alone tokenized — is bash's own order and is what both shapes
-need. The `SubstBail` path then becomes the special case it should always
-have been: the *last*, unterminated body, parsed on the way out because there
-is no `)` to close it on.
+**The fix considered and not taken:** moving the eager body parse out of the
+parser and into the scan — `read_balanced_body` already knows where each nested
+`$( … )` / `<( … )` / `>( … )` body begins and ends, so it could parse each one
+as it closes it, which is bash's own order. It was not needed: the scan has no
+`ParseOpts`, and carrying the read bodies out on the error reaches the same
+measured behaviour with a strictly smaller change along the line `SubstBail`
+already established. `SubstBail` accordingly stays what it is — the *last*,
+unterminated body, parsed on the way out because there is no `)` to close it
+on — and `eager_bodies` covers every body that did close.
 
 ### TD-OILS-A-CONDITIONAL-RHS-THAT-DIES-AT-EOF-GETS-ONLY-ONE-OF-BASHS-TWO-DIAGNOSTICS. `[[ x =~ ( ]]` — 2026-08-06 — ✅ FIXED 2026-08-07
 
@@ -18942,10 +19939,45 @@ printed — `Shell::is_null_command` gates a `shell_times` argument to
 TD-OILS-TIMEFORMAT-IS-UNIMPLEMENTED and the CPU accounting with TD-OILS10 — so
 the case counts lines and matches rather than showing them.)
 
+**Also done since — posix mode respells `kill`'s signal names, both ways.** The
+manual gives this as two items and they turned out to be independent, so both
+were probed separately against bash 5.2.37:
+
+* **The listing.** `kill -l` with no operands prints every *bare* name on one
+  line, single-space separated, one closing newline and no trailing space —
+  POSIX spells a signal without its `SIG`, and gives the listing no numbers, so
+  the columnar `N) SIGNAME` layout goes entirely and takes the numbering with
+  it. `kill -L`, whose whole purpose is to force the columns, takes this form
+  too: the mode wins over the option. `trap -l` is **not** in the rule and keeps
+  its columns in both modes, which a reading of the manual's one-line item would
+  miss.
+* **The lookup.** A `SIG`-prefixed name stops being a name, in every spelling
+  `kill` reads one: `-SIGTERM`, `-s SIGTERM`, `-sSIGTERM`, `-n SIGTERM` and
+  `kill -l SIGTERM` all become `invalid signal specification` (status 1), while
+  `-TERM`, `-s TERM`, `-n 15` and `-18` keep working. The refusal is
+  case-insensitive (`sIgTeRm` too) — it is the prefix that is gone, not one
+  spelling of it. Three things it does *not* touch: the number→name direction
+  (which never printed a prefix — `kill -l 9` is `KILL` and `kill -l 0` is
+  `EXIT` in both modes), the pseudo signals (none has a `SIG` spelling to lose,
+  so `EXIT`/`DEBUG` answer in both modes and `SIGEXIT` is refused in both), and
+  `trap`, which accepts `trap ':' SIGUSR1` in posix mode.
+
+Implemented as `signal_list_posix` next to `signal_list_columns`, plus bash's
+`DSIG_SIGPREFIX` made explicit as `decode_signal_flags(spec, sig_prefix)` —
+`decode_signal` is now the `sig_prefix = true` wrapper, so `trap` and everything
+else are unchanged and only `kill` passes `false`. `builtin_kill` reads the mode
+once before its option run and `kill_list` once at entry.
+
+Covered by two lib tests, `posix_mode_lists_signals_on_one_line_without_the_sig_prefix`
+and `posix_mode_refuses_a_sig_prefixed_name_to_kill` — lib rather than corpus
+because the signal *set* is the target's, not the host's (see
+TD-OILS-SIGNAL-TABLE-IS-LINUXS-NOT-THE-HOSTS). That entry blocks *differential*
+cases only; the layout and the lookup rule are osh-internal and check fine
+against osh's own table, which is why this was implementable after all.
+
 **Still open:** the rest of bash's posix-mode list. It has now been *surveyed*
 rather than guessed at — the GNU manual's "Bash POSIX Mode" page gives 75 items,
-and a 42-case probe of them against osh leaves these real gaps, roughly in
-increasing order of size:
+and a 42-case probe of them against osh leaves this one real gap:
 
 * `cd` in logical mode validates the resulting path and falls back to physical.
   (Probed and **not reproducible** on the reference bash: with `lnk -> a/b` and
@@ -18953,9 +19985,6 @@ increasing order of size:
   falling back to the physical `a/b/../c`. Either this Cygwin build already
   behaves the posix way, or the fallback needs a trigger the probe missed —
   there is nothing to make match until a case that *does* differ is found.)
-* `kill -l` prints one line with no `SIG` prefixes, and `kill` rejects a
-  `SIG`-prefixed signal name. (Blocked by
-  TD-OILS-SIGNAL-TABLE-IS-LINUXS-NOT-THE-HOSTS.)
 
 ### TD-OILS-PATH-IS-SPLIT-ON-THE-HOSTS-SEPARATOR, so a `:`-separated `$PATH` is one entry — 2026-08-03 — ✅ **FIXED 2026-08-04**
 
@@ -24732,7 +25761,7 @@ to line start (`grep -q "^$WAIT_MARKER"` / `^BOOT_OK`) in `scripts/boot-test.sh`
 so only the standalone marker line counts.  Found while validating the
 fastpy-nice (nice→priority) self-test.
 
-### TD-FRAME-OWNER-1GIB. `frame_owner` ownership array only tracks the first 1 GiB of RAM (fixed `[u8; 65536]`) — 2026-07-22 — OPEN (diagnostic-only; low severity)
+### TD-FRAME-OWNER-1GIB. `frame_owner` ownership array only tracks the first 1 GiB of RAM (fixed `[u8; 65536]`) — 2026-07-22 — ✅ RESOLVED 2026-08-14 (array made dynamic *and* wired into the allocator)
 
 **Where:** `kernel/src/mm/frame_owner.rs` — `const MAX_FRAMES: usize = 65536;`
 and the `OwnerArray([u8; MAX_FRAMES])` static; `set`/`get`/`clear` no-op when
@@ -24766,6 +25795,74 @@ carve `total_frames` bytes from the frame-allocator metadata region in
 and bounds-check `set`/`get`/`clear` against the dynamic length. The metadata
 region already reserves per-frame bytes; adding one more `total_frames`-byte
 sub-array is the same pattern used for `page_info`/`refcount`/cgroup.
+
+---
+
+**RESOLVED 2026-08-14.** Both halves were done together, exactly as the note
+above insisted — resizing the array alone would have been busywork while
+`set`/`clear` still had no callers.
+
+**1. Dynamic array.** `const MAX_FRAMES = 65536` and the
+`OwnerArray([u8; MAX_FRAMES])` static are gone. `frame::plan_metadata` now
+reserves a fourth per-frame sub-array (`owner_offset = cgroup_offset +
+total_frames`), `frame::init` zeroes it (`0` == `Owner::Free`) and publishes it
+via `frame_owner::init_storage(ptr, total_frames)`; `OWNERS_PTR`/`OWNERS_LEN`
+back a `slot()` helper that every accessor goes through. Same pattern as the
+cgroup array (BUG-CGROUP-1GIB). Boot confirms the carve:
+`[mm] Metadata: ... [page_info: 327680B, refcount: 655360B, cgroup: 327680B, owner: 327680B]`.
+
+**2. Actually wired up.** `tag_alloc_owner`/`untag_free_owner` are called from
+all six allocator choke points: both per-CPU fast paths in `alloc_frame`, the
+zero-pool pop in `alloc_frame_zeroed`, `alloc_order`, `alloc_order_constrained`,
+`free_frame` and `free_order`. The zero-pool refiller tags parked frames
+`Owner::ZeroPool`; the consumer re-tags on pop.
+
+**3. Ambient owner context.** The allocator cannot know its caller, so
+attribution comes from `OwnerScope` — a cache-line-padded per-CPU RAII guard
+that saves the previous tag and restores it on drop, so it nests correctly even
+when an IRQ handler allocates inside another subsystem's scope. Tagged so far:
+page tables (`page_table.rs` PT-page pool refill), kernel stacks (`kstack.rs`),
+slab + large heap (`heap.rs`), CoW (`cow.rs`), and user anon pages (`vma.rs`
+demand paging, `idt.rs` stack growth). Untagged allocations record
+`Owner::Unknown`, which is honest rather than wrong.
+
+Known accuracy limit, documented on `OwnerScope`: the tag is per-CPU, so a task
+preempted and migrated mid-scope restores onto the new CPU and can mis-attribute
+a handful of frames. Accepted deliberately — this is diagnostic-only, and a lock
+or a per-task field reachable from boot/IRQ contexts would cost more on the
+allocation hot path than the precision is worth.
+
+**Verified.** Boot PASSED 273s; the rewritten self-test reports:
+
+```
+[frame_owner]   Covers all 327680 frames (5120 MiB): OK
+[frame_owner]   High frame 327679 (> old 65536-frame window): OK
+[frame_owner]   Alloc/free tagging round-trip: OK
+[frame_owner]   OwnerScope nesting: OK
+[frame_owner]   summary/find_by_owner: OK
+[frame_owner]   Stats: sets=155837, clears=299809
+```
+
+The second line is the direct regression test for this bug. The nonzero
+`sets`/`clears` are the proof that the allocator now reaches this module at all.
+
+*On `clears` > `sets`:* these count **calls, not transitions**. `clear()` runs on
+every free, including frames that were never tagged — anything allocated before
+`init_storage` published the array, plus rollback paths that free via
+`free_order_inner` without a matching tagged alloc. Not a leak; the per-frame
+state is still a correct free/allocated mirror, as test 4's round-trip shows.
+
+**The self-test had to be rewritten, not just extended.** The old one wrote raw
+indices (100, 200, 300…) straight into the array. That was harmless while
+nothing populated it, but the moment the allocator went live those writes would
+corrupt *real* frames' records. It now allocates and frees actual frames for
+every check, and saves/restores around the one raw-index probe.
+
+**Side effect: found and fixed a latent bug.** Making `current_owner()` run on
+every allocation pulled `smp::fast_cpu_index()` into early boot and exposed
+B-SMP-FAST-CPU-INDEX-PANICS-BEFORE-APIC-INIT (tier-3 APIC fallback reads a null
+APIC base before `apic::init` — panic in debug, wild read in release). See that
+entry.
 
 ### BUG-CGROUP-1GIB. (RESOLVED 2026-07-22) per-frame cgroup array only covered the first 1 GiB → cgroup accounting leak above 1 GiB
 
@@ -38424,7 +39521,238 @@ not clear IF).
 
 ---
 
-### B-PTHREAD-CHILD-JUMPS-TO-GARBAGE. One `pthread_create`d thread intermittently starts at a bogus RIP and is killed; the process keeps running and reports a wrong answer — PARTIALLY FIXED (defect 2 fixed 2026-08-13; defect 1 still OPEN, 1 in 10 boots) 2026-08-13
+### B-PTHREAD-JOIN-LOST-CTID. `pthread_join` intermittently blocks forever because the child's `CLONE_CHILD_CLEARTID` was registered *after* the child was made runnable — FIXED 2026-08-13
+
+**Symptom.** The Path-Z real-glibc pthread self-test times out rather than
+producing a wrong answer (this is a *different* failure from
+B-PTHREAD-CHILD-JUMPS-TO-GARBAGE below, which returns wrong counters):
+
+```
+[spawn]   FAIL: real glibc pthread — process did not exit within 262144 yields
+          (state=Some(Running)); a thread likely deadlocked on a futex or a worker faulted
+WARNING: Path-Z real glibc pthread self-test failed: TimedOut
+```
+
+Caught on iteration 1 of soak run `soak-20260813-222924`
+(`build/hang-catches/soak-20260813-222924-iter01.serial.txt`), i.e. at roughly
+the same ~1-in-10 rate as the other pthread flakes.
+
+**Reading the serial log — how to tell this apart from a worker fault.** The
+region around the failure is:
+
+```
+[sched] Spawned task 265 ...            <- main thread of process 296
+[sched] Spawned task 266 ...
+[sched] Task 266 exiting                <- worker exits IMMEDIATELY after spawn
+[sched] Spawned task 267 / 268 / 269
+[sched] Task 267 exiting
+[sched] Task 268 exiting
+[sched] Task 269 exiting
+[thread] Process 296 has no threads left — now zombie
+[spawn]   FAIL: ... (state=Some(Running))
+```
+
+All four workers exit cleanly and none faults, yet the main thread 265 never
+prints `[sched] Task 265 exiting`. Two details are easy to misread:
+
+* The `now zombie` line is **not** task 265 exiting. It comes from the test's
+  own cleanup, `thread::on_thread_exit(result.task_id)` at
+  `kernel/src/proc/spawn.rs` (in the glibc-pthread test, just after the state
+  snapshot), which removes the still-registered main thread. That is also why
+  the `FAIL` line can report `state=Some(Running)` on the line *after* a
+  `now zombie` message — the state was sampled before that cleanup ran.
+* In a healthy boot the order is `... 269 exiting` → `now zombie` →
+  `Task 265 exiting`, because `sys_exit` calls `on_thread_exit` (which prints
+  the zombie line) *before* `sched::task_exit` (which prints the exit line).
+  Compare `soak-20260813-093459-iter02/03/09` for the healthy shape.
+
+So the signature is precisely: **every worker exits, the joiner never does.**
+
+**Root cause.** `proc::thread_clone::clone_thread` called
+`thread::spawn_with_tls(...)`, which *admits* the child (makes it runnable)
+before returning, and only then ran:
+
+```rust
+let task_id = thread::spawn_with_tls(...)?;   // <-- child is RUNNABLE here
+...
+if (args.flags & CLONE_CHILD_CLEARTID) != 0 && args.child_tid_ptr != 0 {
+    register_clear_child_tid(task_id, args.child_tid_ptr);   // <-- too late
+}
+```
+
+On the uniprocessor a timer preemption in that window lets the child run to
+completion. `on_thread_exit_hook` then does
+`match CLEAR_CHILD_TID.lock().remove(&task_id) { Some(p) => p, None => return }`
+— it takes the `None` path and performs **neither** the zero-write to `*ctid`
+**nor** the `futex_wake(ctid_ptr, 1)`. glibc's `pthread_join` is parked on
+exactly that word, so it blocks forever on a tid that will never be cleared;
+the process never zombifies and the test burns its whole yield budget. The
+late `register_clear_child_tid` also left a permanent `CLEAR_CHILD_TID` entry
+keyed on a task id that had already exited (a slow leak, and a latent mis-fire
+if task ids are ever recycled).
+
+`CLONE_CHILD_SETTID` had the same window with an inverted effect: had the
+child exited first, the parent's `copy_to_user` of the tid would have landed
+*after* the exit hook zeroed `*ctid`, resurrecting a non-zero tid into a dead
+thread's descriptor — hanging `pthread_join` just as surely.
+
+`proc::fork::fork` carried an identical copy of the defect (its
+`CLONE_CHILD_CLEARTID` registration also ran after `spawn_with_tls` returned).
+
+**Why the futex layer was *not* at fault.** Two plausible-looking alternatives
+were checked and cleared, so a future session need not redo them:
+`futex_wait_bitset` performs its `*addr == expected` compare and its wait-queue
+enqueue under one `FUTEX_TABLE.lock()`, so a wake cannot slip between the
+compare and the enqueue; and the window between dropping that lock and calling
+`sched::block_current()` is covered by the scheduler's sticky `pending_wake`
+flag (`sched::wake` sets it when the target is Running/Ready, and
+`block_current` consumes it and returns without blocking).
+
+**Fix.** The set of per-thread state that must exist before a child can run had
+grown to four items (`THREAD_OWNERS`, `pcb::add_thread`, the `%fs`/`%gs` bases,
+and the ctid), and each one registered after the spawn call re-opened the same
+race — so the two-phase spawn is now explicit at the `proc::thread` level
+rather than being threaded through an ever-widening parameter list:
+
+* `thread::spawn_suspended_with_tls(...)` — phase 1, returns a task that is
+  registered with its process but still `Blocked`, so it cannot run or exit.
+* `thread::admit(pid, task_id)` — phase 2, makes it runnable; unwinds the
+  thread registration and destroys the task on failure.
+* `thread::spawn` / `thread::spawn_with_tls` are now just phase 1 + phase 2 and
+  are unchanged for the many callers that need no extra registration.
+* `thread_clone::forget_clear_child_tid(task_id)` drops a ctid registration
+  without firing it, used to unwind a failed `admit`.
+
+`clone_thread` and `fork` now do all of PARENT_SETTID / CHILD_SETTID /
+CHILD_CLEARTID between the two phases, so there is no instant at which the
+child is schedulable with incomplete exit-path state.
+
+**Files.** `kernel/src/proc/thread.rs` (the two-phase API),
+`kernel/src/proc/thread_clone.rs` (`clone_thread`, `forget_clear_child_tid`),
+`kernel/src/proc/fork.rs` (`fork`).
+
+**Bug class — worth grepping for.** This is the third instance of
+"register-after-admit" in the same code path: B-PTHREAD-YIELDBUDGET
+(`THREAD_OWNERS`/`add_thread`), B-PTHREAD-CHILD-JUMPS-TO-GARBAGE defect 1
+(`%fs` base), and now the ctid. **Any** new per-thread registration keyed on a
+task id must go between `spawn_suspended_with_tls` and `admit` — never after
+the spawn helper returns.
+
+---
+
+### B-THREAD-JOIN-EXIT-RACE. `thread::join` could park forever on a thread that exited between the liveness check and the waiter registration — FIXED 2026-08-13
+
+**How it was found.** Not from a failing boot: it came out of the audit that
+followed B-PTHREAD-JOIN-LOST-CTID above, checking every piece of state
+`on_thread_exit` consults for the same "the other side registers too late"
+shape. `THREAD_JOIN_WAITERS` is the one such table registered by the *joiner*
+rather than by the spawner, so it needed the mirror-image argument.
+
+**The window.** `proc::thread::join` did:
+
+1. take `THREAD_OWNERS`, confirm the target exists and shares our process,
+   **drop the lock**;
+2. take `THREAD_JOIN_WAITERS`, insert `target -> caller`, drop it;
+3. park in a loop whose *only* exit condition is that entry being removed.
+
+`on_thread_exit` drains `THREAD_JOIN_WAITERS` (waking the joiner) **before** it
+removes the task from `THREAD_OWNERS`. So a target that exits between steps 1
+and 2 drains an empty waiter map, and the entry inserted at step 2 is one that
+nothing will ever remove — the loop at step 3 never terminates and the joiner
+is stuck for the life of the process.
+
+This is a genuine hang, but a much narrower one than the ctid bug: it needs a
+preemption inside a two-instruction-wide gap between dropping one lock and
+taking another, and it only affects the native `SYS_THREAD_JOIN` path (glibc
+`pthread_join` goes through the ctid futex instead), which is why no soak has
+caught it.
+
+**Fix.** Register-then-recheck, the same idiom `futex_wait_bitset` already uses
+for the signal-arrival race. After publishing the waiter entry, re-check
+`THREAD_OWNERS`; if the target is gone, the exit already ran, so withdraw the
+entry (only if it is still ours — a racing `on_thread_exit` may have removed it
+and issued a real wake, which must not be swallowed) and return the recorded
+outcome, or `NoSuchProcess` if none — matching what the pre-existing
+target-not-registered branch above already returns. The ordering that makes
+this correct is the one noted above: waiters are drained strictly before the
+`THREAD_OWNERS` removal, so "gone from `THREAD_OWNERS`" implies "the waiter
+drain has already happened."
+
+Neither lock is ever held while taking the other, so no new lock-order edge is
+introduced.
+
+**Files.** `kernel/src/proc/thread.rs` (`join`).
+
+---
+
+### TD-KERNEL-KILL-THREAD-DEAD-CODE. `proc::thread::kill_thread` has no callers — ✅ RESOLVED 2026-08-14 (and it was not dead code: it was an unwired bug fix) 2026-08-13
+
+`kernel/src/proc/thread.rs:kill_thread` is a `pub fn` with zero call sites
+anywhere in the tree, so the binary build emits a `dead_code` warning for it.
+Noticed while building the two fixes above; deliberately left alone rather than
+churned, because it is plausibly intended as part of the thread-teardown API
+surface. Proper resolution: either wire it into the process-teardown path that
+should be using it, or delete it and let `sched::kill_task` remain the single
+entry point. Pre-existing — it is not a regression from those fixes (verified:
+the same single occurrence, definition only, exists at commit `315a7e0ca`).
+
+**Resolution 2026-08-14 — this was filed under the wrong heading. It was a
+live bug, not tech debt.** The "either wire it up or delete it" framing above
+treats the two options as comparable. They were not, and the answer was
+written inside the function's own doc comment the whole time:
+
+> Calling `sched::kill_task` on its own — which is what the shell's `kill`
+> command **used to** do — skips every one of those and leaves the thread
+> registered forever with its joiner parked.
+
+The shell's `kill` command did not "used to" do that. It still did:
+`kshell.rs:cmd_kill` called `crate::sched::kill_task(task_id)` directly. So
+`kill_thread` was not a speculative API-surface addition — it was the fix for
+that exact defect, written but **never wired to its one caller**. Every
+`kill <tid>` typed at the kernel prompt therefore:
+
+1. leaked a `THREAD_OWNERS` entry (the thread→process mapping is never
+   removed, so the process can never reach its zombie transition through that
+   thread);
+2. left any task parked in `join()` on the victim parked forever; and
+3. recorded no `ThreadOutcome::Killed`, so a joiner that *was* woken by some
+   other path would read a fabricated normal return instead of
+   `KernelError::Cancelled` — the precise wrong-answer failure mode that
+   `B-PTHREAD-CHILD-JUMPS-TO-GARBAGE` defect 2 was fixed to prevent.
+
+**Fix:** `cmd_kill` now calls `proc::thread::kill_thread`, with a doc comment
+recording *why* it must not use the scheduler call directly (so the next
+person to "simplify" it has the reason in front of them).
+
+**Why nothing caught it.** There was no test of `kill_thread` at all — the
+existing `test_killed_thread_does_not_join_normally` exercises `record_killed`
+and `join` directly with synthetic task IDs, which covers the outcome map but
+deliberately never calls `kill_thread`. So the only evidence the function had
+no callers was a `dead_code` warning, and a warning that says "unused" reads
+as "harmless" rather than "your fix is not connected".
+
+**Test added:** `thread::test_kill_thread_cleans_up` (test 9). It spawns a
+victim and kills it **before it is ever scheduled**, which (a) makes the test
+unable to leave a runaway task behind if the kill is refused, and (b) lets the
+entry function's untouched counter prove the task never ran, so the stack
+`&counter` it was handed cannot outlive the frame. It asserts the accepted
+kill deregisters the thread and joins as `Cancelled`, and that a *second*,
+refused kill withdraws the speculative `Killed` marker (the `else` branch that
+exists only in `kill_thread`) so a later join reports `NoSuchProcess` rather
+than a death that never happened.
+
+**Deliberately left alone:** `syscall/handlers.rs:5877` also calls
+`sched::kill_task` directly, on the sibling threads of a process being torn
+down by a fatal signal. That site pairs it with an unconditional
+`thread::on_thread_exit(t)`, which `kill_thread` would skip for a thread that
+is already dead — and for a dying process, deregistering an already-dead
+sibling is the wanted behaviour. Its missing `record_killed` is immaterial
+there because the joiners are inside the same process and are being killed in
+the same loop.
+
+---
+
+### B-PTHREAD-CHILD-JUMPS-TO-GARBAGE. One `pthread_create`d thread intermittently starts at a bogus RIP and is killed; the process keeps running and reports a wrong answer — FIXED (defect 2 fixed 2026-08-13 `315a7e0ca`; defect 1 fixed 2026-08-13 `975114f54`, corroborated by a 20/20 clean soak) 2026-08-13
 
 **Symptom.** A deliberate 40-boot soak (`scripts/wedge-soak.sh`, run
 `soak-20260813-093459`) was launched to hunt an unrelated wedge. It did not
@@ -38567,12 +39895,52 @@ B-PTHREAD-YIELDBUDGET (resolved) was a silent hang, not a fault.
 soak script already treats a self-test regression as a catch and preserves
 the serial log, which is how this was captured.
 
-**Next step when picked up (defect 1).** Add a `clone`-time trace to
+**Next step when picked up (defect 1).** ~~Add a `clone`-time trace to
 `kernel/src/proc/thread_clone.rs` printing, for each child: the requested TLS
 base, the `%fs` base actually installed, and the first 8 bytes at
 `tls_base + offsetof(struct pthread, start_routine)`; then soak until it trips.
 The failure is frequent enough (1/10) that a single 20-boot soak should catch
-it with the trace attached.
+it with the trace attached.~~ **Superseded — the defect was found by static
+audit instead, see below.**
+
+**Defect 1 FIXED 2026-08-13** (`975114f54`, *seed thread `%fs`/`%gs` base
+before admission*). The planned trace was never needed: auditing the spawn
+path for the register-after-admit pattern found the mechanism directly.
+
+`clone_thread` called `thread::spawn_with_tls`, which **admitted the child to
+the run queue before writing its `%fs`/`%gs` base**. On our uniprocessor
+(TCG) build a timer preemption inside that window lets the child start with an
+unseeded `%fs`. glibc's clone entry stub loads the thread function from
+TLS — a `%fs`-relative fetch of `struct pthread`'s `start_routine` — so with a
+stale/zero `%fs` base it reads a garbage word and jumps to it. That is exactly
+the reported signature: worker `id == 0` (the first child created, i.e. the one
+most likely to be preempted before seeding) starting at a bogus RIP with
+`rip == aux == CR2`, the fault address *being* the instruction pointer.
+
+Fixed structurally rather than by reordering two statements: `thread` now
+exposes a two-phase API — `spawn_suspended_with_tls()` (create + register
+everything, including the TLS bases) followed by an explicit `admit()` — so a
+child cannot become runnable before its per-thread state exists.
+`spawn_with_tls` is retained as a thin wrapper that calls both.
+
+**Confirmation and its honest limits.** The 20-boot soak this entry asked for
+has since run (`build/hang-catches/soak-ctidfix.log`, 2026-08-13 23:02 →
+2026-08-14 01:52): **20/20 boots passed**, every one reporting
+`REAL glibc pthread (… 40000 mutex/futex ops, pthread_join, captured 48 bytes
+== expected): OK` — i.e. the exact `counter=40000 joinsum=10` assertion whose
+failure defined this bug — and zero kernel faults.
+
+That is consistent with a fix but is **not** statistically conclusive on its
+own: at the measured 1-in-10 rate, 20 clean boots would happen by chance
+`0.9^20 ≈ 12%` of the time. The confidence comes primarily from the mechanism
+being understood and closed by construction, with the soak as corroboration.
+If a `counter=30000 joinsum=9` (or the now-loud faulting variant) ever
+reappears, reopen this entry rather than assuming a new bug.
+
+**Bug class.** Third of three register-after-admit defects found in this
+subsystem, alongside B-PTHREAD-JOIN-LOST-CTID (the ctid registration) and
+B-THREAD-JOIN-EXIT-RACE (the join-waiter registration). Worth grepping for
+whenever new per-thread state is keyed on a task id.
 
 **How the defect-2 fix changes what a soak looks like.** Before, the 1-in-10
 boot that hit this produced a *quiet wrong answer* (`counter=30000
@@ -38723,6 +40091,60 @@ prime suspects are any `current_cpu_id()`/`load_current_task()` call made while
 running on a *borrowed* or already-freed stack, or an off-by-one stack write in
 the clone/exit path. The `dump_stack_scan` capture should show the exact stack
 address holding `&CURRENT_TASK_IDS[0]` relative to task 123's `rsp`.
+
+**Update 2026-08-14a — the assumed byte decode does not fit the error code, so
+the "stored qword is the cell base" story is incomplete.** Audit 2026-07-15b
+explains the `+0x2` as "the resolver rounding to the nearest preceding symbol;
+the stored qword is the cell base". That reading is doubtful:
+`scripts/resolve-rip.sh` reports *nearest preceding symbol + offset*, so a
+report of `+0x2` means RIP genuinely **was** `&CURRENT_TASK_IDS[0] + 2`, not
+the base. The natural mechanism is instead: `ret` jumped to the base, the
+instruction there executed, and the *next* instruction — at base+2 — faulted.
+
+But that does not close either. `panic_diagnostics()` reported the current task
+as 123, so CPU 0's cell held `123 = 0x7B`, i.e. bytes `7B 00 00 00 00 00 00 00`:
+
+- `base+0`: `7B 00` = `JNP rel8 +0` — whether or not the branch is taken, the
+  next instruction is at `base+2`. Consistent with the observed RIP.
+- `base+2`: `00 00` = `add byte [rax], al` — a read-modify-**write**. On a
+  not-present page x86 reports error bit 1 set, i.e. `error = 0x2`.
+
+The captured error was `0x0` (**read**). So the faulting instruction was *not*
+`add [rax], al`, and at least one of the assumptions (which cell, what it held,
+or that RIP is inside `CURRENT_TASK_IDS` at all) is wrong. A plausible
+alternative is that the resolver attributed RIP to `CURRENT_TASK_IDS` merely
+because it is the nearest *preceding* symbol — the true target may be a later,
+symbol-less location, which would invalidate the whole "per-CPU cell address"
+inference and with it the search direction of audit 2 above.
+
+**Action taken instead of more inference: the handler now dumps the raw bytes
+at RIP** (`idt.rs`, right after `dump_stack_scan`, guarded by a
+`page_table::translate` mapped-check so it cannot itself fault, and emitted
+after the scan so it can never displace it). One repro now settles what
+executed, rather than another round of decode guesswork.
+
+**Update 2026-08-14b — 20 consecutive boots, zero occurrences.** The
+confirmation soak for B-PTHREAD-JOIN-LOST-CTID ran 20 full boots
+(`build/hang-catches/soak-ctidfix.log`, 23:02–01:52) with **no `EXCEPTION:` /
+`Page Fault` / `FATAL` line at all**, on a build carrying both
+register-after-admit fixes (`%fs`-base-before-admit and
+ctid-before-admit). Against the historically recorded ~1/5 rate that is
+`0.8^20 ≈ 1.2%` likely, which is real evidence the rate has dropped.
+
+Two candidate explanations, not yet distinguished:
+
+1. **The TLS fix cured it.** B-PTHREAD-CHILD-JUMPS-TO-GARBAGE defect 1 let a
+   clone child run before its `%fs` base was seeded — itself a control-flow /
+   wild-access defect in *this exact self-test*. A shared root cause is very
+   plausible.
+2. **The rate merely drifted.** The 1/5 figure is from 2026-07-15, a month and
+   many changes ago, so the null hypothesis "unchanged rate" may already have
+   been false for unrelated reasons.
+
+Deliberately **not** downgrading this entry to FIXED on that evidence: 20 clean
+boots cannot separate "cured" from "rarer", and silently closing it would throw
+away the instrumentation's value. Keep at WATCH; if a repro appears, the new
+bytes-at-RIP dump plus the existing stack scan should close it in one capture.
 
 ### B-FORKEXEC-BOOT-HANG. Intermittent silent boot hang at the glibc `fork()`+`execl()`+`waitpid()` self-test — WATCH (rare, non-fatal to a re-run) 2026-07-15
 
@@ -43219,6 +44641,65 @@ truncation; given two recorded recurrences now, a finer-grained marker
 pass around the `mm::oom::self_test()` / `sysctl::set` lock window
 (per the F1/F4 method) is the priority diagnostic when next observed.
 
+**Mechanism identified 2026-08-14 — this is very likely the console-lock
+deadlock, already fixed twice since the last recurrence.**
+
+The entry has been carrying a *statistical* closure bar (~90 clean boots)
+because no mechanism was known. There is now a mechanism, and it makes the
+blind-soak bar the wrong instrument.
+
+Look at the fingerprint rather than the location. Serial stops **mid-token**
+— `[sysctl] mm.oom_pol…`, cut inside the sysctl name — and never resumes,
+while an immediate identical-binary re-run is clean. Truncation *mid-print* is
+the discriminator: the UART write is synchronous and takes ~87 µs/char, so a
+CPU that wedged for some unrelated reason would overwhelmingly wedge
+*between* lines, with the in-flight line already flushed. Stopping inside the
+formatting of an argument means the printing CPU itself stopped, mid-write,
+holding the `SERIAL` spin mutex. That is the same shape as
+`B-KASAN-INSTRUMENTED-BOOT-WEDGES-MID-PRINT-ON-A-PAGE-FAULT` (`EXCEPTION:
+Page Fault (#PF) at` truncated exactly where `{:#x}` would have formatted
+`frame.rip`), and it matches this entry's own long-standing assessment that
+`mm::oom::self_test()` is *the victim, not the cause* — the self-test is
+simply whatever happened to be printing.
+
+**All of W1's evidence predates every fix to that path.** W1's recurrences are
+2026-06-10 and 2026-06-12, and its last soak is 2026-06-14. `serial.rs` has
+since gained, in order:
+
+| Commit | Date | What it closed |
+|---|---|---|
+| `cac8d7624` | 2026-07-03 | lock-free `emergency_println!` (an escape hatch existed at all) |
+| `1e5c091f4` | 2026-07-15 | `cli` around the `SERIAL` critical section — same-CPU **interrupt** re-entry |
+| `58102abca` | 2026-08-12 | per-CPU `IN_PRINT` + emergency fallback — same-CPU **exception** re-entry |
+
+`1e5c091f4`'s own commit message calls it the "long-open boot-wedge" fix, and
+its in-source note describes precisely W1's symptom: *"a task holds it mid-write
+and a timer/IRQ handler on the SAME CPU then tries to print … the handler spins
+forever on the lock the interrupted task can no longer release — a hard
+single-CPU wedge."* W1 is the OOM self-test's instance of that wedge.
+
+**Consequence for the closure condition.** W1 can no longer present as a
+*silent* mid-line truncation, by construction and along both remaining paths:
+
+- if the re-entry is an interrupt, `cli` now prevents it from happening at all;
+- if it is an exception (or anything else that re-enters `_print` on this CPU),
+  the per-CPU flag routes the nested write to the lock-free emergency port, so
+  the fault **prints** instead of spinning.
+
+So the next occurrence, if any, is expected to yield a legible report rather
+than silence. Recommend **retargeting the bar from ~90 blind boots to one
+observation**: treat W1 as cured-incidentally on the reasoning above, and
+re-open it *only* on a truncation that still produces no diagnostics — which
+would falsify this analysis and be far more informative than the 83 remaining
+clean boots the old bar asks for. Note also that the recorded streak of 7 is
+stale bookkeeping, not a real count: many dozens of routine boots have passed
+since 2026-06-14 (including a 20/20 pthread soak on 2026-08-13) with no
+recurrence, and the entry's own rule counts routine boots toward the streak.
+
+Left at WATCHLIST rather than closed unilaterally, since retargeting a closure
+condition an earlier session set deliberately is the operator's call if they
+want it; the analysis above is the argument for doing so.
+
 ### W2. Deferred benchmark suite livelocks in `bench_pick_next` after `context_switch` → `BENCH_OK` never prints — ROOT-CAUSED & FIXED 2026-06-14
 
 **RESOLUTION 2026-06-14 — root cause was the mouse cursor task busy-yielding,
@@ -43521,6 +45002,313 @@ classes of remaining disagreement that are deliberate rather than defects.
 
 After the fix the corpus sweep over all 556 faces agrees on 9368 of 10008
 runs, and the 288-face class this entry describes is gone.
+### TD-BENCH-OWNER-AB-BUDGET-WAS-AN-ABSOLUTE-CYCLE-COUNT. Five boots of "ownership tagging costs 8500 cycles" were the emulator, not the code — 2026-08-14 — RESOLVED 2026-08-14
+
+**Where:** `kernel/src/bench.rs` (`run_all`, the `page_alloc_free_owner_ab` and
+`fast_cpu_index` budget checks) and `bench/baselines.toml`.
+
+**Symptom.** `page_alloc_free_owner_ab` reported `SLOW (tagging costs N
+cycles/alloc+free, limit 500)` on five consecutive boots: **10826 / 7660 /
+8512 / 10580 / 11288**. `fast_cpu_index` simultaneously reported `SLOW (274 /
+282 cycles, limit 200)` — on boots *after* the tier-0 fix that benchmark had
+been added to prove worked.
+
+**Why it was worth chasing rather than dismissing as noise.** The
+reproducibility. A number that lands within ±20% five times is measuring
+something. And the accused code is trivial: `frame_owner::set` is a relaxed
+load, a bounds check, a byte store and a counter bump. When a measurement and
+a static reading of the code disagree by two orders of magnitude, one of them
+is wrong, and guessing which is how people end up optimising the wrong line.
+
+**Three hypotheses, each killed by measurement rather than by argument:**
+
+1. *Ambient load / windowing.* The first version ran 500 iterations with
+   tagging off, then 500 with it on. Two consecutive windows on a live system
+   are not the same system, and `min` does not save you — it is robust to
+   *spikes*, not to a window uniformly busier than its neighbour. The evidence
+   was in the same output: the off window had `max=129078` while the on window
+   had `max=635531436` and a 30x higher mean. Fixed by alternating the arms
+   every iteration (`ab_interleaved`), microseconds apart, so drift on a
+   scheduling timescale lifts both and cancels. **The number did not move.**
+2. *TCG's atomic-RMW fallback.* TCG cannot always lower a guest atomic RMW
+   inline; `cpu_loop_exit_atomic` aborts the translation block and re-executes
+   with the world stopped — thousands of cycles for one increment. Two shared
+   `fetch_add` statistics counters sat on exactly this path. Measured directly:
+   `atomic_fetch_add_relaxed` came out at **0-238 cycles**, so the two counters
+   accounted for ~124 of ~8500. (The counters were moved to per-CPU
+   cache-line-padded slots anyway, on general principles — the file already
+   padded `CURRENT_OWNER` per-CPU with a comment about a "false-sharing storm"
+   while leaving these unpadded on the same path. That commit says explicitly
+   that it was *not* the cause.)
+3. *The halves don't add up.* A first split put `set` at 2978 cycles and
+   `current_owner` at 924 — `set + clear + current ≈ 6900` against a measured
+   8512-10580, so they did add up and the cost was genuinely inside `set`.
+   **But that split was flawed**: it never controlled the `ENABLED` flag, so
+   "2978 cycles for `set`" lumped the cost of *calling* `set` together with the
+   cost of the work `set` does — the two things that had to be told apart,
+   pointing at opposite conclusions.
+
+**What actually settled it.** A three-arm experiment: `set` with tracking
+**off** (the early-return path — the harness's floor for calling into
+`frame_owner`), `set` with tracking **on**, and a byte store to an ordinary
+`.bss` static as a control. Result:
+
+```
+frame_owner_set_split: call_floor=278 work=2416 bss_store_control=218
+```
+
+**A single byte store to plain kernel `.bss` costs 218 cycles in this
+harness.** `set` performs about half a dozen guest memory accesses (the
+`ENABLED` load, the length and pointer loads inside `slot`, the tag store, and
+the per-CPU counter's load and store); 6 × 218 ≈ 1300, the right order for the
+measured 2416. Under TCG *every* guest memory access carries a softmmu lookup
+costing a few hundred host cycles; the same accesses on real hardware are L1
+hits at ~1-4 cycles. So ownership tagging adds ~16 memory accesses per
+alloc+free — **~30 cycles of real machine, ~2500 cycles of emulator.**
+
+Nothing had regressed. The benchmark was measuring the emulator and comparing
+it to a budget sized for hardware.
+
+**The real defect, and it is a general one.** An absolute cycle budget cannot
+work in this harness. It conflates the code under test with an emulation
+constant that varies with the host, the QEMU build and the accelerator, and it
+fails permanently on code that is correct. `fast_cpu_index`'s 200-cycle budget
+was the same defect in its purest form: **200 cycles is below the harness's
+floor for a single memory access**, so *no* implementation could ever have
+passed it — the check was structurally incapable of reporting PASS, and it was
+accusing the very fix it had been added to guard.
+
+**Fix — budgets in units of measured memory accesses.** `run_all` now measures
+`memory_access_floor` first (a byte store to a dedicated `.bss` static,
+interleaved against an empty closure, clamped to a minimum of 100 so a
+noise-driven 0 cannot collapse every budget to 0) and expresses both delta
+budgets as multiples of it:
+
+* `fast_cpu_index`: 4 accesses (was 200 cycles). Clear of the noise, still far
+  under an APIC MMIO round-trip.
+* `page_alloc_free_owner_ab`: 40 accesses (was 500 cycles). The path performs
+  ~16, so 2.5x headroom absorbs variation in how many the optimiser folds.
+
+**The fix failed its own verification boot, in two ways, and both are worth
+recording because both are mistakes the *unit change* made easy to miss.**
+
+```
+memory_access_floor: 100 cycles/guest byte-store (measured=74 nop=1278 store=1352)
+fast_cpu_index: PASS (288 cycles over an empty closure, limit 400 = 4 accesses)
+page_alloc_free_owner_ab: SLOW (17176 cycles/alloc+free = 171 accesses, limit 40)
+```
+
+1. **The calibration was itself vulnerable to the noise it existed to
+   correct for.** It timed *one* store against one empty closure, and the
+   subtraction is only meaningful if the two arms' baselines agree. They did
+   not: `nop=1278` here, while the very next block in the same run measured
+   `nop=448`. A ~200-cycle access simply has no signal above a
+   several-hundred-cycle wander, so `measured=74` was noise and **the clamp
+   became the answer** — which then under-scaled every budget derived from it
+   and manufactured the SLOW below. Fixed by *amplifying*: 64 stores per timed
+   window, divided by 64. The signal scales with N, the wander does not, so it
+   divides away. The loop's own overhead is left inside the measurement
+   deliberately — it can only enlarge the floor and loosen the budgets, and for
+   a check whose whole purpose is to stop crying wolf, false negatives are the
+   safe direction. The clamp stays as a backstop, but if a run ever prints
+   `measured` at or below it, that run's budget verdicts are unreliable rather
+   than findings.
+2. **40 accesses was too tight even against a correct floor.** Honest recount:
+   ~20 architectural accesses per alloc+free (`tag_alloc_owner` = 1 is_enabled
+   + 2 current_owner + 8 set; `untag_free_owner` = 1 + 8). Observed healthy is
+   ~50-57 (11288/218 = 51.7 on one boot, ~57 on the next) — a consistent
+   2.5-3x multiplier, which has a cause rather than being slop:
+   `scripts/boot-test.sh` runs a plain `cargo build`, and the workspace's
+   `[profile.dev]` sets only `panic = "abort"`, so **opt-level is 0 and the
+   benchmarked kernel is unoptimised** (`cargo` prints `Finished dev profile
+   [unoptimized + debuginfo]`). Nothing is inlined, so each of the ~6 calls on
+   this path runs a real prologue/epilogue whose spills and saved registers are
+   memory accesses the source-level count omits. ~3x over the architectural
+   count is what an unoptimised build predicts and what two independent boots
+   measured. Budget raised to **150** ≈ 3x the observed ~50.
+
+   The temptation here was to loosen until it passes, which is the anti-pattern
+   this whole entry is about. What makes 150 legitimate is that the number is
+   derived from a *mechanism* (opt-level 0, non-inlined calls) that predicts the
+   observed multiplier independently, and that the looseness costs no detection
+   power: this is a structural tripwire, not a stopwatch, and every failure it
+   guards against is an order-of-magnitude event, not a percentage.
+
+**Verified 2026-08-14** on the boot following both follow-up fixes:
+
+```
+memory_access_floor: 284 cycles/guest byte-store (measured=284 over 64 stores/window: nop=8238 store=26474)
+fast_cpu_index: PASS (476 cycles over an empty closure, limit 1136 = 4 accesses)
+page_alloc_free_owner_ab: PASS (tagging costs 11778 cycles/alloc+free = 41 accesses, limit 150)
+frame_owner_set_split: call_floor=282 cycles work=3054 cycles
+```
+
+The amplified calibration produced `measured=284` where the single-store form
+produced `74`, so the clamp no longer binds and the floor is a real quantity.
+It cross-checks: the independently-measured `.bss` control in
+`frame_owner_set_split` came out at 218 on an earlier boot, and 284 exceeds
+that by roughly the loop overhead this deliberately declines to subtract.
+
+The detail worth keeping in view is that the absolute cycle figure — **11778** —
+sits squarely in the same 7660-11288 band that was reported as `SLOW` for five
+consecutive boots. Not one line of `frame_owner` changed between those runs and
+this one. Only the unit the budget is written in changed, which is the whole
+thesis of this entry stated as a measurement.
+
+**Follow-up wart, also fixed:** the split diagnostic printed
+`call_floor=282 cycles (0 accesses)` — 0.99 accesses truncated to `0` by
+integer division, reading as "this costs nothing" in the one line whose job is
+to say where the cost lives. Access counts now print to one decimal via a
+`accesses(cycles, floor) -> (whole, tenths)` helper.
+
+This keeps the checks doing what they exist for. The failures worth catching —
+an uncached MMIO round-trip, a contended lock, a per-frame loop where a
+`write_bytes` belongs (which scales with `count`) — cost 10-100x a plain
+access on hardware *and* under emulation, so they still blow past the budget.
+
+**Kept as a permanent diagnostic:** the `frame_owner_set_split` line, now
+reported in access units. If the A/B ever fires again it says in one line
+whether the cost is inside `set`'s working path or elsewhere — the fork this
+investigation burned four boots failing to resolve by argument.
+
+**Lesson for the next benchmark added to this file.** Any threshold on an
+in-kernel QEMU/TCG measurement must be expressed relative to something
+measured by the same harness in the same run. Absolute nanosecond and cycle
+targets taken from Linux publications belong in `baselines.toml` as *context*;
+they cannot be pass/fail gates here. The pre-existing `ABOVE TARGET` verdicts
+in this suite (e.g. `isr_latency: 233451ns, target 10000ns, 2334%`) are the
+same category of statement and should be read as "this is what the emulator
+does", not as regressions.
+
+---
+
+### B-SPAWN-SYSCALLS-NEVER-RECORDED-THE-PARENT. Every syscall-spawned child was unreapable, uncapability'd, and escaped its parent's namespace — 2026-08-14 — FIXED 2026-08-14
+
+**Where:** `kernel/src/syscall/handlers.rs` — `sys_process_spawn` (~3279) and
+`sys_process_spawn_ex` (~3397). Fallout in `kernel/src/proc/spawn.rs`
+(`SpawnOptions::parent`, steps 5b/5c) and `kernel/src/proc/pcb.rs`
+(`try_reap`, 4219-4247).
+
+**Symptom that led here.** The `ticker` service crash-looped nine times in a
+routine boot log, each time reported by init as `exited with code -400` — while
+`[ticker] Ready.` kept appearing in the same log. A process cannot both be
+dead and printing. `-400` is `KernelError::PermissionDenied`, and the only
+permission check on the wait path is `pcb::try_reap`'s
+`proc.parent != parent_pid`.
+
+**Root cause.** `SpawnOptions` has a `parent(pid)` builder, and **neither spawn
+syscall ever called it**. Both built `SpawnOptions::new(name)` and left
+`options.parent = 0`. So every process ever created through
+`SYS_PROCESS_SPAWN` / `SYS_PROCESS_SPAWN_EX` recorded the kernel (PID 0) as its
+parent. Three consequences, all silent:
+
+1. **No process could reap its own children.** `try_reap` compares the caller
+   against the recorded parent and returns `PermissionDenied`. Every spawned
+   child therefore leaked as a zombie for the life of the system, and every
+   supervisor mis-read the error as an exit status (see the lane-b request
+   `requests/a-b-init-conflates-syscall-error-with-exit-code.md` — init prints
+   `ret` from `process_try_wait` as an exit code without checking its sign,
+   which is how `-400` became "exited with code -400" and triggered a restart).
+2. **The parent was never granted a `Process` capability over the child.**
+   `spawn_process` step 5b (spawn.rs:974) is gated on `options.parent != 0`, so
+   the READ|WRITE|DELETE|WAIT|SIGNAL|DUPLICATE grant never happened. Callers
+   had no handle with which to signal or kill what they had spawned.
+3. **Sandbox escape.** Step 5c (spawn.rs:1001) inherits the parent's filesystem
+   namespace, and is gated on the same condition. A process confined to a
+   non-root namespace could spawn a child that landed in the *root* namespace.
+   This is the serious one: confinement was defeated by the single act of
+   spawning.
+
+**Why nobody noticed.** `fork` sets the parent on its own path, so every
+fork→exec→wait test passed. Nothing in the test suite spawned via the syscall
+*and then reaped*. And `SpawnOptions::parent` carried
+`#[allow(dead_code)] // Public builder API — callers use SpawnOptions::new() + chaining.`
+— a suppression that was factually wrong (there were no chaining callers) and
+that turned "this builder method has zero callers" from a compiler warning into
+a comment asserting the opposite. That is the real lesson: an `#[allow]` whose
+justification is a claim about the rest of the codebase silently rots when the
+claim stops being true.
+
+**Fix.** Both syscalls now pass `.parent(caller_pid().unwrap_or(0))`.
+`unwrap_or(0)` is correct rather than a fallback: no caller PID means the spawn
+came from the kernel, and PID 0 has implicit authority and needs no grant. The
+`#[allow(dead_code)]` on `SpawnOptions::parent` is removed — if it ever goes
+unused again that should be a warning, not a comment.
+
+**Regression test.** `test_spawn_records_parent` in `kernel/src/proc/spawn.rs`
+(registered in `spawn::self_test`) spawns with an explicit parent, asserts
+`pcb::parent(child) == Some(parent)`, then asserts `try_reap(parent, child)` is
+**not** `PermissionDenied`. It deliberately accepts "still running" as a pass:
+the bug produced a specific error code, and testing for its absence is what
+distinguishes the fix from emulator timing.
+
+### B-FAST-CPU-INDEX-FELL-BACK-TO-AN-APIC-MMIO-READ-ON-EVERY-ALLOC. A self-inflicted allocator regression, and the benchmark that should have caught it never runs — 2026-08-14 — FIXED 2026-08-14
+
+**Where:** `kernel/src/smp.rs` — `fast_cpu_index` / `current_cpu_index`.
+
+**Self-reported.** Nothing failed; I found this by re-reading my own
+`TD-FRAME-OWNER-1GIB` change against CLAUDE.md's performance-critical table.
+It is logged rather than quietly patched precisely because it was invisible.
+
+**What I did wrong.** `TD-FRAME-OWNER-1GIB` wired ownership tagging into the
+allocator, so `alloc_frame` and `free_frame` each gained a call to
+`frame_owner::current_owner()` → `smp::fast_cpu_index()`. On the boot-test CPU
+model (`qemu64`) **neither RDPID nor rdtscp is advertised**, so every one of
+those calls fell through to tier 3 — an uncached APIC MMIO read, hundreds of
+cycles under emulation. `alloc_frame` is in the performance-critical table
+(Linux buddy 100-500 ns, our target < 1 µs) and the recorded QEMU baseline for
+`page_alloc_free` is 198 ns / 736 cycles, so this was a large relative cost on
+a path CLAUDE.md explicitly says to benchmark after every change. I merged it
+without benchmarking.
+
+**The same fallback was also in ISR context.** `current_cpu_index` carried its
+own hand-copied duplicate of the tier ladder, and the copy had drifted: it
+never grew the RDPID tier, so on RDPID hardware it paid for a TSC read it threw
+away, and on `qemu64` it took the APIC MMIO round-trip **on every timer tick**.
+Its doc comment names the timer ISR as a hot path, which is what makes the
+drift notable — the duplication defeated the optimisation exactly where the
+comment claimed it mattered.
+
+**Fix — tier 0, plus deleting the duplicate.** `fast_cpu_index` gained a
+tier-0 fast path guarded by a new `MULTI_CPU_ACTIVE` flag: while no AP has ever
+been released from the trampoline, exactly one CPU is executing kernel code, so
+the answer is provably `BSP_CPU_INDEX` and no hardware read is needed at all.
+`current_cpu_index` now delegates to `fast_cpu_index` after its
+`SMP_INITIALIZED` gate, so there is one ladder instead of two and it cannot
+drift again.
+
+**The flag is deliberately not `NUM_CPUS_ONLINE > 1`,** which is the obvious
+implementation and is unsound. An AP runs `gdt::init_for_ap`, `apic::init_ap`
+and `spectre::init_ap` — all of which allocate — *before* it bumps that counter
+(`smp.rs`, `ap_entry`). A counter-based test would therefore tell a live AP it
+was the BSP and hand it the BSP's per-CPU allocator magazine: silent cross-CPU
+corruption. Instead the **BSP** sets `MULTI_CPU_ACTIVE` before it sends the
+first INIT-SIPI, so it is already true before an AP retires its first
+instruction. It is monotonic and never cleared, because a stale `true` merely
+costs the normal hardware read whereas a stale `false` is unsound.
+
+**The real finding is why no one noticed.** The project has a benchmark suite,
+`bench/baselines.toml` targets, and a pass/fail scorecard — and
+`bench::run_all()` is spawned as a *deferred low-priority task* that prints
+`BENCH_OK` only after `BOOT_OK`. The routine boot test waits for `BOOT_OK` and
+kills QEMU immediately, so the benchmarks never finish. In the 26094-line KASAN
+log, `[bench] === Kernel micro-benchmarks ===` is the **second-to-last line** —
+the task started and was killed mid-suite. In the ordinary boot log the header
+does not appear at all. So there was no gate to catch this, and there is none
+for the next one either. `boot-test.sh --bench` (which waits for `BENCH_OK` and
+surfaces `ABOVE TARGET` verdicts) exists but is not part of the routine gate.
+Tracked separately as `TD-BENCHMARKS-ARE-NEVER-ACTUALLY-RUN-BY-THE-BOOT-GATE`.
+
+**Regression guard added.** `bench::run_all` now measures `fast_cpu_index`
+directly, with a `fast_cpu_index` entry in `bench/baselines.toml`. The target
+(100 ns) is deliberately loose: it exists to detect "we fell back to the APIC
+MMIO path", not to police single cycles. It is benchmarked not for its own sake
+but because it is a *multiplier* — called twice per frame alloc/free and twice
+per heap alloc/free — so a regression in it surfaces as a diffuse slowdown
+across the whole allocator rather than as an obvious local fault, which is
+exactly how this one hid.
+
+---
 
 ### B-FTS-INSTANCE-POOL-IS-SHARED-ACROSS-THREADS. Two concurrent `fts_open` calls could be handed the *same* stream — 2026-08-13 — FIXED 2026-08-13
 
@@ -43817,6 +45605,71 @@ completion produce `PathBuf` candidates, and add an escape input (e.g. the
 no key can still be entered. Not blocked on anything; deferred because the
 editor's cursor arithmetic is `char`-indexed throughout and converting it is a
 self-contained but non-trivial rewrite.
+
+**Scoping pass 2026-08-14 — two claims above are wrong, and the real cost is
+in a different place than this entry says.** Read the code before planning
+from the paragraph above.
+
+**Correction 1: the cursor arithmetic is not `char`-indexed. It is already
+byte-indexed throughout.** `cursor` is derived from and compared against
+`buf.len()` (a *byte* length) at every site — `kshell.rs:3333, 3370, 3374,
+3376, 3395, 3410, 3509, 3531, 3554, 3573, 3582, 3586` — and the redraw path
+already slices bytes (`buf.as_bytes().get(cursor..)`, `redraw_from_cursor`,
+`kshell.rs:2955-2969`) and already emits bytes (`console::putchar(b)`).
+`replace_line` (`kshell.rs:2921-2949`) is likewise pure byte arithmetic. So
+the editor is not a UTF-8-aware editor that needs converting to bytes; it is a
+byte editor whose buffer happens to be typed `String`. Converting the four
+editor functions is close to a mechanical type change (`String`→`Vec<u8>`,
+`&str`→`&[u8]`), *not* the "non-trivial rewrite" this entry warns about.
+
+Corollary: because the arithmetic is byte-based while `String` is char-based,
+the current code is already subtly wrong for multibyte input — `String::remove`
+/`String::insert` at a non-char-boundary byte index panic. It never fires only
+because of the input guard described next.
+
+**Correction 2: the escape-input suggestion cites the wrong shell.** The
+`$'\xff'` ANSI-C quoting that "the shell already parses in word expansion" is
+**Oils/osh** — `userspace/oils/`, Lane B, userspace. This entry is about
+**kshell**, the in-kernel shell, which has no ANSI-C quoting at all (no
+`$'...'` parser exists in `kernel/src/kshell.rs`). So the escape input has to
+be *built*, not reused, and whoever picks this up should not plan around
+borrowing it.
+
+**The actual gate on typing a high byte** is a single match guard:
+`kshell.rs:3580`, `ch if ch >= 0x20 && ch < 0x7F`. Bytes ≥ 0x80 fall through
+to the `_ => {}` arm and are silently discarded. **Landmine for whoever widens
+it:** the insert on the next line is `buf.insert(cursor, ch as char)`
+(`kshell.rs:3583`). `ch` is a `u8`; `ch as char` maps 0x80..=0xFF to
+U+0080..=U+00FF, which `String::insert` then encodes as **two** UTF-8 bytes.
+Widening the guard without changing the buffer type would therefore insert two
+bytes for one keystroke and desynchronise the byte-indexed cursor from the
+buffer — a corruption bug, and a worse state than today's honest refusal. The
+type change must land first, or with it.
+
+**Where the cost actually is: the parser, not the editor.** The editor is four
+functions (`read_line` `3191-3601`, `reverse_search_mode` `3061-3190`,
+`replace_line`, `redraw_from_cursor`) with exactly **one** real caller
+(`kshell.rs:2892`; the only other is a unit test at `64187`). The expensive
+part is everything downstream of that caller, which is uniformly `&str`:
+`execute(line: &str)` (`3872`), `execute_single` (`4149`), and the sibling
+statement executors `execute_while_loop`, `execute_select`,
+`execute_until_loop`, `execute_for_loop`, `execute_cfor_loop`, `execute_case`,
+`execute_function`, `execute_input_redirect`, `execute_redirect`,
+`execute_heredoc`, `execute_pipe_chain` — plus `resolve_path(path: &str) ->
+String` (`208`), which is the ~270-call-site figure this entry quotes. History
+(`entries: Vec<String>`, `2629`) has to move to `Vec<Vec<u8>>` as well, or
+recalling a byte-bearing command re-corrupts it.
+
+**Consequence for sequencing.** A partial conversion is worse than none: if the
+editor becomes byte-clean but `execute()` still takes `&str`, the lossy step
+just moves from the keyboard to the parser entry, where it is *less* visible.
+So this should land as one coherent change over the editor **and** the
+statement executors, not as an "editor first, parser later" split. That is the
+real reason it is a big task — not the cursor arithmetic.
+
+**Status:** unblocked and in-lane; not started, because the conversion wants a
+free build machine to iterate against (a boot test was occupying QEMU during
+this scoping pass).
 
 ### TD-OILS-AN-UPPERCASE-G-WAS-READ-BY-THE-HALF-OF-THE-COMMAND-THAT-ONLY-EVER-READS-THE-LOWERCASE-ONE. `declare -Ga g=(1 2)` bound the array globally where bash keeps it in the frame — 2026-08-12 — FIXED 2026-08-12
 
@@ -47719,7 +49572,55 @@ of the frag_history hang AND zero recurrence of Active Bugs #1
 
 ## Technical Debt
 
-### TD-POSIX-SLOT-POOLS-ASSUME-A-SINGLE-THREADED-PROCESS. Every fixed-size table in `posix/` claims slots with an unsynchronised check-then-set — LOGGED 2026-08-13
+### TD-BOOT-RUNS-THE-ENTIRE-SELF-TEST-SUITE-AND-IS-OUTGROWING-ITS-TIMEOUT — LOGGED 2026-08-14
+
+**Where:** `kernel/src/main.rs` boot path (every subsystem's `self_test()` is
+called inline before `BOOT_OK`), and the `TIMEOUT` default in
+`scripts/boot-test.sh`.
+
+**The number.** Measured 2026-08-14 under TCG on `qemu64`: `BOOT_OK` at
+**~456 s**. The `boot-test.sh` comment describing the same figure said
+**~305 s** and the default timeout was **480 s** — a 24 s margin, i.e. ~5%.
+The in-kernel liveness detector (`sched::liveness_boot_deadline_check`, armed
+at `harness_timeout − 45 s − now`) was consequently firing
+`BOOT DEADLINE EXCEEDED` with a full task-table dump and a 17-frame backtrace
+on **every clean boot**, exactly the false positive its own doc comment says
+it was retuned to avoid.
+
+**Mitigated, not fixed.** The default timeout is now 900 s (~2× observed) and
+the stale comment carries the measured number and an instruction to re-measure.
+That buys headroom; it does not change the trajectory.
+
+**Why it is debt.** Boot time is a *linear function of the total number of
+self-tests in the tree*, and that number only goes up — the Path-Z ring-3
+toolchain tests alone each spawn a real glibc/tcc/make/dash process under
+`ld.so`. Every lane's new subsystem test lands on the critical path of every
+other lane's boot test. The failure mode when the margin runs out is
+expensive to diagnose: a healthy kernel is killed mid-boot and reported as a
+hang, and the first hypothesis is never "the clock".
+
+**What the proper fix looks like.** Stop running the full suite on every boot.
+Options, roughly in order of preference:
+
+1. **Tiered suites.** A `smoke` tier on the critical path (boot, mm, sched,
+   syscall dispatch — the things whose failure makes every later test
+   meaningless) and a `full` tier behind a cmdline flag, with the gate running
+   `full` and interactive/iteration runs running `smoke`. Needs a registry of
+   tests with tier tags rather than the current hand-written call list.
+2. **Run the suite as a deferred task after `BOOT_OK`,** the way `bench::run_all`
+   already does, with its own `SELFTEST_OK` marker. Boot latency stops growing;
+   the gate waits for the later marker. Cheapest to implement, but it decouples
+   "booted" from "tested", so a gate that only checks `BOOT_OK` would silently
+   stop testing — the marker change has to land in the same commit.
+3. **Only run the tests for subsystems whose sources changed.** Correct in
+   principle, needs build-time plumbing we do not have, and cross-subsystem
+   regressions are exactly the kind this suite exists to catch. Not recommended.
+
+**Trigger.** Do this before the next time a boot test is diagnosed as a hang
+and turns out to be a timeout — or when `BOOT_OK` passes ~600 s, whichever
+comes first.
+
+### TD-POSIX-SLOT-POOLS-ASSUME-A-SINGLE-THREADED-PROCESS. Every fixed-size table in `posix/` claims slots with an unsynchronised check-then-set — LOGGED 2026-08-13 — FIXED 2026-08-13
 
 **Where:** the `process_global!` tables and their `alloc_*` helpers in
 `posix/src/`: `aio.rs` (~line 283), `dirent.rs` (~709, ~869), `epoll.rs` (~173,
@@ -47756,19 +49657,72 @@ existing entry with a matching key and then allocate if absent, so even an atomi
 per-slot claim would not make them correct — two threads could each create a
 segment for the same key.
 
-**Proper fix.** Add one shared primitive rather than 15 hand-rolled ones — a
-small slot-pool type in `perprocess.rs` offering (a) an atomic
-`compare_exchange`-based claim for the simple "first free slot" pools, and (b) a
-guard for the compound find-or-create pools, so the key lookup and the claim
-happen under the same critical section. Then convert all 15 sites and delete the
-per-module `in_use` scanning loops. Follow the `pthread.rs` `ATFORK_LOCK`
-spinlock as the model for the guard.
+**Correction to the survey above.** The original entry counted ten unlocked
+modules. On starting the work, five of them — `mqueue`, `semaphore`,
+`sysv_msg`, `sysv_sem`, `sysv_shm` — turned out to *already* serialise their
+scans, each with its own hand-rolled `AtomicBool` + `lock_acquire` /
+`lock_release` / `struct Guard`. So the real debt was four genuinely-unlocked
+modules (`aio`, `dirent`, `epoll`, `stdio`) plus five near-identical copies of
+the same twenty lines of locking. The copies had already drifted (`AcqRel` vs
+`Acquire` on the exchange, differing guard names), which is the usual argument
+for the shared primitive.
 
-**Why deferred.** It is a 10-module refactor and the current work (the
-`vfs-byte-paths` branch) needs to land first. It is not currently *reachable* as
-a bug: nothing on the target yet runs two threads through these entry points,
-and on the host `process_global!` makes each pool per-thread. Trigger to do it
-properly: before any target-side service is made multithreaded.
+**Fix (2026-08-13).** `perprocess.rs` gained `PoolLock` / `PoolGuard` /
+`lock_pool()`: a spin lock whose guard releases on `Drop`, so the early
+`return` out of the middle of a claim loop — the shape every one of these pools
+is written in — needs no manual unlock. All fifteen sites now run
+scan-and-claim inside one critical section, and the five hand-rolled locks were
+deleted in favour of it. Rationale in **design-decisions.md §301**; the short
+version:
+
+- **One guard over the whole scan, not a per-slot `compare_exchange`.** A CAS
+  on `in_use` fixes the simple pools but cannot express the compound
+  find-or-create ones (`sysv_*::alloc_*(key)`, the getdents cache), where the
+  lookup and the claim must be one indivisible step.
+- **The lock covers scans, not the objects.** Allocate, release and
+  find-by-key take it; `with_instance_mut`, `readdir`, `epoll_ctl` and every
+  other by-index accessor stay unlocked, because POSIX already makes
+  concurrent use of one `DIR *` / `FILE *` the caller's problem. Each such
+  accessor now carries a comment saying so, replacing the stale
+  `// SAFETY: single-threaded` that used to be there.
+- **Releases take the lock too.** Clearing `in_use` outside it is a plain data
+  race against a concurrent claim reading it.
+- **The lock's scope must match its table's scope.** `process_global!` table →
+  `process_global!` lock (declared in the same block); plain `static mut` table
+  → plain `static` lock. `mqueue` and `semaphore` were found with a plain
+  `static` lock over a `process_global!` table — over-broad rather than
+  under-broad, so safe, but on the host it couples every test thread to every
+  other, and a spin lock has no poisoning: a panic inside the critical section
+  would wedge unrelated later tests. Both moved inside the `process_global!`
+  block.
+
+**Two structural changes fell out of it:**
+
+- `dirent`'s getdents cache was split into `claim_getdents_cache()` (takes the
+  slot with `fd = -1`, so no concurrent `find_getdents_cache` can match it) and
+  `publish_getdents_cache(slot, fd)` (called once the `SYS_FS_LIST_DIR`
+  snapshot is filled). That syscall is far too slow to hold a process-wide lock
+  across.
+- `aio`'s finders were split into `_locked` variants, because the spin lock is
+  not reentrant and `store_aio_record` calls the finder from inside its own
+  critical section. Without the split it would have deadlocked against itself
+  on the first concurrent `aio_read`.
+
+**Regression test:** `perprocess.rs`'s
+`a_scan_and_claim_under_the_lock_never_hands_out_a_slot_twice` — 8 threads × 8
+claims over 64 slots. Its first version passed with `lock_pool` removed,
+because the `Mutex<Vec<usize>>` collecting the results was serialising the
+threads all by itself; the version in the tree adds a `std::sync::Barrier`, a
+`yield_now()` between the read of `in_use` and the write, and per-thread
+private `Vec`s merged after `join`. With the lock removed it now fails as
+`left: 20, right: 64`. A companion test checks the guard actually releases on
+an early `return` by reading the flag directly, so a regression fails rather
+than hangs.
+
+**Residual, accepted.** Two threads calling `getdents64` on the *same* fd
+simultaneously can each end up with their own cache slot, each with its own
+position — a consequence of the claim/publish split above. That is concurrent
+use of one fd, already the caller's problem, and it is memory-safe.
 
 ### TD-ARCHIVE-WRITER-NAMES-ARE-STRING-NOT-BYTES. ar/rar/7z member names were still `String` — LOGGED 2026-08-13 — FIXED 2026-08-13
 
@@ -58065,16 +60019,365 @@ optional; `iconv` treats a NULL `inbuf` as a state reset. `telldir`/`seekdir`
 looked like hits but the EINVAL there is in glibc's *stub*; Linux's versions
 (`sysdeps/unix/sysv/linux/`) have no check.
 
-**What remains.** The ~280 surviving `is_null() -> EFAULT` sites have not been
+**Third pass, 2026-08-13 — `pthread.rs` (47 sites), and it was not a judgement
+call after all.** This cluster was recorded here as the one needing "a decision
+rather than a lookup", because NPTL contains no NULL checks at all and so
+offers no errno to copy. That framing was wrong. The answerable question was
+the *ordering* one this entry's own **Proper fix** paragraph names: NPTL
+validates its **scalar** argument first and dereferences the pointer only
+afterwards, so on Linux a call that is bad in both ways returns the scalar's
+`EINVAL`/`ERANGE`, never `EFAULT`. Our code checked the pointer first
+everywhere. Nine functions fixed, each verified against the glibc (or kernel)
+source and cited in both the code and the test — full reasoning in
+`design-decisions.md` §303:
+
+- `pthread_attr_setstacksize`, `pthread_attr_setstack` — size checked first
+  (`check_stacksize_attr`). **Also** their floor was a hardcoded `4096` while
+  the crate's own `PTHREAD_STACK_MIN` is `16384`; they now use the shared
+  constant, so three stack sizes glibc rejects are no longer accepted.
+- `pthread_attr_setdetachstate`, `pthread_mutexattr_settype`,
+  `pthread_condattr_setclock` — scalar checked first.
+- `pthread_rwlockattr_setpshared` — scalar first, **and** the errno was wrong:
+  any non-`PRIVATE` value used to be `ENOTSUP`, conflating "we don't support
+  cross-process rwlocks" with "that isn't a pshared value". glibc's
+  `futex_supports_pshared` accepts both POSIX values and gives `EINVAL` for
+  anything else; `ENOTSUP` is now `PTHREAD_PROCESS_SHARED` alone.
+- `pthread_barrier_init` — count checked first, **and** `u32::MAX` used to be
+  accepted, which was a latent hang (the arrival counter is an `AtomicI32`, so
+  a count above `i32::MAX` is unreachable and every waiter would block
+  forever). Now capped at glibc's `BARRIER_IN_THRESHOLD` (`UINT_MAX / 2`).
+- `pthread_getname_np` — `len` checked first, **and** the check was against the
+  stored name's length rather than `TASK_COMM_LEN`; glibc compares against the
+  constant unconditionally, so a 4-byte buffer is `ERANGE` even for a
+  2-character name. The second, now-dead length test is gone.
+- `pthread_getaffinity_np` — both length rejections moved above the NULL check,
+  and the missing `len & (sizeof (unsigned long) - 1)` test added.
+  `pthread_setaffinity_np` keeps NULL-first and gained a comment saying why:
+  the asymmetry is Linux's, not ours (`sched_setaffinity`'s `get_user_cpu_mask`
+  does no size rejection and copies first, so `EFAULT` wins there).
+
+**Fourth pass, 2026-08-13 — `xattr.rs` (11 sites).** Every one of these
+pointers *does* reach a syscall, so §300's rule keeps `EFAULT` for all of them
+and not one constant changed. The ordering was wrong throughout, though. Linux
+resolves the path in `path_getxattr`/`path_setxattr`/`path_removexattr`
+(fs/xattr.c) **before** the attribute name is ever read, and for the setters
+`setxattr_copy` (fs/xattr.c:598-602) checks the flags before the name too. Our
+entry points checked `path.is_null() || name.is_null()` as one test and then
+the flags, giving three divergences:
+
+- A nonexistent path with a NULL name was `EFAULT`; Linux gives `ENOENT`,
+  because the name is not read until the path has resolved. (Bare metal only.)
+- A bad flag with a NULL name was `EFAULT` in `setxattr`/`lsetxattr`/
+  `fsetxattr`; Linux gives `EINVAL`.
+- The path and the name were conflated, so neither could outrank the other.
+
+The order is now path → (flags) → name in all nine path/name entry points,
+enforced by two shared helpers, `resolve_xattr_path` and `check_xattr_name`,
+which carry the citation once instead of at eleven call sites.
+
+The same pass found an *invented* check: `setxattr_flags_valid` rejected
+`XATTR_CREATE | XATTR_REPLACE` with `EINVAL`, an errno Linux never returns for
+it. The kernel's only flag test is the mask `flags & ~(XATTR_CREATE |
+XATTR_REPLACE)`, which both bits pass; the filesystem then answers from the
+attribute's state — `EEXIST` if it exists, `ENODATA` if it does not (ext4's
+`ext4_xattr_set_handle`, fs/ext4/xattr.c:2412-2423). Our own kernel already
+agreed with Linux (`xattr_validate_size_flags` in `kernel/src/syscall/linux.rs`
+masks with `0x3` and has no both-flags test), so the libc check was also
+inconsistent with the layer below it. Removed: it is the filesystem's
+judgement, not libc's.
+
+**Fifth pass, 2026-08-13 — `unistd.rs` (13 sites).** Most were already correct
+and several already carried citations (`realpath`, `canonicalize_file_name`
+and `getrandom` were fixed in the earlier passes; `chdir`, `chroot`,
+`getresuid`/`getresgid`, `sysinfo` and the `*at` paths all forward the pointer
+to a syscall, so `EFAULT` stands). Three did not:
+
+- **`getentropy(NULL, 512)` was `EFAULT`; glibc gives `EIO`.** glibc's
+  `getentropy` (sysdeps/unix/sysv/linux/getentropy.c) opens with
+  `if (length > 256) { __set_errno (EIO); return -1; }` before it forms
+  `end = buffer + length` or issues `getrandom`. And `getentropy(NULL, 0)`
+  now *succeeds*: the `while (buffer < end)` loop does not run, so no syscall
+  is issued and the pointer is never touched — the same shape `getrandom`
+  already documented one function above.
+- **`gethostname(NULL, 0)` was `EFAULT`; glibc gives `ENAMETOOLONG`.**
+  `__gethostname` (sysdeps/posix/gethostname.c) never checks the pointer; it
+  `memcpy`s `min (len, node_len)` bytes and *then* tests
+  `node_len > len`. With `len == 0` the copy moves nothing, so a NULL buffer
+  is safe and the length test decides.
+- **`gethostname` did not truncate.** The same `memcpy` runs unconditionally,
+  so glibc fills a too-small buffer with as much of the name as fits —
+  truncated and not null-terminated — before returning `ENAMETOOLONG`. We
+  left the caller's buffer untouched, so a caller that ignored the return
+  value read stale bytes instead of a truncated hostname. Now matched.
+
+`getdomainname` is a **deliberate** divergence, now documented at the function:
+glibc (misc/getdomain.c, the `_UTSNAME_DOMAIN_LENGTH` branch Linux takes) has
+no length rejection at all and returns 0 after truncating, so a short buffer
+silently receives an unterminated string. We keep `EINVAL` — quiet truncation
+is the corruption this codebase forbids, and it is what the Linux man page
+documents. Because the check is ours, it is ours to order, and it now goes
+first, so `getdomainname(NULL, 0)` is `EINVAL` rather than `EFAULT`.
+
+**Sixth pass, 2026-08-14 — `socket.rs` (15 sites).** Every constant was already
+right; every bug was an ordering bug, and the answers this time came almost
+entirely from `net/socket.c` rather than glibc, because the socket calls are
+thin syscall wrappers. The one thing worth carrying forward is that *the
+descriptor lookup is not uniformly first*: Linux splits the socket entry points
+into two families, and the split is deliberate, not accidental.
+
+- **`bind` / `connect` checked the address before the descriptor.**
+  `__sys_bind` (net/socket.c:1835) calls `sockfd_lookup_light` and only then
+  `move_addr_to_kernel`, so `bind(-1, NULL, len)` is `EBADF`; ours said
+  `EFAULT`. `__sys_connect` (:2056) is the same via `fdget`. Fixed, and the
+  existing `test_phase201_bind_null_addr_efault_before_eacces` had to move to a
+  real socket fd — it had been passing `-1` and so was silently asserting the
+  wrong precedence all along.
+- **The two calls disagree about `ENOTSOCK`, and that is upstream's doing.**
+  `bind` uses `sockfd_lookup_light` (:553), which resolves *and* type-checks
+  before the address is read, so `ENOTSOCK` outranks `EFAULT`. `connect` uses a
+  bare `fdget` and calls `sock_from_file` inside `__sys_connect_file`, i.e.
+  *after* `move_addr_to_kernel`, so there `EFAULT` outranks `ENOTSOCK`. Both
+  are now spelled out at the call sites with a cross-reference, because the
+  asymmetry reads like a mistake and would otherwise be "tidied up".
+- **`addrlen == 0` must not fault.** `move_addr_to_kernel` (:247) returns 0 at
+  `ulen == 0` *before* its `copy_from_user`, so `bind(fd, NULL, 0)` never
+  touches the pointer and falls through to the protocol's own length test:
+  `EINVAL`, not `EFAULT`. A short-but-nonzero `addrlen` does reach the copy, so
+  there `EFAULT` wins over that same `EINVAL`. Both directions now have tests.
+- **`socketpair` faulted before it validated the type flags.**
+  `__sys_socketpair` (:1729) tests `flags & ~(SOCK_CLOEXEC | SOCK_NONBLOCK)` at
+  :1737, before it has reserved a descriptor — but reaches
+  `put_user(fd1, &usockvec[0])` at :1758 *before* `sock_create` at :1771. So
+  exactly one check outranks `EFAULT` (the flag `EINVAL`) and the family, type
+  and protocol verdicts all rank below it. The first guess — that all of them
+  outranked `EFAULT` — was wrong, and only reading the function settled it.
+- **`inet_ntop` rejected NULL pointers before looking at the family.** glibc's
+  `inet_ntop` (resolv/inet_ntop.c) is a bare `switch (af)` with no pointer
+  checks at all, so an unrecognised family is `EAFNOSUPPORT` whatever the
+  pointers hold. Within a family, `inet_ntop4` formats into a stack buffer and
+  compares against `size` before its closing `strcpy`, so `ENOSPC` also
+  outranks a NULL `dst`. The `dst` check now lives in both formatters, just
+  after the `ENOSPC` test; the full order is `EAFNOSUPPORT`, `src`, `ENOSPC`,
+  `dst`.
+- **`setsockopt`'s multicast path conflated two errors into one.** It answered
+  `EINVAL` for both a short `optlen` and a NULL `optval`.
+  `do_ip_setsockopt` (net/ipv4/ip_sockglue.c:1222-1233) rejects
+  `optlen < sizeof(struct ip_mreq)` and only then runs `copy_from_sockptr`, so
+  they are distinct verdicts. Folding them told a caller with a correctly-sized
+  buffer at a bad address that its *length* was wrong.
+- **`sendmsg` / `recvmsg` read the header before the descriptor**, and worse,
+  returned 0 for an empty `msg_iov` without ever looking at the fd.
+  `__sys_sendmsg` (:2634) and `__sys_recvmsg` run `sockfd_lookup_light` before
+  `___sys_sendmsg` copies the header in. Note the contrast with `sendto` /
+  `recvfrom`: `__sys_sendto` (:2161) and `__sys_recvfrom` (:2224) import the
+  user buffer *first*, so there `EFAULT` genuinely does outrank `EBADF` and our
+  existing order was right. A new `socket_fd_is_valid()` helper carries the
+  `sockfd_lookup_light` semantics (and the citation) once.
+- **A zero-length `send`/`recv`/`recvfrom` returned 0 on a closed fd.** The
+  POSIX no-op was short-circuiting above the descriptor lookup, but
+  `__sys_sendto`/`__sys_recvfrom` look the descriptor up whatever the length
+  is. A zero-length send is a common idiom for probing a socket's liveness;
+  ours could not distinguish a live socket from a closed one.
+
+**Seventh pass, 2026-08-14 — `spawn.rs` (16 sites).** The prediction going in
+was that `spawn.rs` would be an ordinary §300 lookup with the constants right
+and the ordering wrong. Half true: the ordering was indeed wrong at five call
+sites, but here the *constants* were wrong too, and one check was missing
+outright. `posix_spawn` is a pure-userspace API — no syscall is involved in
+building a file-actions object — so every answer came from glibc, and all five
+`add*`/`setflags` entry points turn out to hinge on a single 4-line helper.
+
+- **`__spawn_valid_fd` is the whole story, and we had reimplemented it wrong.**
+  posix/spawn_valid_fd.c is
+  `fd >= 0 && (maxfd < 0 || fd < maxfd)`, with `maxfd = __sysconf
+  (_SC_OPEN_MAX)`. Ours was `fd < 0` and returned `EINVAL`. Two independent
+  bugs: **the errno is `EBADF`**, and **the upper bound was missing entirely**,
+  so `addclose(acts, 1_000_000)` was accepted and would only fail later, in the
+  child, after the fork. It is now one `spawn_valid_fd()` helper carrying the
+  citation once, used by all four `add*` calls.
+- **The descriptor check comes first, before the object and before the path.**
+  `spawn_faction_addclose.c`, `spawn_faction_adddup2.c:32`,
+  `spawn_faction_addopen.c` and `spawn_faction_addclosefrom.c:31` all open with
+  `if (!__spawn_valid_fd (fd)) return EBADF;` — ahead of any read of
+  `file_actions->__used` and, in `addopen`, ahead of `__strdup (path)`. We
+  checked the pointers first, so `addopen(acts, -1, NULL, …)` reported the
+  *path* when glibc reports the *descriptor*. `adddup2` tests both fds in the
+  same expression, so an out-of-range `newfd` is `EBADF` on the same footing as
+  a bad `fd`.
+- **`addclosefrom_np` already had the right constant and the wrong order** —
+  the one site where a previous pass got `EBADF` right by inspection but still
+  put it below the NULL check.
+- **`posix_spawnattr_setflags` had the order inverted *and a doc comment
+  justifying the inversion*.** `__posix_spawnattr_setflags`
+  (posix/spawnattr_setflags.c) is two statements — the `flags & ~ALL_FLAGS`
+  rejection, then the store — with no NULL check at all; a NULL `attr` faults
+  on the store, so the flag word is decided while the pointer is still
+  untouched. Ours checked `attr` first and explained that this gave the caller
+  "the more informative `EFAULT`". That is the **second** invented
+  justification this audit has found in a doc comment, after `bind`'s in the
+  sixth pass, and it is the more dangerous failure mode of the two: a wrong
+  constant looks like an oversight and invites checking, whereas a wrong
+  constant with a rationale attached reads as deliberate and deflects it. Both
+  are now replaced by the upstream text, and the misnamed test
+  (`test_setflags_null_attr_precedes_flag_check`, which asserted the opposite)
+  is renamed with a note in its body recording what it used to claim.
+
+The habit this pass adds: **when a check is duplicated across sibling
+functions, find the shared helper upstream and port *it*, not the check.** All
+four `add*` bugs were one bug, replicated four times by four separate readings
+of four man pages that each say only "EBADF … the value specified by fildes is
+negative".
+
+**Eighth pass, 2026-08-14 — `file.rs` (28 sites).** The last dense cluster, and
+the one that most rewarded reading. `file.rs` wraps thin syscalls, so — as in
+`socket.rs` — the constants were nearly all right and the *orderings* were
+wrong; but three of the entry points here have a **three- or four-deep** rank,
+and we had several of them almost exactly reversed.
+
+- **`read`/`write` short-circuited a zero-length call above the descriptor
+  lookup.** `ksys_read` (fs/read_write.c:604) is `fdget_pos` first, and there
+  is no zero-length shortcut anywhere upstream; `EFAULT` arises only later from
+  `access_ok` inside `vfs_read` (:458). So `read(closed_fd, buf, 0)` was
+  silently returning 0. This is the *same bug* the sixth pass fixed in
+  `send`/`recv` — and a zero-length read is a common liveness probe, so the
+  silent success is the worst possible answer.
+- **`pread`/`pwrite` ran a four-deep order backwards.** `ksys_pread64` (:652)
+  is `pos < 0` → `EINVAL`, `fdget` → `EBADF`, `!FMODE_PREAD` → `ESPIPE`, then
+  `EFAULT`. We had `EFAULT`, zero-count, `EINVAL`, `EBADF`, `ESPIPE`.
+- **The `pread`/`preadv` tests had been passing `fd 0`** — a console — so once
+  `ESPIPE` was ordered correctly they *all* failed. They had only ever
+  exercised the shortcuts that used to sit above the descriptor checks; none of
+  them had ever reached the code they were named for. Same failure mode as
+  `test_phase201_bind_null_addr_efault_before_eacces` in the sixth pass, at
+  larger scale: **a test that picks a convenient fd rather than the right one
+  silently stops testing anything once the ordering is fixed.**
+- **The vectored calls folded three distinct verdicts into one `EINVAL`.**
+  `iov.is_null() || iovcnt <= 0 || iovcnt > 1024` was a single branch.
+  `iovec_from_user` (lib/iov_iter.c) separates them: `nr_segs == 0` returns an
+  *empty iterator* (success, 0 bytes) before anything else, `nr_segs >
+  UIO_MAXIOV` is `EINVAL`, and `copy_iovec_from_user` is `EFAULT`. The zero
+  case is deliberate and commented upstream — "SuS says the readv() function
+  *may* fail if the iovcnt argument was less than or equal to 0 … Linux has
+  traditionally returned zero for zero segments" — and we were failing it.
+  Note the interaction with the previous point: the zero-segment call is
+  exactly the one a per-segment loop never checks a descriptor for, so it is
+  also the one that must still report `EBADF`.
+- **`truncate` checked the path before the length, and its own sibling ten
+  lines below already had it right.** `do_sys_truncate` (fs/open.c:129) rejects
+  a negative length before `user_path_at`; `do_sys_ftruncate` (:164-170) puts
+  the same `EINVAL` above `fdget`'s `EBADF`, and `ftruncate` implemented that
+  correctly. Adjacent functions, same file, one right and one wrong — the
+  sixth pass's "do not generalise from a sibling" habit cuts both ways: you
+  also cannot assume a sibling's *correctness* transfers.
+- **`open`/`openat` never rejected `O_DIRECTORY|O_CREAT`** (nor `O_TMPFILE`
+  without `O_DIRECTORY`, nor without write access). `build_open_flags`
+  (fs/open.c) returns `EINVAL` for all three and runs ahead of both
+  `getname(filename)` and `do_filp_open`'s use of `dfd`, so they outrank
+  `EFAULT` for the path *and* `EBADF` for the directory. Factored into
+  `validate_open_flags()` so both entry points run it in upstream's position.
+  Our `EOPNOTSUPP` for a well-formed-but-unsupported `O_TMPFILE` correctly
+  ranks below them: it corresponds to `do_tmpfile`, reached only inside
+  `path_openat`.
+- **`name_to_handle_at` — the third invented justification.** It checked
+  `pathname`, `handle` and `mount_id` together, with a doc comment conceding
+  that Linux "defers `handle`/`mount_id` checks until after `user_path_at`, but
+  our model can do the cheap NULL check up front **without observable
+  difference**." The difference is observable and obvious:
+  `name_to_handle_at(bad_fd, "p", NULL, NULL, 0)` is `EBADF` upstream and was
+  `EFAULT` here. After `bind` (sixth pass) and `posix_spawnattr_setflags`
+  (seventh), that is three doc comments that *argued for* an order instead of
+  citing one, and all three arguments were wrong.
+- **`openat2` was already correct**, cited step by step against `sys_openat2`.
+  Worth recording: the pass is not uniformly finding bugs, and the one function
+  that had been written *from* the upstream source rather than from a man page
+  is the one that needed nothing.
+
+**The habit this pass adds — and it is the most useful one so far.** Every
+wrong answer in this file was produced by a comment or a test that reasoned
+about what an errno *ought* to be. Every right answer was produced by someone
+reading the function. So: **a doc comment that argues for an ordering is a
+defect marker.** Three for three. When you find one, do not evaluate the
+argument — go read the upstream function, because the argument exists precisely
+because nobody did.
+
+**Ninth pass, 2026-08-14 — the timed waits (4 sites).** This one started as a
+`pthread.rs` pass and immediately stopped being one: §303 had already walked
+that file, so there was nothing left to classify there. What the re-read *did*
+surface is that none of the blocking primitives validated `tv_nsec` at all.
+glibc has a single shared predicate for it, `valid_nanoseconds`
+(`include/time.h:517`, `0 <= ns && ns < 1000000000`), and calls it from
+`pthread_cond_timedwait`, `pthread_mutex_timedlock`, the rwlock timed
+variants and `sem_timedwait`. We called it from none of them, so a malformed
+deadline silently became a very long — or instantly expired — wait.
+
+The interesting part is that the *same* predicate is invoked from three
+different places in the control flow, and the differences are deliberate:
+
+- `pthread_cond_timedwait` checks **first**, before the mutex is released
+  (`nptl/pthread_cond_wait.c:635` is the function's opening statement). The
+  rejection is side-effect-free and the caller still holds the mutex.
+- `pthread_mutex_timedlock` checks **lazily**, inside the contended branch —
+  `nptl/pthread_mutex_timedlock.c:221` is literally commented "We are about
+  to block; check whether the timeout is invalid." So an *uncontended*
+  `timedlock` with `tv_nsec = 1e9` returns 0 and never reads the timespec.
+  POSIX licenses this: "the validity of the abstime parameter need not be
+  checked if the lock can be immediately acquired."
+- `sem_timedwait` checks **eagerly**, above `__new_sem_wait_fast`
+  (`nptl/sem_timedwait.c:28`), so the same call shape that succeeds for a
+  mutex is `EINVAL` for a semaphore.
+
+That is the sixth pass's "do not generalise from a sibling" rule again, but
+sharper: here the three call sites share a *predicate* and still differ in
+placement, and glibc knows it — `pthread_rwlock_common.c:286-291` carries a
+comment explaining that the rwlocks were **switched from lazy to eager**, with
+POSIX permitting either. So the lesson is not just that siblings differ, it is
+that **a shared helper is not evidence of a shared control flow.** Porting the
+helper (the seventh pass's rule) is necessary and not sufficient; you still
+have to place each call where its own caller places it.
+
+The fourth site is the counterexample that keeps the predicate honest.
+`mq_timedsend`/`mq_timedreceive` are bare syscalls, so their deadline is
+vetted by the *kernel*: `prepare_timeout` (ipc/mqueue.c) → `timespec64_valid`
+(include/linux/time64.h), which additionally rejects `tv_sec < 0` ("Dates
+before 1970 are bogus"). glibc's `valid_nanoseconds` never looks at `tv_sec`,
+so a negative one is a deadline in the past — `ETIMEDOUT`, not `EINVAL`. Our
+`deadline_from_timespec` had the nsec half and was missing the `tv_sec` half.
+Two predicates that look interchangeable, differ in one line, and apply to
+adjacent functions in the same crate: the §300 question ("does the pointer
+reach a syscall") turns out to decide not only the errno but *which validity
+rule applies at all*.
+
+Habit from this pass: **when you find a validation missing, find its
+predicate upstream before you write one** — and then check whether the
+upstream predicate is glibc's or the kernel's, because the two disagree and
+the disagreement is load-bearing.
+
+**What remains.** The surviving `is_null() -> EFAULT` sites have not been
 individually classified. This entry stays open for coverage, not because any
-specific remaining site is known wrong. The densest concentrations are
-`pthread.rs` (47), `file.rs` (28), `spawn.rs` (16), `socket.rs` (15),
-`unistd.rs` (13) and `xattr.rs` (11). `pthread.rs` is the one that still needs
-a decision rather than a lookup: NPTL is pure userspace, so none of its 47
-sites can be justified by "the kernel would say `EFAULT`" — but glibc mostly
-does not check at all there and simply faults, so there is no upstream errno to
-copy and the question is what we *should* return in glibc's place. That is a
-judgement call across 47 functions and wants its own pass.
+specific remaining site is known wrong. **No dense cluster is left.**
+`pthread.rs` looks like the largest concentration in a raw `rg` count (~48
+sites), but it is not open work: design-decisions.md §303 already walked it,
+fixed its nine ordering bugs, and settled the pointer sites wholesale —
+NPTL has no NULL checks at all, so there is no upstream errno to look up and
+`EFAULT` is the adopted substitute. Do not re-open it by grep count. After
+`file.rs`, the largest genuinely-unclassified files are `process.rs` (10) and
+`epoll.rs` (9), and everything below that is a long tail of eight or fewer per
+file — a shape that argues for retiring this entry by sampling rather than by
+another file-at-a-time sweep.
+
+Four habits carry forward, one per pass that produced one. From `socket.rs`:
+**do not generalise a rule from one sibling call to the next** — `bind` and
+`connect` order `ENOTSOCK` oppositely, and `sendmsg` and `sendto` order
+`EBADF` oppositely, in the same file. From `spawn.rs`: **when sibling
+functions share a check, port the upstream helper rather than the check.**
+From `file.rs`: **a doc comment that argues for an ordering is a defect
+marker** — three for three across the last three passes — and **a test that
+picks a convenient fd rather than the correct one silently stops testing
+anything**, which is how eight `pread`/`pwrite` tests spent their whole lives
+never reaching the code they were named for. And across all eight: expect the
+*ordering* to be wrong more often than the constant, and do not assume a
+sibling's correctness transfers — `ftruncate` was right and `truncate` was
+wrong ten lines apart.
 
 **Reproduce.** Not a runtime failure. `rg -A3 'is_null\(\)' posix/src`, filtered
 for `EFAULT` in the following lines, enumerates the candidate sites; each has to
@@ -58093,7 +60396,22 @@ the same pass.
 **Tooling.** `D:\refsrc\glibc-2.39` (added 2026-08-13; shallow clone of the
 `glibc-2.39` tag from the `bminor/glibc` GitHub mirror — `sourceware.org`
 answers 429) is the reference for this work, alongside the bash checkout in
-`TOOLING-BASH-5.2.37-SOURCE`. Do **not** do this audit from man pages:
+`TOOLING-BASH-5.2.37-SOURCE`.
+
+`D:\refsrc\linux-6.6` (added 2026-08-13; shallow clone of the `v6.6` tag from
+`gitlab.com/linux-kernel/linux`, sparse-checked-out to
+`kernel fs mm ipc include/linux include/uapi`, ~130 MB) is the **other half**
+of this audit and was missing until the pthread pass needed it. §300's rule has
+a kernel side — "does the pointer reach a syscall, and what does the kernel do
+with it" — which cannot be answered from glibc, because for a thin wrapper like
+`pthread_getaffinity_np` glibc is nothing but `INTERNAL_SYSCALL_CALL` and every
+validation lives in `kernel/sched/core.c`. Note for whoever clones it next:
+`git checkout` fails on Windows with `invalid path …/aux.c` — `AUX` is a
+reserved DOS device name and git validates *every* index entry, not just the
+ones inside the sparse cone, so narrowing the cone does not help. Use
+`git -c core.protectNTFS=false checkout v6.6`.
+
+Do **not** do this audit from man pages:
 `ptsname_r`'s documented `EINVAL` has not matched any glibc implementation
 since the TIOCGPTN fast path landed, and trusting the man page is exactly how
 the first attempt at this fix went wrong.
@@ -60515,3 +62833,1486 @@ font). That one is an operator question, not a bug.
 **Where.** `gui/font/src/hangul.rs` (parked), `gui/font/src/lib.rs` (the missing
 `mod hangul;`), and the three files named above. The reference is HarfBuzz's
 `src/hb-ot-shaper-hangul.cc`.
+### [B] D-POSIX-SOCKET-META-WAS-NOT-SCOPED-TO-ITS-FD-TABLE — ✅ FIXED 2026-08-14
+
+**Found while running the eighth audit pass**, not by looking for it:
+`socket::tests::test_phase201_bind_port443_no_cap_eacces` failed once with
+`ENOTSOCK` where `EACCES` was expected, then passed three runs in a row.
+
+`SOCKET_META` (posix/src/socket.rs) is indexed by fd number, so it must have
+exactly the same scope as the fd table it is keyed by. `fdtable` made its
+storage **per-thread** on host builds (design-decisions.md §110) precisely
+because libtest runs tests on parallel threads. `SOCKET_META` stayed a
+process-global `static mut`, and the mismatch was reachable: two tests on
+different threads each create a socket and, drawing from *separate* per-thread
+fd tables, both get the same fd number `N` — near-certain, not unlikely, since
+each thread's table starts empty. They then shared one `SOCKET_META[N]`, and
+the first to `close()` wiped the entry the other was still using, whose next
+call saw a live fd with no metadata and reported `ENOTSOCK` for a good socket.
+
+Fixed by giving `SOCKET_META` the same `cfg`-split storage as
+`fdtable::fd_store`. Six consecutive full runs clean afterwards.
+
+Two things worth keeping from this. First, the `// SAFETY: Single-threaded
+access.` comments on these accesses were **true on the target and false under
+`cargo test`** — a safety comment that silently changes truth value with
+`cfg` is worse than none, and `fdtable` had already learned this lesson
+without the fix being propagated to the table keyed by its own indices.
+Second, an intermittent failure at roughly one run in four is easy to
+dismiss as noise when it appears in a test unrelated to what you are
+changing; it was worth the ten minutes to chase.
+
+### [B] D-POSIX-TIMED-WAITS-DID-NOT-VALIDATE-TV-NSEC — ✅ FIXED 2026-08-14
+
+`pthread_cond_timedwait`, `pthread_mutex_timedlock` and `sem_timedwait`
+accepted any `timespec` whatsoever. A `tv_nsec` of `1_000_000_000` or `-1` —
+the classic result of adding a nanosecond offset without carrying into
+`tv_sec` — should be `EINVAL` (glibc `valid_nanoseconds`, `include/time.h:517`);
+instead it fell through to the deadline comparison, where a too-large
+`tv_nsec` silently extended the wait by up to a second and a negative one made
+the call return `ETIMEDOUT` immediately. Both are wrong in the direction that
+hides the caller's bug. Separately, `mqueue::deadline_from_timespec` checked
+`tv_nsec` but not `tv_sec < 0`, which the kernel's `timespec64_valid` rejects.
+
+Fixed by adding `time::valid_nanoseconds` (glibc's predicate, verbatim) and
+calling it from each site **at the position its own upstream uses** — eagerly
+in `pthread_cond_timedwait` and `sem_timedwait`, lazily (contended branch
+only) in `pthread_mutex_timedlock` — plus the missing `tv_sec` half in
+`mqueue`. See the ninth-pass write-up under
+`D-POSIX-NULL-POINTER-ERRNO-NEEDS-A-PER-FUNCTION-AUDIT` for why the three
+placements differ and why the mqueue predicate is not the same predicate.
+
+Seven tests pin the distinctions, including the two that would silently pass
+under a naive "check it at the top of every function" fix:
+`test_pthread_mutex_timedlock_uncontended_ignores_a_bad_deadline` and
+`test_sem_timedwait_checks_the_deadline_before_the_fast_path`.
+
+**Not fixed, because we do not have them:** `pthread_cond_clockwait`,
+`sem_clockwait` and the `pthread_rwlock_{timed,clock}{rd,wr}lock` family are
+unimplemented. When they are added they need the same predicate plus
+`futex_abstimed_supported_clockid`, and the rwlocks check **eagerly** — see
+the comment at `pthread_rwlock_common.c:286-291`.
+
+---
+
+### [B] TD-OILS-A-PROCESS-SUBSTITUTION-IN-A-BRACE-BODY-IS-NEVER-PERFORMED. bash runs `${z:-<(echo hi)}` and substitutes `/dev/fd/63`; osh yielded the nine characters `<(echo hi)` — 2026-08-14 — ✅ FIXED 2026-08-14
+
+**Where it was:** `userspace/oils/src/lexer.rs`, [`Lexer::read_word_verbatim`],
+which reads the operand, the pattern and the replacement of a `${ … }` and had
+no `<`/`>` arm at all.
+
+bash splits this construct across two files and osh had only one half of it.
+**Part (A) — the parse** — is `parse_matched_pair` naming `<(`, `>(` and `$(` in
+one breath (parse.y:5028) and sending all three through `parse_comsub`
+(parse.y:5042), so a `${ … }` body's scan parses a process substitution where it
+meets it, its syntax error is the enclosing unit's, and what survives is the
+parse *re-printed*; see
+`userspace/oils/tests/corpus/a-process-substitution-in-a-brace-body-is-parsed-where-it-is-met.sh`
+and [`parser::procsub_reprints`]. **Part (B) — the performance** — is
+`expand_word_internal` *running* it, and was this entry.
+
+**The rule** is bash's quoting flag, not the position. `expand_word_internal`
+reads a process substitution only when `if (string[++sindex] != LPAREN ||
+(quoted & (Q_HERE_DOCUMENT|Q_DOUBLE_QUOTES)) || (word->flags & W_NOPROCSUB))`
+lets it (subst.c:11079), so an **operand** runs one when the expansion is bare
+and keeps the characters when it is double-quoted, a **pattern** and a
+**replacement** run one either way (both are re-entered without
+`Q_DOUBLE_QUOTES`), and a **subscript** or a **substring bound** never does
+(`Q_DOUBLE_QUOTES|Q_ARITH`), so its arithmetic error names the characters.
+
+**The fix.** [`Verbatim`] gained an `Arith` mode beside `Bare`, `Replacement`
+and `Dquote` — identical to `Bare` in every other respect — and
+[`Lexer::read_word_verbatim`] gained a `<`/`>` arm live in `Bare` and
+`Replacement` only. On the parser side [`parser::verbatim_word_at`] picks the
+lexer entry from a new `Frag` (`Word` or `Arith`), which is what a subscript and
+the `' … '` runs inside it now pass. The body the arm reads is already the
+*re-print* part (A) spliced in, which is what bash performs too: the token
+buffer a `${ … }` scan leaves behind holds the re-print and nothing else.
+
+No new expansion machinery was needed. The double-quoted operand was already
+right — the splice puts the re-print into the text and its nested `$( … )` then
+expands normally, so `"${z:-<(echo $(echo q))}"` is `<(echo q)` in both shells —
+so the whole of part (B) was one liveness decision taken at lex time, which is
+where osh decides quoting.
+
+**The pre-existing inconsistency this closed.** The substring bound
+(`${z:<(echo hi)}`, via [`parser::parse_slice_bounds`]) *did* perform the procsub
+while the subscript beside it did not, so osh's two arithmetic contexts — which
+bash expands identically — disagreed. The bound is tokenized rather than read
+verbatim, so it has no `Verbatim` mode to set; [`parser::word_from_source`], its
+only reader, now turns a `Seg::ProcSub` back into the characters it was read
+from. Both contexts are on the same side now.
+
+**Verified:** `a-process-substitution-in-a-brace-body-is-performed-unless-the-expansion-is-quoted.sh`,
+27 cases across the five contexts. None of them prints a substitution's path —
+bash names it `/dev/fd/N` and osh a temporary file — so each asks a question the
+path does not answer: whether the text still begins `<(`, whether it names
+something that exists, or what a `cat` of it reads.
+
+**How it was found:** implementing part (A) — the eager parse and re-print of a
+process substitution met by a `${ … }` body scan.
+
+### [B] TD-OILS-A-PROCESS-SUBSTITUTION-A-SECOND-SCAN-FINDS-IN-A-BRACE-BODY-IS-NOT-PARSED-AGAIN. bash's `brace_gobbler` and its `${x@P}` re-read each meet a `<(` osh's do not — 2026-08-14 — ✅ FIXED 2026-08-14 (both halves, and the arithmetic-fragment residue)
+
+Two residues of TD-OILS-A-PROCESS-SUBSTITUTION-IN-A-BRACE-BODY-IS-NEVER-PERFORMED
+(above), left after both halves of it were done. Each is a *second* scan of the
+same text — one that is not `parse_matched_pair` and not `expand_word_internal` —
+which has a `<(` row of its own that osh's counterpart lacks. The `$(` spelling
+of each already matches bash byte for byte, so in both the machinery is there
+and only the row is missing.
+
+**Where:** `userspace/oils/src/interp.rs`, [`Shell::gobbled_subs`]; and the
+`${x@P}` re-read, `userspace/oils/src/parser.rs`, [`dquote_word_from_source`].
+
+* **✅ FIXED 2026-08-14.** `echo "${z:-"<(fi)"}"` — bash reports
+  `command substitution: line N+1: syntax error near unexpected token 'fi'`
+  plus the tail of the physical line, where osh prints `<(fi)`. The agent is
+  **`brace_gobbler`**, whose command-substitution row names all three spellings
+  (`(c == '$' || c == '<' || c == '>') && text[i+1] == '('`, braces.c:675) and
+  reaches `extract_command_subst` → `xparse_dolparen`, which *parses* the body
+  and throws the result away. Two facts pin it down. The gobbler's `quoted`
+  state does not nest and `${` opens none of its own (it is treated like `\{`),
+  so the **inner** `"` is `c == quoted` and clears the state — which is why the
+  row fires here and not in the plain `"${z:-<(fi)}"`, where parse.y has
+  already answered. And it fires only where brace expansion runs: an argument
+  or command word errors (`: "${z:-"<(fi)"}"`, `f "${z:-"<(fi)"}"`,
+  `echo "${a["<(fi)"]}"`), while an assignment RHS — which is not brace-expanded
+  — does not (`x="${z:-"<(fi)"}"` is silent). bash only ever *parses* it: with a
+  body that does parse, `echo "${z:-"<(echo hi)"}"` prints `<(echo hi)` in both
+  shells, so this is a diagnostic and not a missing expansion.
+
+  What was missing was something to hang the row on. [`Shell::gobbled_subs`]
+  walks the *parse* structurally, and here the tree is right to hold characters
+  — the `<(` sits in a `" … "` run inside a double-quoted operand, where neither
+  bash's expander nor osh's reads one — so no part was ever going to appear for
+  it. The fix is therefore not another lexer mode but a text-level pass beside
+  the structural walk, as `gobbled_backtick_subs` already is for a backquote:
+
+  * `wordscan::gobbler_procsubs(s, dquoted)` — the same flat-state loop as
+    `gobbler_readable`, reporting the index of each `<(`/`>(` met while `quoted`
+    is 0. (`gobbler_readable` could not answer this: it reports the stretches the
+    **`$(`** row fires in, which is `quoted == 0` *and* `quoted == '"'`, and the
+    `<(` row is the first of those alone.) A `$( … )` is skipped whole rather
+    than reported — that is the one spelling a part already stands for.
+  * `Shell::gobbled_procsubs` — for each index, lex `$(` + the rest of the word
+    with `parser::dquote_word_from_source` and take the resulting
+    `CmdSubBody::Unread`. The two spellings reach the same
+    `extract_command_subst`, so the swap is exact, and one lex settles the body,
+    the remainder and whether there was a `)` at all. It is a *lex*, not the
+    paren count `gobbler_readable` skips with, because `xparse_dolparen` is a
+    real parse: a `(` inside a quoted run of the body is not a nesting level to
+    it, and a count would carve `echo <(echo "(")` into a body that fails.
+  * The two are merged by **remainder length**: every tail the gobbler's word
+    carries is measured against the whole word (`unparse::gobbler_word`), so a
+    longer one is an earlier meeting. That is what keeps the interleaving right
+    where a word holds both — measured, `echo "${z:-'$(fi)'"<(for)"}"` reports
+    the `$(fi)` and `echo "${z:-"<(fi)"'$(for)'}"` the `<(fi)`.
+  * `Shell::has_gobbled_sub` — the cheap pre-test — gained a `WordPart::Literal`
+    row, answering wide (any `<(`/`>(` in a literal under quotes) so the word
+    reaches the scan that settles it.
+
+  **Verified:** `userspace/oils/tests/corpus/a-process-substitution-a-brace-scan-meets-is-read-where-the-quoting-is-clear.sh`,
+  29 rows, all matching bash 5.2.37 — including the parity (`"${z:-"a"<(fi)"b"}"`
+  is a *parse* error, `"${z:-"${y:-"<(fi)"}"}"` is silent), the `set +B` gate, the
+  words brace expansion does not reach (assignment RHS, `case` word, here-doc
+  body), the read happening before expansion (`z=Z`, `${z:+…}`), and the `declare
+  -f` re-print.
+* **✅ FIXED 2026-08-14 for the double-quoted operand** (`${z:-…}`, `${z:+…}`,
+  `${z:=…}`, `${z:?…}` and the plain `${z-…}` family) — which is the position
+  the report named, and the only one a `${x@P}`/`PS4` re-read reaches with the
+  quoting bash's own expansion declines a process substitution under. The
+  remaining positions are a residue of their own, logged at the end of this
+  bullet. Original report: `x='${z:-<(fi)}'; echo "${x@P}"` — bash's `extract_dollar_brace_string`
+  (subst.c:1881-1950) has a `<(` row of its own and recurses into it with a real
+  parse, so the `@P` re-read is a `bad substitution` and the text is printed
+  unchanged; osh splices the re-print and prints `<(fi)`.
+
+  **Measured against bash 5.2.37 (2026-08-14).** The row behaves as the `$(`
+  row beside it in every respect: `A${z:-<(fi)}TAIL` and `A${z:-$(fi)}TAIL`
+  give byte-identical output, down to the quoted remainder `` `fi)}TAIL' ``
+  and the `line 2` numbering `xparse_dolparen` gives an unread body. It is the
+  scan's row and not the string's — `x='a<(fi)b'` is silent — and it is reached
+  only where the scan's own quoting allows: `"<(fi)"` (double-quoted),
+  `'<(fi)'` (single-quoted, `skip_single_quoted`) and `\<(fi)` are all silent
+  and print their text. A body that parses is silent too and is *not*
+  performed: `A${z:-<(echo A >&2)}B` prints `A<(echo A >&2)B` and no `A` on
+  stderr.
+
+  osh already matched on six of those shapes. What it got wrong:
+
+  | written (as `x`, then `echo "${x@P}"`) | bash | osh (before) |
+  |---|---|---|
+  | `A${z:-<(fi)}TAIL` | reports, `bad substitution`, text | `A<(fi)TAIL` |
+  | `A${z:-${y:-<(fi)}}B` | reports (nested body too) | `A<(fi)B` |
+  | `A${z:-p<(fi)q$(for)r}B` | reports the **`<(fi)`** | reports the `$(for)` |
+  | `A${z:-<(fi}B` | `unexpected EOF`, `bad substitution`, text | runs `fi}` — `command not found` |
+
+  All but the last now match. The last is a *different* defect that the `$(`
+  spelling has identically — see
+  TD-OILS-AN-UNCLOSED-SUBSTITUTION-IN-AN-UNREAD-BRACE-BODY-IS-RUN-INSTEAD-OF-REFUSED
+  below — so it was left alone here rather than fixed twice.
+
+  **Why it was not a two-line change.** The `<(` span *is* already collected —
+  `Lexer::read_dollar_brace` has the row (lexer.rs:7069) and records a
+  `CmdSubSpan` with `SubOpen::Proc`, its `src`, its `range` and
+  `SubBody::Unread`. What is missing is a [`WordPart`] for
+  [`Shell::brace_scanned_subs`] to walk to: `procsub_reprints`
+  (parser.rs:6288) splices a re-print only for a `SubBody::Eager` span, and the
+  re-lex that carves the operand out of the body (`read_word_verbatim`) leaves
+  a `<(` as characters on purpose. So for an *unread* body the process
+  substitution survives only as text in a `WordPart::Literal`.
+  `arith_unread_subs` is the shape of the answer for the arithmetic scan, and
+  it excludes this spelling deliberately (parser.rs:6233-6240).
+
+  Two things make the obvious fixes wrong, both measured above:
+
+  * **The remainder runs past the `}`.** `` `fi)}TAIL' `` and
+    `` `fi)}B${y:-<(for)}C' `` are the rest of the *whole re-read string*, not
+    of the `${ … }`. So a text scan confined to the brace's own source (the
+    only text [`Shell::brace_extent_scan`] is handed) cannot build the part's
+    `tail`, and the `$( … )` spelling gets its own from
+    `unparse::attach_comsub_tails`, which runs over the assembled word in the
+    parser.
+  * **It must interleave with the `$(` spelling**, in the order the one scan
+    meets them — hence the `p<(fi)q$(for)r` row above.
+
+  Reusing [`CmdSubBody::Unread`] for the synthesized part is safe for the
+  *read* (the diagnostic quotes the body's remnant, never the delimiter, so a
+  `<(` and a `$(` in this position are byte-identical) but not for anything
+  that re-prints or *runs* one — `interp.rs:34302` performs an unread body, and
+  a process substitution here is never performed. So either the part carries
+  its spelling (a new field on `CmdSubBody::Unread`, two construction sites and
+  one printer, plus the run site taught to refuse) or it is synthesized late
+  enough that it can never escape into a print or a run — which is what
+  `Shell::gobbled_procsubs` does for the `brace_gobbler` half above, and the
+  reason that one could be done without touching the AST.
+
+  **What was done.** The first of the two: the part carries its spelling, which
+  makes both blockers vanish rather than needing to be worked around.
+
+  * `ast::SubDelim { Dollar, ProcIn, ProcOut }`, with `bytes()` (the delimiter
+    as written) and `is_performed()` (true only for `Dollar`). Recorded on
+    `CmdSubBody::Unread` and on the lexer's `SubBody::Unread`. Only the unread
+    form needs it: a body a parser *read* is a `CmdSubBody::Parsed` for `$(`
+    and a `WordPart::ProcSub` for the other two, so those two shapes already
+    tell the spellings apart.
+  * `Lexer::read_word_verbatim` gained a `<(`/`>(` row for `Verbatim::Dquote`
+    **when the text is unread** (`self.here_text`), emitting
+    `Seg::CmdSub(body, close, SubBody::Unread { delim })`. The existing
+    `Verbatim::Bare | Verbatim::Replacement` row above it is untouched — those
+    fragments really do *perform* the substitution, measured:
+    `x='A${z/p/<(echo hi)}B'; echo "${x@P}"` prints a `/dev/fd/N` in bash.
+  * `unparse.rs` prints the body back in `delim.bytes()`, and
+    `Shell::command_sub_body` returns that text instead of running anything
+    when `!delim.is_performed()`.
+  * The backslash arm of the same loop takes a `\<(`/`\>(` into the literal
+    run, because the *scan* that produced this text honours a backslash
+    whatever follows it (`extract_dollar_brace_string`'s `case '\\'`,
+    subst.c:1899) while the operand's own dquote read does not. `A${z:-\<(fi)}B`
+    prints `A\<(fi)B` and reports nothing.
+
+  Both blockers then answer themselves: the `tail` is filled by
+  `unparse::attach_comsub_tails` over the whole assembled word (so it runs past
+  the `}`, giving `` `fi)}TAIL' ``), and the interleaving is
+  `Shell::brace_scanned_subs`'s existing left-to-right walk.
+
+  **Verified:** `userspace/oils/tests/corpus/a-process-substitution-a-brace-re-read-meets-is-read-like-the-dollar-spelling.sh`,
+  22 rows, all matching bash 5.2.37 — the byte-identity with the `$(` spelling,
+  both interleavings, the nested body, the not-performed rows (including
+  `>(cat)` and a body writing to stderr, quoted and unquoted), the read
+  happening before the operand is chosen (`z=Z`, `${z:+…}`), the four shields
+  (unbraced text, `" … "`, `' … '`, backslash), the stepped-over subscript, and
+  the `PS4` spelling of the same re-read.
+
+* **✅ FIXED 2026-08-14** (every position but the arithmetic one; that one
+  closed later the same day, at the end of this bullet)**.** The row
+  was wired for the double-quoted **operand** only, and bash's scan reads the
+  whole `${ … }` body — it walks characters and knows nothing of the `#`, `/`
+  or `^^` it has already passed — so every other fragment wanted the same row:
+
+  | written (as `x`, then `echo "${x@P}"`) | bash | osh before |
+  |---|---|---|
+  | `A${z#<(fi)}B` (pattern) | reports ×2, `bad substitution`, text | right text, **no diagnostics** |
+  | `A${z/p/<(fi)}B` (replacement) | reports ×2, `bad substitution`, text | right text, **no diagnostics** |
+  | `A${z^^<(fi)}B` (case pattern) | reports ×2, `bad substitution`, text | right text, **no diagnostics** |
+  | `A${z:0:<(fi)}B` (offset) | reports ×2, `bad substitution`, text | `AB` |
+
+  The `$( … )` spelling was right in all four (measured), so again only the row
+  was missing. It was harder than the operand's, because in these positions the
+  substitution is *both* read for its extent **and** performed — a replacement
+  really does expand to `/dev/fd/N`, measured — so the part could not simply be
+  the non-performed `CmdSubBody::Unread` the operand's is.
+
+  **What was done.** The split `CmdSubBody` already makes between a body a
+  parser read and one only a scan read is now made for the process-substitution
+  part too, so one part answers for both halves:
+
+  * `ast::ProcSubBody` — `Parsed(Program)` or `Unread { src, tail, closed }` —
+    replaces the bare `Program` in `WordPart::ProcSub`.
+  * `lexer::ProcRead` (`Eager` / `Unread { closed }`) rides on `Seg::ProcSub`;
+    the `Verbatim::Bare | Verbatim::Replacement` arm of
+    `Lexer::read_word_verbatim` picks it from `self.here_text`, and now
+    tolerates a missing `)` exactly as the `$(` spelling does.
+  * `parser::seg_to_part` parses only an eager body. An unread one is carried
+    as text, because its read belongs to the scan and happens later, from
+    where a failure is `bad substitution` rather than a script syntax error.
+  * `unparse`: an unread body prints back as written, and joins
+    `attach_comsub_tails` so it gets the same remainder the `$(` spelling does.
+  * `interp`: `Shell::brace_scanned_subs_slice` collects it,
+    `Shell::extent_read_of_subs` reads it through the same
+    `comsub_reparse_read`, and the new `Shell::proc_sub_body` parses-then-
+    performs at expansion — only reachable if that read succeeded.
+
+  **Verified:** corpus case
+  `a-process-substitution-a-brace-re-read-meets-is-read-wherever-in-the-braces-it-sits.sh`,
+  21 rows, IDENTICAL against bash 5.2.37.
+
+  **✅ The arithmetic fragment, 2026-08-14.** Deferred at first, because osh
+  diverged over `<` in a bound before any process substitution was written at
+  all (`${z:1<(2)}` is `bcdef` in bash and was an `operand expected` in osh);
+  that was fixed as
+  TD-OILS-A-LESS-THAN-IN-A-BRACE-ARITHMETIC-FRAGMENT-LOSES-ITS-LEFT-OPERAND,
+  and this row followed.
+
+  It was **not** simply `Verbatim::Arith`'s row, as the deferral assumed. A
+  subscript shares that mode and must *not* get it: bash's scan steps over a
+  subscript whole (`skip_matched_pair` from the `[`), so `${z[<(fi)]}` never
+  offers its body to `extract_command_subst` and is an `operand expected` —
+  which osh already matched. A bound is walked in the open. So the mode split
+  in two: `Verbatim::Bound` / `Frag::Bound`, reached by `lex_bound_verbatim`
+  and `parser::word_bound_from_source_at`, identical to `Arith` in every
+  respect but that it takes `Dquote`'s unread-`<(` arm. That is the whole
+  change — the arm was already written for the operand, and the read/perform
+  split it produces (`SubBody::Unread`) is exactly a bound's: read for its
+  extent by the scan, never performed, because `Q_DOUBLE_QUOTES|Q_ARITH` is
+  what stops `expand_word_internal` (subst.c:11079).
+
+  No interp-side work was needed: `unparse::nested_parts` already classifies
+  `ParamSubstr`/`ArraySlice` bounds as `Nested::Operand`, so
+  `Shell::brace_scanned_subs_slice` was already descending into them.
+
+  **Verified:** 14 further rows in the same corpus case (the bound in offset
+  and length position, `${a[@]:…}` and `${@:…}`, the `@P` and `PS4` spellings,
+  the three quotings that shield it, and the well-formed `${z:<(echo 1)}` that
+  reaches the evaluator as characters), IDENTICAL against bash 5.2.37.
+
+**How it was found:** implementing the entry above.
+
+### [B] TD-OILS-AN-UNCLOSED-SUBSTITUTION-IN-AN-UNREAD-BRACE-BODY-IS-RUN-INSTEAD-OF-REFUSED. `x='A${z:-$(fi}B'; echo "${x@P}"` runs `fi}` where bash reports `bad substitution` — 2026-08-14 — ⚠️ OPEN
+
+A `$( … ` with no `)` inside a `${ … }` written in text no parser read — a
+`${x@P}` re-read, a `PS4`, a here-document body. bash reads the extent with
+`xparse_dolparen`, which fails at end of input; `si` is left past the end of the
+string, so the brace never closes, so `parameter_brace_expand` reports
+`bad substitution` naming the whole text and prints the text unchanged. Nothing
+is run. osh gets the *first* diagnostic right and then runs the body anyway:
+
+```sh
+x='A${z:-$(fi}B'; echo "${x@P}"
+# bash: command substitution: line 3: unexpected EOF while looking for matching `)'
+#       line 1: A${z:-$(fi}B: bad substitution
+#       A${z:-$(fi}B
+# osh:  command substitution: line 3: unexpected EOF while looking for matching `)'
+#       line 1: fi}: command not found
+#       A
+
+x='A${z:-$(echo hi}B'; echo "${x@P}"
+# bash: … unexpected EOF …; … bad substitution; A${z:-$(echo hi}B
+# osh:  … unexpected EOF …; Ahi}
+```
+
+Both spellings are affected identically — `<(fi}` behaves exactly as `$(fi}`,
+which is the point: the delimiter is not what is wrong here.
+
+**Where:** `userspace/oils/src/interp.rs`, [`Shell::extent_read_of_subs`]
+(~29622) and [`Shell::run_abandoned_extent`]. The scan classifies the failed
+read as `ExtentRead::Abandoned { body, rest }` and hands the body on to be run.
+That classification is *right* for an abandoned extent bash really does run on
+— it is `extract_command_subst`'s no-`)` path with the `jump_to_top_level`
+suppressed — but wrong when the caller is the brace scan, because there the
+unclosed read is also what stops the `}` from ever being found, and the
+`bad substitution` that follows pre-empts the run.
+
+**Proper fix:** distinguish the two callers. `extent_read_of_subs` should
+report the abandonment to the brace scan (so `brace_extent_scan` fails the
+whole `${ … }` and takes the `bad substitution` path with the source text)
+rather than letting the body reach `run_abandoned_extent`. The `closed: false`
+flag on `CmdSubBody::Unread` already names exactly this shape, so the test is
+to hand.
+
+**How it was found:** measuring the `<(` row of
+TD-OILS-A-PROCESS-SUBSTITUTION-A-SECOND-SCAN-FINDS-IN-A-BRACE-BODY-IS-NOT-PARSED-AGAIN
+against its `$(` twin, which turned out to be wrong the same way.
+
+### [B] TD-OILS-A-LESS-THAN-IN-A-BRACE-ARITHMETIC-FRAGMENT-LOSES-ITS-LEFT-OPERAND
+
+**Status:** ✅ FIXED 2026-08-14. Found 2026-08-14, measured against bash 5.2.37.
+The cause turned out to be wider than the title: the two bounds were
+**tokenized as a command** rather than read as arithmetic, so `<` was only the
+most visible of the operators being lost. See "The fix" at the end.
+
+A `<` in the offset or length of `${z:o:l}` swallows everything to its left.
+The same expression inside a plain `$(( ... ))` is fine, so this is the brace
+fragment's own reading of the text, not the arithmetic evaluator's:
+
+| written | bash | osh |
+|---|---|---|
+| `z=abcdef; echo "${z:1<(2)}"` | `bcdef` | `z: <(2): syntax error: operand expected` |
+| `z=abcdef; echo "${z:0:1<(2)}"` | `a` | same error |
+| `echo $(( 1<(2) ))` | `1` | `1` |
+
+bash reads `1<(2)` as `1 < (2)`, which is `1`, so the offset is 1. osh
+evaluates `<(2)` alone -- the `1` is gone by the time the evaluator sees the
+expression, which is what the quoted error token shows.
+
+**Where:** `userspace/oils/src/lexer.rs`, the `Verbatim::Arith` path of
+[`Lexer::read_word_verbatim`], and whatever splits a `${z:o:l}` body into its
+two fragments in `userspace/oils/src/parser.rs`. The `<` is being taken for
+something other than a comparison operator -- most likely a fragment boundary.
+
+**Proper fix:** treat `<` in an arithmetic fragment as the comparison operator
+it is, so the whole fragment reaches the evaluator. A `<(` there is *not* a
+process substitution to be performed either -- measured, `${z:0:<(echo 1)}` is
+an `operand expected` in bash with the characters `<(echo 1)` standing as the
+error token, which osh already matches.
+
+**Blocked, and then unblocked (same day):** the arithmetic-fragment row of
+TD-OILS-A-PROCESS-SUBSTITUTION-A-SECOND-SCAN-FINDS-IN-A-BRACE-BODY-IS-NOT-PARSED-AGAIN.
+bash's `${ ... }` scan reads a `<( ... )` in an arithmetic fragment exactly as it
+reads one anywhere else in the body -- `x='A${z:0:<(fi)}B'; echo "${x@P}"`
+reports the parse twice and then `bad substitution`, where osh printed `AB` --
+but a corpus row for it would have been measuring this bug instead, so the
+corpus case
+`a-process-substitution-a-brace-re-read-meets-is-read-wherever-in-the-braces-it-sits.sh`
+left that position out and said so. The fix below removed the obstacle, and the
+rows went in the same day: that case now measures a bound in seven further
+positions.
+
+**How it was found:** measuring where bash's brace scan reads a `<( ... )`,
+while checking whether the `Verbatim::Arith` fragments needed the same row as
+the pattern and replacement ones.
+
+**The fix (2026-08-14).** `parse_slice_bounds`
+(`userspace/oils/src/parser.rs`) read each bound with `word_from_source`, which
+called `tokenize(...)` — a *command* tokenizer — and then joined the surviving
+`Tok::Word`s with a literal space. So every operator character was claimed by
+the tokenizer instead of reaching the evaluator, and whatever it could not make
+a word of was silently dropped. `<` was merely the case that produced an IO
+number and a redirect. The rest, all measured against bash 5.2.37 with
+`z=abcdef`:
+
+| written | bash | osh, tokenized |
+|---|---|---|
+| `${z:1<2}` | `bcdef` | `cdef` — `1<` taken for a redirect |
+| `${z:1>2}` | `abcdef` | `cdef` — likewise |
+| `${z:1<=2}` | `bcdef` | `=2: operand expected` |
+| `${z:1 < (2)}` | `bcdef` | `1 2: syntax error` |
+| `${z:1;2}` | `;2: invalid arithmetic operator` | `1 2: syntax error` |
+| `${z:1&2}` | `abcdef` | `1 2: syntax error` |
+| `${z:3|2}` | `def` | `3 2: syntax error` |
+| `${z:1&&2}` | `bcdef` | `1 2: syntax error` |
+| `${z:1)}` | `1): syntax error in expression` | silently `abcdef` |
+
+Both bounds now go through `word_subscript_from_source_at` — the very reader an
+array subscript uses, which is `verbatim_word_at(..., Frag::Arith)` plus
+`attach_subscript_reads`. The two arithmetic fragments therefore no longer
+disagree with each other, which is what `attach_subscript_reads`'s own doc
+comment had been asking for.
+
+Two further defects of the same splitter were found while measuring it, and are
+fixed in the same change:
+
+* **Which colon cuts.** bash does not `strchr` for the `:`; `skiparith`
+  (subst.c) skips one `:` for every `?` seen, and counts nothing at all inside
+  a `( … )`. `${z:1?2:3}` is `cdef` (the whole text is the offset) while
+  `${z:1?2:3:1}` is `c`; `${z:1?1?2:3:4}` is `cdef`, two `?` swallowing both
+  colons; `${z:(1?2:3):1}` is `c`. osh split on the first `:` unconditionally
+  and so reported `` `:' expected for conditional expression `` for all of
+  these. Now `slice_split_colon` implements the rule.
+* **An empty bounds text.** `${z:}` is `${z:}: bad substitution` in bash, and
+  uniformly so — `${@:}`, `${*:}`, `${a[@]:}`, `${a[1]:}` and an unset
+  parameter all report it. osh printed the whole value. It is the *text* that
+  must be non-empty, not what it expands to: `${z:$e}` with `e=` is `abcdef`.
+  `parse_slice_bounds` now returns `None` for an empty text and each of its
+  three call sites turns that into `WordPart::BadSubst`.
+
+Verified by the corpus case
+`a-slice-cuts-its-bounds-with-skiparith-and-reads-each-as-arithmetic.sh`
+(75 rows, IDENTICAL), the lib suite and a full sweep.
+
+**Unblocked, and then done (same day):** the arithmetic-fragment row named
+under "Blocks" above was the only thing left of
+TD-OILS-A-PROCESS-SUBSTITUTION-A-SECOND-SCAN-FINDS-IN-A-BRACE-BODY-IS-NOT-PARSED-AGAIN,
+and it is now closed there. It was a separate row from this entry's — after
+this fix `${z:1<(2)}` evaluated correctly but `x='A${z:0:<(fi)}B'; echo
+"${x@P}"` still printed `AB`, where bash reads the body for its extent and
+reports `bad substitution`. It turned out **not** to be the `Verbatim::Arith`
+row this entry's title suggested, because the *subscript* shares that mode and
+must not get it: bash's `${ … }` scan steps over a subscript whole
+(`skip_matched_pair`), so `${z[<(fi)]}` never offers its body to the scan and
+is an `operand expected` in bash — which osh already matched. Only a bound is
+walked in the open, so `Frag::Arith` split in two and the new `Frag::Bound`
+took the row. See that entry for the change.
+
+### [B] TD-OILS-AN-UNBALANCED-PAREN-IN-A-SLICES-BOUNDS-IS-AN-ARITHMETIC-ERROR-NOT-A-BAD-SUBSTITUTION
+
+**Status:** ✅ FIXED 2026-08-14. Found 2026-08-14, measured against bash 5.2.37.
+The fix turned up a second rule of the same walk, fixed with it — see "The fix"
+at the end.
+
+`skiparith` (subst.c) balances parens while looking for the colon that cuts
+`${x:off:len}` in two, and an unbalanced `(` makes it run off the end. bash
+then reports that as a **bad substitution** naming the whole bounds text, before
+either bound is evaluated. osh implements the balancing (that is what makes
+`${z:(1?2:3):1}` cut in the right place) but not the complaint, so the text
+reaches the evaluator and produces an arithmetic diagnostic instead:
+
+| written | bash | osh |
+|---|---|---|
+| `${z:(1}` | ``bad substitution: no closing `)' in (1`` | ``z: (1: missing `)' (error token is "1")`` |
+| `${z:(1:2}` | ``… no closing `)' in (1:2`` | ``z: (1: missing `)'`` — and it cut at the colon |
+| `${z:((1:2}` | ``… no closing `)' in ((1:2`` | likewise |
+| `${z:1+(2}` | ``… no closing `)' in 1+(2`` | ``z: 1+(2: missing `)'`` |
+| `${a[@]:(1}` | ``… no closing `)' in (1`` | arithmetic error |
+| `${@:(1}` | ``… no closing `)' in (1`` | arithmetic error |
+
+Both are rc=1, so only the message differs — but the message differs in class,
+not just wording: bash's is the DISCARD-class `bad substitution` family, raised
+by the cut, and it names the bounds text rather than the parameter.
+
+Three things scope it precisely, all measured:
+
+* It is the **whole bounds text** that is checked, once, before the cut — the
+  message quotes `(1:2` entire, the colon never having split it.
+* It is only the text the *cut* walks. Once a colon has been found with the
+  depth back at zero, an unbalanced `(` in the length is an ordinary arithmetic
+  error: `${z:0:(1}` is ``z: (1: missing `)'`` in bash too, and osh matches.
+* A stray `)` at depth zero is not an error at all: `${z:)1}` is
+  `)1: syntax error: operand expected` in both.
+
+**Where:** `userspace/oils/src/parser.rs`, `slice_split_colon` — which already
+tracks the depth and would only need to report a non-zero one at the end — and
+its three call sites in `parse_braced_param_in`, which currently turn the
+`None` that means "empty bounds" into `WordPart::BadSubst(raw)`.
+
+**Proper fix:** `slice_split_colon` reports the unbalanced case distinctly from
+the empty one, and the call sites raise ``bad substitution: no closing `)' in
+<bounds text>``. That message shape already exists in
+`userspace/oils/src/interp.rs` (`b"bad substitution: no closing `)' in "`,
+~35600) but it names the whole *word*, whereas this one names the bounds text
+only, so it needs its own carrier on the word part rather than a reuse of
+`BadSubst`, whose printer names `${…}` entire.
+
+**Blocked:** one row of the corpus case
+`a-slice-cuts-its-bounds-with-skiparith-and-reads-each-as-arithmetic.sh`,
+which said so in its header and left the shape out. Now measured there.
+
+**How it was found:** measuring bash's slice bounds exhaustively while fixing
+TD-OILS-A-LESS-THAN-IN-A-BRACE-ARITHMETIC-FRAGMENT-LOSES-ITS-LEFT-OPERAND. It
+was the last of four divergences that measurement turned up, and the only one
+not fixed there.
+
+**The fix (2026-08-14).** Two things, because measuring the first turned up the
+second.
+
+**(1) The complaint.** `slice_split_colon` now returns the depth it ended at
+beside the split index, `parse_slice_bounds` carries a non-zero one as
+`SliceBounds::unclosed`, and both `WordPart::ParamSubstr` and
+`WordPart::ArraySlice` gained an `unclosed: Option<Str>` field for it. It is a
+field on the operator rather than a `WordPart::BadSubst`, because *where* it is
+raised is the whole of what distinguishes the two: `${z:}` is a bad
+substitution even for an unset parameter, while `${u:(1}` with `u` unset is
+silently empty. So the check sits exactly where the offset would have been
+evaluated — `Shell::slice_bounds_unclosed`, called from `scalar_slice`,
+`assoc_slice` and the indexed path of `slice_elements_resolved`, each after its
+own "nothing to measure" exit. Every ordering measured lines up: an empty
+array, an empty `$@`, `set -u`, and a set-but-empty scalar (which *does* report,
+having one position).
+
+`no_longjmp_on_fatal_error` — `Shell::prompt_expanding` — **suppresses** the
+complaint rather than rewording it, so under `${x@P}` or `PS4` the characters go
+on to the evaluator and the arithmetic error is what comes out. That is the
+`if (no_longjmp_on_fatal_error == 0)` guard the report sits behind, and it is
+why osh's *old* answer was right in those two contexts and only those two.
+
+**(2) The walk is quote-aware.** Measuring (1) showed the walk steps over a
+`' … '` run, a `" … "` run and a backslash-escape whole — all three counters
+included, not just the paren one. `${z:"1:2"}` does not split (the evaluator
+meets `1:2` as one bound and says so), `${z:1"?"2:3}` does split (the quoted `?`
+buys no colon), and `${z:0"("}`, `${z:0'('}`, `${z:0\(}` and `${z:(1"("2)}` are
+all balanced. osh's walk saw none of that, so before this fix it both cut in the
+wrong place and complained where bash did not. Note this is about the *walk*
+only: the quote characters stay in the bound, and the arithmetic reading each
+half is given removes them (or does not — a `' … '` keeps its second reading).
+
+The walk is over the text **as written**, which the same measurement pins down
+from the other side: `p="("; ${z:$p 1}` and `${z:$(echo "(1")}` are ordinary
+arithmetic errors, each being balanced as written however unbalanced its value.
+
+**Verified:** 37 further rows in
+`a-slice-cuts-its-bounds-with-skiparith-and-reads-each-as-arithmetic.sh`, the
+lib suite and a full sweep.
+
+### [B] TD-OILS-THE-WAIT-NO-OPERANDS-CORPUS-CASE-IS-FLAKY-UNDER-A-FULL-SWEEP. The job holding `$!` is not spared, once per many sweeps — 2026-08-14 — OPEN
+
+**Where:** `userspace/oils/tests/corpus/wait-with-no-operands-and-a-job-that-just-ended.sh`,
+the group "only the last one backgrounded is spared", against
+`Shell::builtin_wait`'s operand-less arm and `Shell::drain_jobs`
+(`userspace/oils/src/interp.rs`).
+
+**What — and this time the whole row was captured.** One full
+`scripts/osh-bash-diff.py` sweep came back `654 matched, 0 waived, 1 failed`
+with **one line** of the case different, everything else in it identical:
+
+```sh
+( exit 3 ) & ( exit 4 ) & sleep 0.4; wait; echo "  noargs=$?"
+VAR=stale; wait -n -p VAR; echo "  n=$? $(pvar)"
+```
+
+| | bash 5.2.37 | osh (this sweep) |
+|---|---|---|
+| `noargs=` | 0 | 0 (agreed) |
+| `n=` | `4 a pid` | **`127 unset`** |
+
+So osh had nothing left to report where bash still had the last-backgrounded
+job. Re-run on its own immediately after: `1 matched, 0 waived, 0 failed`.
+Saved report:
+`target/dvscratch/corpus-failures/20260814-145703/wait-with-no-operands-and-a-job-that-just-ended.txt`.
+
+**What a 127 requires, read out of the code rather than guessed.** The spare is
+`builtin_wait`'s operand-less arm: after `drain_jobs`, every job with a status
+is marked `notified` *except* the one whose pid is `last_bg_pid`, and
+`cleanup_dead_jobs` then drops exactly the notified ones. But `drain_jobs`
+itself marks `notified` for every job it *waited for*, and it waits for any job
+not already in its `known` snapshot — `known` being the jobs whose `exit_seen`
+was set **before** the wait was reached. So the spare survives only when the
+`$!` job's `exit_seen` was already set, which the unit-boundary
+`cleanup_dead_jobs` does for a job that is both finished and older than
+`JOB_EXIT_NOTICE_GRACE` (20 ms). A 127 means that did not happen for the `$!`
+job specifically: had it been the *other* job that was late, `drain_jobs` would
+have waited that one and the spare would still stand.
+
+**The margin is not thin, which is what makes this odd.** Both shells were
+measured at four margins (`build/pgS.sh`), and they agree exactly:
+
+| `sleep` before the `wait` | bash | osh |
+|---|---|---|
+| none | `127 unset` | `127 unset` |
+| 0.01 | `4 a pid` | `4 a pid` |
+| 0.05 | `4 a pid` | `4 a pid` |
+| 0.4 | `4 a pid` | `4 a pid` |
+
+The flip is between 0 and 0.01, so the case's `sleep 0.4` is a ~40x margin — not
+the ~1x margin that
+TD-OILS-THE-COMPGEN-JOB-CORPUS-CASE-IS-FLAKY-UNDER-A-FULL-SWEEP turned out to
+be. **Do not assume the same diagnosis and just widen the sleep.**
+
+**Loads that do NOT reproduce it — do not spend the time again.** The job is
+thread-backed, not a process (`( exit 4 ) & echo $!` prints the synthetic
+`900000`, where `sleep 0.4 &` prints a real pid), so both of the obvious
+starvation stories were tried and neither bit:
+
+- 20 serial runs of the group alone: clean.
+- 119 runs of the group at 8-way concurrency: clean.
+- 64 runs of the *whole case* at 8-way concurrency: clean.
+- 36 runs under a process-spawn storm (6 loops spawning `osh -c :` and
+  `bash -c :` back to back, this host's documented ~200-290 ms spike source):
+  clean.
+- 30 runs under CPU saturation (24 busy-loop processes on 12 cores): clean.
+
+Probes are `build/repro-wait.sh` (the group), `build/repro-wait2.sh` (the whole
+case), `build/spawnstorm.sh`, `build/cpuburn.py` — all in the gitignored
+`build/`, so re-create them from this entry if they are gone.
+
+**Proper fix.** Unknown, and deliberately not guessed at. The next sighting
+should establish which of the two conditions failed — whether the `$!` job's
+body was genuinely unfinished at the unit-boundary poll, or whether the poll did
+not run — by instrumenting `poll_jobs` to record, per job, `is_finished` and
+`born_at.elapsed()` at each call, and dumping that when `wait -n` answers 127.
+That distinguishes "the thread really was 400 ms late" from a bookkeeping fault,
+and only the first is a case-margin problem.
+
+**Impact.** An intermittently red sweep, which is the gate on every commit —
+and the sweep takes ~19 minutes, so a re-run to disambiguate is expensive.
+
+**Sighting 2026-08-14, in the *unit* suite, and fixed there.**
+`interp::tests::wait_n_ignores_a_job_whose_status_was_already_reported` failed
+once under `cargo test -p oils --lib` (`wait -n` answered 127 where 3 was due,
+i.e. the operand-less `wait` had *not* spared the job) and passed when re-run
+alone. Same shape as this entry, but with a cause the test owned: it backgrounded
+`( exit 3 ) &` and then slept a constant `0.2` to make the job finish first, and
+no constant is long enough to promise that on a loaded machine. Fixed properly
+rather than by lengthening the sleep — a new `settle_jobs` test helper (the
+whole-table form of the existing `settle_job`) polls `poll_jobs` until every job
+has a status, after the same `JOB_EXIT_NOTICE_GRACE`. That removes this test from
+the flaky family; the *corpus* case above is untouched and stays open.
+
+---
+
+### TD-OILS-AN-ARITHMETIC-SCAN-REPORTS-NONE-OF-THE-READS-IT-MAKES. `$(( … ))` swallows the diagnostics its nested `$( … )` should raise, and loses the text after a read that stopped early — 2026-08-14
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::arith_extent_expand` /
+`arith_extent_frame` and the `$((` route out of `Shell::arith_extent_route`.
+
+**What is wrong.** `param_expand` reaches a `$((` through
+`extract_command_subst` with `SX_COMMAND` (subst.c:10575), so the paren count
+*does* recurse into a nested `$( … )` — a real parse, reported where it is met.
+osh runs the count but never reports, and in one shape stops in the wrong place.
+Measured against bash 5.2.37 (`build/pgX.sh` rows a/c, `build/pgY.sh` d4/d5):
+
+| word (inside `v='…'`, via `"${v@P}"`) | bash | osh |
+|---|---|---|
+| `A$((1+$(echo hi⏎q` | reports EOF, `[A]` | reports EOF, `[Ahi]` |
+| `A$((1+$(for⏎q))B` | reports **twice** (`for`, then `` `(1+$(for' ``), `[AB]` | silent, `[A]` |
+| `A$((1+$(for⏎xB` | reports `for`, `[A]` | reports `for`, **runs `fo`**, `[A⏎xB]` |
+
+Rows 1 and 3 report because the read runs from `Shell::arith_nested_read`,
+which does call `Shell::comsub_reparse_read`; what those two get wrong is the
+*value*, both by performing the abandoned extent the way the string level does
+and the brace level does not. Row 2 is the substantive one: the read stopped
+part way, so bash's count resumed after the `for`'s line and found the `))`,
+leaving `B` to the word. osh consumes to the end and loses it — and so never
+reaches the read at all, which is why it is the one row that is also silent.
+
+**What the proper fix looks like.** The `$((` count needs the same two-outcome
+treatment `${ … }` got on 2026-08-14: `Shell::comsub_reparse_read` for the
+report (which also decides jump vs. no-jump), and
+`Shell::failed_extent_split`'s resume point for where the count carries on.
+`Lexer::unread_comsub_stop` already puts the lexer in the right place; what is
+missing is the interp half — an `arith`-side counterpart of
+`Shell::unclosed_brace_reads`.
+
+**Impact.** Diagnostics only for two of the three rows; a wrong value for the
+third. Needs `@P`/`PS4`/here-doc text to be reachable at all.
+
+---
+
+### TD-OILS-AN-UNDECODED-BRACE-BODY-IS-RE-LEXED-AS-A-DOUBLE-QUOTED-RUN. A `<(`/`>(` in it is never read, though the brace scan names it — 2026-08-14 — ✅ FIXED 2026-08-14
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::extent_read_of_rest` and
+`Shell::unclosed_brace_reads`, both of which lex their text with
+`crate::parser::dquote_word_from_source` → `crate::lexer::lex_dquote_body`.
+
+**What is wrong.** `extract_dollar_brace_string` names `$(`, `<(` and `>(`
+together and hands each to the same `extract_command_subst` (subst.c:1881-1950),
+**whatever the quoting** — that is why `x='A${z#<(fi)}B'` reports the parse
+twice. A double-quoted *run*, by contrast, has no process substitution in it at
+all: at string level bash and osh agree that `v='A<(echo hi⏎q'` is literal
+text. So `lex_dquote_body` is the right lexer for a string-level remainder and
+the wrong one for text the **brace scan** is walking.
+
+Measured (`build/pgY.sh` d6), `A${z:-P1<(echo hi⏎S1}B` under `${…@P}`:
+
+| | bash 5.2.37 | osh |
+|---|---|---|
+| reports | `` unexpected EOF while looking for matching `)' `` **then** `…: bad substitution` | the `bad substitution` only |
+| value | undecoded word | same |
+
+The `$(` spelling of the same row (`build/pgW.sh` row 5) is byte-exact, so this
+is precisely the two openers `lex_dquote_body` cannot see. The dollar spelling
+of d7 — where the read stops early and the brace closes — is also exact,
+because that path re-lexes through `parse_braced_param_in` in
+`Quoting::Unread`, which *does* read them.
+
+**It is not only the two openers — the whole quote model is wrong** (measured
+2026-08-14, `build/pq1.sh` and `build/pq2.sh`). `extract_dollar_brace_string`
+**skips** a quoted run rather than walking it, and the two quotes skip
+differently:
+
+| word (inside `v='…'`, via `"${v@P}"`) | bash 5.2.37 | what it shows |
+|---|---|---|
+| `A${z:-P1<(echo hi⏎S1}B` | reports EOF, `bad substitution` | the bare `<(` row **is** read |
+| `A${z:-P1"<(echo hi⏎S1"}B` | silent, `[AZZB]` | a `<(` inside `" … "` is **not** |
+| `A${z:-P1"$(echo hi⏎S1"}B` | reports EOF, `bad substitution` | a `$(` inside `" … "` **is** |
+| `A${z:-P1'$(echo hi⏎S1'}B` | silent, `[AZZB]` | a `$(` inside `' … '` is **not** |
+| `A${z:-P1'<(echo hi⏎S1'}B` | silent, `[AZZB]` | …nor a `<(` |
+| `A${z:-P1"<(echo hi⏎S1}B` | `bad substitution`, **no** read report | a lone `"` swallows to end of string |
+| `A${z:-P1'<(echo hi⏎S1}B` | `bad substitution`, **no** read report | …and so does a lone `'` |
+| `A${z:-"x"<(echo hi⏎S1}B` | reports EOF, `bad substitution` | a *closed* run does not suppress what follows |
+| `A${z:-P1\<(echo hi⏎S1}B` | silent, `[AZZB]` | a backslash escapes the opener |
+
+So the brace scan delegates a `" … "` run to a double-quote skipper that has
+the `$(` row and **not** the `<(`/`>(` row — bash's ordinary rule that there is
+no process substitution inside double quotes — and skips a `' … '` run whole,
+offering its interior to nothing.
+
+`lex_dquote_body` models neither — it treats both quote characters as ordinary
+literals, which is correct for `Q_DOUBLE_QUOTES`, where the string *is* already
+the quoted run. Measured (`build/pq1.sh`, `build/pq2.sh`, `build/pq3.sh`), osh
+nevertheless agrees with bash on every *quoted* row above, by a different
+mechanism in each case: where the run closes, the brace closes too and the word
+goes through `parse_braced_param_in`, which does model quotes; where the run does
+not close, `lex_dquote_body`'s missing `<(` row happens to suppress the same read
+bash's skip suppresses. Two rows were left where the mechanisms did not coincide;
+the first of them is now fixed:
+
+| word (inside `v='…'`, via `"${v@P}"`) | bash 5.2.37 | osh |
+|---|---|---|
+| `A${z:-P1"$(echo hi⏎S1}B` | reports EOF, `bad substitution`, undecoded | ✅ same since 2026-08-14 |
+| `A${z:-'p$(echo hi'q$(fi⏎S1}B` | reports `fi`, `[AZZB]` | silent, `[AZZB]` |
+
+Row 1 was the serious one — a **spurious command execution**: osh reported the
+EOF, then ran `S1}` and produced `[Ahi]`. A lone `"` opens a run that swallows to
+end of string, leaving the brace nothing to close on, so bash condemns the word;
+osh instead let the failed read out of `read_opaque_span`'s `"`-run `$(` sub-arm,
+where [`Lexer::unclosed_seg`] degraded the whole word into a *string-level*
+`$( … )` and then performed it. Fixed 2026-08-14 by giving that sub-arm
+(`userspace/oils/src/lexer.rs`, `read_opaque_span`'s `'"'` arm) the same
+`Err(e) if self.unread_comsub(&e)` recovery the two `read_dollar_brace_body`
+arms already had: re-emit the `$(` into the raw text, take back what the reader
+consumed with `Lexer::unread_comsub_stop`, and `continue` the quoted-run loop.
+The read is still reported — it happened — and the run then swallows the rest,
+so the brace never closes and the word is condemned, exactly as in bash. The bug
+was **pre-existing**, not a regression: measured identical on the commit before
+the earlier 2026-08-14 brace-scan fix.
+
+Row 2 is a lost diagnostic only; the same row before the brace-scan fix had the
+wrong value *and* ran `f`, so it is much improved.
+
+**A second mechanism loses the same report where the brace *does* close**
+(measured 2026-08-14, `build/pr1.sh` r3). `A${z:-'i"t'<(fi⏎S1}B` reports `fi`
+in bash and expands to `[AZZB]`; osh now gets the value right (it was the
+undecoded word until the unmated-`"` fix of the same day) but still says
+nothing. That path never goes near `extent_read_of_rest`: the brace closed, so
+the reads are replayed off the *parsed operand*, and the operand lexer is
+`read_word_verbatim` in [`Verbatim::Dquote`] — which has a perfectly good `<(`
+row, but never reaches it, because the `"` inside the `' … '` run opens a
+quoted run that swallows `t'<(fi⏎S1` whole.
+
+Both scans are right about their own text and wrong about each other's, which
+is the shape of the whole issue: bash runs **two** passes over these bytes with
+**different quote rules** — `extract_dollar_brace_string`, where a `'` run is
+skipped and a `"` is a quote, and `expand_word_internal`, where a `'` is an
+ordinary character and a `"` is a quote. osh derives the reads from the
+expansion's lex in one path and from a string-level lex in the other, and
+neither is the scan's.
+
+**What the proper fix looks like.** A real lex entry for "text a brace scan is
+walking" — not `lex_dquote_body` with a row bolted on, and not the operand lex
+either. It needs, at its own level: the `<(`/`>(` openers beside `$(`; a `'`
+that consumes to the next `'` or to end of string, offering nothing inside it;
+and a `"` that consumes to the next `"` or to end of string, offering only `$(`
+(and `` ` ``) inside it. A backslash hides the byte after it. Then
+`extent_read_of_rest`, `unclosed_brace_reads` **and `brace_extent_scan`** all
+take their reads from that one pass, `lex_dquote_body` keeps its current
+string-level callers unchanged — the p1/p2 probe above confirms those answers
+are right as they stand — and the operand lex stops being asked a question it
+was never answering.
+
+These rows are the acceptance test the table above does not already cover — the
+ones that pin *which* quote wins when the two are interleaved (measured
+2026-08-14 against bash 5.2.37, `build/pr1.sh`):
+
+| word (inside `v='…'`, via `"${v@P}"`) | bash 5.2.37 | osh today |
+|---|---|---|
+| `A${z:-"it's"$(fi⏎S1}B` | reports `fi`, `[AZZB]` | same |
+| `A${z:-"it's"<(fi⏎S1}B` | reports `fi`, `[AZZB]` | same |
+| `A${z:-'i"t'<(fi⏎S1}B` | reports `fi`, `[AZZB]` | ✅ same since 2026-08-14 |
+| `A${z:-P1\'<(echo hi⏎S1}B` | reports EOF, `bad substitution` | ✅ same since 2026-08-14 |
+| `A${z:->(echo hi⏎S1}B` | reports EOF, `bad substitution` | ✅ same since 2026-08-14 |
+| `A${z:-${y:-<(fi⏎S1}B` | reports `fi`, `bad substitution` | same |
+
+So a `'` inside a closed `" … "` run opens nothing (rows 1-2) and a `"` inside a
+closed `' … '` run opens nothing (row 3) — each quote is invisible inside the
+other's run — and a backslash spends itself on the quote it precedes, leaving
+the `<(` after it live (row 4).
+
+An attempt that added only the `<(`/`>(` row to `lex_dquote_body` was written
+and reverted on 2026-08-14, before being compiled, because these measurements
+showed it would have regressed the three suppressed rows above (they are silent
+in bash today and in osh today, and would have started reporting).
+
+**Fixed 2026-08-14**, along the lines above. Three pieces:
+
+- `Lexer::brace_scan` (`userspace/oils/src/lexer.rs`) — a flag saying "this
+  scan stands in for `extract_dollar_brace_string`, not for the expansion after
+  it". With it set, `read_double_quote_until` grows the scan's other two
+  openers: a `<(`/`>(` becomes a `SubBody::Unread` segment carrying its own
+  `SubDelim`, which the expansion prints straight back
+  (`SubDelim::is_performed` is false for both), so the word's **value** is
+  untouched and only the extent walk gains a construct to read. The new entry
+  `lexer::lex_brace_scan_body` → `parser::brace_scan_word_from_source` is what
+  `Shell::extent_read_of_rest` now lexes its remainder with, which is the
+  unclosed-brace half (rows 4-5 of the interleaving table above).
+- The closed-brace half (row 3) is the same flag turned on from
+  `read_word_verbatim`'s `"` arm, and **only** when that run opened inside a
+  `' … '` one — `in_run && self.here_text`. That is exactly the case where the
+  scan never saw a quote at all, because it stepped over the single quotes
+  whole. Outside a run the `"` is the scan's own, and there `skip_double_quoted`
+  reads the `$(` spelling alone, which is what the reader already did.
+- The quote state itself moved out of the lexer and into the walk, as
+  `ScanQuote` (`interp.rs`): two independent flags, because
+  `skip_single_quoted` hunts for a `'` and `skip_double_quoted` for a `"` and
+  neither knows the other character — so each quote is an ordinary byte inside
+  the other's run. `Shell::brace_scanned_subs_slice` tracks both over the
+  literal runs (a `\` still hides the byte after it) and suppresses the two
+  process-substitution spellings inside a `" … "` while letting `$(` through;
+  `brace_scanned_subs_in` no longer resets the state on entering a
+  `WordPart::DoubleQuoted` whose `"` the scan never saw.
+
+Corpus case:
+`userspace/oils/tests/corpus/the-brace-scan-reads-a-process-substitution-and-the-expansion-after-it-does-not.sh`
+— 14 shapes plus a here-document body, byte-identical to bash 5.2.37 including
+stderr.
+
+**Impact while it stood.** Diagnostics only — the values already agreed. A
+`<(`/`>(` at brace level lost its read report. The worst shape — a lone `"`
+before a `$( … )` making osh run a command bash does not, and yield the wrong
+value — was fixed earlier the same day (see row 1 of the two-row table above).
+Reachable only through `@P`/`PS4`/here-doc text holding a malformed `${ … }`.
+
+**Not fixed by this, and tracked separately:** row 2 of the two-row table,
+`A${z:-'p$(echo hi'q$(fi⏎S1}B`. That one is not about the openers but about
+where a construct *ends*; see
+`TD-OILS-A-SQUOTE-RUN-DOES-NOT-CUT-A-SUBSTITUTION-SHORT-FOR-THE-BRACE-SCAN`.
+
+---
+
+### TD-OILS-AN-UNMATED-DOUBLE-QUOTE-GROWS-A-MATE-WHEN-THE-WORD-IS-PRINTED-BACK — 2026-08-14 — ✅ FIXED 2026-08-14
+
+**Where:** `userspace/oils/src/unparse.rs` — `part_src`'s
+`WordPart::DoubleQuoted` arm, which writes a `"` on both ends unconditionally;
+the run that has no closing `"` is built by `userspace/oils/src/lexer.rs`,
+`Lexer::read_word_verbatim`'s `'"'` arm under `ParseOpts::tolerant`.
+
+**Repro** (bash 5.2.37, `build/pr11.sh` t1):
+
+```sh
+z=ZZ
+v='A${z:-'"'"'i"t'"'"'$(fi)}B'; printf '[%s]\n' "${v@P}"
+```
+
+| | bash 5.2.37 | osh |
+|---|---|---|
+| remainder quoted by the read | `` `fi)}B' `` | `` `fi)"}B' `` |
+| word named by `bad substitution` | `A${z:-'i"t'$(fi)}B` | `A${z:-'i"t'$(fi)"}B` |
+| value | `[A${z:-'i"t'$(fi)}B]` | same |
+
+**What is wrong.** In text no parser read, a `"` with no mate is not an error:
+`string_extract_double_quoted` is handed a *finished word* and its walk ends at
+the end of the string as readily as at a quote (that is
+`ParseOpts::tolerant`, and the corpus case
+`a-double-quote-with-no-mate-in-an-operand-runs-to-the-end-of-the-operand.sh`
+pins the expansion of it). The resulting `WordPart::DoubleQuoted` therefore
+covers a run whose closing quote **was never in the source** — but the part
+does not record that, and `part_src` prints the pair back. Every consumer of
+`crate::unparse::word_src` then sees one byte that was not in the word.
+
+The value is unaffected, because quote removal drops the `"` either way. What is
+affected is everything derived from the *text*: `Shell::bad_sub_word` (the word
+`bad substitution` names), the tail `extract_command_subst` quotes back in its
+own diagnostic, and — in principle, though no divergence has been measured for
+it yet — `crate::wordscan::word_fault`, which re-scans `word_src` for the
+unclosed `${`/`` ` `` verdicts and could be pushed either way by a stray quote.
+
+The single-quote analogue exists in the same shape:
+`Lexer::read_single_quote` has a `None if self.opts.tolerant => return Ok(s)`
+arm, and `part_src`'s `WordPart::SingleQuoted` likewise writes both `'`s. No
+divergence has been measured for it, because the paths that produce an unmated
+`'` do not currently reach a diagnostic that prints the word back — but the
+defect is the same one and a fix should cover both.
+
+**What the proper fix looks like.** Record the missing mate on the part rather
+than guessing at print time: `Seg::Dq(Vec<Seg>)` → `Seg::Dq(Vec<Seg>, bool)`
+and `WordPart::DoubleQuoted(Vec<WordPart>)` → a `closed` field, exactly as
+`Seg::Sq(Str, bool)` already carries its own flag, with `part_src` writing the
+trailing quote only when it was there. About 27 sites mention `DoubleQuoted`
+across `ast.rs`, `parser.rs`, `interp.rs` and `unparse.rs`; most are matches
+that need only a `..`. The single-quote half is the same edit on
+`WordPart::SingleQuoted`.
+
+Not worth reaching for a cheaper trick: an unmated run always extends to the
+end of its text, so "omit the quote when the part is last" would be *nearly*
+right, and nearly-right quoting is how a word stops re-parsing.
+
+**Fixed 2026-08-14**, along the lines above. `read_double_quote_until` now
+reports whether a `"` really ended the run — it has exactly two `Ok` returns,
+one per case, so the flag falls straight out of the existing control flow — and
+that rides on `Seg::Dq(Vec<Seg>, bool)` into
+`WordPart::DoubleQuoted { parts, closed }`. `part_src` writes the trailing quote
+only when `closed`. The single-quote half is the same edit:
+`read_single_quote`'s tolerant arm answers `false`, `Seg::Sq` became a struct
+variant `{ text, escaped, closed }` rather than grow a second unnamed `bool`,
+and an unmated run prints as `'` + text instead of going through
+`sh_single_quote`, whose whole job is to supply the mate.
+
+Two returns needed thought rather than transcription: the pair inside
+`read_double_quote_until` that end the run on an *unclosed construct* absorbed
+into a `Seg::Unclosed` answer `false`, since the run ended on the construct and
+not on a quote; and the backslash spelling of `Seg::Sq` is unconditionally
+`closed: true`, having no quotes to match.
+
+Corpus case:
+`userspace/oils/tests/corpus/a-double-quote-with-no-mate-does-not-grow-one-when-the-word-is-printed-back.sh`
+— 8 shapes including `PS4` and a here-document body, byte-identical to bash
+5.2.37 including stderr.
+
+**Impact while it stood.** Diagnostics only — one spurious `"` in the two lines
+bash prints for a malformed `${ … }` whose operand holds a `"` opened inside a
+`' … '` run. Reachable only through `@P`/`PS4`/here-doc text.
+
+---
+
+### TD-OILS-AN-UNMATED-SQUOTE-IN-A-SUBSCRIPT-LOSES-ITS-QUOTE-BYTES-FROM-THE-WORD-PRINTED-BACK — 2026-08-14 — ✅ FIXED 2026-08-14
+
+**Where:** `attach_subscript_reads` (`userspace/oils/src/parser.rs`), which gives
+each top-level `' … '` of an arithmetic fragment its interior parse.
+
+**Repro** (bash 5.2.37):
+
+```sh
+declare -a arr=(10 20 30)
+declare -A m=([k]=V)
+echo "[${arr['x${m:-']}]"
+```
+
+bash names `` 'x${m:-' `` — the whole fragment, quotes included. osh named
+`x${m:-` — the interior of the run alone.
+
+**Cause, which was not the one first written here.** The first note guessed the
+text came from `crate::unparse::word_src` by way of `crate::wordscan::word_fault`.
+It does not: `word_fault` returns `None` for these words, and the word source osh
+builds is byte-correct. The diagnostic comes from `Shell::expand_unclosed` on an
+`Unclosed::BadSubst` whose `text` the *interior's own lexer* filled in with
+`Lexer::whole_text` — the interior being a string of osh's making. bash has no
+such string: an arithmetic fragment is expanded with `Q_DOUBLE_QUOTES` set, which
+switches the single quote off, so `expand_word_internal` walks straight through
+the pair and the string it was handed is the fragment. Both "no closing"
+reporters echo that string (`report_error (…, string)`, subst.c:1498 for
+`$[ … ]`, subst.c:1972 for `${ … }`).
+
+That also explains the shape the note found puzzling — a name that begins one
+byte late and ends two bytes early is exactly the interior of a `' … '` run.
+There were not two faults there, but there is a second one beside it; see
+`TD-OILS-A-BRACE-WHOSE-NAME-SCAN-RUNS-OFF-A-FRAGMENT-TAKES-THE-OTHER-DIAGNOSTIC`.
+
+**Fix.** `attach_subscript_reads` already re-measures the fragment after parsing
+an interior — that is what `crate::unparse::attach_comsub_tails` does for a
+`$( … )`'s echoed remainder. It now also re-*names*: a new
+`name_unclosed_after_the_fragment` walks the interiors it just attached and gives
+every top-level `WordPart::Unclosed(Unclosed::BadSubst { text, .. })` the
+fragment's source for its `text`. Only the run's own level is renamed; a `" … "`
+inside the interior is carved out by `string_extract_double_quoted` as its own
+string and keeps naming itself, as one written a character to the left of the `'`
+would. `src` is left alone — it is the construct's spelling for a re-print, not a
+diagnostic's `%s`.
+
+Corpus:
+`a-construct-left-open-in-a-quoted-subscript-names-the-fragment-around-it.sh`
+(seven rows: a `${ … }` body scan running off, the same with text after the run,
+a `$[ … ]`, both substring bounds, and a run that closes nothing early).
+
+---
+
+### TD-OILS-A-BRACE-WHOSE-NAME-SCAN-RUNS-OFF-A-FRAGMENT-TAKES-THE-OTHER-DIAGNOSTIC — 2026-08-14 — ✅ FIXED 2026-08-14
+
+**Where:** `Shell::expand_unclosed` (`userspace/oils/src/interp.rs`) and the
+`Unclosed::BadSubst` the lexer raises for it (`userspace/oils/src/lexer.rs`).
+
+**Repro** (bash 5.2.37):
+
+```sh
+declare -a arr=(10 20 30)
+declare -A m=([k]=V)
+echo "[${arr['x${m']}]"
+```
+
+| | |
+|---|---|
+| bash | `` 'x${m': bad substitution `` |
+| osh | ``bad substitution: no closing `}' in 'x${m'`` |
+
+The same string is named — that much was fixed the same day — but it is the
+wrong one of bash's two messages.
+
+**Why bash has two.** A `${ … }` in a string is read in two steps, and only the
+second one is `extract_dollar_brace_string`. First `parameter_brace_expand`
+extracts the *name* with `string_extract (string, &t_index, "#%^,~:-=?+/@}",
+SX_VARNAME)` (subst.c:9550), which stops at one of those operator characters or
+at the end of the string — `SX_VARNAME` stepping over a whole `[ … ]` subscript
+on the way. If it stopped at the end, `c` is `NUL` and the `switch (c)` falls to
+`default: case '\0': bad_substitution:` (subst.c:10018-10024), which is
+`report_error (_("%s: bad substitution"), string)` and no longjmp. Only if it
+stopped at an *operator* does the body go to `extract_dollar_brace_string`, whose
+own running-out is the "no closing" one that longjmps (subst.c:1972).
+
+So the two messages divide on whether the unclosed brace got as far as an
+operator, and the division is visible:
+
+| fragment | bash |
+|---|---|
+| `'x${m'` | `` 'x${m': bad substitution `` |
+| `'x${#m'` | `` 'x${#m': bad substitution `` |
+| `'x${m[0]'` | `` 'x${m[0]': bad substitution `` |
+| `'x${m['` | `` 'x${m[': bad substitution `` |
+| `'x${m:-'` | ``no closing `}' in 'x${m:-'`` |
+
+**Two things the entry got wrong, found while fixing it.**
+
+*It is not only a fragment.* A here-document body takes the same two messages,
+and osh had the same one answer for both — `cat <<E`/`a${m b`/`E` is
+`a${m b⏎: bad substitution` in bash. The `${x@P}` case really does collapse
+(`no_longjmp_on_fatal_error` makes `extract_dollar_brace_string` return `NULL`
+quietly and its caller fall to the same label), which is why the divergence
+looked narrower than it was.
+
+*The name scan is not the whole story.* Two checks between it and
+`extract_dollar_brace_string` also reach `bad_substitution:` with an operator
+already found — `valid_brace_expansion_word` on the name (subst.c:9803) and the
+length branch's `string[sindex-1] != RBRACE` (subst.c:9687). So `'x${m[a:b'`
+(the `:` *is* reached, but `m[a` is no name) and `'x${#q:-'` are both plain bad
+substitutions. A third check, `parameter_brace_expand_indir` (subst.c:9807),
+runs there too and reports in the missing brace's place: `a${!nosuch:-b` is
+`nosuch: invalid indirect expansion`, and a pointer holding `not a name` is
+`not a name: invalid variable name`.
+
+**The fix.** None of this needed new state on `Unclosed::BadSubst`. osh already
+had the whole decision procedure — `Shell::unterminated_brace_kind`, written for
+the arithmetic-string scanner, which answers `BadSub` / `NoClosing` /
+`Indir(name)` from the body text alone and has `Shell::arith_indir_resolves`
+beside it for the third. `Shell::expand_unclosed` now asks it, for `close ==
+'}'`, before anything else it does, and a new `Shell::unclosed_bad_substitution`
+reports the `BadSub` answer naming `text` (bash's `string`) with the
+`ErrexitOrPosix` class the `bad_substitution:` label carries.
+
+Asking it *first* matters, and is bash's own order: a `$( … )` written inside
+the name is walked over by `string_extract` without being parsed, so
+`a${m$(fi) b` names the bad substitution and never mentions the `fi` — where osh
+used to run `Shell::unclosed_brace_reads` first and report the `fi`.
+
+**Fixed by:** `Shell::expand_unclosed` + `Shell::unclosed_bad_substitution`
+(`userspace/oils/src/interp.rs`). Corpus:
+`a-brace-whose-name-scan-runs-off-the-text-is-a-bad-substitution-not-a-missing-brace.sh`
+— sixteen shapes covering the fragment, the here-document, the command
+substitution in each half, all three indirection outcomes and the prompt
+collapse, byte-identical to bash 5.2.37 including stderr.
+
+---
+
+### TD-OILS-AN-UNCLOSED-ARITH-SUBSTITUTION-IN-A-QUOTED-SUBSCRIPT-IS-NOT-CAUGHT-BEFORE-EXPANSION — 2026-08-14
+
+**Where:** `crate::wordscan` (`userspace/oils/src/wordscan.rs`), the word-extent
+pass `Shell::begin_word` runs before a word is expanded.
+
+**Repro** (bash 5.2.37):
+
+```sh
+declare -a arr=(10 20 30)
+echo "$(touch RAN)[${arr['x$(( 1+ ']}]"
+```
+
+bash prints ``bad substitution: no closing `)' in "$(touch RAN)[${arr['x$(( 1+ ']}]"``
+— the **whole word** — and `RAN` is never created. osh prints
+``bad substitution: no closing `)' in 'x$(( 1+ '`` — the fragment — and the
+`touch` runs.
+
+The side effect is the real defect; the name follows from it. bash reaches this
+one on the *extent* pass, before any part of the word expands, so it names the
+string that pass was walking. osh reaches it only when the subscript is expanded,
+by which time the substitution ahead of it has already run.
+
+**Not the same as the two entries above.** Those are about which string a fault
+found *during* the fragment's expansion names. This one is about a fault bash
+finds before expansion starts and osh does not find at all until later.
+
+**What the proper fix looks like.** `wordscan::scan` has rows for `${`,
+`` ` ``, `$(`, `$[` and `<(`/`>(`, and its faults are `WordFault::Brace` and
+`WordFault::Backquote`. An unclosed `$((` inside a `' … '` in a subscript is a
+third: `extract_delimited_string`'s (subst.c:1498), which names the scanned
+string and closes it with `)`. Adding it means teaching `word_fault` a fault that
+carries its own closing delimiter, and teaching the subscript skip that a `'` in
+there does not hide a `$((` from the enclosing scan.
+
+**Impact.** A command substitution written before such a subscript runs when bash
+would not have run it. Narrow, but it is a side effect and not just text.
+
+---
+
+### TD-OILS-A-BACKQUOTE-IN-A-QUOTED-SUBSCRIPT-IS-A-PARSE-ERROR-WHERE-BASH-EXPANDS — 2026-08-14 — ✅ FIXED 2026-08-14 (in-scope half; see the scope note at the end)
+
+**Where:** the `' … '` interior parse of an arithmetic fragment —
+`attach_subscript_reads` (`userspace/oils/src/parser.rs`) and the lexer path
+behind it.
+
+**Repro** (bash 5.2.37):
+
+```sh
+declare -a arr=(10 20 30)
+echo "[${arr['x`fi']}]"
+echo TAIL
+```
+
+| | |
+|---|---|
+| bash | ``bad substitution: no closing "`" in `fi'`` at line 2, then `TAIL` |
+| osh, before | ``unexpected EOF while looking for matching `` ` ``'`` at line 4 — the script never runs |
+| osh, now | identical to bash |
+
+osh turned a runtime diagnostic into a *parse* error, so the whole script was
+rejected. bash's parser stops at the `'` and resumes at its mate, so the
+backquote inside is text as far as any parse is concerned; it is met only by
+`param_expand`'s own `string_extract (…, SX_REQMATCH)` at expansion time
+(subst.c:11269), which names `string + t_index` — the text from the backquote on.
+
+**The fix.** Three parts:
+
+- `Lexer::read_word_verbatim`'s `` ` `` arm used a bare `?`, which let the
+  `LexError` escape as a parse error. It now converts to an `Unclosed::Backquote`
+  segment via `unclosed_seg`, exactly as the `$` arm does for an unmatched `${`.
+  This is the part that stopped the script being rejected.
+- `Unclosed::Backquote` gained a `text` field, because its `%s` is
+  `string + t_index` and not `string`: the report runs from the backquote to the
+  end of the **fragment**, whereas `src` is also what `part_src`/`parts_src`
+  re-print and so cannot be widened in place.
+- `name_unclosed_after_the_fragment` (`parser.rs`) widens that `text` with the
+  fragment tail past the run's interior — the run's own closing quote and
+  whatever follows it — mirroring what it already did for `BadSubst`.
+
+**Verified.** `userspace/oils/tests/corpus/an-unmated-backquote-in-a-quoted-subscript-is-met-at-expansion-and-not-by-a-parse.sh`
+is byte-identical to bash 5.2.37, as are probes `build/pr28.sh` and
+`build/pr29.sh`. Full sweep green.
+
+**SCOPE: one residue is out of frozen scope (§305) and is deliberately left
+unfixed.** Where the unmated backquote sits inside a *nested double quote* within
+the run — `build/pr30.sh` d2, `echo "[${arr['x"`fi"']}]"` — bash reports
+``no closing "`" in `fi"'`` and osh reports ``no closing "`" in `fi"``: osh is one
+trailing `'` short. Everything else matches, including the script surviving, the
+exit status and all other output. The cause is known:
+`name_unclosed_after_the_fragment` visits only the run's own top level and does
+not descend into a nested `DoubleQuoted` part (`crate::unparse::nested_parts_mut`
+would give the descent; note its `SingleQuoted { .. }` arm returns `Vec::new()`,
+so it can only supplement the outer loop, not replace it).
+
+This is **the exact substring an error message echoes**, which design-decisions
+§305 names as out of scope: nothing SlateOS runs will ever depend on it. Fix it only
+if it turns up as part of something that does. The in-scope half of this
+entry — a whole script being rejected where bash runs it — is closed.
+
+**Fixed by:** the corpus case named above, plus `lexer.rs` (`Unclosed::Backquote`
+`text` field, `read_word_verbatim`'s `` ` `` arm), `interp.rs`
+(`Unclosed::Backquote` report) and `parser.rs`
+(`name_unclosed_after_the_fragment`).
+
+### TD-OILS-A-SQUOTE-RUN-DOES-NOT-CUT-A-SUBSTITUTION-SHORT-FOR-THE-BRACE-SCAN. A `$( … )` opened inside one swallows the read that should have followed it — 2026-08-14
+
+**Where:** `userspace/oils/src/lexer.rs` — `Lexer::read_word_verbatim`'s `$`
+arm in [`Verbatim::Dquote`], reached through
+`Shell::brace_extent_scan` → `Shell::brace_scanned_subs`.
+
+**Repro** (bash 5.2.37, `build/pr12.sh`):
+
+```sh
+z=ZZ
+v='A${z:-'"'"'p$(echo hi'"'"'q$(fi
+S1}B'; printf '[%s]\n' "${v@P}"
+```
+
+| | bash 5.2.37 | osh |
+|---|---|---|
+| reports | ``syntax error near unexpected token `fi' `` | **nothing** |
+| value | `[AZZB]` | same |
+
+**What is wrong.** The two passes bash makes over this word carve it into
+*different constructs*, not merely read the same constructs differently.
+
+- `extract_dollar_brace_string` meets the `'` and hands the run to
+  `skip_single_quoted`, which stops at the **mate**. So `'p$(echo hi'` is one
+  skipped run, the `$(` inside it is never seen at all, and the scan resumes at
+  `q` — where it meets `$(fi⏎S1}B`, reads it, and reports `fi`.
+- `expand_word_internal` has no `'` left to speak of, so its
+  `string_extract_double_quoted` meets the **first** `$(`, hands the rest of the
+  word to `extract_command_subst`, and — there being no `)` anywhere — takes
+  everything. One substitution, not two.
+
+osh derives the brace scan's reads from the expansion's lex, so it gets the
+second carving and the second `$(` is inside the first's body, where the walk
+never reaches it. `Shell::brace_scanned_subs_slice`'s single-quote bookkeeping
+then correctly suppresses the one construct it *can* see (it is inside the run),
+and the result is silence.
+
+This is the residue of
+`TD-OILS-AN-UNDECODED-BRACE-BODY-IS-RE-LEXED-AS-A-DOUBLE-QUOTED-RUN`, which
+fixed the part of the same disagreement that was only about *which openers*
+count. Rows where the two passes agree on the extents but not on the openers are
+now handled by `Lexer::brace_scan`; this row is one where they disagree on the
+extents, and no flag on the expansion's lex can express it.
+
+**What the proper fix looks like.** `Shell::brace_extent_scan` has to run over
+the brace's **text**, with the scan's own carve, rather than over the parsed
+part. Concretely: keep the undecoded source of an unread `${ … }` on the part
+(or reach it through `crate::unparse`), and lex it once in
+`Lexer::brace_scan` mode with the single-quote rule the scan really has — a `'`
+consumes to its mate and offers nothing inside, so a `$(` in there can neither
+be read nor run past the mate. `read_word_verbatim` already computes that mate
+(`sq_close`); what it does not do is let it bound a substitution, because for
+the *expansion* it must not.
+
+Note that `Lexer::brace_scan` as it stands is deliberately the narrow version:
+it adds openers and leaves extents alone. Widening it to bound a `$( … )` at
+`sq_close` would be wrong for the same lexer's expansion duty, so the widening
+has to come with the second pass, not instead of it.
+
+**Impact.** Diagnostics only — the value is already right. Reachable only
+through `@P`/`PS4`/here-doc text holding a `${ … }` whose operand has both an
+unterminated `$( … )` inside a `' … '` run and a failing one after it.
+
+---
+
+### TD-OILS-A-DOLLAR-BRACKET-BOUND-DOES-NOT-PERFORM-ITS-COMMAND-SUBSTITUTION. `$[ 1+$(… ]` reads the `$( … )` as an arithmetic operand token — 2026-08-14
+
+**Where:** `userspace/oils/src/interp.rs` — the evaluation of a
+`WordPart::ArithSub { bracket: true, … }` whose expression text holds an
+unclosed `$( … )`.
+
+**What is wrong.** `extract_arithmetic_subst` is
+`extract_delimited_string (string, sindex, "$[", "[", "]", 0)` (subst.c:1299) —
+flags `0`, so **no** `SX_COMMAND` and no nested read. The `$[` therefore closes
+at its `]` by plain delimiter counting, and the unclosed `$( … )` inside is met
+later, by the *arithmetic expansion* of the bounds text, which performs it under
+`Q_DOUBLE_QUOTES|Q_ARITH`: it reports, runs the abandoned extent, and yields
+nothing. osh instead hands the raw characters to its arithmetic tokenizer, which
+calls them a bad operand.
+
+Measured (`build/pgY.sh` d1/d2):
+
+| word (inside `v='…'`, via `"${v@P}"`) | bash | osh |
+|---|---|---|
+| `A$[1+$(for⏎x]B` | reports `for`, runs `fo`, `[A1B]` | silent, `[AA$[1+$(for⏎x]B]` |
+| `A$[1+$(echo hi⏎x]B` | reports EOF, `[A1B]` | silent, `[AA$[1+$(echo hi⏎x]B]` |
+
+Row d3 — the same body with no `]` at all — is byte-exact in both shells
+(silent, undecoded text), because there the `$[` genuinely never closes.
+
+**What the proper fix looks like.** Two things, in order. (1) `$[`'s lex must
+close at its `]` by plain delimiter counting, without the nested read — which
+means `Lexer::read_opaque_span` needs to know its enclosing close character, so
+that the `$((` spelling (SX_COMMAND) and the `$[` one (flags `0`) can part
+company. Routing that arm through `Lexer::unread_comsub_stop` was tried on
+2026-08-14 and reverted: it made the `$[` bounds text match bash on d1/d2, but
+it *regressed* the `$((` spelling in the corpus case
+`an-unterminated-construct-in-text-no-parser-read-is-a-runtime-failure`, whose
+`$((1+$(echo` row must report the read and stop rather than condemn the `$((`.
+A passing case outranks a documented divergence, so that arm keeps its `?`.
+(2) The arithmetic evaluator must perform a `$( … )` in its expression text
+with the unread-text rule rather than tokenizing it — which is what makes both
+rows' values follow.
+
+**Impact.** Wrong value and wrong diagnostic for a deprecated spelling of
+arithmetic expansion, in malformed input, reachable only through `@P`/`PS4`/
+here-doc text.
+---
+
+### [A] B-SMP-FAST-CPU-INDEX-PANICS-BEFORE-APIC-INIT. `smp::fast_cpu_index()` reads the APIC before it is mapped — `debug_assert` panic in debug, wild read in release — FIXED 2026-08-14
+
+**Where:** `kernel/src/smp.rs` — the tier-3 fallback in `fast_cpu_index()`;
+`kernel/src/apic.rs:~214` — `apic_read()`'s `debug_assert!(base != 0, "APIC not
+initialized")`.
+
+**What.** `fast_cpu_index()` has three tiers: RDPID, then `rdtscp`, then an APIC
+MMIO read. On a CPU where neither RDPID nor `rdtscp` is advertised — which is
+exactly the boot-test configuration, `qemu64,+smep,+smap,+umip` under TCG —
+every call lands in tier 3 and does `crate::apic::read_id()`. Before
+`apic::init` has run, `APIC_BASE_VIRT` is still 0, so:
+
+- **debug builds:** `debug_assert!` fires → `KERNEL PANIC: APIC not initialized`.
+- **release builds:** *worse* — the assert is compiled out and `apic_read`
+  dereferences `(0 + offset) as *const u32`, a wild read of low memory. Silent
+  garbage, or a fault, depending on what is mapped there.
+
+**How it surfaced.** Wiring `frame_owner` ownership tagging into the frame
+allocator (TD-FRAME-OWNER-1GIB) made `current_owner()` — and therefore
+`fast_cpu_index()` — run on *every* frame allocation, including the allocator's
+own boot-time self-test. That self-test runs long before `apic::init`, so the
+kernel panicked at `[mm] Running frame allocator self-test...`:
+
+```
+!!! KERNEL PANIC !!!
+panicked at kernel\src\apic.rs:214:5:
+APIC not initialized
+  Task: 0 (""), priority 0, cpu 0
+```
+
+**Why it was latent.** The pre-existing tier-3 callers were all gated behind
+flags that only go true well after APIC init — the frame allocator's own
+per-CPU cache checks `PCPU_ENABLED` first, for instance. Nothing called
+`fast_cpu_index()` early, so the landmine was never stepped on. It was a real
+bug regardless: the function's contract claims tier 3 "always works", and any
+future early-boot caller would have hit it, in release builds silently.
+
+**Fix.** Added `apic::is_ready()` (`APIC_BASE_VIRT != 0`) and made tier 3 check
+it, returning CPU 0 when the APIC is not yet mapped. That is not a fudge: before
+`apic::init` the system is strictly uniprocessor (BSP only), so 0 is the
+*correct* index, not a fallback guess. Cost is one relaxed atomic load on the
+already-slowest tier; tiers 1 and 2 are untouched, so real hardware pays
+nothing.
+
+**Lesson.** A "this can't happen yet" precondition that is enforced only by the
+accident of who happens to call the function is not enforced at all. When the
+cheap tiers of a tiered fast path are unavailable, the "always works" fallback
+is the one that runs — so it is the one that has to actually always work.
+
+---
+
+### [B] B-INIT-READS-A-KERNEL-ERROR-AS-A-CHILD-EXIT-CODE-AND-RESTARTS-ON-IT — ✅ FIXED 2026-08-14
+
+**Reported by lane-a** in
+`requests/a-b-init-conflates-syscall-error-with-exit-code.md`; fixed in
+`services/init/src/main.rs`, which is lane-b's tree.
+
+**Where:** `ServiceRegistry`'s supervisor poll (`services/init/src/main.rs`,
+the `process_try_wait` call in the reap loop) and the `process_try_wait`
+wrapper itself.
+
+**What was wrong.** `SYS_PROCESS_TRY_WAIT` overloads one `i64` with two
+disjoint domains — a child's exit status (`>= 0`) and a kernel error (`< 0`).
+init decoded that `i64` *at the use site*, and only special-cased
+`ERR_WOULD_BLOCK` (`-4`). Every other negative value fell through to the
+"child exited with code N" path, so the supervisor concluded the service had
+died and scheduled a restart.
+
+**How it bit.** Before lane-a's kernel fix, neither `sys_process_spawn` nor
+`sys_process_spawn_ex` set `SpawnOptions::parent`, so every syscall-spawned
+child recorded `parent = 0` and `pcb::try_reap` answered `PermissionDenied`
+(`-400`). init read `-400` as an exit code and restarted `ticker` **nine
+times** — while `ticker` was alive and printing `[ticker] Ready.` throughout.
+The kernel half is fixed, but the misreading is a bug on its own terms and
+would re-fire on the next error the wait path can return (`NoSuchProcess`,
+`PermissionDenied` after a re-parent, anything added later).
+
+**The fix.** Classify once, at the syscall boundary, so the two domains cannot
+be confused downstream:
+
+```rust
+enum WaitStatus { Running, Exited(i64), Failed(i64) }
+fn process_try_wait(pid: u64) -> WaitStatus { … }
+```
+
+- `Running` — as before, and it resets the new consecutive-error counter.
+- `Failed(err)` — logs `[svc] <name> (PID n): wait failed (err=N, K in a row)`
+  and returns **without touching** `pid`, `crash_count`, `backoff_ns` or
+  `restart_after_ns`. No restart can be caused by a wait error any more.
+- `Exited(code)` — the pre-existing path, now reachable only for `code >= 0`.
+
+After `MAX_WAIT_ERRORS = 5` *consecutive* failures on one service init prints
+`giving up supervision of PID n … it is NOT being restarted`, clears `pid` and
+sets `auto_restart = false`. Five rides through a transient (a re-parent
+racing a poll) and stops a permanent one from scrolling the console at the
+supervisor's tick rate. The child is deliberately left running and
+unsupervised: a wait failure is a bug in the kernel or in init, and killing a
+healthy service to tidy up our own bookkeeping is the same category of mistake
+as restarting it.
+
+**The general shape, worth remembering.** An overloaded return value is a fine
+ABI — as long as **exactly one place decodes it**. The bug was not the `i64`;
+it was decoding it inline at the use site, where the error case is easy to
+forget and impossible to see. Nothing downstream of `process_try_wait` can now
+name a raw wait return at all.
+
+**Known residue (not a bug today).** The `Failed` discriminator is `ret < 0`.
+If the status domain is ever widened into negative values — a signal-style
+encoding, say — that test stops being sound and the kernel-side out-param
+variant lane-a offered becomes necessary. Recorded so the assumption is
+written down rather than implied.
+
+**Verified.** `services/init` builds clean for `x86_64-unknown-none`; full
+QEMU boot test green.

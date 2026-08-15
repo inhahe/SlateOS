@@ -196,6 +196,16 @@ mod aio_store {
         imp::table().cast::<AioRecord>()
     }
 
+    crate::perprocess::process_global! {
+        /// Serialises the scans of the record array.
+        ///
+        /// Declared with the same target/host split as the table itself, so
+        /// the lock is exactly as widely shared as what it guards — see
+        /// [`crate::perprocess::PoolLock`].
+        pub(super) fn lock() -> crate::perprocess::PoolLock =
+            crate::perprocess::PoolLock::new();
+    }
+
     /// Bump and return the next age value.  Wraps after 2^64 submissions,
     /// which is impossible in practice; treated as monotonic forever.
     pub(super) fn next_age() -> u64 {
@@ -239,11 +249,22 @@ fn next_age() -> u64 {
     aio_store::next_age()
 }
 
-/// Find the existing record for `cb_ptr`, if any.
-fn find_aio_record(cb_ptr: usize) -> Option<usize> {
-    // SAFETY: `base()` is non-null and valid for MAX_AIO_OPS records, and
-    // on host builds is reachable from this thread alone; every `add` below
-    // is bounded by MAX_AIO_OPS.
+/// Find the existing record for `cb_ptr`, if any, without taking the lock.
+///
+/// Split out from [`find_aio_record`] because the pool lock is a plain spin
+/// lock with no reentrancy: `store_aio_record` and `free_aio_record` need the
+/// lookup and the mutation that follows it to be one critical section, and
+/// would deadlock against themselves if the lookup re-acquired.
+///
+/// # Safety
+///
+/// The caller must hold [`aio_store::lock`] for the whole time it uses the
+/// returned index — the record it names is only guaranteed to still be the
+/// one that was found while the lock is held.
+unsafe fn find_aio_record_locked(cb_ptr: usize) -> Option<usize> {
+    // SAFETY: `base()` is non-null and valid for MAX_AIO_OPS records, the
+    // caller holds the pool lock so no other thread is scanning it, and
+    // every `add` below is bounded by MAX_AIO_OPS.
     unsafe {
         let base = aio_store::base();
         let mut i: usize = 0;
@@ -258,18 +279,41 @@ fn find_aio_record(cb_ptr: usize) -> Option<usize> {
     None
 }
 
+/// Find the existing record for `cb_ptr`, if any.
+///
+/// Note that the index is only meaningful while the lock is held, which this
+/// function has already dropped by the time it returns — so it is for callers
+/// that want a yes/no answer (the tests), not for callers that go on to
+/// dereference the slot.  Those take the guard themselves and use
+/// [`find_aio_record_locked`].
+#[cfg(test)]
+fn find_aio_record(cb_ptr: usize) -> Option<usize> {
+    // SAFETY: `aio_store::lock()` is this context's lock, valid as long as
+    // the storage is.
+    let _guard = unsafe { crate::perprocess::lock_pool(aio_store::lock()) };
+    // SAFETY: the guard is held for the whole call.
+    unsafe { find_aio_record_locked(cb_ptr) }
+}
+
 /// Allocate (or reuse) a record slot for `cb_ptr`.
 ///
 /// If a record already exists for this pointer, it's overwritten in
 /// place.  Otherwise a free slot is used; if none are free, the oldest
 /// (smallest `age`) is evicted.  The chosen slot is returned populated
 /// with the given status/bytes.
+///
+/// The whole find-then-claim-then-evict decision runs under the pool lock, so
+/// two threads submitting at once cannot pick the same free slot — nor can
+/// one evict the record the other has just decided to reuse.
 fn store_aio_record(cb_ptr: usize, status: i32, bytes: isize) {
-    // SAFETY: as in `find_aio_record`.
+    // SAFETY: `aio_store::lock()` is this context's lock, valid as long as
+    // the storage is.
+    let _guard = unsafe { crate::perprocess::lock_pool(aio_store::lock()) };
+    // SAFETY: as in `find_aio_record_locked`, whose guard is held here.
     unsafe {
         let base = aio_store::base();
         // 1) Existing record?
-        if let Some(idx) = find_aio_record(cb_ptr) {
+        if let Some(idx) = find_aio_record_locked(cb_ptr) {
             let r = base.add(idx);
             (*r).status = status;
             (*r).bytes = bytes;
@@ -310,11 +354,34 @@ fn store_aio_record(cb_ptr: usize, status: i32, bytes: isize) {
     }
 }
 
-/// Release the record for `cb_ptr` (called by `aio_return`).
+/// Locked wrapper around [`free_aio_record_locked`].
+///
+/// The lookup and the release are one critical section: between an unlocked
+/// find and an unlocked clear, another thread could free and reuse the slot,
+/// and this call would then retire *its* record instead.
+///
+/// `aio_return` cannot use this — it needs the record's contents *and* the
+/// release under one guard — so this form is only reached from the tests, the
+/// same as [`find_aio_record`].
+#[cfg(test)]
 fn free_aio_record(cb_ptr: usize) {
-    if let Some(idx) = find_aio_record(cb_ptr) {
-        // SAFETY: idx came from find_aio_record, so it is in bounds; see
-        // `find_aio_record` for the pointer's validity.
+    // SAFETY: `aio_store::lock()` is this context's lock, valid as long as
+    // the storage is.
+    let _guard = unsafe { crate::perprocess::lock_pool(aio_store::lock()) };
+    // SAFETY: the guard is held for the whole lookup-and-clear.
+    unsafe { free_aio_record_locked(cb_ptr) }
+}
+
+/// [`free_aio_record`] for a caller that already holds the pool lock.
+///
+/// # Safety
+///
+/// The caller must hold [`aio_store::lock`].
+unsafe fn free_aio_record_locked(cb_ptr: usize) {
+    // SAFETY: the caller holds the pool lock.
+    if let Some(idx) = unsafe { find_aio_record_locked(cb_ptr) } {
+        // SAFETY: idx came from `find_aio_record_locked` under the same
+        // still-held lock, so it is in bounds and still names that record.
         unsafe {
             let base = aio_store::base();
             let r = base.add(idx);
@@ -419,14 +486,21 @@ pub extern "C" fn aio_error(aiocbp: *const Aiocb) -> i32 {
     if aiocbp.is_null() {
         return errno::EINVAL;
     }
-    if let Some(idx) = find_aio_record(aiocbp as usize) {
-        // SAFETY: idx is in-bounds (returned by find_aio_record).
-        unsafe {
+    // The lookup and the read of `status` are one critical section: with the
+    // lock dropped in between, another thread could retire the record and a
+    // third reuse the slot, so the status read back would be someone else's.
+    // SAFETY: `aio_store::lock()` is this context's lock, valid as long as
+    // the storage is.
+    let _guard = unsafe { crate::perprocess::lock_pool(aio_store::lock()) };
+    // SAFETY: the guard is held, and `idx` is in-bounds (returned by
+    // `find_aio_record_locked` under this same lock).
+    unsafe {
+        if let Some(idx) = find_aio_record_locked(aiocbp as usize) {
             let base = aio_store::base();
             (*base.add(idx)).status
+        } else {
+            errno::EINVAL
         }
-    } else {
-        errno::EINVAL
     }
 }
 
@@ -441,17 +515,27 @@ pub extern "C" fn aio_return(aiocbp: *mut Aiocb) -> isize {
         errno::set_errno(errno::EFAULT);
         return -1;
     }
-    let Some(idx) = find_aio_record(aiocbp as usize) else {
+    // Find, read and retire under one guard.  Splitting them would let two
+    // threads calling `aio_return` on the same aiocb both read the result and
+    // both report success, and would let a slot reused in between hand this
+    // caller a stranger's status.
+    // SAFETY: `aio_store::lock()` is this context's lock, valid as long as
+    // the storage is.
+    let guard = unsafe { crate::perprocess::lock_pool(aio_store::lock()) };
+    // SAFETY: the guard is held for the whole lookup-read-retire sequence.
+    let Some((status, bytes)) = (unsafe {
+        find_aio_record_locked(aiocbp as usize).map(|idx| {
+            let base = aio_store::base();
+            let r = base.add(idx);
+            let out = ((*r).status, (*r).bytes);
+            free_aio_record_locked(aiocbp as usize);
+            out
+        })
+    }) else {
         errno::set_errno(errno::EINVAL);
         return -1;
     };
-    // SAFETY: idx came from find_aio_record.
-    let (status, bytes) = unsafe {
-        let base = aio_store::base();
-        let r = base.add(idx);
-        ((*r).status, (*r).bytes)
-    };
-    free_aio_record(aiocbp as usize);
+    drop(guard);
     if status != 0 {
         errno::set_errno(status);
         -1

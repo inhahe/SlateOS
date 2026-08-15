@@ -148,188 +148,25 @@ Full write-up:
 `known-issues.md` → `TD-OILS-A-DECLARATION-WITH-NOTHING-TO-DO-BINDS-A-NULL-THROUGH-THE-REFERENCE`.
 
 
-## Q41 — §72's blocker expired on day 4 and was never re-checked: should bash be cross-compiled instead of osh reimplemented? — Status: OPEN
+## Q41 — Should bash be cross-compiled instead of osh reimplemented? — Status: **RESOLVED 2026-08-14 → design-decisions.md §305**
 
-**Raised by the operator** (2026-08-12), who asked whether comparing osh against
-bash and patching every difference means we should have cross-compiled bash from
-the start. Auditing the decision showed the concern is better founded than §72
-reads.
+**Answer: the hybrid, with osh's fidelity scope frozen.** osh remains the shell;
+the cross-compiled GNU bash 5.2 (which boots and runs on SlateOS) ships beside
+it as the escape hatch and future on-device differential oracle; and
+byte-for-byte bash parity stops being an open-ended goal — **§305 carries the
+binding stopping criterion, and every `TD-OILS-*` entry and new corpus case is
+now gated by it.**
 
-**The finding.** §72 rejected cross-compiling on one decisive fact: *"There is no
-C/C++ → `x86_64-slateos` cross-toolchain in this repo."* That was **true when
-written** (oils' first commit: 2026-07-18). It stopped being true almost
-immediately:
+Decided by the operator, who also raised the question. Claude recommended this
+option.
 
-| Date | Event |
-|---|---|
-| 2026-07-18 | oils begins; §72 rejects cross-compile as prerequisite-blocked |
-| 2026-07-21 | `x86_64-slateos` C cross-compilation target added (fastpy, initiative F) |
-| 2026-07-22 | `zig cc` wired in as the C cross-compiler; `toolchain/sysroot/lib/libc.a` |
-
-§72 wrote its own reversal condition ("if a C++/slateos toolchain is later
-built…"). The **C half fired within four days and nobody audited it.** Roughly
-1,100 of the 1,181 `userspace/oils` commits landed *after* the stated blocker
-ceased to exist. The original call was sound; the failure is that a decision with
-a written expiry was never re-examined. bash is C, not C++ — so it needs strictly
-less than the `oils-for-unix` cross-compile §72 was actually arguing against.
-
-**What is genuinely still missing** (so this is not a slam dunk): `posix/src/signal.rs:572`
-— *"We have no kernel suspend mechanism; report ENOSYS."* Bash's job control
-(`SIGTSTP`/`SIGCONT`, Ctrl-Z, `fg`/`bg`) is built directly on it. Also unmeasured:
-autotools cross-configure, readline, and how much of `libstubs.a` bash would hit.
-Note this gap constrains **osh identically** — it is a kernel limitation, not an
-argument for the reimplementation.
-
-> **Correction (2026-08-12, later the same day): the job-control gap is closed.**
-> The paragraph above — and the "one real blocker" bullet in the spike results
-> below — was itself stale in exactly the way this question is *about*. The
-> kernel had `TaskState::Suspended`, `JobControlEvent`, `stop_process_for_signal`
-> and `continue_process` all along; what was missing was a way for a process to
-> ask for its *own* stop. That is now `SYS_SIGNAL_STOP_SELF` (1062), and
-> `posix`'s `Stop` default action goes through it. The parent half followed the
-> same day — `waitpid`'s `WUNTRACED`/`WCONTINUED` are honoured through
-> `SYS_PROCESS_WAIT_STATUS` (1063) — and the loop is now proven end to end in
-> ring 3 by `services/ctest-jobctl`: a child stops itself with SIGTSTP, its
-> parent's *blocking* `waitpid` reports `WIFSTOPPED`/`WSTOPSIG == SIGTSTP`, and
-> `kill(child, SIGCONT)` resumes it into a `WIFCONTINUED` report. Process groups
-> (533–536) and a real `killpg` also exist. So job control is no longer an
-> argument for either side, and neither is anything else on the feasibility
-> axis: **Q41 is now purely the scope/ownership call in its closing line.**
->
-> The **controlling terminal** followed the same day and is now real kernel
-> state: `tcsetpgrp`/`tcgetpgrp` and `ioctl(TIOCSCTTY/TIOCNOTTY)` go through
-> native syscalls 537–540 to a per-session table (`pcb::CTTY_FG_PGRP`), the
-> Linux shim's `TIOCGPGRP`/`TIOCSPGRP` read and write that same state, and the
-> group `^C`/`^\`/`^Z` signal is a derived read of it (see design-decisions
-> §113). That last part matters for *this* question specifically: **a `Ctrl-Z`
-> typed at the keyboard now stops the foreground job end to end** on the
-> Linux-ABI console read path — `tty::feed` generates `SIGTSTP` from `VSUSP`,
-> `deliver_console_signal` sends it to the session's real foreground group, and
-> `SIGTSTP`'s default action stops the process. Combined with
-> `SYS_SIGNAL_STOP_SELF`, that is the whole of what bash's `fg`/`bg`/`^Z` needs
-> from the kernel. (An earlier version of this note claimed `^Z` "still reaches
-> no job"; that was wrong — the generation and delivery were always there, only
-> the *target group* was broken, which is exactly what this change fixed.)
-> ~~What genuinely remains is *enforcement*, not state: nothing raises
-> SIGTTIN/SIGTTOU on a background read/write, though the predicate
-> (`pcb::ctty_is_background`) exists — see `todo.txt`.~~ **Also closed
-> 2026-08-12** (commit `a6e286332`, design-decisions §115): `sys_tty_read`,
-> `sys_console_read_char`, `sys_console_write` (under `TOSTOP`) and the
-> `tcsetattr`/`tcsetpgrp` paths now go through `tty_job_control_decide`, which
-> follows Linux's `__tty_check_change()` including the orphaned-group `EIO`
-> substitution. So the *entire* kernel-side surface bash's job control touches —
-> process groups, self-stop, wait-status reporting, the controlling terminal,
-> and now terminal-access enforcement — exists. Nothing on the feasibility axis
-> is outstanding in either direction; this question is purely the scope call.
-> (One deliberate limitation remains, and it constrains a *native-ABI* shell
-> only, never bash: the kernel cannot see a native process's `SIG_IGN`, so a
-> native job-control shell must **block** `SIGTTOU` around `tcsetpgrp` where
-> bash ignores it. Bash runs under `AbiMode::Linux`, whose dispositions the
-> kernel does own, so it gets exact POSIX behaviour. See `known-issues.md`,
-> `TD-KERNEL-NATIVE-ABI-SIG_IGN-IS-INVISIBLE-TO-THE-KERNEL`.)
-
-**Options.**
-- **A — timeboxed spike, then decide.** Point `zig cc --target=x86_64-slateos` at
-  bash against the existing sysroot; report how far it gets. *Pro:* converts the
-  question from speculation to measurement for ~1–2 h of active work; both
-  outcomes are valuable (bash runs → freeze osh's scope immediately; it walls →
-  we learn exactly which libc/kernel pieces are missing, a far better roadmap item
-  than "keep patching diffs"). *Con:* the spike is wasted if the operator would
-  keep osh regardless.
-- **B — keep osh, close this permanently.** *Pro:* osh is 138k lines, 642/642
-  byte-exact vs bash, and works *today* on an OS with no dynamic linker; a real
-  bash still could not do job control. *Con:* commits to an unbounded fidelity
-  chase — bash has 40 years of edge cases and the corpus can grow forever.
-- **C — switch to cross-compiling bash.** *Pro:* fidelity becomes free and exact.
-  *Con:* discards 1,181 commits; blocked on kernel suspend for job control; osh
-  would still be needed as the fallback shell meanwhile.
-
-**Claude's recommendation.** **A**, then very likely **B** — but the spike first,
-because the honest answer is that nobody has measured it and §72's factual basis
-is now stale. The deeper question the operator is really raising is not
-strategy but **scope**: byte-for-byte bash fidelity has no stopping criterion.
-One case validated today asserts `OPTIND=4294967297` wraps to the first argument
-because bash stores it in a C `int` — true of bash, and nothing on SlateOS will
-ever depend on it. Worth pairing with Q40, which asks the same "does fidelity
-have limits?" question from the other side.
-
-**Meanwhile.** Nothing is blocked; osh work continues and is green (642/642).
-
-**Spike results (2026-08-12, operator authorised option A).** Scripts live in
-`scripts/bash-spike/` (see its README); artifacts land in the gitignored
-`build/spike/`. Measured, not estimated — and the headline is that **it works**:
-
-> **GNU bash 5.2 now boots and runs on SlateOS**, as a 5,349,720-byte static
-> ELF linked against `toolchain/sysroot/lib/libc.a` — our own POSIX layer, not
-> glibc, with **zero undefined symbols and no shims**. The kernel self-test
-> `self_test_bash_on_slateos_libc` (`kernel/src/proc/spawn.rs`) runs a script
-> using arrays, `${#a[@]}`, `${v,,}`, `$(( ** ))` and brace expansion — none of
-> which dash has, so the result cannot be a `/bin/sh` fallback — with bash
-> doing its own `{ …; } > file` redirection. Exit 0, 55 bytes byte-exact.
-> Boot is green.
-
-The detail:
-
-- **bash 5.2 builds.** A native build succeeded first (4,501,576-byte binary),
-  proving the source tree is sound. A cross-configure/cross-compile with
-  `zig cc --target=x86_64-linux-musl` (`--without-bash-malloc --disable-nls
-  --disable-readline --without-curses`) then compiled every translation unit
-  clean. Note the first cross attempt died with `CROSS_CONFIGURE_EXIT=77`
-  ("C compiler cannot create executables") purely because autotools
-  word-splits `$CC` and this repo lives under `visual studio projects` — fixed
-  with a wrapper script on a spaceless path, not a real toolchain problem.
-- **The symbol surface is nearly covered already.** SlateOS `libc.a` defines
-  2,900 symbols; bash references 2,030; **only 23 are unresolved**, and they
-  decompose as: 9 termcap (`tgetent`/`tputs`/`tgoto`/`tgetflag`/`tgetnum`/
-  `tgetstr`/`BC`/`PC`/`UP`, all dropped by `--disable-readline`), 8 glibc-ism
-  artifacts of the native build (`__isoc23_strtol`, `__longjmp_chk`,
-  `__fdelt_chk`, `__fpurge`, `__mbrlen`, `__mbsrtowcs_chk`, `__wcsrtombs_chk`,
-  `__isoc23_strtoumax` — musl doesn't need these), 1 linker symbol
-  (`_GLOBAL_OFFSET_TABLE_`), and **5 genuinely missing, all trivial**:
-  `arc4random`, `eaccess`, `getservent`, `setservent`, `endservent`.
-- **Stub quality is not the problem either.** Exactly **one** bash symbol was
-  served only by `libstubs.a`: `killpg`. There are 1,299 `ENOSYS` sites in
-  `posix/src`, but they cluster in aio/crypt/dirent/epoll — subsystems bash
-  never calls.
-- **Linking against our own `libc.a` left exactly three real gaps**, since
-  closed for real in `posix/src` (not shimmed): `killpg` (`signal.rs`),
-  `eaccess`/`euidaccess` (`file.rs`), `__fpurge` (`stdio.rs`).
-- ~~**The one real blocker is unchanged and is a kernel gap, not a libc gap:**
-  `posix/src/signal.rs:572`, no kernel suspend ⇒ no `SIGTSTP`/`SIGCONT` ⇒ no
-  Ctrl-Z / `fg` / `bg`; and no process groups, so `killpg` can only return
-  `ENOSYS`. **This constrains osh identically** — it is not an argument for
-  either side.~~ **Closed 2026-08-12** — see the correction note above.
-  Process groups landed as syscalls 533–536 with a real `killpg`, and the
-  self-stop landed as `SYS_SIGNAL_STOP_SELF` (1062). Nothing on the
-  feasibility axis is outstanding.
-
-So §72's prerequisite objection is not merely stale, it is *comprehensively*
-stale: C bash was three small libc functions from running on this OS, and now
-does. **Feasibility is settled and is no longer an input to this decision.**
-
-That does not make the answer C. What the spike changes is *which* arguments
-are live. Still-valid reasons to keep osh (option B): 138k lines already
-written and byte-exact at 642/642; it is ours to debug and extend, whereas bash
-is 40-year-old C we would be maintaining a fork of; and a real bash still
-cannot do job control here. Still-valid reasons to switch (option C): fidelity
-stops being an unbounded chase with no stopping criterion — which is the actual
-concern the operator raised — and every future corpus case is one we no longer
-have to write. **A hybrid is now also on the table and was not before:** ship
-osh as the shell and keep the cross-compiled bash as a differential oracle that
-runs *on SlateOS itself*, which would remove the Linux-reference-bash
-dependency from `scripts/osh-bash-diff.py` entirely.
-
-**Still open, and now purely a scope/ownership call:** B, C, or the hybrid.
-
-**Where it bites.** `design-decisions.md` §72 (its "How to reverse" clause and
-the now-stale prerequisite claim), `userspace/oils/` (all of it),
-`posix/src/signal.rs` (`stop_self`, the former suspend gap — now the
-`SYS_SIGNAL_STOP_SELF` call site), `toolchain/sysroot/lib/libc.a`,
-fastpy's `compiler/toolchain.py` (`SLATEOS_TARGET`, `_find_zig_cc`),
-`scripts/bash-spike/` (the spike, kept reproducible),
-`scripts/create-ext4-rootfs.sh` (stages `/bin/bash`, best-effort) and
-`kernel/src/proc/spawn.rs::self_test_bash_on_slateos_libc`.
-
+**Do not re-open this as a feasibility question.** Feasibility was settled by
+measurement on 2026-08-12 (`scripts/bash-spike/`): bash cross-compiles with
+`zig cc`, links against our own `toolchain/sysroot/lib/libc.a` with zero
+undefined symbols and no shims, and runs — `kernel/src/proc/spawn.rs::self_test_bash_on_slateos_libc`
+proves it on every boot. The full spike results, the day-by-day history of how
+§72's expiry condition fired on 2026-07-22 and went unchecked for 25 days, and
+the general rule that failure established, are all in **§305**.
 
 ## Q42 — Two crates are not rustfmt-clean, which makes `cargo fmt` a trap. Do a one-shot repo-wide reformat, or keep formatting only touched files? — Status: OPEN
 
@@ -680,6 +517,172 @@ blindly.
 `gui/toolkit/src/text.rs` (`elide` / `elide_start`), and every `max_width:
 Some(..)` in `gui/**` and `apps/**`.
 
+## Q40 — Install the GNAT/SPARK and LLVM toolchains? Two Lane A roadmap items are blocked on them, and nothing else in Lane A is — Status: OPEN
+
+**Question.** The Lane A roadmap backlog has five items. Three are either
+"Later" (NTFS/Btrfs/ZFS/F2FS), lane-C-driven (TCP/IP stack), or a very large
+port that wants its own go-ahead (AMDGPU / i915-xe). The remaining two are the
+natural next increments — and **both are blocked on a compiler that is not
+installed on this machine**, not on any design or code question:
+
+| Roadmap item | Needs | Probe result |
+|---|---|---|
+| `[A]` Ada/SPARK FFI bridge for kernel-space drivers | `gnat`, `gprbuild`, `gnatprove` | all missing |
+| `[A]` Enable LLVM CFI as default for C/C++ compilation | `clang`, `lld` | both missing |
+
+(Probed 2026-08-14 via `command -v`. The `*ada*` directories under
+`userspace/` are coincidental CLI names — `ada-cli`, `cutadapt-cli` — not an
+Ada toolchain. A stray `ld.lld` exists under an Embarcadero install but is not
+a usable LLVM toolchain.)
+
+Per the global tooling rule I install missing tools myself when that is safe
+and self-contained, and pause to ask when it is heavyweight, system-wide, or
+has licensing implications. Both of these are in the "ask" category, and they
+are separable, so please answer them independently.
+
+**Option A — install GNAT/SPARK (unblocks the Ada FFI bridge).**
+
+- *Pro:* it is the only thing standing between the roadmap and a design-spec
+  feature. `design.txt` (lines 84-95) is specific about what it buys: SPARK
+  *proves* driver logic has no buffer overflows, no integer overflows and no
+  invalid state transitions, and the layering it names — Rust kernel → FFI →
+  SPARK driver in kernel space → IOMMU-constrained DMA — is a real
+  defence-in-depth story rather than a nice-to-have.
+- *Con:* it is the heaviest of the three asks. Beyond the ~1-2 GB toolchain
+  there is a **licensing fork** worth your call (FSF GNAT via MSYS2/MinGW vs
+  AdaCore's GNAT Pro; GNAT Community is discontinued), and a real technical
+  cost: a freestanding kernel needs a **restricted Ada runtime** (ZFP or
+  light), because the full runtime wants an OS underneath it. That is
+  configuration work, not just an install.
+- *Con:* `gnatprove` is what makes this "SPARK" rather than "Ada". If we
+  install a toolchain without the prover, we get FFI plumbing and none of the
+  proof — i.e. the entire justification.
+
+**Option B — install clang + lld (unblocks LLVM CFI).**
+
+- *Pro:* much lighter and less contentious; clang/lld are a standard,
+  well-understood install with no licensing question.
+- *Con:* the payoff is presently small. The rule is that C is used *only* when
+  porting existing C code (ext4, Mesa, Chromium), so "CFI as default for C/C++"
+  currently governs a very small amount of compilation — the C in
+  `scripts/create-ext4-rootfs.sh` is built with **gcc**, and that script is
+  Lane B's. Enabling CFI as a default would therefore reach across a lane
+  boundary to change Lane B's build for a benefit that only materialises once
+  the big C ports land.
+- *Con:* CFI wants LTO, which changes build times and link behaviour for
+  everything it touches.
+
+**Option C — install neither now; defer both.**
+
+- *Pro:* neither item is on the critical path today, and there is unblocked
+  Lane A work (see below), so the cost of waiting is zero.
+- *Con:* it leaves the Lane A roadmap backlog effectively down to
+  "Later"/large-port items, so the *next* time Lane A needs a task the same
+  question comes back.
+
+**Claude's recommendation:** **B now, A when you want the driver-safety story
+started, and tell me which GNAT.** clang/lld is cheap, uncontroversial, and I
+can install it without further input if you say go. GNAT/SPARK I would rather
+not choose for you: the FSF-vs-AdaCore call and the restricted-runtime
+decision are both yours, and installing the wrong one wastes the larger
+download. I would also want to sequence A *after* the IOMMU work it pairs with
+in `design.txt`, so it is not urgent.
+
+**What I am doing in the meantime — this question blocks nothing.** I have
+moved to `TD-KSHELL-LINE-EDITOR-IS-UTF8`, which is unblocked, in-lane, pure
+Rust, and a genuine correctness item rather than polish: `CLAUDE.md`'s rule 7
+says OS-boundary data is bytes and must never be forced through UTF-8, and the
+kshell line editor currently holds the command line as a `String`, so a
+filename containing a non-UTF-8 byte can be listed but neither typed nor
+tab-completed. Please do **not** treat this question as a reason to expect me
+idle.
+
+**Where it bites:** `scripts/kasan-build.sh`-style toolchain probing generally;
+for A, a new `drivers/spark/` tree plus a `build.rs` FFI shim and
+`toolchain/`-side runtime configuration; for B, `.cargo/config.toml` C flags
+and `scripts/create-ext4-rootfs.sh` (Lane B — would need a `requests/` entry).
+Roadmap lines ~297-298 (`roadmap.md` Lane A backlog) and `design.txt` lines
+84-95.
+
+---
+
+## B-Q1 — The zoneinfo reader is done and nothing on disk to read: which tzdata do we ship, from where, and how is it updated? — Status: OPEN
+
+*(First question filed under `roadmap.md`'s lane-prefix convention; the
+unprefixed `Q1`–`Q44` above predate the three-lane split.)*
+
+**Raised by Claude (Lane B)** (2026-08-13), on finishing
+`known-issues.md` → `TD-NO-SYSTEM-DEFAULT-ZONE-WITHOUT-TZ`.
+
+**The situation.** As of today both the libc and osh resolve `TZ` through real
+binary zoneinfo files: `tzrules::TzFile` reads TZif v1/v2/v3 (RFC 8536) with no
+allocator, `TZ=America/New_York` is looked up under `TZDIR` (default
+`/usr/share/zoneinfo`), and an unset `TZ` follows `/etc/localtime` exactly as
+glibc does. The reader is tested and the search order matches glibc's.
+
+**Nothing is on disk.** So `TZ=America/New_York` still silently answers UTC —
+the user gets UTC while believing they selected Eastern — and a fresh machine
+still has no wall clock it can be honest about. Every piece of the fix is built
+except the data, and shipping the data is a packaging decision rather than a
+coding one, which is why it stops here instead of me picking.
+
+**Why this needs you rather than me.** Three sub-decisions, none with an
+obviously-correct answer, and all of them user-visible:
+
+**(a) Which zones.** A full tzdata is ~450 KiB of binaries plus ~1 800 files.
+
+- **A1 — full tzdata.** Everything, including backward-compatibility links
+  (`US/Eastern`, `Asia/Calcutta`). Any ported program finds the name it expects.
+  Costs ~450 KiB of every base image forever.
+- **A2 — current zones only** (`zic -b slim`, no `backward` links). ~250 KiB,
+  ~350 files. A script or a container image that says `TZ=US/Eastern` — a very
+  common spelling — breaks, silently, back to UTC.
+- **A3 — a minimal set at install, the rest as a `pkg/` package.** The
+  installer ships the zone the user picks plus UTC; `pkg install tzdata` gets
+  the rest. Smallest image; but a program that needs a zone the user never
+  picked fails on a machine that looks fully installed.
+
+**(b) Where the bytes come from.** We do not have `zic`, and I would rather not
+write one — it is a real compiler for the tzdata source grammar, and getting it
+subtly wrong means a wrong clock that nobody notices for months.
+
+- **B1 — vendor the prebuilt binaries** from the IANA distribution into the
+  repo (or into `pkg/`), checked in and version-pinned. Reproducible; no build
+  dependency. Adds ~450 KiB of binary to git history per update.
+- **B2 — port `zic`** (it is small, portable C) and compile tzdata from the
+  text sources at image-build time. Keeps only text in git and makes the data
+  auditable, at the cost of a C port on the critical path of the image build.
+- **B3 — generate the TZif files with a small Rust tool of our own** reading
+  the tzdata text sources. Same benefit as B2 with no C port, but it is the
+  option most likely to be subtly wrong, for the reason above.
+
+**(c) How it is updated.** tzdata changes several times a year, usually at
+short notice, and a stale one is a wrong clock — the failure mode that started
+this entry.
+
+- **C1 — a `pkg/` package updated like anything else.** Fits the existing
+  machinery; a user who never updates drifts.
+- **C2 — updated with the OS image only.** Simple, but ties a timezone fix to a
+  full release.
+- **C3 — a dedicated fast channel** for tzdata (and only tzdata), so a zone
+  change ships without a release.
+
+**My recommendation: A1 + B1 + C1.** Full tzdata because ~450 KiB is nothing
+against being wrong about `US/Eastern`, and because the whole reason to use TZif
+rather than invent something is that ported programs expect what everyone else
+ships. Vendored prebuilt binaries because the alternative is writing or porting
+a compiler for a grammar whose bugs are invisible. A `pkg/` package because the
+update cadence is exactly what `pkg/` exists for, and C3's dedicated channel is
+infrastructure to build only once C1 has proven too slow in practice.
+
+**Where it bites:** `pkg/` (the packaging decision), `posix/src/tz.rs`
+(`TZDIR_DEFAULT`, `LOCALTIME_PATH`, `load_zoneinfo`),
+`userspace/oils/src/interp.rs` (`TZDIR_DEFAULT`, `Shell::zoneinfo_dir`),
+`tzrules/src/tzif.rs` (the reader, already done), the installer (which must
+write `/etc/localtime`), and the two tests that assert the current
+UTC fallback — `test_zoneinfo_names_resolve_to_utc_until_tzdata_is_shipped`
+(libc) and `printf_time_falls_back_to_utc_for_a_zone_it_cannot_resolve` (oils),
+both of which should start failing the day the data lands.
 
 ---
 

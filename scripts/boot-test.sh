@@ -16,7 +16,11 @@
 #                                       # numbers (the micro-benchmarks run in a
 #                                       # deferred background task AFTER BOOT_OK,
 #                                       # so the default fast path never sees
-#                                       # them — use this to catch perf regressions)
+#                                       # them — use this to catch perf
+#                                       # regressions).  Raises the default
+#                                       # timeout to 1200s, since the suite
+#                                       # runs well past BOOT_OK; an explicit
+#                                       # --timeout= still wins.
 #   ./scripts/boot-test.sh --hard-lockup-watchdog
 #                                       # attach a QEMU i6300esb PCI watchdog set
 #                                       # to inject an NMI on timeout. OFF by
@@ -91,6 +95,91 @@ report_pathz_skips() {
     return 0
 }
 
+# Directories whose contents are performance-critical per CLAUDE.md's
+# "Performance-Critical Subsystems" table.  A change under any of these is a
+# change that CLAUDE.md requires benchmarking, so it is the trigger for
+# nagging about a stale benchmark record.
+BENCH_CRITICAL_PATHS=(
+    "kernel/src/mm"
+    "kernel/src/sched"
+    "kernel/src/ipc"
+    "kernel/src/syscall"
+    "kernel/src/smp.rs"
+)
+
+# Say — out loud — that this boot produced NO benchmark numbers.
+#
+# Called only on the PASS paths, and only when --bench was NOT given.  It never
+# changes the exit code: a routine boot legitimately skips the suite, because
+# --bench roughly doubles the ~405 s TCG cycle.
+#
+# The point is that "PASSED" must not be readable as "performance was checked".
+# It was not: the deferred bench task is spawned on every boot and killed the
+# moment BOOT_OK appears, so an ordinary log contains at most the suite's own
+# header and never a single result
+# (known-issues.md -> TD-BENCHMARKS-ARE-NEVER-ACTUALLY-RUN-BY-THE-BOOT-GATE).
+# Same principle as the Path-Z fix above: a silent skip gets believed.
+#
+# It also answers "should I have run --bench?" instead of leaving it to
+# memory.  bench-history.py stamps each recorded run with its git commit, so
+# we can diff that commit against HEAD over the perf-critical paths and
+# escalate from a one-line note to a real warning only when this boot actually
+# contains unbenchmarked changes to code CLAUDE.md says must be benchmarked.
+report_bench_absence() {
+    local file="$1"
+    local hist="$PROJECT_ROOT/bench/history.jsonl"
+
+    # Did the suite at least start before QEMU was torn down?
+    local started="no"
+    [ -f "$file" ] && grep -qa 'Kernel micro-benchmarks' "$file" && started="yes"
+
+    echo "=== NO BENCHMARK RESULTS THIS RUN (--bench not given) ==="
+    if [ "$started" = "yes" ]; then
+        echo "  The deferred bench task started but was killed at $WAIT_MARKER before"
+        echo "  producing numbers. This run's PASS covers correctness only."
+    else
+        echo "  The bench task never reached its first result. This run's PASS"
+        echo "  covers correctness only."
+    fi
+
+    # Escalate only if perf-critical code moved since the last recorded run.
+    local last_commit=""
+    if [ -f "$hist" ]; then
+        last_commit="$(sed -n 's/.*"commit"[[:space:]]*:[[:space:]]*"\([0-9a-f]*\)".*/\1/p' "$hist" | tail -1)"
+    fi
+
+    if [ -z "$last_commit" ]; then
+        echo "  No previous run in bench/history.jsonl — there is no baseline for this"
+        echo "  host yet. Run: ./scripts/boot-test.sh --bench"
+        return 0
+    fi
+
+    if ! git -C "$PROJECT_ROOT" cat-file -e "${last_commit}^{commit}" 2>/dev/null; then
+        echo "  Last recorded run was $last_commit, which is not in this repo"
+        echo "  (rebased or not fetched); cannot tell what changed since."
+        echo "  Run: ./scripts/boot-test.sh --bench"
+        return 0
+    fi
+
+    local changed
+    changed="$(git -C "$PROJECT_ROOT" diff --name-only "$last_commit" HEAD -- \
+        "${BENCH_CRITICAL_PATHS[@]}" 2>/dev/null)"
+
+    if [ -n "$changed" ]; then
+        echo "  !! Performance-critical code changed since the last benchmarked commit"
+        echo "     ($last_commit). CLAUDE.md requires benchmarking these:"
+        echo "$changed" | head -8 | sed 's/^/       /'
+        local n
+        n="$(echo "$changed" | grep -c .)"
+        [ "$n" -gt 8 ] && echo "       ... and $((n - 8)) more"
+        echo "     Run: ./scripts/boot-test.sh --bench"
+    else
+        echo "  No perf-critical changes since the last benchmarked commit ($last_commit),"
+        echo "  so skipping the suite is reasonable here."
+    fi
+    return 0
+}
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
@@ -144,12 +233,38 @@ kill_qemu() {
 }
 # Default boot timeout.  The boot path runs the full self-test suite before
 # printing BOOT_OK, including the Path-Z ring-3 toolchain tests (each spawns a
-# real glibc/tcc/make/dash process under ld.so), which now dominate boot time:
-# a clean boot reaches BOOT_OK around ~305s and the suite keeps growing as new
-# Path-Z rungs land.  Keep a comfortable margin over the observed boot time so
-# the default invocation never spuriously "times out" on a healthy kernel;
-# override with --timeout= for slower hosts or the --bench wait marker.
-TIMEOUT=480
+# real glibc/tcc/make/dash process under ld.so), which now dominate boot time.
+#
+# This number has to be maintained.  It was 480s against a measured ~305s
+# boot; by 2026-08-14 a healthy boot reached BOOT_OK at ~456s — a 24s margin,
+# and the in-kernel liveness detector was already firing "BOOT DEADLINE
+# EXCEEDED" with a task-table dump on every clean run.  The failure mode when
+# the margin runs out is nasty: a perfectly healthy kernel is killed mid-boot
+# and reported as a hang, which costs a diagnosis cycle before anyone thinks
+# to check the clock.  So the default is set at roughly 2x the observed boot,
+# not just above it.
+#
+# Detecting a *real* hang quickly is not this knob's job — that is
+# --stall-secs=N, which watches for the serial log going silent and does not
+# care how long a healthy boot takes.
+#
+# Measured: BOOT_OK at ~456s (2026-08-14, TCG, qemu64).  Re-measure and raise
+# this when the self-test suite grows; override with --timeout= for slower
+# hosts.
+TIMEOUT=900
+# Did the caller pass --timeout= explicitly?  Only used to decide whether
+# --bench may raise the default (see BENCH_TIMEOUT below); an explicit
+# --timeout= always wins.
+TIMEOUT_EXPLICIT=0
+# Timeout used when --bench is given and --timeout= is not.  The benchmark
+# suite runs *after* BOOT_OK, as a deferred low-priority task, and it is not
+# cheap under TCG: the asymmetric-crypto benchmarks alone are tens of seconds
+# each (ed25519_sign averages ~433ms per iteration for 50 iterations).  A
+# --bench run at the 480s boot default therefore reaches BOOT_OK and is then
+# killed part-way through the crypto section, reporting "Boot test FAILED
+# (BENCH_OK not reached)" for a kernel that booted perfectly.  That is a
+# harness false negative, and it happened.
+BENCH_TIMEOUT=1200
 NO_BUILD=0
 NO_STAGE=0
 BENCH=0
@@ -185,11 +300,18 @@ for arg in "$@"; do
         # note on B-KNULLJUMP-SIGNAL).
         --no-stage) NO_BUILD=1; NO_STAGE=1 ;;
         --bench) BENCH=1; WAIT_MARKER="BENCH_OK" ;;
-        --timeout=*) TIMEOUT="${arg#*=}" ;;
+        --timeout=*) TIMEOUT="${arg#*=}"; TIMEOUT_EXPLICIT=1 ;;
         --stall-secs=*) STALL_SECS="${arg#*=}" ;;
         --hard-lockup-watchdog) HARD_LOCKUP_WATCHDOG=1 ;;
     esac
 done
+
+# --bench waits for a marker that is emitted long after BOOT_OK, so it needs a
+# correspondingly longer budget.  Applied only if the caller did not pick a
+# timeout themselves — an explicit --timeout= always wins, in either direction.
+if [ "$BENCH" = "1" ] && [ "$TIMEOUT_EXPLICIT" = "0" ]; then
+    TIMEOUT="$BENCH_TIMEOUT"
+fi
 
 # Optional hard-lockup NMI watchdog device (see --hard-lockup-watchdog above and
 # Q20).  Empty unless opted in, so the default QEMU command line is unchanged.
@@ -371,21 +493,39 @@ resolve_kernel_symbol() {
 }
 
 # Print the micro-benchmark result lines from the serial log.  The kernel emits
-# them as "[bench] <name>: <number>" plus PASS / "ABOVE TARGET" verdicts from a
-# background task that runs AFTER BOOT_OK.  We surface an "ABOVE TARGET" verdict
-# as a soft PERF NOTE rather than a hard failure: under QEMU's TCG interpreter
-# the absolute cycle counts are noisy and routinely exceed the bare-metal
-# targets, so a slow run here is not by itself a regression signal — it's a
-# prompt to compare against the previous run's numbers.
+# them as "[bench] <name>: <number>" plus PASS / "OVER HARDWARE TARGET" lines
+# from a background task that runs AFTER BOOT_OK.
+#
+# An over-target verdict is NOT a failure here and is not reported as one.
+# Under QEMU's TCG interpreter every guest memory access carries a softmmu
+# lookup costing a few hundred host cycles, where real hardware takes an L1 hit
+# at 1-4 cycles, so the bare-metal targets in bench/baselines.toml are
+# unreachable by construction and most of the suite sits 10-400x over them
+# while being perfectly correct.  Five boots were once spent chasing exactly
+# that illusion (known-issues.md,
+# TD-BENCH-OWNER-AB-BUDGET-WAS-AN-ABSOLUTE-CYCLE-COUNT).
+#
+# The comparison that does carry signal is run-over-run on this same host,
+# which cancels the emulation constant.  scripts/bench-history.py records each
+# run to bench/history.jsonl and diffs against the previous one.  This used to
+# say "compare against prior runs" without anything storing them, which made
+# the advice unfollowable.
 print_bench_results() {
     local file="$1"
     [ -f "$file" ] || return 0
     echo "=== Benchmark results ==="
-    grep -E '^\[bench\]' "$file" || echo "(no [bench] lines found)"
-    if grep -q "ABOVE TARGET" "$file"; then
-        echo "PERF NOTE: one or more benchmarks reported ABOVE TARGET."
-        echo "  (QEMU/TCG cycle counts are noisy; compare against prior runs"
-        echo "   rather than treating this as a hard regression.)"
+    # The machine-readable SCORE lines are for bench-history.py, not the reader.
+    grep -E '^\[bench\]' "$file" | grep -v '^\[bench\] SCORE ' \
+        || echo "(no [bench] lines found)"
+
+    # Record and diff.  Never fatal: a missing python or a write failure must
+    # not turn a healthy boot into a failed one.
+    if command -v python &>/dev/null; then
+        python "$SCRIPT_DIR/bench-history.py" --serial "$file" || true
+    elif command -v python3 &>/dev/null; then
+        python3 "$SCRIPT_DIR/bench-history.py" --serial "$file" || true
+    else
+        echo "(python not found; skipping benchmark history diff)"
     fi
 }
 
@@ -580,6 +720,95 @@ fi
 # rather than dead code.  Override with QEMU_CPU=... to test other models.
 QEMU_CPU="${QEMU_CPU:-qemu64,+smep,+smap,+umip}"
 
+# --- Cross-worktree boot lock -------------------------------------------------
+#
+# The three lanes each work in their OWN git worktree (D:/…/os, os-lane-a,
+# os-lane-c), so `target/` and `build/serial-test.txt` are NO LONGER shared —
+# roadmap.md §6 predates the worktree split and is wrong about that.  What IS
+# still shared is the machine: we boot under TCG (pure emulation, CPU-bound),
+# so two concurrent QEMUs roughly double each other's wall-clock boot time and
+# push long boots past TIMEOUT, producing phantom "hang" failures.  A soak that
+# takes ~480s/iteration solo starts timing out when another lane boots
+# alongside it.
+#
+# So the lock must live somewhere ALL worktrees can see.  `git rev-parse
+# --git-common-dir` resolves to the single real .git directory shared by every
+# worktree (linked worktrees return its absolute path), which is exactly the
+# anchor we need.  Fall back to build/ when git is unavailable — that degrades
+# to the old per-tree behaviour rather than failing.
+#
+# Acquisition is `mkdir`, which is atomic on both NTFS and POSIX (unlike a
+# test-then-create on a file).  Metadata goes in a file inside the directory.
+#
+# Escape hatches:
+#   BOOT_LOCK=0          skip locking entirely (single-lane / debugging)
+#   BOOT_LOCK_WAIT=<sec> max seconds to wait for the lock (default 3600).
+#                        On expiry we proceed anyway rather than failing the
+#                        test — a slow boot beats a spurious error.
+BOOT_LOCK_DIR=""
+BOOT_LOCK_OWNER=""   # must exist before release_boot_lock runs under `set -u`
+if [ "${BOOT_LOCK:-1}" != "0" ]; then
+    _common_git="$(git -C "$PROJECT_ROOT" rev-parse --git-common-dir 2>/dev/null || echo "")"
+    if [ -n "$_common_git" ]; then
+        # A main worktree reports a relative ".git"; make it absolute.
+        case "$_common_git" in
+            /*|[A-Za-z]:*) : ;;
+            *) _common_git="$PROJECT_ROOT/$_common_git" ;;
+        esac
+        BOOT_LOCK_DIR="$_common_git/slateos-boot-lock"
+    else
+        BOOT_LOCK_DIR="$PROJECT_ROOT/build/.boot-lock"
+    fi
+fi
+
+# Release is idempotent and safe to call when we never acquired: we only remove
+# the lock if the owner file still names THIS process, so we can never delete a
+# lock that another lane acquired after we broke/released ours.
+release_boot_lock() {
+    [ -n "$BOOT_LOCK_DIR" ] || return 0
+    [ -d "$BOOT_LOCK_DIR" ] || return 0
+    if [ "$(cat "$BOOT_LOCK_DIR/owner" 2>/dev/null || echo "")" = "$BOOT_LOCK_OWNER" ]; then
+        rm -rf "$BOOT_LOCK_DIR" 2>/dev/null || true
+    fi
+}
+
+if [ -n "$BOOT_LOCK_DIR" ]; then
+    BOOT_LOCK_OWNER="$(python "$PROJECT_ROOT/scripts/which-lane.py" 2>/dev/null | awk '/^lane:/{print $2}' || true)"
+    BOOT_LOCK_OWNER="lane-${BOOT_LOCK_OWNER:-?}/pid-$$/$(date +%s)"
+    _lock_wait="${BOOT_LOCK_WAIT:-3600}"
+    _lock_waited=0
+    while ! mkdir "$BOOT_LOCK_DIR" 2>/dev/null; do
+        # Break a stale lock: >20 min old means the holder died without
+        # releasing (hard kill, power loss).  20 min > our longest healthy
+        # boot (~8 min) with a wide margin, so this cannot steal a live lock.
+        _lock_age=999999
+        if [ -f "$BOOT_LOCK_DIR/owner" ]; then
+            _lock_mtime="$(date -r "$BOOT_LOCK_DIR/owner" +%s 2>/dev/null || echo 0)"
+            [ "$_lock_mtime" -gt 0 ] && _lock_age=$(( $(date +%s) - _lock_mtime ))
+        fi
+        if [ "$_lock_age" -gt 1200 ]; then
+            echo "=== Breaking stale boot lock (age ${_lock_age}s, held by $(cat "$BOOT_LOCK_DIR/owner" 2>/dev/null || echo unknown)) ==="
+            rm -rf "$BOOT_LOCK_DIR" 2>/dev/null || true
+            continue
+        fi
+        if [ "$_lock_waited" -ge "$_lock_wait" ]; then
+            echo "=== Boot lock still held after ${_lock_waited}s; booting anyway (results may be slow) ==="
+            BOOT_LOCK_DIR=""
+            break
+        fi
+        if [ $(( _lock_waited % 60 )) -eq 0 ]; then
+            echo "=== Waiting for boot lock, held by $(cat "$BOOT_LOCK_DIR/owner" 2>/dev/null || echo unknown) (${_lock_waited}s) ==="
+        fi
+        sleep 5
+        _lock_waited=$(( _lock_waited + 5 ))
+    done
+    if [ -n "$BOOT_LOCK_DIR" ]; then
+        echo "$BOOT_LOCK_OWNER" > "$BOOT_LOCK_DIR/owner" 2>/dev/null || true
+        trap 'release_boot_lock' EXIT INT TERM
+        echo "=== Boot lock acquired: $BOOT_LOCK_OWNER ==="
+    fi
+fi
+
 # Step 4: Boot QEMU
 echo "=== Booting QEMU (timeout: ${TIMEOUT}s, cpu: $QEMU_CPU) ==="
 rm -f "$SERIAL_FILE"
@@ -607,7 +836,12 @@ QEMU_PID=$!
 # or exits early — a surviving qemu keeps the serial file locked and breaks
 # the next run.  (A hard SIGKILL/TaskStop of the harness cannot run this, so
 # callers that force-stop the script must still clean up qemu themselves.)
-trap 'kill_qemu "$QEMU_PID"' EXIT INT TERM
+#
+# NOTE: this trap must ALSO release the boot lock — it replaces the
+# release-only trap installed at lock-acquisition time, and bash keeps just one
+# handler per signal.  Reaping qemu first is deliberate: the next lane must not
+# be handed the lock while our emulator is still burning CPU.
+trap 'kill_qemu "$QEMU_PID"; release_boot_lock' EXIT INT TERM
 
 # Wait for BOOT_OK or timeout
 ELAPSED=0
@@ -631,7 +865,11 @@ while kill -0 "$QEMU_PID" 2>/dev/null && [ "$ELAPSED" -lt "$TIMEOUT" ]; do
             echo "=== Boot test FAILED ($WAIT_MARKER reached but a self-test failed) ==="
             exit 1
         fi
-        [ "$BENCH" -eq 1 ] && print_bench_results "$SERIAL_FILE"
+        if [ "$BENCH" -eq 1 ]; then
+            print_bench_results "$SERIAL_FILE"
+        else
+            report_bench_absence "$SERIAL_FILE"
+        fi
         report_pathz_skips "$SERIAL_FILE"
         echo "=== Boot test PASSED ==="
         exit 0
@@ -683,7 +921,11 @@ if [ -f "$SERIAL_FILE" ]; then
             echo "=== Boot test FAILED ($WAIT_MARKER reached but a self-test failed) ==="
             exit 1
         fi
-        [ "$BENCH" -eq 1 ] && print_bench_results "$SERIAL_FILE"
+        if [ "$BENCH" -eq 1 ]; then
+            print_bench_results "$SERIAL_FILE"
+        else
+            report_bench_absence "$SERIAL_FILE"
+        fi
         report_pathz_skips "$SERIAL_FILE"
         echo "=== Boot test PASSED ==="
         exit 0

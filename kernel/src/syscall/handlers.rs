@@ -3276,7 +3276,12 @@ pub fn sys_process_spawn(args: &SyscallArgs) -> SyscallResult {
         core::str::from_utf8(&name_bytes).unwrap_or("unnamed")
     };
 
-    let options = SpawnOptions::new(name);
+    // Record the caller as the child's parent.  See `sys_process_spawn_ex`
+    // for why omitting this is not a cosmetic bookkeeping matter.
+    // `unwrap_or(0)` means "spawned by the kernel", which is the correct
+    // answer for a spawn that has no user process behind it; PID 0 has
+    // implicit authority and needs no capability grant.
+    let options = SpawnOptions::new(name).parent(caller_pid().unwrap_or(0));
 
     match spawn_process(&elf_data, &options) {
         Ok(result) => {
@@ -3394,7 +3399,27 @@ pub fn sys_process_spawn_ex(args: &SyscallArgs) -> SyscallResult {
         alloc::vec::Vec::new()
     };
 
+    // Record the caller as the child's parent.
+    //
+    // Both spawn syscalls used to leave this at its default of 0, which is
+    // the "spawned by the kernel" sentinel, and three things in
+    // `spawn_process` are gated on `options.parent != 0`:
+    //
+    //  * Step 5b — the parent is granted a `Process` capability over the
+    //    child (WAIT/SIGNAL/DELETE/...).  Skipped, so the parent held no
+    //    authority over what it had just spawned.
+    //  * Step 5c — the child inherits the parent's filesystem namespace.
+    //    Skipped, so a process confined to a non-root namespace could spawn
+    //    a child that landed in the *root* namespace: a sandbox escape.
+    //  * `pcb::try_reap` rejects any reap whose recorded parent does not
+    //    match the caller, so every `SYS_PROCESS_WAIT`/`_TRY_WAIT` on a
+    //    spawned child returned `PermissionDenied` and no userspace process
+    //    could ever reap its own children — leaking a zombie each time.
+    //
+    // `fork` was unaffected because it sets the parent on its own path,
+    // which is why the fork→exec→reap tests passed throughout.
     let options = SpawnOptions::new(name)
+        .parent(caller_pid().unwrap_or(0))
         .fd_map(&fd_pairs)
         .argv(&argv_slices)
         .envp(&envp_slices);

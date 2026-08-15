@@ -35,20 +35,21 @@ use crate::ast::{
     CondExpr, ForArithClause, ForClause, FunctionDef, HereDoc, IfClause, Item, ItemSep, LineMap,
     LoopClause,
     ParamOp,
-    Pipeline, Program,
-    Redirect, RedirectOp, ReplaceAnchor, SelectClause, SimpleCommand, SubshellClause, Word,
-    WordPart,
+    Pipeline, ProcSubBody, Program,
+    Redirect, RedirectOp, ReplaceAnchor, SelectClause, SimpleCommand, SubDelim, SubshellClause,
+    Word, WordPart,
 };
 use crate::assoc::AssocArray;
 use crate::bfmt;
 use crate::bytes::{self, BStr, Ch, Str};
 use crate::lexer::{
-    AliasExpansion, CmdSubSpan, DparenCopy, HeredocEof, ParseOpts, Op, ReaderWarning, Seg, Spanned,
-    Tok, SubBody, TokSpan, Tokenized, UngatheredHeredoc,
-    expand_aliases_tracked, tokenize,
+    AliasExpansion, CmdSubSpan, DparenCopy, HeredocEof, ParseOpts, Op, ProcRead, ReaderWarning, Seg, Spanned,
+    Tok, SubBody, SubOpen, TokSpan, Tokenized, UngatheredHeredoc,
+    expand_aliases_tracked,
     tokenize_paren_body, tokenize_deferred, tokenize_spanned, word_is_assignment,
 };
 use crate::wordscan::BraceEnd;
+use std::borrow::Cow;
 
 /// Whether `s` is a syntactically valid shell identifier.
 ///
@@ -431,8 +432,10 @@ impl From<crate::lexer::LexError> for ParseError {
     }
 }
 
-/// [`ParseError::from`], after giving a substitution body that the scan never
-/// found the `)` of its say. See [`crate::lexer::SubstBail`].
+/// [`ParseError::from`], after giving the substitution bodies the scan read but
+/// did not parse their say — the ones it read whole inside a word that then ran
+/// out ([`crate::lexer::LexError::eager_bodies`]), and the one it never found
+/// the `)` of ([`crate::lexer::SubstBail`]).
 ///
 /// bash parses that body *as it reads it*, so an error in it comes out before
 /// the missing paren is ever noticed — ``echo $(fi`` is ``syntax error near
@@ -448,8 +451,38 @@ impl From<crate::lexer::LexError> for ParseError {
 /// means exactly that, and is bash's `EOF_Reached` path (parse.y:4170), on
 /// which the `)` message stands.
 fn resolve_subst_bail(e: crate::lexer::LexError, opts: ParseOpts) -> ParseError {
+    // A word that ran out of input reports the bodies it read on the way there
+    // first: they sit earlier in the text than whatever the scan finally ran
+    // out inside, and bash reports the first failure it meets. See
+    // [`crate::lexer::LexError::eager_bodies`].
+    if let Some(subs) = e.eager_bodies.as_deref()
+        && let Some(err) = eager_body_error(subs, opts)
+    {
+        return err;
+    }
     let Some(bail) = e.bail.clone() else { return ParseError::from(e) };
     bail_body_error(&bail, opts).unwrap_or_else(|| ParseError::from(e))
+}
+
+/// The error bash's parse of the substitution bodies inside an unfinished word
+/// would raise, or `None` if all of them parse (or merely run out of input
+/// themselves).
+///
+/// The bodies are in reading order and the first failure wins, which is bash
+/// reading left to right: `echo " $(fi) $(done)` names `fi`.
+///
+/// An end-of-input error is passed over for the same reason [`bail_body_error`]
+/// passes over one — a body that merely ran out did not *say* anything, and
+/// what the word itself gave up on is then the thing to report.
+fn eager_body_error(subs: &[crate::lexer::EagerBody], opts: ParseOpts) -> Option<ParseError> {
+    subs.iter().find_map(|b| {
+        let parsed = if b.procsub {
+            parse_procsub_body(&b.src, b.line, opts)
+        } else {
+            parse_cmdsub_body(&b.src, b.line, opts)
+        };
+        parsed.err().filter(|e| !e.is_incomplete())
+    })
 }
 
 /// The error bash's nested parse of an unterminated substitution body would
@@ -2572,8 +2605,8 @@ fn map_segs(segs: &mut [Seg], map: &LineMap) {
                 *open = map.map(*open);
                 map_arith_comsubs(nested, map);
             }
-            Seg::ProcSub(_, _, open) => *open = map.map(*open),
-            Seg::Dq(inner) => map_segs(inner, map),
+            Seg::ProcSub(_, _, open, _) => *open = map.map(*open),
+            Seg::Dq(inner, _) => map_segs(inner, map),
             _ => {}
         }
     }
@@ -2583,9 +2616,19 @@ fn map_segs(segs: &mut [Seg], map: &LineMap) {
 /// [`Seg::CmdSub`]'s own close line is renumbered: they are parsed in this token
 /// stream, so an error in one is blamed on the enclosing source's line and not
 /// on the line a fresh lex of the body would have counted.
+///
+/// Both of the lines a span may carry are renumbered, because the two spellings
+/// count from different ends: a `$( … )` body is numbered back from its closing
+/// `)` and a `<( … )` / `>( … )` body forward from its opening delimiter (see
+/// [`parse_procsub_body`]). Leaving the second one alone is why a procsub in a
+/// `${ … }` body used to be blamed on line 1 of an `eval` string while the `$(`
+/// spelling beside it named the line the `eval` was written on.
 fn map_arith_comsubs(nested: &mut [CmdSubSpan], map: &LineMap) {
     for sub in nested {
         sub.close_line = map.map(sub.close_line);
+        if let SubOpen::Proc { open_line, .. } = &mut sub.open {
+            *open_line = map.map(*open_line);
+        }
     }
 }
 
@@ -6057,10 +6100,10 @@ fn word_from_segs_in(segs: &[Seg], opts: ParseOpts, q: Quoting) -> Result<Word, 
 /// *its* words — so the body must not also cut the word holding it.
 fn segs_hold_a_nul(segs: &[Seg]) -> bool {
     segs.iter().any(|s| match s {
-        Seg::Lit(t) | Seg::Sq(t, _) | Seg::ParamBraced(t, ..) | Seg::Arith(t, ..) => {
+        Seg::Lit(t) | Seg::Sq { text: t, .. } | Seg::ParamBraced(t, ..) | Seg::Arith(t, ..) => {
             t.contains(&0)
         }
-        Seg::Dq(inner) => segs_hold_a_nul(inner),
+        Seg::Dq(inner, _) => segs_hold_a_nul(inner),
         // An unclosed construct's text is echoed back by a diagnostic rather
         // than expanded, and the diagnostic writes bytes rather than a C string.
         Seg::Param(_) | Seg::CmdSub(..) | Seg::ProcSub(..) | Seg::Unclosed(_) => false,
@@ -6082,10 +6125,10 @@ fn segs_splice_past_the_brace(segs: &[Seg]) -> bool {
     segs.iter().any(|s| match s {
         // The splice only happens inside double quotes, so the scan that
         // decides where the expansion ends is the double-quoted one.
-        Seg::ParamBraced(raw, _, _, true) => {
+        Seg::ParamBraced(raw, _, _, spliced) if !spliced.is_empty() => {
             matches!(crate::wordscan::expansion_body_len(raw, true), BraceEnd::Early(_))
         }
-        Seg::Dq(inner) => segs_splice_past_the_brace(inner),
+        Seg::Dq(inner, _) => segs_splice_past_the_brace(inner),
         _ => false,
     })
 }
@@ -6117,8 +6160,9 @@ fn word_expanded_from_its_text(word: Word, segs: &[Seg]) -> Word {
     }
 }
 
-/// Parse the `$( … )` bodies an arithmetic scan stepped over, and return each
-/// one's re-print beside the range of the scan's text it replaces.
+/// Parse the substitution bodies an arithmetic or `${ … }` scan stepped over,
+/// and return each one's re-print beside the range of the scan's text it
+/// replaces.
 ///
 /// bash parses them where it meets them — `parse_matched_pair` under `P_ARITH`
 /// sends a `$(` to `parse_dollar_word` and from there to `parse_comsub`
@@ -6146,8 +6190,15 @@ fn parse_arith_comsubs(
         if sub.kind != SubBody::Eager {
             continue;
         }
-        let prog = parse_cmdsub_body(&sub.src, sub.close_line, opts)?;
-        out.push((sub.range.clone(), crate::unparse::comsub_reprint(b"$(", &prog)));
+        // A process substitution met by the same scan is parsed by the same
+        // rule and re-printed into the same buffer — only from its *opening*
+        // line, and by the parser that ends a body on a `)` that is not a
+        // `list_terminator`. See [`SubOpen`].
+        let prog = match sub.open {
+            SubOpen::Dollar => parse_cmdsub_body(&sub.src, sub.close_line, opts)?,
+            SubOpen::Proc { open_line, .. } => parse_procsub_body(&sub.src, open_line, opts)?,
+        };
+        out.push((sub.range.clone(), crate::unparse::comsub_reprint(sub.open.delim(), &prog)));
     }
     Ok(out)
 }
@@ -6179,8 +6230,14 @@ fn parse_arith_comsubs(
 /// however deeply spelled. Which of the two scans its own parts is the
 /// arithmetic's question, answered in `Shell::arith_extent_scan`.
 fn arith_unread_subs(expr: &Str, nested: &[CmdSubSpan]) -> Vec<WordPart> {
-    let mut spans: Vec<&CmdSubSpan> =
-        nested.iter().filter(|s| matches!(s.kind, SubBody::Unread { .. })).collect();
+    // Only the `$( … )` spelling. A `<( … )` reaches this collection from a
+    // `${ … }` the arithmetic scan stepped over, and the expansion-time scan
+    // does not recurse into one with a parse the way `extract_command_subst`
+    // does — it is text there, and stays text here. See [`SubOpen`].
+    let mut spans: Vec<&CmdSubSpan> = nested
+        .iter()
+        .filter(|s| matches!(s.kind, SubBody::Unread { .. }) && matches!(s.open, SubOpen::Dollar))
+        .collect();
     if spans.is_empty() {
         return vec![WordPart::Literal(expr.clone())];
     }
@@ -6194,10 +6251,13 @@ fn arith_unread_subs(expr: &Str, nested: &[CmdSubSpan]) -> Vec<WordPart> {
         if s.range.start < at || s.range.end > expr.len() {
             continue;
         }
-        let SubBody::Unread { closed } = s.kind else { continue };
+        let SubBody::Unread { closed, .. } = s.kind else { continue };
         parts.push(WordPart::Literal(expr.get(at..s.range.start).unwrap_or_default().to_vec()));
         parts.push(WordPart::CommandSub {
             body: CmdSubBody::Unread {
+                // The spans this walk keeps are filtered to `SubOpen::Dollar`
+                // above, so the spelling is never in doubt here.
+                delim: SubDelim::Dollar,
                 src: s.src.clone(),
                 // Filled by `unparse::attach_comsub_tails`, once the word this
                 // arithmetic sits in has been assembled.
@@ -6210,6 +6270,84 @@ fn arith_unread_subs(expr: &Str, nested: &[CmdSubSpan]) -> Vec<WordPart> {
     }
     parts.push(WordPart::Literal(expr.get(at..).unwrap_or_default().to_vec()));
     parts
+}
+
+/// The re-prints of the *process* substitutions a `${ … }` scan stepped over —
+/// [`parse_arith_comsubs`] restricted to the `<( … )` / `>( … )` spelling.
+///
+/// The two spellings need separating because only one of them is read a second
+/// time. A `$( … )` in a `${ … }` body is met again by the re-lex that carves
+/// the operand, pattern or subscript out of the body's text, and the part that
+/// re-lex builds re-prints itself; splicing the re-print into the text as well
+/// would gather a nested here-document twice. A `<( … )` is not met again —
+/// `read_word_verbatim` leaves it as characters on purpose, since osh decides
+/// at lex time whether a process substitution is live and none of the fragments
+/// that re-lex is one bash performs it in — so for that spelling the splice
+/// here is the only thing that carries the parse into the body's text.
+///
+/// # Errors
+/// Returns the first body's [`ParseError`], which is the enclosing unit's:
+/// `echo "${z:-<(fi)}"` is a syntax error at `fi`.
+fn procsub_reprints(
+    nested: &[CmdSubSpan],
+    opts: ParseOpts,
+) -> Result<Vec<(core::ops::Range<usize>, Str)>, ParseError> {
+    let mut out = Vec::new();
+    for sub in nested {
+        let SubOpen::Proc { open_line, .. } = sub.open else { continue };
+        if sub.kind != SubBody::Eager {
+            continue;
+        }
+        let prog = parse_procsub_body(&sub.src, open_line, opts)?;
+        out.push((sub.range.clone(), crate::unparse::comsub_reprint(sub.open.delim(), &prog)));
+    }
+    Ok(out)
+}
+
+/// [`splice_reprints`], carrying a set of ranges measured against the same text
+/// across the change.
+///
+/// The ranges are the body's [bare splices](crate::lexer::Lexer::bare_splices) —
+/// stretches no parser read — and a re-print that is not the length of the
+/// source it replaces moves every one of them that sits after it. Nothing can
+/// sit *inside* a re-printed span (a substitution found in spliced text is not
+/// recorded, that text having been written rather than read), so each range
+/// only ever moves as a whole.
+///
+/// Returns the text and ranges untouched when there is nothing to splice, which
+/// is the overwhelmingly common case.
+fn splice_reprints_tracking<'a>(
+    text: &'a Str,
+    mut reprints: Vec<(core::ops::Range<usize>, Str)>,
+    splices: &'a [core::ops::Range<usize>],
+) -> (Cow<'a, Str>, Cow<'a, [core::ops::Range<usize>]>) {
+    if reprints.is_empty() {
+        return (Cow::Borrowed(text), Cow::Borrowed(splices));
+    }
+    reprints.sort_by_key(|(r, _)| r.start);
+    let mut out = text.clone();
+    let mut moved = splices.to_vec();
+    // Right to left, so a range still to be spliced is still valid; see
+    // [`splice_reprints`].
+    for (range, rep) in reprints.into_iter().rev() {
+        // A range that does not fit is not something a correct scan can
+        // produce; dropping the splice keeps the source text rather than
+        // corrupting it.
+        if range.start > range.end || range.end > out.len() {
+            continue;
+        }
+        let (at, old, new) = (range.start, range.end - range.start, rep.len());
+        out.splice(range, rep);
+        if new != old {
+            let shift = |p: usize| {
+                if p <= at { p } else { (p + new).saturating_sub(old) }
+            };
+            for s in &mut moved {
+                *s = shift(s.start)..shift(s.end);
+            }
+        }
+    }
+    (Cow::Owned(out), Cow::Owned(moved))
 }
 
 /// Write each re-print from [`parse_arith_comsubs`] back over the text it
@@ -6287,7 +6425,7 @@ fn seg_to_parts(
     out: &mut Vec<WordPart>,
 ) -> Result<(), ParseError> {
     if let Seg::ParamBraced(raw, _, nested, spliced) = seg
-        && *spliced
+        && !spliced.is_empty()
         // The splice only happens inside double quotes, so the scan that
         // decides is the double-quoted one.
         && !matches!(crate::wordscan::expansion_body_len(raw, true), BraceEnd::Same)
@@ -6309,27 +6447,38 @@ fn seg_to_parts(
 fn seg_to_part(seg: &Seg, opts: ParseOpts, q: Quoting) -> Result<WordPart, ParseError> {
     Ok(match seg {
         Seg::Lit(s) => WordPart::Literal(s.clone()),
-        Seg::Sq(s, escaped) => WordPart::SingleQuoted {
-            text: s.clone(),
+        Seg::Sq { text, escaped, closed } => WordPart::SingleQuoted {
+            text: text.clone(),
             escaped: *escaped,
+            closed: *closed,
             // Filled in afterwards, and only for a subscript or a substring
             // bound. See [`word_subscript_from_source_at`].
             parts: None,
         },
-        Seg::Dq(inner) => {
+        Seg::Dq(inner, closed) => {
             let mut parts = Vec::with_capacity(inner.len());
             for s in inner {
                 seg_to_parts(s, opts, Quoting::Dquote, &mut parts)?;
             }
-            WordPart::DoubleQuoted(parts)
+            WordPart::DoubleQuoted { parts, closed: *closed }
         }
         Seg::Param(n) => WordPart::Param { name: n.clone(), braced: false },
         Seg::Unclosed(u) => WordPart::Unclosed(u.clone()),
         // The body is lexed again in here, from its own line 1, so every
         // fragment of it has to be told the physical line it starts on — see
         // [`frag_line`] and [`map_frag_segs`].
-        Seg::ParamBraced(raw, open, nested, _) => {
-            let mut part = parse_braced_param_in(raw, opts, q, *open);
+        Seg::ParamBraced(raw, open, nested, spliced) => {
+            // A process substitution the scan stepped over is parsed here and
+            // its re-print written over the source, because nothing downstream
+            // will do either — see [`procsub_reprints`]. So
+            // `echo "${z:-<(fi)}"` is a syntax error at `fi` rather than a
+            // brace body holding the text `<(fi)`, and
+            // `f() { echo "${z:-<(echo   hi)}"; }` prints back with the run of
+            // spaces gone.
+            let (raw, spliced) =
+                splice_reprints_tracking(raw, procsub_reprints(nested, opts)?, spliced);
+            let (raw, spliced) = (&*raw, &*spliced);
+            let mut part = parse_braced_param_in(raw, opts, q, *open, spliced);
             // A `$( … )` in the body is parsed by bash where it *reads* it, so
             // its syntax error beats every verdict the `${ … }` could reach —
             // a runtime `bad substitution`, an outright refusal of the body's
@@ -6373,7 +6522,14 @@ fn seg_to_part(seg: &Seg, opts: ParseOpts, q: Quoting) -> Result<WordPart, Parse
                 // source. The `tail` is filled by
                 // `unparse::attach_comsub_tails` once the word is assembled,
                 // exactly as a `Parsed` body's is.
-                SubBody::Unread { closed } => CmdSubBody::Unread {
+                // A `Seg::CmdSub` is the `$( … )` spelling everywhere a parser
+                // read the text, because the other two are lowered to a live
+                // [`WordPart::ProcSub`] there. In *unread* text they are not
+                // — nothing performs one, and the segment records which
+                // delimiter wrote it so the part can print and stand as its
+                // own source. See [`SubDelim`].
+                SubBody::Unread { closed, delim } => CmdSubBody::Unread {
+                    delim: *delim,
                     src: raw.clone(),
                     tail: Str::new(),
                     close_line: *close_line,
@@ -6382,6 +6538,9 @@ fn seg_to_part(seg: &Seg, opts: ParseOpts, q: Quoting) -> Result<WordPart, Parse
                 SubBody::Backtick(verbatim) => CmdSubBody::Backtick {
                     src: raw.clone(),
                     verbatim: verbatim.clone(),
+                    // Only the gobbler's copy of the word wants this, and only
+                    // it fills it — see [`CmdSubBody::Backtick::tail`].
+                    tail: Str::new(),
                 },
                 // Collected by the same `P_ARITH` scan, so its nested bodies
                 // are re-printed into it the same way — the classification
@@ -6433,9 +6592,24 @@ fn seg_to_part(seg: &Seg, opts: ParseOpts, q: Quoting) -> Result<WordPart, Parse
             // from here. See [`crate::ast::WordPart::ArithSub::tail`].
             WordPart::ArithSub { expr, bracket: *bracket, parts, tail: Str::new() }
         }
-        Seg::ProcSub(input, raw, open_line) => WordPart::ProcSub {
+        Seg::ProcSub(input, raw, open_line, read) => WordPart::ProcSub {
             input: *input,
-            body: parse_procsub_body(raw, *open_line, opts)?,
+            body: match read {
+                ProcRead::Eager => {
+                    ProcSubBody::Parsed(parse_procsub_body(raw, *open_line, opts)?)
+                }
+                // Not parsed here: no parser read the text this was written in,
+                // so the read that finds it is the `${ … }` scan's, made later
+                // and from where a failure is `bad substitution` rather than a
+                // script syntax error. The `tail` is filled by
+                // `unparse::attach_comsub_tails` once the word is assembled,
+                // exactly as an unread `$( … )` body's is.
+                ProcRead::Unread { closed } => ProcSubBody::Unread {
+                    src: raw.clone(),
+                    tail: Str::new(),
+                    closed: *closed,
+                },
+            },
         },
     })
 }
@@ -6727,16 +6901,99 @@ fn split_name_subscript(
     Ok(NameSubscript::Split(name, None, chs.get(i..).unwrap_or_default().to_vec(), line))
 }
 
+/// Where the `:` that separates a slice's offset from its length is — bash's
+/// `skiparith` (subst.c), which is not `strchr`. Three things hide a colon from
+/// it, and all are measured against bash 5.2.37 with `z=abcdef`:
+///
+/// * **A pending `?`.** One `:` is skipped for each `?` seen, the ternary's own
+///   colon belonging to the ternary. `${z:1?2:3}` is `cdef` — the whole text is
+///   the offset, `1?2:3` being 2 — while `${z:1?2:3:1}` is `c`, the *second*
+///   colon splitting. The count is not capped at one: `${z:1?1?2:3:4}` is
+///   `cdef`, two `?` swallowing both colons.
+/// * **A paren.** Nothing inside a `( … )` counts at all, colon and `?` alike:
+///   `${z:(1?2:3)}` is `cdef` and `${z:(1?2:3):1}` is `c`. An *unbalanced* `(`
+///   therefore hides the rest of the text outright.
+/// * **A quote.** A `' … '` run, a `" … "` run and a backslash-escape are each
+///   stepped over whole, before any of the counting: `${z:"1:2"}` does not
+///   split (the evaluator meets `1:2` as one bound and says so) and neither
+///   `${z:1"?"2:3}`'s `?` nor `${z:0"("}`'s paren counts. The characters
+///   themselves stay in the bound — the quotes are removed later, by the
+///   arithmetic reading each half is given — so this is only about the walk.
+///
+/// The walk is over the text **as written**, which is why an expansion that
+/// *yields* an unbalanced paren is none of its business: `p="("; ${z:$p 1}` and
+/// `${z:$(echo "(1")}` are ordinary arithmetic errors, the raw text of each
+/// being balanced.
+///
+/// Returns `rest.len()` when no colon splits, which is the "offset only" case,
+/// and `true` when a `(` was still open at the end — bash's own
+/// `no closing `)'` condition, since the walk ran off looking for its match.
+fn slice_split_colon(rest: &[Ch]) -> (usize, bool) {
+    let (mut skipcol, mut depth) = (0u32, 0u32);
+    let mut i = 0;
+    while let Some(&c) = rest.get(i) {
+        i += 1;
+        match syn(c) {
+            // A quoted run is stepped over whole, an unterminated one running
+            // to the end. Inside `" … "` a backslash still escapes, inside
+            // `' … '` nothing does.
+            q @ ('\'' | '"') => {
+                while let Some(&d) = rest.get(i) {
+                    i += 1;
+                    match syn(d) {
+                        c if c == q => break,
+                        '\\' if q == '"' => i += 1,
+                        _ => {}
+                    }
+                }
+            }
+            '\\' => i += 1,
+            '(' => depth += 1,
+            ')' if depth > 0 => depth -= 1,
+            _ if depth > 0 => {}
+            ':' if skipcol > 0 => skipcol -= 1,
+            ':' => return (i - 1, false),
+            '?' => skipcol += 1,
+            _ => {}
+        }
+    }
+    (rest.len(), depth > 0)
+}
+
+/// A slice's two bounds, as [`parse_slice_bounds`] cut them.
+struct SliceBounds {
+    offset: Box<Word>,
+    /// `Some` where a colon cut a length off. Always `None` beside an
+    /// `unclosed`, the unbalanced walk having consumed the whole text.
+    length: Option<Box<Word>>,
+    /// See [`crate::ast::WordPart::ArraySlice`]'s field of the same name.
+    unclosed: Option<Str>,
+}
+
 /// Parse the `offset[:length]` portion of a substring/slice expansion (the
 /// text after the leading `:`). The offset and each length are parsed as
-/// arithmetic words. Splits on the *first* unescaped `:` only.
+/// arithmetic words. Splits on the one colon [`slice_split_colon`] finds.
+///
+/// `None` is a **bad substitution**: the text being empty outright is one, and
+/// uniformly so — `${z:}`, `${@:}`, `${*:}`, `${a[@]:}` and `${a[1]:}` all
+/// report `${…}: bad substitution` in bash 5.2.37, an unset parameter included.
+/// It is the *text* that must be non-empty, not what it expands to: `${z:$e}`
+/// with `e=` is `abcdef`, and so is `${z:$(echo)}`. A colon and nothing else is
+/// fine on both sides of it — `${z::}` is the empty string, offset and length
+/// both reading as 0. An unbalanced `(` is a bad substitution too, but a later
+/// and differently-worded one, so it rides along as
+/// [`SliceBounds::unclosed`] rather than as a `None`.
 fn parse_slice_bounds(
     rest: &[Ch],
     opts: ParseOpts,
     q: Quoting,
     line: u32,
-) -> Result<(Box<Word>, Option<Box<Word>>), ParseError> {
-    let (off, len) = match rest.iter().position(|&c| syn(c) == ':') {
+) -> Result<Option<SliceBounds>, ParseError> {
+    if rest.is_empty() {
+        return Ok(None);
+    }
+    let (split, unbalanced) = slice_split_colon(rest);
+    let (off, len) = match Some(split).filter(|&i| i < rest.len()) {
         Some(idx) => (
             rest.get(..idx).unwrap_or_default(),
             // The offset it follows may span lines — `${x:$(`/`echo 1`/`):2}` —
@@ -6745,21 +7002,45 @@ fn parse_slice_bounds(
         ),
         None => (rest, None),
     };
-    // Both bounds are arithmetic, so a `' … '` in either has the second reading
-    // a subscript's does — see [`attach_subscript_reads`].
+    // Both bounds are arithmetic, and so are read exactly as a subscript is —
+    // verbatim, with each top-level `' … '` given its second reading. They are
+    // *not* tokenized: bash never tokenizes either bound, it cuts the `${ … }`
+    // body at the `:` and hands the characters to `expand_arith_string` and
+    // then `evalexp`. Every operator a command tokenizer would have taken for
+    // its own is therefore an arithmetic operator here, which is what osh used
+    // to lose — measured against bash 5.2.37, `z=abcdef`:
+    //
+    // | written | bash | osh, tokenized |
+    // |---|---|---|
+    // | `${z:1<2}` | `bcdef` | `cdef` — an IO number and a redirect |
+    // | `${z:1>2}` | `abcdef` | `cdef` — likewise |
+    // | `${z:1<=2}` | `bcdef` | `=2: operand expected` |
+    // | `${z:1 < (2)}` | `bcdef` | `1 2: syntax error` |
+    // | `${z:1;2}` | `;2: invalid arithmetic operator` | `1 2: syntax error` |
+    // | `${z:1&2}` | `abcdef` | `1 2: syntax error` |
+    // | `${z:1?2:3}` | `cdef` | `` `:' expected `` — the split `:` is the bound's |
+    // | `${z:(1}` | ``no closing `)' `` | silently `abcdef` |
+    //
+    // The last two rows are the ones that show it is not merely a matter of
+    // which characters are operators: a tokenizer *drops* what it cannot make a
+    // word of, so an unbalanced `(` vanishes instead of being complained about.
     let length = match len {
         Some((s, len_line)) => {
             let text = bytes::from_chars(s.iter().copied());
-            let mut w = word_from_source(&text, opts, q.as_pattern(), len_line)?;
-            attach_subscript_reads(&mut w, opts, q.as_pattern(), len_line)?;
-            Some(Box::new(w))
+            Some(Box::new(word_bound_from_source_at(&text, opts, q.as_pattern(), len_line)?))
         }
         None => None,
     };
     let off_text = bytes::from_chars(off.iter().copied());
-    let mut offset = word_from_source(&off_text, opts, q.as_pattern(), line)?;
-    attach_subscript_reads(&mut offset, opts, q.as_pattern(), line)?;
-    Ok((Box::new(offset), length))
+    let offset = word_bound_from_source_at(&off_text, opts, q.as_pattern(), line)?;
+    // The unbalanced text is kept as characters rather than rebuilt from the
+    // word: bash quotes back what the writer wrote, and nothing in it has been
+    // expanded yet when the complaint is made.
+    Ok(Some(SliceBounds {
+        offset: Box::new(offset),
+        length,
+        unclosed: unbalanced.then(|| off_text.clone()),
+    }))
 }
 
 /// Is `name` a parameter that `${#…}` may take the length of?
@@ -6774,6 +7055,42 @@ fn is_length_target(name: &str) -> bool {
         || (!name.is_empty() && name.bytes().all(|b| b.is_ascii_digit()))
 }
 
+/// Carry [`parse_braced_param_in`]'s splice ranges into the coordinates of a
+/// stretch of text carved out of the body: the `from..from + len` bytes of it,
+/// which land at `to` in the buffer being built. Ranges outside that stretch are
+/// dropped, and one straddling its edge is clipped to it — an operand only wants
+/// to know which of *its own* bytes no scan read.
+fn splices_within(
+    splices: &[core::ops::Range<usize>],
+    from: usize,
+    len: usize,
+    to: usize,
+) -> Vec<core::ops::Range<usize>> {
+    if splices.is_empty() {
+        return Vec::new();
+    }
+    let end = from.saturating_add(len);
+    splices
+        .iter()
+        .filter_map(|r| {
+            let start = r.start.max(from);
+            let stop = r.end.min(end);
+            (start < stop).then(|| (start - from + to)..(stop - from + to))
+        })
+        .collect()
+}
+
+/// [`splices_within`] for an operand, which is always a byte *suffix* of the
+/// body — everything before it was consumed as a name and an operator, character
+/// by character, so its offset is just what the two lengths differ by.
+fn operand_splices(
+    splices: &[core::ops::Range<usize>],
+    raw: BStr<'_>,
+    arg: BStr<'_>,
+) -> Vec<core::ops::Range<usize>> {
+    splices_within(splices, raw.len().saturating_sub(arg.len()), arg.len(), 0)
+}
+
 /// Parse a `${ … }` body that reached the expander as *text* rather than as a
 /// segment the word lexer had already lowered — an arithmetic string, or a
 /// `${!ref…` whose brace never closed. `q` is the quoting the text is being
@@ -6783,18 +7100,27 @@ pub(crate) fn parse_braced_param(
     opts: ParseOpts,
     q: Quoting,
 ) -> Result<WordPart, ParseError> {
-    parse_braced_param_in(raw, opts, q, RUNTIME_TEXT)
+    // Text that reached the expander is text no scan of ours spliced into: what
+    // a `$'…'` in it becomes is that expansion's business, not a parse's.
+    parse_braced_param_in(raw, opts, q, RUNTIME_TEXT, &[])
 }
 
 /// [`parse_braced_param`] with the quoting the `${…}` was written in, which
 /// only its operand cares about (see [`Quoting`]), and the physical line the
 /// body starts on, which every fragment of it is numbered from (see
 /// [`frag_line`]).
+///
+/// `splices` are the stretches of `raw` the word lexer wrote in without reading
+/// — a bare `$'…'` translation, bash's third row (parse.y:3887) — as byte ranges
+/// into `raw`. Only an operand can hold one and still be parsed, so they are
+/// carried no further than [`operand_from_source`], which hands them to
+/// [`crate::lexer::lex_operand_in_dquote`].
 fn parse_braced_param_in(
     raw: BStr<'_>,
     opts: ParseOpts,
     q: Quoting,
     line: u32,
+    splices: &[core::ops::Range<usize>],
 ) -> Result<WordPart, ParseError> {
     if let Some(after_hash) = raw.strip_prefix(b"#") {
         if after_hash.is_empty() {
@@ -6933,10 +7259,19 @@ fn parse_braced_param_in(
             } else {
                 name.clone().into_bytes()
             };
-            modifier_src.extend(bytes::from_chars(remaining.iter().copied()));
+            let rest_bytes = bytes::from_chars(remaining.iter().copied());
+            // The modifier text is the tail of the body with a different head
+            // glued on, so a splice in that tail moves by the difference.
+            let moved = splices_within(
+                splices,
+                raw.len().saturating_sub(rest_bytes.len()),
+                rest_bytes.len(),
+                modifier_src.len(),
+            );
+            modifier_src.extend(rest_bytes);
             // The name spliced on the front is a stand-in with no newline in it,
             // so the modifier text still begins where it did in the real body.
-            let mut target = parse_braced_param_in(&modifier_src, opts, q, remaining_line)?;
+            let mut target = parse_braced_param_in(&modifier_src, opts, q, remaining_line, &moved)?;
             if positional {
                 if name == "@" && matches!(target, WordPart::ParamCase { .. }) {
                     return Ok(WordPart::BadSubst(raw.to_vec()));
@@ -7022,13 +7357,17 @@ fn parse_braced_param_in(
             // `${a[@]:off:len}` / `${a[*]:off:len}` — array slice (a `:` not
             // followed by a `-=+?` operator char).
             if syn_at(&rest, 0) == ':' && !matches!(syn_at(&rest, 1), '-' | '=' | '+' | '?') {
-                let (offset, length) =
-                    parse_slice_bounds(rest.get(1..).unwrap_or_default(), opts, q, rest_line)?;
+                let Some(b) =
+                    parse_slice_bounds(rest.get(1..).unwrap_or_default(), opts, q, rest_line)?
+                else {
+                    return Ok(WordPart::BadSubst(raw.to_vec()));
+                };
                 return Ok(WordPart::ArraySlice {
                     name,
                     star: matches!(index, ArrayIndex::Star),
-                    offset,
-                    length,
+                    offset: b.offset,
+                    length: b.length,
+                    unclosed: b.unclosed,
                 });
             }
             // `${a[@]#pat}` / `${a[*]/x/y}` / `${a[@]^^}` / `${a[@]@Q}` — an
@@ -7079,7 +7418,13 @@ fn parse_braced_param_in(
                 star,
                 op,
                 colon,
-                arg: Box::new(operand_from_source(&arg_str, opts, q, rest_line)?),
+                arg: Box::new(operand_from_source(
+                    &arg_str,
+                    opts,
+                    q,
+                    rest_line,
+                    &operand_splices(splices, raw, &arg_str),
+                )?),
             });
         }
     };
@@ -7090,13 +7435,16 @@ fn parse_braced_param_in(
         && syn_at(&rest, 0) == ':'
         && !matches!(syn_at(&rest, 1), '-' | '=' | '+' | '?')
     {
-        let (offset, length) =
-            parse_slice_bounds(rest.get(1..).unwrap_or_default(), opts, q, rest_line)?;
+        let Some(b) = parse_slice_bounds(rest.get(1..).unwrap_or_default(), opts, q, rest_line)?
+        else {
+            return Ok(WordPart::BadSubst(raw.to_vec()));
+        };
         return Ok(WordPart::ArraySlice {
             name: name.clone(),
             star: name == "*",
-            offset,
-            length,
+            offset: b.offset,
+            length: b.length,
+            unclosed: b.unclosed,
         });
     }
     // `${@#pat}` / `${*/x/y}` / `${@^^}` — element-wise transform over the
@@ -7152,7 +7500,13 @@ fn parse_braced_param_in(
                 name,
                 op,
                 colon,
-                arg: Box::new(operand_from_source(&arg_str, opts, q, rest_line)?),
+                arg: Box::new(operand_from_source(
+                    &arg_str,
+                    opts,
+                    q,
+                    rest_line,
+                    &operand_splices(splices, raw, &arg_str),
+                )?),
             });
         }
     }
@@ -7234,13 +7588,17 @@ fn parse_braced_param_in(
         // Substring `:offset[:length]` — but `:` followed by one of -=+? is the
         // use/assign/alt/error operator, handled below.
         ':' if !matches!(syn_at(&rest, 1), '-' | '=' | '+' | '?') => {
-            let (offset, length) =
-                parse_slice_bounds(rest.get(1..).unwrap_or_default(), opts, q, rest_line)?;
+            let Some(b) =
+                parse_slice_bounds(rest.get(1..).unwrap_or_default(), opts, q, rest_line)?
+            else {
+                return Ok(WordPart::BadSubst(raw.to_vec()));
+            };
             Ok(WordPart::ParamSubstr {
                 name,
                 index: elem_index,
-                offset,
-                length,
+                offset: b.offset,
+                length: b.length,
+                unclosed: b.unclosed,
             })
         }
         // `:-`, `:=`, `:+`, `:?` and the colon-less `-=+?` forms.
@@ -7270,7 +7628,13 @@ fn parse_braced_param_in(
                 index: elem_index,
                 op,
                 colon,
-                arg: Box::new(operand_from_source(&arg_str, opts, q, rest_line)?),
+                arg: Box::new(operand_from_source(
+                    &arg_str,
+                    opts,
+                    q,
+                    rest_line,
+                    &operand_splices(splices, raw, &arg_str),
+                )?),
                 // Written directly, the name read and the name complained about
                 // are the same one; only indirection separates them.
                 label: None,
@@ -7534,6 +7898,35 @@ pub(crate) fn word_verbatim_from_source_at(
     q: Quoting,
     line: u32,
 ) -> Result<Word, ParseError> {
+    verbatim_word_at(s, opts, q, line, Frag::Word)
+}
+
+/// Which of the three verbatim readings a fragment gets. They differ in what a
+/// `<( … )` written in the fragment means — whether it is *performed*, and
+/// whether the `${ … }` scan even *read* it. See
+/// [`crate::lexer::lex_subscript_verbatim`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Frag {
+    /// A pattern, a replacement or a bare operand — expanded as a word, so a
+    /// process substitution in it runs.
+    Word,
+    /// A subscript — expanded as an arithmetic string
+    /// (`Q_DOUBLE_QUOTES|Q_ARITH`), so one does not run; and stepped over whole
+    /// by the `${ … }` scan, so one is not read either.
+    Arith,
+    /// A substring bound — [`Frag::Arith`] except that the scan does reach it,
+    /// so a process substitution here is read for its extent. See
+    /// [`crate::lexer::Verbatim::Bound`].
+    Bound,
+}
+
+fn verbatim_word_at(
+    s: BStr<'_>,
+    opts: ParseOpts,
+    q: Quoting,
+    line: u32,
+    frag: Frag,
+) -> Result<Word, ParseError> {
     if s.is_empty() {
         return Ok(Word::default());
     }
@@ -7543,8 +7936,12 @@ pub(crate) fn word_verbatim_from_source_at(
     // changes nothing else.
     let lex_opts =
         ParseOpts { reread: opts.reread, tolerant: opts.tolerant, ..ParseOpts::default() };
-    let mut segs = crate::lexer::lex_word_verbatim_opts(s, lex_opts, q.read_ctx())
-        .map_err(|e| ParseError::new(&e.msg))?;
+    let read = match frag {
+        Frag::Word => crate::lexer::lex_word_verbatim_opts,
+        Frag::Arith => crate::lexer::lex_subscript_verbatim,
+        Frag::Bound => crate::lexer::lex_bound_verbatim,
+    };
+    let mut segs = read(s, lex_opts, q.read_ctx()).map_err(|e| ParseError::new(&e.msg))?;
     map_frag_segs(&mut segs, line);
     let mut parts: Vec<WordPart> = Vec::with_capacity(segs.len());
     for seg in &segs {
@@ -7605,15 +8002,31 @@ pub(crate) fn word_subscript_from_source_at(
     q: Quoting,
     line: u32,
 ) -> Result<Word, ParseError> {
-    let mut w = word_verbatim_from_source_at(s, opts, q, line)?;
+    let mut w = verbatim_word_at(s, opts, q, line, Frag::Arith)?;
+    attach_subscript_reads(&mut w, opts, q, line)?;
+    Ok(w)
+}
+
+/// [`word_subscript_from_source_at`] for the other arithmetic fragment, a
+/// **substring bound**. The two differ only in whether the `${ … }` scan
+/// reached the text — see [`crate::lexer::Verbatim::Bound`] — and a `' … '` run
+/// in either is read the same way, the scan having stepped over it in both.
+pub(crate) fn word_bound_from_source_at(
+    s: BStr<'_>,
+    opts: ParseOpts,
+    q: Quoting,
+    line: u32,
+) -> Result<Word, ParseError> {
+    let mut w = verbatim_word_at(s, opts, q, line, Frag::Bound)?;
     attach_subscript_reads(&mut w, opts, q, line)?;
     Ok(w)
 }
 
 /// Give every top-level `' … '` of an already-parsed subscript or substring
 /// bound its arithmetic reading. See [`word_subscript_from_source_at`], which
-/// documents what the reading is; this is the half [`parse_slice_bounds`] needs
-/// too, its two bounds being tokenized rather than read verbatim.
+/// documents what the reading is. Both callers reach it through
+/// [`word_subscript_from_source_at`] — a subscript and the two bounds of
+/// [`parse_slice_bounds`], which are read the same way.
 fn attach_subscript_reads(
     w: &mut Word,
     opts: ParseOpts,
@@ -7623,7 +8036,7 @@ fn attach_subscript_reads(
     let inner_q = q.as_unread();
     let mut any = false;
     for part in &mut w.parts {
-        let WordPart::SingleQuoted { text, escaped: false, parts } = part else {
+        let WordPart::SingleQuoted { text, escaped: false, parts, .. } = part else {
             continue;
         };
         if text.is_empty() {
@@ -7632,7 +8045,11 @@ fn attach_subscript_reads(
         // Tolerant, because the run's interior can be cut short of a quote it
         // opened — `'"'` is a `"` with no mate, and bash's expander runs it to
         // the end of the string rather than complaining.
-        *parts = Some(word_tolerant_from_source_at(text, opts, inner_q, line)?.parts);
+        // Still arithmetic text: `Q_DOUBLE_QUOTES` merely switches the single
+        // quote off, so a `<( … )` inside the run is no more performed than one
+        // beside it.
+        let tolerant = ParseOpts { tolerant: true, ..opts };
+        *parts = Some(verbatim_word_at(text, tolerant, inner_q, line, Frag::Arith)?.parts);
         any = true;
     }
     // The interior was parsed on its own and so knows nothing of what follows
@@ -7643,8 +8060,76 @@ fn attach_subscript_reads(
     // scope for the ones that are not (a `name[sub]=v` left-hand side).
     if any {
         crate::unparse::attach_comsub_tails(w);
+        name_unclosed_after_the_fragment(w);
     }
     Ok(())
+}
+
+/// Give a construct the interior parse left open the **fragment** to name,
+/// rather than the interior it was parsed out of.
+///
+/// The interior is a string of osh's making, not of bash's: `Q_DOUBLE_QUOTES` is
+/// set for an arithmetic fragment, so `expand_word_internal` never treats the
+/// `'` as an opener and walks straight through it — there is one string here and
+/// it is the whole fragment. Both "no closing" diagnostics echo the string the
+/// scan was handed (`report_error (…, string)`, subst.c:1498 and subst.c:1972),
+/// so that is what they must echo here. Measured against bash 5.2.37, with
+/// `a=(0 1 2)`:
+///
+/// ```text
+/// echo "[${a['x${m:-']}]"   ->   bad substitution: no closing `}' in 'x${m:-'
+/// echo "[${a['x$[1 ']}]"    ->   bad substitution: no closing `]' in 'x$[1 '
+/// ```
+///
+/// — the quotes included, where the interior alone would have been `x${m:-`.
+///
+/// Only the run's own level is renamed. A `" … "` inside the interior is a run
+/// of this same string and `string_extract_double_quoted` carves it out as its
+/// own, so a fault found in *there* names the run, exactly as one found in a
+/// double-quoted run written a character to the left of the `'` would.
+///
+/// The backquote reporter is widened the same way but from a different place,
+/// because its `%s` is `string + t_index` (subst.c:11269) and not `string`: it
+/// runs from the backquote to the end of the fragment, so what is glued on is
+/// the run's own closing quote and whatever follows it. Measured:
+///
+/// ```text
+/// echo "[${a['x`fi'y]}]"     ->   bad substitution: no closing "`" in `fi'y
+/// echo "[${a['x`fi''q']}]"   ->   bad substitution: no closing "`" in `fi''q'
+/// ```
+fn name_unclosed_after_the_fragment(w: &mut Word) {
+    use crate::lexer::Unclosed;
+    let frag = crate::unparse::word_src(w);
+    // Where each part's source begins in the fragment, for the reporter that
+    // names only the text from its own construct on.
+    let mut starts: Vec<usize> = Vec::with_capacity(w.parts.len());
+    let mut at = 0usize;
+    for p in &w.parts {
+        starts.push(at);
+        at = at.saturating_add(crate::unparse::part_src(p).len());
+    }
+    for (part, start) in w.parts.iter_mut().zip(starts) {
+        let WordPart::SingleQuoted { parts: Some(inner), .. } = part else {
+            continue;
+        };
+        // Everything the fragment holds past the run's interior: its closing
+        // quote, where it has one, and then the rest of the fragment. A scan
+        // that gave up ran to the end of that interior, so this is the whole of
+        // what its own `src` is short of. The `1` is the opening quote.
+        let after = start
+            .saturating_add(1)
+            .saturating_add(crate::unparse::parts_src(inner).len());
+        let tail = frag.get(after..).unwrap_or_default();
+        for p in inner.iter_mut() {
+            match p {
+                WordPart::Unclosed(Unclosed::BadSubst { text, .. }) => text.clone_from(&frag),
+                WordPart::Unclosed(Unclosed::Backquote { src, text }) => {
+                    *text = bfmt![&*src, tail];
+                }
+                _ => {}
+            }
+        }
+    }
 }
 
 /// The word `expand_word_internal` reads out of `s` — [`word_verbatim_from_source_at`]
@@ -7683,15 +8168,18 @@ fn operand_from_source(
     opts: ParseOpts,
     q: Quoting,
     line: u32,
+    splices: &[core::ops::Range<usize>],
 ) -> Result<Word, ParseError> {
     if !q.dquoted() {
+        // A splice only happens inside double quotes (parse.y:3882 requotes
+        // otherwise), so there is nothing to carry down this path.
         return word_verbatim_from_source_at(s, opts, q, line);
     }
     if s.is_empty() {
         return Ok(Word::default());
     }
-    let mut segs =
-        crate::lexer::lex_operand_in_dquote(s, q.read_ctx()).map_err(|e| ParseError::new(&e.msg))?;
+    let mut segs = crate::lexer::lex_operand_in_dquote(s, q.read_ctx(), splices)
+        .map_err(|e| ParseError::new(&e.msg))?;
     map_frag_segs(&mut segs, line);
     let mut parts: Vec<WordPart> = Vec::with_capacity(segs.len());
     for seg in &segs {
@@ -7733,6 +8221,31 @@ pub(crate) fn dquote_word_from_source(s: BStr<'_>, opts: ParseOpts) -> Result<Wo
     Ok(word)
 }
 
+/// Like [`dquote_word_from_source`], but reading `s` the way the `${ … }`
+/// **scan** walks it rather than the way the expansion after it does: a `<( … )`
+/// and a `>( … )` are read for their extent there, exactly as a `$( … )` is
+/// (subst.c:1881-1950). See [`crate::lexer::lex_brace_scan_body`].
+///
+/// The extra parts carry their own spelling and are never performed, so the
+/// word expands to the same bytes [`dquote_word_from_source`] would give; the
+/// difference is only what an extent walk over it finds to read.
+///
+/// # Errors
+/// Returns [`ParseError`] on an unterminated substitution inside `s`.
+pub(crate) fn brace_scan_word_from_source(s: BStr<'_>, opts: ParseOpts) -> Result<Word, ParseError> {
+    if s.is_empty() {
+        return Ok(Word::default());
+    }
+    let segs = crate::lexer::lex_brace_scan_body(s).map_err(|e| ParseError::new(&e.msg))?;
+    let mut parts: Vec<WordPart> = Vec::with_capacity(segs.len());
+    for seg in &segs {
+        parts.push(seg_to_part(seg, opts, Quoting::Unread)?);
+    }
+    let mut word = Word { parts };
+    crate::unparse::attach_comsub_tails(&mut word);
+    Ok(word)
+}
+
 /// Like [`word_verbatim_from_source`] but for the *replacement* half of
 /// `${var/pat/repl}`: a literal `\&`/`\\` is preserved (not consumed at lex
 /// time) so the runtime `&`-substitution can distinguish an escaped ampersand
@@ -7752,37 +8265,6 @@ fn word_replacement_from_source(
     let mut parts: Vec<WordPart> = Vec::with_capacity(segs.len());
     for seg in &segs {
         parts.push(seg_to_part(seg, opts, q)?);
-    }
-    Ok(Word { parts })
-}
-
-fn word_from_source(
-    s: BStr<'_>,
-    opts: ParseOpts,
-    q: Quoting,
-    line: u32,
-) -> Result<Word, ParseError> {
-    if s.is_empty() {
-        return Ok(Word::default());
-    }
-    let mut toks = tokenize(s, opts, q.read_ctx()).map_err(|e| ParseError::new(&e.msg))?;
-    for t in &mut toks {
-        if let Tok::Word(segs) = t {
-            map_frag_segs(segs, line);
-        }
-    }
-    let mut parts: Vec<WordPart> = Vec::new();
-    let mut first = true;
-    for t in &toks {
-        if let Tok::Word(segs) = t {
-            if !first {
-                parts.push(WordPart::Literal(" ".into()));
-            }
-            first = false;
-            for seg in segs {
-                parts.push(seg_to_part(seg, opts, q)?);
-            }
-        }
     }
     Ok(Word { parts })
 }
@@ -10212,6 +10694,164 @@ mod tests {
             ("echo $(echo `fi", "unexpected EOF while looking for matching ``'"),
         ] {
             assert_eq!(emsg(&parse(src).unwrap_err()), msg, "{src:?}");
+        }
+    }
+
+    /// The same order for a body that *closed*: it was parsed where it was met,
+    /// so its error is reported and whatever the word ran out inside afterwards
+    /// never gets to miss its own delimiter. See `LexError::eager_bodies`.
+    /// Every row is measured from bash 5.2.37.
+    #[test]
+    fn a_body_read_inside_a_word_that_ran_out_is_parsed_anyway() {
+        let near = |t: &str| format!("syntax error near unexpected token `{t}'");
+        for (src, tok) in [
+            ("echo \" $(fi)", "fi"),
+            // A `${ … }` and a `$(( … ))` step over their nested `$( … )` with
+            // the same eager parse, so those bodies count too.
+            ("echo \" ${x:-$(fi)}", "fi"),
+            ("echo \" $(( $(fi) ))", "fi"),
+            // Left to right: the first body that will not parse wins, whether
+            // what follows is another whole body or the one the scan ran out in.
+            ("echo \" $(fi) $(done)", "fi"),
+            ("echo \" $(fi) $(done", "fi"),
+            ("echo \" $(fi) `done`", "fi"),
+            // The quote is not what makes it eager — the word is. Whatever the
+            // word finally ran out inside, the bodies before it still win.
+            ("echo $(fi)x$(", "fi"),
+            ("echo $(fi)x${y", "fi"),
+            ("echo $(fi)x$((1+", "fi"),
+            ("echo $(fi)x\"y", "fi"),
+            ("echo $(fi)x'y", "fi"),
+            ("echo $(fi)x`y", "fi"),
+            // A `" … "` that closed nests as a segment and is descended into.
+            ("echo \"a$(fi)\"x$(", "fi"),
+            // A process substitution is parsed as eagerly, and is numbered from
+            // its *opening* delimiter rather than its `)`.
+            ("echo <(fi)x$(", "fi"),
+            ("echo >(fi)x$(", "fi"),
+        ] {
+            let e = parse(src).unwrap_err();
+            assert_eq!(emsg(&e), near(tok), "{src:?}");
+            // Found inside a body, so fatal to whoever was reading it.
+            assert!(e.fatal, "{src:?}");
+        }
+        // A backquote body is read as text to its mate and parsed only at
+        // expansion time, so nothing objects before the word runs out — and a
+        // body that parses, or that merely ran out itself, says nothing either.
+        for (src, msg) in [
+            ("echo \" `fi`", "unexpected EOF while looking for matching `\"'"),
+            ("echo \"abc", "unexpected EOF while looking for matching `\"'"),
+            ("echo \" $(echo ok)", "unexpected EOF while looking for matching `\"'"),
+            ("echo \" $(a |", "unexpected EOF while looking for matching `)'"),
+            ("echo \" $(echo ok) $(if", "unexpected EOF while looking for matching `)'"),
+            ("echo $(echo ok)x$(", "unexpected EOF while looking for matching `)'"),
+            ("echo `fi`x$(", "unexpected EOF while looking for matching `)'"),
+        ] {
+            assert_eq!(emsg(&parse(src).unwrap_err()), msg, "{src:?}");
+        }
+        // The body is numbered physically — which is what the two different
+        // reference lines are for, the `)` for a `$( … )` and the `<(` for a
+        // process substitution. Both land on the line `fi` is written on.
+        assert_eq!(parse("echo one\necho $(\nfi)x$(").unwrap_err().line, Some(3));
+        assert_eq!(parse("echo one\necho <(\nfi)x$(").unwrap_err().line, Some(3));
+        // A body in an *earlier* word is not this mechanism's — that word
+        // finished, so it is a token the parser reaches on its own. It needs
+        // the shell's deferred tokenizer, which keeps a failing line's tokens,
+        // and so is measured in the corpus rather than through this `parse`:
+        // `echo $(fi)x <(` and `echo a$(fi) b$(` both name `fi` there.
+    }
+
+    /// `<(`, `>(` and `$(` are one row of `parse_matched_pair` (parse.y:5028)
+    /// and all three go through `parse_comsub`, so a `${ … }` body's scan reads
+    /// a process substitution exactly as it reads a command substitution: the
+    /// body is parsed there and then, and its error is the enclosing unit's.
+    /// Every row is measured from bash 5.2.37.
+    #[test]
+    fn a_process_substitution_in_a_brace_body_is_read_where_it_is_met() {
+        let near = |t: &str| format!("syntax error near unexpected token `{t}'");
+        for src in [
+            "echo \"${z:-<(fi)}\"",
+            // The quotes are not what make it eager, and neither is the `:-`.
+            "echo ${z:-<(fi)}",
+            "echo \"${z#<(fi)}\"",
+            "echo \"${z/x/<(fi)}\"",
+            "echo \"${a[<(fi)]}\"",
+            // `>(` is the same row.
+            "echo \"${z:-a>(fi)b}\"",
+            // Beside a `$( … )` the same scan already read.
+            "echo \"${z:-$(echo x)<(fi)}\"",
+            // A body kept as *text* — the `${#…}` shape has no operand word —
+            // is parsed all the same.
+            "echo \"${#x:-<(fi)}\"",
+            // A nested body's parses are the outer body's too.
+            "echo \"${x:-${y:-<(fi)}}\"",
+        ] {
+            let e = parse(src).unwrap_err();
+            assert_eq!(emsg(&e), near("fi"), "{src:?}");
+            // Found inside a body, so fatal to whoever was reading it.
+            assert!(e.fatal, "{src:?}");
+        }
+        // A `' … '` run at the top of a brace body is stepped over whole, and a
+        // `" … "` inside one is read by a scan that does not have this row at
+        // all — `echo "<(fi)"` is the word `<(fi)`. Neither is a parse error.
+        for src in ["echo \"${z:-'<(fi)'}\"", "echo \"<(fi)\"", "echo '<(fi)'"] {
+            assert!(parse(src).is_ok(), "{src:?}");
+        }
+        // A body that ran out says nothing, so the enclosing scan's own missing
+        // delimiter stands — and which one that is still comes from where the
+        // `${` was written, exactly as for a `$(` in the same place.
+        for (src, msg) in [
+            ("echo \"${z:-<(fi}\"", "unexpected EOF while looking for matching `\"'"),
+            ("echo ${z:-<(echo hi}", "unexpected EOF while looking for matching `)'"),
+        ] {
+            assert_eq!(emsg(&parse(src).unwrap_err()), msg, "{src:?}");
+        }
+        // Numbered from the `<(`, and so landing on the physical line `fi` is
+        // written on.
+        assert_eq!(parse("echo one\necho \"${z:-<(\nfi)}\"").unwrap_err().line, Some(3));
+    }
+
+    /// Having parsed it, whether bash *performs* it is one test:
+    /// `expand_word_internal` reads a process substitution only when the
+    /// expansion is not under `Q_DOUBLE_QUOTES` (subst.c:11079). So the
+    /// fragments a `${ … }` body is cut into split two ways — a pattern, a
+    /// replacement and a bare operand run one, while a double-quoted operand
+    /// and the two arithmetic fragments keep the characters — and the split is
+    /// taken at lex time, which is where osh knows the quoting. Every row is
+    /// measured from bash 5.2.37; see the corpus case
+    /// `a-process-substitution-in-a-brace-body-is-performed-unless-the-expansion-is-quoted.sh`.
+    #[test]
+    fn whether_a_brace_bodys_process_substitution_is_performed_is_the_quoting() {
+        let opts = ParseOpts::default();
+        let live = |w: &Word| w.parts.iter().any(|p| matches!(p, WordPart::ProcSub { .. }));
+        let show = |f: &[u8]| String::from_utf8_lossy(f).into_owned();
+        // A pattern and a bare operand are read by the same scan, and it
+        // performs.
+        for frag in [b"<(echo hi)".as_slice(), b"a<(echo hi)b", b"<(echo a)<(echo b)", b">(cat)"] {
+            let w = verbatim_word_at(frag, opts, Quoting::Bare, 1, Frag::Word).unwrap();
+            assert!(live(&w), "{}", show(frag));
+        }
+        // …and the replacement's own reader agrees, `\&` handling aside.
+        assert!(live(&word_replacement_from_source(b"<(echo hi)", opts, Quoting::Bare, 1).unwrap()));
+        // The arithmetic fragments do not: `Q_DOUBLE_QUOTES|Q_ARITH` is exactly
+        // what stops the read, so the evaluator meets the characters and its
+        // error names them.
+        assert!(!live(&verbatim_word_at(b"<(echo 1)", opts, Quoting::Bare, 1, Frag::Arith).unwrap()));
+        assert!(!live(&word_subscript_from_source(b"<(echo 1)", opts, Quoting::Bare).unwrap()));
+        // A substring bound is the other arithmetic fragment, and now reaches
+        // the very same reader — it used to be tokenized, which is what made it
+        // the one context that disagreed with the subscript beside it.
+        let bound: Vec<Ch> = bytes::chars(b"<(echo 1)").collect();
+        assert!(!live(
+            &parse_slice_bounds(&bound, opts, Quoting::Bare, 1).unwrap().unwrap().offset
+        ));
+        // A double-quoted operand keeps the characters. So does a quoted run
+        // inside a *bare* one — the quotes are what the test is about, not
+        // which fragment it is.
+        assert!(!live(&operand_from_source(b"<(echo hi)", opts, Quoting::Dquote, 1, &[]).unwrap()));
+        for frag in [b"\"<(echo hi)\"".as_slice(), b"'<(echo hi)'", b"\\<\\(echo hi\\)"] {
+            let w = verbatim_word_at(frag, opts, Quoting::Bare, 1, Frag::Word).unwrap();
+            assert!(!live(&w), "{}", show(frag));
         }
     }
 

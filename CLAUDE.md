@@ -73,12 +73,36 @@ Execution"**: the ownership map, the `requests/` dropbox for cross-lane
 changes, the append-only conventions for the shared documents
 (`known-issues.md`, `design-decisions.md`, `open-questions.md`,
 `todo.txt`), the per-lane `design-decisions.md` numbering split, the
-`build/.boot-lock` protocol that serialises QEMU, and the per-lane
+automatic lock that serialises QEMU, and the per-lane
 backlogs. Read that section before picking a task.
 
 Work only roadmap items tagged with your own lane letter. When you need a
 change in another lane's tree, file `requests/<from>-<to>-<slug>.md` and
 pick up something else rather than making the change yourself.
+
+**Fetch and merge `origin/main` at the start of every task, and merge your
+lane up to `main` at the end of every green one.** Every shared document —
+`roadmap.md`, `known-issues.md`, `design-decisions.md`, `open-questions.md`,
+`todo.txt`, and the whole `requests/` dropbox — exists *once per branch*.
+They are files, not a shared mailbox: a request another lane filed for you is
+invisible in your worktree until you merge. Lane A's
+`requests/a-b-init-conflates-syscall-error-with-exit-code.md` sat on
+`origin/main` unread for a day for exactly this reason.
+
+Two corollaries:
+
+- **`origin/main` is the trunk. The `D:\visual studio projects\os` directory
+  is a *checkout* of it that may be badly stale** — it was 67 commits behind
+  when this paragraph was written. Never read a shared doc there and conclude
+  something about the project's state without `git -C "…/os" pull` first, or
+  read `origin/main` directly (`git show origin/main:<path>`).
+- **Merge, don't rebase, when integrating `origin/main` into your lane.**
+  Your lane branch is published at `origin/lane-<x>`; rebasing published
+  history requires a force-push, which is forbidden outright. Use
+  `git fetch origin && git merge origin/main`. The per-lane conventions in
+  `roadmap.md` rule 3 are designed to make that merge clean, and it is —
+  `design-decisions.md`'s numbering split auto-merged across a 72-commit
+  divergence with zero conflicts.
 
 If the project ever drops back to a single session, restore
 `roadmap.single-agent.md` over `roadmap.md` and this section reverts to
@@ -138,9 +162,10 @@ Each lane works on its own branch — `lane-a`, `lane-b`, `lane-c`, each in
 its own worktree above — and merges to `main` when the work compiles and
 passes tests. Before merging:
 
-- `git pull --rebase origin main` (rebase, never merge)
+- `git fetch origin && git merge origin/main` (**merge**, not rebase — your
+  lane branch is published, and rebasing it would force a force-push)
 - Run the full test suite
-- Only then merge
+- Only then merge up
 
 Because the boot test builds the whole workspace, a broken lane blocks the
 other two. Never merge a red tree to `main` "to unblock myself."
@@ -291,6 +316,36 @@ killed); `125` failed to launch; `130` interrupted. Prefer this over bare
 potentially-hanging test suites through it in the background so a genuine
 deadlock is bounded and can never orphan.
 
+### Background a long run with `run_in_background: true`, never `nohup … &`
+
+Boot tests (~8 min), soaks (hours) and full workspace builds must not block
+the conversation. Background them with the Bash tool's **`run_in_background`
+parameter**. Do **not** hand-roll it with `nohup … &`, `start /b`, or a
+trailing `&` inside the command.
+
+The difference is not cosmetic. A job started with `run_in_background: true`
+is owned by the tool harness, which means:
+
+- **It appears in the operator's background-task list.** A `nohup`-detached
+  job is invisible there, so the operator sees an idle agent with no way to
+  tell that a 3-hour soak is in fact running.
+- **You get a completion notification.** A detached job cannot notify anyone
+  when it finishes. You would only discover the result by polling on a
+  timer — which wastes wake-ups, and silently loses the result entirely if
+  the loop ends before the job does.
+- **Its output is captured** to a file you can read incrementally, and the
+  job can be inspected and stopped through the harness.
+
+If a long run is *already* going as a detached process and killing it would
+throw away real work, don't restart it — background a **watcher** instead,
+which gets you the notification without losing progress:
+
+```bash
+# with run_in_background: true
+while kill -0 <pid> 2>/dev/null; do sleep 30; done
+echo "=== finished ==="; tail -20 <logfile>
+```
+
 ---
 
 ## Performance — Benchmark Everything Critical
@@ -424,7 +479,7 @@ The human operator is often away from the computer or asleep. Do not stop and wa
     - `Claude (autonomous)` — **you made the final call yourself,** without putting it to the operator. This is yours to revisit later (and the operator may overrule it). If the operator pre-approved the general scope/direction but you made the specific call, use `Claude (operator-approved scope)` and note the split.
     This distinction matters: an **Operator** decision is settled policy you should not silently revisit, whereas a **Claude** one is yours to revisit. Never blur the two — and never attribute a decision to yourself merely because you proposed the option the operator ultimately chose.
 - **Track decisions that need the operator in `open-questions.md`.** When a decision genuinely needs the human (an architectural fork, a user-visible policy, a tradeoff with no obviously-correct answer) and you've deferred it rather than resolved it, add it to `open-questions.md` — the question, the options with pros/cons, your recommendation if you have one, and where in the code it bites. This is distinct from `design-decisions.md` (decisions already *made*) and from `known-issues.md` (bugs/tech-debt): `open-questions.md` is the operator's decision queue. When the operator answers one, move it to `design-decisions.md` (marked `Decided by: Operator`) and remove it from `open-questions.md`.
-- **Push often, on your own volition.** You do not need to ask. Run `git push` after every completed task, or at minimum after every few meaningful commits. If you've done good work and the machine loses power, that work should not be lost. Never let a long stretch of unpushed commits accumulate. With three lanes live, push **your own lane branch** (`git push origin lane-<x>`); push `main` only after a merge that built and passed a boot test. **Never force-push** anything — a force-push to a shared branch destroys the other two lanes' work. If a push is rejected as non-fast-forward, `git pull --rebase` and push again; never resolve it with `--force`.
+- **Push often, on your own volition.** You do not need to ask. Run `git push` after every completed task, or at minimum after every few meaningful commits. If you've done good work and the machine loses power, that work should not be lost. Never let a long stretch of unpushed commits accumulate. With three lanes live, push **your own lane branch** (`git push origin lane-<x>`); push `main` only after a merge that built and passed a boot test. **Never force-push** anything — a force-push to a shared branch destroys the other two lanes' work. If a push is rejected as non-fast-forward, `git fetch origin && git merge origin/<branch>` and push again; never resolve it with `--force` and never rebase a branch you have already pushed.
 - **If you're genuinely stuck** — a design contradiction, a hardware issue, a question that truly requires human judgment — document exactly what you need in `todo.txt`, commit and push your progress so far, then stop. But the bar for "genuinely stuck" is high. Most obstacles have answers in the design files or can be resolved with a reasonable default.
 - **Default behavior: schedule a 60-second heartbeat wakeup every turn.** Unless work is genuinely blocked on a human decision, at the end of every turn call `ScheduleWakeup` with `delaySeconds=60` (prompt `<<autonomous-loop-dynamic>>` for autonomous roadmap work) so the autonomous loop keeps ticking and forward progress continues. This is the standing default — you do not need the operator to ask for it; re-establish the heartbeat automatically whenever it is not already running. The only exception is when work is genuinely blocked on a human decision — then schedule no wakeup and let the loop end (see the state-(3) rule above). On this project roadmap work almost always exists, so 60s should be the norm; do not back off to longer idle intervals.
 
@@ -498,17 +553,24 @@ were not used to derive the active rate.)
 8. If you created a new crate or module, add a `//!` module doc explaining what it does and how it fits into the architecture.
 9. Commit with a clear message. One logical change per commit.
 10. **`git push`** your branch. Do not leave completed work only in the local repo.
+11. **Merge your lane up into `main` and push `main`** (from the `os`
+    integration worktree). Work that lives only on your lane branch is
+    invisible to the other two lanes — including any `requests/` you filed
+    for them, which is the whole point of having filed them.
 
 ---
 
 ## When You Start a Task
 
-1. Read this file.
-2. Read the relevant section of `design.txt` and any related design files.
-3. Check `roadmap.md` for the task's dependencies — don't start if prerequisites are not done.
-4. Check `todo.txt` for any notes left by other sessions that affect your work.
-5. Check `requests/` for any interface requests you can fulfill or that affect your zone.
-6. Study existing implementations per the table above.
-7. Write the benchmark first (if applicable).
-8. Write tests alongside the implementation, not after.
-9. Build and test before committing.
+1. **`git fetch origin && git merge origin/main`** — before you read any
+   shared document, make sure you are reading a current copy of it. Steps 4-6
+   below are worthless against a branch that last saw `main` yesterday.
+2. Read this file.
+3. Read the relevant section of `design.txt` and any related design files.
+4. Check `roadmap.md` for the task's dependencies — don't start if prerequisites are not done.
+5. Check `todo.txt` for any notes left by other sessions that affect your work.
+6. Check `requests/` for any interface requests you can fulfill or that affect your zone.
+7. Study existing implementations per the table above.
+8. Write the benchmark first (if applicable).
+9. Write tests alongside the implementation, not after.
+10. Build and test before committing.

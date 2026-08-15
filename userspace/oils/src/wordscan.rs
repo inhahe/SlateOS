@@ -583,6 +583,180 @@ fn skip_to(s: BStr<'_>, start: usize, ch: u8) -> usize {
         .map_or(s.len(), |off| start + off)
 }
 
+/// The stretches of `s` in which `brace_gobbler` would read a command
+/// substitution — that is, where its `quoted` is `0` or `"`.
+///
+/// The gobbler's quoting state is a **flat** character loop, and one byte wide:
+///
+/// ```c
+///   if (c == '\\' && quoted != '\'') { i += 2; continue; }   /* pass_next */
+///   if (c == '$' && text[i+1] == '{' && quoted != '\'')      /* like \{ */
+///     { pass_next = 1; i++; continue; }
+///   if (quoted)
+///     {
+///       if (c == quoted) quoted = 0;
+///       if (quoted == '"' && c == '$' && text[i+1] == '(') goto comsub;
+///       ADVANCE_CHAR (text, tlen, i); continue;
+///     }
+///   if (c == '"' || c == '\'' || c == '`') { quoted = c; i++; continue; }
+///   if ((c == '$' || c == '<' || c == '>') && text[i+1] == '(')
+///     { comsub: si = i + 2; extract_command_subst (text, &si, 0); i = si + 1; }
+///                                                  /* braces.c:637-682 */
+/// ```
+///
+/// Nothing about it nests: a `"` met while `quoted` is `"` clears the state
+/// outright, and a `'` or `` ` `` met while it is clear opens a stretch the
+/// `$(` row cannot fire in — however deeply the *parse* thought that byte was
+/// nested. So a reader that walks a parsed word structurally, as
+/// [`crate::interp::Shell::gobbled_subs`] does, has to be told which stretches
+/// of a run's text the scan was actually reading in.
+///
+/// `dquoted` is the state on entry: `true` for text the scan reached from
+/// inside `" … "`, which is every caller's case, since that is the only way it
+/// walks into a quoted run at all.
+///
+/// The returned ranges are in order, disjoint, and cover everything the scan
+/// reads; a `$( … )` extent belongs whole to the range it starts in, because
+/// `extract_command_subst` consumes it whole and a quote inside it flips
+/// nothing. A range may be empty — an unreadable stretch that runs to the end
+/// of `s` leaves an empty one behind it, and an empty `s` answers with one
+/// empty range rather than none, since the scan does read all nothing of it.
+pub(crate) fn gobbler_readable(s: BStr<'_>, dquoted: bool) -> Vec<core::ops::Range<usize>> {
+    let mut out: Vec<core::ops::Range<usize>> = Vec::new();
+    let mut quoted: u8 = if dquoted { b'"' } else { 0 };
+    // Where the stretch in progress began, once there is one. The entry state
+    // is always readable, so there is one from the first byte.
+    let mut open = Some(0usize);
+    let mut i = 0usize;
+    while i < s.len() {
+        let c = s[i];
+        let next = s.get(i.saturating_add(1)).copied();
+        // A backslash passes the next character over — but not inside `' … '`,
+        // where bash's `pass_next` row is gated on `quoted != '\''`.
+        if c == b'\\' && quoted != b'\'' {
+            i = i.saturating_add(2);
+            continue;
+        }
+        // `${` is treated like `\{`: the `{` is passed over, and no state of
+        // its own is opened. So what is between the braces is scanned in
+        // whatever quoting was already in force.
+        if c == b'$' && next == Some(b'{') && quoted != b'\'' {
+            i = i.saturating_add(2);
+            continue;
+        }
+        let comsub = if quoted == 0 {
+            if matches!(c, b'"' | b'\'' | b'`') {
+                // A stretch the `$(` row cannot fire in starts here, and the
+                // opening quote belongs to it.
+                if c != b'"'
+                    && let Some(from) = open.take()
+                {
+                    out.push(from..i);
+                }
+                quoted = c;
+                i = i.saturating_add(1);
+                continue;
+            }
+            matches!(c, b'$' | b'<' | b'>') && next == Some(b'(')
+        } else {
+            if c == quoted {
+                quoted = 0;
+                i = i.saturating_add(1);
+                // …and the closing quote belongs to it too, so a readable
+                // stretch resumes only after it.
+                if open.is_none() {
+                    open = Some(i);
+                }
+                continue;
+            }
+            // Only the `"` state reaches the comsub row; `'` and `` ` `` do
+            // not, which is the whole of the disagreement this exists for.
+            quoted == b'"' && c == b'$' && next == Some(b'(')
+        };
+        if comsub {
+            // `extract_command_subst` takes the extent whole. Everything in it
+            // is the substitution's own business, quotes included.
+            i = past(skip_matched(s, i.saturating_add(2), b'(', b')', 0), s);
+            continue;
+        }
+        i = i.saturating_add(1);
+    }
+    if let Some(from) = open {
+        out.push(from..s.len());
+    }
+    out
+}
+
+/// Where each `<( … )` / `>( … )` `brace_gobbler` reads in `s` begins — the
+/// index of the `<` or `>` itself.
+///
+/// The gobbler's comsub row names all three spellings in one breath —
+/// `(c == '$' || c == '<' || c == '>') && text[i+1] == '('` (braces.c:675) — but
+/// only from the *unquoted* state. The `quoted` branch has a row of its own and
+/// it is the `$(` alone (`quoted == '"' && c == '$' && text[i+1] == '('`,
+/// braces.c:668), so a `<(` written inside `" … "` is not read and a `<(`
+/// written where the state has been cleared again is.
+///
+/// That clearing is why this exists as a question at all. Nothing about the
+/// state nests: a `"` met while `quoted` is `"` sets it to 0 outright, and a
+/// `${` opens no state of its own, so the *inner* quotes of `"${z:-"<(fi)"}"`
+/// leave the scan unquoted over the `<(` — which the parser, whose `" … "` is a
+/// recursive `parse_matched_pair` with no such row, read as characters. So this
+/// names a substitution no [`crate::ast::WordPart`] stands for, and
+/// [`crate::interp::Shell::gobble_scan`] has nowhere but the text to find it.
+///
+/// A `$( … )` is skipped whole rather than reported: it is the one spelling the
+/// parse *did* read, so a part already stands for it wherever it is readable.
+///
+/// `dquoted` is the state on entry, as in [`gobbler_readable`].
+pub(crate) fn gobbler_procsubs(s: BStr<'_>, dquoted: bool) -> Vec<usize> {
+    let mut out: Vec<usize> = Vec::new();
+    let mut quoted: u8 = if dquoted { b'"' } else { 0 };
+    let mut i = 0usize;
+    while i < s.len() {
+        let c = s[i];
+        let next = s.get(i.saturating_add(1)).copied();
+        if c == b'\\' && quoted != b'\'' {
+            i = i.saturating_add(2);
+            continue;
+        }
+        if c == b'$' && next == Some(b'{') && quoted != b'\'' {
+            i = i.saturating_add(2);
+            continue;
+        }
+        let (comsub, procsub) = if quoted == 0 {
+            if matches!(c, b'"' | b'\'' | b'`') {
+                quoted = c;
+                i = i.saturating_add(1);
+                continue;
+            }
+            let row = matches!(c, b'$' | b'<' | b'>') && next == Some(b'(');
+            (row, row && c != b'$')
+        } else {
+            if c == quoted {
+                quoted = 0;
+                i = i.saturating_add(1);
+                continue;
+            }
+            (quoted == b'"' && c == b'$' && next == Some(b'('), false)
+        };
+        if comsub {
+            if procsub {
+                out.push(i);
+            }
+            // `extract_command_subst` takes the extent whole, quotes included —
+            // and where it stops is the caller's business, not this scan's: the
+            // real answer is a parse, and only the *reported* substitutions are
+            // worth one. Skipping on a paren count is what [`gobbler_readable`]
+            // does for the same purpose.
+            i = past(skip_matched(s, i.saturating_add(2), b'(', b')', 0), s);
+            continue;
+        }
+        i = i.saturating_add(1);
+    }
+    out
+}
+
 /// `skipsubscript (string, start, 0)` (subst.c:2166) — where the `]` that
 /// matches the `[` at `start` is, or `s.len()` when there is none.
 ///
@@ -658,7 +832,89 @@ fn skip_matched(s: BStr<'_>, start: usize, open: u8, close: u8, d: u32) -> usize
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
-    use super::{BraceEnd, WordFault, expansion_body_len, skip_subscript, word_fault};
+    use super::{
+        BraceEnd, WordFault, expansion_body_len, gobbler_procsubs, gobbler_readable, skip_subscript,
+        word_fault,
+    };
+
+    /// The stretches [`gobbler_readable`] answers with, as the text in them.
+    fn readable(src: &str, dquoted: bool) -> Vec<&str> {
+        gobbler_readable(src.as_bytes(), dquoted)
+            .into_iter()
+            .map(|r| src.get(r).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn the_gobblers_flat_quoting_says_which_stretches_of_a_run_it_reads() {
+        // Entry state `"`, which is how every caller reaches a quoted run: a
+        // plain stretch is read whole, the `$( … )` in it included.
+        assert_eq!(readable("a$(fi)b", true), ["a$(fi)b"]);
+        // A quote *inside* an extent flips nothing — `extract_command_subst`
+        // takes the extent whole and the scan resumes past it.
+        assert_eq!(readable("a$(echo '`')b", true), ["a$(echo '`')b"]);
+        // A `"` met while the state is `"` clears it outright; it does not
+        // nest. What follows is still read, because `0` reaches the `$(` row
+        // just as `"` does.
+        assert_eq!(readable(r#"a"b$(fi)"#, true), [r#"a"b$(fi)"#]);
+        // …but with the state cleared, a backquote opens a stretch the `$(`
+        // row cannot fire in. This is the one the fill's gate declines.
+        assert_eq!(readable("a\"`$(fi)`", true), ["a\"", ""]);
+        // A `'` does the same, and reading resumes after the closing quote.
+        assert_eq!(readable("a\"'$(fi)'z", true), ["a\"", "z"]);
+        assert_eq!(readable("a\"`x`b$(fi)", true), ["a\"", "b$(fi)"]);
+        // At the top level the state starts clear, so the `$(` row fires…
+        assert_eq!(readable("a$(fi)", false), ["a$(fi)"]);
+        // …and a `"` there opens the readable state rather than closing one.
+        assert_eq!(readable(r#"a"$(fi)""#, false), [r#"a"$(fi)""#]);
+        // …while a `'` there is a quote, and hides what it holds.
+        assert_eq!(readable("a'$(fi)'b", false), ["a", "b"]);
+        // A backslash passes the next byte over, so a quote can be hidden…
+        assert_eq!(readable(r#"a\`$(fi)"#, true), [r#"a\`$(fi)"#]);
+        // …except inside `' … '`, where bash's `pass_next` row is not reached,
+        // so the `\` is an ordinary byte and the next `'` closes the run.
+        assert_eq!(readable(r#"a"'\'$(fi)"#, true), ["a\"", "$(fi)"]);
+        // `${` is passed over like `\{` and opens no state of its own, so the
+        // body is scanned in whatever quoting was already in force.
+        assert_eq!(readable("${z#$(fi)}", true), ["${z#$(fi)}"]);
+        // Nothing at all is read whole, trivially — one empty stretch, not none.
+        assert_eq!(readable("", true), [""]);
+    }
+
+    /// The process substitutions the gobbler reads in `src`, as the text of each
+    /// from its `<`/`>` to the end of the string.
+    fn procsubs(src: &str, dquoted: bool) -> Vec<&str> {
+        gobbler_procsubs(src.as_bytes(), dquoted).into_iter().filter_map(|i| src.get(i..)).collect()
+    }
+
+    #[test]
+    fn a_process_substitution_is_read_only_where_the_flat_quoting_is_clear() {
+        // The unquoted row takes all three spellings; only two are collected,
+        // the `$(` being one a part already stands for.
+        assert_eq!(procsubs("a<(fi)b", false), ["<(fi)b"]);
+        assert_eq!(procsubs("a>(fi)b", false), [">(fi)b"]);
+        assert_eq!(procsubs("a$(fi)b", false), [] as [&str; 0]);
+        // Inside `" … "` the row is the `$(` alone, so nothing is read…
+        assert_eq!(procsubs("a<(fi)b", true), [] as [&str; 0]);
+        // …until a `"` clears the state, which is not a nesting but a flip.
+        assert_eq!(procsubs(r#"${z:-"<(fi)"}"#, true), [r#"<(fi)"}"#]);
+        assert_eq!(procsubs(r#"${z:-"a"<(fi)"b"}"#, true), [] as [&str; 0]);
+        assert_eq!(procsubs(r#"${z:-"${y:-"<(fi)"}"}"#, true), [] as [&str; 0]);
+        // A `'` or a `` ` `` met with the state clear hides what it holds.
+        assert_eq!(procsubs(r#"${z:-"'<(fi)'"}"#, true), [] as [&str; 0]);
+        assert_eq!(procsubs("${z:-\"`<(fi)`\"}", true), [] as [&str; 0]);
+        // A backslash passes the `<` over.
+        assert_eq!(procsubs(r#"${z:-"\<(fi)"}"#, true), [] as [&str; 0]);
+        // An extent is stepped over whole, whichever spelling opened it, so one
+        // written inside another is the outer one's business and not read here.
+        assert_eq!(procsubs("$(x <(fi))<(y)", false), ["<(y)"]);
+        assert_eq!(procsubs("<(x <(fi))<(y)", false), ["<(x <(fi))<(y)", "<(y)"]);
+        // Two in a row, in the order the scan meets them.
+        assert_eq!(procsubs(r#"${z:-"<(a)""<(b)"}"#, true), [r#"<(a)""<(b)"}"#, r#"<(b)"}"#]);
+        // One that never closes is still read; where its body ends is the
+        // reader's question, not the scan's.
+        assert_eq!(procsubs(r#"${z:-"<(fi"}"#, true), [r#"<(fi"}"#]);
+    }
 
     /// The subscript `skipsubscript` reads out of `src`, whose `[` is at `open`,
     /// or `None` when it never closes.

@@ -24,6 +24,7 @@ use guitk::event::{Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, Mo
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
+use guitk::table::{Column, Fit, Table};
 use guitk::text;
 
 // ============================================================================
@@ -64,6 +65,54 @@ const DISK_MAP_HEIGHT: f32 = 80.0;
 const DISK_MAP_PADDING: f32 = 12.0;
 const DISK_MAP_BAR_HEIGHT: f32 = 40.0;
 const PARTITION_ROW_HEIGHT: f32 = 24.0;
+/// The partition list's columns.
+///
+/// These widths used to live in a `cols: &[(&str, f32)]` array whose numbers
+/// were the column *pitch*, so every cell subtracted its own padding
+/// (`max_width: Some(col_w - 8.0)` drawn at `col_x + 4.0`) and every row
+/// advanced by the undiscounted pitch. The header, drawn at `+4.0` but bounded
+/// by the full pitch, could overhang the next column by 4px. Here the width is
+/// the width a cell may actually use, and the 8px pitch difference is the
+/// table's gap.
+const PARTITION_GAP: f32 = 8.0;
+const PARTITION_COLUMNS: &[Column] = &[
+    Column {
+        label: "#",
+        width: 22.0,
+    },
+    Column {
+        label: "Label",
+        width: 112.0,
+    },
+    Column {
+        label: "Filesystem",
+        width: 72.0,
+    },
+    Column {
+        label: "Size",
+        width: 82.0,
+    },
+    Column {
+        label: "Used",
+        width: 82.0,
+    },
+    Column {
+        label: "Flags",
+        width: 72.0,
+    },
+    Column {
+        label: "Mount",
+        width: 92.0,
+    },
+];
+const PART_INDEX: usize = 0;
+const PART_LABEL: usize = 1;
+const PART_FS: usize = 2;
+const PART_SIZE: usize = 3;
+const PART_FLAGS: usize = 5;
+const PARTITION_HEADER_FONT: f32 = 10.0;
+const PARTITION_ROW_FONT: f32 = 11.0;
+
 const DETAIL_PANEL_WIDTH: f32 = 300.0;
 const PROPERTY_ROW_HEIGHT: f32 = 22.0;
 const SECTION_HEADER_HEIGHT: f32 = 28.0;
@@ -345,7 +394,11 @@ impl Partition {
         if self.flags.is_empty() {
             return String::from("none");
         }
-        self.flags.iter().map(|f| f.label()).collect::<Vec<_>>().join(", ")
+        self.flags
+            .iter()
+            .map(|f| f.label())
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 
     /// Used percentage (0..100), or None if unknown.
@@ -463,9 +516,13 @@ impl Disk {
         } else {
             1
         };
-        let last_usable: u64 = self.total_sectors.saturating_sub(
-            if self.table_type == PartitionTableType::Gpt { 34 } else { 1 },
-        );
+        let last_usable: u64 =
+            self.total_sectors
+                .saturating_sub(if self.table_type == PartitionTableType::Gpt {
+                    34
+                } else {
+                    1
+                });
 
         let mut cursor = first_usable;
 
@@ -574,38 +631,100 @@ impl PendingOperation {
     /// Human-readable description of this operation.
     pub fn describe(&self) -> String {
         match self {
-            Self::CreatePartition { label, filesystem, start_sector, end_sector, .. } => {
+            Self::CreatePartition {
+                label,
+                filesystem,
+                start_sector,
+                end_sector,
+                ..
+            } => {
                 let size = end_sector.saturating_sub(*start_sector).saturating_mul(512);
-                format!("Create {} partition \"{}\" ({})", filesystem.label(), label, format_size(size))
+                format!(
+                    "Create {} partition \"{}\" ({})",
+                    filesystem.label(),
+                    label,
+                    format_size(size)
+                )
             }
-            Self::DeletePartition { partition_label, partition_index, .. } => {
-                format!("Delete partition {} (\"{}\")", partition_index, partition_label)
+            Self::DeletePartition {
+                partition_label,
+                partition_index,
+                ..
+            } => {
+                format!(
+                    "Delete partition {} (\"{}\")",
+                    partition_index, partition_label
+                )
             }
-            Self::ResizePartition { partition_index, new_start_sector, new_end_sector, .. } => {
-                let size = new_end_sector.saturating_sub(*new_start_sector).saturating_mul(512);
-                format!("Resize partition {} to {}", partition_index, format_size(size))
+            Self::ResizePartition {
+                partition_index,
+                new_start_sector,
+                new_end_sector,
+                ..
+            } => {
+                let size = new_end_sector
+                    .saturating_sub(*new_start_sector)
+                    .saturating_mul(512);
+                format!(
+                    "Resize partition {} to {}",
+                    partition_index,
+                    format_size(size)
+                )
             }
-            Self::FormatPartition { partition_index, new_filesystem, .. } => {
-                format!("Format partition {} as {}", partition_index, new_filesystem.label())
+            Self::FormatPartition {
+                partition_index,
+                new_filesystem,
+                ..
+            } => {
+                format!(
+                    "Format partition {} as {}",
+                    partition_index,
+                    new_filesystem.label()
+                )
             }
-            Self::SetLabel { partition_index, new_label, .. } => {
-                format!("Set label on partition {} to \"{}\"", partition_index, new_label)
+            Self::SetLabel {
+                partition_index,
+                new_label,
+                ..
+            } => {
+                format!(
+                    "Set label on partition {} to \"{}\"",
+                    partition_index, new_label
+                )
             }
-            Self::SetFlag { partition_index, flag, enabled, .. } => {
+            Self::SetFlag {
+                partition_index,
+                flag,
+                enabled,
+                ..
+            } => {
                 if *enabled {
-                    format!("Enable {} flag on partition {}", flag.label(), partition_index)
+                    format!(
+                        "Enable {} flag on partition {}",
+                        flag.label(),
+                        partition_index
+                    )
                 } else {
-                    format!("Disable {} flag on partition {}", flag.label(), partition_index)
+                    format!(
+                        "Disable {} flag on partition {}",
+                        flag.label(),
+                        partition_index
+                    )
                 }
             }
-            Self::SetMountPoint { partition_index, mount_point, .. } => {
-                match mount_point {
-                    Some(mp) => format!("Mount partition {} at {}", partition_index, mp),
-                    None => format!("Unmount partition {}", partition_index),
-                }
-            }
+            Self::SetMountPoint {
+                partition_index,
+                mount_point,
+                ..
+            } => match mount_point {
+                Some(mp) => format!("Mount partition {} at {}", partition_index, mp),
+                None => format!("Unmount partition {}", partition_index),
+            },
             Self::CreatePartitionTable { table_type, .. } => {
-                format!("Create new {} partition table (ALL DATA WILL BE LOST)", table_type.label())
+                format!(
+                    "Create new {} partition table (ALL DATA WILL BE LOST)",
+                    table_type.label()
+                )
             }
         }
     }
@@ -713,7 +832,10 @@ impl CreatePartitionDialog {
     /// Selected filesystem.
     pub fn selected_filesystem(&self) -> FilesystemType {
         let formattable = FilesystemType::formattable();
-        formattable.get(self.filesystem_index).copied().unwrap_or(FilesystemType::Ext4)
+        formattable
+            .get(self.filesystem_index)
+            .copied()
+            .unwrap_or(FilesystemType::Ext4)
     }
 
     /// Computed end sector for the partition.
@@ -745,7 +867,10 @@ impl FormatDialog {
 
     pub fn selected_filesystem(&self) -> FilesystemType {
         let formattable = FilesystemType::formattable();
-        formattable.get(self.filesystem_index).copied().unwrap_or(FilesystemType::Ext4)
+        formattable
+            .get(self.filesystem_index)
+            .copied()
+            .unwrap_or(FilesystemType::Ext4)
     }
 }
 
@@ -888,21 +1013,19 @@ fn sample_disks() -> Vec<Disk> {
             sector_size: 512,
             total_sectors: 468_862_128,
             table_type: PartitionTableType::Mbr,
-            partitions: vec![
-                Partition {
-                    index: 1,
-                    label: String::from("Windows"),
-                    filesystem: FilesystemType::Ntfs,
-                    start_sector: 2048,
-                    end_sector: 409_602_047,
-                    size_bytes: 209_715_200_000,
-                    flags: vec![PartitionFlag::Boot],
-                    mount_point: None,
-                    uuid: String::from("1234ABCD"),
-                    used_bytes: Some(95_000_000_000),
-                    free_bytes: Some(114_715_200_000),
-                },
-            ],
+            partitions: vec![Partition {
+                index: 1,
+                label: String::from("Windows"),
+                filesystem: FilesystemType::Ntfs,
+                start_sector: 2048,
+                end_sector: 409_602_047,
+                size_bytes: 209_715_200_000,
+                flags: vec![PartitionFlag::Boot],
+                mount_point: None,
+                uuid: String::from("1234ABCD"),
+                used_bytes: Some(95_000_000_000),
+                free_bytes: Some(114_715_200_000),
+            }],
             smart_health: SmartHealth::Warning,
             temperature_c: Some(42),
         },
@@ -983,9 +1106,7 @@ impl PartitionManagerApp {
     pub fn selected_partition(&self) -> Option<&Partition> {
         let disk = self.current_disk()?;
         match &self.selected_item {
-            SelectedItem::Partition(idx) => {
-                disk.partitions.iter().find(|p| p.index == *idx)
-            }
+            SelectedItem::Partition(idx) => disk.partitions.iter().find(|p| p.index == *idx),
             _ => None,
         }
     }
@@ -1293,7 +1414,11 @@ fn render_disk_map(tree: &mut RenderTree, app: &PartitionManagerApp) {
     tree.push(RenderCommand::Text {
         x: map_x,
         y: map_y,
-        text: format!("Disk Layout - {} ({})", disk.name, format_size(disk.total_size_bytes)),
+        text: format!(
+            "Disk Layout - {} ({})",
+            disk.name,
+            format_size(disk.total_size_bytes)
+        ),
         color: COLOR_TEXT,
         font_size: 12.0,
         font_weight: FontWeightHint::Bold,
@@ -1472,7 +1597,11 @@ fn render_partition_list(tree: &mut RenderTree, app: &PartitionManagerApp) {
     let top = TITLE_BAR_HEIGHT + TOOLBAR_HEIGHT + DISK_MAP_HEIGHT + DISK_MAP_PADDING * 2.0 + 30.0;
     let left = SIDEBAR_WIDTH + DISK_MAP_PADDING;
     let list_width = app.width - SIDEBAR_WIDTH - DETAIL_PANEL_WIDTH - DISK_MAP_PADDING * 2.0;
-    let queue_h = if app.queue_expanded { QUEUE_PANEL_HEIGHT } else { 28.0 };
+    let queue_h = if app.queue_expanded {
+        QUEUE_PANEL_HEIGHT
+    } else {
+        28.0
+    };
     let bottom = app.height - STATUS_BAR_HEIGHT - queue_h;
     let list_height = bottom - top;
 
@@ -1490,28 +1619,13 @@ fn render_partition_list(tree: &mut RenderTree, app: &PartitionManagerApp) {
     let header_y = top + 18.0;
 
     // Column headers
-    let cols: &[(&str, f32)] = &[
-        ("#", 30.0),
-        ("Label", 120.0),
-        ("Filesystem", 80.0),
-        ("Size", 90.0),
-        ("Used", 90.0),
-        ("Flags", 80.0),
-        ("Mount", 100.0),
-    ];
-    let mut cx = left;
-    for (col_name, col_w) in cols {
-        tree.push(RenderCommand::Text {
-            x: cx + 4.0,
-            y: header_y + 4.0,
-            text: String::from(*col_name),
-            color: COLOR_SUBTEXT0,
-            font_size: 10.0,
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(*col_w),
-        });
-        cx += col_w;
-    }
+    let table = Table::with_gap(PARTITION_COLUMNS, left + 4.0, PARTITION_GAP);
+    table.header(
+        &mut tree.commands,
+        header_y + 4.0,
+        COLOR_SUBTEXT0,
+        PARTITION_HEADER_FONT,
+    );
 
     // Divider under header
     let data_top = header_y + PARTITION_ROW_HEIGHT;
@@ -1559,88 +1673,77 @@ fn render_partition_list(tree: &mut RenderTree, app: &PartitionManagerApp) {
             corner_radii: CornerRadii::ZERO,
         });
 
-        let mut col_x = left;
         match region {
             DiskRegion::Partition(p) => {
-                let values: Vec<String> = vec![
-                    format!("{}", p.index),
-                    p.label.clone(),
-                    String::from(p.filesystem.label()),
-                    format_size(p.size_bytes),
-                    p.used_percent().map_or(String::from("-"), |pct| format!("{pct}%")),
-                    p.flags_string(),
-                    p.mount_point.clone().unwrap_or_else(|| String::from("-")),
+                // A partition label and a mount point are both arbitrary-length
+                // strings the user chose, and were clipped with no marker, so
+                // two long values agreeing on their visible part read as the
+                // same value.
+                //
+                // They are cut at opposite ends, because they are identified at
+                // opposite ends. A label is prose the user wrote and names
+                // itself first ("Timemachine backup" — the rest is detail), so
+                // it keeps its head. A mount point is a path, and a path's leaf
+                // is what names it: cut at the end, `/mnt/external/backups/2026`
+                // and `/mnt/external/backups/2027` both render as
+                // `/mnt/external/back…` and become indistinguishable — exactly
+                // the failure the marker exists to prevent. Cut at the front
+                // they read `…backups/2026` and `…backups/2027`.
+                let values: [(String, Fit); 7] = [
+                    (format!("{}", p.index), Fit::Start),
+                    (p.label.clone(), Fit::Start),
+                    (String::from(p.filesystem.label()), Fit::Start),
+                    (format_size(p.size_bytes), Fit::Start),
+                    (
+                        p.used_percent()
+                            .map_or(String::from("-"), |pct| format!("{pct}%")),
+                        Fit::Start,
+                    ),
+                    (p.flags_string(), Fit::Start),
+                    (
+                        p.mount_point.clone().unwrap_or_else(|| String::from("-")),
+                        Fit::End,
+                    ),
                 ];
-                for (j, val) in values.iter().enumerate() {
-                    let (_, col_w) = cols.get(j).copied().unwrap_or(("", 80.0));
-                    let text_color = if p.is_system() && (j == 1 || j == 5) {
+                debug_assert_eq!(
+                    values.len(),
+                    table.len(),
+                    "a cell with no column is positioned past the table and drawn empty",
+                );
+                for (j, (val, fit)) in values.iter().enumerate() {
+                    let text_color = if p.is_system() && (j == PART_LABEL || j == PART_FLAGS) {
                         COLOR_YELLOW
                     } else {
                         COLOR_TEXT
                     };
-                    tree.push(RenderCommand::Text {
-                        x: col_x + 4.0,
-                        y: ry + 5.0,
-                        text: val.clone(),
-                        color: text_color,
-                        font_size: 11.0,
-                        font_weight: FontWeightHint::Regular,
-                        max_width: Some(col_w - 8.0),
-                    });
-                    col_x += col_w;
+                    table.cell(
+                        &mut tree.commands,
+                        j,
+                        ry + 5.0,
+                        val,
+                        text_color,
+                        PARTITION_ROW_FONT,
+                        *fit,
+                    );
                 }
             }
             DiskRegion::Unallocated(u) => {
-                // Index column: dash
-                let (_, w0) = cols[0];
-                tree.push(RenderCommand::Text {
-                    x: col_x + 4.0,
-                    y: ry + 5.0,
-                    text: String::from("-"),
-                    color: COLOR_OVERLAY0,
-                    font_size: 11.0,
-                    font_weight: FontWeightHint::Regular,
-                    max_width: Some(w0 - 8.0),
-                });
-                col_x += w0;
-
-                // Label: "Unallocated"
-                let (_, w1) = cols[1];
-                tree.push(RenderCommand::Text {
-                    x: col_x + 4.0,
-                    y: ry + 5.0,
-                    text: String::from("Unallocated"),
-                    color: COLOR_OVERLAY0,
-                    font_size: 11.0,
-                    font_weight: FontWeightHint::Regular,
-                    max_width: Some(w1 - 8.0),
-                });
-                col_x += w1;
-
-                // Filesystem: dash
-                let (_, w2) = cols[2];
-                tree.push(RenderCommand::Text {
-                    x: col_x + 4.0,
-                    y: ry + 5.0,
-                    text: String::from("-"),
-                    color: COLOR_OVERLAY0,
-                    font_size: 11.0,
-                    font_weight: FontWeightHint::Regular,
-                    max_width: Some(w2 - 8.0),
-                });
-                col_x += w2;
-
-                // Size
-                let (_, w3) = cols[3];
-                tree.push(RenderCommand::Text {
-                    x: col_x + 4.0,
-                    y: ry + 5.0,
-                    text: format_size(u.size_bytes),
-                    color: COLOR_OVERLAY0,
-                    font_size: 11.0,
-                    font_weight: FontWeightHint::Regular,
-                    max_width: Some(w3 - 8.0),
-                });
+                for (index, val) in [
+                    (PART_INDEX, String::from("-")),
+                    (PART_LABEL, String::from("Unallocated")),
+                    (PART_FS, String::from("-")),
+                    (PART_SIZE, format_size(u.size_bytes)),
+                ] {
+                    table.cell(
+                        &mut tree.commands,
+                        index,
+                        ry + 5.0,
+                        &val,
+                        COLOR_OVERLAY0,
+                        PARTITION_ROW_FONT,
+                        Fit::Start,
+                    );
+                }
             }
         }
     }
@@ -1709,10 +1812,11 @@ fn render_detail_panel(tree: &mut RenderTree, app: &PartitionManagerApp) {
         ("Table Type", String::from(disk.table_type.label())),
         ("Partitions", format!("{}", disk.partition_count())),
         ("SMART", String::from(disk.smart_health.label())),
-        ("Temperature", disk.temperature_c.map_or(
-            String::from("N/A"),
-            |t| format!("{t} C"),
-        )),
+        (
+            "Temperature",
+            disk.temperature_c
+                .map_or(String::from("N/A"), |t| format!("{t} C")),
+        ),
     ];
 
     for (label, value) in &disk_props {
@@ -1794,16 +1898,23 @@ fn render_detail_panel(tree: &mut RenderTree, app: &PartitionManagerApp) {
             ("UUID", part.uuid.clone()),
             ("Filesystem", String::from(part.filesystem.label())),
             ("Size", format_size(part.size_bytes)),
-            ("Used", part.used_bytes.map_or(
-                String::from("N/A"),
-                |u| format!("{} ({}%)", format_size(u), part.used_percent().unwrap_or(0)),
-            )),
-            ("Free", part.free_bytes.map_or(
-                String::from("N/A"),
-                format_size,
-            )),
+            (
+                "Used",
+                part.used_bytes.map_or(String::from("N/A"), |u| {
+                    format!("{} ({}%)", format_size(u), part.used_percent().unwrap_or(0))
+                }),
+            ),
+            (
+                "Free",
+                part.free_bytes.map_or(String::from("N/A"), format_size),
+            ),
             ("Flags", part.flags_string()),
-            ("Mount", part.mount_point.clone().unwrap_or_else(|| String::from("Not mounted"))),
+            (
+                "Mount",
+                part.mount_point
+                    .clone()
+                    .unwrap_or_else(|| String::from("Not mounted")),
+            ),
             ("Start", format!("sector {}", part.start_sector)),
             ("End", format!("sector {}", part.end_sector)),
         ];
@@ -1871,7 +1982,11 @@ fn render_detail_panel(tree: &mut RenderTree, app: &PartitionManagerApp) {
 // ============================================================================
 
 fn render_queue_panel(tree: &mut RenderTree, app: &PartitionManagerApp) {
-    let queue_h = if app.queue_expanded { QUEUE_PANEL_HEIGHT } else { 28.0 };
+    let queue_h = if app.queue_expanded {
+        QUEUE_PANEL_HEIGHT
+    } else {
+        28.0
+    };
     let top = app.height - STATUS_BAR_HEIGHT - queue_h;
     let left = SIDEBAR_WIDTH;
     let panel_width = app.width - SIDEBAR_WIDTH;
@@ -1932,7 +2047,11 @@ fn render_queue_panel(tree: &mut RenderTree, app: &PartitionManagerApp) {
         let ry = list_top + (i as f32) * QUEUE_ROW_HEIGHT - app.queue_scroll;
         let hovered = app.hovered_queue_row == Some(i);
 
-        let bg = if hovered { COLOR_SURFACE1 } else { COLOR_SURFACE0 };
+        let bg = if hovered {
+            COLOR_SURFACE1
+        } else {
+            COLOR_SURFACE0
+        };
         tree.push(RenderCommand::FillRect {
             x: left,
             y: ry,
@@ -1954,7 +2073,11 @@ fn render_queue_panel(tree: &mut RenderTree, app: &PartitionManagerApp) {
         });
 
         // Destructive indicator
-        let desc_color = if op.is_destructive() { COLOR_RED } else { COLOR_TEXT };
+        let desc_color = if op.is_destructive() {
+            COLOR_RED
+        } else {
+            COLOR_TEXT
+        };
 
         tree.push(RenderCommand::Text {
             x: left + 36.0,
@@ -2085,7 +2208,11 @@ fn render_confirm_dialog(tree: &mut RenderTree, app: &PartitionManagerApp) {
         x: dx + 20.0,
         y: dy + 20.0,
         text: dialog.title.clone(),
-        color: if dialog.destructive { COLOR_RED } else { COLOR_TEXT },
+        color: if dialog.destructive {
+            COLOR_RED
+        } else {
+            COLOR_TEXT
+        },
         font_size: 14.0,
         font_weight: FontWeightHint::Bold,
         max_width: Some(DIALOG_WIDTH - 40.0),
@@ -2141,7 +2268,11 @@ fn render_confirm_dialog(tree: &mut RenderTree, app: &PartitionManagerApp) {
     // Confirm button
     let confirm_hovered = dialog.hovered_button == Some(0);
     let confirm_bg = if dialog.destructive {
-        if confirm_hovered { COLOR_RED } else { Color::rgba(COLOR_RED.r, COLOR_RED.g, COLOR_RED.b, 180) }
+        if confirm_hovered {
+            COLOR_RED
+        } else {
+            Color::rgba(COLOR_RED.r, COLOR_RED.g, COLOR_RED.b, 180)
+        }
     } else if confirm_hovered {
         COLOR_BLUE
     } else {
@@ -2168,7 +2299,11 @@ fn render_confirm_dialog(tree: &mut RenderTree, app: &PartitionManagerApp) {
 
     // Cancel button
     let cancel_hovered = dialog.hovered_button == Some(1);
-    let cancel_bg = if cancel_hovered { COLOR_SURFACE2 } else { COLOR_SURFACE1 };
+    let cancel_bg = if cancel_hovered {
+        COLOR_SURFACE2
+    } else {
+        COLOR_SURFACE1
+    };
 
     tree.push(RenderCommand::FillRect {
         x: cancel_x,
@@ -2305,7 +2440,11 @@ fn render_create_partition_dialog(tree: &mut RenderTree, app: &PartitionManagerA
             text: String::from(fs.label()),
             color: fg,
             font_size: 10.0,
-            font_weight: if selected { FontWeightHint::Bold } else { FontWeightHint::Regular },
+            font_weight: if selected {
+                FontWeightHint::Bold
+            } else {
+                FontWeightHint::Regular
+            },
             max_width: Some(btn_w - 16.0),
         });
         fx += btn_w + 4.0;
@@ -2346,7 +2485,11 @@ fn render_create_partition_dialog(tree: &mut RenderTree, app: &PartitionManagerA
     } else {
         dialog.label.clone()
     };
-    let label_color = if dialog.label.is_empty() { COLOR_OVERLAY0 } else { COLOR_TEXT };
+    let label_color = if dialog.label.is_empty() {
+        COLOR_OVERLAY0
+    } else {
+        COLOR_TEXT
+    };
     tree.push(RenderCommand::Text {
         x: dx + 28.0,
         y: fy + 6.0,
@@ -2362,7 +2505,11 @@ fn render_create_partition_dialog(tree: &mut RenderTree, app: &PartitionManagerA
     tree.push(RenderCommand::Text {
         x: dx + 20.0,
         y: fy,
-        text: format!("Size: {} ({}%)", format_size(dialog.selected_size_bytes()), dialog.size_percent),
+        text: format!(
+            "Size: {} ({}%)",
+            format_size(dialog.selected_size_bytes()),
+            dialog.size_percent
+        ),
         color: COLOR_SUBTEXT0,
         font_size: 11.0,
         font_weight: FontWeightHint::Regular,
@@ -2396,7 +2543,9 @@ fn render_create_partition_dialog(tree: &mut RenderTree, app: &PartitionManagerA
     let cancel_x = dx + dw - DIALOG_BTN_WIDTH - 20.0;
 
     let create_hovered = dialog.hovered_button == Some(0);
-    let create_bg = if create_hovered { COLOR_BLUE } else {
+    let create_bg = if create_hovered {
+        COLOR_BLUE
+    } else {
         Color::rgba(COLOR_BLUE.r, COLOR_BLUE.g, COLOR_BLUE.b, 180)
     };
 
@@ -2419,7 +2568,11 @@ fn render_create_partition_dialog(tree: &mut RenderTree, app: &PartitionManagerA
     });
 
     let cancel_hovered = dialog.hovered_button == Some(1);
-    let cancel_bg = if cancel_hovered { COLOR_SURFACE2 } else { COLOR_SURFACE1 };
+    let cancel_bg = if cancel_hovered {
+        COLOR_SURFACE2
+    } else {
+        COLOR_SURFACE1
+    };
 
     tree.push(RenderCommand::FillRect {
         x: cancel_x,
@@ -2501,7 +2654,10 @@ fn render_format_dialog(tree: &mut RenderTree, app: &PartitionManagerApp) {
     tree.push(RenderCommand::Text {
         x: dx + 20.0,
         y: dy + 20.0,
-        text: format!("Format Partition {} (\"{}\")", dialog.partition_index, dialog.partition_label),
+        text: format!(
+            "Format Partition {} (\"{}\")",
+            dialog.partition_index, dialog.partition_label
+        ),
         color: COLOR_RED,
         font_size: 14.0,
         font_weight: FontWeightHint::Bold,
@@ -2561,7 +2717,11 @@ fn render_format_dialog(tree: &mut RenderTree, app: &PartitionManagerApp) {
             text: String::from(fs.label()),
             color: fg,
             font_size: 10.0,
-            font_weight: if selected { FontWeightHint::Bold } else { FontWeightHint::Regular },
+            font_weight: if selected {
+                FontWeightHint::Bold
+            } else {
+                FontWeightHint::Regular
+            },
             max_width: Some(btn_w - 16.0),
         });
         fx += btn_w + 4.0;
@@ -2573,7 +2733,9 @@ fn render_format_dialog(tree: &mut RenderTree, app: &PartitionManagerApp) {
     let cancel_x = dx + DIALOG_WIDTH - DIALOG_BTN_WIDTH - 20.0;
 
     let format_hovered = dialog.hovered_button == Some(0);
-    let format_bg = if format_hovered { COLOR_RED } else {
+    let format_bg = if format_hovered {
+        COLOR_RED
+    } else {
         Color::rgba(COLOR_RED.r, COLOR_RED.g, COLOR_RED.b, 180)
     };
 
@@ -2596,7 +2758,11 @@ fn render_format_dialog(tree: &mut RenderTree, app: &PartitionManagerApp) {
     });
 
     let cancel_hovered = dialog.hovered_button == Some(1);
-    let cancel_bg = if cancel_hovered { COLOR_SURFACE2 } else { COLOR_SURFACE1 };
+    let cancel_bg = if cancel_hovered {
+        COLOR_SURFACE2
+    } else {
+        COLOR_SURFACE1
+    };
 
     tree.push(RenderCommand::FillRect {
         x: cancel_x,
@@ -2673,10 +2839,7 @@ pub fn handle_event(app: &mut PartitionManagerApp, event: &Event) -> EventResult
     }
 }
 
-fn handle_mouse(
-    app: &mut PartitionManagerApp,
-    mouse: &guitk::event::MouseEvent,
-) -> EventResult {
+fn handle_mouse(app: &mut PartitionManagerApp, mouse: &guitk::event::MouseEvent) -> EventResult {
     let x = mouse.x;
     let y = mouse.y;
 
@@ -2686,15 +2849,9 @@ fn handle_mouse(
     }
 
     match &mouse.kind {
-        MouseEventKind::Press(MouseButton::Left) => {
-            handle_left_click(app, x, y)
-        }
-        MouseEventKind::Move => {
-            handle_mouse_move(app, x, y)
-        }
-        MouseEventKind::Scroll { dy, .. } => {
-            handle_scroll(app, x, y, *dy)
-        }
+        MouseEventKind::Press(MouseButton::Left) => handle_left_click(app, x, y),
+        MouseEventKind::Move => handle_mouse_move(app, x, y),
+        MouseEventKind::Scroll { dy, .. } => handle_scroll(app, x, y, *dy),
         _ => EventResult::Ignored,
     }
 }
@@ -2732,11 +2889,25 @@ fn handle_left_click(app: &mut PartitionManagerApp, x: f32, y: f32) -> EventResu
     }
 
     // Partition list click
-    let list_top = TITLE_BAR_HEIGHT + TOOLBAR_HEIGHT + DISK_MAP_HEIGHT + DISK_MAP_PADDING * 2.0 + 30.0 + PARTITION_ROW_HEIGHT + 18.0;
-    let queue_h = if app.queue_expanded { QUEUE_PANEL_HEIGHT } else { 28.0 };
+    let list_top = TITLE_BAR_HEIGHT
+        + TOOLBAR_HEIGHT
+        + DISK_MAP_HEIGHT
+        + DISK_MAP_PADDING * 2.0
+        + 30.0
+        + PARTITION_ROW_HEIGHT
+        + 18.0;
+    let queue_h = if app.queue_expanded {
+        QUEUE_PANEL_HEIGHT
+    } else {
+        28.0
+    };
     let list_bottom = app.height - STATUS_BAR_HEIGHT - queue_h;
 
-    if y >= list_top && y < list_bottom && x >= SIDEBAR_WIDTH + DISK_MAP_PADDING && x < app.width - DETAIL_PANEL_WIDTH {
+    if y >= list_top
+        && y < list_bottom
+        && x >= SIDEBAR_WIDTH + DISK_MAP_PADDING
+        && x < app.width - DETAIL_PANEL_WIDTH
+    {
         return handle_partition_list_click(app, y, list_top);
     }
 
@@ -2782,23 +2953,30 @@ fn execute_toolbar_action(app: &mut PartitionManagerApp, action: usize) -> Event
                 let regions = app.current_disk().map(|d| d.regions()).unwrap_or_default();
                 if let Some(DiskRegion::Unallocated(u)) = regions.get(*idx) {
                     let sector_size = app.current_disk().map(|d| d.sector_size).unwrap_or(512);
-                    app.dialog = ActiveDialog::CreatePartition(
-                        CreatePartitionDialog::new(u.start_sector, u.end_sector, sector_size),
-                    );
+                    app.dialog = ActiveDialog::CreatePartition(CreatePartitionDialog::new(
+                        u.start_sector,
+                        u.end_sector,
+                        sector_size,
+                    ));
                 }
             }
         }
         2 => {
             // Delete partition
             if let SelectedItem::Partition(idx) = &app.selected_item {
-                let label = app.selected_partition()
+                let label = app
+                    .selected_partition()
                     .map(|p| p.label.clone())
                     .unwrap_or_default();
-                let is_sys = app.selected_partition()
+                let is_sys = app
+                    .selected_partition()
                     .map(|p| p.is_system())
                     .unwrap_or(false);
                 let msg = if is_sys {
-                    format!("Delete SYSTEM partition {} (\"{}\")? This is extremely dangerous!", idx, label)
+                    format!(
+                        "Delete SYSTEM partition {} (\"{}\")? This is extremely dangerous!",
+                        idx, label
+                    )
                 } else {
                     format!("Delete partition {} (\"{}\")?", idx, label)
                 };
@@ -2819,7 +2997,8 @@ fn execute_toolbar_action(app: &mut PartitionManagerApp, action: usize) -> Event
         4 => {
             // Format
             if let SelectedItem::Partition(idx) = &app.selected_item {
-                let label = app.selected_partition()
+                let label = app
+                    .selected_partition()
                     .map(|p| p.label.clone())
                     .unwrap_or_default();
                 app.dialog = ActiveDialog::Format(FormatDialog::new(*idx, &label));
@@ -2866,7 +3045,10 @@ fn execute_toolbar_action(app: &mut PartitionManagerApp, action: usize) -> Event
                 let count = app.pending_count();
                 app.dialog = ActiveDialog::Confirm(ConfirmDialog::new(
                     "Apply Operations",
-                    &format!("Apply {} pending operation(s)? Some are destructive.", count),
+                    &format!(
+                        "Apply {} pending operation(s)? Some are destructive.",
+                        count
+                    ),
                     "Apply All",
                     true,
                 ));
@@ -2981,32 +3163,38 @@ fn handle_mouse_move(app: &mut PartitionManagerApp, x: f32, y: f32) -> EventResu
     if y >= map_y_start && y < map_y_end {
         let map_x_start = SIDEBAR_WIDTH + DISK_MAP_PADDING;
         let map_x_end = app.width - DETAIL_PANEL_WIDTH - DISK_MAP_PADDING;
-        if x >= map_x_start && x < map_x_end
-            && let Some(disk) = app.current_disk() {
-                let regions = disk.regions();
-                let total_sectors = disk.total_sectors as f64;
-                if total_sectors > 0.0 {
-                    let available_width = (map_x_end - map_x_start) as f64;
-                    let mut rx = map_x_start as f64;
-                    for (i, region) in regions.iter().enumerate() {
-                        let sector_span =
-                            (region.end_sector().saturating_sub(region.start_sector())) as f64;
-                        let fraction = sector_span / total_sectors;
-                        let region_width =
-                            (fraction * available_width).max(MIN_PARTITION_BAR_WIDTH as f64);
-                        if (x as f64) >= rx && (x as f64) < rx + region_width {
-                            app.hovered_map_region = Some(i);
-                            break;
-                        }
-                        rx += region_width;
+        if x >= map_x_start
+            && x < map_x_end
+            && let Some(disk) = app.current_disk()
+        {
+            let regions = disk.regions();
+            let total_sectors = disk.total_sectors as f64;
+            if total_sectors > 0.0 {
+                let available_width = (map_x_end - map_x_start) as f64;
+                let mut rx = map_x_start as f64;
+                for (i, region) in regions.iter().enumerate() {
+                    let sector_span =
+                        (region.end_sector().saturating_sub(region.start_sector())) as f64;
+                    let fraction = sector_span / total_sectors;
+                    let region_width =
+                        (fraction * available_width).max(MIN_PARTITION_BAR_WIDTH as f64);
+                    if (x as f64) >= rx && (x as f64) < rx + region_width {
+                        app.hovered_map_region = Some(i);
+                        break;
                     }
+                    rx += region_width;
                 }
             }
+        }
         return EventResult::Consumed;
     }
 
     // Queue hover
-    let queue_h = if app.queue_expanded { QUEUE_PANEL_HEIGHT } else { 28.0 };
+    let queue_h = if app.queue_expanded {
+        QUEUE_PANEL_HEIGHT
+    } else {
+        28.0
+    };
     let queue_top = app.height - STATUS_BAR_HEIGHT - queue_h;
     if y >= queue_top + 28.0 && y < app.height - STATUS_BAR_HEIGHT && x >= SIDEBAR_WIDTH {
         if app.queue_expanded {
@@ -3022,24 +3210,28 @@ fn handle_mouse_move(app: &mut PartitionManagerApp, x: f32, y: f32) -> EventResu
 }
 
 fn handle_scroll(app: &mut PartitionManagerApp, x: f32, y: f32, dy: f32) -> EventResult {
-    let queue_h = if app.queue_expanded { QUEUE_PANEL_HEIGHT } else { 28.0 };
+    let queue_h = if app.queue_expanded {
+        QUEUE_PANEL_HEIGHT
+    } else {
+        28.0
+    };
     let queue_top = app.height - STATUS_BAR_HEIGHT - queue_h;
 
     // Queue panel scroll
     if y >= queue_top && y < app.height - STATUS_BAR_HEIGHT && x >= SIDEBAR_WIDTH {
-        let max_scroll = (app.operation_queue.len() as f32 * QUEUE_ROW_HEIGHT
-            - (queue_h - 28.0))
-            .max(0.0);
+        let max_scroll =
+            (app.operation_queue.len() as f32 * QUEUE_ROW_HEIGHT - (queue_h - 28.0)).max(0.0);
         app.queue_scroll = (app.queue_scroll - dy * 20.0).clamp(0.0, max_scroll);
         return EventResult::Consumed;
     }
 
     // Partition list scroll
-    let list_top = TITLE_BAR_HEIGHT + TOOLBAR_HEIGHT + DISK_MAP_HEIGHT + DISK_MAP_PADDING * 2.0 + 30.0;
+    let list_top =
+        TITLE_BAR_HEIGHT + TOOLBAR_HEIGHT + DISK_MAP_HEIGHT + DISK_MAP_PADDING * 2.0 + 30.0;
     if y >= list_top && y < queue_top && x >= SIDEBAR_WIDTH && x < app.width - DETAIL_PANEL_WIDTH {
         let region_count = app.current_disk().map(|d| d.regions().len()).unwrap_or(0);
-        let max_scroll = (region_count as f32 * PARTITION_ROW_HEIGHT - (queue_top - list_top - 40.0))
-            .max(0.0);
+        let max_scroll =
+            (region_count as f32 * PARTITION_ROW_HEIGHT - (queue_top - list_top - 40.0)).max(0.0);
         app.partition_scroll = (app.partition_scroll - dy * 20.0).clamp(0.0, max_scroll);
         return EventResult::Consumed;
     }
@@ -3074,16 +3266,17 @@ fn handle_dialog_mouse(
                     }
                 }
                 MouseEventKind::Press(MouseButton::Left)
-                    if y >= btn_y && y < btn_y + DIALOG_BTN_HEIGHT => {
-                        if x >= confirm_x && x < confirm_x + DIALOG_BTN_WIDTH {
-                            // Confirmed -- perform the action
-                            handle_confirm_accepted(app);
-                            return EventResult::Consumed;
-                        } else if x >= cancel_x && x < cancel_x + DIALOG_BTN_WIDTH {
-                            app.dialog = ActiveDialog::None;
-                            return EventResult::Consumed;
-                        }
+                    if y >= btn_y && y < btn_y + DIALOG_BTN_HEIGHT =>
+                {
+                    if x >= confirm_x && x < confirm_x + DIALOG_BTN_WIDTH {
+                        // Confirmed -- perform the action
+                        handle_confirm_accepted(app);
+                        return EventResult::Consumed;
+                    } else if x >= cancel_x && x < cancel_x + DIALOG_BTN_WIDTH {
+                        app.dialog = ActiveDialog::None;
+                        return EventResult::Consumed;
                     }
+                }
                 _ => {}
             }
         }
@@ -3204,7 +3397,8 @@ fn handle_confirm_accepted(app: &mut PartitionManagerApp) {
         });
     } else if title.contains("Delete") {
         if let SelectedItem::Partition(idx) = &app.selected_item {
-            let label = app.selected_partition()
+            let label = app
+                .selected_partition()
                 .map(|p| p.label.clone())
                 .unwrap_or_default();
             app.enqueue_operation(PendingOperation::DeletePartition {
@@ -3224,9 +3418,12 @@ fn handle_create_partition_accepted(app: &mut PartitionManagerApp) {
     let disk_id = app.current_disk().map(|d| d.id).unwrap_or(0);
 
     let (start, end, fs, label) = match &app.dialog {
-        ActiveDialog::CreatePartition(d) => {
-            (d.start_sector, d.computed_end_sector(), d.selected_filesystem(), d.label.clone())
-        }
+        ActiveDialog::CreatePartition(d) => (
+            d.start_sector,
+            d.computed_end_sector(),
+            d.selected_filesystem(),
+            d.label.clone(),
+        ),
         _ => return,
     };
 
@@ -3268,11 +3465,10 @@ fn handle_key(app: &mut PartitionManagerApp, key_ev: &KeyEvent) -> EventResult {
     }
 
     // Escape closes dialogs
-    if key_ev.key == Key::Escape
-        && app.dialog.is_open() {
-            app.dialog = ActiveDialog::None;
-            return EventResult::Consumed;
-        }
+    if key_ev.key == Key::Escape && app.dialog.is_open() {
+        app.dialog = ActiveDialog::None;
+        return EventResult::Consumed;
+    }
 
     // If dialog open, handle text input for create-partition label
     if let ActiveDialog::CreatePartition(ref mut dialog) = app.dialog {
@@ -3296,10 +3492,11 @@ fn handle_key(app: &mut PartitionManagerApp, key_ev: &KeyEvent) -> EventResult {
             }
             _ => {
                 if let Some(ch) = key_ev.text
-                    && (ch.is_alphanumeric() || ch == ' ' || ch == '-' || ch == '_') {
-                        dialog.label.push(ch);
-                        return EventResult::Consumed;
-                    }
+                    && (ch.is_alphanumeric() || ch == ' ' || ch == '-' || ch == '_')
+                {
+                    dialog.label.push(ch);
+                    return EventResult::Consumed;
+                }
             }
         }
         return EventResult::Consumed;
@@ -3333,11 +3530,10 @@ fn handle_key(app: &mut PartitionManagerApp, key_ev: &KeyEvent) -> EventResult {
             app.undo_last_operation();
             return EventResult::Consumed;
         }
-        Key::Enter if key_ev.modifiers.ctrl
-            && app.has_pending_operations() => {
-                let _ = execute_toolbar_action(app, 9); // Apply
-                return EventResult::Consumed;
-            }
+        Key::Enter if key_ev.modifiers.ctrl && app.has_pending_operations() => {
+            let _ = execute_toolbar_action(app, 9); // Apply
+            return EventResult::Consumed;
+        }
         Key::Up => {
             select_adjacent_region(app, true);
             return EventResult::Consumed;
@@ -3365,11 +3561,9 @@ fn select_adjacent_region(app: &mut PartitionManagerApp, up: bool) {
     }
 
     let current_index = match &app.selected_item {
-        SelectedItem::Partition(idx) => {
-            regions.iter().position(|r| {
-                matches!(r, DiskRegion::Partition(p) if p.index == *idx)
-            })
-        }
+        SelectedItem::Partition(idx) => regions
+            .iter()
+            .position(|r| matches!(r, DiskRegion::Partition(p) if p.index == *idx)),
         SelectedItem::Unallocated(ui) => Some(*ui),
         SelectedItem::None => None,
     };
@@ -3892,36 +4086,51 @@ mod tests {
 
     #[test]
     fn test_operation_is_destructive() {
-        assert!(PendingOperation::DeletePartition {
-            disk_id: 0,
-            partition_index: 1,
-            partition_label: String::new(),
-        }.is_destructive());
-        assert!(PendingOperation::FormatPartition {
-            disk_id: 0,
-            partition_index: 1,
-            new_filesystem: FilesystemType::Ext4,
-        }.is_destructive());
-        assert!(PendingOperation::CreatePartitionTable {
-            disk_id: 0,
-            table_type: PartitionTableType::Gpt,
-        }.is_destructive());
+        assert!(
+            PendingOperation::DeletePartition {
+                disk_id: 0,
+                partition_index: 1,
+                partition_label: String::new(),
+            }
+            .is_destructive()
+        );
+        assert!(
+            PendingOperation::FormatPartition {
+                disk_id: 0,
+                partition_index: 1,
+                new_filesystem: FilesystemType::Ext4,
+            }
+            .is_destructive()
+        );
+        assert!(
+            PendingOperation::CreatePartitionTable {
+                disk_id: 0,
+                table_type: PartitionTableType::Gpt,
+            }
+            .is_destructive()
+        );
     }
 
     #[test]
     fn test_operation_not_destructive() {
-        assert!(!PendingOperation::CreatePartition {
-            disk_id: 0,
-            start_sector: 0,
-            end_sector: 100,
-            filesystem: FilesystemType::Ext4,
-            label: String::new(),
-        }.is_destructive());
-        assert!(!PendingOperation::SetLabel {
-            disk_id: 0,
-            partition_index: 1,
-            new_label: String::new(),
-        }.is_destructive());
+        assert!(
+            !PendingOperation::CreatePartition {
+                disk_id: 0,
+                start_sector: 0,
+                end_sector: 100,
+                filesystem: FilesystemType::Ext4,
+                label: String::new(),
+            }
+            .is_destructive()
+        );
+        assert!(
+            !PendingOperation::SetLabel {
+                disk_id: 0,
+                partition_index: 1,
+                new_label: String::new(),
+            }
+            .is_destructive()
+        );
     }
 
     #[test]
@@ -4331,8 +4540,7 @@ mod tests {
         let mut app = PartitionManagerApp::new();
         // Far more than the dialog can hold, so the cap is what stops it.
         let long = "Deleting this partition removes every file on it. ".repeat(8);
-        app.dialog =
-            ActiveDialog::Confirm(ConfirmDialog::new("Delete", &long, "Delete", true));
+        app.dialog = ActiveDialog::Confirm(ConfirmDialog::new("Delete", &long, "Delete", true));
         let lines = confirm_message_lines(&app);
         let bottom = lines
             .last()
@@ -4350,12 +4558,187 @@ mod tests {
         );
     }
 
+    // -- Partition list column tests --
+
+    /// The partition list's geometry, anchored where `render_partition_list`
+    /// anchors it.
+    fn partition_table() -> Table<'static> {
+        Table::with_gap(
+            PARTITION_COLUMNS,
+            SIDEBAR_WIDTH + DISK_MAP_PADDING + 4.0,
+            PARTITION_GAP,
+        )
+    }
+
+    /// An app whose first disk's partitions all carry a label and a mount point
+    /// far too long for their columns.
+    ///
+    /// The strings share a long prefix on purpose: that is the shape that makes
+    /// a silent clip a *misreading* rather than merely an omission. Clipped with
+    /// no marker, every one of these rows reads as a complete value, and as the
+    /// same complete value as its neighbours.
+    fn app_with_overlong_partition_strings() -> PartitionManagerApp {
+        let mut app = PartitionManagerApp::new();
+        if let Some(disk) = app.disks.get_mut(0) {
+            for p in &mut disk.partitions {
+                p.label = format!("Timemachine nightly backup volume {}", p.index);
+                p.mount_point = Some(format!("/mnt/external/backups/nightly/volume-{}", p.index));
+            }
+        }
+        app
+    }
+
+    /// Every text the partition list draws, as `(x, text, font_size, weight)`.
+    fn partition_list_texts(app: &PartitionManagerApp) -> Vec<(f32, String, f32, FontWeightHint)> {
+        let mut tree = RenderTree::new();
+        render_partition_list(&mut tree, app);
+        tree.commands
+            .iter()
+            .filter_map(|cmd| match cmd {
+                RenderCommand::Text {
+                    x,
+                    text,
+                    font_size,
+                    font_weight,
+                    ..
+                } => Some((*x, text.clone(), *font_size, *font_weight)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn no_partition_row_cell_escapes_its_column() {
+        let app = app_with_overlong_partition_strings();
+        let table = partition_table();
+        let spans = table.spans();
+        let mut checked = 0usize;
+        for (x, text, size, weight) in partition_list_texts(&app) {
+            // The section heading is drawn at the panel edge, not at a column,
+            // and is not this test's business.
+            let Some((_, right)) = spans.iter().copied().find(|(l, _)| (l - x).abs() < 0.01) else {
+                continue;
+            };
+            let drawn = x + text::measure(&text, size, weight);
+            assert!(
+                drawn <= right + 0.01,
+                "cell {text:?} at {x} draws to {drawn}, past its column edge {right}"
+            );
+            checked = checked.saturating_add(1);
+        }
+        assert!(checked >= 28, "only {checked} cells checked");
+    }
+
+    #[test]
+    fn an_overlong_partition_label_says_it_was_cut() {
+        let app = app_with_overlong_partition_strings();
+        let label_x = partition_table().left(PART_LABEL);
+        let labels: Vec<String> = partition_list_texts(&app)
+            .into_iter()
+            .filter(|(x, t, ..)| (x - label_x).abs() < 0.01 && t.starts_with("Timemachine"))
+            .map(|(_, t, ..)| t)
+            .collect();
+        assert!(!labels.is_empty(), "no partition label rows were drawn");
+        for label in &labels {
+            assert!(
+                label.ends_with('…'),
+                "a label too long for its column was not marked as cut: {label:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_overlong_mount_point_keeps_the_leaf_that_names_it() {
+        // The mount points in this fixture share everything but their last
+        // component. Cut the usual way they would all render as
+        // `/mnt/external/back…` — one string for every row, which is worse than
+        // showing nothing, because it looks like an answer.
+        let app = app_with_overlong_partition_strings();
+        let mount_x = partition_table().left(PARTITION_COLUMNS.len() - 1);
+        let mounts: Vec<String> = partition_list_texts(&app)
+            .into_iter()
+            .filter(|(x, t, ..)| (x - mount_x).abs() < 0.01 && t.starts_with('…'))
+            .map(|(_, t, ..)| t)
+            .collect();
+        assert!(
+            mounts.len() >= 2,
+            "expected several cut mount points, got {mounts:?}"
+        );
+        for mount in &mounts {
+            assert!(
+                mount.contains("volume-"),
+                "a cut mount point lost the leaf that names it: {mount:?}"
+            );
+        }
+        let distinct: std::collections::BTreeSet<&String> = mounts.iter().collect();
+        assert_eq!(
+            distinct.len(),
+            mounts.len(),
+            "two different mount points rendered identically: {mounts:?}"
+        );
+    }
+
+    #[test]
+    fn a_partition_label_that_fits_is_drawn_verbatim() {
+        // The counterpart to the two tests above: eliding must not touch a
+        // value that had room, or every short label would grow a false marker.
+        let app = PartitionManagerApp::new();
+        let label_x = partition_table().left(PART_LABEL);
+        let labels: Vec<String> = partition_list_texts(&app)
+            .into_iter()
+            .filter(|(x, ..)| (x - label_x).abs() < 0.01)
+            .map(|(_, t, ..)| t)
+            .collect();
+        assert!(labels.iter().any(|l| l == "EFI"), "got {labels:?}");
+        assert!(
+            labels.iter().any(|l| l == "Slate OS Root"),
+            "got {labels:?}"
+        );
+    }
+
+    #[test]
+    fn the_partition_header_and_rows_agree_on_where_a_column_starts() {
+        // The defect this replaced: the widths lived in the header array, in
+        // each cell's `max_width`, and again in the row cursor's increment, so
+        // "where does the Label column start" had three answers.
+        let app = PartitionManagerApp::new();
+        let texts = partition_list_texts(&app);
+        let header_x: Vec<f32> = texts
+            .iter()
+            .filter(|(.., size, weight)| {
+                (size - PARTITION_HEADER_FONT).abs() < 0.01 && *weight == FontWeightHint::Bold
+            })
+            .map(|(x, ..)| *x)
+            .collect();
+        assert_eq!(header_x.len(), PARTITION_COLUMNS.len());
+        let mut row_x: Vec<f32> = texts
+            .iter()
+            .filter(|(.., size, _)| (size - PARTITION_ROW_FONT).abs() < 0.01)
+            .map(|(x, ..)| *x)
+            .collect();
+        assert!(!row_x.is_empty(), "no body cells were drawn");
+        row_x.sort_by(f32::total_cmp);
+        row_x.dedup_by(|a, b| (*a - *b).abs() < 0.01);
+        for x in row_x {
+            assert!(
+                header_x.iter().any(|h| (h - x).abs() < 0.01),
+                "a body cell starts at {x}, which is no column's left edge ({header_x:?})"
+            );
+        }
+    }
+
     // -- Event handling tests --
 
     #[test]
     fn test_handle_resize() {
         let mut app = PartitionManagerApp::new();
-        let result = handle_event(&mut app, &Event::Resize { width: 800, height: 600 });
+        let result = handle_event(
+            &mut app,
+            &Event::Resize {
+                width: 800,
+                height: 600,
+            },
+        );
         assert_eq!(result, EventResult::Consumed);
         assert_eq!(app.width, 800.0);
         assert_eq!(app.height, 600.0);
@@ -4521,8 +4904,12 @@ mod tests {
         let disks = sample_disks();
         for disk in &disks {
             for part in &disk.partitions {
-                assert!(part.end_sector <= disk.total_sectors,
-                    "Partition {} on {} exceeds disk", part.index, disk.name);
+                assert!(
+                    part.end_sector <= disk.total_sectors,
+                    "Partition {} on {} exceeds disk",
+                    part.index,
+                    disk.name
+                );
             }
         }
     }
@@ -4541,8 +4928,12 @@ mod tests {
     #[test]
     fn test_sample_disks_has_gpt_and_mbr() {
         let disks = sample_disks();
-        let has_gpt = disks.iter().any(|d| d.table_type == PartitionTableType::Gpt);
-        let has_mbr = disks.iter().any(|d| d.table_type == PartitionTableType::Mbr);
+        let has_gpt = disks
+            .iter()
+            .any(|d| d.table_type == PartitionTableType::Gpt);
+        let has_mbr = disks
+            .iter()
+            .any(|d| d.table_type == PartitionTableType::Mbr);
         assert!(has_gpt);
         assert!(has_mbr);
     }

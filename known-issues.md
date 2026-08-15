@@ -60853,6 +60853,33 @@ proved it out.
   Front, not back, because the tail is the selected snapshot and its near
   ancestors say where it came from; the distant root is the least informative
   part.
+- ~~`apps/habits`~~ **done** (`55372701b`). The statistics table: eight columns,
+  hand-written pushes, and a habit name — the one user-entered value on the row
+  — clipped with no marker, so "Read" and "Read thirty minutes before bed"
+  rendered the same. Converted to `Table::with_gap`. Worth recording what the
+  regression test taught: both long names elided to the *identical* string, so
+  the comment I had written claiming the marker disambiguates a shared prefix
+  was wrong and had to be rewritten. **An ellipsis does not disambiguate; it
+  only says "there is more".** Do not justify eliding on the grounds that it
+  tells two similar values apart — it does not, and where telling them apart
+  matters, the fix is to cut at the *other* end (see partmanager below).
+- ~~`apps/partmanager`~~ **done**. The partition list's `cols: &[(&str, f32)]`
+  array held column *pitch*, so every cell subtracted its own padding
+  (`max_width: Some(col_w - 8.0)` drawn at `col_x + 4.0`) while the **header**
+  was drawn at `+4.0` but bounded by the *full* pitch — a header could overhang
+  the next column by 4px. `Table::with_gap` removes the discrepancy by
+  construction: the width is what a cell may use and the 8px difference is the
+  gap. A long partition label overran its column by 75px in the regression test.
+  The instructive part was the mount-point column. I first wrote it `Fit::Start`
+  with a comment arguing that "a mount point's leading directories distinguish
+  `/mnt/...` from `/media/...`" — while *citing* `/mnt/backup-2026` vs
+  `/mnt/backup-2027` as the motivating failure, which differ at the **tail**.
+  The comment contradicted its own example and I did not notice; the test did,
+  by failing. A mount point is a path and a path's leaf is what names it, so it
+  is now `Fit::End`, and the test asserts the cut mount points are **pairwise
+  distinct** rather than merely marked. That assertion is the one worth copying:
+  "is it marked as cut?" passes on a column that renders every row identically,
+  which is the failure that actually misleads a reader.
 
 The lesson that generalises past the cursor pattern: **a per-element bound is
 not a bound on the row.** Eliding each cell to its own width makes every cell
@@ -60862,6 +60889,13 @@ wrong. Any layout that repeats an element a data-dependent number of times —
 ancestry chains, tag pills, breadcrumbs, filter chips — needs a budget against
 the container's edge as well as a cap per element, and a test that renders a
 deep case rather than one element.
+
+And the one the partmanager mount column added: **"was it marked as cut?" is
+too weak a test for a column of near-identical values.** A cut marker satisfies
+that assertion while every row still renders as the same string. Where the
+values in a column share a long prefix (paths, mount points, versioned names),
+assert the drawn cells are pairwise **distinct**, and let that drive which end
+`Fit` keeps.
 
 The other pattern to take forward: wherever a cursor-laid-out row draws a cell
 clipped to one width and advances by another, the advance is the bug, and its

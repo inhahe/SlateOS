@@ -47,6 +47,7 @@ mod fallback;
 mod fixture;
 mod gpos;
 pub mod gsub;
+mod hangul;
 mod indic;
 mod indic_machine;
 mod indic_shape;

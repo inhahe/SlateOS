@@ -33,6 +33,7 @@ use crate::bidi::{self, Base, Level};
 use crate::fallback::{self, Extents};
 use crate::gpos::{Adjust, Run};
 use crate::gsub::SubGlyph;
+use crate::hangul;
 use crate::indic::Char;
 use crate::indic_shape::{Script, continues_word};
 use crate::joining::{self, Form};
@@ -469,6 +470,30 @@ impl ScaledFont {
         // bidi at all, which is every left-to-right string.
         let levels = byte_levels(text);
         let mut pieces = norm::pieces(text, |ch| self.face.glyph_index(ch).is_some());
+        // Korean, which `norm::pieces` deliberately left spelled as the text
+        // spelled it. Which spelling to draw is a question about the face —
+        // whether it ships the 11,172 precomposed syllables, the conjoining
+        // jamo, or both — so it is answered here, with the `cmap` in hand, and
+        // not by a normalization pass that can only see the text.
+        //
+        // Before `piece_levels` below and not after: this rewrites `pieces`,
+        // and that vector is one level per piece by index.
+        //
+        // `zero_width` is asked only about tone marks, and is the narrower
+        // question than `has_glyph`: a face that draws a tone mark with no
+        // advance is declaring that it overstrikes, and a mark that overstrikes
+        // must not be moved to the front of its syllable.
+        let mut jamo: Vec<Option<hangul::Jamo>> = Vec::new();
+        hangul::preprocess(
+            &mut pieces,
+            &mut jamo,
+            |ch| self.face.glyph_index(ch).is_some(),
+            |ch| {
+                self.face
+                    .glyph_index(ch)
+                    .is_some_and(|gid| self.face.advance(gid).is_ok_and(|adv| adv == 0))
+            },
+        );
         // A level per *piece*, for the run splitter, and rule L4 while we are
         // here: a bracket in a right-to-left run is drawn as its pair, because
         // the character encodes the bracket that *opens* and which side that
@@ -599,7 +624,15 @@ impl ScaledFont {
                     Char::DEFAULT
                 },
                 word: indic && !tab && continues_word(ch),
-                ..SubGlyph::cursive(gid, cluster, forms.get(i).copied().flatten())
+                // A conjoining jamo takes its slot's feature and gives up
+                // `calt`; everything else takes its cursive form. The two are
+                // exclusive — no character is both — and `jamo` is empty for
+                // every run with no Korean in it, so the lookup costs nothing.
+                ..if hangul::is_jamo(ch) {
+                    SubGlyph::jamo(gid, cluster, jamo.get(i).copied().flatten())
+                } else {
+                    SubGlyph::cursive(gid, cluster, forms.get(i).copied().flatten())
+                }
             });
             tabs.push(tab);
         }

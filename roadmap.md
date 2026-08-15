@@ -677,6 +677,17 @@ Roadmap:
   entirely — Hangul jamo (553) and composed Latin diacritics (339) — where
   HarfBuzz decomposes and recomposes per font coverage and we normalize to
   NFC first.
+  The Hangul 553 are now 0: the parked `hangul.rs` (HarfBuzz's
+  `preprocess_text_hangul`) is wired up, which required teaching
+  normalization a Hangul policy so that `nfc` keeps meaning NFC while the
+  shaping path hands jamo through untouched and lets the *face* decide
+  whether to compose (design-decisions §423). `differ` 892 → **339**,
+  `agree` 11847 → **12400**, `reordered` and `misplaced` still 0; `osfont`
+  482 → **501** tests, since the module's own 19 had never run.
+  The last 339 are all composed Latin diacritics — one question asked 339
+  times, filed as `open-questions.md` **C-Q1**: whether normalization may
+  consult font coverage, which would invert the layering §423 just
+  defended. Operator's call, not a bug.
   Next unblocked step is the rest of shaping: no Khmer/Myanmar/Thai/USE
   shapers (`TD-FONT-HAS-NO-UNIVERSAL-SHAPING-ENGINE`), no language
   selection (`TD-FONT-IGNORES-LANGSYS-OVERRIDES`), and no device tables in

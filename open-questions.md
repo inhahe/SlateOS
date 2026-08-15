@@ -686,6 +686,69 @@ both of which should start failing the day the data lands.
 
 ---
 
+## C-Q1 — Should normalization consult font coverage? The last 339 sweep disagreements are all this one question — Status: OPEN
+
+**Raised by Claude (Lane C)** (2026-08-15), on finishing `known-issues.md` →
+`TD-FONT-HAS-A-HANGUL-SHAPER-NOTHING-CALLS`. That fix took the HarfBuzz
+differential sweep from 892 disagreements to 339, and the 339 that remain are
+**one question asked 339 times**, not a scatter of unrelated bugs: `\u1e09`
+(ḉ — c with cedilla and acute) 255 cases, `\u212b` (Å angstrom sign) 57,
+`été` 10, and a short tail.
+
+**Question.** `norm.rs` is layered on a deliberate principle, written into its
+module doc: **`nfc` answers a question about *text* and knows nothing about
+fonts; `fit_to_face` answers a question about the *font* and does not
+renormalize.** Unicode composition is a property of the string, so it is
+decided before any face is consulted. HarfBuzz does the opposite — it
+decomposes to NFD, then *recomposes only where the face has a glyph*, so the
+same string normalizes differently in two fonts. Which layering do we want?
+
+Concretely, for `\u1e09` in a face that has `c`, the cedilla and the acute but
+no precomposed ḉ: we emit one missing-glyph box, HarfBuzz emits three glyphs
+that stack into the right-looking character.
+
+**Options.**
+
+- **A — keep the current layering** (`nfc` is pure Unicode; font coverage is
+  `fit_to_face`'s problem). *Pro:* each stage has one job and one input, which
+  is why the module reads clearly and why the Hangul work above was four small
+  edits rather than a rewrite; normalization is reproducible without a font in
+  hand, so it can be tested, cached, and shared across faces. *Con:* we draw a
+  box where HarfBuzz draws correct text, on real strings, in real fonts. The
+  user does not care which stage was principled.
+- **B — adopt HarfBuzz's font-aware recomposition.** *Pro:* matches the
+  reference implementation and every other shaper, closes the sweep's residue
+  to near zero, and is strictly better output on faces with partial coverage.
+  *Con:* normalization becomes a function of `(text, face)`, so it can no
+  longer be hoisted, cached per string, or reasoned about without a font;
+  `norm.rs`'s layering claim becomes false and its doc has to be rewritten to
+  say the opposite.
+- **C — a narrow fallback: keep `nfc` pure, but let `fit_to_face` decompose a
+  composed character it cannot draw when the parts *are* drawable.** *Pro:*
+  gets B's user-visible outcome for exactly the failing case while keeping
+  A's layering, because the decomposition happens in the stage that already
+  owns "what can this face draw" — `split_undrawable` is already that
+  function and already takes this shape. *Con:* it is two mechanisms where
+  HarfBuzz has one, so we would agree with HarfBuzz on output while diverging
+  on structure, and the sweep may surface ordering cases (mark reordering
+  after a late decomposition) that HarfBuzz gets right by construction.
+
+**My recommendation: C**, and I have *not* implemented it. It is the only
+option that does not require choosing between correct pixels and a coherent
+module boundary, and `split_undrawable` already exists as the hook. But it is
+a user-visible rendering-policy change on a design principle that was written
+down deliberately, so it is yours rather than mine. Meanwhile the behaviour is
+A (unchanged) and the residue is documented, not silently tolerated.
+
+**Where it bites:** `gui/font/src/norm.rs` (`nfc`, `normalize`,
+`decompose_once`, `split_undrawable`, `fit_to_face`, and the module doc's
+layering paragraph), `gui/font/src/scaled.rs::shape` (call order), and
+`gui/font/tools/harfbuzz_sweep.py` (the 339 would move to `agree`). Reference:
+HarfBuzz `src/hb-ot-shape-normalize.cc`,
+`HB_OT_SHAPE_NORMALIZATION_MODE_COMPOSED_DIACRITICS_NO_SHORT_CIRCUIT`.
+
+---
+
 Recently resolved (see `design-decisions.md` for the full rationale):
 
 - Q38 Should osh be locale-aware, or UTF-8-only? — resolved 2026-08-07 (§104):

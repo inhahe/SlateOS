@@ -62773,7 +62773,7 @@ apply 611 more of `ELEPHNT`'s pairs than HarfBuzz does and put us alone among
 engines. The font was never tested with those pairs applied, so "the
 designer's intent" is not a thing the table can be asked about.
 
-## TD-FONT-HAS-A-HANGUL-SHAPER-NOTHING-CALLS
+## TD-FONT-HAS-A-HANGUL-SHAPER-NOTHING-CALLS — ✅ FIXED 2026-08-15
 
 **What.** `gui/font/src/hangul.rs` is a complete, tested transcription of
 HarfBuzz's `preprocess_text_hangul` — 673 lines, 19 tests, all passing — that is
@@ -62833,6 +62833,38 @@ font). That one is an operator question, not a bug.
 **Where.** `gui/font/src/hangul.rs` (parked), `gui/font/src/lib.rs` (the missing
 `mod hangul;`), and the three files named above. The reference is HarfBuzz's
 `src/hb-ot-shaper-hangul.cc`.
+
+**Resolution — 2026-08-15.** All four edits landed together with the missing
+`mod hangul;`, and the prediction above held to the case. The HarfBuzz
+differential sweep (556 host faces × 23 strings, 12,739 comparisons):
+
+| bucket | before | after |
+|---|---|---|
+| `agree` | 11,847 | **12,400** |
+| `differ` | 892 | **339** |
+| `reordered` | 0 | 0 |
+| `misplaced` | 0 | 0 |
+
+`\u1100\u1161\u11a8` — all 553 of its cases — left the disagreement list
+entirely, and nothing regressed into `reordered`/`misplaced`. `osfont` goes
+from 482 to **501 passing tests**: the module's own 19 tests had never run
+before, because a module that is not declared does not compile and therefore
+does not test either. That is the sharper lesson here — "19 tests, all
+passing" was a true statement about a file `cargo test` had never once
+looked at.
+
+Two notes on how the edits differ from the plan above. `gsub.rs`'s three new
+feature tags are **appended** to `FEATURES` rather than inserted in tag order,
+so that no existing bit constant shifts; the bits are `1 << 34/35/36`.
+And `norm::nfc` lost its last production caller in the split, so it now
+carries `#[cfg_attr(not(test), allow(dead_code, …))]` — it is kept deliberately
+as the text-question half of the split (NFC is NFC), not as dead weight, and
+the reason is written at its definition.
+
+The residual 339 are exactly the composed-Latin-diacritics cases this entry
+predicted (`\u1e09` 255, `\u212b` 57, `été` 10, …). They are **not** tracked
+here as a bug; they are the layering question in `norm.rs`'s module doc, and
+belong to the operator. See `open-questions.md`.
 ### [B] D-POSIX-SOCKET-META-WAS-NOT-SCOPED-TO-ITS-FD-TABLE — ✅ FIXED 2026-08-14
 
 **Found while running the eighth audit pass**, not by looking for it:

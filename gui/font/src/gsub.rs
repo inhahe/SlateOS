@@ -162,6 +162,11 @@ const FEATURES: &[&[u8; 4]] = &[
     // per plan and lets whichever shaper is running own the tag.
     b"nukt", b"akhn", b"rphf", b"rkrf", b"pref", b"blwf", b"abvf", b"half", b"pstf", b"vatu",
     b"cjct", b"pres", b"abvs", b"blws", b"psts", b"haln",
+    // Hangul: a glyph is eligible for one of these only when
+    // [`hangul`](crate::hangul) has decided the syllable's spelling and said
+    // which slot the jamo occupies. Appended rather than inserted, so that no
+    // bit constant above moves.
+    b"ljmo", b"vjmo", b"tjmo",
 ];
 
 /// The feature mask every glyph carries: bits for the fourteen unconditional
@@ -180,6 +185,19 @@ const INIT: u64 = 0b1000_0000_0000_0000;
 const MEDI: u64 = 0b1_0000_0000_0000_0000;
 /// The bit for `fina`, the eighteenth.
 const FINA: u64 = 0b10_0000_0000_0000_0000;
+
+/// The bit for `calt`, the sixth entry of [`FEATURES`].
+///
+/// Named because the Hangul pass has to *clear* it, which is the one place a
+/// constructor takes a bit away rather than adding one.
+const CALT: u64 = 0b10_0000;
+
+/// The bit for `ljmo`, the thirty-fifth entry of [`FEATURES`].
+const LJMO: u64 = 1 << 34;
+/// The bit for `vjmo`, the thirty-sixth.
+const VJMO: u64 = 1 << 35;
+/// The bit for `tjmo`, the thirty-seventh.
+const TJMO: u64 = 1 << 36;
 
 /// Every feature at once: the one stage a caller with no staging plan runs.
 ///
@@ -609,6 +627,45 @@ impl SubGlyph {
             gid,
             cluster,
             mask: form_mask(form),
+            klass: 0,
+            mark: false,
+            lig: Lig::default(),
+            indic: Char::DEFAULT,
+            syllable: 0,
+            word: false,
+        }
+    }
+
+    /// The same, but for a conjoining Hangul jamo.
+    ///
+    /// Two departures from [`new`](Self::new), both of them HarfBuzz's
+    /// `setup_masks_hangul`:
+    ///
+    /// - the one feature naming this jamo's slot is added, because the same
+    ///   consonant is drawn differently leading and trailing and only the
+    ///   feature says which;
+    /// - `calt` is **removed**, and this is not an optimization. Noto Sans CJK
+    ///   and Source Han Sans file all of their jamo lookups under `calt`, so a
+    ///   jamo left eligible for it would be rewritten a second time by the
+    ///   lookups this pass has already applied. Clearing the bit per glyph
+    ///   rather than switching `calt` off for the run is what lets Latin
+    ///   sharing the run keep its contextual alternates.
+    ///
+    /// `None` means a jamo with no slot — the tone marks and the filler — which
+    /// still gets `calt` cleared, since it is still Hangul the face's `calt`
+    /// lookups might match.
+    #[must_use]
+    pub(crate) fn jamo(gid: u16, cluster: usize, slot: Option<crate::hangul::Jamo>) -> Self {
+        let bit = match slot {
+            Some(crate::hangul::Jamo::Leading) => LJMO,
+            Some(crate::hangul::Jamo::Vowel) => VJMO,
+            Some(crate::hangul::Jamo::Trailing) => TJMO,
+            None => 0,
+        };
+        Self {
+            gid,
+            cluster,
+            mask: (ALWAYS & !CALT) | bit,
             klass: 0,
             mark: false,
             lig: Lig::default(),
@@ -2738,6 +2795,14 @@ mod tests {
         assert_eq!(bit(b"init"), INIT);
         assert_eq!(bit(b"medi"), MEDI);
         assert_eq!(bit(b"fina"), FINA);
+        assert_eq!(bit(b"calt"), CALT);
+        assert_eq!(bit(b"ljmo"), LJMO);
+        assert_eq!(bit(b"vjmo"), VJMO);
+        assert_eq!(bit(b"tjmo"), TJMO);
+        // `calt` is one of the unconditional features, which is what makes
+        // clearing it in `SubGlyph::jamo` meaningful: a bit that was not in
+        // `ALWAYS` would already be clear and the removal a no-op.
+        assert_eq!(ALWAYS & CALT, CALT);
         assert!(FEATURES.len() < u64::BITS as usize, "a feature past the 64th gets no bit");
         // `ALWAYS` is a prefix of the list: every feature before the first
         // positional one and none after it. Being a *prefix* is the property

@@ -213,10 +213,17 @@ pub(crate) fn is_mark(ch: char) -> bool {
 /// as "is a combining mark" and be quietly wrong for years — Hangul jamo and
 /// Indic two-part vowels join backwards without being marks, and a run of
 /// them would sail through unnormalized. [`combines_backward`] is that case.
+/// Hangul is asked about here under [`Hangul::Normalize`], which is the
+/// conservative direction: this predicate may say yes to a run the pass turns
+/// out to leave alone, and that costs one identity pass — whereas saying no to
+/// a run that needed work would drop the work silently, which is the failure
+/// this function's whole design is trying to avoid.
 #[must_use]
 pub(crate) fn needs_work(text: &str) -> bool {
     text.chars().any(|ch| {
-        combining_class(ch) != 0 || decompose_once(ch).is_some() || combines_backward(ch)
+        combining_class(ch) != 0
+            || decompose_once(ch, Hangul::Normalize).is_some()
+            || combines_backward(ch)
     })
 }
 
@@ -234,13 +241,40 @@ fn combines_backward(ch: char) -> bool {
     COMBINES_BACKWARD.binary_search(&cp).is_ok()
 }
 
+/// Whether a normalization pass may rewrite the spelling of Hangul.
+///
+/// Korean is encoded two ways — as 11,172 precomposed syllables and as
+/// sequences of conjoining jamo — and canonical equivalence says they are the
+/// same text. For a *text* question that is the whole story, and the answer is
+/// [`Hangul::Normalize`].
+///
+/// For a *drawing* question it is not, because a face need not cover both
+/// spellings, so which one to draw is a question about the face. That is
+/// [`hangul::preprocess`](crate::hangul::preprocess)'s job, and it can only do
+/// it if the spelling it is handed is still the one the text used — which is
+/// why HarfBuzz's Hangul shaper sets `HB_OT_SHAPE_NORMALIZATION_MODE_NONE`
+/// rather than normalizing and then trying to undo it. [`Hangul::LeaveAlone`]
+/// is that mode: every other script still normalizes, and Hangul is passed
+/// through untouched for the shaper that follows to decide about.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Hangul {
+    /// Compose and decompose Hangul like anything else. What NFC means.
+    Normalize,
+    /// Leave Hangul spelled the way the text spelled it.
+    LeaveAlone,
+}
+
 /// The canonical decomposition of `ch`, one step, if it has one.
 ///
 /// `Some((a, Some(b)))` for a pair, `Some((a, None))` for a singleton.
-/// Hangul syllables answer here too, computed rather than looked up.
-fn decompose_once(ch: char) -> Option<(char, Option<char>)> {
+/// Hangul syllables answer here too, computed rather than looked up — unless
+/// `hangul` is [`Hangul::LeaveAlone`], in which case a syllable has no
+/// decomposition as far as this function is concerned.
+fn decompose_once(ch: char, hangul: Hangul) -> Option<(char, Option<char>)> {
     let cp = ch as u32;
-    if let Some(d) = hangul_decompose(cp) {
+    if hangul == Hangul::Normalize
+        && let Some(d) = hangul_decompose(cp)
+    {
         return Some(d);
     }
     if let Ok(i) = PAIRS.binary_search_by_key(&cp, |&(c, _, _)| c) {
@@ -275,8 +309,13 @@ fn hangul_decompose(cp: u32) -> Option<(char, Option<char>)> {
 }
 
 /// The character `a` and `b` compose to, if they do.
-fn compose_pair(a: char, b: char) -> Option<char> {
-    if let Some(s) = hangul_compose(a as u32, b as u32) {
+///
+/// Under [`Hangul::LeaveAlone`] a jamo pair does not compose, so text typed as
+/// jamo stays jamo for the Hangul shaper to rule on.
+fn compose_pair(a: char, b: char, hangul: Hangul) -> Option<char> {
+    if hangul == Hangul::Normalize
+        && let Some(s) = hangul_compose(a as u32, b as u32)
+    {
         return Some(s);
     }
     let key = (a as u32, b as u32);
@@ -320,12 +359,12 @@ fn hangul_compose(a: u32, b: u32) -> Option<char> {
 }
 
 /// Append the full canonical decomposition of `ch` to `out`, at `cluster`.
-fn decompose_into(ch: char, cluster: usize, out: &mut Vec<Piece>, depth: u32) {
-    match decompose_once(ch) {
+fn decompose_into(ch: char, cluster: usize, out: &mut Vec<Piece>, depth: u32, hangul: Hangul) {
+    match decompose_once(ch, hangul) {
         Some((a, b)) if depth < MAX_DEPTH => {
-            decompose_into(a, cluster, out, depth.saturating_add(1));
+            decompose_into(a, cluster, out, depth.saturating_add(1), hangul);
             if let Some(b) = b {
-                decompose_into(b, cluster, out, depth.saturating_add(1));
+                decompose_into(b, cluster, out, depth.saturating_add(1), hangul);
             }
         }
         _ => out.push((ch, cluster)),
@@ -378,8 +417,28 @@ fn sort_marks(pieces: &mut [Piece], class: impl Fn(char) -> u8) {
 /// Decompose fully, sort marks into canonical order, then recompose greedily
 /// onto the last starter. The clusters that come out are the input's, with
 /// every mark charged to the character it attaches to.
+///
+/// Nothing in the crate draws through this any more — [`pieces`] asks for
+/// [`Hangul::LeaveAlone`] — so outside the tests it is currently uncalled. It
+/// is kept, and kept exact, because "what is this text in NFC" is a different
+/// question from "how should this face draw it" and the distinction is the
+/// point of the split; the tests below hold it to real NFC either way.
+#[cfg_attr(not(test), allow(dead_code, reason = "the text-question half of the \
+    normalize split; only the drawing half has callers today"))]
 #[must_use]
 pub(crate) fn nfc(text: &str) -> Vec<Piece> {
+    // NFC is NFC: a question about *text* gets the Unicode answer, Hangul
+    // included. Only the drawing path below asks for anything else.
+    normalize(text, Hangul::Normalize)
+}
+
+/// [`nfc`], with the Hangul question left open.
+///
+/// The whole of NFC except that `hangul` decides whether Hangul takes part.
+/// Split out so the drawing path can ask for NFC-of-everything-else without
+/// `nfc` itself ceasing to mean NFC.
+#[must_use]
+fn normalize(text: &str, hangul: Hangul) -> Vec<Piece> {
     let mut pieces: Vec<Piece> = Vec::with_capacity(text.len());
     let mut cluster = 0usize;
     for (offset, ch) in text.char_indices() {
@@ -389,10 +448,10 @@ pub(crate) fn nfc(text: &str) -> Vec<Piece> {
         if combining_class(ch) == 0 || pieces.is_empty() {
             cluster = offset;
         }
-        decompose_into(ch, cluster, &mut pieces, 0);
+        decompose_into(ch, cluster, &mut pieces, 0, hangul);
     }
     sort_marks(&mut pieces, combining_class);
-    compose(&mut pieces);
+    compose(&mut pieces, hangul);
     pieces
 }
 
@@ -404,7 +463,7 @@ pub(crate) fn nfc(text: &str) -> Vec<Piece> {
 /// same or lower combining class from composing onto that starter, because
 /// composing past it would move a mark across another mark and change what
 /// the text says.
-fn compose(pieces: &mut Vec<Piece>) {
+fn compose(pieces: &mut Vec<Piece>, hangul: Hangul) {
     let mut starter: Option<usize> = None;
     let mut last_ccc: Option<u8> = None;
     let mut write = 0usize;
@@ -424,7 +483,7 @@ fn compose(pieces: &mut Vec<Piece>) {
         if let Some(at) = starter
             && !blocked
             && let Some(&(base, base_cluster)) = pieces.get(at)
-            && let Some(joined) = compose_pair(base, ch)
+            && let Some(joined) = compose_pair(base, ch, hangul)
         {
             if let Some(slot) = pieces.get_mut(at) {
                 *slot = (joined, base_cluster);
@@ -469,7 +528,11 @@ pub(crate) fn pieces(text: &str, has_glyph: impl Fn(char) -> bool) -> Vec<Piece>
     // nothing to reorder and nothing to take apart.
     let work = needs_work(text);
     let mut out = if work {
-        nfc(text)
+        // Everything but Hangul. Which spelling of a Korean syllable to draw
+        // depends on what the face covers, so it is `hangul::preprocess` that
+        // decides it, a stage later — and it can only decide if the spelling
+        // reaching it is still the text's own.
+        normalize(text, Hangul::LeaveAlone)
     } else {
         // Already NFC by inspection, so the offsets are the string's own and
         // there is nothing to reorder or join.
@@ -549,7 +612,12 @@ fn split_undrawable(
     if depth >= MAX_DEPTH {
         return false;
     }
-    let Some((a, b)) = decompose_once(ch) else {
+    // `LeaveAlone` here, and not because this stage is indifferent to Hangul:
+    // a syllable that reaches this point is one `hangul::preprocess` looked at
+    // and declined to split, on grounds this function cannot see — namely that
+    // the face has no jamo to split it into. Splitting it here would overrule
+    // that with less information and turn one missing-glyph box into three.
+    let Some((a, b)) = decompose_once(ch, Hangul::LeaveAlone) else {
         return false;
     };
     let mark = out.len();
@@ -796,7 +864,7 @@ mod tests {
     #[test]
     fn hangul_decomposes_all_the_way_to_jamo() {
         let mut out = Vec::new();
-        decompose_into('\u{ac01}', 0, &mut out, 0);
+        decompose_into('\u{ac01}', 0, &mut out, 0, Hangul::Normalize);
         assert_eq!(chars(&out), "\u{1100}\u{1161}\u{11a8}");
     }
 
@@ -969,10 +1037,14 @@ mod tests {
             else {
                 unreachable!("table row {c:#X} is not made of characters");
             };
-            assert_eq!(decompose_once(c), Some((a, Some(b))), "decomposing {c:?}");
+            assert_eq!(
+                decompose_once(c, Hangul::Normalize),
+                Some((a, Some(b))),
+                "decomposing {c:?}"
+            );
             let excluded = NO_COMPOSE.binary_search(&(c as u32)).is_ok();
             assert_eq!(
-                compose_pair(a, b) == Some(c),
+                compose_pair(a, b, Hangul::Normalize) == Some(c),
                 !excluded,
                 "composing {a:?}+{b:?}"
             );

@@ -375,8 +375,7 @@ pub(crate) fn preprocess(
             // case the block *is* drawable, but drawing it beside a stray T
             // would show the vowel twice, so the whole thing goes to jamo.
             if !drawable || loose_t.is_some() {
-                let parts_drawable =
-                    has_glyph(l) && has_glyph(v) && t.is_none_or(|t| has_glyph(t));
+                let parts_drawable = has_glyph(l) && has_glyph(v) && t.is_none_or(&has_glyph);
                 if parts_drawable {
                     out.push((l, cluster));
                     jamo.push(Some(Jamo::Leading));
@@ -446,7 +445,7 @@ fn rotate_tone(out: &mut [Piece], jamo: &mut [Option<Jamo>], start: usize, end: 
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::indexing_slicing)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 mod tests {
     use alloc::string::String;
 

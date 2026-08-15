@@ -219,9 +219,14 @@ pub(crate) fn positions_marks(tags: Option<ScriptTags>, simple: bool) -> bool {
 /// "Declares nothing" is load-bearing: the same ten in a face that files its
 /// features under `DFLT` or `latn` *do* have their advances zeroed, because
 /// that face has called the shaper off. See [`shaped_as_default`].
-static NO_ZERO_WIDTH_MARKS: [[u8; 4]; 10] = [
-    *b"bng2", *b"dev2", *b"gjr2", *b"gur2", *b"khmr", *b"knd2", *b"mlm2", *b"ory2", *b"tel2",
-    *b"tml2",
+/// `hang` is here for a different reason than the other ten, and not from the
+/// same measurement: HarfBuzz's Hangul shaper sets `zero_width_marks` to
+/// `NONE` outright. It is deliberately **not** in [`COMPLEX_SCRIPTS`], because
+/// that shaper's `fallback_position` is `true` — Hangul declines the zeroing
+/// and accepts the placement, which is the opposite pairing to the Indic ten.
+static NO_ZERO_WIDTH_MARKS: [[u8; 4]; 11] = [
+    *b"bng2", *b"dev2", *b"gjr2", *b"gur2", *b"hang", *b"khmr", *b"knd2", *b"mlm2", *b"ory2",
+    *b"tel2", *b"tml2",
 ];
 
 /// Whether a run of this script has its marks' advances zeroed.

@@ -804,7 +804,7 @@ fresh measurement disagree, the measurement wins.
 
 ## Active Bugs
 
-### TD-POSIX-TIMES-FLAKE. `posix::sys_times::tests::test_times_increments_each_call` fails intermittently under a full-workspace run — 2026-08-15 — filed to lane B as `requests/c-b-flaky-sys-times-test.md`
+### TD-POSIX-TIMES-FLAKE. `posix::sys_times::tests::test_times_increments_each_call` fails intermittently under a full-workspace run — 2026-08-15 — ✅ FIXED 2026-08-15 by lane B (`posix/src/sys_times.rs`), and the triage found a second, worse bug underneath it
 
 **Not lane C's tree** — logged here so the next lane to hit it does not re-triage
 it from scratch. `posix/src/sys_times.rs:583-595` asserts
@@ -825,6 +825,43 @@ merging, and costs that lane a triage cycle to prove otherwise.
 which is what the implementation actually guarantees. Serialising the
 `times()`-using tests behind a `Mutex` also works but is more fragile — it holds
 only as long as every future `times()` caller in the crate remembers the lock.
+
+**✅ FIXED 2026-08-15 (lane B).** Lane C's diagnosis and preferred fix were both
+right, and taking it seriously turned up a second bug that the flake was sitting
+on top of.
+
+*The reported half.* `test_times_increments_each_call` is now
+`test_times_is_strictly_monotonic` and asserts `t > prev`, which is the
+counter's real contract. Its doc comment carries the whole history so nobody
+"tightens" it back into an exact-delta assertion; the module doc that seeded the
+mistake ("a monotonic call counter (for unit-test determinism)") now says
+*process-wide* and *strictly increasing* in as many words, and states outright
+that `t2 == t1 + 1` is not assertable.
+
+*The half nobody had noticed.* The counter was a `static mut TICK_COUNTER: i64`
+bumped by a plain read-modify-write under the comment `// SAFETY:
+single-threaded access` — in a binary that runs 20 289 tests across a thread
+pool. That comment was simply false, and the race is undefined behaviour, not
+merely non-deterministic: two callers can read the same pre-increment value and
+return the **same** tick. That would have broken the strict-monotonicity
+assertion too, i.e. lane C's suggested fix would have been flaky for a second,
+much less obvious reason. It is now an `AtomicI64` with
+`fetch_add(1, Relaxed)`, which makes every caller's value distinct and totally
+ordered; `Relaxed` is sufficient because single-location coherence already
+guarantees a thread's own successive calls increase, and nothing else is
+published through the counter.
+
+*Regression cover.* `test_times_hands_out_distinct_ticks_across_threads` runs 8
+threads × 200 calls, released together through a bounded spin barrier, and
+asserts every returned tick is distinct. The barrier is load-bearing: without
+it the first thread finishes before the last is spawned, and a racy
+implementation would pass vacuously. 26/26 `sys_times` tests green.
+
+*Why this was worth the extra step.* The reported symptom was "a test asserts
+more than the implementation promises." The actual state was "the
+implementation does not reliably deliver even what the weaker assertion
+checks." Fixing only the test would have left a UB data race in a libc
+primitive, still green, and made the next failure look like a fresh flake.
 
 ### TD-FONT-NO-CFF-OUTLINES. `osfont` cannot draw any `.otf` whose outlines are PostScript/CFF rather than TrueType — 2026-08-13 — ✅ FIXED 2026-08-14 (`gui/font/src/cff.rs`, `gui/font/src/sfnt.rs`, `gui/font/src/raster.rs`)
 

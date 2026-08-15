@@ -86,10 +86,7 @@ mod tests {
         assert_eq!(MAP_HUGE_1GB >> MAP_HUGE_SHIFT, 30);
         // 2 MiB = 2^21, 1 GiB = 2^30.
         assert_eq!(1u64 << (MAP_HUGE_2MB >> MAP_HUGE_SHIFT), 2 * 1024 * 1024);
-        assert_eq!(
-            1u64 << (MAP_HUGE_1GB >> MAP_HUGE_SHIFT),
-            1024 * 1024 * 1024
-        );
+        assert_eq!(1u64 << (MAP_HUGE_1GB >> MAP_HUGE_SHIFT), 1024 * 1024 * 1024);
     }
 
     #[test]

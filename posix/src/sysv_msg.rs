@@ -12,10 +12,7 @@
 // check.  These lints would only be useful here if we accepted
 // attacker-controlled integer indices into the pool/ring, which we
 // do not.
-#![allow(
-    clippy::indexing_slicing,
-    clippy::arithmetic_side_effects,
-)]
+#![allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 
 //! System V message queues — `<sys/msg.h>`.
 //!
@@ -370,7 +367,11 @@ unsafe fn select_msg(q: *mut Queue, msgtyp: i64, except: bool) -> Option<usize> 
             let matches = match msgtyp.cmp(&0) {
                 core::cmp::Ordering::Equal => true,
                 core::cmp::Ordering::Greater => {
-                    if except { mt != msgtyp } else { mt == msgtyp }
+                    if except {
+                        mt != msgtyp
+                    } else {
+                        mt == msgtyp
+                    }
                 }
                 core::cmp::Ordering::Less => {
                     // msgtyp < 0: any message with 1 <= type <= |msgtyp|.

@@ -39,14 +39,10 @@ pub const BLKIO_WEIGHT_DEVICE: &str = "blkio.weight_device";
 pub const BLKIO_LEAF_WEIGHT: &str = "blkio.leaf_weight";
 pub const BLKIO_LEAF_WEIGHT_DEVICE: &str = "blkio.leaf_weight_device";
 
-pub const BLKIO_THROTTLE_READ_BPS_DEVICE: &str =
-    "blkio.throttle.read_bps_device";
-pub const BLKIO_THROTTLE_WRITE_BPS_DEVICE: &str =
-    "blkio.throttle.write_bps_device";
-pub const BLKIO_THROTTLE_READ_IOPS_DEVICE: &str =
-    "blkio.throttle.read_iops_device";
-pub const BLKIO_THROTTLE_WRITE_IOPS_DEVICE: &str =
-    "blkio.throttle.write_iops_device";
+pub const BLKIO_THROTTLE_READ_BPS_DEVICE: &str = "blkio.throttle.read_bps_device";
+pub const BLKIO_THROTTLE_WRITE_BPS_DEVICE: &str = "blkio.throttle.write_bps_device";
+pub const BLKIO_THROTTLE_READ_IOPS_DEVICE: &str = "blkio.throttle.read_iops_device";
+pub const BLKIO_THROTTLE_WRITE_IOPS_DEVICE: &str = "blkio.throttle.write_iops_device";
 
 pub const BLKIO_IO_SERVICED: &str = "blkio.io_serviced";
 pub const BLKIO_IO_SERVICE_BYTES: &str = "blkio.io_service_bytes";

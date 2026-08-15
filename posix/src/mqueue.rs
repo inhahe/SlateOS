@@ -10,10 +10,7 @@
 //
 // Bounds are established locally but clippy cannot see across the
 // check.
-#![allow(
-    clippy::indexing_slicing,
-    clippy::arithmetic_side_effects,
-)]
+#![allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 
 //! POSIX message queues (`<mqueue.h>`).
 //!
@@ -425,7 +422,9 @@ pub extern "C" fn mq_open(name: *const u8, oflag: i32, _mode: u32, attr: *const 
     // Validate name outside the lock — it's read-only and bounded.
     // Linux's `getname(u_name)` runs before `do_open`, so name errors
     // (EFAULT/ENOENT/ENAMETOOLONG) surface before access-mode EINVAL.
-    let Some((name_buf, name_len)) = (unsafe { validate_name(name) }) else { return -1 };
+    let Some((name_buf, name_len)) = (unsafe { validate_name(name) }) else {
+        return -1;
+    };
 
     // Access-mode validation: the two-bit field `oflag & O_ACCMODE`
     // has four encodings, but only three are legal (RDONLY=0,
@@ -518,7 +517,9 @@ pub extern "C" fn mq_open(name: *const u8, oflag: i32, _mode: u32, attr: *const 
 pub extern "C" fn mq_close(mqdes: MqdT) -> i32 {
     let _g = lock();
     // SAFETY: Lock held.
-    let Some((didx, qidx, _nonblock)) = (unsafe { resolve(mqdes) }) else { return -1 };
+    let Some((didx, qidx, _nonblock)) = (unsafe { resolve(mqdes) }) else {
+        return -1;
+    };
     unsafe {
         let d = descs_ptr().add(didx);
         (*d).in_use = false;
@@ -542,7 +543,9 @@ pub extern "C" fn mq_close(mqdes: MqdT) -> i32 {
 /// The queue is destroyed once the last open descriptor closes.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn mq_unlink(name: *const u8) -> i32 {
-    let Some((name_buf, name_len)) = (unsafe { validate_name(name) }) else { return -1 };
+    let Some((name_buf, name_len)) = (unsafe { validate_name(name) }) else {
+        return -1;
+    };
     let _g = lock();
     // SAFETY: Lock held.
     let Some(qidx) = (unsafe { find_queue_by_name(&name_buf[..name_len]) }) else {
@@ -650,7 +653,9 @@ fn send_common(
         let inserted = {
             let _g = lock();
             // SAFETY: Lock held.
-            let Some((_didx, qidx, nonblock)) = (unsafe { resolve(mqdes) }) else { return -1 };
+            let Some((_didx, qidx, nonblock)) = (unsafe { resolve(mqdes) }) else {
+                return -1;
+            };
             if unsafe { validate_send_args(qidx, msg, len, prio) }.is_err() {
                 return -1;
             }
@@ -695,7 +700,9 @@ pub extern "C" fn mq_timedsend(
     msg_prio: u32,
     abs_timeout: *const Timespec,
 ) -> i32 {
-    let Ok(deadline) = deadline_from_timespec(abs_timeout) else { return -1 };
+    let Ok(deadline) = deadline_from_timespec(abs_timeout) else {
+        return -1;
+    };
     send_common(mqdes, msg_ptr, msg_len, msg_prio, Some(deadline))
 }
 
@@ -764,7 +771,9 @@ fn recv_common(
         let result = {
             let _g = lock();
             // SAFETY: Lock held.
-            let Some((_didx, qidx, nonblock)) = (unsafe { resolve(mqdes) }) else { return -1 };
+            let Some((_didx, qidx, nonblock)) = (unsafe { resolve(mqdes) }) else {
+                return -1;
+            };
             if unsafe { validate_recv_args(qidx, buf, buf_len) }.is_err() {
                 return -1;
             }
@@ -819,7 +828,9 @@ pub extern "C" fn mq_timedreceive(
     msg_prio: *mut u32,
     abs_timeout: *const Timespec,
 ) -> isize {
-    let Ok(deadline) = deadline_from_timespec(abs_timeout) else { return -1 };
+    let Ok(deadline) = deadline_from_timespec(abs_timeout) else {
+        return -1;
+    };
     recv_common(mqdes, msg_ptr, msg_len, msg_prio, Some(deadline))
 }
 
@@ -836,7 +847,9 @@ pub extern "C" fn mq_getattr(mqdes: MqdT, attr: *mut MqAttr) -> i32 {
     }
     let _g = lock();
     // SAFETY: Lock held.
-    let Some((_didx, qidx, nonblock)) = (unsafe { resolve(mqdes) }) else { return -1 };
+    let Some((_didx, qidx, nonblock)) = (unsafe { resolve(mqdes) }) else {
+        return -1;
+    };
     let q = unsafe { queues_ptr().add(qidx) };
     // SAFETY: attr non-null.
     unsafe {
@@ -865,7 +878,9 @@ pub extern "C" fn mq_setattr(mqdes: MqdT, newattr: *const MqAttr, oldattr: *mut 
     }
     let _g = lock();
     // SAFETY: Lock held.
-    let Some((didx, qidx, nonblock_old)) = (unsafe { resolve(mqdes) }) else { return -1 };
+    let Some((didx, qidx, nonblock_old)) = (unsafe { resolve(mqdes) }) else {
+        return -1;
+    };
     let q = unsafe { queues_ptr().add(qidx) };
     if !oldattr.is_null() {
         // SAFETY: caller contract.
@@ -1548,7 +1563,13 @@ mod tests {
         // Same rule on the receive side; both go through
         // `deadline_from_timespec`.
         let mut buf = [0u8; 64];
-        let r = mq_timedreceive(fd, buf.as_mut_ptr(), 64, core::ptr::null_mut(), &raw const bad);
+        let r = mq_timedreceive(
+            fd,
+            buf.as_mut_ptr(),
+            64,
+            core::ptr::null_mut(),
+            &raw const bad,
+        );
         assert_eq!(r, -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
         assert_eq!(mq_close(fd), 0);

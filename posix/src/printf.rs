@@ -285,11 +285,7 @@ pub(crate) fn _sprintf_impl(buf: *mut u8, fmt: *const u8, args: &mut Args) -> i3
 /// point that walks the format string twice (measure, then write) and a
 /// `va_list` cannot be rewound: each pass starts from its own copy, which is
 /// exactly what C's `va_copy` is for.
-pub(crate) unsafe fn _asprintf_impl(
-    strp: *mut *mut u8,
-    fmt: *const u8,
-    va: Option<VaList>,
-) -> i32 {
+pub(crate) unsafe fn _asprintf_impl(strp: *mut *mut u8, fmt: *const u8, va: Option<VaList>) -> i32 {
     if strp.is_null() {
         return -1;
     }
@@ -545,7 +541,9 @@ impl<'a> Args<'a> {
             Self::empty()
         } else {
             // SAFETY: non-null, and the caller's va_list contract carries over.
-            Self { va: Some(unsafe { &mut *va }) }
+            Self {
+                va: Some(unsafe { &mut *va }),
+            }
         }
     }
 
@@ -895,21 +893,33 @@ fn dispatch_spec(
         // Floating-point specifiers.  `%Lf` fetches 16 bytes from the overflow
         // area (X87/X87UP is MEMORY-class), not a `double` from %xmm.
         b'f' | b'F' => {
-            let bits = if spec.long_double { args.long_double() } else { args.double() };
+            let bits = if spec.long_double {
+                args.long_double()
+            } else {
+                args.double()
+            };
             let val = f64::from_bits(bits);
             let prec = spec.precision.unwrap_or(6);
             format_float_fixed(dst, val, ch == b'F', &spec.flags, spec.width, prec);
         }
 
         b'e' | b'E' => {
-            let bits = if spec.long_double { args.long_double() } else { args.double() };
+            let bits = if spec.long_double {
+                args.long_double()
+            } else {
+                args.double()
+            };
             let val = f64::from_bits(bits);
             let prec = spec.precision.unwrap_or(6);
             format_float_sci(dst, val, ch == b'E', &spec.flags, spec.width, prec);
         }
 
         b'g' | b'G' => {
-            let bits = if spec.long_double { args.long_double() } else { args.double() };
+            let bits = if spec.long_double {
+                args.long_double()
+            } else {
+                args.double()
+            };
             let val = f64::from_bits(bits);
             let prec = if spec.precision == Some(0) {
                 1
@@ -920,11 +930,22 @@ fn dispatch_spec(
         }
 
         b'a' | b'A' => {
-            let bits = if spec.long_double { args.long_double() } else { args.double() };
+            let bits = if spec.long_double {
+                args.long_double()
+            } else {
+                args.double()
+            };
             let val = f64::from_bits(bits);
             // No default precision: C99 says an absent one means "as many
             // digits as it takes to be exact", which is not any fixed number.
-            format_float_hex(dst, val, ch == b'A', &spec.flags, spec.width, spec.precision);
+            format_float_hex(
+                dst,
+                val,
+                ch == b'A',
+                &spec.flags,
+                spec.width,
+                spec.precision,
+            );
         }
 
         _ => {
@@ -1452,7 +1473,11 @@ fn format_float_general(
     let pi = i32::try_from(p).unwrap_or(i32::MAX);
     let mut dec = crate::decfloat::Decimal::new(abs_val);
     dec.round_to_significant(pi);
-    let exp = if dec.is_zero() { 0 } else { dec.decpt().wrapping_sub(1) };
+    let exp = if dec.is_zero() {
+        0
+    } else {
+        dec.decpt().wrapping_sub(1)
+    };
 
     let mut buf = [0u8; FLOAT_BUF];
     let mut text = if exp < -4 || exp >= pi {
@@ -1528,7 +1553,11 @@ fn format_float_hex(
     /// Hex digits those bits make: 52 / 4, exactly.
     const HEX_DIGITS: usize = 13;
 
-    let bits = if negative { (-val).to_bits() } else { val.to_bits() };
+    let bits = if negative {
+        (-val).to_bits()
+    } else {
+        val.to_bits()
+    };
     let exp_field = (bits >> FRAC_BITS) & 0x7ff;
     let mant = bits & ((1u64 << FRAC_BITS) - 1);
 
@@ -1539,7 +1568,10 @@ fn format_float_hex(
         // the subnormal range.
         (0u64, if mant == 0 { 0i32 } else { -1022 })
     } else {
-        (1u64, i32::try_from(exp_field).unwrap_or(0).wrapping_sub(1023))
+        (
+            1u64,
+            i32::try_from(exp_field).unwrap_or(0).wrapping_sub(1023),
+        )
     };
 
     // Fraction digits, rounded to `precision` if one was given.  `kept` holds
@@ -1580,11 +1612,19 @@ fn format_float_hex(
         }
     };
 
-    let hex =if upper { b"0123456789ABCDEF" } else { b"0123456789abcdef" };
+    let hex = if upper {
+        b"0123456789ABCDEF"
+    } else {
+        b"0123456789abcdef"
+    };
     let mut buf = [0u8; FLOAT_BUF];
     let mut pos = 0usize;
 
-    put(&mut buf, &mut pos, hex.get(lead as usize % 16).copied().unwrap_or(b'0'));
+    put(
+        &mut buf,
+        &mut pos,
+        hex.get(lead as usize % 16).copied().unwrap_or(b'0'),
+    );
 
     if digits > 0 || pad > 0 || flags.alt_form {
         put(&mut buf, &mut pos, b'.');
@@ -1593,7 +1633,11 @@ fn format_float_hex(
     while i > 0 {
         i -= 1;
         let nibble = (kept >> (i * 4)) & 0xf;
-        put(&mut buf, &mut pos, hex.get(nibble as usize).copied().unwrap_or(b'0'));
+        put(
+            &mut buf,
+            &mut pos,
+            hex.get(nibble as usize).copied().unwrap_or(b'0'),
+        );
     }
 
     // The omitted zeros belong here, between the last digit and the `p`.
@@ -1610,7 +1654,11 @@ fn format_float_hex(
         j = j.wrapping_add(1);
     }
 
-    let text = FloatText { len: pos, zeros_at, zeros: pad };
+    let text = FloatText {
+        len: pos,
+        zeros_at,
+        zeros: pad,
+    };
     let prefix: &[u8] = if upper { b"0X" } else { b"0x" };
     emit_float_padded_prefixed(dst, prefix, &buf, text, negative, flags, width);
 }
@@ -1681,7 +1729,11 @@ fn insert_point_before_exponent(buf: &mut [u8], text: &mut FloatText) {
 /// before, which also removes a `.` left with nothing after it.
 fn trim_float_text(buf: &mut [u8], text: FloatText) -> FloatText {
     let len = trim_trailing_zeros(buf, text.len);
-    FloatText { len, zeros_at: len, zeros: 0 }
+    FloatText {
+        len,
+        zeros_at: len,
+        zeros: 0,
+    }
 }
 
 /// Emit a formatted float with sign, padding, and alignment.
@@ -1830,17 +1882,19 @@ fn render_fixed(dec: &crate::decfloat::Decimal, precision: usize, buf: &mut [u8]
         }
     }
     if precision == 0 {
-        return FloatText { len: pos, zeros_at: pos, zeros: 0 };
+        return FloatText {
+            len: pos,
+            zeros_at: pos,
+            zeros: 0,
+        };
     }
     put(buf, &mut pos, b'.');
 
     // Fraction digit `j` (1-based) is significant index `decpt + j - 1`, so the
     // last one that can be nonzero is `j == len - decpt`.  Past that every
     // digit is a zero the expansion does not hold, and need not be written.
-    let avail = usize::try_from(
-        i64::try_from(dec.len()).unwrap_or(i64::MAX) - i64::from(decpt),
-    )
-    .unwrap_or(0);
+    let avail = usize::try_from(i64::try_from(dec.len()).unwrap_or(i64::MAX) - i64::from(decpt))
+        .unwrap_or(0);
     let emit = precision.min(avail);
     let mut j = 1i32;
     let stop = i32::try_from(emit).unwrap_or(i32::MAX);
@@ -1848,14 +1902,22 @@ fn render_fixed(dec: &crate::decfloat::Decimal, precision: usize, buf: &mut [u8]
         put(buf, &mut pos, dec.digit(decpt + j - 1));
         j += 1;
     }
-    FloatText { len: pos, zeros_at: pos, zeros: precision.wrapping_sub(emit) }
+    FloatText {
+        len: pos,
+        zeros_at: pos,
+        zeros: precision.wrapping_sub(emit),
+    }
 }
 
 /// Format a non-negative, finite `f64` in scientific notation into `buf`.
 fn fmt_scientific(val: f64, precision: usize, upper: bool, buf: &mut [u8]) -> FloatText {
     let mut dec = crate::decfloat::Decimal::new(val);
     // `precision` digits after the point plus the one before it.
-    dec.round_to_significant(i32::try_from(precision).unwrap_or(i32::MAX).saturating_add(1));
+    dec.round_to_significant(
+        i32::try_from(precision)
+            .unwrap_or(i32::MAX)
+            .saturating_add(1),
+    );
     render_scientific(&dec, precision, upper, buf)
 }
 
@@ -1870,7 +1932,11 @@ fn render_scientific(
     // A zero has no exponent of its own; C fixes the output at "0.000e+00".
     let exp: i32 = if dec.is_zero() { 0 } else { dec.decpt() - 1 };
     let mut pos = 0usize;
-    put(buf, &mut pos, if dec.is_zero() { b'0' } else { dec.digit(0) });
+    put(
+        buf,
+        &mut pos,
+        if dec.is_zero() { b'0' } else { dec.digit(0) },
+    );
 
     let mut zeros = 0usize;
     let mut zeros_at = pos;
@@ -1898,10 +1964,18 @@ fn render_scientific(
         put(buf, &mut pos, b'0'.wrapping_add((abs_exp / 100) as u8));
     }
     // C requires at least two exponent digits.
-    put(buf, &mut pos, b'0'.wrapping_add(((abs_exp / 10) % 10) as u8));
+    put(
+        buf,
+        &mut pos,
+        b'0'.wrapping_add(((abs_exp / 10) % 10) as u8),
+    );
     put(buf, &mut pos, b'0'.wrapping_add((abs_exp % 10) as u8));
 
-    FloatText { len: pos, zeros_at, zeros }
+    FloatText {
+        len: pos,
+        zeros_at,
+        zeros,
+    }
 }
 
 /// Remove trailing zeros after the decimal point in a formatted float.
@@ -2036,7 +2110,10 @@ mod tests {
 
         let mut spill = 0usize;
         for &v in ints.iter().skip(6).chain(floats.iter().skip(8)) {
-            assert!(spill + 8 <= scratch.overflow.len(), "overflow area too small");
+            assert!(
+                spill + 8 <= scratch.overflow.len(),
+                "overflow area too small"
+            );
             scratch.overflow[spill..spill + 8].copy_from_slice(&v.to_le_bytes());
             spill += 8;
         }
@@ -3521,11 +3598,7 @@ mod tests {
     #[test]
     fn more_than_eight_float_conversions() {
         let bits: Vec<u64> = (1..=9).map(|i| f64::from(i).to_bits()).collect();
-        let (s, _) = snprintf_str(
-            b"%.0f%.0f%.0f%.0f%.0f%.0f%.0f%.0f%.0f\0",
-            &[],
-            &bits,
-        );
+        let (s, _) = snprintf_str(b"%.0f%.0f%.0f%.0f%.0f%.0f%.0f%.0f%.0f\0", &[], &bits);
         assert_eq!(s, "123456789");
     }
 
@@ -3609,12 +3682,12 @@ mod tests {
         // The old cast-based integer part saturated at 2^64-1, so everything
         // from here up printed the same 20 digits of garbage.
         assert_eq!(fmt_f(b"%.2f ", 1e20), "100000000000000000000.00");
-        assert_eq!(
-            fmt_f(b"%.2f ", 1e25),
-            "10000000000000000905969664.00"
-        );
+        assert_eq!(fmt_f(b"%.2f ", 1e25), "10000000000000000905969664.00");
         // 2^64 exactly: the first value the old code could not represent.
-        assert_eq!(fmt_f(b"%.0f ", 18_446_744_073_709_551_616.0), "18446744073709551616");
+        assert_eq!(
+            fmt_f(b"%.0f ", 18_446_744_073_709_551_616.0),
+            "18446744073709551616"
+        );
         // %.0f of DBL_MAX is 309 digits; check the ends and the length.
         let s = fmt_f(b"%.0f ", f64::MAX);
         assert_eq!(s.len(), 309);
@@ -3688,18 +3761,9 @@ mod tests {
         // Every f64 has a finite exact decimal expansion, and printf must show
         // it rather than the drift of a multiply-by-ten loop.  These are the
         // real digits of the doubles nearest the written literals.
-        assert_eq!(
-            fmt_f(b"%.30f ", 0.1),
-            "0.100000000000000005551115123126"
-        );
-        assert_eq!(
-            fmt_f(b"%.20f ", 1e-20),
-            "0.00000000000000000001"
-        );
-        assert_eq!(
-            fmt_f(b"%.25f ", 1.0 / 3.0),
-            "0.3333333333333333148296163"
-        );
+        assert_eq!(fmt_f(b"%.30f ", 0.1), "0.100000000000000005551115123126");
+        assert_eq!(fmt_f(b"%.20f ", 1e-20), "0.00000000000000000001");
+        assert_eq!(fmt_f(b"%.25f ", 1.0 / 3.0), "0.3333333333333333148296163");
         // Past the end of the expansion the digits are genuinely zero, and a
         // precision larger than any buffer still prints them all.
         assert_eq!(fmt_f(b"%.60f ", 0.5), format!("0.5{}", "0".repeat(59)));

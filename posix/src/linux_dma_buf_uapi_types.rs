@@ -23,8 +23,7 @@ pub const DMA_BUF_SYNC_START: u64 = 0 << 2;
 pub const DMA_BUF_SYNC_END: u64 = 1 << 2;
 
 /// Bit-mask covering every valid flag (used to reject unknown bits).
-pub const DMA_BUF_SYNC_VALID_FLAGS_MASK: u64 =
-    DMA_BUF_SYNC_RW | DMA_BUF_SYNC_END;
+pub const DMA_BUF_SYNC_VALID_FLAGS_MASK: u64 = DMA_BUF_SYNC_RW | DMA_BUF_SYNC_END;
 
 // ---------------------------------------------------------------------------
 // ioctl base / numbers (DMA_BUF_BASE = 'b', _IOW('b', 0, u64))
@@ -68,10 +67,7 @@ mod tests {
 
     #[test]
     fn test_valid_mask_covers_all_flags() {
-        let all = DMA_BUF_SYNC_READ
-            | DMA_BUF_SYNC_WRITE
-            | DMA_BUF_SYNC_END
-            | DMA_BUF_SYNC_START;
+        let all = DMA_BUF_SYNC_READ | DMA_BUF_SYNC_WRITE | DMA_BUF_SYNC_END | DMA_BUF_SYNC_START;
         assert_eq!(all & !DMA_BUF_SYNC_VALID_FLAGS_MASK, 0);
     }
 

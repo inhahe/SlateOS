@@ -12,10 +12,7 @@
 // Bounds are established locally but clippy cannot see across the
 // check.  These lints would only be useful here if we accepted
 // attacker-controlled integer indices, which we do not.
-#![allow(
-    clippy::indexing_slicing,
-    clippy::arithmetic_side_effects,
-)]
+#![allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 
 //! System V semaphores — `<sys/sem.h>`.
 //!

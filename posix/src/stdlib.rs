@@ -413,8 +413,7 @@ unsafe fn scan_float_cstr(
         return (crate::decfloat::FloatToken::None, false);
     }
 
-    let (token, negative, consumed) =
-        crate::decfloat::scan_float_token(&CStrSource(nptr), acc);
+    let (token, negative, consumed) = crate::decfloat::scan_float_token(&CStrSource(nptr), acc);
 
     if !endptr.is_null() {
         // SAFETY: the caller promises `endptr` is writable, and `consumed`
@@ -4573,7 +4572,6 @@ mod tests {
         unsafe { strtod(z.as_ptr(), core::ptr::null_mut()) }
     }
 
-
     // -----------------------------------------------------------------------
     // Hexadecimal floats (C99 7.20.1.3)
     //
@@ -4798,7 +4796,11 @@ mod tests {
         // but rounds to exactly that midpoint in f64, where ties-to-even then
         // sends it back down.
         let text = "1.000000059604644830901776231257827021181583404541015625";
-        assert_eq!(parse(text) as f32, 1.0_f32, "the trap this test guards against");
+        assert_eq!(
+            parse(text) as f32,
+            1.0_f32,
+            "the trap this test guards against"
+        );
         let mut z = text.as_bytes().to_vec();
         z.push(0);
         let got = unsafe { strtof(z.as_ptr(), core::ptr::null_mut()) };

@@ -147,10 +147,7 @@ mod tests {
         }
         // All four are disjoint.
         assert_eq!(
-            DASD_FMT_INT_FMT_NOR0
-                | DASD_FMT_INT_FMT_R0
-                | DASD_FMT_INT_INVAL
-                | DASD_FMT_INT_COMPAT,
+            DASD_FMT_INT_FMT_NOR0 | DASD_FMT_INT_FMT_R0 | DASD_FMT_INT_INVAL | DASD_FMT_INT_COMPAT,
             0x0F
         );
     }

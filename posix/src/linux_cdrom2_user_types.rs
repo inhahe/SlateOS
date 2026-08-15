@@ -57,9 +57,21 @@ mod tests {
     #[test]
     fn test_control_ioctls_in_s_family() {
         for v in [
-            CDROMPAUSE, CDROMRESUME, CDROMPLAYMSF, CDROMPLAYTRKIND, CDROMREADTOCHDR,
-            CDROMREADTOCENTRY, CDROMSTOP, CDROMSTART, CDROMEJECT, CDROMVOLCTRL,
-            CDROMSUBCHNL, CDROMREADMODE2, CDROMREADMODE1, CDROMREADAUDIO, CDROMEJECT_SW,
+            CDROMPAUSE,
+            CDROMRESUME,
+            CDROMPLAYMSF,
+            CDROMPLAYTRKIND,
+            CDROMREADTOCHDR,
+            CDROMREADTOCENTRY,
+            CDROMSTOP,
+            CDROMSTART,
+            CDROMEJECT,
+            CDROMVOLCTRL,
+            CDROMSUBCHNL,
+            CDROMREADMODE2,
+            CDROMREADMODE1,
+            CDROMREADAUDIO,
+            CDROMEJECT_SW,
         ] {
             // High byte of u16 ioctl number is the 'S' type (0x53).
             assert_eq!((v >> 8) & 0xFF, 0x53);
@@ -69,9 +81,21 @@ mod tests {
     #[test]
     fn test_ioctl_numbers_dense_0x01_to_0x0f() {
         let o = [
-            CDROMPAUSE, CDROMRESUME, CDROMPLAYMSF, CDROMPLAYTRKIND, CDROMREADTOCHDR,
-            CDROMREADTOCENTRY, CDROMSTOP, CDROMSTART, CDROMEJECT, CDROMVOLCTRL,
-            CDROMSUBCHNL, CDROMREADMODE2, CDROMREADMODE1, CDROMREADAUDIO, CDROMEJECT_SW,
+            CDROMPAUSE,
+            CDROMRESUME,
+            CDROMPLAYMSF,
+            CDROMPLAYTRKIND,
+            CDROMREADTOCHDR,
+            CDROMREADTOCENTRY,
+            CDROMSTOP,
+            CDROMSTART,
+            CDROMEJECT,
+            CDROMVOLCTRL,
+            CDROMSUBCHNL,
+            CDROMREADMODE2,
+            CDROMREADMODE1,
+            CDROMREADAUDIO,
+            CDROMEJECT_SW,
         ];
         for (i, &v) in o.iter().enumerate() {
             assert_eq!(v & 0xFF, (i + 1) as u32);
@@ -97,12 +121,7 @@ mod tests {
     #[test]
     fn test_disc_types_dense_100_to_105() {
         let t = [
-            CDS_AUDIO,
-            CDS_DATA_1,
-            CDS_DATA_2,
-            CDS_XA_2_1,
-            CDS_XA_2_2,
-            CDS_MIXED,
+            CDS_AUDIO, CDS_DATA_1, CDS_DATA_2, CDS_XA_2_1, CDS_XA_2_2, CDS_MIXED,
         ];
         for (i, &v) in t.iter().enumerate() {
             assert_eq!(v as usize, 100 + i);

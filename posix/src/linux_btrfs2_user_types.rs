@@ -18,9 +18,8 @@ pub const BTRFS_BALANCE_SYSTEM: u64 = 1 << 1;
 pub const BTRFS_BALANCE_METADATA: u64 = 1 << 2;
 
 /// Combined mask of all three.
-pub const BTRFS_BALANCE_TYPE_MASK: u64 = BTRFS_BALANCE_DATA
-    | BTRFS_BALANCE_SYSTEM
-    | BTRFS_BALANCE_METADATA;
+pub const BTRFS_BALANCE_TYPE_MASK: u64 =
+    BTRFS_BALANCE_DATA | BTRFS_BALANCE_SYSTEM | BTRFS_BALANCE_METADATA;
 
 /// Force a chunk relocation even if it does not match filters.
 pub const BTRFS_BALANCE_FORCE: u64 = 1 << 3;

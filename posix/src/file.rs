@@ -2735,7 +2735,13 @@ pub extern "C" fn fchmodat(dirfd: i32, path: *const u8, mode: ModeT, flags: i32)
     // otherwise chmod (follow the final symlink).  Linux 6.6+ honours this via
     // fchmodat2; we thread NO_FOLLOW to SYS_FS_SET_PERMS the same way.
     let no_follow = flags & AT_SYMLINK_NOFOLLOW != 0;
-    let apply = |p: *const u8| if no_follow { lchmod(p, mode) } else { chmod(p, mode) };
+    let apply = |p: *const u8| {
+        if no_follow {
+            lchmod(p, mode)
+        } else {
+            chmod(p, mode)
+        }
+    };
     if dirfd == AT_FDCWD || is_absolute_path(path) {
         return apply(path);
     }
@@ -2793,7 +2799,13 @@ pub extern "C" fn fchownat(
     // AT_SYMLINK_NOFOLLOW routes through lchown (operate on the link inode
     // itself); otherwise chown (follow the final symlink).
     let no_follow = flags & AT_SYMLINK_NOFOLLOW != 0;
-    let apply = |p: *const u8| if no_follow { lchown(p, owner, group) } else { chown(p, owner, group) };
+    let apply = |p: *const u8| {
+        if no_follow {
+            lchown(p, owner, group)
+        } else {
+            chown(p, owner, group)
+        }
+    };
     if dirfd == AT_FDCWD || is_absolute_path(path) {
         return apply(path);
     }
@@ -4379,12 +4391,7 @@ fn set_times_path(path: *const u8, accessed_ns: u64, modified_ns: u64) -> i32 {
 /// `no_follow` is set (`lutimes` / `utimensat(AT_SYMLINK_NOFOLLOW)`), the
 /// kernel stamps the link inode itself (arg4 bit 0 = NO_FOLLOW).
 #[cfg(target_os = "none")]
-fn set_times_path_ex(
-    path: *const u8,
-    accessed_ns: u64,
-    modified_ns: u64,
-    no_follow: bool,
-) -> i32 {
+fn set_times_path_ex(path: *const u8, accessed_ns: u64, modified_ns: u64, no_follow: bool) -> i32 {
     let mut resolved = [0u8; crate::unistd::PATH_MAX];
     let Some(resolved_len) = resolve_or_err(path, &mut resolved) else {
         return -1;
@@ -5564,10 +5571,11 @@ pub extern "C" fn statx(
     // filesystem actually recorded a creation time; otherwise leave the
     // STATX_BTIME bit clear so callers know it is unavailable.
     if mask & STATX_BTIME != 0
-        && let Some(btime) = crate::stat::btime_from_fsstat(&raw) {
-            sx.stx_btime = timespec_to_statx_ts(&btime);
-            filled |= STATX_BTIME;
-        }
+        && let Some(btime) = crate::stat::btime_from_fsstat(&raw)
+    {
+        sx.stx_btime = timespec_to_statx_ts(&btime);
+        filled |= STATX_BTIME;
+    }
 
     sx.stx_blksize = st.st_blksize as u32;
     // Device numbers: split st_dev/st_rdev into major/minor.
@@ -5642,9 +5650,8 @@ mod tests {
 
     #[test]
     fn translate_all_flags() {
-        let flags = translate_open_flags(
-            fcntl::O_RDWR | fcntl::O_CREAT | fcntl::O_TRUNC | fcntl::O_APPEND,
-        );
+        let flags =
+            translate_open_flags(fcntl::O_RDWR | fcntl::O_CREAT | fcntl::O_TRUNC | fcntl::O_APPEND);
         assert_eq!(flags & (N_READ | N_WRITE), N_READ | N_WRITE);
         assert_ne!(flags & N_CREATE, 0);
         assert_ne!(flags & N_TRUNCATE, 0);
@@ -6745,7 +6752,12 @@ mod tests {
     fn test_openat_bad_flags_outrank_a_bad_dirfd() {
         let path = b"relative/path\0";
         assert_eq!(
-            openat(-1, path.as_ptr(), fcntl::O_DIRECTORY | fcntl::O_CREAT, 0o644),
+            openat(
+                -1,
+                path.as_ptr(),
+                fcntl::O_DIRECTORY | fcntl::O_CREAT,
+                0o644
+            ),
             -1
         );
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
@@ -9294,7 +9306,10 @@ mod tests {
             let via_faccessat =
                 faccessat(AT_FDCWD, b"/nonexistent_xyz\0".as_ptr(), mode, AT_EACCESS);
             let e2 = crate::errno::get_errno();
-            assert_eq!(via_eaccess, via_faccessat, "return differs for mode {mode:#x}");
+            assert_eq!(
+                via_eaccess, via_faccessat,
+                "return differs for mode {mode:#x}"
+            );
             assert_eq!(e1, e2, "errno differs for mode {mode:#x}");
         }
     }
@@ -12051,8 +12066,8 @@ mod tests {
         }
         impl CapGuard {
             fn snapshot() -> Self {
-            let (lo, hi) = crate::sys_capability::current_caps_effective();
-            Self { lo, hi }
+                let (lo, hi) = crate::sys_capability::current_caps_effective();
+                Self { lo, hi }
             }
         }
         impl Drop for CapGuard {
@@ -12381,16 +12396,14 @@ mod tests {
         const CAP_CHOWN: u32 = crate::sys_capability::CAP_CHOWN;
 
         struct CapGuard {
-
             lo: u32,
 
             hi: u32,
-
         }
         impl CapGuard {
             fn snapshot() -> Self {
-            let (lo, hi) = crate::sys_capability::current_caps_effective();
-            Self { lo, hi }
+                let (lo, hi) = crate::sys_capability::current_caps_effective();
+                Self { lo, hi }
             }
         }
         impl Drop for CapGuard {

@@ -369,11 +369,11 @@ core::arch::global_asm!(
     ".global _pthread_trampoline",
     ".type _pthread_trampoline, @function",
     "_pthread_trampoline:",
-    "    pop rsi",                  // rsi = arg            (2nd C argument)
-    "    pop rdi",                  // rdi = start_routine  (1st C argument)
-    "    pop rdx",                  // rdx = thread pointer (3rd C argument)
+    "    pop rsi",                     // rsi = arg            (2nd C argument)
+    "    pop rdi",                     // rdi = start_routine  (1st C argument)
+    "    pop rdx",                     // rdx = thread pointer (3rd C argument)
     "    call __pthread_thread_start", // never returns
-    "    ud2",                      // unreachable
+    "    ud2",                         // unreachable
 );
 
 #[cfg(target_os = "none")]
@@ -1246,7 +1246,10 @@ pub unsafe extern "C" fn pthread_setspecific(key: PthreadKeyT, value: *mut u8) -
         Some(idx) => {
             // SAFETY: TSD_LOCK held; idx in range.
             let table = unsafe { &mut *core::ptr::addr_of_mut!(TSD_TABLE) };
-            if let Some(slot) = table.get_mut(idx).and_then(|s| s.values.get_mut(key as usize)) {
+            if let Some(slot) = table
+                .get_mut(idx)
+                .and_then(|s| s.values.get_mut(key as usize))
+            {
                 *slot = value;
                 0
             } else {
@@ -4723,8 +4726,7 @@ mod tests {
 
     static TSD_DTOR_CALLS: core::sync::atomic::AtomicUsize =
         core::sync::atomic::AtomicUsize::new(0);
-    static TSD_DTOR_LAST: core::sync::atomic::AtomicUsize =
-        core::sync::atomic::AtomicUsize::new(0);
+    static TSD_DTOR_LAST: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
     extern "C" fn tsd_record_dtor(val: *mut u8) {
         TSD_DTOR_CALLS.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
@@ -4795,10 +4797,7 @@ mod tests {
     static ATFORK_SEQ: std::sync::Mutex<Vec<i32>> = std::sync::Mutex::new(Vec::new());
 
     fn atfork_seq_push(v: i32) {
-        ATFORK_SEQ
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .push(v);
+        ATFORK_SEQ.lock().unwrap_or_else(|e| e.into_inner()).push(v);
     }
     fn atfork_seq_take() -> Vec<i32> {
         let mut g = ATFORK_SEQ.lock().unwrap_or_else(|e| e.into_inner());
@@ -5229,7 +5228,10 @@ mod tests {
         // A thread ID that was never named yields the empty string (not an
         // error), regardless of any stale data at the old modulo slot.
         let mut buf = [0xFFu8; 16];
-        assert_eq!(unsafe { pthread_getname_np(54321, buf.as_mut_ptr(), 16) }, 0);
+        assert_eq!(
+            unsafe { pthread_getname_np(54321, buf.as_mut_ptr(), 16) },
+            0
+        );
         assert_eq!(buf[0], 0);
     }
 
@@ -5328,14 +5330,23 @@ mod tests {
         );
         assert_eq!(slot.state.load(Ordering::Relaxed), STATE_JOINABLE);
         release_slot(slot);
-        assert!(find_slot(tid).is_none(), "slot should be free after release");
+        assert!(
+            find_slot(tid).is_none(),
+            "slot should be free after release"
+        );
     }
 
     #[test]
     fn test_detach_marks_state_detached() {
         let tid: u64 = 0x5100_0002;
         // base = 0 so the (never-reached) reclaim path won't call munmap.
-        assert!(store_thread_info(tid, 0, DEFAULT_THREAD_STACK_SIZE, DEFAULT_THREAD_STACK_SIZE, false));
+        assert!(store_thread_info(
+            tid,
+            0,
+            DEFAULT_THREAD_STACK_SIZE,
+            DEFAULT_THREAD_STACK_SIZE,
+            false
+        ));
         assert_eq!(pthread_detach(tid), 0);
         let slot = find_slot(tid).expect("detached thread stays tracked");
         assert_eq!(slot.state.load(Ordering::Acquire), STATE_DETACHED);
@@ -5354,7 +5365,13 @@ mod tests {
     #[test]
     fn test_double_detach_is_einval() {
         let tid: u64 = 0x5100_0003;
-        assert!(store_thread_info(tid, 0, DEFAULT_THREAD_STACK_SIZE, DEFAULT_THREAD_STACK_SIZE, false));
+        assert!(store_thread_info(
+            tid,
+            0,
+            DEFAULT_THREAD_STACK_SIZE,
+            DEFAULT_THREAD_STACK_SIZE,
+            false
+        ));
         assert_eq!(pthread_detach(tid), 0);
         assert_eq!(pthread_detach(tid), crate::errno::EINVAL);
         let slot = find_slot(tid).expect("still tracked");
@@ -5364,7 +5381,13 @@ mod tests {
     #[test]
     fn test_join_rejects_detached_thread() {
         let tid: u64 = 0x5100_0004;
-        assert!(store_thread_info(tid, 0, DEFAULT_THREAD_STACK_SIZE, DEFAULT_THREAD_STACK_SIZE, false));
+        assert!(store_thread_info(
+            tid,
+            0,
+            DEFAULT_THREAD_STACK_SIZE,
+            DEFAULT_THREAD_STACK_SIZE,
+            false
+        ));
         assert_eq!(pthread_detach(tid), 0);
         // Joining a detached thread must be rejected before any syscall.
         let mut rv: *mut u8 = core::ptr::null_mut();
@@ -5377,7 +5400,13 @@ mod tests {
     fn test_detach_after_joinable_exit_reaps() {
         let tid: u64 = 0x5100_0005;
         // base = 0 so detach's reclaim path skips the host munmap call.
-        assert!(store_thread_info(tid, 0, DEFAULT_THREAD_STACK_SIZE, DEFAULT_THREAD_STACK_SIZE, false));
+        assert!(store_thread_info(
+            tid,
+            0,
+            DEFAULT_THREAD_STACK_SIZE,
+            DEFAULT_THREAD_STACK_SIZE,
+            false
+        ));
         // Simulate the exit path winning the race: it marks the slot EXITED
         // and leaves the stack for a reaper.
         let slot = find_slot(tid).expect("tracked");

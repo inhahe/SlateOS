@@ -135,14 +135,7 @@ mod tests {
     #[test]
     fn test_class_dense_low_3_bits() {
         let c = [
-            BPF_LD,
-            BPF_LDX,
-            BPF_ST,
-            BPF_STX,
-            BPF_ALU,
-            BPF_JMP,
-            BPF_RET,
-            BPF_MISC,
+            BPF_LD, BPF_LDX, BPF_ST, BPF_STX, BPF_ALU, BPF_JMP, BPF_RET, BPF_MISC,
         ];
         for (i, &x) in c.iter().enumerate() {
             assert_eq!(x as usize, i);
@@ -182,8 +175,8 @@ mod tests {
     #[test]
     fn test_alu_ops_distinct() {
         let a = [
-            BPF_ADD, BPF_SUB, BPF_MUL, BPF_DIV, BPF_OR, BPF_AND, BPF_LSH,
-            BPF_RSH, BPF_NEG, BPF_MOD, BPF_XOR,
+            BPF_ADD, BPF_SUB, BPF_MUL, BPF_DIV, BPF_OR, BPF_AND, BPF_LSH, BPF_RSH, BPF_NEG,
+            BPF_MOD, BPF_XOR,
         ];
         for i in 0..a.len() {
             for j in (i + 1)..a.len() {

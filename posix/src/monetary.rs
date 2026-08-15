@@ -18,7 +18,6 @@
 // would silently invite "unused variable" warnings the day someone forgets
 // to wire the value into the emitter.
 #![allow(clippy::used_underscore_binding)]
-
 // Indexing and arithmetic in strfmon operate on:
 //
 //  - `int_buf`/`frac_buf` (fixed 32-byte locals) indexed by `i`/`j`
@@ -31,10 +30,7 @@
 //
 // Bounds are established locally but clippy cannot see across the
 // check.
-#![allow(
-    clippy::indexing_slicing,
-    clippy::arithmetic_side_effects,
-)]
+#![allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 
 /// `strfmon` — format monetary value.
 ///
@@ -257,13 +253,12 @@ pub extern "C" fn strfmon(
         }
 
         // Close parentheses for negative with parens.
-        if negative && use_parens
-            && out_pos < maxsize.wrapping_sub(1) {
-                unsafe {
-                    *s.add(out_pos) = b')';
-                }
-                out_pos = out_pos.wrapping_add(1);
+        if negative && use_parens && out_pos < maxsize.wrapping_sub(1) {
+            unsafe {
+                *s.add(out_pos) = b')';
             }
+            out_pos = out_pos.wrapping_add(1);
+        }
     }
 
     // Null terminate.

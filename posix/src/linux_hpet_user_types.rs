@@ -69,7 +69,12 @@ mod tests {
     #[test]
     fn test_ioctls_distinct_and_use_letter_h() {
         let ops = [
-            HPET_IE_ON, HPET_IE_OFF, HPET_INFO, HPET_EPI, HPET_DPI, HPET_IRQFREQ,
+            HPET_IE_ON,
+            HPET_IE_OFF,
+            HPET_INFO,
+            HPET_EPI,
+            HPET_DPI,
+            HPET_IRQFREQ,
         ];
         for i in 0..ops.len() {
             for j in (i + 1)..ops.len() {

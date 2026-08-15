@@ -80,9 +80,11 @@ impl Zone {
     #[must_use]
     pub fn standard(&self) -> TzInfo {
         match self {
-            Self::Posix(tz) => {
-                TzInfo { gmtoff: tz.std_gmtoff, is_dst: false, name: tz.std_name }
-            }
+            Self::Posix(tz) => TzInfo {
+                gmtoff: tz.std_gmtoff,
+                is_dst: false,
+                name: tz.std_name,
+            },
             Self::File(f) => f.standard(),
         }
     }
@@ -92,9 +94,11 @@ impl Zone {
     #[must_use]
     pub fn daylight(&self) -> Option<TzInfo> {
         match self {
-            Self::Posix(tz) => tz
-                .dst
-                .map(|d| TzInfo { gmtoff: d.gmtoff, is_dst: true, name: d.name }),
+            Self::Posix(tz) => tz.dst.map(|d| TzInfo {
+                gmtoff: d.gmtoff,
+                is_dst: true,
+                name: d.name,
+            }),
             Self::File(f) => f.daylight(),
         }
     }
@@ -164,7 +168,9 @@ pub fn name_ptr(index: usize) -> *const u8 {
     // and the storage is a process-lifetime static.
     unsafe {
         let slots = &*core::ptr::addr_of!(NAME_C);
-        slots.get(index.min(1)).map_or(core::ptr::null(), |s| s.as_ptr())
+        slots
+            .get(index.min(1))
+            .map_or(core::ptr::null(), |s| s.as_ptr())
     }
 }
 
@@ -357,7 +363,9 @@ fn load_zoneinfo(path: &[u8]) -> Option<TzFile<'static>> {
     let buf = unsafe { &mut *core::ptr::addr_of_mut!(ZONE_FILE) };
     let mut len = 0usize;
     let ok = loop {
-        let Some(rest) = buf.get_mut(len..) else { break false };
+        let Some(rest) = buf.get_mut(len..) else {
+            break false;
+        };
         if rest.is_empty() {
             // The buffer filled exactly.  One more byte would mean the file is
             // too big for us, so probe for it rather than accepting a prefix.
@@ -372,8 +380,12 @@ fn load_zoneinfo(path: &[u8]) -> Option<TzFile<'static>> {
         if n == 0 {
             break true;
         }
-        let Ok(n) = usize::try_from(n) else { break false };
-        let Some(next) = len.checked_add(n) else { break false };
+        let Ok(n) = usize::try_from(n) else {
+            break false;
+        };
+        let Some(next) = len.checked_add(n) else {
+            break false;
+        };
         if next > buf.len() {
             // A `read` that claims to have written more than it was given.
             break false;
@@ -481,7 +493,10 @@ mod tests {
     #[test]
     fn an_absolute_tz_names_the_file_directly() {
         let _env = crate::environ::lock_env_for_test();
-        assert_eq!(path_for(b"/etc/localtime").as_deref(), Some(&b"/etc/localtime"[..]));
+        assert_eq!(
+            path_for(b"/etc/localtime").as_deref(),
+            Some(&b"/etc/localtime"[..])
+        );
     }
 
     #[test]
@@ -552,7 +567,10 @@ mod tests {
     #[test]
     fn a_loaded_zoneinfo_file_becomes_the_current_zone() {
         let _env = crate::environ::lock_env_for_test();
-        assert!(install_zoneinfo_bytes(&eastern_tzif()), "fixture must parse");
+        assert!(
+            install_zoneinfo_bytes(&eastern_tzif()),
+            "fixture must parse"
+        );
         let zone = current();
         assert!(matches!(zone, Zone::File(_)));
         assert_eq!(zone.standard().name.as_bytes(), b"EST");
@@ -565,8 +583,14 @@ mod tests {
         assert!(zone.lookup(1_909_267_200).is_dst); // 2030-07-01
         assert_eq!(zone.lookup(0).gmtoff, -5 * 3600); // 1970, before the table
         // `tzname[]` must follow a file zone as it does a rule zone.
-        assert_eq!(unsafe { core::ffi::CStr::from_ptr(name_ptr(0).cast()) }.to_bytes(), b"EST");
-        assert_eq!(unsafe { core::ffi::CStr::from_ptr(name_ptr(1).cast()) }.to_bytes(), b"EDT");
+        assert_eq!(
+            unsafe { core::ffi::CStr::from_ptr(name_ptr(0).cast()) }.to_bytes(),
+            b"EST"
+        );
+        assert_eq!(
+            unsafe { core::ffi::CStr::from_ptr(name_ptr(1).cast()) }.to_bytes(),
+            b"EDT"
+        );
         set(Tz::UTC);
     }
 
@@ -589,4 +613,3 @@ mod tests {
         assert!(matches!(current(), Zone::Posix(tz) if tz == Tz::UTC));
     }
 }
-

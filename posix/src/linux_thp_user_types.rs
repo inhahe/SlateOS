@@ -26,8 +26,7 @@ pub const SYS_THP_HPAGE_PMD_SIZE: &str = "/sys/kernel/mm/transparent_hugepage/hp
 
 // khugepaged tunables
 pub const SYS_KHUGEPAGED_ROOT: &str = "/sys/kernel/mm/transparent_hugepage/khugepaged";
-pub const SYS_KHUGEPAGED_DEFRAG: &str =
-    "/sys/kernel/mm/transparent_hugepage/khugepaged/defrag";
+pub const SYS_KHUGEPAGED_DEFRAG: &str = "/sys/kernel/mm/transparent_hugepage/khugepaged/defrag";
 pub const SYS_KHUGEPAGED_PAGES_TO_SCAN: &str =
     "/sys/kernel/mm/transparent_hugepage/khugepaged/pages_to_scan";
 pub const SYS_KHUGEPAGED_SCAN_SLEEP_MS: &str =
@@ -106,7 +105,13 @@ mod tests {
 
     #[test]
     fn test_tristate_values_distinct() {
-        let v = [THP_ALWAYS, THP_MADVISE, THP_NEVER, THP_DEFER, THP_DEFER_MADVISE];
+        let v = [
+            THP_ALWAYS,
+            THP_MADVISE,
+            THP_NEVER,
+            THP_DEFER,
+            THP_DEFER_MADVISE,
+        ];
         for a in 0..v.len() {
             for b in (a + 1)..v.len() {
                 assert_ne!(v[a], v[b]);

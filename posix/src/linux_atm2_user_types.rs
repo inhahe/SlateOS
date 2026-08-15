@@ -95,14 +95,7 @@ mod tests {
 
     #[test]
     fn test_service_categories_dense_0_to_5() {
-        let s = [
-            ATM_NONE,
-            ATM_UBR,
-            ATM_CBR,
-            ATM_VBR,
-            ATM_ABR,
-            ATM_ANYCLASS,
-        ];
+        let s = [ATM_NONE, ATM_UBR, ATM_CBR, ATM_VBR, ATM_ABR, ATM_ANYCLASS];
         for (i, &v) in s.iter().enumerate() {
             assert_eq!(v as usize, i);
         }

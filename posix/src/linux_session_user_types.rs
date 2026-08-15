@@ -97,7 +97,12 @@ mod tests {
     fn test_uid_gid_syscalls_dense() {
         // The "credentials" syscall numbers cluster around 102..108.
         let n = [
-            NR_GETUID, NR_GETEUID, NR_GETGID, NR_GETEGID, NR_GETGROUPS, NR_SETGROUPS,
+            NR_GETUID,
+            NR_GETEUID,
+            NR_GETGID,
+            NR_GETEGID,
+            NR_GETGROUPS,
+            NR_SETGROUPS,
         ];
         for v in n {
             assert!((102..=116).contains(&v));

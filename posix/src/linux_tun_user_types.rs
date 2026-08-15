@@ -93,8 +93,14 @@ mod tests {
         // IFF_NO_PI through IFF_TUN_EXCL live in the high byte to keep
         // them clear of the netdevice `IFF_*` flags (UP/RUNNING/etc).
         let h = [
-            IFF_NO_PI, IFF_ONE_QUEUE, IFF_VNET_HDR, IFF_TUN_EXCL, IFF_MULTI_QUEUE,
-            IFF_ATTACH_QUEUE, IFF_DETACH_QUEUE, IFF_PERSIST,
+            IFF_NO_PI,
+            IFF_ONE_QUEUE,
+            IFF_VNET_HDR,
+            IFF_TUN_EXCL,
+            IFF_MULTI_QUEUE,
+            IFF_ATTACH_QUEUE,
+            IFF_DETACH_QUEUE,
+            IFF_PERSIST,
         ];
         for v in h {
             assert!(v >= 0x0100, "{v:#x} should be in high byte");
@@ -117,7 +123,15 @@ mod tests {
 
     #[test]
     fn test_tun_offload_flags_low_7_bits() {
-        let o = [TUN_F_CSUM, TUN_F_TSO4, TUN_F_TSO6, TUN_F_TSO_ECN, TUN_F_UFO, TUN_F_USO4, TUN_F_USO6];
+        let o = [
+            TUN_F_CSUM,
+            TUN_F_TSO4,
+            TUN_F_TSO6,
+            TUN_F_TSO_ECN,
+            TUN_F_UFO,
+            TUN_F_USO4,
+            TUN_F_USO6,
+        ];
         for (i, &v) in o.iter().enumerate() {
             assert_eq!(v, 1 << i);
         }

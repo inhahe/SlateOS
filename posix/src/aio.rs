@@ -135,7 +135,7 @@ mod aio_store {
 
     #[cfg(target_os = "none")]
     mod imp {
-        use super::{AioTable, AIO_INIT};
+        use super::{AIO_INIT, AioTable};
         static mut AIO_TABLE: AioTable = AIO_INIT;
         static mut AIO_AGE: u64 = 0;
         pub(super) fn table() -> *mut AioTable {
@@ -158,7 +158,7 @@ mod aio_store {
 
     #[cfg(not(target_os = "none"))]
     mod imp {
-        use super::{AioTable, AIO_INIT};
+        use super::{AIO_INIT, AioTable};
         use core::cell::{Cell, UnsafeCell};
 
         std::thread_local! {

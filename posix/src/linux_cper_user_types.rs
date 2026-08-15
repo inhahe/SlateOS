@@ -120,7 +120,11 @@ mod tests {
 
     #[test]
     fn test_valid_bits_single() {
-        for b in [CPER_VALID_PLATFORM_ID, CPER_VALID_TIMESTAMP, CPER_VALID_PARTITION_ID] {
+        for b in [
+            CPER_VALID_PLATFORM_ID,
+            CPER_VALID_TIMESTAMP,
+            CPER_VALID_PARTITION_ID,
+        ] {
             assert!(b.is_power_of_two());
         }
         assert_eq!(

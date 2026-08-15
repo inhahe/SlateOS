@@ -99,7 +99,12 @@ mod tests {
 
     #[test]
     fn test_device_prefixes_under_dev() {
-        for path in [DEV_VIDEO_PREFIX, DEV_VBI_PREFIX, DEV_RADIO_PREFIX, DEV_V4L_SUBDEV_PREFIX] {
+        for path in [
+            DEV_VIDEO_PREFIX,
+            DEV_VBI_PREFIX,
+            DEV_RADIO_PREFIX,
+            DEV_V4L_SUBDEV_PREFIX,
+        ] {
             assert!(path.starts_with("/dev/"));
         }
     }

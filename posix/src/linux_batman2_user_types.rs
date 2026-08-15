@@ -121,9 +121,6 @@ mod tests {
         // OGM emitted every second; nodes purged after ~200s of silence.
         assert_eq!(BATMAN_OGM_INTERVAL_MS, 1_000);
         assert_eq!(BATMAN_PURGE_TIMEOUT_MS, 200_000);
-        assert_eq!(
-            BATMAN_PURGE_TIMEOUT_MS / BATMAN_OGM_INTERVAL_MS,
-            200
-        );
+        assert_eq!(BATMAN_PURGE_TIMEOUT_MS / BATMAN_OGM_INTERVAL_MS, 200);
     }
 }

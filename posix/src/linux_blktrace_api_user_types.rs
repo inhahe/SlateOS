@@ -153,12 +153,7 @@ mod tests {
 
     #[test]
     fn test_setup_ioctls_in_blk_namespace() {
-        for v in [
-            BLKTRACESETUP,
-            BLKTRACESTART,
-            BLKTRACESTOP,
-            BLKTRACETEARDOWN,
-        ] {
+        for v in [BLKTRACESETUP, BLKTRACESTART, BLKTRACESTOP, BLKTRACETEARDOWN] {
             // _IO(0x12, ...) family.
             assert_eq!(v >> 8, 0x12);
         }

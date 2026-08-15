@@ -584,7 +584,12 @@ fn scan_signed_int(ctx: &mut ScanCtx<'_, '_>, suppress: bool, width: usize, long
 /// - `0` (without x) → octal (base 8)
 /// - otherwise → decimal (base 10)
 #[allow(clippy::arithmetic_side_effects)]
-fn scan_signed_int_auto(ctx: &mut ScanCtx<'_, '_>, suppress: bool, width: usize, long_mod: u8) -> bool {
+fn scan_signed_int_auto(
+    ctx: &mut ScanCtx<'_, '_>,
+    suppress: bool,
+    width: usize,
+    long_mod: u8,
+) -> bool {
     ctx.skip_ws();
     if ctx.peek() == 0 {
         return false;
@@ -1632,10 +1637,7 @@ mod tests {
         let mut buf1 = [0u8; 64];
         let mut buf2 = [0u8; 64];
         let args = [buf1.as_mut_ptr() as u64, buf2.as_mut_ptr() as u64];
-        let n = sscanf_va(
-            b"hello world\0".as_ptr(),
-            b"%s %s\0".as_ptr(), &args,
-        );
+        let n = sscanf_va(b"hello world\0".as_ptr(), b"%s %s\0".as_ptr(), &args);
         assert_eq!(n, 2);
         assert_eq!(&buf1[..5], b"hello");
         assert_eq!(&buf2[..5], b"world");
@@ -1686,10 +1688,7 @@ mod tests {
         let mut val: i32 = 0;
         let mut pos: i32 = 0;
         let args = [&raw mut val as u64, &raw mut pos as u64];
-        let n = sscanf_va(
-            b"hello 42\0".as_ptr(),
-            b"%*s %d%n\0".as_ptr(), &args,
-        );
+        let n = sscanf_va(b"hello 42\0".as_ptr(), b"%*s %d%n\0".as_ptr(), &args);
         assert_eq!(n, 1);
         assert_eq!(val, 42);
         assert_eq!(pos, 8);
@@ -1745,10 +1744,7 @@ mod tests {
     fn scan_suppression() {
         let mut val: i32 = 0;
         let args = [&raw mut val as u64];
-        let n = sscanf_va(
-            b"ignored 42\0".as_ptr(),
-            b"%*s %d\0".as_ptr(), &args,
-        );
+        let n = sscanf_va(b"ignored 42\0".as_ptr(), b"%*s %d\0".as_ptr(), &args);
         assert_eq!(n, 1);
         assert_eq!(val, 42);
     }
@@ -1841,10 +1837,7 @@ mod tests {
         let mut b: i64 = 0;
         let mut c: i64 = 0;
         let args = [&raw mut a as u64, &raw mut b as u64, &raw mut c as u64];
-        let n = sscanf_va(
-            b"12 -34 56\0".as_ptr(),
-            b"%zu %jd %td\0".as_ptr(), &args,
-        );
+        let n = sscanf_va(b"12 -34 56\0".as_ptr(), b"%zu %jd %td\0".as_ptr(), &args);
         assert_eq!(n, 3);
         assert_eq!(a, 12);
         assert_eq!(b, -34);
@@ -1901,7 +1894,6 @@ mod tests {
         assert_eq!(&word[..4], b"rest");
     }
 
-
     // -----------------------------------------------------------------------
     // %f with hexadecimal floats
     //
@@ -1923,7 +1915,10 @@ mod tests {
 
     #[test]
     fn scan_f_reads_hexadecimal_floats() {
-        assert_eq!(scan_hex("0x1.8p+1rest", b"%lf%s\0"), (2, 3.0, "rest".into()));
+        assert_eq!(
+            scan_hex("0x1.8p+1rest", b"%lf%s\0"),
+            (2, 3.0, "rest".into())
+        );
         assert_eq!(scan_hex("0x1", b"%lf%s\0").1, 1.0);
         assert_eq!(scan_hex("0X1P+3", b"%lf%s\0").1, 8.0);
         assert_eq!(scan_hex("0x.8", b"%lf%s\0").1, 0.5);
@@ -2054,7 +2049,10 @@ mod tests {
         // which is a complete number.
         let mut c: f64 = 0.0;
         let args = [&raw mut c as u64];
-        assert_eq!(sscanf_va(b"1.25e34\0".as_ptr(), b"%6lf\0".as_ptr(), &args), 1);
+        assert_eq!(
+            sscanf_va(b"1.25e34\0".as_ptr(), b"%6lf\0".as_ptr(), &args),
+            1
+        );
         assert_eq!(c, 1250.0);
 
         // Five characters reach "1.25e", which is not — but the 'e' is still
@@ -2169,10 +2167,7 @@ mod tests {
     fn scan_scanset_negated() {
         let mut buf = [0u8; 64];
         let args = [buf.as_mut_ptr() as u64];
-        let n = sscanf_va(
-            b"hello world\0".as_ptr(),
-            b"%[^ ]\0".as_ptr(), &args,
-        );
+        let n = sscanf_va(b"hello world\0".as_ptr(), b"%[^ ]\0".as_ptr(), &args);
         assert_eq!(n, 1);
         assert_eq!(&buf[..5], b"hello");
         assert_eq!(buf[5], 0);
@@ -2219,10 +2214,7 @@ mod tests {
             &raw mut age as u64,
             &raw mut score as u64,
         ];
-        let n = sscanf_va(
-            b"Alice 30 95.5\0".as_ptr(),
-            b"%s %d %f\0".as_ptr(), &args,
-        );
+        let n = sscanf_va(b"Alice 30 95.5\0".as_ptr(), b"%s %d %f\0".as_ptr(), &args);
         assert_eq!(n, 3);
         assert_eq!(&name[..5], b"Alice");
         assert_eq!(age, 30);
@@ -2247,10 +2239,7 @@ mod tests {
         let mut a: i32 = 0;
         let mut b: i32 = 0;
         let args = [&raw mut a as u64, &raw mut b as u64];
-        let n = sscanf_va(
-            b"10\t\t\n  20\0".as_ptr(),
-            b"%d %d\0".as_ptr(), &args,
-        );
+        let n = sscanf_va(b"10\t\t\n  20\0".as_ptr(), b"%d %d\0".as_ptr(), &args);
         assert_eq!(n, 2);
         assert_eq!(a, 10);
         assert_eq!(b, 20);
@@ -2328,10 +2317,7 @@ mod tests {
     fn scan_hex_long() {
         let mut val: u64 = 0;
         let args = [&raw mut val as u64];
-        let n = sscanf_va(
-            b"0xDEADBEEFCAFE\0".as_ptr(),
-            b"%lx\0".as_ptr(), &args,
-        );
+        let n = sscanf_va(b"0xDEADBEEFCAFE\0".as_ptr(), b"%lx\0".as_ptr(), &args);
         assert_eq!(n, 1);
         assert_eq!(val, 0xDEAD_BEEF_CAFEu64);
     }
@@ -2394,7 +2380,8 @@ mod tests {
         let args = [&raw mut val as u64];
         let n = sscanf_va(
             b"42\0".as_ptr(),
-            b"%99999999999999999999d\0".as_ptr(), &args,
+            b"%99999999999999999999d\0".as_ptr(),
+            &args,
         );
         assert_eq!(n, 1);
         assert_eq!(val, 42);

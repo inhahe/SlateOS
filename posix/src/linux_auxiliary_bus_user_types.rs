@@ -74,20 +74,10 @@ mod tests {
     #[test]
     fn test_sysfs_paths() {
         assert!(SYS_BUS_AUXILIARY.starts_with("/sys/bus/"));
-        assert!(
-            SYS_BUS_AUXILIARY_DEVICES.starts_with(SYS_BUS_AUXILIARY)
-        );
-        assert!(
-            SYS_BUS_AUXILIARY_DRIVERS.starts_with(SYS_BUS_AUXILIARY)
-        );
-        assert_eq!(
-            SYS_BUS_AUXILIARY_DEVICES,
-            "/sys/bus/auxiliary/devices"
-        );
-        assert_eq!(
-            SYS_BUS_AUXILIARY_DRIVERS,
-            "/sys/bus/auxiliary/drivers"
-        );
+        assert!(SYS_BUS_AUXILIARY_DEVICES.starts_with(SYS_BUS_AUXILIARY));
+        assert!(SYS_BUS_AUXILIARY_DRIVERS.starts_with(SYS_BUS_AUXILIARY));
+        assert_eq!(SYS_BUS_AUXILIARY_DEVICES, "/sys/bus/auxiliary/devices");
+        assert_eq!(SYS_BUS_AUXILIARY_DRIVERS, "/sys/bus/auxiliary/drivers");
     }
 
     #[test]

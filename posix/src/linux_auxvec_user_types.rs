@@ -65,7 +65,10 @@ mod tests {
     fn test_total_size_doubles_arch_plus_base_plus_one() {
         // Total = 2 * (BASE + ARCH + 1) because each entry is a
         // (key, value) pair and the kernel macro counts u64 slots.
-        assert_eq!(AT_VECTOR_SIZE, 2 * (AT_VECTOR_SIZE_BASE + AT_VECTOR_SIZE_ARCH + 1));
+        assert_eq!(
+            AT_VECTOR_SIZE,
+            2 * (AT_VECTOR_SIZE_BASE + AT_VECTOR_SIZE_ARCH + 1)
+        );
         // Even number of slots (key/value pairs always come in twos).
         assert_eq!(AT_VECTOR_SIZE % 2, 0);
     }

@@ -89,7 +89,12 @@ mod tests {
 
     #[test]
     fn test_sockopts_dense_1_to_4() {
-        let o = [MPTCP_INFO, MPTCP_TCPINFO, MPTCP_SUBFLOW_ADDRS, MPTCP_FULL_INFO];
+        let o = [
+            MPTCP_INFO,
+            MPTCP_TCPINFO,
+            MPTCP_SUBFLOW_ADDRS,
+            MPTCP_FULL_INFO,
+        ];
         for (i, &v) in o.iter().enumerate() {
             assert_eq!(v as usize, i + 1);
         }

@@ -772,7 +772,13 @@ mod tests {
     fn test_setxattr_path_outranks_flags_and_name() {
         errno::set_errno(0);
         assert_eq!(
-            setxattr(core::ptr::null(), core::ptr::null(), core::ptr::null(), 0, 0x40),
+            setxattr(
+                core::ptr::null(),
+                core::ptr::null(),
+                core::ptr::null(),
+                0,
+                0x40
+            ),
             -1
         );
         assert_eq!(errno::get_errno(), errno::EFAULT);
@@ -786,7 +792,13 @@ mod tests {
     fn test_setxattr_flags_outrank_a_null_name() {
         errno::set_errno(0);
         assert_eq!(
-            setxattr(b"/tmp/test\0".as_ptr(), core::ptr::null(), core::ptr::null(), 0, 0x40),
+            setxattr(
+                b"/tmp/test\0".as_ptr(),
+                core::ptr::null(),
+                core::ptr::null(),
+                0,
+                0x40
+            ),
             -1
         );
         assert_eq!(errno::get_errno(), errno::EINVAL);
@@ -797,7 +809,13 @@ mod tests {
     fn test_lsetxattr_flags_outrank_a_null_name() {
         errno::set_errno(0);
         assert_eq!(
-            lsetxattr(b"/tmp\0".as_ptr(), core::ptr::null(), core::ptr::null(), 0, 0x40),
+            lsetxattr(
+                b"/tmp\0".as_ptr(),
+                core::ptr::null(),
+                core::ptr::null(),
+                0,
+                0x40
+            ),
             -1
         );
         assert_eq!(errno::get_errno(), errno::EINVAL);

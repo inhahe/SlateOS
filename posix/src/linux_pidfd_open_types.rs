@@ -79,10 +79,7 @@ mod tests {
     #[test]
     fn test_valid_mask_covers_all_open_flags() {
         // VALID_FLAGS must include every accepted flag and nothing else.
-        assert_eq!(
-            PIDFD_OPEN_VALID_FLAGS,
-            PIDFD_THREAD | PIDFD_NONBLOCK
-        );
+        assert_eq!(PIDFD_OPEN_VALID_FLAGS, PIDFD_THREAD | PIDFD_NONBLOCK);
         // Any bit not in VALID_FLAGS must be rejected at the syscall;
         // verify by checking a random unrelated bit.
         assert_eq!(PIDFD_OPEN_VALID_FLAGS & 0x4000_0000, 0);

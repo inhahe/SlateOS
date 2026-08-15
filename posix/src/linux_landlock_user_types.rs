@@ -123,10 +123,16 @@ mod tests {
 
     #[test]
     fn test_net_access_bits_pow2() {
-        for &b in &[LANDLOCK_ACCESS_NET_BIND_TCP, LANDLOCK_ACCESS_NET_CONNECT_TCP] {
+        for &b in &[
+            LANDLOCK_ACCESS_NET_BIND_TCP,
+            LANDLOCK_ACCESS_NET_CONNECT_TCP,
+        ] {
             assert!(b.is_power_of_two());
         }
-        assert_ne!(LANDLOCK_ACCESS_NET_BIND_TCP, LANDLOCK_ACCESS_NET_CONNECT_TCP);
+        assert_ne!(
+            LANDLOCK_ACCESS_NET_BIND_TCP,
+            LANDLOCK_ACCESS_NET_CONNECT_TCP
+        );
     }
 
     #[test]

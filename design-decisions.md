@@ -12771,3 +12771,351 @@ that can be asserted on a non-Unix test host.
 `encode_bytes`, `decode_path`, `decode_bytes`, `META_VERSION`, `RecycleBin`),
 `apps/backup/src/main.rs` (the same four functions, `MANIFEST_VERSION`,
 `FileEntry::to_json`/`from_json`, `relative_path`).
+
+
+## §309 — Byte-fidelity with bash has an "unless it is a defect" clause; osh does not reproduce the null array element
+
+**Date:** 2026-08-15
+**Decided by:** Operator (Claude recommended this option — open-questions.md Q40 option B)
+
+**The question.** osh is held to byte-fidelity with bash 5.2.37. One measured
+bash behaviour, reachable only through a nameref, stores a **null pointer** into
+an array element (`n=(a b c); declare -n q='n[1]'; declare q`), after which the
+array reads as empty while its elements are demonstrably still present. It looks
+like a defect rather than a design: bash cannot describe the resulting state
+with any of its own printers, no bash-level operation other than this one can
+produce it, and the bind carries `ASS_FORCE` so it also silently defeats
+`readonly`.
+
+**Decision: do not reproduce it (option B).** osh keeps `Str` array elements and
+the array reads normally. The divergence is waived in the corpus and the full
+write-up stays in `known-issues.md` →
+`TD-OILS-A-DECLARATION-WITH-NOTHING-TO-DO-BINDS-A-NULL-THROUGH-THE-REFERENCE`,
+so the decision is reversible if a real script is ever found that depends on it.
+
+**What this actually settles — the precedent, not the bug.** The narrow
+cost/benefit was never close: option A wanted every array reader in `interp.rs`
+rewritten around an `Option<Str>` element type, permanently, to preserve a state
+no bash-level operation can otherwise produce. The reason it needed the operator
+is that it establishes **whether byte-fidelity has an "unless it's a bug" clause
+at all**. It now does. Consequences:
+
+- "The measurement wins" is no longer absolute. A measured bash behaviour may be
+  waived when it is (i) unreachable except through a construct built to reach
+  it, (ii) inconsistent with bash's own observable model, and (iii) expensive to
+  reproduce in a way that degrades osh's value model.
+- Every future waiver must be argued against those three tests **in
+  `known-issues.md`**, not decided silently. A waiver that is not written down is
+  a divergence, not a decision.
+- This does not loosen §305's frozen fidelity scope. §305 says which behaviours
+  are in scope; this says a behaviour in scope may still be waived as a defect.
+
+**Rejected alternative — option C, reproduce only the visible half** via an
+out-of-band "poisoned index" marker. It is a second parallel representation of
+emptiness, threaded through the same readers as option A, for a less honest
+model — most of A's cost without A's one virtue.
+
+**Where it bites:** `userspace/oils/src/interp.rs` (`Shell::declare_ref_bind_read`,
+`Shell::arrays`, `Shell::assoc`), the corpus case
+`a-declaration-with-nothing-to-do-evaluates-the-subscript-the-reference-carries.sh`
+(which covers the evaluated-subscript half osh *does* match and deliberately
+stops short of the store), and `known-issues.md` as above.
+
+
+## §310 — One-shot repo-wide rustfmt, with a `.git-blame-ignore-revs` file alongside
+
+**Date:** 2026-08-15
+**Decided by:** Operator (Claude recommended this option — open-questions.md Q42 option A)
+
+**The question.** `CLAUDE.md` sets the convention as "rustfmt defaults, no manual
+formatting overrides", but two crates are not rustfmt-clean: `kernel` (16 911
+hunks) and `posix` (389 hunks across 244 of 2 299 files). Because `cargo fmt` is
+package-scoped with no file filter, formatting your own change in a drifted
+crate rewrites hundreds of files you never touched — one ~150-line edit in
+`posix` produced a 1 403-insertion / 1 429-deletion diff across 173 files that
+could not afterwards be separated from the real change, costing a
+revert-and-redo.
+
+**Decision: option A — reformat the whole repo once, and commit a
+`.git-blame-ignore-revs` file naming the reformat commits.** Afterwards
+`cargo fmt` is safe, the stated convention becomes true rather than
+aspirational, and any future drift is a real diff.
+
+**The cost, stated honestly.** This rewrites `git blame` for ~17 000 hunks of
+kernel code. Blame is the primary tool for "why is this line here?" in a
+codebase with no human reviewer and a 4 600-commit history, and this is the one
+part that cannot be undone. `.git-blame-ignore-revs` mitigates it for anyone who
+configures it (`git config blame.ignoreRevsFile .git-blame-ignore-revs`) and for
+`git blame --ignore-rev`, but **not** for GitHub's plain blame view or a casual
+`git log -S`. The operator accepted that trade: the trap is permanent and recurs
+on every edit, the blame churn is one-time.
+
+**Execution constraints that shape how it lands.**
+
+- `cargo fmt --all` does **not** run in this workspace — it dies with
+  `The filename or extension is too long. (os error 206)`, the Windows
+  command-line limit, hit by the sheer number of workspace members. The
+  reformat must iterate crates one at a time.
+- It is **two commits in two lanes**, not one. `posix/` is Lane B's and
+  `kernel/` is Lane A's; a single cross-lane reformat commit would be exactly
+  the clobbering the lane split exists to prevent. Each lane reformats its own
+  crate, and both commit hashes go into `.git-blame-ignore-revs`.
+- Each reformat commit must contain **nothing but** formatting, so that
+  `--ignore-rev` is safe to apply wholesale.
+
+**Rejected alternatives.** **B** (format only files you edited, via
+`rustfmt --edition 2024 <file>`) was the working stopgap and has zero history
+churn, but leaves the trap armed for anyone reaching for the obvious command and
+never shrinks the drift. **C** (reformat `posix` only) clears the crate under
+daily work for 1.5% of A's blame cost, but leaves the worst offender armed — and
+a half-applied convention is the state that caused the incident.
+
+**Where it bites:** every `.rs` file in `kernel/` and `posix/`, the new
+`.git-blame-ignore-revs`, `CLAUDE.md`'s formatting convention (now true), and
+`known-issues.md` → `TD-REPO-IS-NOT-RUSTFMT-CLEAN-SO-RUNNING-CARGO-FMT-IS-A-TRAP`.
+
+
+## §311 — Ship full tzdata, vendored as prebuilt TZif binaries, updated as a `pkg/` package
+
+**Date:** 2026-08-15
+**Decided by:** Operator (Claude recommended this combination — open-questions.md B-Q1, A1 + B1 + C1)
+
+**The situation.** Both the libc and osh resolve `TZ` through real binary
+zoneinfo: `tzrules::TzFile` reads TZif v1/v2/v3 (RFC 8536) with no allocator,
+`TZDIR` defaults to `/usr/share/zoneinfo`, and an unset `TZ` follows
+`/etc/localtime` exactly as glibc does. Every piece was built except the data,
+so `TZ=America/New_York` silently answered UTC — the user gets UTC while
+believing they selected Eastern. Shipping the data is a packaging decision, not
+a coding one, which is why it went to the operator.
+
+**Decision, in three parts:**
+
+- **(a) A1 — full tzdata**, including the `backward` compatibility links
+  (`US/Eastern`, `Asia/Calcutta`). ~450 KiB and ~1 800 files in every base
+  image. Chosen because ~450 KiB is nothing against being *wrong* about
+  `US/Eastern`, and because the entire reason to use TZif rather than invent a
+  format is that ported programs expect exactly what everyone else ships.
+  A2 (`zic -b slim`, no backward links) saves ~200 KiB and breaks a very common
+  spelling **silently, back to UTC** — the same failure mode this work exists to
+  end. A3 (minimal at install, rest as a package) leaves a fully-installed-looking
+  machine unable to resolve a zone the user did not personally pick.
+- **(b) B1 — vendor the prebuilt binaries** from the IANA distribution,
+  checked in and version-pinned. Reproducible, no build dependency, ~450 KiB of
+  binary per update in git history. B2 (port `zic`) and B3 (write our own TZif
+  generator in Rust) were both rejected for the same reason: `zic` is a real
+  compiler for the tzdata source grammar, and getting it subtly wrong produces a
+  **wrong clock that nobody notices for months**. B3 is the most likely of the
+  three to be subtly wrong and would put that risk on our own code.
+- **(c) C1 — updated as a `pkg/` package.** tzdata changes several times a year
+  at short notice; that cadence is exactly what `pkg/` exists for. C2 (ship with
+  the OS image only) ties a timezone fix to a full release. C3 (a dedicated fast
+  channel for tzdata alone) is infrastructure to build only once C1 has proven
+  too slow in practice — not before.
+
+**The residual risk this accepts.** A user who never runs `pkg update` drifts
+into a stale tzdata and therefore a wrong wall clock, with nothing loud to tell
+them. If that proves common, C3 is the escalation, and it is additive.
+
+**Cross-lane note.** The reader, the libc paths and osh are Lane B; the `pkg/`
+packaging is **Lane C's tree**, so the C1 half lands via a `requests/` entry
+rather than directly.
+
+**Where it bites:** `pkg/` (Lane C), `posix/src/tz.rs` (`TZDIR_DEFAULT`,
+`LOCALTIME_PATH`, `load_zoneinfo`), `userspace/oils/src/interp.rs`
+(`TZDIR_DEFAULT`, `Shell::zoneinfo_dir`), `tzrules/src/tzif.rs` (the reader,
+already done), the installer (which must write `/etc/localtime`), and the two
+tests that assert the current UTC fallback and **must start failing the day the
+data lands** — `test_zoneinfo_names_resolve_to_utc_until_tzdata_is_shipped`
+(libc) and `printf_time_falls_back_to_utc_for_a_zone_it_cannot_resolve` (oils).
+
+## §312 — libc's Linux capability words are a conservative projection of the kernel's `(ResourceType, Rights)` handles, not a fiction
+
+**Date:** 2026-08-15
+**Decided by:** Operator (Claude recommended this option)
+**Question:** `open-questions.md` Q44 (now RESOLVED)
+**Answer, verbatim:** *"Q44: a."*
+
+### The decision
+
+**Option A — conservative projection.** Each Linux `CAP_*` bit is derived from a
+specific `(ResourceType, Rights)` predicate over the capabilities the process
+actually holds, and reports **not held** whenever no rule matches. The default
+is *deny*, not *allow*: an unmapped `CAP_*` is false, never true.
+
+Worked examples of the rule shape:
+
+| `CAP_*` | Predicate over held capabilities |
+|---|---|
+| `CAP_SYS_RAWIO` | any `PortIo` handle with `READ` or `WRITE` |
+| `CAP_KILL` | any `Process` handle with `SIGNAL` |
+| `CAP_SYS_PTRACE` | any `Process` handle with `DEBUG` |
+| `CAP_SYS_NICE` | any `Thread` handle with `IO_REALTIME` |
+| `CAP_NET_RAW` | any `NetRaw` handle |
+| `CAP_SYS_ADMIN` | **hand-maintained union** — see below |
+
+`CAP_SYS_ADMIN` is the exception and is explicitly *not* derived. It is Linux's
+junk drawer, it has no natural preimage in a per-object model, and it accounts
+for 20 of libc's 63 gate sites. It gets an explicit, hand-written union of the
+predicates that each of those 20 sites actually needs, maintained as a list with
+a comment per member. A derived rule for it would either be permanently false
+(breaking 20 sites) or so broad that it re-grants everything (which is the bug
+being fixed).
+
+### What this replaces
+
+`posix/src/sys_capability.rs` kept Linux's three capability words in libc's own
+memory and initialised them from `CAPS_DEFAULT` with **every bit set**. Nothing
+ever asked the kernel what the process held, so `capget()` reported the full set
+to a process spawned with `capabilities: &[]`, and every libc-side gate passed.
+
+That was safe only by accident: the kernel re-checks every privileged operation
+itself, so libc's optimistic answer could never *grant* anything. The failure
+mode is the silent one — a port that trusts `capget()` to decide what to attempt,
+or to drop privileges, gets a confidently wrong answer with no error anywhere.
+
+### Why A and not the others
+
+- **B (a `ResourceType::PosixCapability` handle granted per `CAP_*` at spawn)**
+  was rejected on principle. It is ambient authority wearing a capability
+  costume: a handle meaning "may do `CAP_SYS_ADMIN` things", process-wide, tied
+  to no object. It reproduces exactly the property `design.txt` rejects while
+  looking compliant because it is spelled as a handle. Notably it is the option
+  that would have made `CAP_SYS_ADMIN` *easy*, and it was still not worth it.
+- **C (keep libc optimistic, document `capget()` as "the ceiling, not the
+  grant")** is the honest do-nothing. It breaks no fixture and carries no risk,
+  but it leaves the silent-wrong-answer trap open — which is the entire reason
+  `TD-POSIX-CAPS-ARE-NOT-THE-KERNEL'S` was logged.
+- **D (make `capget()` fail with `ENOSYS`)** is the most honest answer and the
+  worst outcome for a compatibility layer. Linux software calls `capget()`
+  informationally and does not expect failure; this trades one silent wrong
+  answer for loud breakage across every port.
+
+### Consequences, in the order they have to happen
+
+1. **An enumerating capability query syscall must exist first.** This is not
+   optional under any option and is not in dispute. `SYS_CAP_QUERY` (400,
+   `kernel/src/syscall/handlers.rs::sys_cap_query`) returns only a *count* of
+   the caller's capabilities; its own doc comment says "a future extension will
+   support filling a user-space buffer with detailed capability entries", and
+   its sole consumer today is `userspace/strace`'s syscall name table. **That
+   handler is Lane A's tree** — filed as `requests/b-a-cap-enumerating-query-syscall.md`.
+2. **libc seeds its words from that query**, once, at process start, and on
+   demand after any operation that could change the set.
+3. **The libc gates stay advisory until the fixtures are given real
+   capabilities.** This is the staging that keeps the change from being a
+   flag-day. Making a gate truthful breaks every fixture that relies on the
+   permissive behaviour, and there are known ones:
+   `services/ctest-jobctl` (its doc comment says so out loud — "our libc's own
+   `CAP_KILL` gate reads the process capability words, which start out with
+   every capability held"), `self_test_cctty`, and `self_test_cpgroup`, all
+   spawned with `capabilities: &[]`. That is boot-test-visible, so the flip
+   from advisory to enforcing lands with QEMU free.
+
+### The cost accepted
+
+`capget()` becomes truthful, which means code that previously sailed through a
+libc gate now gets refused by it. That is the point — but it means the flip is a
+behavioural change to every fixture's effective privilege, not a no-op refactor,
+and it must be sequenced (step 3) rather than switched on with the mapping.
+
+**Where it lives:** `posix/src/sys_capability.rs` (`CAPS_DEFAULT` ~line 251),
+the 63 gate sites led by `posix/src/process.rs` (13) and `posix/src/unistd.rs`
+(10), `kernel/src/cap/mod.rs` + `kernel/src/cap/rights.rs` (the model being
+projected), `kernel/src/syscall/handlers.rs` (`sys_cap_query`), and
+`known-issues.md` → `TD-POSIX-CAPS-ARE-NOT-THE-KERNEL'S`.
+
+## §313 — `open-questions.md` is written for a reader who does not know the subsystem, and questions that are not yet answerable move to `deferred-questions.md`
+
+**Date:** 2026-08-15
+**Decided by:** Operator (operator's own proposal, both halves)
+
+**In short:** the operator said they often cannot understand the entries in
+`open-questions.md` — partly terse wording, but mostly terms they do not know.
+They also pointed out that one entry (Q39) says in its own text that now is not
+the time to decide it, and asked whether it should live somewhere else. Both
+observations are about the same failure: the file is supposed to be a list of
+things the operator can act on, and it had drifted into being a list of things
+Claude found interesting.
+
+### The problem, stated plainly
+
+`open-questions.md` is the **operator's decision queue**. Its only job is to let
+the operator make a decision. An entry that is technically flawless but not
+understandable has failed at that job completely — it produces no decision, and
+worse, it produces *silence*, which is indistinguishable from "not yet read".
+Several of today's answers arrived days after the questions were filed for
+exactly this reason, and one (`Q44`) came back not as an answer but as a
+question about a term used in the question itself ("i forget what 'ambient'
+means").
+
+The second failure is padding. Q39's own recommendation section read "None yet,
+on purpose… Ask again then." A queue containing items that say *do not act on
+this* teaches the reader to skim the queue, which costs attention on the items
+that genuinely need it.
+
+### Decision, part 1 — legibility rules for `open-questions.md`
+
+Recorded in `CLAUDE.md` under the `open-questions.md` bullet, and mirrored in
+the file's own header:
+
+- **Every entry opens with `In short:` — 2–4 sentences, no jargon at all**:
+  what is wrong now, what a user would actually see, what the choice is between.
+  If a term of art seems unavoidable there, the paragraph is wrong.
+- **Every term of art is glossed in-line on first use, in ≤ 10 words**, even if
+  it was glossed in another entry, another file, or last week. The operator
+  reads one entry at a time, months apart; nothing carries over.
+- **Every option carries a one-line `What changes:`** stated as an observable
+  difference ("the clock reads Eastern instead of UTC"), not an implementation,
+  so options can be compared without reading the prose.
+- **Every entry says what happens if it is never answered** — is today's
+  behaviour safe, is anything blocked, does it get worse with time.
+- **Entries are capped to what a decision needs.** Detail that only matters
+  *after* the answer goes in `known-issues.md` or the `requests/` file. Prefer a
+  table to a paragraph, an example to an abstraction.
+- The same `In short:` opener applies to `design-decisions.md` entries, so a
+  decision can be re-read a year later without reconstructing the context.
+
+**The tension this creates, and how it resolves.** The operator also said they
+do not want *a lot more reading*. Glossing terms and adding a summary both add
+words, so the rules above are not purely additive — the length cap is part of
+the decision, not a footnote to it. The `In short:` paragraph is meant to
+*replace* the rambling first section of an entry, and the "cap it to what a
+decision needs" rule is what pays for the glosses. An entry that gets longer
+overall has applied the rule wrong.
+
+**Alternative rejected: a project glossary.** A central `glossary.md` looks like
+the tidy answer — define "ambient authority" once, link it everywhere. It was
+rejected because it optimises for the writer, not the reader: it turns one
+unfamiliar word into a click, a context switch, and a second document, at the
+exact moment the reader is trying to hold a tradeoff in their head. A ten-word
+parenthetical costs the writer a repetition and costs the reader nothing. The
+repetition is the feature.
+
+### Decision, part 2 — `deferred-questions.md`
+
+A new shared document at the repo root for questions that will need the operator
+**eventually** but cannot be answered usefully **today**, because the evidence or
+the prerequisite does not exist.
+
+- **Every entry carries a `Trigger:` line** — the concrete event that makes it
+  answerable. Without one it is either a real open question or dead; it is never
+  deferred. This is the whole mechanism: a deferred question with no trigger is
+  just a question that has been hidden.
+- Entries are numbered `D-Q<n>` and are append-only, same as the other shared
+  docs (`roadmap.md` rule 3, now updated).
+- When the trigger fires, the entry moves *back* into `open-questions.md`,
+  refreshed with whatever the evidence turned out to be, and is deleted here.
+
+**Moved on creation:** Q39 (which way the shipping default points once a fastpy
+utility clears both the parity bar and the performance bar) became **D-Q1**. Its
+trigger is the first fastpy utility clearing both bars; nothing does today, so
+answering it now would be answering without evidence.
+
+**The risk accepted.** A deferred question is easier to forget than an open one —
+that is the point, and it is also the hazard. `deferred-questions.md` has no
+process that surfaces it on a schedule; it relies on whoever fires the trigger
+noticing the entry. The mitigation is that triggers are written as events in the
+work (*"the first fastpy utility clears both bars"*), so the person who causes
+the event is the person reading the file's subject matter at that moment. If
+that proves optimistic, the escalation is a check in the task-completion
+checklist, not a bigger file.

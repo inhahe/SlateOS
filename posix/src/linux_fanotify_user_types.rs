@@ -17,8 +17,7 @@ pub const FAN_CLASS_CONTENT: u32 = 0x0000_0004;
 /// Receive permission events before content has been cached.
 pub const FAN_CLASS_PRE_CONTENT: u32 = 0x0000_0008;
 /// Mask covering all classes.
-pub const FAN_ALL_CLASS_BITS: u32 =
-    FAN_CLASS_NOTIF | FAN_CLASS_CONTENT | FAN_CLASS_PRE_CONTENT;
+pub const FAN_ALL_CLASS_BITS: u32 = FAN_CLASS_NOTIF | FAN_CLASS_CONTENT | FAN_CLASS_PRE_CONTENT;
 
 /// fanotify fd is close-on-exec.
 pub const FAN_CLOEXEC: u32 = 0x0000_0001;

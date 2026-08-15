@@ -15,8 +15,7 @@ pub const SYSCTL_PANIC_PRINT: &str = "/proc/sys/kernel/panic_print";
 pub const SYSCTL_OOPS_LIMIT: &str = "/proc/sys/kernel/oops_limit";
 pub const SYSCTL_WARN_LIMIT: &str = "/proc/sys/kernel/warn_limit";
 pub const SYSCTL_HUNG_TASK_PANIC: &str = "/proc/sys/kernel/hung_task_panic";
-pub const SYSCTL_HUNG_TASK_TIMEOUT_SECS: &str =
-    "/proc/sys/kernel/hung_task_timeout_secs";
+pub const SYSCTL_HUNG_TASK_TIMEOUT_SECS: &str = "/proc/sys/kernel/hung_task_timeout_secs";
 
 // ---------------------------------------------------------------------------
 // `panic` timeout encoding

@@ -747,8 +747,7 @@ unsafe impl Sync for TzPtr {}
 /// changes — a zone that never updates its own name is exactly the bug this
 /// module used to have.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub static mut tzname: [TzPtr; 2] =
-    [TzPtr(core::ptr::null()), TzPtr(core::ptr::null())];
+pub static mut tzname: [TzPtr; 2] = [TzPtr(core::ptr::null()), TzPtr(core::ptr::null())];
 
 /// Seconds **west** of UTC for standard time.
 ///
@@ -791,8 +790,7 @@ fn publish_tz_globals() {
         (*core::ptr::addr_of_mut!(tzname)) =
             [TzPtr(crate::tz::name_ptr(0)), TzPtr(crate::tz::name_ptr(1))];
         // POSIX's sign is west-positive; ours is east-positive.
-        (*core::ptr::addr_of_mut!(timezone)) =
-            i64::from(tz.standard().gmtoff).saturating_neg();
+        (*core::ptr::addr_of_mut!(timezone)) = i64::from(tz.standard().gmtoff).saturating_neg();
         (*core::ptr::addr_of_mut!(daylight)) = i32::from(tz.has_dst());
     }
 }
@@ -1331,7 +1329,11 @@ pub unsafe extern "C" fn strftime(
                 // renders its zone. Reading the current zone here instead
                 // would misreport any `tm` the caller built by hand.
                 let off = t.tm_gmtoff;
-                let (sign, mag) = if off < 0 { (b'-', off.unsigned_abs()) } else { (b'+', off.unsigned_abs()) };
+                let (sign, mag) = if off < 0 {
+                    (b'-', off.unsigned_abs())
+                } else {
+                    (b'+', off.unsigned_abs())
+                };
                 pos = write_char(buf, limit, pos, sign);
                 // `tm_gmtoff` is bounded by the ±24 h a TZ offset can express,
                 // so these casts cannot truncate.
@@ -2456,7 +2458,7 @@ type ItimerState = [Itimerval; ITIMER_COUNT];
 /// the call sites mutate the table in place; the pointer is valid for the
 /// calling thread and must not be shared with another one.
 mod timer_store {
-    use super::{ItimerState, Itimerval, TimerTable, Timeval, ITIMER_COUNT, MAX_TIMERS};
+    use super::{ITIMER_COUNT, ItimerState, Itimerval, MAX_TIMERS, TimerTable, Timeval};
 
     /// Cold-start state of the timer table, stated once for both builds.
     const TIMERS_INIT: TimerTable = [None; MAX_TIMERS];
@@ -2474,7 +2476,7 @@ mod timer_store {
 
     #[cfg(target_os = "none")]
     mod imp {
-        use super::{ItimerState, TimerTable, ITIMERS_INIT, TIMERS_INIT};
+        use super::{ITIMERS_INIT, ItimerState, TIMERS_INIT, TimerTable};
         static mut TIMER_TABLE: TimerTable = TIMERS_INIT;
         static mut ITIMER_STATE: ItimerState = ITIMERS_INIT;
         pub(super) fn timers() -> *mut TimerTable {
@@ -2487,7 +2489,7 @@ mod timer_store {
 
     #[cfg(not(target_os = "none"))]
     mod imp {
-        use super::{ItimerState, TimerTable, ITIMERS_INIT, TIMERS_INIT};
+        use super::{ITIMERS_INIT, ItimerState, TIMERS_INIT, TimerTable};
         use core::cell::UnsafeCell;
 
         std::thread_local! {
@@ -3069,10 +3071,7 @@ mod tests {
             let guard = crate::environ::lock_env_for_test();
             let saved = crate::environ::getenv_bytes(b"TZ").map(<[u8]>::to_vec);
             Self::put(tz);
-            Self {
-                _env: guard,
-                saved,
-            }
+            Self { _env: guard, saved }
         }
 
         /// Install UTC — the zone the timezone-agnostic tests assume.

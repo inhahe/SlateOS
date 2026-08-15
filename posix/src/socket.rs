@@ -436,7 +436,7 @@ pub(crate) struct SocketMeta {
 /// `test_phase201_bind_port443_no_cap_eacces` fail intermittently (observed
 /// once in roughly four full runs of the suite).
 mod meta_store {
-    use super::{SocketMeta, MAX_SOCKETS};
+    use super::{MAX_SOCKETS, SocketMeta};
 
     /// The table type, named once so the two implementations agree.
     pub(super) type MetaTable = [Option<SocketMeta>; MAX_SOCKETS];
@@ -445,7 +445,7 @@ mod meta_store {
 
     #[cfg(target_os = "none")]
     mod imp {
-        use super::{MetaTable, META_INIT};
+        use super::{META_INIT, MetaTable};
 
         static mut SOCKET_META: MetaTable = META_INIT;
 
@@ -456,7 +456,7 @@ mod meta_store {
 
     #[cfg(not(target_os = "none"))]
     mod imp {
-        use super::{MetaTable, META_INIT};
+        use super::{META_INIT, MetaTable};
         use core::cell::UnsafeCell;
 
         std::thread_local! {
@@ -3810,7 +3810,12 @@ impl HostentBuf {
     /// `this` must point at a `HostentBuf` the calling thread owns
     /// exclusively — in practice the one inside its own `PerThread` block —
     /// and `name` must be readable for `name_len` bytes.
-    unsafe fn fill(this: *mut Self, name: *const u8, name_len: usize, addr: [u8; 4]) -> *const Hostent {
+    unsafe fn fill(
+        this: *mut Self,
+        name: *const u8,
+        name_len: usize,
+        addr: [u8; 4],
+    ) -> *const Hostent {
         // SAFETY: the caller guarantees `this` is a valid, exclusively-owned
         // `HostentBuf` and that `name` is readable for `name_len` bytes.
         // The two never overlap: `name` is caller memory or a stack buffer,
@@ -3828,7 +3833,10 @@ impl HostentBuf {
 
             let addr_list = &raw mut (*this).addr_list;
             addr_list.cast::<*const u8>().write(addr_buf.cast::<u8>());
-            addr_list.cast::<*const u8>().add(1).write(core::ptr::null());
+            addr_list
+                .cast::<*const u8>()
+                .add(1)
+                .write(core::ptr::null());
 
             let aliases = &raw mut (*this).aliases;
             aliases.cast::<*const u8>().write(core::ptr::null());
@@ -4044,7 +4052,9 @@ pub extern "C" fn __h_errno_location() -> *mut i32 {
 /// Set the calling thread's resolver error.
 fn set_h_errno(val: i32) {
     // SAFETY: as in `__h_errno_location`.
-    unsafe { (*crate::perthread::current()).h_errno = val; }
+    unsafe {
+        (*crate::perthread::current()).h_errno = val;
+    }
 }
 
 /// Read the calling thread's resolver error.
@@ -7857,11 +7867,20 @@ mod tests {
 
     #[test]
     fn resolver_error_for_maps_transport_failures_to_try_again() {
-        assert_eq!(resolver_error_for(-i64::from(errno::ENOENT)), HOST_NOT_FOUND);
+        assert_eq!(
+            resolver_error_for(-i64::from(errno::ENOENT)),
+            HOST_NOT_FOUND
+        );
         assert_eq!(resolver_error_for(-i64::from(errno::ETIMEDOUT)), TRY_AGAIN);
         assert_eq!(resolver_error_for(-i64::from(errno::EAGAIN)), TRY_AGAIN);
-        assert_eq!(resolver_error_for(-i64::from(errno::ENETUNREACH)), TRY_AGAIN);
-        assert_eq!(resolver_error_for(-i64::from(errno::EHOSTUNREACH)), TRY_AGAIN);
+        assert_eq!(
+            resolver_error_for(-i64::from(errno::ENETUNREACH)),
+            TRY_AGAIN
+        );
+        assert_eq!(
+            resolver_error_for(-i64::from(errno::EHOSTUNREACH)),
+            TRY_AGAIN
+        );
         assert_eq!(resolver_error_for(-i64::from(errno::EINVAL)), NO_RECOVERY);
         assert_eq!(resolver_error_for(-i64::from(errno::EACCES)), NO_RECOVERY);
         // Nonsense returns must not panic or wrap into a retryable code.
@@ -8854,8 +8873,8 @@ mod tests {
         }
         impl CapGuard {
             pub(super) fn snapshot() -> Self {
-            let (lo, hi) = crate::sys_capability::current_caps_effective();
-            Self { lo, hi }
+                let (lo, hi) = crate::sys_capability::current_caps_effective();
+                Self { lo, hi }
             }
         }
         impl Drop for CapGuard {
@@ -9202,8 +9221,8 @@ mod tests {
         }
         impl CapGuard {
             pub(super) fn snapshot() -> Self {
-            let (lo, hi) = crate::sys_capability::current_caps_effective();
-            Self { lo, hi }
+                let (lo, hi) = crate::sys_capability::current_caps_effective();
+                Self { lo, hi }
             }
         }
         impl Drop for CapGuard {

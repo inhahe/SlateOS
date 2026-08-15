@@ -122,7 +122,17 @@ mod tests {
         assert_eq!(EV_CNT, 0x20);
         // Every defined type fits within EV_MAX.
         for &t in &[
-            EV_SYN, EV_KEY, EV_REL, EV_ABS, EV_MSC, EV_SW, EV_LED, EV_SND, EV_REP, EV_FF, EV_PWR,
+            EV_SYN,
+            EV_KEY,
+            EV_REL,
+            EV_ABS,
+            EV_MSC,
+            EV_SW,
+            EV_LED,
+            EV_SND,
+            EV_REP,
+            EV_FF,
+            EV_PWR,
             EV_FF_STATUS,
         ] {
             assert!(t <= EV_MAX);

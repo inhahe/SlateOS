@@ -78,7 +78,12 @@ mod tests {
 
     #[test]
     fn test_splice_flags_low_4_bits_dense() {
-        let f = [SPLICE_F_MOVE, SPLICE_F_NONBLOCK, SPLICE_F_MORE, SPLICE_F_GIFT];
+        let f = [
+            SPLICE_F_MOVE,
+            SPLICE_F_NONBLOCK,
+            SPLICE_F_MORE,
+            SPLICE_F_GIFT,
+        ];
         let mut or = 0u32;
         for (i, v) in f.iter().enumerate() {
             assert_eq!(*v, 1 << i);

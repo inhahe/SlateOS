@@ -149,15 +149,9 @@ mod tests {
         // four pairs and +6 for the last two.
         assert_eq!(SNDRV_TIMER_EVENT_MSTART - SNDRV_TIMER_EVENT_START, 7);
         assert_eq!(SNDRV_TIMER_EVENT_MSTOP - SNDRV_TIMER_EVENT_STOP, 7);
-        assert_eq!(
-            SNDRV_TIMER_EVENT_MCONTINUE - SNDRV_TIMER_EVENT_CONTINUE,
-            7
-        );
+        assert_eq!(SNDRV_TIMER_EVENT_MCONTINUE - SNDRV_TIMER_EVENT_CONTINUE, 7);
         assert_eq!(SNDRV_TIMER_EVENT_MPAUSE - SNDRV_TIMER_EVENT_PAUSE, 7);
-        assert_eq!(
-            SNDRV_TIMER_EVENT_MSUSPEND - SNDRV_TIMER_EVENT_SUSPEND,
-            6
-        );
+        assert_eq!(SNDRV_TIMER_EVENT_MSUSPEND - SNDRV_TIMER_EVENT_SUSPEND, 6);
         assert_eq!(SNDRV_TIMER_EVENT_MRESUME - SNDRV_TIMER_EVENT_RESUME, 6);
         // EARLY (=6) sits between PAUSE (5) and SUSPEND (7); has no master pair.
         assert_eq!(SNDRV_TIMER_EVENT_EARLY, 6);

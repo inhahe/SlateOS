@@ -100,8 +100,14 @@ mod tests {
     #[test]
     fn test_sibling_list_pairs_have_list_suffix() {
         let pairs = [
-            (TOPOLOGY_FILE_THREAD_SIBLINGS, TOPOLOGY_FILE_THREAD_SIBLINGS_LIST),
-            (TOPOLOGY_FILE_CORE_SIBLINGS, TOPOLOGY_FILE_CORE_SIBLINGS_LIST),
+            (
+                TOPOLOGY_FILE_THREAD_SIBLINGS,
+                TOPOLOGY_FILE_THREAD_SIBLINGS_LIST,
+            ),
+            (
+                TOPOLOGY_FILE_CORE_SIBLINGS,
+                TOPOLOGY_FILE_CORE_SIBLINGS_LIST,
+            ),
             (TOPOLOGY_FILE_PACKAGE_CPUS, TOPOLOGY_FILE_PACKAGE_CPUS_LIST),
             (TOPOLOGY_FILE_DIE_CPUS, TOPOLOGY_FILE_DIE_CPUS_LIST),
             (TOPOLOGY_FILE_CLUSTER_CPUS, TOPOLOGY_FILE_CLUSTER_CPUS_LIST),

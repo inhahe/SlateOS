@@ -440,7 +440,9 @@ pub extern "C" fn hcreate(nel: usize) -> i32 {
         // good distribution, minimum 16).
         let mut size = 16_usize;
         while size < nel {
-            size = if let Some(s) = size.checked_mul(2) { s } else {
+            size = if let Some(s) = size.checked_mul(2) {
+                s
+            } else {
                 errno::set_errno(errno::ENOMEM);
                 return 0;
             };

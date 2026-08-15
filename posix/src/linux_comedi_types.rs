@@ -165,7 +165,13 @@ mod tests {
     #[test]
     fn test_trigger_sources_single_bits() {
         let trigs = [
-            TRIG_NONE, TRIG_NOW, TRIG_FOLLOW, TRIG_TIMER, TRIG_COUNT, TRIG_EXT, TRIG_INT,
+            TRIG_NONE,
+            TRIG_NOW,
+            TRIG_FOLLOW,
+            TRIG_TIMER,
+            TRIG_COUNT,
+            TRIG_EXT,
+            TRIG_INT,
             TRIG_OTHER,
         ];
         for &t in &trigs {

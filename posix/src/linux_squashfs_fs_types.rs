@@ -159,10 +159,20 @@ mod tests {
         }
         // All 14 codes distinct.
         let all: [u16; 14] = [
-            basics[0], basics[1], basics[2], basics[3], basics[4], basics[5],
+            basics[0],
+            basics[1],
+            basics[2],
+            basics[3],
+            basics[4],
+            basics[5],
             basics[6],
-            extended[0], extended[1], extended[2], extended[3], extended[4],
-            extended[5], extended[6],
+            extended[0],
+            extended[1],
+            extended[2],
+            extended[3],
+            extended[4],
+            extended[5],
+            extended[6],
         ];
         for i in 0..all.len() {
             for j in (i + 1)..all.len() {

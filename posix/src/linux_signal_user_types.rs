@@ -137,14 +137,7 @@ mod tests {
     #[test]
     fn test_si_codes_distinct_user_vs_kernel() {
         let s = [
-            SI_USER,
-            SI_KERNEL,
-            SI_QUEUE,
-            SI_TIMER,
-            SI_MESGQ,
-            SI_ASYNCIO,
-            SI_SIGIO,
-            SI_TKILL,
+            SI_USER, SI_KERNEL, SI_QUEUE, SI_TIMER, SI_MESGQ, SI_ASYNCIO, SI_SIGIO, SI_TKILL,
         ];
         for a in 0..s.len() {
             for b in (a + 1)..s.len() {

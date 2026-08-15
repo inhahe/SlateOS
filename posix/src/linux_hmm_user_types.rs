@@ -77,10 +77,7 @@ mod tests {
     #[test]
     fn test_flags_aggregate() {
         // FLAGS mask must include each individual flag and nothing else.
-        assert_eq!(
-            HMM_PFN_FLAGS,
-            HMM_PFN_VALID | HMM_PFN_WRITE | HMM_PFN_ERROR
-        );
+        assert_eq!(HMM_PFN_FLAGS, HMM_PFN_VALID | HMM_PFN_WRITE | HMM_PFN_ERROR);
         assert_eq!(HMM_PFN_FLAGS & HMM_PFN_VALID, HMM_PFN_VALID);
         assert_eq!(HMM_PFN_FLAGS & HMM_PFN_WRITE, HMM_PFN_WRITE);
         assert_eq!(HMM_PFN_FLAGS & HMM_PFN_ERROR, HMM_PFN_ERROR);

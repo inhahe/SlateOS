@@ -19,8 +19,7 @@ const O_EXCL: u32 = 0o200;
 
 /// Mask of every flag bit `pipe2` accepts. Anything outside returns
 /// `EINVAL`.
-pub const PIPE2_VALID_FLAGS: u32 =
-    O_CLOEXEC | O_NONBLOCK | O_DIRECT | O_NOTIFICATION_PIPE;
+pub const PIPE2_VALID_FLAGS: u32 = O_CLOEXEC | O_NONBLOCK | O_DIRECT | O_NOTIFICATION_PIPE;
 
 // ---------------------------------------------------------------------------
 // Pipe-buffer sizing ABI (`fcntl(F_*PIPE_SZ)` + sysctl)
@@ -35,10 +34,8 @@ pub const PIPE_DEF_BUFFERS: u32 = 16;
 pub const PIPE_DEF_SIZE_BYTES: u32 = PIPE_DEF_BUFFERS * 4096;
 
 pub const SYSCTL_PIPE_MAX_SIZE: &str = "/proc/sys/fs/pipe-max-size";
-pub const SYSCTL_PIPE_USER_PAGES_HARD: &str =
-    "/proc/sys/fs/pipe-user-pages-hard";
-pub const SYSCTL_PIPE_USER_PAGES_SOFT: &str =
-    "/proc/sys/fs/pipe-user-pages-soft";
+pub const SYSCTL_PIPE_USER_PAGES_HARD: &str = "/proc/sys/fs/pipe-user-pages-hard";
+pub const SYSCTL_PIPE_USER_PAGES_SOFT: &str = "/proc/sys/fs/pipe-user-pages-soft";
 
 // ---------------------------------------------------------------------------
 // Syscalls

@@ -157,13 +157,7 @@ mod tests {
         assert_eq!(BLK_STS_ZONE_RESOURCE, 14);
         assert_eq!(BLK_STS_ZONE_OPEN_RESOURCE, 15);
         assert_eq!(BLK_STS_ZONE_ACTIVE_RESOURCE, 16);
-        assert_eq!(
-            BLK_STS_ZONE_OPEN_RESOURCE - BLK_STS_ZONE_RESOURCE,
-            1
-        );
-        assert_eq!(
-            BLK_STS_ZONE_ACTIVE_RESOURCE - BLK_STS_ZONE_OPEN_RESOURCE,
-            1
-        );
+        assert_eq!(BLK_STS_ZONE_OPEN_RESOURCE - BLK_STS_ZONE_RESOURCE, 1);
+        assert_eq!(BLK_STS_ZONE_ACTIVE_RESOURCE - BLK_STS_ZONE_OPEN_RESOURCE, 1);
     }
 }

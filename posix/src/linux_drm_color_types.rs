@@ -82,10 +82,7 @@ mod tests {
 
     #[test]
     fn test_quant_ranges_distinct() {
-        assert_ne!(
-            DRM_COLOR_YCBCR_LIMITED_RANGE,
-            DRM_COLOR_YCBCR_FULL_RANGE
-        );
+        assert_ne!(DRM_COLOR_YCBCR_LIMITED_RANGE, DRM_COLOR_YCBCR_FULL_RANGE);
     }
 
     #[test]

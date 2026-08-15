@@ -182,7 +182,8 @@ worst contention point in the repo:
 | `roadmap.md` | Edit **only** the lines tagged with your own lane letter. Never reflow or reorder. |
 | `known-issues.md` | **Append only**, at the very end of the file. Prefix every new heading with your lane letter: `### [A] B-FOO. …`. Editing an existing entry is allowed only if its heading carries your lane letter. |
 | `design-decisions.md` | Append only, at the very end. Numbering is by lane to avoid collisions: **A** takes §200–299, **B** §300–399, **C** §400–499. (§1–§127 are the existing single-agent history — never renumber them.) |
-| `open-questions.md` | Append only. Prefix the question ID with your lane letter. |
+| `open-questions.md` | Append only. Prefix the question ID with your lane letter. Write it for a reader who does not know the subsystem — see `CLAUDE.md` and the file's own header. |
+| `deferred-questions.md` | Append only, `D-Q<n>`. Questions that will need the operator *eventually* but cannot be answered usefully yet; every entry carries a `Trigger:` for promoting it back to `open-questions.md`. See `design-decisions.md` §313. |
 | `todo.txt` | Append only, under a `## Lane A` / `## Lane B` / `## Lane C` heading. |
 
 If you need to *change* another lane's entry (e.g. you fixed their bug),
@@ -221,7 +222,8 @@ version bump there rebuilds everyone's world.
 ### 5.5. Sync with `origin/main` — twice per task, not "eventually"
 
 **Every shared document in this repo exists once per branch.** `roadmap.md`,
-`known-issues.md`, `design-decisions.md`, `open-questions.md`, `todo.txt` and
+`known-issues.md`, `design-decisions.md`, `open-questions.md`,
+`deferred-questions.md`, `todo.txt` and
 `requests/` are ordinary tracked files, so your worktree holds *your branch's
 copy* of each. They are not a shared mailbox that updates itself. A note
 another lane wrote for you is invisible to you until you fetch and merge, no

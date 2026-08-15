@@ -3391,17 +3391,39 @@ passing in isolation, is this failure class until proven otherwise — look for
 module-level mutable state the test writes, and check it against the
 carve-out list above before assuming a real regression.
 
-### TD-REPO-IS-NOT-RUSTFMT-CLEAN-SO-RUNNING-CARGO-FMT-IS-A-TRAP. `cargo fmt -p posix` rewrites 244 files you did not touch — 2026-08-12 — OPEN
+### TD-REPO-IS-NOT-RUSTFMT-CLEAN-SO-RUNNING-CARGO-FMT-IS-A-TRAP. `cargo fmt -p posix` rewrites 244 files you did not touch — 2026-08-12 — 🔶 HALF FIXED 2026-08-15 (`posix` clean; `kernel` still drifted — Lane A)
+
+> **UPDATE 2026-08-15 — the operator answered Q42 with option A, and Lane B's
+> half is done.** `design-decisions.md` **§310**: one-shot repo-wide reformat,
+> with a `.git-blame-ignore-revs` file committed alongside.
+>
+> - **`posix` is now rustfmt-clean.** `cargo fmt -p posix`, 178 files, in the
+>   formatting-only commit `06ad616e0`. Verified afterwards with
+>   `cargo fmt -p posix -- --check` (passes), `cargo +nightly check-slateos -p
+>   posix` (compiles) and the full suite — **20 289 passed, 0 failed**.
+> - **`kernel` is untouched and still carries all 16 911 hunks.** It is Lane A's
+>   tree; a single cross-lane reformat commit is exactly the silent clobber the
+>   lane split exists to prevent, and at 17 000 hunks it would be the worst
+>   possible instance. Requested in
+>   `requests/b-a-rustfmt-repo-wide-reformat.md`.
+> - **`.git-blame-ignore-revs` exists at the repo root** with the `posix` hash;
+>   Lane A appends the kernel hash. Enable it locally with
+>   `git config blame.ignoreRevsFile .git-blame-ignore-revs`. Note it does *not*
+>   cover GitHub's blame view or `git log -S` — §310 records that as accepted.
+>
+> **The working rule below still applies to `kernel` and only to `kernel`.** In
+> `posix` you may now use `cargo fmt -p posix` normally; that was the point.
+> This entry closes when Lane A's commit lands.
 
 **Where:** repo-wide, unevenly. Measured 2026-08-12 with `cargo fmt -p <crate> --
 --check`:
 
-| Crate | Hunks needing reformat |
-|---|---|
-| `kernel` | 16 911 |
-| `posix` | 389 (244 of 2 299 files, ~11%) |
-| `net` | 0 |
-| `fs` | 0 |
+| Crate | Hunks needing reformat | Status |
+|---|---|---|
+| `kernel` | 16 911 | **still drifted — Lane A** |
+| `posix` | 389 (244 of 2 299 files, ~11%) | ✅ clean since `06ad616e0` |
+| `net` | 0 | ✅ |
+| `fs` | 0 | ✅ |
 
 CLAUDE.md states the convention as "`rustfmt` defaults. No manual formatting
 overrides." Two crates comply; two do not.
@@ -3427,10 +3449,13 @@ predated me. Every fmt run in a drifted crate costs an investigation like that.
 in `kernel` or `posix`. This removes the hazard without touching history.
 
 **The proper fix is a one-shot repo-wide reformat**, which is *not* obviously
-correct and is therefore the operator's call — it rewrites `git blame` for
+correct and was therefore the operator's call — it rewrites `git blame` for
 ~17 000 hunks of kernel code, and blame is the main tool for answering "why is
 this line here?" in a codebase with no human reviewer. Raised as **Q42** in
-`open-questions.md`. Until it is answered, the working rule above holds.
+`open-questions.md`; **answered A on 2026-08-15** → `design-decisions.md` §310.
+See the update at the top of this entry: `posix` is done, `kernel` is Lane A's
+and outstanding, and until that lands the working rule above holds *for
+`kernel`*.
 
 **Also note:** `cargo fmt --all` does not run in this workspace at all — it dies
 with `The filename or extension is too long. (os error 206)`, a Windows command
@@ -16366,7 +16391,27 @@ What that bind then *stores* is still not modelled — see
 `TD-OILS-A-DECLARATION-WITH-NOTHING-TO-DO-BINDS-A-NULL-THROUGH-THE-REFERENCE`
 below.
 
-### TD-OILS-A-DECLARATION-WITH-NOTHING-TO-DO-BINDS-A-NULL-THROUGH-THE-REFERENCE. `declare -n q='n[1]'; declare q` makes bash's `n` read as empty — 2026-08-06 — OPEN, operator-gated (`open-questions.md` Q40)
+### TD-OILS-A-DECLARATION-WITH-NOTHING-TO-DO-BINDS-A-NULL-THROUGH-THE-REFERENCE. `declare -n q='n[1]'; declare q` makes bash's `n` read as empty — 2026-08-06 — ⚖️ WAIVED 2026-08-15 by the operator (`design-decisions.md` §309)
+
+> **RESOLVED 2026-08-15 — deliberately NOT reproduced.** The operator answered
+> `open-questions.md` Q40 with **option B**: osh keeps `Str` array elements and
+> the array reads normally. This is a **knowing, documented divergence from
+> measured bash** — the first of its kind in oils — not an unfixed bug. Do not
+> "fix" it by implementing option A.
+>
+> **This entry stays open-shaped on purpose**, because it is the record that
+> makes the divergence reversible: if a real script is ever found that depends
+> on the null-element behaviour, everything needed to reproduce it is below.
+>
+> **The precedent it set matters more than the case.** Byte-fidelity with bash
+> now has an *"unless it is a defect"* clause. Per §309, a measured behaviour may
+> be waived only when all three hold: (i) it is unreachable except through a
+> construct built to reach it, (ii) it is inconsistent with bash's own
+> observable model, and (iii) reproducing it would degrade osh's value model.
+> **Any future waiver must be argued against those three tests, here, in
+> writing** — a waiver that is not written down is a divergence, not a decision.
+> This does not loosen §305's frozen fidelity scope: §305 says what is in scope,
+> §309 says something in scope may still be waived as a defect.
 
 **Where:** `userspace/oils/src/interp.rs` — `Shell::declare_ref_bind_read` reads
 the element the reference designates but performs no store; the store would have
@@ -49053,7 +49098,7 @@ loop:
       if (level > NAMEREF_MAX)
 	return ((SHELL_VAR *)0);	/* error message here? */
       newname = nameref_cell (v);
-      if (newname == 0 || *newname == ' ')
+      if (newname == 0 || *newname == '\0')
 	return ((SHELL_VAR *)0);
       oldv = v;
       ...
@@ -60401,7 +60446,7 @@ stripped pattern would have matched `axb` and does not), the embedded quote that
 puts the bit back, the replacement side, and the `$*`/list rows that show what
 `Q_PATQUOTE` does keep.
 
-### TD-POSIX-CAPS-ARE-NOT-THE-KERNEL'S. libc's Linux capability words start as "all caps held" and are never seeded from the process's real kernel capabilities — 2026-08-12
+### TD-POSIX-CAPS-ARE-NOT-THE-KERNEL'S. libc's Linux capability words start as "all caps held" and are never seeded from the process's real kernel capabilities — 🔷 **Q44 ANSWERED 2026-08-15 → §312; implementation staged, step 1 is Lane A's** — 2026-08-12
 
 **What.** `posix/src/sys_capability.rs` keeps the three Linux capability sets
 (effective/permitted/inheritable) in its own store and initialises them from
@@ -60452,9 +60497,10 @@ of **per-object** authority, not Linux's 41 **ambient** numbered bits, so
 someone has to define which kernel rights imply which `CAP_*` — and
 `CAP_SYS_ADMIN`, which is 20 of the 63 gate sites, has no natural preimage at
 all. That mapping decides what a Linux port is allowed to conclude about our
-capability model, so it is an operator decision: **asked as `open-questions.md`
-Q44** (2026-08-12), with four options and a recommendation. It moves to
-`design-decisions.md` once answered.
+capability model, so it was an operator decision: **asked as
+`open-questions.md` Q44** (2026-08-12) and **answered 2026-08-15 — option A**,
+recorded as `design-decisions.md` **§312**. See "The answer and what is left"
+below.
 
 **CORRECTED 2026-08-12.** An earlier version of this section named
 `SYS_CAP_QUERY` (400) as the syscall to seed the words from. **It cannot serve
@@ -60466,10 +60512,36 @@ entries"), and its only consumer today is `userspace/strace`'s syscall-name
 table. So an **enumerating** query syscall has to be built first, under any
 answer to Q44. Do not start the libc side expecting 400 to hand you the set.
 
-Until Q44 is answered the optimistic answer stays. The honest alternative —
-`capget` failing rather than answering confidently — would break Linux ports
-that call it informationally, which is worse for a compatibility layer than a
-documented-safe wrong answer.
+**The answer, and what is left — 2026-08-15.** Q44 was answered **A —
+conservative projection** (`design-decisions.md` §312). Each `CAP_*` is derived
+from a specific `(ResourceType, Rights)` predicate and reports **not held**
+whenever no rule matches, so the default is *deny*: `CAP_SYS_RAWIO` ⇐ a `PortIo`
+handle with `READ|WRITE`, `CAP_KILL` ⇐ `Process` with `SIGNAL`, `CAP_SYS_PTRACE`
+⇐ `Process` with `DEBUG`, `CAP_SYS_NICE` ⇐ `Thread` with `IO_REALTIME`.
+`CAP_SYS_ADMIN` — 20 of the 63 sites — is deliberately **not** derived: it gets an
+explicit hand-maintained union with a comment per member, because Linux's junk
+drawer has no preimage in a per-object model and any derived rule would be either
+permanently false or broad enough to re-grant everything.
+
+Rejected, and worth not re-litigating: **B** (`ResourceType::PosixCapability`)
+was refused as ambient authority wearing a capability costume — process-wide
+authority tied to no object — even though it is the option that would have made
+`CAP_SYS_ADMIN` easy. **D** (`capget()` failing outright) was refused because
+Linux ports call it informationally, so it trades one silent wrong answer for
+loud breakage everywhere; that argument still stands and is why the optimistic
+answer is allowed to persist through steps 1–2 below rather than being turned off
+first.
+
+**This entry stays open until step 3.** The three steps, in order, from §312:
+
+1. **An enumerating query syscall must exist** (see the CORRECTED note above —
+   400 returns a count). **Lane A's tree**, filed as
+   `requests/b-a-cap-enumerating-query-syscall.md`. Nothing changes behaviourally
+   when it lands.
+2. **libc seeds its three words from that query** instead of `CAPS_DEFAULT`.
+   Still no behavioural flip: the gates remain advisory.
+3. **The gates stop being advisory** — the boot-test-visible step, gated on the
+   fixture grants in the paragraph below.
 
 **Do not make a gate truthful without freeing QEMU first.** Fixtures depend on
 the permissive behaviour: `services/ctest-jobctl` (documented in its own doc
@@ -66450,3 +66522,49 @@ character set, and routing `export_config` around `to_config_line`. That last
 one is the break that reproduces the original bug exactly, and it is worth
 keeping precisely because it will fail again the moment someone re-inlines the
 format for convenience.
+## One stray NUL byte made `known-issues.md` unmergeable for every lane (FIXED)
+
+**Status: FIXED 2026-08-15** (lane C, during the routine `lane-c` → `main`
+merge). Not an app bug — a bug in the shared documents themselves, which is
+why it had gone unnoticed while costing every lane a manual conflict
+resolution.
+
+Merging `origin/lane-c` into `main` produced a whole-file conflict on
+`known-issues.md`: one hunk, `1,65791c1,65863`, as if not a single line
+matched. But line 100 of the two sides was byte-identical. The reason is that
+git had classified the 3.8 MB document as **binary**, and a binary file has no
+lines to merge — it can only be taken whole from one side or the other.
+
+The cause was a single byte at offset 2 870 859, inside a quoted bash C
+snippet in one of the oils entries:
+
+```c
+if (newname == 0 || *newname == '<NUL>')
+```
+
+The author meant C's two-character escape `'\0'`. Whatever produced the
+paste turned it into an actual `U+0000`, and `git diff`'s binary heuristic is
+simply "does the first 8 000 bytes contain a NUL" — no, but git also scans
+further for blob attributes, and a NUL anywhere in the content is enough for
+the merge driver to refuse a textual merge.
+
+**The same byte silently caused a second, unrelated-looking symptom.** This
+repo sets `core.autocrlf = input`, which normalises CRLF to LF on commit —
+but only for files git considers *text*. Because the NUL made this file
+binary, that normalisation was skipped, so when one lane's editor rewrote the
+file with CRLF endings it was committed verbatim. `main`'s copy was entirely
+CRLF while `base` and `lane-c` were entirely LF, which is a second reason
+every line differed. Two symptoms, one byte.
+
+Fixed by writing the escape the author meant (`'\0'` as two characters) and
+normalising the file back to LF. With the NUL gone the three-way merge of the
+same three versions succeeded with **zero conflicts** — which is what the
+append-only convention in `roadmap.md` rule 3 is designed to produce, and had
+been quietly failing to deliver.
+
+Worth generalising, because this is the audit's own lesson turned back on us:
+a control character that a format cannot represent does not announce itself.
+It changes how *tooling* reads the document — here, from a mergeable text file
+into an opaque blob — and the damage shows up somewhere far from the paste, as
+a merge conflict nobody could explain. When pasting source into a shared
+markdown document, paste the escape, never the character.

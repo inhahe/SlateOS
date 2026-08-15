@@ -96,7 +96,14 @@ mod tests {
     #[test]
     fn test_tag_bits_single_or_zero() {
         // Real tags are single bits in low 6 positions; UNDEFINED is 0.
-        let t = [ACL_USER_OBJ, ACL_USER, ACL_GROUP_OBJ, ACL_GROUP, ACL_MASK, ACL_OTHER];
+        let t = [
+            ACL_USER_OBJ,
+            ACL_USER,
+            ACL_GROUP_OBJ,
+            ACL_GROUP,
+            ACL_MASK,
+            ACL_OTHER,
+        ];
         let mut or = 0u16;
         for v in t {
             assert!(v.is_power_of_two());

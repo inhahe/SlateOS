@@ -289,7 +289,7 @@ mod tests {
             f64::MAX,
             f64::MIN,
             f64::MIN_POSITIVE,
-            f64::from_bits(1),                 // smallest subnormal
+            f64::from_bits(1),                     // smallest subnormal
             f64::from_bits(0x000F_FFFF_FFFF_FFFF), // largest subnormal
             core::f64::consts::PI,
             core::f64::consts::E,
@@ -356,7 +356,10 @@ mod tests {
         // A tie whose lower neighbour is odd must round *up* (to even).
         let odd_base = (1u64 << 63) | (1u64 << 11); // mantissa lsb = 1
         let tie_up = ld(odd_base | (1u64 << 10), 16383);
-        assert_eq!(to_f64(tie_up).to_bits(), to_f64(ld(odd_base, 16383)).to_bits() + 1);
+        assert_eq!(
+            to_f64(tie_up).to_bits(),
+            to_f64(ld(odd_base, 16383)).to_bits() + 1
+        );
     }
 
     #[test]

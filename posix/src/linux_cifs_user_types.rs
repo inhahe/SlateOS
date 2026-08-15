@@ -148,7 +148,10 @@ mod tests {
     #[test]
     fn test_nt_status_success_is_zero() {
         assert_eq!(NT_STATUS_SUCCESS, 0);
-        assert_eq!(NT_STATUS_SUCCESS & NT_STATUS_SEVERITY_MASK, NT_STATUS_SEVERITY_SUCCESS);
+        assert_eq!(
+            NT_STATUS_SUCCESS & NT_STATUS_SEVERITY_MASK,
+            NT_STATUS_SEVERITY_SUCCESS
+        );
     }
 
     #[test]

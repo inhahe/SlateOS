@@ -2302,7 +2302,9 @@ mod nnp {
     // `try_with` rather than `with`: a read during thread-local teardown
     // must degrade to the cold-boot value, not panic.
     pub(super) fn get() -> bool {
-        NO_NEW_PRIVS.try_with(core::cell::Cell::get).unwrap_or(false)
+        NO_NEW_PRIVS
+            .try_with(core::cell::Cell::get)
+            .unwrap_or(false)
     }
     pub(super) fn set(v: bool) {
         // A failed `try_with` means the thread is shutting down and the
@@ -3404,10 +3406,11 @@ pub extern "C" fn klogctl(cmd: i32, buf: *mut u8, len: i32) -> i32 {
             }
         }
         SYSLOG_ACTION_CONSOLE_LEVEL
-            if !(SYSLOG_LOG_LEVEL_MIN..=SYSLOG_LOG_LEVEL_MAX).contains(&len) => {
-                errno::set_errno(errno::EINVAL);
-                return -1;
-            }
+            if !(SYSLOG_LOG_LEVEL_MIN..=SYSLOG_LOG_LEVEL_MAX).contains(&len) =>
+        {
+            errno::set_errno(errno::EINVAL);
+            return -1;
+        }
         _ => {
             // CLOSE, OPEN, CLEAR, CONSOLE_OFF, CONSOLE_ON,
             // SIZE_UNREAD, SIZE_BUFFER — no buf/len validation needed.
@@ -5229,8 +5232,8 @@ mod tests {
         }
         impl CapGuard {
             fn snapshot() -> Self {
-            let (lo, hi) = crate::sys_capability::current_caps_effective();
-            Self { lo, hi }
+                let (lo, hi) = crate::sys_capability::current_caps_effective();
+                Self { lo, hi }
             }
         }
         impl Drop for CapGuard {
@@ -5883,8 +5886,8 @@ mod tests {
         }
         impl CapGuard {
             fn snapshot() -> Self {
-            let (lo, hi) = crate::sys_capability::current_caps_effective();
-            Self { lo, hi }
+                let (lo, hi) = crate::sys_capability::current_caps_effective();
+                Self { lo, hi }
             }
         }
         impl Drop for CapGuard {
@@ -6251,8 +6254,8 @@ mod tests {
         }
         impl CapGuard {
             fn snapshot() -> Self {
-            let (lo, hi) = crate::sys_capability::current_caps_effective();
-            Self { lo, hi }
+                let (lo, hi) = crate::sys_capability::current_caps_effective();
+                Self { lo, hi }
             }
         }
         impl Drop for CapGuard {
@@ -6606,16 +6609,14 @@ mod tests {
         use super::*;
 
         struct CapGuard {
-
             lo: u32,
 
             hi: u32,
-
         }
         impl CapGuard {
             fn snapshot() -> Self {
-            let (lo, hi) = crate::sys_capability::current_caps_effective();
-            Self { lo, hi }
+                let (lo, hi) = crate::sys_capability::current_caps_effective();
+                Self { lo, hi }
             }
         }
         impl Drop for CapGuard {
@@ -6943,16 +6944,14 @@ mod tests {
         use super::*;
 
         struct CapGuard {
-
             lo: u32,
 
             hi: u32,
-
         }
         impl CapGuard {
             fn snapshot() -> Self {
-            let (lo, hi) = crate::sys_capability::current_caps_effective();
-            Self { lo, hi }
+                let (lo, hi) = crate::sys_capability::current_caps_effective();
+                Self { lo, hi }
             }
         }
         impl Drop for CapGuard {
@@ -7317,16 +7316,14 @@ mod tests {
         use super::*;
 
         struct CapGuard {
-
             lo: u32,
 
             hi: u32,
-
         }
         impl CapGuard {
             fn snapshot() -> Self {
-            let (lo, hi) = crate::sys_capability::current_caps_effective();
-            Self { lo, hi }
+                let (lo, hi) = crate::sys_capability::current_caps_effective();
+                Self { lo, hi }
             }
         }
         impl Drop for CapGuard {
@@ -8576,8 +8573,8 @@ mod tests {
         }
         impl CapGuard {
             fn snapshot() -> Self {
-            let (lo, hi) = crate::sys_capability::current_caps_effective();
-            Self { lo, hi }
+                let (lo, hi) = crate::sys_capability::current_caps_effective();
+                Self { lo, hi }
             }
         }
         impl Drop for CapGuard {
@@ -9101,8 +9098,8 @@ mod tests {
         }
         impl CapGuard {
             fn snapshot() -> Self {
-            let (lo, hi) = crate::sys_capability::current_caps_effective();
-            Self { lo, hi }
+                let (lo, hi) = crate::sys_capability::current_caps_effective();
+                Self { lo, hi }
             }
         }
         impl Drop for CapGuard {
@@ -10630,8 +10627,8 @@ mod tests {
         }
         impl CapGuard {
             fn snapshot() -> Self {
-            let (lo, hi) = crate::sys_capability::current_caps_effective();
-            Self { lo, hi }
+                let (lo, hi) = crate::sys_capability::current_caps_effective();
+                Self { lo, hi }
             }
         }
         impl Drop for CapGuard {

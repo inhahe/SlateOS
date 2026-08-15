@@ -480,19 +480,31 @@ break. Worth generalising: **a well-tested support module is not evidence that
 the code calling it is tested**, and in this crate the untested file was the one
 users actually touch.
 
-Two smaller defects in `fileops.rs` noticed during the same read, not yet fixed:
+Two smaller defects in `fileops.rs` noticed during the same read — **also FIXED
+2026-08-15**, commit `35f17dfd7`:
 
-- `RecycleBin::recycle` moves data with a bare `fs::rename`, which fails with
+- `RecycleBin::recycle` moved data with a bare `fs::rename`, which fails with
   `EXDEV` across a mount point — so deleting anything from a separate data
-  partition simply errors. `fileops::same_device` exists for exactly this check
-  and is referenced only by its own test (`dropzone.rs` carries a second copy of
-  the same function). The fix is a copy-then-remove fallback when
-  `same_device(path, &self.root)` is false.
-- `RecycleBin::recycle` writes the original path to `meta.txt` with
-  `path.display()`, which is lossy, and `read_entry` parses it back as UTF-8. A
-  non-UTF-8 path therefore cannot be restored to where it came from. Same class
-  as the `u8 as char` section above, reached through `Display` instead: the
-  metadata should store the path's bytes.
+  partition simply errored, and `restore` had the same problem in reverse. Now
+  routed through a `move_path` helper that tries the rename and falls back to
+  copy-then-remove. Note that `fileops::same_device` exists for exactly this
+  check and was referenced only by its own test (`dropzone.rs` carries a second
+  copy of the same function); it was not used here, because attempting the
+  rename and reacting to its failure is both cheaper in the common case and
+  correct where a first-component heuristic guesses wrong.
+- `RecycleBin::recycle` wrote the original path to `meta.txt` with
+  `path.display()`, which is lossy, and `read_entry` parsed it back as UTF-8 —
+  so a non-UTF-8 path was restored under a *different name*, silently renaming
+  the user's data during an operation advertised as reversible. Same class as
+  the `u8 as char` section above, reached through `Display` instead. The path is
+  now percent-encoded from `OsStr::as_encoded_bytes`, with a version marker on
+  line 1 so an already-populated bin is still readable.
+
+A third, unlogged defect fell out of writing those tests: metadata was written
+before the data was moved but not removed if the move failed, so a failed
+recycle left the bin listing an entry whose `data/` was not there. Ordering
+kept (metadata first is the safe order — orphaned metadata is harmless, moved
+data with no metadata is unrestorable), with cleanup on the failure path.
 
 ## Almost no `apps/` crate opts into the workspace lints (lane C)
 

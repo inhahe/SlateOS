@@ -2869,6 +2869,7 @@ crash, below).
 - [ ] **Optional structured records** for programs that want to do better than flat text: `enter(fn)` / `exit(fn, outcome)`, `phase(name)`, `progress(done, total)`, `waiting_on(what)`. A viewer renders these as a collapsible call tree or a timeline rather than a scrolling wall, and they are what make "which function is it stuck in" answerable at a glance.
   - [ ] `libactivity` (Rust crate + Python package via fastpy) with a derive macro / decorator that instruments a function's entry and exit in one annotation.
   - [ ] Records carry a monotonic timestamp, so a stalled `enter` with no matching `exit` is directly visible as "in `parse_manifest` for 40 s".
+  - [ ] These records are also what produce the nesting hierarchy — `enter`/`exit` pairs and `phase` boundaries *are* the tree, with no separate grouping API. See **Grouping and nesting**, below, for depth and fold policy.
 - [ ] **The current-activity one-liner.** Separate from the scrolling stream, a process publishes a single short "what I am doing right now" string, overwritten in place. This is what appears in the Process Explorer row, the tray menu and `psdoing`. It is far more useful per pixel than any log, and costs one store.
   - [ ] Derived automatically from the innermost open `phase`/`enter` record when the program has not set one explicitly.
 - [ ] **Promotion on crash.** When a process dies abnormally, the tail of its ring (last N KB, configurable) is captured into the crash report and a `process.crashed` event in the event log references it. This is the bridge that makes the ring worth writing to: the chatter that was worthless a second before the crash becomes the most valuable thing in the postmortem.
@@ -2894,6 +2895,40 @@ per-process streams are its detail rows._
 - [ ] **Ring budget is charged per group, not per process**, so one app spawning 200 workers cannot consume the global cap. Within a group, an app can weight its members (give the coordinator a bigger ring than the workers).
 - [ ] **Instances.** Two windows of the same app may be one group or two depending on whether the app is single- or multi-process; the grouping follows the actual process tree rather than the package identity, and the viewer shows the package name with an instance discriminator when there is more than one.
 
+#### Grouping and nesting — subtasks under tasks
+
+_A flat stream is only readable while it is short. Real work is a hierarchy —
+"install package" contains "resolve dependencies" contains "fetch index" — and a
+viewer that cannot show that hierarchy forces the user to reconstruct it from
+indentation they have to squint at, which is what reading a build log is like
+today._
+
+_**Depth is unlimited in the record and limited in the view.** These are separate
+questions and conflating them is the trap. Nesting comes from the call graph, so
+capping it at record time means either refusing to record deeper frames (losing
+the data) or flattening them (misreporting it) — and the cap you picked is
+wrong the first time someone's dependency resolver is one level deeper than you
+guessed. Recording depth costs nothing: it is implicit in the `enter`/`exit`
+pairing that is already there. Meanwhile "how deep do I want to look right now"
+is a display preference that should be changeable live, without re-running the
+program. So: record everything, and let the view fold._
+
+- [ ] **Nesting is created by the structured records already specified**: `enter`/`exit` pairs nest exactly as the call stack does, and `phase(name)` opens a named group that closes when the next phase opens or the enclosing frame exits. No separate grouping API — if a program is instrumented at all, it is already producing the tree.
+- [ ] **A recording-time depth cap as a safety valve, not a design limit** (default 64). Beyond it, frames are counted but not individually recorded — the viewer shows "+1,204 deeper frames elided" — so a runaway recursion cannot consume the whole ring with stack noise. This is set far below any depth a human view would want to show and far above any depth real code produces; it exists to bound the damage, not to shape the feature.
+- [ ] **Unbalanced frames are rendered honestly.** An `enter` with no `exit` is the normal state of a running frame and the *permanent* state of one whose process died mid-call; it renders as still-open with its elapsed time, never silently balanced. A ring that has wrapped can also evict an `enter` whose `exit` survives, so the viewer must tolerate orphan exits and mark them rather than mis-parenting the lines around them.
+- [ ] **Nesting composes with the process tree rather than competing with it.** The outer levels of the tree are app → process → thread (from the activity-group rules above); within a thread, the levels are call and phase nesting. A spawned process attaches as a child of whatever frame was open in its parent at spawn time, so a coordinator's workers appear *under* the phase that launched them instead of as a sibling fleet the user has to mentally re-associate.
+
+**Default fold state — keyed on whether a frame is finished, not on how deep it is:**
+
+- [ ] **Open (still-running) frames are expanded.** They are the current stack, which is the entire point of a live view — "which function is it in" has to be answerable without clicking. A tree that starts collapsed shows a user watching their app work a screen that never moves.
+- [ ] **Completed frames fold to a one-line summary** when they close: name, outcome, duration, and a count of what they contained ("resolve dependencies — ok, 1.4 s, 312 lines"). Work that is done stops taking up space on its own, and the view naturally becomes "full detail on what is happening now, with finished work folding away above it" — which is how a good progress display behaves and how none of them are built.
+- [ ] **A frame that failed, or that contains a warning or error, stays expanded** — auto-expanded down to the offending line if it has already closed. The one case where hiding detail is most tempting is the one case where the user definitely wants it.
+- [ ] **Very short frames fold into their parent entirely** below a threshold (default ~1 ms, configurable, off-able). Ten thousand successful two-microsecond calls are noise; the parent shows them as a count. Anything that failed is exempt regardless of duration.
+- [ ] **Sticky ancestors** when scrolled deep inside a frame: the enclosing frames pin to the top of the pane so the user can always see what the lines they are reading are *part of*, the way sticky scroll works for code.
+- [ ] **Expand-all / collapse-all and an explicit "show N levels" control**, remembered per app, so a user whose mental model of a particular program is "I only ever care about phases" can have that permanently without arguing with the defaults each time.
+- [ ] **AMBIGUITY:** whether a program may *request* a default fold depth for its own output (an installer saying "start me collapsed to phases"). It is the program that knows which of its levels are meaningful, and it is also the program that will get this wrong or use it to hide its own noise. Leaning towards allowing it as a hint the user's per-app preference overrides, but it is a user-visible policy call.
+- [ ] **Uninstrumented programs get a heuristic, clearly marked as one.** A program whose stream is only captured stdout has no nesting information at all, but a great many CLI tools indent their own sub-output. An opt-in "infer nesting from leading whitespace" mode recovers a usable tree for those, flagged in the UI as inferred so nobody mistakes a guess for a fact.
+
 #### Surface A — inspection tool (Process Explorer, §4.3)
 
 - [ ] **Activity column** in the main process list showing each process's current-activity one-liner, live-updating. Sortable and filterable; a fleet of otherwise-identical worker processes becomes readable at a glance.
@@ -2903,7 +2938,9 @@ per-process streams are its detail rows._
   - [ ] **Provenance gutter** in merged views: each line marked with which process (and thread) emitted it, click-through to that node, and a per-contributor colour so a fleet's interleaving is readable rather than a wall of undifferentiated text.
   - [ ] **"Only this process" / "include children"** toggle, so a coordinator's own narration can be read without its workers' noise, which is the common case when the coordinator is the thing misbehaving.
   - [ ] Ragged-history markers where a contributor's ring has wrapped, so a gap is never mistaken for silence.
-- [ ] **Call-tree / timeline view** for processes emitting structured records, with open-but-not-yet-closed frames highlighted — the "it is stuck here" view.
+- [ ] **Call-tree / timeline view** for processes emitting structured records, with open-but-not-yet-closed frames highlighted — the "it is stuck here" view. This is the primary consumer of the **Grouping and nesting** rules above: open frames expanded, completed frames folded to their summary line, failures auto-expanded, sticky ancestors while scrolled deep.
+  - [ ] Fold and unfold with the keyboard as well as the mouse, and a "show N levels" control in the pane's toolbar; the setting is remembered per app, not per window, so it survives closing and reopening the tool.
+  - [ ] The Activity *pane* and the call-tree *view* are the same widget at two densities rather than two implementations — a flat stream is just a tree whose records carry no nesting, which is exactly the uninstrumented-stdout case.
 - [ ] **"Why is this program not responding?"** — when a window stops pumping events, the hung-app dialog (§4.1/§3.4) shows the program's current activity and the tail of its stream inline, instead of the contentless "This program is not responding" every other OS shows.
 - [ ] Cross-reference: the same kernel-stamped originator tag that powers §4.3's service-mediated resource attribution lets a *service's* activity lines be attributed back to the program that caused them — so "what is the filesystem service doing?" can answer "reading 2 GB for Backup.app".
 
@@ -2950,6 +2987,8 @@ kernel views as the GUI so the two can never disagree._
 - [ ] `pstail <pid|name|app>` — tail an activity stream (`-f` to follow, `-n` for backlog, level and stream filters). The `journalctl -f` of live process activity.
   - [ ] Naming an **app** tails the merged group stream; naming a **PID** tails that process. `--children` / `--no-children` picks between a node's subtree and the node alone, matching Process Explorer's toggle so the two tools cannot disagree about what "the app's log" means.
   - [ ] `--by <pid|tid>` prefixes each line with its emitter, which is what makes a merged tail greppable.
+  - [ ] `--depth N` limits how many levels of nesting are printed (deeper frames collapse into their ancestor's summary line), and `--fold` / `--no-fold` selects between the GUI's completed-frames-fold default and the full flat firehose. A terminal cannot fold interactively, so the choice has to be made at invocation — but the *policy* is the same one the GUI applies, so the two tools show the same tree.
+  - [ ] Nesting is rendered as indentation by default and as flat lines under `--flat`, with a `--json` mode emitting the structured records verbatim (JSON-lines, per the no-binary-logs rule) so the tree can be post-processed rather than screen-scraped.
 - [ ] `psdoing [pid|name|app]` — print the current-activity one-liner for one process, one app, or all of them; one line each, greppable.
 - [ ] `pstree --doing` — the process tree annotated with what each node is currently doing, with activity-group boundaries marked so "which of these processes are one app" is visible in the same output.
 
@@ -2964,7 +3003,9 @@ kernel views as the GUI so the two can never disagree._
 #### Settings
 
 - [ ] Per-app: activity stream on/off, group ring budget and how it is weighted across members, default verbosity, whether this app is one the user wants flagged on the tray icon when it reports an error (default no).
+  - [ ] Per-app fold preference — the remembered "show N levels", and whether this app's own requested default fold depth (the AMBIGUITY above) is honoured or ignored. Per-app rather than global because "I only care about phases" is true of an installer and false of a debugger.
 - [ ] Global: default per-group budget, global cap on memory spent across all rings, whether stdout capture is on by default, whether the Activity tray icon is shown at all, retention of promoted and spilled traces.
+  - [ ] Global fold defaults: whether completed frames fold on close, the short-frame fold threshold (default ~1 ms, settable to zero to disable), the view's default depth limit, and whether leading-whitespace nesting inference is applied to stdout-only streams. The recording-time depth cap (default 64) is a policy knob here too, but presented as a safety limit rather than a display preference, because that is what it is.
 - [ ] A "programs that are narrating" list, so a user can see which programs support structured activity records and which are only being captured from stdout.
 
 #### Making it something programs actually do

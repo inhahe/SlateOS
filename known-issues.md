@@ -60485,9 +60485,25 @@ judgement calls recur:
 
 - **Terminal-style views** (`apps/tmux`, `apps/hexeditor`, `apps/logviewer`)
   genuinely want a character grid. Keep the grid, but derive the cell width
-  from `text::digit_advance(font_size, weight)` rather than hardcoding it, and
-  count **characters** rather than bytes — this is exactly what
+  from `text::cell_advance(font_size, weight)` and draw the grid inside a
+  `RenderCommand::PushFont { family: FontFamily::Mono }` scope, counting
+  **characters** rather than bytes — this is what
   `guitk::textview::SimpleTextView` now does, and it is the pattern to copy.
+
+  ⚠️ **This advice used to say `digit_advance`, and that was wrong.** See
+  design-decisions.md §425. `digit_advance` returns a digit's advance *in the
+  proportional UI face* — a cell only digits fit. At 13px a digit is 7.55px
+  while `'W'` is 13.08px, so every non-digit glyph overhung its neighbour's
+  cell, and any code inverting the arithmetic to hit-test resolved to the
+  wrong cell, further wrong the further right. Five grid views were built on
+  that advice before it was caught (`3477cf982`): `hexeditor`'s ASCII column
+  (clicks selected the wrong byte), `filediff`'s inline highlight (slid off
+  the change it marked), `markdowneditor`'s caret and selection band,
+  `snippets`' overlapping code tokens, and `textview`'s own simple view. A
+  cell is only a cell if the face is monospace — hence the scope, not just
+  the arithmetic. `digit_advance` remains correct for its actual purpose:
+  sizing something that really does hold only digits (a line-number gutter,
+  `RichTextView`'s indent unit).
 - **Prose and labels** should measure. Where a widget both measures and draws,
   the two must go through one call so they cannot drift — see
   `RichTextView::span_font`/`span_width` for the shape of that.

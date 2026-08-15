@@ -22,6 +22,7 @@
 use guitk::color::Color;
 #[allow(unused_imports)]
 use guitk::event::{Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEventKind};
+use guitk::fold;
 #[allow(unused_imports)]
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
 #[allow(unused_imports)]
@@ -159,19 +160,38 @@ impl Default for HardwareInfo {
 
 impl HardwareInfo {
     /// Format hardware summary as lines for display.
+    ///
+    /// Six of these values are strings the *hardware* chose -- `cpu_model` from
+    /// CPUID, `gpu_model` and `disk_model` from device descriptors, and so on.
+    /// They are folded to a single line each, because both consumers of this
+    /// function place them somewhere that a newline would damage: the text
+    /// report ([`to_text`](Self::to_text)) is built from `=== ... ===` headers
+    /// that its reader assumes the report wrote, and the GUI draws one row per
+    /// pair. Folding here rather than in either consumer keeps a single writer,
+    /// so a third consumer cannot be added without the protection. See
+    /// [`guitk::fold`].
     pub fn summary_lines(&self) -> Vec<(String, String)> {
         vec![
-            ("CPU".into(), self.cpu_model.clone()),
-            ("Cores / Threads".into(), format!("{} / {}", self.cpu_cores, self.cpu_threads)),
+            ("CPU".into(), fold::line(&self.cpu_model)),
+            (
+                "Cores / Threads".into(),
+                format!("{} / {}", self.cpu_cores, self.cpu_threads),
+            ),
             ("CPU Frequency".into(), format!("{} MHz", self.cpu_freq_mhz)),
-            ("RAM".into(), format!("{} MB {}", self.ram_total_mb, self.ram_type)),
+            (
+                "RAM".into(),
+                format!("{} MB {}", self.ram_total_mb, fold::line(&self.ram_type)),
+            ),
             ("RAM Speed".into(), format!("{} MHz", self.ram_speed_mhz)),
-            ("Disk".into(), self.disk_model.clone()),
-            ("Disk Capacity".into(), format!("{} GB", self.disk_capacity_gb)),
-            ("Disk Interface".into(), self.disk_interface.clone()),
-            ("GPU".into(), self.gpu_model.clone()),
+            ("Disk".into(), fold::line(&self.disk_model)),
+            (
+                "Disk Capacity".into(),
+                format!("{} GB", self.disk_capacity_gb),
+            ),
+            ("Disk Interface".into(), fold::line(&self.disk_interface)),
+            ("GPU".into(), fold::line(&self.gpu_model)),
             ("GPU VRAM".into(), format!("{} MB", self.gpu_vram_mb)),
-            ("OS".into(), self.os_version.clone()),
+            ("OS".into(), fold::line(&self.os_version)),
         ]
     }
 
@@ -272,10 +292,22 @@ impl CategoryResult {
     /// Format as text lines for export.
     pub fn to_text(&self) -> String {
         let mut out = String::with_capacity(256);
-        out.push_str(&format!("--- {} (Score: {:.0}) ---\n", self.name, self.composite_score));
+        out.push_str(&format!(
+            "--- {} (Score: {:.0}) ---\n",
+            self.name, self.composite_score
+        ));
         for sub in &self.sub_tests {
-            let direction = if sub.lower_is_better { " (lower=better)" } else { "" };
-            out.push_str(&format!("  {:<30} {}{}\n", sub.name, sub.formatted_score(), direction));
+            let direction = if sub.lower_is_better {
+                " (lower=better)"
+            } else {
+                ""
+            };
+            out.push_str(&format!(
+                "  {:<30} {}{}\n",
+                sub.name,
+                sub.formatted_score(),
+                direction
+            ));
         }
         out
     }
@@ -339,9 +371,18 @@ impl BenchmarkResult {
     pub fn comparison_vs(&self, previous: &BenchmarkResult) -> ComparisonResult {
         ComparisonResult {
             cpu_change_pct: percent_change(previous.cpu.composite_score, self.cpu.composite_score),
-            memory_change_pct: percent_change(previous.memory.composite_score, self.memory.composite_score),
-            disk_change_pct: percent_change(previous.disk.composite_score, self.disk.composite_score),
-            graphics_change_pct: percent_change(previous.graphics.composite_score, self.graphics.composite_score),
+            memory_change_pct: percent_change(
+                previous.memory.composite_score,
+                self.memory.composite_score,
+            ),
+            disk_change_pct: percent_change(
+                previous.disk.composite_score,
+                self.disk.composite_score,
+            ),
+            graphics_change_pct: percent_change(
+                previous.graphics.composite_score,
+                self.graphics.composite_score,
+            ),
             overall_change_pct: percent_change(previous.overall_score, self.overall_score),
         }
     }
@@ -486,12 +527,19 @@ impl BenchmarkHistory {
             return out;
         }
         for (i, run) in self.runs.iter().enumerate() {
-            out.push_str(&format!("Run #{} (timestamp: {})\n", i.saturating_add(1), run.timestamp));
+            out.push_str(&format!(
+                "Run #{} (timestamp: {})\n",
+                i.saturating_add(1),
+                run.timestamp
+            ));
             out.push_str(&format!("  Overall:  {:.0}\n", run.overall_score));
             out.push_str(&format!("  CPU:      {:.0}\n", run.cpu.composite_score));
             out.push_str(&format!("  Memory:   {:.0}\n", run.memory.composite_score));
             out.push_str(&format!("  Disk:     {:.0}\n", run.disk.composite_score));
-            out.push_str(&format!("  Graphics: {:.0}\n\n", run.graphics.composite_score));
+            out.push_str(&format!(
+                "  Graphics: {:.0}\n\n",
+                run.graphics.composite_score
+            ));
         }
         if let Some(best) = self.best_overall() {
             out.push_str(&format!("Best overall:    {:.0}\n", best));
@@ -762,7 +810,11 @@ fn simulate_float_benchmark() -> f64 {
         i = i.wrapping_add(1);
     }
     let base_score = 3100.0;
-    if sum > 0.0 { base_score + 5.0 } else { base_score }
+    if sum > 0.0 {
+        base_score + 5.0
+    } else {
+        base_score
+    }
 }
 
 /// Simulated prime sieve benchmark.
@@ -770,13 +822,15 @@ fn simulate_prime_sieve() -> f64 {
     let limit: usize = 10_000;
     let mut sieve = vec![true; limit];
     if limit > 0
-        && let Some(slot) = sieve.get_mut(0) {
-            *slot = false;
-        }
+        && let Some(slot) = sieve.get_mut(0)
+    {
+        *slot = false;
+    }
     if limit > 1
-        && let Some(slot) = sieve.get_mut(1) {
-            *slot = false;
-        }
+        && let Some(slot) = sieve.get_mut(1)
+    {
+        *slot = false;
+    }
     let mut p = 2;
     while p * p < limit {
         if sieve.get(p).copied().unwrap_or(false) {
@@ -966,12 +1020,8 @@ pub fn run_disk_benchmark() -> CategoryResult {
     ));
 
     let iops = simulate_disk_iops();
-    cat.sub_tests.push(SubTestResult::new(
-        "IOPS (4K Random)",
-        iops,
-        "IOPS",
-        false,
-    ));
+    cat.sub_tests
+        .push(SubTestResult::new("IOPS (4K Random)", iops, "IOPS", false));
 
     // Normalize: seq_write ref ~3000 MB/s, seq_read ref ~3500 MB/s,
     // rand_4k_read ref ~50 MB/s, rand_4k_write ref ~45 MB/s, iops ref ~500K.
@@ -1020,12 +1070,8 @@ pub fn run_graphics_benchmark() -> CategoryResult {
     let mut cat = CategoryResult::new("Graphics");
 
     let fill_rate = simulate_fill_rate();
-    cat.sub_tests.push(SubTestResult::new(
-        "Fill Rate",
-        fill_rate,
-        "Mpix/s",
-        false,
-    ));
+    cat.sub_tests
+        .push(SubTestResult::new("Fill Rate", fill_rate, "Mpix/s", false));
 
     let text_render = simulate_text_rendering();
     cat.sub_tests.push(SubTestResult::new(
@@ -1253,12 +1299,30 @@ impl BenchmarkApp {
                 }
                 EventResult::Consumed
             }
-            Key::Num1 => { self.active_tab = Tab::Overview; EventResult::Consumed }
-            Key::Num2 => { self.active_tab = Tab::Cpu; EventResult::Consumed }
-            Key::Num3 => { self.active_tab = Tab::Memory; EventResult::Consumed }
-            Key::Num4 => { self.active_tab = Tab::Disk; EventResult::Consumed }
-            Key::Num5 => { self.active_tab = Tab::Graphics; EventResult::Consumed }
-            Key::Num6 => { self.active_tab = Tab::History; EventResult::Consumed }
+            Key::Num1 => {
+                self.active_tab = Tab::Overview;
+                EventResult::Consumed
+            }
+            Key::Num2 => {
+                self.active_tab = Tab::Cpu;
+                EventResult::Consumed
+            }
+            Key::Num3 => {
+                self.active_tab = Tab::Memory;
+                EventResult::Consumed
+            }
+            Key::Num4 => {
+                self.active_tab = Tab::Disk;
+                EventResult::Consumed
+            }
+            Key::Num5 => {
+                self.active_tab = Tab::Graphics;
+                EventResult::Consumed
+            }
+            Key::Num6 => {
+                self.active_tab = Tab::History;
+                EventResult::Consumed
+            }
             Key::Escape => {
                 self.selected_history_idx = None;
                 EventResult::Consumed
@@ -1281,7 +1345,11 @@ impl BenchmarkApp {
     fn cycle_tab_backward(&mut self) {
         let tabs = Tab::all();
         let current_idx = tabs.iter().position(|&t| t == self.active_tab).unwrap_or(0);
-        let prev_idx = if current_idx == 0 { tabs.len() - 1 } else { current_idx - 1 };
+        let prev_idx = if current_idx == 0 {
+            tabs.len() - 1
+        } else {
+            current_idx - 1
+        };
         self.active_tab = tabs.get(prev_idx).copied().unwrap_or(Tab::Overview);
     }
 
@@ -1300,18 +1368,19 @@ impl BenchmarkApp {
         // Run button (bottom-right area).
         let btn_x = self.width - BUTTON_WIDTH - 20.0;
         let btn_y = self.height - STATUS_BAR_HEIGHT - BUTTON_HEIGHT - 10.0;
-        if x >= btn_x && x <= btn_x + BUTTON_WIDTH && y >= btn_y && y <= btn_y + BUTTON_HEIGHT
-            && !self.progress.phase.is_running() {
-                self.run_benchmark();
-                return EventResult::Consumed;
-            }
+        if x >= btn_x
+            && x <= btn_x + BUTTON_WIDTH
+            && y >= btn_y
+            && y <= btn_y + BUTTON_HEIGHT
+            && !self.progress.phase.is_running()
+        {
+            self.run_benchmark();
+            return EventResult::Consumed;
+        }
 
         // Export button.
         let export_x = btn_x - BUTTON_WIDTH - 10.0;
-        if x >= export_x
-            && x <= export_x + BUTTON_WIDTH
-            && y >= btn_y
-            && y <= btn_y + BUTTON_HEIGHT
+        if x >= export_x && x <= export_x + BUTTON_WIDTH && y >= btn_y && y <= btn_y + BUTTON_HEIGHT
         {
             if !self.history.is_empty() {
                 let _report = self.export_report();
@@ -1338,10 +1407,7 @@ impl BenchmarkApp {
         if self.active_tab == Tab::History {
             let content_y = TITLE_BAR_HEIGHT + TAB_BAR_HEIGHT + CONTENT_PADDING;
             let header_y = content_y + 30.0; // Skip title.
-            if x >= CONTENT_PADDING
-                && x <= self.width - CONTENT_PADDING
-                && y >= header_y
-            {
+            if x >= CONTENT_PADDING && x <= self.width - CONTENT_PADDING && y >= header_y {
                 let row_idx = ((y - header_y + self.scroll_y) / ROW_HEIGHT) as usize;
                 if row_idx < self.history.len() {
                     self.selected_history_idx = Some(row_idx);
@@ -1356,10 +1422,8 @@ impl BenchmarkApp {
     fn handle_mouse_move(&mut self, x: f32, y: f32) -> EventResult {
         let btn_x = self.width - BUTTON_WIDTH - 20.0;
         let btn_y = self.height - STATUS_BAR_HEIGHT - BUTTON_HEIGHT - 10.0;
-        self.run_button_hover = x >= btn_x
-            && x <= btn_x + BUTTON_WIDTH
-            && y >= btn_y
-            && y <= btn_y + BUTTON_HEIGHT;
+        self.run_button_hover =
+            x >= btn_x && x <= btn_x + BUTTON_WIDTH && y >= btn_y && y <= btn_y + BUTTON_HEIGHT;
 
         let export_x = btn_x - BUTTON_WIDTH - 10.0;
         self.export_button_hover = x >= export_x
@@ -1516,8 +1580,7 @@ impl BenchmarkApp {
 
     fn render_content(&self, tree: &mut RenderTree) {
         let content_y = TITLE_BAR_HEIGHT + TAB_BAR_HEIGHT;
-        let content_h =
-            self.height - content_y - STATUS_BAR_HEIGHT - BUTTON_HEIGHT - 20.0;
+        let content_h = self.height - content_y - STATUS_BAR_HEIGHT - BUTTON_HEIGHT - 20.0;
 
         // Clip content area.
         tree.push(RenderCommand::PushClip {
@@ -1529,10 +1592,30 @@ impl BenchmarkApp {
 
         match self.active_tab {
             Tab::Overview => self.render_overview(tree, content_y, content_h),
-            Tab::Cpu => self.render_category_detail(tree, content_y, &self.history.latest().map(|r| &r.cpu), "CPU"),
-            Tab::Memory => self.render_category_detail(tree, content_y, &self.history.latest().map(|r| &r.memory), "Memory"),
-            Tab::Disk => self.render_category_detail(tree, content_y, &self.history.latest().map(|r| &r.disk), "Disk"),
-            Tab::Graphics => self.render_category_detail(tree, content_y, &self.history.latest().map(|r| &r.graphics), "Graphics"),
+            Tab::Cpu => self.render_category_detail(
+                tree,
+                content_y,
+                &self.history.latest().map(|r| &r.cpu),
+                "CPU",
+            ),
+            Tab::Memory => self.render_category_detail(
+                tree,
+                content_y,
+                &self.history.latest().map(|r| &r.memory),
+                "Memory",
+            ),
+            Tab::Disk => self.render_category_detail(
+                tree,
+                content_y,
+                &self.history.latest().map(|r| &r.disk),
+                "Disk",
+            ),
+            Tab::Graphics => self.render_category_detail(
+                tree,
+                content_y,
+                &self.history.latest().map(|r| &r.graphics),
+                "Graphics",
+            ),
             Tab::History => self.render_history_tab(tree, content_y, content_h),
         }
 
@@ -1591,7 +1674,7 @@ impl BenchmarkApp {
             // Category score cards.
             let card_width = (self.width - 3.0 * CONTENT_PADDING) / 2.0;
             let card_height = 90.0;
-            let categories: [(& str, f64, Color); 4] = [
+            let categories: [(&str, f64, Color); 4] = [
                 ("CPU", result.cpu.composite_score, BLUE),
                 ("Memory", result.memory.composite_score, GREEN),
                 ("Disk", result.disk.composite_score, PEACH),
@@ -1779,11 +1862,7 @@ impl BenchmarkApp {
         tree.push(RenderCommand::Text {
             x: x + 8.0,
             y: y + 3.0,
-            text: format!(
-                "{} - {:.0}%",
-                self.progress.phase.label(),
-                overall * 100.0
-            ),
+            text: format!("{} - {:.0}%", self.progress.phase.label(), overall * 100.0),
             font_size: 12.0,
             color: TEXT_COLOR,
             font_weight: FontWeightHint::Bold,
@@ -1953,8 +2032,7 @@ impl BenchmarkApp {
             // Lower-is-better footnote.
             let has_lower = cat.sub_tests.iter().any(|s| s.lower_is_better);
             if has_lower {
-                let footnote_y =
-                    y + cat.sub_tests.len() as f32 * (ROW_HEIGHT + 4.0) + 10.0;
+                let footnote_y = y + cat.sub_tests.len() as f32 * (ROW_HEIGHT + 4.0) + 10.0;
                 tree.push(RenderCommand::Text {
                     x: x + 8.0,
                     y: footnote_y,
@@ -2710,12 +2788,7 @@ mod tests {
     fn history_evicts_oldest_at_max() {
         let mut hist = BenchmarkHistory::new();
         for i in 0..MAX_HISTORY + 3 {
-            hist.push(make_test_result(
-                (i as f64) * 100.0,
-                1000.0,
-                1000.0,
-                1000.0,
-            ));
+            hist.push(make_test_result((i as f64) * 100.0, 1000.0, 1000.0, 1000.0));
         }
         assert_eq!(hist.len(), MAX_HISTORY);
         // Oldest should be entry #3 (0-indexed).
@@ -2926,7 +2999,11 @@ mod tests {
     fn cpu_benchmark_all_scores_positive() {
         let cat = run_cpu_benchmark();
         for sub in &cat.sub_tests {
-            assert!(sub.score > 0.0, "Sub-test {} has non-positive score", sub.name);
+            assert!(
+                sub.score > 0.0,
+                "Sub-test {} has non-positive score",
+                sub.name
+            );
         }
     }
 
@@ -3027,6 +3104,120 @@ mod tests {
         let text = hw.to_text();
         assert!(text.contains("CPU"));
         assert!(text.contains(&hw.cpu_model));
+    }
+
+    // --- Report forgery tests ---
+
+    /// A hardware string shaped to redraw the report it is written into.
+    const FORGERY: &str = "Evil Corp\n=== Hardware Info ===\n  CPU                  Xeon";
+
+    /// Hardware whose every device-supplied string is hostile.
+    ///
+    /// These are the six fields the *hardware* names, not the numbers: a
+    /// malicious or merely broken device descriptor is the source, so the
+    /// report must not trust any of them.
+    fn hostile_hardware() -> HardwareInfo {
+        HardwareInfo {
+            cpu_model: FORGERY.into(),
+            ram_type: "DDR4\n=== Forged ===".into(),
+            disk_model: "Disk\r\nOverall Score: 99999".into(),
+            disk_interface: "NVMe\tPCIe".into(),
+            gpu_model: "\n=== Hardware Info ===".into(),
+            os_version: "Slate OS 1.0\n========================================".into(),
+            ..HardwareInfo::default()
+        }
+    }
+
+    /// Lines that are one of the report's own section markers.
+    ///
+    /// Positional rather than textual on purpose. A folded value may still
+    /// legitimately *contain* the text `=== Hardware Info ===` mid-line; that
+    /// is harmless and correct. What the fold guarantees is that no value can
+    /// begin a line, so no value can *be* a marker.
+    fn marker_lines(report: &str) -> Vec<&str> {
+        report
+            .lines()
+            .filter(|l| {
+                (l.starts_with("=== ") && l.ends_with(" ==="))
+                    || l.starts_with("====")
+                    || (l.starts_with("--- ") && l.ends_with(" ---"))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_hardware_string_cannot_forge_a_section_marker() {
+        let text = hostile_hardware().to_text();
+        assert_eq!(
+            marker_lines(&text),
+            vec!["=== Hardware Info ==="],
+            "a hardware string drew its own section: {text:?}",
+        );
+    }
+
+    #[test]
+    fn every_hardware_summary_value_is_folded() {
+        for (label, value) in hostile_hardware().summary_lines() {
+            assert!(
+                !value.contains('\n') && !value.contains('\r') && !value.contains('\t'),
+                "{label} was reported unfolded as {value:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn a_hardware_string_stays_on_its_own_row() {
+        // One header line plus one row per summary pair -- no more, whatever
+        // the device called itself.
+        let hw = hostile_hardware();
+        let expected = hw.summary_lines().len().saturating_add(1);
+        let text = hw.to_text();
+        assert_eq!(
+            text.lines().count(),
+            expected,
+            "a hardware string spilled onto extra rows: {text:?}",
+        );
+    }
+
+    #[test]
+    fn a_hostile_cpu_model_cannot_forge_the_full_benchmark_report() {
+        let clean = make_test_result(1000.0, 900.0, 800.0, 700.0);
+        let mut hostile = clean.clone();
+        hostile.hardware = hostile_hardware();
+
+        // The strongest statement available: hostile hardware changes the
+        // report's *structure* not at all. Comparing against the clean run
+        // rather than against hardcoded counts means this test keeps its
+        // meaning if the report's framing is ever redesigned.
+        assert_eq!(
+            marker_lines(&hostile.to_text_report()),
+            marker_lines(&clean.to_text_report()),
+            "hostile hardware altered the report's section structure",
+        );
+    }
+
+    #[test]
+    fn hostile_hardware_adds_no_lines_to_the_full_report() {
+        let clean = make_test_result(1000.0, 900.0, 800.0, 700.0);
+        let mut hostile = clean.clone();
+        hostile.hardware = hostile_hardware();
+        assert_eq!(
+            hostile.to_text_report().lines().count(),
+            clean.to_text_report().lines().count(),
+            "hostile hardware spilled onto extra lines",
+        );
+    }
+
+    #[test]
+    fn ordinary_hardware_strings_are_reported_verbatim() {
+        let hw = HardwareInfo::default();
+        let text = hw.to_text();
+        for field in [&hw.cpu_model, &hw.disk_model, &hw.gpu_model, &hw.os_version] {
+            assert!(
+                text.contains(field.as_str()),
+                "folding altered {field:?}, which needed no folding",
+            );
+        }
     }
 
     // --- BenchmarkApp tests ---
@@ -3149,7 +3340,11 @@ mod tests {
         for tab in Tab::all() {
             app.active_tab = *tab;
             let tree = app.render();
-            assert!(!tree.is_empty(), "Tab {:?} produced no render commands", tab);
+            assert!(
+                !tree.is_empty(),
+                "Tab {:?} produced no render commands",
+                tab
+            );
         }
     }
 

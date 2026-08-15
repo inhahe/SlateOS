@@ -11,70 +11,43 @@ This file is distinct from:
   `Decided by: Operator` entry and delete it from this file.
 - **`known-issues.md`** — bugs and accumulated technical debt.
 - **`todo.txt`** — the working scratchpad / judgment-call log.
+- **`deferred-questions.md`** — questions that will need the operator *eventually*
+  but cannot be answered usefully yet, each with a trigger for promoting it back
+  here. Anything whose own text says "ask again later" belongs there, not here:
+  this file is a queue, and a padded queue gets skimmed.
 
-Format for each entry:
+Format for each entry — **written for a reader who does not know the
+subsystem**, because an entry the operator cannot decide from has failed no
+matter how correct it is:
 
-- **Question** — the decision to be made.
-- **Options** — each with its pros and cons.
+- **`In short:`** — 2–4 sentences, **no jargon**, opening every entry: what is
+  wrong now, what a user would actually see, and what the choice is between. If
+  a term of art seems unavoidable here, the paragraph is wrong — rewrite it.
+- **Question** — the decision to be made, with every term of art glossed in-line
+  on first use in ≤ 10 words, even if it is glossed in another entry. Assume
+  nothing carries over: the operator reads one entry at a time, months apart.
+- **Options** — each with pros, cons, and a one-line **`What changes:`** stated
+  as an observable difference ("the clock reads Eastern instead of UTC"), not an
+  implementation, so the options can be compared without reading the prose.
+- **If never answered** — one line: is today's behaviour safe, is anything
+  blocked, does it get worse with time.
 - **Claude's recommendation** — if there is a defensible default (and what
   Claude is doing in the meantime).
 - **Where it bites** — files/symbols affected, so the resolution can be applied.
 - **Status** — `OPEN` until the operator decides.
 
+Keep entries to what a *decision* needs. Detail that only matters after the
+answer belongs in `known-issues.md` or the `requests/` file. Prefer a short
+table to a paragraph and a concrete example to an abstraction. (The rule is in
+`CLAUDE.md` → "Write `open-questions.md` for a reader who does not know the
+subsystem".)
+
 Earlier deferred operator decisions (Q1–Q38) have been
 resolved — see the "Recently resolved" list below and `design-decisions.md` for
-full rationale. New decisions should be appended as `## Q40 …` just above the
-`---` separator that precedes the "Recently resolved" list.
-
-## Q39 — Where should the *shipping default* point once a fastpy utility clears both bars? — Status: OPEN
-
-**Question.** §108 settled that fastpy utilities stay additive for now and that
-the trajectory is for them to become real implementations, per command, once
-each has (a) a parity test suite and (b) measured performance that is faster,
-equal, or not significantly slower than the canonical implementation — with the
-user able to opt in. What it deliberately left open is which way the **default**
-points in a stock install: does SlateOS prefer the fastpy implementation
-wherever one has cleared both bars, or prefer the canonical one and make fastpy
-the thing you switch on?
-
-This is not the same as "may fastpy ever replace a Rust coreutil" — that is
-answered (yes, per command, gated). This is about what a user who never touches
-the setting gets.
-
-**Options.**
-
-- **A — canonical by default, fastpy opt-in.** *Pro:* a stock install is always
-  the most-exercised code path, so bug reports and performance numbers describe
-  what almost everyone runs; switching is a deliberate act with a deliberate
-  owner. *Con:* the fastpy implementations stay lightly exercised in the field
-  precisely because they are off, which is the same "perpetual demo" trap §108
-  was trying to leave — just one bar higher.
-- **B — fastpy by default wherever it has cleared both bars, canonical opt-out.**
-  *Pro:* the bars are the whole point; if a fastpy utility is genuinely at parity
-  and not slower, defaulting to it is what makes the two bars mean something, and
-  it gets real-world exercise. *Con:* the bars are measured, not proven — a
-  parity suite is not the same as years of field use, and the failure mode is
-  user-visible behaviour changing under people who never asked for it.
-- **C — per-command, decided at promotion time.** Each utility's swap carries its
-  own default, argued on its own evidence. *Pro:* no blanket rule to be wrong
-  about; a `cat` and a package manager are not the same risk. *Con:* no coherent
-  story for a user to hold ("which of my tools are which?"), and it defers the
-  question forever by construction.
-
-**Claude's recommendation.** None yet, on purpose. Answering this before a
-single fastpy utility has cleared both bars would be answering it without
-evidence — the honest input is *how close to parity the first one actually gets
-and what it measures*, and that does not exist yet. Ask again then.
-
-**Not blocking.** §108 part 1 (additive-only promotion into the test rootfs) is
-the current behaviour and needs no answer here. This question only becomes live
-at the first real swap.
-
-**Where it bites.** `scripts/create-ext4-rootfs.sh` (the `PROMOTED` map, and
-whatever assembles the production rootfs `/bin`), `kernel/src/proc/spawn.rs`
-(`resolve_command` / `COMMAND_PATH`), and wherever the opt-in switch ends up
-living — most likely the settings surface rather than a build flag, since §108
-makes it a user choice.
+full rationale. New decisions are appended just above the `---` separator that
+precedes the "Recently resolved" list, numbered with your lane's prefix
+(`A-Q<n>`, `B-Q<n>`, `C-Q<n>`) — the unprefixed `Q<n>` numbers are pre-split and
+are not to be extended.
 
 ## Q40 — Should osh reproduce bash's *null array element*, which looks like an upstream defect? — Status: **RESOLVED 2026-08-15 → design-decisions.md §309**
 
@@ -334,7 +307,36 @@ for loud breakage in every port that calls it informationally.
    flip from advisory to enforcing is boot-test-visible and lands with QEMU
    free.
 
-## Q45 — Text clipped by `max_width` is cut mid-glyph with no ellipsis. Should `RenderCommand::Text` carry an overflow policy? — Status: OPEN
+## Q45 — Text clipped by `max_width` is cut mid-glyph with no ellipsis. Should `RenderCommand::Text` carry an overflow policy? — Status: **ANSWERED 2026-08-15 — Lane C to record in `design-decisions.md`**
+
+### ANSWER 2026-08-15 — option **A**: `RenderCommand::Text` gets an `overflow` field
+
+The operator answered in a Lane B session. Verbatim: **"q45: a."** That is
+Claude's own recommendation, so nothing about the plan changes — but it is a
+decision now, not a proposal.
+
+**What was chosen.** Add an `overflow: TextOverflow` field (`Clip` | `Ellipsis`)
+to `RenderCommand::Text`, and let the **compositor** draw the ellipsis, because
+it is the only party that knows exactly where the glyphs ran out. One
+measurement instead of two, and the policy is visible at every call site.
+
+**The cost that was accepted, so it is on the record.** Rust has no default for
+a struct-variant field, so this edits **every construction of `Text` in the
+tree** — several hundred sites across `gui/**` and `apps/**`. The question said
+so, and the answer is still A. Two consequences follow:
+
+- **Land it as its own commit with nothing else in flight.** A several-hundred-
+  site mechanical diff conflicts with anything else touching rendering, and this
+  is the same trap `§310` (the rustfmt reformat) was about — a wide mechanical
+  change entangled with real work cannot be separated afterwards.
+- **`gui/**` and `apps/**` are Lane C's tree.** Lane B is recording the answer,
+  not implementing it. Filed as
+  `requests/b-c-operator-answered-q45-and-c-q1.md`.
+
+**Recording:** `design-decisions.md` under Lane C's §400–499 range. Lane B has
+deliberately not written it there — inventing a section number from another
+lane's range is how two lanes collide after a merge. Also close
+`known-issues.md` → `TD-GUI-CLIPPED-TEXT-IS-NOT-MARKED` when it lands.
 
 **Raised by Claude** (2026-08-14), falling out of the pass that closed
 `known-issues.md` → `TD-GUI-TEXT-COMMAND-DOES-NOT-WRAP`. Logged there as
@@ -389,6 +391,27 @@ blindly.
 Some(..)` in `gui/**` and `apps/**`.
 
 ## A-Q1 — Install the GNAT/SPARK and LLVM toolchains? — Status: **A ANSWERED 2026-08-15 (Lane A to record in `design-decisions.md`) — B STILL OPEN**
+
+**In short:** this entry asked about **two unrelated compiler installs** in one
+question, and only the first was answered.
+
+| | What it is | Status |
+|---|---|---|
+| **A** | **Ada/SPARK** — a second programming language whose toolchain can mathematically *prove* driver code has no buffer overflows and no bad state transitions. `design.txt` wants it for safety-critical drivers. | ✅ **Answered: install it, with the prover (`gnatprove`).** |
+| **B** | **clang + lld** — an alternative C compiler and linker. Installing them is what would let us switch on **CFI** (Control-Flow Integrity: a compiler feature that stops an attacker redirecting a function call to code of their choosing). | ❓ **Still open — nothing has been said about it.** |
+
+**What B is actually asking you for:** one word, install or don't. It is a
+small, standard, uncontroversial install. The only reason it isn't obvious is
+that the payoff is currently near zero — we use C only for *ported* code, and
+the one piece of C we compile today (`scripts/create-ext4-rootfs.sh`) is built
+with gcc, so turning CFI on would change Lane B's build for a benefit that only
+arrives when the big C ports (ext4, Mesa) land. It also pulls in LTO
+(whole-program optimization at link time), which slows every build it touches.
+Saying "not yet" costs nothing; nothing is blocked either way.
+
+*(Two smaller follow-ups inside A are also unsettled — which GNAT distribution
+to install, and which cut-down Ada runtime to use — but those are Lane A's calls
+to make, not yours. They are spelled out at the end of the answer below.)*
 
 ### ANSWER 2026-08-15 — option **A**, including `gnatprove`. Option **B** was not answered.
 
@@ -597,7 +620,41 @@ The two tests asserting the current UTC fallback
 failing the day the data lands** — that is the signal it worked, not a
 regression.
 
-## C-Q1 — Should normalization consult font coverage? The last 339 sweep disagreements are all this one question — Status: OPEN
+## C-Q1 — Should normalization consult font coverage? The last 339 sweep disagreements are all this one question — Status: **ANSWERED 2026-08-15 — Lane C to record in `design-decisions.md`**
+
+### ANSWER 2026-08-15 — option **C**: keep `nfc` pure, let `fit_to_face` decompose what it cannot draw
+
+The operator answered in a Lane B session. Verbatim: **"c-q1: c."** That is
+Lane C's own recommendation, so the plan is unchanged — but it is now a decision
+and needs recording.
+
+**What was chosen.** The layering principle in `norm.rs`'s module doc **stands**:
+`nfc` answers a question about *text* and never looks at a font; `fit_to_face`
+answers a question about the *font*. The narrow fallback goes in the second
+stage — when `fit_to_face` meets a composed character the face cannot draw, and
+the *pieces* are drawable, it decomposes. `split_undrawable` already exists and
+already has this shape, which is why C was the recommendation.
+
+Result for the 339 residual sweep disagreements: they should move to `agree`
+without `nfc` ever taking a face as input.
+
+**The cost that was accepted.** Two mechanisms where HarfBuzz has one — we agree
+with HarfBuzz on output while diverging on structure. The concrete risk the
+question named is **mark reordering after a late decomposition**, which HarfBuzz
+gets right by construction and we would not. Treat that as the thing to test
+rather than assume: the sweep is the instrument, and any ordering case it
+surfaces is this decision's bill, not a surprise.
+
+**Not chosen, and why it matters later:** **B** (adopt HarfBuzz's font-aware
+recomposition) was refused because it makes normalization a function of
+`(text, face)` — no longer hoistable, no longer cacheable per string, not
+reasonable about without a font in hand. If a future case cannot be fixed inside
+`fit_to_face`, that is the argument that has to be beaten, not re-litigated from
+scratch.
+
+**Recording:** `design-decisions.md` under Lane C's §400–499 range — Lane C's own
+question, Lane C's own range, so Lane B has recorded the answer here only. Filed
+as `requests/b-c-operator-answered-q45-and-c-q1.md`.
 
 **Raised by Claude (Lane C)** (2026-08-15), on finishing `known-issues.md` →
 `TD-FONT-HAS-A-HANGUL-SHAPER-NOTHING-CALLS`. That fix took the HarfBuzz

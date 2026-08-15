@@ -509,9 +509,7 @@ impl DeviceInfo {
 
     /// Whether a driver update is available.
     pub fn has_driver_update(&self) -> bool {
-        self.driver
-            .as_ref()
-            .is_some_and(|d| d.update_available)
+        self.driver.as_ref().is_some_and(|d| d.update_available)
     }
 
     /// Format the MMIO range for display.
@@ -840,7 +838,10 @@ impl DeviceManagerState {
 
     /// Count devices with driver updates available.
     pub fn update_available_count(&self) -> usize {
-        self.devices.iter().filter(|d| d.has_driver_update()).count()
+        self.devices
+            .iter()
+            .filter(|d| d.has_driver_update())
+            .count()
     }
 
     /// Count total enabled devices.
@@ -863,9 +864,10 @@ impl DeviceManagerState {
     /// Toggle the expanded state of a category node.
     pub fn toggle_category(&mut self, index: usize) {
         if let Some(node) = self.tree_nodes.get_mut(index)
-            && node.category.is_some() {
-                node.expanded = !node.expanded;
-            }
+            && node.category.is_some()
+        {
+            node.expanded = !node.expanded;
+        }
     }
 
     /// Select a tree node by index.
@@ -889,13 +891,15 @@ impl DeviceManagerState {
             } else if node.category.is_some() {
                 // Category nodes: visible if any child matches.
                 let cat = node.category.expect("checked above");
-                node.visible = self.devices.iter().any(|d| {
-                    d.category == cat && device_matches_query(d, &q)
-                });
+                node.visible = self
+                    .devices
+                    .iter()
+                    .any(|d| d.category == cat && device_matches_query(d, &q));
             } else if let Some(dev_id) = node.device_id {
-                node.visible = self.devices.iter().any(|d| {
-                    d.id == dev_id && device_matches_query(d, &q)
-                });
+                node.visible = self
+                    .devices
+                    .iter()
+                    .any(|d| d.id == dev_id && device_matches_query(d, &q));
             }
         }
     }
@@ -947,6 +951,20 @@ impl DeviceManagerState {
     }
 
     /// Generate a hardware report as text.
+    ///
+    /// Every interpolated device string goes through [`report_field`]. The
+    /// report's structure is made of line breaks, `--- Section ---` headers
+    /// and two-space indentation, and the strings here are supplied by the
+    /// hardware: a USB device chooses its own product and manufacturer
+    /// descriptors, and nothing in the descriptor format forbids a line break
+    /// in one. A device calling itself
+    /// `"Mouse\n--- Storage ---\n  Disk [OK] (ACME)"` therefore writes a whole
+    /// forged section into the report of the machine it is plugged into.
+    ///
+    /// There is no importer, which is worth stating rather than using as a
+    /// reason to skip this: the absence of a parser does not make the output
+    /// correct, it only changes who is misled -- a person reading the report,
+    /// or whoever they send it to for diagnosis.
     pub fn export_report(&self) -> String {
         let mut report = String::new();
         report.push_str("=== Slate OS Hardware Report ===\n\n");
@@ -955,10 +973,7 @@ impl DeviceManagerState {
             "Problem Devices: {}\n",
             self.problem_device_count()
         ));
-        report.push_str(&format!(
-            "Enabled: {}\n\n",
-            self.enabled_device_count()
-        ));
+        report.push_str(&format!("Enabled: {}\n\n", self.enabled_device_count()));
 
         for cat in DeviceCategory::all() {
             let cat_devices: Vec<&DeviceInfo> =
@@ -970,24 +985,23 @@ impl DeviceManagerState {
             for dev in &cat_devices {
                 report.push_str(&format!(
                     "  {} [{}] ({})\n",
-                    dev.name,
+                    report_field(&dev.name),
                     dev.status.label(),
-                    dev.vendor,
+                    report_field(&dev.vendor),
                 ));
-                report.push_str(&format!("    Type: {}\n", dev.device_type));
+                report.push_str(&format!("    Type: {}\n", report_field(&dev.device_type)));
                 if let Some(ref hw_id) = dev.hw_id {
-                    report.push_str(&format!("    HW ID: {hw_id}\n"));
+                    report.push_str(&format!("    HW ID: {}\n", report_field(hw_id)));
                 }
                 report.push_str(&format!("    IRQ: {}\n", dev.format_irq()));
                 report.push_str(&format!("    MMIO: {}\n", dev.format_mmio()));
-                report.push_str(&format!(
-                    "    Location: {}\n",
-                    dev.location,
-                ));
+                report.push_str(&format!("    Location: {}\n", report_field(&dev.location),));
                 if let Some(ref drv) = dev.driver {
                     report.push_str(&format!(
                         "    Driver: {} v{} ({})\n",
-                        drv.name, drv.version, drv.provider,
+                        report_field(&drv.name),
+                        report_field(&drv.version),
+                        report_field(&drv.provider),
                     ));
                 }
                 report.push('\n');
@@ -1000,7 +1014,7 @@ impl DeviceManagerState {
             report.push_str(&format!(
                 "  IRQ {:>3}: {} {}\n",
                 irq.irq,
-                irq.device_name,
+                report_field(&irq.device_name),
                 if irq.shared { "(shared)" } else { "" },
             ));
         }
@@ -1011,7 +1025,7 @@ impl DeviceManagerState {
             report.push_str(&format!(
                 "  {} : {}\n",
                 mmio.format_range(),
-                mmio.device_name,
+                report_field(&mmio.device_name),
             ));
         }
         report.push('\n');
@@ -1020,7 +1034,8 @@ impl DeviceManagerState {
         for dma in &self.resource_view.dma_channels {
             report.push_str(&format!(
                 "  Channel {:>2}: {}\n",
-                dma.channel, dma.device_name,
+                dma.channel,
+                report_field(&dma.device_name),
             ));
         }
 
@@ -1070,6 +1085,37 @@ impl Default for DeviceManagerState {
     }
 }
 
+/// Fold a hardware-supplied string into something that can occupy one field of
+/// the text report without redrawing it.
+///
+/// This is a sanitise rather than an escape, and the choice is deliberate.
+/// There is no reader to undo an escape -- the report is read by a person --
+/// so a `\n` in the output would be noise to them while a real newline is a
+/// forged section header. Device names are short prose with no escape
+/// character of their own, so folding is the honest operation: every control
+/// character becomes at most one space, runs collapse, and the result is a
+/// readable phrase on one line.
+///
+/// Leading and trailing space is dropped rather than kept, because the report
+/// aligns fields with its own indentation and a device whose name begins with
+/// a run of spaces would otherwise appear to sit at a different tree depth.
+fn report_field(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut pending_space = false;
+    for c in s.chars() {
+        if c.is_control() || c == '\t' {
+            pending_space = !out.is_empty();
+            continue;
+        }
+        if pending_space {
+            out.push(' ');
+            pending_space = false;
+        }
+        out.push(c);
+    }
+    out
+}
+
 // ============================================================================
 // Helper: check if a device matches a search query
 // ============================================================================
@@ -1084,7 +1130,12 @@ fn device_matches_query(dev: &DeviceInfo, query: &str) -> bool {
         || dev.device_type.to_lowercase().contains(query)
         || dev.category.label().to_lowercase().contains(query)
         || dev.status.label().to_lowercase().contains(query)
-        || dev.hw_id.as_deref().unwrap_or("").to_lowercase().contains(query)
+        || dev
+            .hw_id
+            .as_deref()
+            .unwrap_or("")
+            .to_lowercase()
+            .contains(query)
         || dev.location.to_lowercase().contains(query)
         || dev
             .driver
@@ -1100,8 +1151,7 @@ fn device_matches_query(dev: &DeviceInfo, query: &str) -> bool {
 fn build_tree_nodes(devices: &[DeviceInfo]) -> Vec<TreeNode> {
     let mut nodes = Vec::new();
     for cat in DeviceCategory::all() {
-        let cat_devices: Vec<&DeviceInfo> =
-            devices.iter().filter(|d| d.category == *cat).collect();
+        let cat_devices: Vec<&DeviceInfo> = devices.iter().filter(|d| d.category == *cat).collect();
         if cat_devices.is_empty() {
             continue;
         }
@@ -1384,17 +1434,72 @@ fn sample_devices() -> Vec<DeviceInfo> {
 /// Generate sample event history for development/testing.
 fn sample_events() -> Vec<DeviceEvent> {
     vec![
-        DeviceEvent::new(1, DeviceEventKind::Connected, "2026-05-18 08:00:12", "Virtio GPU enumerated at boot"),
-        DeviceEvent::new(1, DeviceEventKind::DriverLoaded, "2026-05-18 08:00:13", "virtio-gpu v1.2.0 loaded"),
-        DeviceEvent::new(3, DeviceEventKind::Connected, "2026-05-18 08:00:14", "Virtio NIC enumerated"),
-        DeviceEvent::new(3, DeviceEventKind::DriverLoaded, "2026-05-18 08:00:15", "virtio-net v2.0.1 loaded"),
-        DeviceEvent::new(11, DeviceEventKind::Connected, "2026-05-18 08:00:16", "RTL8139 detected"),
-        DeviceEvent::new(11, DeviceEventKind::Error, "2026-05-18 08:00:17", "Hardware error code 10"),
-        DeviceEvent::new(11, DeviceEventKind::Disabled, "2026-05-18 08:01:00", "Disabled by user"),
-        DeviceEvent::new(12, DeviceEventKind::Connected, "2026-05-18 09:15:30", "USB device plugged in"),
-        DeviceEvent::new(12, DeviceEventKind::DriverLoaded, "2026-05-18 09:15:31", "usb-storage v1.1.0 loaded"),
-        DeviceEvent::new(12, DeviceEventKind::Disabled, "2026-05-18 09:20:00", "Disabled by administrator"),
-        DeviceEvent::new(10, DeviceEventKind::Connected, "2026-05-18 08:00:18", "Unknown PCI device found"),
+        DeviceEvent::new(
+            1,
+            DeviceEventKind::Connected,
+            "2026-05-18 08:00:12",
+            "Virtio GPU enumerated at boot",
+        ),
+        DeviceEvent::new(
+            1,
+            DeviceEventKind::DriverLoaded,
+            "2026-05-18 08:00:13",
+            "virtio-gpu v1.2.0 loaded",
+        ),
+        DeviceEvent::new(
+            3,
+            DeviceEventKind::Connected,
+            "2026-05-18 08:00:14",
+            "Virtio NIC enumerated",
+        ),
+        DeviceEvent::new(
+            3,
+            DeviceEventKind::DriverLoaded,
+            "2026-05-18 08:00:15",
+            "virtio-net v2.0.1 loaded",
+        ),
+        DeviceEvent::new(
+            11,
+            DeviceEventKind::Connected,
+            "2026-05-18 08:00:16",
+            "RTL8139 detected",
+        ),
+        DeviceEvent::new(
+            11,
+            DeviceEventKind::Error,
+            "2026-05-18 08:00:17",
+            "Hardware error code 10",
+        ),
+        DeviceEvent::new(
+            11,
+            DeviceEventKind::Disabled,
+            "2026-05-18 08:01:00",
+            "Disabled by user",
+        ),
+        DeviceEvent::new(
+            12,
+            DeviceEventKind::Connected,
+            "2026-05-18 09:15:30",
+            "USB device plugged in",
+        ),
+        DeviceEvent::new(
+            12,
+            DeviceEventKind::DriverLoaded,
+            "2026-05-18 09:15:31",
+            "usb-storage v1.1.0 loaded",
+        ),
+        DeviceEvent::new(
+            12,
+            DeviceEventKind::Disabled,
+            "2026-05-18 09:20:00",
+            "Disabled by administrator",
+        ),
+        DeviceEvent::new(
+            10,
+            DeviceEventKind::Connected,
+            "2026-05-18 08:00:18",
+            "Unknown PCI device found",
+        ),
     ]
 }
 
@@ -1501,7 +1606,11 @@ fn render_toolbar(state: &DeviceManagerState, cmds: &mut Vec<RenderCommand>) {
         let btn_y = y + (TOOLBAR_HEIGHT - TOOLBAR_BTN_HEIGHT) / 2.0;
 
         let is_hovered = state.hovered_toolbar_action == Some(i);
-        let bg = if is_hovered { COLOR_SURFACE2 } else { COLOR_SURFACE1 };
+        let bg = if is_hovered {
+            COLOR_SURFACE2
+        } else {
+            COLOR_SURFACE1
+        };
 
         cmds.push(RenderCommand::FillRect {
             x: btn_x,
@@ -1691,7 +1800,6 @@ fn render_sidebar(state: &DeviceManagerState, cmds: &mut Vec<RenderCommand>) {
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
                 });
-
 
                 cmds.push(RenderCommand::Text {
                     x: indent + 14.0,
@@ -1894,11 +2002,7 @@ fn render_tab_bar(
             });
         }
 
-        let text_color = if is_active {
-            COLOR_BLUE
-        } else {
-            COLOR_SUBTEXT
-        };
+        let text_color = if is_active { COLOR_BLUE } else { COLOR_SUBTEXT };
 
         cmds.push(RenderCommand::Text {
             x: tab_x + tab_width / 2.0 - 20.0,
@@ -1994,12 +2098,22 @@ fn render_general_tab(
         ("Type", dev.device_type.clone()),
         ("Vendor", dev.vendor.clone()),
         ("Category", dev.category.label().to_string()),
-        ("HW ID", dev.hw_id.clone().unwrap_or_else(|| "N/A".to_string())),
+        (
+            "HW ID",
+            dev.hw_id.clone().unwrap_or_else(|| "N/A".to_string()),
+        ),
         ("IRQ", dev.format_irq()),
         ("MMIO", dev.format_mmio()),
-        ("DMA", dev.dma_channel.map_or("N/A".to_string(), |c| format!("Channel {c}"))),
+        (
+            "DMA",
+            dev.dma_channel
+                .map_or("N/A".to_string(), |c| format!("Channel {c}")),
+        ),
         ("Location", dev.location.clone()),
-        ("Enabled", if dev.enabled { "Yes" } else { "No" }.to_string()),
+        (
+            "Enabled",
+            if dev.enabled { "Yes" } else { "No" }.to_string(),
+        ),
     ];
 
     for (label, value) in &properties {
@@ -2359,7 +2473,9 @@ fn render_resources_tab(
     cmds.push(RenderCommand::Text {
         x: value_x,
         y: row_y,
-        text: dev.dma_channel.map_or("N/A".to_string(), |c| format!("{c}")),
+        text: dev
+            .dma_channel
+            .map_or("N/A".to_string(), |c| format!("{c}")),
         font_size: 11.0,
         color: COLOR_TEXT,
         font_weight: FontWeightHint::Regular,
@@ -2727,11 +2843,12 @@ fn handle_key_event(state: &mut DeviceManagerState, key: &KeyEvent) -> EventResu
             }
             _ => {
                 if let Some(ch) = key.text
-                    && !ch.is_control() {
-                        state.search_query.push(ch);
-                        state.apply_search_filter();
-                        return EventResult::Consumed;
-                    }
+                    && !ch.is_control()
+                {
+                    state.search_query.push(ch);
+                    state.apply_search_filter();
+                    return EventResult::Consumed;
+                }
             }
         }
         return EventResult::Consumed;
@@ -2791,36 +2908,44 @@ fn handle_key_event(state: &mut DeviceManagerState, key: &KeyEvent) -> EventResu
         Key::Left => {
             // Collapse category or move to parent category
             if let Some(idx) = state.selected_tree_index
-                && let Some(node) = state.tree_nodes.get(idx) {
-                    if node.category.is_some() && node.expanded {
-                        state.toggle_category(idx);
-                    } else if node.device_id.is_some() {
-                        // Move to parent category
-                        for i in (0..idx).rev() {
-                            if state.tree_nodes.get(i).is_some_and(|n| n.category.is_some()) {
-                                state.select_tree_node(i);
-                                break;
-                            }
+                && let Some(node) = state.tree_nodes.get(idx)
+            {
+                if node.category.is_some() && node.expanded {
+                    state.toggle_category(idx);
+                } else if node.device_id.is_some() {
+                    // Move to parent category
+                    for i in (0..idx).rev() {
+                        if state
+                            .tree_nodes
+                            .get(i)
+                            .is_some_and(|n| n.category.is_some())
+                        {
+                            state.select_tree_node(i);
+                            break;
                         }
                     }
                 }
+            }
             EventResult::Consumed
         }
         Key::Right => {
             // Expand category
             if let Some(idx) = state.selected_tree_index
                 && let Some(node) = state.tree_nodes.get(idx)
-                    && node.category.is_some() && !node.expanded {
-                        state.toggle_category(idx);
-                    }
+                && node.category.is_some()
+                && !node.expanded
+            {
+                state.toggle_category(idx);
+            }
             EventResult::Consumed
         }
         Key::Enter | Key::Space => {
             if let Some(idx) = state.selected_tree_index
                 && let Some(node) = state.tree_nodes.get(idx)
-                    && node.category.is_some() {
-                        state.toggle_category(idx);
-                    }
+                && node.category.is_some()
+            {
+                state.toggle_category(idx);
+            }
             EventResult::Consumed
         }
         Key::Tab => {
@@ -2874,10 +2999,7 @@ fn handle_mouse_event(
 
             // Check search bar
             let search_y = TITLE_BAR_HEIGHT + TOOLBAR_HEIGHT;
-            if mx < SIDEBAR_WIDTH
-                && my >= search_y
-                && my < search_y + SEARCH_BAR_HEIGHT
-            {
+            if mx < SIDEBAR_WIDTH && my >= search_y && my < search_y + SEARCH_BAR_HEIGHT {
                 state.search_focused = true;
                 return EventResult::Consumed;
             }
@@ -2891,9 +3013,10 @@ fn handle_mouse_event(
                 let click_y = my - tree_top + state.tree_scroll;
                 if let Some(idx) = tree_hit_test(state, click_y) {
                     if let Some(node) = state.tree_nodes.get(idx)
-                        && node.category.is_some() {
-                            state.toggle_category(idx);
-                        }
+                        && node.category.is_some()
+                    {
+                        state.toggle_category(idx);
+                    }
                     state.select_tree_node(idx);
                     return EventResult::Consumed;
                 }
@@ -3026,9 +3149,10 @@ fn is_node_visible(state: &DeviceManagerState, index: usize) -> bool {
     // Device node: check if parent category is expanded.
     for i in (0..index).rev() {
         if let Some(parent) = state.tree_nodes.get(i)
-            && parent.category.is_some() {
-                return parent.expanded;
-            }
+            && parent.category.is_some()
+        {
+            return parent.expanded;
+        }
     }
     true
 }
@@ -3081,7 +3205,13 @@ mod tests {
         let cats = DeviceCategory::all();
         for i in 0..cats.len() {
             for j in (i + 1)..cats.len() {
-                assert_ne!(cats[i].color(), cats[j].color(), "Categories {:?} and {:?} share a color", cats[i], cats[j]);
+                assert_ne!(
+                    cats[i].color(),
+                    cats[j].color(),
+                    "Categories {:?} and {:?} share a color",
+                    cats[i],
+                    cats[j]
+                );
             }
         }
     }
@@ -3120,7 +3250,13 @@ mod tests {
 
     #[test]
     fn test_status_color_nonzero_alpha() {
-        for status in &[DeviceStatus::Working, DeviceStatus::Warning, DeviceStatus::Error, DeviceStatus::Disabled, DeviceStatus::Unknown] {
+        for status in &[
+            DeviceStatus::Working,
+            DeviceStatus::Warning,
+            DeviceStatus::Error,
+            DeviceStatus::Disabled,
+            DeviceStatus::Unknown,
+        ] {
             assert_eq!(status.color().a, 255);
         }
     }
@@ -3156,7 +3292,12 @@ mod tests {
 
     #[test]
     fn test_device_event_new() {
-        let ev = DeviceEvent::new(42, DeviceEventKind::Connected, "2026-01-01 00:00:00", "test detail");
+        let ev = DeviceEvent::new(
+            42,
+            DeviceEventKind::Connected,
+            "2026-01-01 00:00:00",
+            "test detail",
+        );
         assert_eq!(ev.device_id, 42);
         assert_eq!(ev.kind, DeviceEventKind::Connected);
         assert_eq!(ev.timestamp, "2026-01-01 00:00:00");
@@ -3375,7 +3516,10 @@ mod tests {
             if nodes[i].device_id.is_some() {
                 // There must be a category before it
                 let found_cat = nodes[..i].iter().rev().any(|n| n.category.is_some());
-                assert!(found_cat, "Device node at index {i} has no preceding category");
+                assert!(
+                    found_cat,
+                    "Device node at index {i} has no preceding category"
+                );
             }
         }
     }
@@ -3431,7 +3575,10 @@ mod tests {
         assert_eq!(UpdateCheckStatus::NotChecked.label(), "Not Checked");
         assert_eq!(UpdateCheckStatus::Checking.label(), "Checking...");
         assert_eq!(UpdateCheckStatus::UpToDate.label(), "Up to Date");
-        assert_eq!(UpdateCheckStatus::UpdateAvailable.label(), "Update Available");
+        assert_eq!(
+            UpdateCheckStatus::UpdateAvailable.label(),
+            "Update Available"
+        );
         assert_eq!(UpdateCheckStatus::Failed.label(), "Check Failed");
     }
 
@@ -3531,7 +3678,11 @@ mod tests {
     fn test_state_select_device() {
         let mut state = DeviceManagerState::new();
         // Find a device node
-        let dev_idx = state.tree_nodes.iter().position(|n| n.device_id.is_some()).expect("has device nodes");
+        let dev_idx = state
+            .tree_nodes
+            .iter()
+            .position(|n| n.device_id.is_some())
+            .expect("has device nodes");
         state.select_tree_node(dev_idx);
         assert_eq!(state.selected_tree_index, Some(dev_idx));
         assert!(state.selected_device().is_some());
@@ -3550,7 +3701,10 @@ mod tests {
         let state = DeviceManagerState::new();
         let count = state.problem_device_count();
         // Sample data has at least 1 warning and 1 error device
-        assert!(count >= 2, "Expected at least 2 problem devices, got {count}");
+        assert!(
+            count >= 2,
+            "Expected at least 2 problem devices, got {count}"
+        );
     }
 
     #[test]
@@ -3572,7 +3726,11 @@ mod tests {
     #[test]
     fn test_state_toggle_category() {
         let mut state = DeviceManagerState::new();
-        let first_cat = state.tree_nodes.iter().position(|n| n.category.is_some()).expect("has categories");
+        let first_cat = state
+            .tree_nodes
+            .iter()
+            .position(|n| n.category.is_some())
+            .expect("has categories");
         assert!(state.tree_nodes[first_cat].expanded);
         state.toggle_category(first_cat);
         assert!(!state.tree_nodes[first_cat].expanded);
@@ -3622,7 +3780,12 @@ mod tests {
     fn test_state_add_event() {
         let mut state = DeviceManagerState::new();
         let initial_count = state.event_history.len();
-        state.add_event(DeviceEvent::new(1, DeviceEventKind::Reset, "2026-05-18 12:00:00", "test"));
+        state.add_event(DeviceEvent::new(
+            1,
+            DeviceEventKind::Reset,
+            "2026-05-18 12:00:00",
+            "test",
+        ));
         assert_eq!(state.event_history.len(), initial_count + 1);
     }
 
@@ -3688,18 +3851,28 @@ mod tests {
     fn test_search_matches_vendor() {
         let q = "intel";
         let devices = sample_devices();
-        let matches: Vec<&DeviceInfo> = devices.iter().filter(|d| device_matches_query(d, q)).collect();
+        let matches: Vec<&DeviceInfo> = devices
+            .iter()
+            .filter(|d| device_matches_query(d, q))
+            .collect();
         assert!(!matches.is_empty());
         // All matched devices should have "Intel" somewhere
         for m in &matches {
             let combined = format!(
                 "{} {} {} {} {} {}",
-                m.name, m.vendor, m.device_type,
-                m.category.label(), m.status.label(),
+                m.name,
+                m.vendor,
+                m.device_type,
+                m.category.label(),
+                m.status.label(),
                 m.hw_id.as_deref().unwrap_or(""),
             )
             .to_lowercase();
-            assert!(combined.contains(q), "Device {:?} should match '{q}'", m.name);
+            assert!(
+                combined.contains(q),
+                "Device {:?} should match '{q}'",
+                m.name
+            );
         }
     }
 
@@ -3742,6 +3915,105 @@ mod tests {
         assert!(report.contains("Intel HD Audio"));
     }
 
+    /// Strings a device can genuinely put in its own descriptors. A USB device
+    /// chooses its product and manufacturer strings, and the descriptor format
+    /// constrains neither their content nor their length.
+    const HOSTILE_NAMES: &[&str] = &[
+        "Mouse\n--- Storage ---\n  Fake Disk [OK] (ACME)",
+        "Mouse\r\n    Driver: rootkit v1.0 (Trusted)",
+        "Mouse\tTabbed",
+        "\u{7}bell",
+        "  padded  ",
+    ];
+
+    /// Count the lines that *are* a section header, rather than the places the
+    /// text `--- ` appears.
+    ///
+    /// The distinction is the whole test. A correctly folded name keeps the
+    /// characters of its payload -- `--- Storage ---` is still in there, now
+    /// harmlessly mid-sentence -- so any assertion phrased as `contains` or as
+    /// a substring count fails against output that is perfectly safe. What the
+    /// fold actually guarantees is structural: every interpolated field is
+    /// preceded on its line by the report's own indentation, so no field can
+    /// begin a line, and therefore none can *be* a header.
+    fn header_lines(report: &str) -> usize {
+        report
+            .lines()
+            .filter(|l| l.starts_with("--- ") && l.ends_with(" ---"))
+            .count()
+    }
+
+    #[test]
+    fn a_device_name_cannot_forge_a_report_section() {
+        let clean = DeviceManagerState::new();
+        let baseline = clean.export_report();
+        let want_headers = header_lines(&baseline);
+        let want_lines = baseline.lines().count();
+
+        for name in HOSTILE_NAMES {
+            let mut state = DeviceManagerState::new();
+            let dev = state.devices.first_mut().expect("a device to rename");
+            dev.name = (*name).to_string();
+            let report = state.export_report();
+            assert_eq!(
+                header_lines(&report),
+                want_headers,
+                "{name:?} forged a section header"
+            );
+            assert_eq!(
+                report.lines().count(),
+                want_lines,
+                "{name:?} changed the line count"
+            );
+        }
+    }
+
+    #[test]
+    fn every_reported_device_string_is_folded() {
+        // Not just the name: vendor, type, hardware ID, location and the three
+        // driver strings are all supplied by the same source, and a report is
+        // only as trustworthy as its least-checked field.
+        let mut state = DeviceManagerState::new();
+        let payload = String::from("x\n--- Forged ---");
+        {
+            let dev = state.devices.first_mut().expect("a device");
+            dev.vendor = payload.clone();
+            dev.device_type = payload.clone();
+            dev.hw_id = Some(payload.clone());
+            dev.location = payload.clone();
+            if let Some(drv) = dev.driver.as_mut() {
+                drv.name = payload.clone();
+                drv.version = payload.clone();
+                drv.provider = payload.clone();
+            }
+        }
+        let clean = DeviceManagerState::new().export_report();
+        let report = state.export_report();
+        // Again per line, not `contains`: the payload's characters survive the
+        // fold on purpose, they just cannot be a line of their own any more.
+        assert_eq!(
+            header_lines(&report),
+            header_lines(&clean),
+            "a forged header reached the report"
+        );
+        assert_eq!(
+            report.lines().count(),
+            clean.lines().count(),
+            "a field added lines to the report"
+        );
+    }
+
+    #[test]
+    fn folding_a_name_keeps_it_readable() {
+        assert_eq!(report_field("Virtio GPU"), "Virtio GPU");
+        assert_eq!(
+            report_field("Mouse\n--- Storage ---"),
+            "Mouse --- Storage ---"
+        );
+        assert_eq!(report_field("a\r\n\r\nb"), "a b");
+        assert_eq!(report_field("\u{7}bell"), "bell");
+    }
+
     #[test]
     fn test_export_report_contains_irqs() {
         let state = DeviceManagerState::new();
@@ -3775,7 +4047,11 @@ mod tests {
     #[test]
     fn test_render_with_selected_device() {
         let mut state = DeviceManagerState::new();
-        let dev_idx = state.tree_nodes.iter().position(|n| n.device_id.is_some()).expect("has devices");
+        let dev_idx = state
+            .tree_nodes
+            .iter()
+            .position(|n| n.device_id.is_some())
+            .expect("has devices");
         state.select_tree_node(dev_idx);
         let cmds = render(&state);
         assert!(!cmds.is_empty());
@@ -3793,7 +4069,11 @@ mod tests {
     #[test]
     fn test_render_all_tabs() {
         let mut state = DeviceManagerState::new();
-        let dev_idx = state.tree_nodes.iter().position(|n| n.device_id.is_some()).expect("has devices");
+        let dev_idx = state
+            .tree_nodes
+            .iter()
+            .position(|n| n.device_id.is_some())
+            .expect("has devices");
         state.select_tree_node(dev_idx);
         state.show_resource_view = false;
 
@@ -3809,7 +4089,13 @@ mod tests {
     #[test]
     fn test_handle_resize() {
         let mut state = DeviceManagerState::new();
-        let result = handle_event(&mut state, &Event::Resize { width: 800, height: 600 });
+        let result = handle_event(
+            &mut state,
+            &Event::Resize {
+                width: 800,
+                height: 600,
+            },
+        );
         assert_eq!(result, EventResult::Consumed);
         assert_eq!(state.width, 800.0);
         assert_eq!(state.height, 600.0);
@@ -3946,7 +4232,11 @@ mod tests {
     #[test]
     fn test_handle_left_collapses_category() {
         let mut state = DeviceManagerState::new();
-        let cat_idx = state.tree_nodes.iter().position(|n| n.category.is_some()).expect("has categories");
+        let cat_idx = state
+            .tree_nodes
+            .iter()
+            .position(|n| n.category.is_some())
+            .expect("has categories");
         state.select_tree_node(cat_idx);
         assert!(state.tree_nodes[cat_idx].expanded);
         handle_event(
@@ -3964,7 +4254,11 @@ mod tests {
     #[test]
     fn test_handle_right_expands_category() {
         let mut state = DeviceManagerState::new();
-        let cat_idx = state.tree_nodes.iter().position(|n| n.category.is_some()).expect("has categories");
+        let cat_idx = state
+            .tree_nodes
+            .iter()
+            .position(|n| n.category.is_some())
+            .expect("has categories");
         state.select_tree_node(cat_idx);
         state.tree_nodes[cat_idx].expanded = false;
         handle_event(
@@ -4019,7 +4313,11 @@ mod tests {
     #[test]
     fn test_is_node_visible_device_under_expanded() {
         let state = DeviceManagerState::new();
-        let dev_idx = state.tree_nodes.iter().position(|n| n.device_id.is_some()).expect("has devices");
+        let dev_idx = state
+            .tree_nodes
+            .iter()
+            .position(|n| n.device_id.is_some())
+            .expect("has devices");
         assert!(is_node_visible(&state, dev_idx));
     }
 
@@ -4047,16 +4345,19 @@ mod tests {
         let mut state = DeviceManagerState::new();
         // Find a disabled device
         let disabled_idx = state.tree_nodes.iter().position(|n| {
-            n.device_id.is_some_and(|id| {
-                state.devices.iter().any(|d| d.id == id && !d.enabled)
-            })
+            n.device_id
+                .is_some_and(|id| state.devices.iter().any(|d| d.id == id && !d.enabled))
         });
         if let Some(idx) = disabled_idx {
             state.select_tree_node(idx);
             state.show_resource_view = false;
             state.handle_toolbar_action(ToolbarAction::Enable);
             let dev_id = state.tree_nodes[idx].device_id.expect("device node");
-            let dev = state.devices.iter().find(|d| d.id == dev_id).expect("exists");
+            let dev = state
+                .devices
+                .iter()
+                .find(|d| d.id == dev_id)
+                .expect("exists");
             assert!(dev.enabled);
         }
     }
@@ -4064,23 +4365,34 @@ mod tests {
     #[test]
     fn test_toolbar_disable_action() {
         let mut state = DeviceManagerState::new();
-        let dev_idx = state.tree_nodes.iter().position(|n| {
-            n.device_id.is_some_and(|id| {
-                state.devices.iter().any(|d| d.id == id && d.enabled)
+        let dev_idx = state
+            .tree_nodes
+            .iter()
+            .position(|n| {
+                n.device_id
+                    .is_some_and(|id| state.devices.iter().any(|d| d.id == id && d.enabled))
             })
-        }).expect("has enabled device");
+            .expect("has enabled device");
         state.select_tree_node(dev_idx);
         state.show_resource_view = false;
         state.handle_toolbar_action(ToolbarAction::Disable);
         let dev_id = state.tree_nodes[dev_idx].device_id.expect("device node");
-        let dev = state.devices.iter().find(|d| d.id == dev_id).expect("exists");
+        let dev = state
+            .devices
+            .iter()
+            .find(|d| d.id == dev_id)
+            .expect("exists");
         assert!(!dev.enabled);
     }
 
     #[test]
     fn test_toolbar_properties_action() {
         let mut state = DeviceManagerState::new();
-        let dev_idx = state.tree_nodes.iter().position(|n| n.device_id.is_some()).expect("has devices");
+        let dev_idx = state
+            .tree_nodes
+            .iter()
+            .position(|n| n.device_id.is_some())
+            .expect("has devices");
         state.select_tree_node(dev_idx);
         state.show_resource_view = false;
         state.active_tab = PropertiesTab::Events;
@@ -4138,10 +4450,23 @@ mod tests {
     #[test]
     fn test_color_constants_opaque() {
         let colors = [
-            COLOR_BASE, COLOR_MANTLE, COLOR_SURFACE0, COLOR_SURFACE1,
-            COLOR_SURFACE2, COLOR_TEXT, COLOR_SUBTEXT, COLOR_OVERLAY,
-            COLOR_BLUE, COLOR_LAVENDER, COLOR_GREEN, COLOR_YELLOW,
-            COLOR_RED, COLOR_PEACH, COLOR_MAUVE, COLOR_TEAL, COLOR_SAPPHIRE,
+            COLOR_BASE,
+            COLOR_MANTLE,
+            COLOR_SURFACE0,
+            COLOR_SURFACE1,
+            COLOR_SURFACE2,
+            COLOR_TEXT,
+            COLOR_SUBTEXT,
+            COLOR_OVERLAY,
+            COLOR_BLUE,
+            COLOR_LAVENDER,
+            COLOR_GREEN,
+            COLOR_YELLOW,
+            COLOR_RED,
+            COLOR_PEACH,
+            COLOR_MAUVE,
+            COLOR_TEAL,
+            COLOR_SAPPHIRE,
         ];
         for c in &colors {
             assert_eq!(c.a, 255, "Color constant has non-opaque alpha");

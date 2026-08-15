@@ -21,6 +21,7 @@
 //! - Three sample decks pre-loaded
 
 use guitk::color::Color;
+use guitk::kv;
 use guitk::render::{FontWeightHint, RenderCommand};
 use guitk::style::CornerRadii;
 use guitk::table::{Column, Fit, Table};
@@ -446,10 +447,17 @@ impl Deck {
 
 /// Escape a value so it occupies exactly one line of the deck format.
 ///
-/// Only three characters need it: the backslash that introduces an escape, and
-/// the two line breaks that would end the field. Commas are deliberately left
-/// alone -- flashcard questions are full of them, and a format meant to be
-/// hand-editable should not turn `What is 2, 3, and 4?` into line noise.
+/// The escaping is [`guitk::kv`]'s rather than this file's own, which it was
+/// until the same escaper had been written inline in four applications. What
+/// that shares is the part every one of them got wrong at least once: the
+/// single-pass decoder, and spelling a trailing space `\s` so the reader's
+/// trim cannot eat half an escape.
+///
+/// Commas are named as structure for tags only. A `T:` line is a
+/// comma-separated list, so a comma inside a tag has to be escaped; a `Q:`
+/// line has no such structure, and turning `What is 2, 3, and 4?` into
+/// `What is 2\, 3\, and 4?` would wreck a format meant to be hand-editable
+/// for nothing.
 ///
 /// CR gets an escape of its own rather than being folded into `\n` with the LF
 /// beside it. vCard has to normalise, because its specification says a line
@@ -457,48 +465,17 @@ impl Deck {
 /// honesty is available: escaping CR separately makes the round trip exact
 /// instead of merely faithful-in-spirit, and leaves no lossy corner to explain.
 fn escape_field(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            _ => out.push(c),
-        }
-    }
-    out
+    kv::escape(s, &[])
 }
 
 /// Escape a value that also has to survive being joined with commas.
 fn escape_tag(s: &str) -> String {
-    escape_field(s).replace(',', "\\,")
+    kv::escape(s, &[','])
 }
 
 /// Decode a value written by [`escape_field`] or [`escape_tag`].
-///
-/// One left-to-right pass. A chain of `replace` calls cannot do this job:
-/// decoding `\n` before `\\` turns the two-character text `\n` into a real
-/// newline, and a single pass structurally cannot make that mistake because it
-/// never re-examines what it has already produced.
-///
-/// An unrecognised escape yields the character that followed the backslash,
-/// so a hand-written `C:\path` degrades to `C:path` rather than being rejected.
 fn unescape_field(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut chars = s.chars();
-    while let Some(c) = chars.next() {
-        if c == '\\' {
-            match chars.next() {
-                Some('n') => out.push('\n'),
-                Some('r') => out.push('\r'),
-                Some(other) => out.push(other),
-                None => out.push('\\'),
-            }
-        } else {
-            out.push(c);
-        }
-    }
-    out
+    kv::unescape(s)
 }
 
 /// Split a field line into its one-letter tag and its raw (still escaped) value.
@@ -522,9 +499,12 @@ fn split_field(line: &str) -> Option<(char, &str)> {
 /// tell it from a separator because it does not know what escaped it.
 ///
 /// Spaces around a tag are trimmed, which is the hand-written convention
-/// (`T: math, algebra`). A tag whose own leading or trailing spaces are
-/// meaningful is therefore not representable -- a known and accepted limit of
-/// the format, noted here because it is the one lossy corner left.
+/// (`T: math, algebra`). That used to make a tag whose own edge spaces are
+/// meaningful unrepresentable -- the format's one remaining lossy corner. It
+/// no longer is: the writer spells an edge space `\s`, which is not a space
+/// and so survives the trim, and only *then* is the tag decoded. The trim
+/// therefore still does what it is for -- absorbing the layout of a
+/// hand-written list -- without being able to reach the value.
 fn split_tags(value: &str) -> Vec<String> {
     let mut tags = Vec::new();
     let mut current = String::new();
@@ -2844,6 +2824,21 @@ mod tests {
         imported.import_text(&original.export_text());
         let card = imported.cards.first().expect("one card");
         assert_eq!(card.tags, vec!["a,b", "plain", r"back\slash"]);
+    }
+
+    #[test]
+    fn a_tag_keeps_its_own_edge_spaces() {
+        // The `T:` reader trims each tag, which is the right leniency for a
+        // hand-written `T: math, algebra` -- but it used to reach the value
+        // too, so a tag of `" spaced "` came back as `"spaced"`. The writer
+        // now spells an edge space `\s`, which is not a space and so is not
+        // what the trim removes.
+        let mut original = Deck::new("D", "");
+        original.add_card_with_tags("q", "a", &[" spaced ", "\ttabbed"]);
+        let mut imported = Deck::new("Imported", "");
+        imported.import_text(&original.export_text());
+        let card = imported.cards.first().expect("one card");
+        assert_eq!(card.tags, vec![" spaced ", "\ttabbed"]);
     }
 
     #[test]

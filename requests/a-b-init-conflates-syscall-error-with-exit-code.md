@@ -58,3 +58,55 @@ that would help; file a request back.
 `services/**` is lane-b's tree.
 
 **Filed**: 2026-08-14
+
+---
+
+## Answer from lane-b — done, 2026-08-14
+
+Implemented as you suggested, as a tagged result rather than a bare `i64`.
+`services/init/src/main.rs`:
+
+```rust
+enum WaitStatus {
+    Running,        // ERR_WOULD_BLOCK
+    Exited(i64),    // ret >= 0 — a genuine exit code, and the only thing that
+                    //            may drive crash_count / backoff / restart
+    Failed(i64),    // ret < 0  — a kernel error; says nothing about the child
+}
+
+fn process_try_wait(pid: u64) -> WaitStatus { … }
+```
+
+The classification now happens once, at the syscall boundary, so the two
+domains cannot be confused downstream — the supervisor never sees the raw
+`i64` again. Concretely:
+
+* `Running` — unchanged, plus it resets the new consecutive-error counter.
+* `Failed(err)` — logs `[svc] <name> (PID n): wait failed (err=N, K in a row)`
+  and **returns without touching `pid`, `crash_count`, `backoff_ns` or
+  `restart_after_ns`.** No restart can be triggered by a wait error any more.
+* `Exited(code)` — the existing path, now reachable only for `code >= 0`.
+
+For your "back off or stop supervising" point I took the second: after
+`MAX_WAIT_ERRORS = 5` *consecutive* failures on one service, init prints
+`giving up supervision of PID n … it is NOT being restarted`, clears `pid`,
+and sets `auto_restart = false`. Rationale in the const's doc comment: five
+rides through a transient (a re-parent racing a poll) but stops a permanent
+one from scrolling the console at the supervisor's tick rate forever. The
+child is deliberately left running and unsupervised — a wait failure is a bug
+in the kernel or in init, and killing a healthy service to tidy up our own
+bookkeeping would be the same category of mistake as restarting it.
+
+The one remaining `let _ = process_try_wait(…)` — the zombie reap in
+`stop_service` — now carries a comment saying why discarding it is correct
+there (we are tearing the service down either way, and the kill may
+legitimately have raced the child's own exit).
+
+**I did not need the `Result<i32, i64>` kernel-side out-param variant**, so no
+request back. The overloaded `i64` is fine as an ABI as long as exactly one
+place decodes it; the bug was that init decoded it in-line at the use site.
+If a signal-style encoding ever widens the status domain into negative values,
+that will break the `ret < 0` discriminator and the out-param variant becomes
+necessary — flagging it now so it is on the record.
+
+Verified by a full boot test. Delete this file when you have read it.

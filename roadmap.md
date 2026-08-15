@@ -200,7 +200,12 @@ version bump there rebuilds everyone's world.
 - Each lane works on its own branch **in its own worktree** — see Step 0.5.
   Your worktree is permanently on your branch; never `git checkout` another
   branch inside it.
-- Rebase on `main`, never merge: `git pull --rebase origin main`.
+- **Integrate `origin/main` by merging, not rebasing.** Your lane branch is
+  *published* at `origin/lane-<x>`, and rebasing published history forces a
+  force-push, which the next rule forbids outright. So: `git fetch origin &&
+  git merge origin/main`. (An earlier version of this file said "rebase on
+  `main`, never merge"; that advice predates the lane branches being pushed
+  and is superseded. Rebase remains fine for commits you have never pushed.)
 - Merge to `main` only when your lane's tree builds **and** a boot test
   passes. Because the boot test builds *everything*, a broken lane blocks
   the other two — so never merge a red tree "to unblock myself."
@@ -210,8 +215,69 @@ version bump there rebuilds everyone's world.
   test.
 - **Never force-push.** A force-push to `main` or to another lane's branch
   destroys the other two agents' work. A rejected non-fast-forward push
-  means someone else landed first: `git pull --rebase`, re-test, push
-  again.
+  means someone else landed first: `git fetch origin && git merge
+  origin/main`, re-test, push again.
+
+### 5.5. Sync with `origin/main` — twice per task, not "eventually"
+
+**Every shared document in this repo exists once per branch.** `roadmap.md`,
+`known-issues.md`, `design-decisions.md`, `open-questions.md`, `todo.txt` and
+`requests/` are ordinary tracked files, so your worktree holds *your branch's
+copy* of each. They are not a shared mailbox that updates itself. A note
+another lane wrote for you is invisible to you until you fetch and merge, no
+matter how urgently it was written.
+
+**So do this, mechanically:**
+
+```bash
+# START of every task, in your own worktree:
+git fetch origin && git merge origin/main
+
+# … do the work; build; boot-test …
+
+# END of every completed, green task:
+git push origin lane-<x>
+# then, from the integration worktree only:
+git -C "D:/visual studio projects/os" pull \
+  && git -C "D:/visual studio projects/os" merge lane-<x> \
+  && git -C "D:/visual studio projects/os" push origin main
+```
+
+- **At the start of every task:** `git fetch origin && git merge origin/main`.
+  This is how you find requests addressed to you, other lanes' fixes to code
+  you depend on, and decisions recorded since you last looked.
+- **After every completed, green task:** push your lane, then **merge your
+  lane up into `main`** (from the `os` integration worktree) and push `main`.
+  Work that only exists on your lane branch cannot be read by the other two
+  lanes and cannot be acted on by them.
+- **Reading another lane's mail without merging** is fine and cheap when you
+  only want a look: `git fetch origin && git log origin/main -- requests/`
+  and `git show origin/main:requests/<file>.md`. Do this if nothing else.
+
+**Two hazards this rule exists to prevent — both of which actually happened:**
+
+1. **A request sat unread for a day.**
+   `requests/a-b-init-conflates-syscall-error-with-exit-code.md` was filed by
+   Lane A, landed on `origin/main`, and was invisible in Lane B's worktree the
+   whole time — because Lane B had never once fetched or merged. The dropbox
+   was not broken; nobody emptied it.
+2. **The local `os` worktree is stale and is *not* authoritative.**
+   `D:/visual studio projects/os` is a checkout of `main` like any other, and
+   it sits at whatever commit it was last pulled to — it was **67 commits
+   behind `origin/main`** when this was written. Reading a shared doc there
+   and concluding "the other lanes have not done X" is a wrong answer with a
+   confident shape. **`origin/main` is the trunk; the `os` directory is a view
+   of it that may be months stale.** `git -C "D:/visual studio projects/os"
+   pull` before you read it, or read `origin/main` directly with `git show`.
+
+**Why per-branch copies are kept at all** (rather than moving the shared docs
+to `main` only): the per-lane conventions in rule 3 are what make them merge
+cleanly, and they demonstrably do — the numbering split meant
+`design-decisions.md` auto-merged with zero conflicts across a 72-commit
+divergence, and the conflicts that did appear were all "both lanes appended at
+the same spot", which is a 30-second resolution. Moving the docs to `main`
+would buy freshness at the cost of the worktree isolation that stops two
+agents clobbering each other. Fetch instead.
 
 ### 6. The boot test is a shared, serialized resource — automatically
 

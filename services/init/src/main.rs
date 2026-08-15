@@ -376,10 +376,41 @@ fn process_wait(pid: u64) -> i64 {
     syscall1(SYS_PROCESS_WAIT, pid)
 }
 
-/// Non-blocking check if a child has exited.
-/// Returns exit code if exited, -4 (WouldBlock) if still running.
-fn process_try_wait(pid: u64) -> i64 {
-    syscall1(SYS_PROCESS_TRY_WAIT, pid)
+/// The outcome of a non-blocking wait on a child.
+///
+/// `SYS_PROCESS_TRY_WAIT` overloads one `i64` with two disjoint domains — an
+/// exit status and a kernel error — and the supervisor must not confuse them.
+/// It once did: before the kernel set `SpawnOptions::parent` on syscall-spawned
+/// children, `try_reap` answered `PermissionDenied` (`-400`), which the loop
+/// below read as "exited with code -400" and "recovered" from by restarting a
+/// process that was alive and healthy, nine times over. Splitting the domains
+/// at the syscall boundary is what makes that class of bug unrepresentable
+/// rather than merely fixed. See `requests/a-b-init-conflates-syscall-error-
+/// with-exit-code.md` (lane-a → lane-b, 2026-08-14).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WaitStatus {
+    /// The child is still running (`ERR_WOULD_BLOCK`).
+    Running,
+    /// The child exited. Carries its genuine exit code (always `>= 0`).
+    Exited(i64),
+    /// The wait syscall itself failed. Carries the negative kernel error.
+    /// **Not** an exit code: nothing may be concluded about the child from it.
+    Failed(i64),
+}
+
+/// Non-blocking check on whether a child has exited.
+///
+/// Returns `Running` while it lives, `Exited(code)` once it has, and
+/// `Failed(err)` if the syscall could not answer the question at all.
+fn process_try_wait(pid: u64) -> WaitStatus {
+    let ret = syscall1(SYS_PROCESS_TRY_WAIT, pid);
+    if ret == ERR_WOULD_BLOCK {
+        WaitStatus::Running
+    } else if ret < 0 {
+        WaitStatus::Failed(ret)
+    } else {
+        WaitStatus::Exited(ret)
+    }
 }
 
 /// Query whether a process has signaled readiness.
@@ -575,6 +606,16 @@ const BACKOFF_MULTIPLIER: u32 = 1;
 /// How long a service must run before we reset its backoff (10 seconds).
 const BACKOFF_RESET_THRESHOLD_NS: u64 = 10_000_000_000;
 
+/// How many consecutive `WaitStatus::Failed` results the supervisor tolerates
+/// on one service before it stops polling that pid.
+///
+/// A wait failure is a bug in the kernel or in this supervisor — never a
+/// service fault — so the response is to surface it, not to restart anything.
+/// Five is enough that a transient error (a re-parent racing a poll) rides
+/// through, and few enough that a permanent one does not scroll the console
+/// forever at the supervisor's tick rate.
+const MAX_WAIT_ERRORS: u32 = 5;
+
 /// Maximum size of packed argv/envp data for `process_spawn_ex()`.
 const MAX_PACKED_ARGS: usize = 1024;
 
@@ -617,6 +658,14 @@ struct Service {
     /// Total number of times this service has crashed.
     crash_count: u64,
 
+    /// Consecutive `WaitStatus::Failed` results from `process_try_wait`.
+    /// Reset by any wait that answers the question (running or exited).
+    /// A wait failure says nothing about the child, so it must never feed
+    /// `crash_count` or the restart backoff; it is tracked separately so a
+    /// persistent failure can be surfaced instead of hidden behind a poll
+    /// loop that never terminates.
+    wait_err_count: u32,
+
     /// Whether the service has signaled it is fully initialized.
     ready: bool,
 
@@ -658,6 +707,7 @@ impl Service {
             started_at_ns: 0,
             restart_after_ns: 0,
             crash_count: 0,
+            wait_err_count: 0,
             ready: false,
             dep_names: [[0u8; MAX_SVC_NAME]; MAX_DEPS],
             dep_name_lens: [0; MAX_DEPS],
@@ -1173,7 +1223,11 @@ impl ServiceRegistry {
             // Kill the process.
             let ret = syscall2(506, svc.pid, 0); // SYS_PROCESS_KILL = 506
             if ret >= 0 {
-                // Reap the zombie.
+                // Reap the zombie. The outcome is deliberately ignored: we
+                // are tearing the service down either way, so neither an exit
+                // code nor a wait error changes what happens next. (The kill
+                // may also have raced the child's own exit, in which case the
+                // reap legitimately reports NoSuchProcess.)
                 let _ = process_try_wait(svc.pid);
             }
             let name = &svc.name[..svc.name_len];
@@ -1248,9 +1302,10 @@ impl ServiceRegistry {
             }
 
             let pid = self.services[i].pid;
-            let ret = process_try_wait(pid);
+            let status = process_try_wait(pid);
 
-            if ret == ERR_WOULD_BLOCK {
+            if status == WaitStatus::Running {
+                self.services[i].wait_err_count = 0;
                 // Still running — check for readiness transition.
                 if !self.services[i].ready && process_is_ready(pid) == 1 {
                     self.services[i].ready = true;
@@ -1263,8 +1318,63 @@ impl ServiceRegistry {
                 continue;
             }
 
-            // Process has exited (ret = exit code) or we got an error
-            // (e.g., NoSuchProcess if it was already reaped).
+            if let WaitStatus::Failed(err) = status {
+                // The syscall failed; it told us *nothing* about the child.
+                // Restarting here would be inventing a crash out of an error
+                // in our own bookkeeping — which is exactly the bug that made
+                // init restart a healthy `ticker` nine times. Surface it and
+                // leave the child alone.
+                let name_len = self.services[i].name_len;
+                let mut name_copy = [0u8; MAX_SVC_NAME];
+                name_copy[..name_len]
+                    .copy_from_slice(&self.services[i].name[..name_len]);
+
+                let svc = &mut self.services[i];
+                svc.wait_err_count = svc.wait_err_count.saturating_add(1);
+
+                print("[svc] ");
+                console_write(&name_copy[..name_len]);
+                print(" (PID ");
+                print_u64(pid);
+                print("): wait failed (err=");
+                print_i64(err);
+                print(", ");
+                print_u64(u64::from(svc.wait_err_count));
+                print(" in a row)\n");
+
+                if svc.wait_err_count >= MAX_WAIT_ERRORS {
+                    // A wait that keeps failing is a bug in the kernel or in
+                    // this supervisor, not a service fault. Stop polling it
+                    // rather than printing forever, and say so loudly — the
+                    // service is left running and unsupervised on purpose.
+                    print("[svc] ");
+                    console_write(&name_copy[..name_len]);
+                    print(": giving up supervision of PID ");
+                    print_u64(pid);
+                    print(" after ");
+                    print_u64(u64::from(MAX_WAIT_ERRORS));
+                    print(" consecutive wait failures; it is NOT being restarted\n");
+                    svc.pid = 0;
+                    svc.auto_restart = false;
+                    svc.restart_after_ns = 0;
+                }
+
+                i += 1;
+                continue;
+            }
+
+            // Genuine exit: `status` is `Exited(code)` and nothing else.
+            let ret = match status {
+                WaitStatus::Exited(code) => code,
+                // Unreachable: `Running` and `Failed` both `continue` above.
+                // Handled rather than `unreachable!()` so a future variant
+                // cannot turn a compile-time gap into a runtime panic in PID 1.
+                _ => {
+                    i += 1;
+                    continue;
+                }
+            };
+            self.services[i].wait_err_count = 0;
             let name_len = self.services[i].name_len;
             let mut name_copy = [0u8; MAX_SVC_NAME];
             name_copy[..name_len].copy_from_slice(

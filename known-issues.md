@@ -60787,9 +60787,65 @@ text fits in it — the question has no home. Collapsing the copies to one
 `&[Column]` did not just remove the drift risk; it made "does this cell fit
 its column?" a question a test could ask, which is how the six real overruns
 became visible at all. The remaining hand-drawn tables from the survey
-(`apps/filesearch`, `apps/logviewer`, `apps/renamer`, `apps/systemrestore`)
-should be assumed to be hiding the same thing until a counted test says
-otherwise.
+(~~`apps/filesearch`~~, ~~`apps/logviewer`~~, ~~`apps/renamer`~~,
+`apps/systemrestore`) should be assumed to be hiding the same thing until a
+counted test says otherwise. That prediction has now paid out three times, and
+each time the hidden bug found was worse than the clipping it was predicted
+from.
+
+**The abstraction now exists: `guitk::table`** (`gui/toolkit/src/table.rs`,
+`528a01aba`…`1311d3e0a`). `Table::new(&[Column], x)` owns the geometry;
+`header` and `cell` both ask it for positions, `cell` elides to the column with
+the cut marked, and `Fit::{Start,End}` picks which end survives.
+`spans()`/`left()`/`right()` exist so a *test* can ask where a column is
+without re-deriving it. Convert a table to this rather than writing a sixth
+private copy — `apps/torrent` was migrated onto it in the same pass that
+proved it out.
+
+- ~~`apps/filesearch`~~ **done** (`1311d3e0a`). Two cells (Size, Type) had no
+  `max_width` at all. The interesting part was not the table: bounding the Type
+  cell meant reading the extension parser, which derived the extension with
+  `name.rsplit('.').next()` — and that yields the **whole name** when there is
+  no dot. `readme` was indexed with extension `readme`, displayed as type
+  "README", counted under `readme` in `extension_stats`, and categorised as
+  though `readme` were a format; `.bashrc` became extension `bashrc`. The
+  nine-character cap on extensions turned out to be a *band-aid for exactly
+  this*, and it rejected genuine long extensions (`.properties`,
+  `.appxbundle`) as collateral. Fixed at the root (`rsplit_once` + non-empty
+  stem), after which the cap could be widened to 24 — safe now precisely
+  because the cell that displays it is bounded.
+- ~~`apps/logviewer`~~ **done**. Not a fixed-column table — a running cursor
+  with conditional cells — but the same shape and the worst instance found so
+  far. The `[source]` cell was clipped to 100 px yet advanced the cursor by the
+  source's **full untruncated width**. So a long source vanished mid-name with
+  no marker *and* pushed the message right by space nothing occupied; past
+  ~1000 px of source the cursor ran off the row, `msg_width` went negative, and
+  `text::elide` of a negative width returns `String::new()`. **The log message
+  disappeared entirely**, leaving a row showing only a clipped source name. The
+  regression test finds it drawn at x=8931 with text `""`.
+- ~~`apps/renamer`~~ **done**. A six-column preview laid out with hand-written
+  `cx += 38.0 / 258.0 / 28.0 / 258.0 / 88.0` increments and no eliding
+  anywhere; a long name overran its 250 px column by 164 px in the regression
+  test, straight through the arrow and into the next name. This is the worst
+  *consequence* of the three even though the mechanism is the mildest, because
+  the list is a **rename preview** — the one screen whose entire job is to let
+  the user check what is about to happen before committing. Both name columns
+  now use `Fit::End`: a name cut the usual way loses the extension and any
+  numeric suffix, which are exactly the parts a rename changes, so a batch of
+  long names would all render identically and the user would be confirming a
+  rename they could not actually see. And, as in filesearch, reading the app to
+  fix the table turned up the same extension-parser bug next door:
+  `rsplit('.').next()` paired with a `len() < name.len()` guard rejects a
+  dotless name but still accepts a **leading** dot, so `.bashrc` was given
+  extension `bashrc` — shown as its type and swept up by a `bashrc` extension
+  filter alongside real `x.bashrc` files. Same root fix.
+
+The pattern to take forward: wherever a cursor-laid-out row draws a cell
+clipped to one width and advances by another, the advance is the bug, and its
+blast radius is everything drawn *after* it on that row — not just the cell
+that overflowed. Grep for `cx +=` near a `max_width:` that is not the same
+expression. The fix is always the same: elide first, then advance by what was
+actually drawn.
 
 **What it is.** `RenderCommand::Text` carries a `max_width`, and the obvious
 reading is that the compositor wraps to it. It does not. `Compositor::draw_text`

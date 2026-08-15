@@ -63009,3 +63009,65 @@ reporting nothing. They now collect under the redirect and assert outside it.
 **Cost.** Four commits of `--bench` boots produced no data: roughly 9 minutes of
 QEMU each, and — more expensively — the P21 baseline measured during this thread
 had to be re-measured, because the run that produced it recorded nothing.
+
+---
+
+#### CORRECTION to P21(b), written BEFORE the measurement — the clause is not gradeable
+
+Registered wording:
+
+> **P21(b)** — `vfs_stat_breakdown_prologue` drops by **less** than
+> `vfs_stat_breakdown_ns` does in absolute cycles, because the prologue's own
+> `normalize_path` still allocates and is untouched. *Falsified if the prologue
+> drops by as much or more*, which would mean the two benchmarks are not
+> measuring the nested quantities the breakdown claims they are.
+
+Reading the code the two benchmarks actually call (`kernel/src/fs/vfs.rs:1555`):
+
+```rust
+pub(crate) fn resolve_prologue(path: &Path) -> KernelResult<PathBuf> {
+    let ns_path = crate::ipc::namespace::resolve_path(path)?;   // == the _ns benchmark
+    let path = ns_path.as_path();
+    validate_path(path)?;
+    Ok(normalize_path(path))
+}
+```
+
+`prologue` **strictly contains** `ns`: it is `ns` plus `validate_path` plus
+`normalize_path`. So if the `Cow` removes one allocation from inside
+`namespace::resolve_path`, and A2 is untouched, both benchmarks lose *the same
+absolute amount*. Equal absolute drops are what correct nesting **predicts**.
+
+The registered clause has this exactly backwards. It calls the equal-drop case a
+falsification and names "the two benchmarks are not measuring the nested
+quantities" as the thing that case would demonstrate — when in fact an equal drop
+is the *signature* of the nesting being right, and a prologue drop substantially
+**smaller** than the `ns` drop would be the anomaly needing explanation.
+
+What the wording was probably reaching for is the *percentage*: the same absolute
+saving is a smaller fraction of the prologue's ~580 ns than of the `ns` phase's
+~261 ns. That claim is true, but it is arithmetic, not a prediction — it follows
+from the two baselines alone and cannot fail.
+
+So P21(b) does not separate any outcomes. "Less" and "equal" are divided by a
+boundary that run-to-run noise straddles, and both readings are consistent with
+the code being correct. **It will be graded UNGRADEABLE, not confirmed and not
+falsified** — and that grade is recorded here *before* the measuring boot
+finishes, because a prediction rewritten after its number is known is worth
+nothing.
+
+The replacement, for the next time this decomposition is touched: the prologue's
+absolute drop should land **within measurement noise of the `ns` phase's**
+(baselines: 261/262 ns across two idle runs, so noise is well under 5 ns on that
+phase). A prologue drop materially *smaller* than the `ns` drop would mean the
+saving is being partly re-absorbed inside A2 — plausibly by allocator ordering,
+since removing one allocation changes what state the next one meets — and that is
+a real, falsifiable claim about a real mechanism.
+
+**The lesson, which is the point of registering these at all:** P21(a) was
+derived from a mechanism (an allocation on a no-op path) and is gradeable.
+P21(b) was derived from a *feeling* that the nested benchmark ought to move
+less, and the "because" clause attached to it was never checked against the four
+lines of code it describes. A prediction whose stated falsification condition is
+its own confirmation is the same defect this file keeps recording one level down:
+**a check that cannot fire is indistinguishable from a check that passes.**

@@ -10444,7 +10444,7 @@ protects against and what it must clear.
 `installed_fonts_reach_lookups_past_the_subtable_budget` in
 `gui/font/tests/host_fonts.rs`.
 
-## 410. Normalize to NFC before shaping, as a layer that knows nothing about the font
+## §410 — Normalize to NFC before shaping, as a layer that knows nothing about the font
 
 **Date:** 2026-08-14
 **Decided by:** Claude (autonomous)
@@ -10549,7 +10549,7 @@ tracked as a defect:
 
 ---
 
-## 411. Choose `GSUB` features by the run's script; decode them once per face
+## §411 — Choose `GSUB` features by the run's script; decode them once per face
 
 **Date:** 2026-08-14
 **Decided by:** Claude (autonomous)
@@ -12550,7 +12550,7 @@ tell lanes A and C why a push of theirs might be refused.
 
 ---
 
-## 412. A program may request a default fold depth for its own activity log, as a hint the user overrides
+## §424 — A program may request a default fold depth for its own activity log, as a hint the user overrides
 
 **Date:** 2026-08-14
 **Decided by:** Operator (Claude proposed this option and recommended it)
@@ -12618,7 +12618,7 @@ call-tree view.
 
 ---
 
-## 413. A monospace face is a *scoped render-tree state*, not a field on every text command
+## §425 — A monospace face is a *scoped render-tree state*, not a field on every text command
 
 **Date:** 2026-08-15
 **Decided by:** Claude (autonomous)

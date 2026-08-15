@@ -54057,7 +54057,7 @@ FAILs).  Reversible (pure translator change; no PCB/state).
 ## ----------------------------------------------------------------------------
 ##
 ## Filed 2026-08-15, lane C, alongside the PushFont/PopFont work
-## (design-decisions.md §413).
+## (design-decisions.md §425).
 ##
 ## WHAT: `guitk::text` now resolves a monospace face by walking a hardcoded
 ## candidate list -- DEFAULT_MONO_FAMILIES in gui/toolkit/src/text.rs: JetBrains

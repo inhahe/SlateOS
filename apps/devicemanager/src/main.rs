@@ -24,6 +24,7 @@
 use guitk::color::Color;
 #[allow(unused_imports)]
 use guitk::event::{Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEventKind};
+use guitk::fold;
 #[allow(unused_imports)]
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
 #[allow(unused_imports)]
@@ -1088,32 +1089,14 @@ impl Default for DeviceManagerState {
 /// Fold a hardware-supplied string into something that can occupy one field of
 /// the text report without redrawing it.
 ///
-/// This is a sanitise rather than an escape, and the choice is deliberate.
-/// There is no reader to undo an escape -- the report is read by a person --
-/// so a `\n` in the output would be noise to them while a real newline is a
-/// forged section header. Device names are short prose with no escape
-/// character of their own, so folding is the honest operation: every control
-/// character becomes at most one space, runs collapse, and the result is a
-/// readable phrase on one line.
-///
-/// Leading and trailing space is dropped rather than kept, because the report
-/// aligns fields with its own indentation and a device whose name begins with
-/// a run of spaces would otherwise appear to sit at a different tree depth.
+/// A sanitise rather than an escape, and the choice is deliberate: the report
+/// is read by a person, so there is no reader to undo an escape, and a literal
+/// `\n` in the output would be noise to them where a real newline is a forged
+/// section header. See [`guitk::fold`] for the full argument and the guarantee
+/// this relies on -- that the report indents every field, so a folded value
+/// can never start a line and therefore can never be read as a header.
 fn report_field(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut pending_space = false;
-    for c in s.chars() {
-        if c.is_control() || c == '\t' {
-            pending_space = !out.is_empty();
-            continue;
-        }
-        if pending_space {
-            out.push(' ');
-            pending_space = false;
-        }
-        out.push(c);
-    }
-    out
+    fold::line(s)
 }
 
 // ============================================================================

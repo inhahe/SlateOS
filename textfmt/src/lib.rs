@@ -37,6 +37,15 @@
 //! | HTML, XML or another markup document | [`escape`] |
 //! | JSON | [`escape::json_string`] |
 //! | one line of a `key = value` config file | [`kv`] |
+//! | a report a person reads, with no parser | [`fold`] |
+//!
+//! The last row is the odd one out, and the difference is worth stating
+//! plainly: [`fold`] does not escape, it destroys. Which of the two a caller
+//! wants is decided by who reads the output. Where a parser will read the
+//! value back, escape — the value must survive. Where a person will read it,
+//! fold — a literal `\n` in the middle of a sentence is noise to a reader,
+//! and the only thing that actually needs preventing is a value drawing its
+//! own section header.
 //!
 //! If a format is not listed, it does not follow that no escaping is needed
 //! — it follows that nobody has written the escaper yet. Add it here rather
@@ -48,4 +57,5 @@ extern crate alloc;
 
 pub mod csv;
 pub mod escape;
+pub mod fold;
 pub mod kv;

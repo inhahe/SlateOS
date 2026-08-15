@@ -62,7 +62,7 @@ pub mod widget;
 // library. It is re-exported here under its original paths: `guitk::csv` and
 // `guitk::escape` are what 137 applications already say, and moving the code
 // is not a reason to touch all of them.
-pub use textfmt::{csv, escape, kv};
+pub use textfmt::{csv, escape, fold, kv};
 
 pub use color::Color;
 pub use event::{Event, KeyEvent, MouseButton, MouseEvent};

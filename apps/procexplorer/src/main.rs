@@ -42,6 +42,15 @@ const STATUS_BAR_HEIGHT: f32 = 24.0;
 const ROW_HEIGHT: f32 = 22.0;
 /// Height of column headers in tables.
 const HEADER_HEIGHT: f32 = 24.0;
+
+/// Inset between a table cell's text and each edge of its column.
+///
+/// Named because it appears on both sides of every fitted cell: the text starts
+/// `CELL_PAD` in from the column's left edge, and must stop `CELL_PAD` short of
+/// the next column's, so a cell's usable width is `column_width - 2 * CELL_PAD`.
+/// Getting this from the same constant the `x` offset uses is what keeps the
+/// two from drifting.
+const CELL_PAD: f32 = 6.0;
 /// Number of historical samples kept for time-series graphs.
 const GRAPH_HISTORY_LEN: usize = 60;
 /// Default auto-refresh interval in milliseconds.
@@ -686,7 +695,9 @@ impl ProcessExplorerState {
                 ProcessColumn::Pid => pa.pid.cmp(&pb.pid),
                 ProcessColumn::Name => pa.name.to_lowercase().cmp(&pb.name.to_lowercase()),
                 ProcessColumn::Status => pa.status.label().cmp(pb.status.label()),
-                ProcessColumn::Cpu => pa.cpu_percent.partial_cmp(&pb.cpu_percent)
+                ProcessColumn::Cpu => pa
+                    .cpu_percent
+                    .partial_cmp(&pb.cpu_percent)
                     .unwrap_or(std::cmp::Ordering::Equal),
                 ProcessColumn::Memory => pa.memory_bytes.cmp(&pb.memory_bytes),
                 ProcessColumn::Threads => pa.thread_count.cmp(&pb.thread_count),
@@ -707,13 +718,14 @@ impl ProcessExplorerState {
 
         // Clamp selection.
         if let Some(sel) = self.selected_index
-            && sel >= self.visible_indices.len() {
-                self.selected_index = if self.visible_indices.is_empty() {
-                    None
-                } else {
-                    Some(self.visible_indices.len().saturating_sub(1))
-                };
-            }
+            && sel >= self.visible_indices.len()
+        {
+            self.selected_index = if self.visible_indices.is_empty() {
+                None
+            } else {
+                Some(self.visible_indices.len().saturating_sub(1))
+            };
+        }
     }
 
     /// Rearrange `visible_indices` into a depth-first tree based on PPID.
@@ -727,7 +739,9 @@ impl ProcessExplorerState {
         }
 
         // Walk from roots (ppid == 0 or ppid not in process set).
-        let known_pids: Vec<u32> = self.visible_indices.iter()
+        let known_pids: Vec<u32> = self
+            .visible_indices
+            .iter()
             .filter_map(|&i| self.processes.get(i).map(|p| p.pid))
             .collect();
 
@@ -738,9 +752,10 @@ impl ProcessExplorerState {
         let mut root_indices: Vec<usize> = Vec::new();
         for &idx in &self.visible_indices {
             if let Some(proc) = self.processes.get(idx)
-                && (proc.ppid == 0 || !known_pids.contains(&proc.ppid)) {
-                    root_indices.push(idx);
-                }
+                && (proc.ppid == 0 || !known_pids.contains(&proc.ppid))
+            {
+                root_indices.push(idx);
+            }
         }
 
         // Push roots in reverse so the first comes out first.
@@ -785,7 +800,11 @@ impl ProcessExplorerState {
     /// Update the status bar message.
     fn update_status(&mut self) {
         let total = self.processes.len();
-        let running = self.processes.iter().filter(|p| p.status == ProcessStatus::Running).count();
+        let running = self
+            .processes
+            .iter()
+            .filter(|p| p.status == ProcessStatus::Running)
+            .count();
         self.status_message = format!(
             "{total} processes ({running} running) | CPU: {:.1}% | Mem: {} / {} | Refresh: {}",
             self.system_info.cpu_overall,
@@ -805,36 +824,39 @@ impl ProcessExplorerState {
     pub fn kill_selected(&mut self) {
         if let Some(sel) = self.selected_index
             && let Some(&proc_idx) = self.visible_indices.get(sel)
-                && let Some(proc) = self.processes.get(proc_idx) {
-                    let pid = proc.pid;
-                    let name = proc.name.clone();
-                    // In production: sys_process_kill(pid)
-                    self.status_message = format!("Killed process {name} (PID {pid})");
-                    self.processes.remove(proc_idx);
-                    self.rebuild_visible_list();
-                }
+            && let Some(proc) = self.processes.get(proc_idx)
+        {
+            let pid = proc.pid;
+            let name = proc.name.clone();
+            // In production: sys_process_kill(pid)
+            self.status_message = format!("Killed process {name} (PID {pid})");
+            self.processes.remove(proc_idx);
+            self.rebuild_visible_list();
+        }
     }
 
     /// Pause (stop) the selected process.
     pub fn pause_selected(&mut self) {
         if let Some(sel) = self.selected_index
             && let Some(&proc_idx) = self.visible_indices.get(sel)
-                && let Some(proc) = self.processes.get_mut(proc_idx) {
-                    // In production: sys_process_stop(proc.pid)
-                    proc.status = ProcessStatus::Stopped;
-                    self.status_message = format!("Paused {} (PID {})", proc.name, proc.pid);
-                }
+            && let Some(proc) = self.processes.get_mut(proc_idx)
+        {
+            // In production: sys_process_stop(proc.pid)
+            proc.status = ProcessStatus::Stopped;
+            self.status_message = format!("Paused {} (PID {})", proc.name, proc.pid);
+        }
     }
 
     /// Resume the selected process.
     pub fn resume_selected(&mut self) {
         if let Some(sel) = self.selected_index
             && let Some(&proc_idx) = self.visible_indices.get(sel)
-                && let Some(proc) = self.processes.get_mut(proc_idx) {
-                    // In production: sys_process_continue(proc.pid)
-                    proc.status = ProcessStatus::Running;
-                    self.status_message = format!("Resumed {} (PID {})", proc.name, proc.pid);
-                }
+            && let Some(proc) = self.processes.get_mut(proc_idx)
+        {
+            // In production: sys_process_continue(proc.pid)
+            proc.status = ProcessStatus::Running;
+            self.status_message = format!("Resumed {} (PID {})", proc.name, proc.pid);
+        }
     }
 
     /// Set sort column. If the same column is clicked again, toggle direction.
@@ -1028,10 +1050,11 @@ impl ProcessExplorerState {
             }
             _ => {
                 if let Some(ch) = key.text
-                    && (ch.is_ascii_graphic() || ch == ' ') {
-                        self.filter_text.push(ch);
-                        self.rebuild_visible_list();
-                    }
+                    && (ch.is_ascii_graphic() || ch == ' ')
+                {
+                    self.filter_text.push(ch);
+                    self.rebuild_visible_list();
+                }
                 EventResult::Consumed
             }
         }
@@ -1044,24 +1067,25 @@ impl ProcessExplorerState {
 
         // If context menu is open, handle it first.
         if let Some(ref menu) = self.context_menu.clone()
-            && let MouseEventKind::Press(MouseButton::Left) = &mouse.kind {
-                let menu_w = 180.0;
-                let item_h = 24.0;
-                let item_count = ContextAction::ALL.len() as f32;
+            && let MouseEventKind::Press(MouseButton::Left) = &mouse.kind
+        {
+            let menu_w = 180.0;
+            let item_h = 24.0;
+            let item_count = ContextAction::ALL.len() as f32;
 
-                if mx >= menu.x
-                    && mx <= menu.x + menu_w
-                    && my >= menu.y
-                    && my <= menu.y + item_h * item_count
-                {
-                    let index = ((my - menu.y) / item_h) as usize;
-                    if let Some(&action) = ContextAction::ALL.get(index) {
-                        self.execute_context_action(action, menu.target_pid);
-                    }
+            if mx >= menu.x
+                && mx <= menu.x + menu_w
+                && my >= menu.y
+                && my <= menu.y + item_h * item_count
+            {
+                let index = ((my - menu.y) / item_h) as usize;
+                if let Some(&action) = ContextAction::ALL.get(index) {
+                    self.execute_context_action(action, menu.target_pid);
                 }
-                self.context_menu = None;
-                return EventResult::Consumed;
             }
+            self.context_menu = None;
+            return EventResult::Consumed;
+        }
 
         match &mouse.kind {
             // Left click — tab bar, toolbar, column headers, process rows
@@ -1127,9 +1151,7 @@ impl ProcessExplorerState {
                     if row_idx < self.visible_indices.len() {
                         self.selected_index = Some(row_idx);
                         if let Some(&proc_idx) = self.visible_indices.get(row_idx) {
-                            let pid = self.processes.get(proc_idx)
-                                .map(|p| p.pid)
-                                .unwrap_or(0);
+                            let pid = self.processes.get(proc_idx).map(|p| p.pid).unwrap_or(0);
                             self.context_menu = Some(ContextMenu {
                                 x: mx,
                                 y: my,
@@ -1221,7 +1243,9 @@ impl ProcessExplorerState {
         match action {
             ContextAction::Kill => {
                 if let Some(idx) = proc_idx {
-                    let name = self.processes.get(idx)
+                    let name = self
+                        .processes
+                        .get(idx)
                         .map(|p| p.name.clone())
                         .unwrap_or_default();
                     self.processes.remove(idx);
@@ -1231,17 +1255,19 @@ impl ProcessExplorerState {
             }
             ContextAction::Pause => {
                 if let Some(idx) = proc_idx
-                    && let Some(proc) = self.processes.get_mut(idx) {
-                        proc.status = ProcessStatus::Stopped;
-                        self.status_message = format!("Paused {} (PID {target_pid})", proc.name);
-                    }
+                    && let Some(proc) = self.processes.get_mut(idx)
+                {
+                    proc.status = ProcessStatus::Stopped;
+                    self.status_message = format!("Paused {} (PID {target_pid})", proc.name);
+                }
             }
             ContextAction::Resume => {
                 if let Some(idx) = proc_idx
-                    && let Some(proc) = self.processes.get_mut(idx) {
-                        proc.status = ProcessStatus::Running;
-                        self.status_message = format!("Resumed {} (PID {target_pid})", proc.name);
-                    }
+                    && let Some(proc) = self.processes.get_mut(idx)
+                {
+                    proc.status = ProcessStatus::Running;
+                    self.status_message = format!("Resumed {} (PID {target_pid})", proc.name);
+                }
             }
             ContextAction::ChangePriority => {
                 self.status_message = format!("Change priority for PID {target_pid} (dialog NYI)");
@@ -1335,7 +1361,14 @@ impl ProcessExplorerState {
         // End Process button
         let end_w = 90.0;
         tree.fill_rect(bx, btn_y, end_w, btn_h, COLOR_DANGER);
-        self.render_bold_text(tree, bx + 8.0, btn_y + 6.0, "End Process", Color::WHITE, 11.0);
+        self.render_bold_text(
+            tree,
+            bx + 8.0,
+            btn_y + 6.0,
+            "End Process",
+            Color::WHITE,
+            11.0,
+        );
         bx += end_w + 6.0;
 
         // New Task button
@@ -1362,17 +1395,37 @@ impl ProcessExplorerState {
         // Filter / search box (right-aligned)
         let filter_w = 200.0;
         let filter_x = w - filter_w - 8.0;
-        let filter_border = if self.filter_focused { COLOR_ACCENT } else { Color::rgb(70, 75, 85) };
+        let filter_border = if self.filter_focused {
+            COLOR_ACCENT
+        } else {
+            Color::rgb(70, 75, 85)
+        };
         tree.stroke_rect(filter_x, btn_y, filter_w, btn_h, filter_border, 1.0);
-        tree.fill_rect(filter_x + 1.0, btn_y + 1.0, filter_w - 2.0, btn_h - 2.0, Color::rgb(25, 28, 34));
+        tree.fill_rect(
+            filter_x + 1.0,
+            btn_y + 1.0,
+            filter_w - 2.0,
+            btn_h - 2.0,
+            Color::rgb(25, 28, 34),
+        );
 
         let filter_display = if self.filter_text.is_empty() {
             "Filter (Ctrl+F)"
         } else {
             &self.filter_text
         };
-        let text_color = if self.filter_text.is_empty() { COLOR_TEXT_DIM } else { COLOR_TEXT };
-        tree.text(filter_x + 8.0, btn_y + 6.0, filter_display, text_color, 11.0);
+        let text_color = if self.filter_text.is_empty() {
+            COLOR_TEXT_DIM
+        } else {
+            COLOR_TEXT
+        };
+        tree.text(
+            filter_x + 8.0,
+            btn_y + 6.0,
+            filter_display,
+            text_color,
+            11.0,
+        );
 
         // Cursor indicator when focused.
         if self.filter_focused {
@@ -1403,7 +1456,11 @@ impl ProcessExplorerState {
                 tree.fill_rect(tx, y + TAB_BAR_HEIGHT - 2.0, tab_w, 2.0, COLOR_TAB_ACTIVE);
             }
 
-            let text_color = if is_active { COLOR_TEXT } else { COLOR_TEXT_DIM };
+            let text_color = if is_active {
+                COLOR_TEXT
+            } else {
+                COLOR_TEXT_DIM
+            };
             tree.text(tx + 12.0, y + 7.0, label, text_color, 12.0);
             tx += tab_w;
         }
@@ -1447,18 +1504,42 @@ impl ProcessExplorerState {
                 label.to_string()
             };
 
-            let label_color = if *col == self.sort_column { COLOR_ACCENT } else { COLOR_TEXT_DIM };
-            tree.text(col_x + 6.0, content_y + 5.0, &display, label_color, 11.0);
+            let label_color = if *col == self.sort_column {
+                COLOR_ACCENT
+            } else {
+                COLOR_TEXT_DIM
+            };
+            // Fitted like the cells below it: the header gains a sort arrow
+            // when it is the sort column, so its width is not the constant the
+            // label alone suggests, and the separator is drawn at `cw - 1`.
+            tree.text_in(
+                col_x + CELL_PAD,
+                content_y + 5.0,
+                (cw - CELL_PAD * 2.0).max(0.0),
+                &display,
+                label_color,
+                11.0,
+            );
 
             // Column separator
-            tree.fill_rect(col_x + cw - 1.0, content_y + 2.0, 1.0, HEADER_HEIGHT - 4.0, Color::rgb(55, 60, 70));
+            tree.fill_rect(
+                col_x + cw - 1.0,
+                content_y + 2.0,
+                1.0,
+                HEADER_HEIGHT - 4.0,
+                Color::rgb(55, 60, 70),
+            );
             col_x += cw;
         }
 
         // Process rows
         let rows_y = content_y + HEADER_HEIGHT;
         let row_area_h = content_h - HEADER_HEIGHT;
-        let visible_rows = if row_area_h > 0.0 { (row_area_h / ROW_HEIGHT) as usize } else { 0 };
+        let visible_rows = if row_area_h > 0.0 {
+            (row_area_h / ROW_HEIGHT) as usize
+        } else {
+            0
+        };
 
         tree.clip(0.0, rows_y, w, row_area_h);
 
@@ -1492,33 +1573,62 @@ impl ProcessExplorerState {
 
             for col in &ProcessColumn::ALL {
                 let cw = col.width();
-                let indent = if self.view_mode == ViewMode::Tree
-                    && *col == ProcessColumn::Name
-                {
+                let indent = if self.view_mode == ViewMode::Tree && *col == ProcessColumn::Name {
                     proc.tree_depth as f32 * 16.0
                 } else {
                     0.0
                 };
 
+                // Every cell is fitted to the column it belongs to. `proc.name`
+                // and `proc.user` are supplied by the process being listed, so
+                // their length is not ours to assume — unfitted, a process
+                // named with 200 characters draws straight across Status, CPU
+                // and Memory, and the row becomes unreadable for every process
+                // *except* the one that did it.
+                let cell_w = (cw - CELL_PAD * 2.0).max(0.0);
                 match col {
                     ProcessColumn::Pid => {
-                        tree.text(cx + 6.0, ry + 4.0, &proc.pid.to_string(), COLOR_TEXT_DIM, 11.0);
+                        tree.text_in(
+                            cx + CELL_PAD,
+                            ry + 4.0,
+                            cell_w,
+                            &proc.pid.to_string(),
+                            COLOR_TEXT_DIM,
+                            11.0,
+                        );
                     }
                     ProcessColumn::Name => {
                         // Tree connector prefix
                         if self.view_mode == ViewMode::Tree && proc.tree_depth > 0 {
                             tree.text(
-                                cx + 6.0 + indent - 14.0,
+                                cx + CELL_PAD + indent - 14.0,
                                 ry + 4.0,
                                 "\u{2514}\u{2500}",
                                 Color::rgb(80, 85, 95),
                                 11.0,
                             );
                         }
-                        tree.text(cx + 6.0 + indent, ry + 4.0, &proc.name, COLOR_TEXT, 11.0);
+                        // The tree indent eats into the name's room, so it has
+                        // to come out of the width too; deep in a process tree
+                        // the name is what gets shortened, not the layout.
+                        tree.text_in(
+                            cx + CELL_PAD + indent,
+                            ry + 4.0,
+                            (cell_w - indent).max(0.0),
+                            &proc.name,
+                            COLOR_TEXT,
+                            11.0,
+                        );
                     }
                     ProcessColumn::Status => {
-                        tree.text(cx + 6.0, ry + 4.0, proc.status.label(), proc.status.color(), 11.0);
+                        tree.text_in(
+                            cx + CELL_PAD,
+                            ry + 4.0,
+                            cell_w,
+                            proc.status.label(),
+                            proc.status.color(),
+                            11.0,
+                        );
                     }
                     ProcessColumn::Cpu => {
                         let cpu_str = format!("{:.1}", proc.cpu_percent);
@@ -1529,19 +1639,47 @@ impl ProcessExplorerState {
                         } else {
                             COLOR_TEXT
                         };
-                        tree.text(cx + 6.0, ry + 4.0, &cpu_str, cpu_color, 11.0);
+                        tree.text_in(cx + CELL_PAD, ry + 4.0, cell_w, &cpu_str, cpu_color, 11.0);
                     }
                     ProcessColumn::Memory => {
-                        tree.text(cx + 6.0, ry + 4.0, &format_bytes(proc.memory_bytes), COLOR_TEXT, 11.0);
+                        tree.text_in(
+                            cx + CELL_PAD,
+                            ry + 4.0,
+                            cell_w,
+                            &format_bytes(proc.memory_bytes),
+                            COLOR_TEXT,
+                            11.0,
+                        );
                     }
                     ProcessColumn::Threads => {
-                        tree.text(cx + 6.0, ry + 4.0, &proc.thread_count.to_string(), COLOR_TEXT_DIM, 11.0);
+                        tree.text_in(
+                            cx + CELL_PAD,
+                            ry + 4.0,
+                            cell_w,
+                            &proc.thread_count.to_string(),
+                            COLOR_TEXT_DIM,
+                            11.0,
+                        );
                     }
                     ProcessColumn::Priority => {
-                        tree.text(cx + 6.0, ry + 4.0, &proc.priority.to_string(), COLOR_TEXT_DIM, 11.0);
+                        tree.text_in(
+                            cx + CELL_PAD,
+                            ry + 4.0,
+                            cell_w,
+                            &proc.priority.to_string(),
+                            COLOR_TEXT_DIM,
+                            11.0,
+                        );
                     }
                     ProcessColumn::User => {
-                        tree.text(cx + 6.0, ry + 4.0, &proc.user, COLOR_TEXT_DIM, 11.0);
+                        tree.text_in(
+                            cx + CELL_PAD,
+                            ry + 4.0,
+                            cell_w,
+                            &proc.user,
+                            COLOR_TEXT_DIM,
+                            11.0,
+                        );
                     }
                 }
                 cx += cw;
@@ -1571,7 +1709,14 @@ impl ProcessExplorerState {
 
         let chart_y = graph_y + 20.0;
         tree.fill_rect(graph_x, chart_y, graph_w, graph_h, Color::rgb(20, 22, 28));
-        tree.stroke_rect(graph_x, chart_y, graph_w, graph_h, Color::rgb(50, 55, 65), 1.0);
+        tree.stroke_rect(
+            graph_x,
+            chart_y,
+            graph_w,
+            graph_h,
+            Color::rgb(50, 55, 65),
+            1.0,
+        );
 
         // Grid lines (25%, 50%, 75%)
         for pct in &[25.0f32, 50.0, 75.0] {
@@ -1582,7 +1727,16 @@ impl ProcessExplorerState {
         }
 
         // CPU history line
-        self.render_line_graph(tree, graph_x, chart_y, graph_w, graph_h, &self.cpu_history, COLOR_GRAPH_CPU, 100.0);
+        self.render_line_graph(
+            tree,
+            graph_x,
+            chart_y,
+            graph_w,
+            graph_h,
+            &self.cpu_history,
+            COLOR_GRAPH_CPU,
+            100.0,
+        );
 
         let mut cur_y = chart_y + graph_h + section_gap;
 
@@ -1595,8 +1749,16 @@ impl ProcessExplorerState {
 
         // Total / Used / Free / Cached
         let mem_items: &[(&str, u64, Color)] = &[
-            ("Used", self.system_info.used_memory, Color::rgb(80, 140, 220)),
-            ("Cached", self.system_info.cached_memory, Color::rgb(120, 180, 80)),
+            (
+                "Used",
+                self.system_info.used_memory,
+                Color::rgb(80, 140, 220),
+            ),
+            (
+                "Cached",
+                self.system_info.cached_memory,
+                Color::rgb(120, 180, 80),
+            ),
             ("Free", self.system_info.free_memory, Color::rgb(60, 65, 75)),
         ];
 
@@ -1614,12 +1776,21 @@ impl ProcessExplorerState {
 
             // Legend entry
             let legend_y = cur_y + bar_h + 4.0;
-            let legend_x = graph_x + mem_items.iter()
-                .position(|&(l, _, _)| l == label)
-                .unwrap_or(0) as f32 * 140.0;
+            let legend_x = graph_x
+                + mem_items
+                    .iter()
+                    .position(|&(l, _, _)| l == label)
+                    .unwrap_or(0) as f32
+                    * 140.0;
             tree.fill_rect(legend_x, legend_y + 2.0, 10.0, 10.0, color);
             let legend_label = format!("{}: {}", label, format_bytes(amount));
-            tree.text(legend_x + 14.0, legend_y, &legend_label, COLOR_TEXT_DIM, 10.0);
+            tree.text(
+                legend_x + 14.0,
+                legend_y,
+                &legend_label,
+                COLOR_TEXT_DIM,
+                10.0,
+            );
         }
 
         // Total label to the right of the bar
@@ -1647,14 +1818,25 @@ impl ProcessExplorerState {
         tree.text(
             graph_x + bar_w + 8.0,
             cur_y,
-            &format!("{} / {}", format_bytes(self.system_info.swap_used), format_bytes(self.system_info.swap_total)),
+            &format!(
+                "{} / {}",
+                format_bytes(self.system_info.swap_used),
+                format_bytes(self.system_info.swap_total)
+            ),
             COLOR_TEXT_DIM,
             11.0,
         );
         cur_y += 24.0 + section_gap;
 
         // -- Per-CPU core bars --
-        self.render_bold_text(tree, graph_x, cur_y, "Per-Core Utilization", COLOR_TEXT, 13.0);
+        self.render_bold_text(
+            tree,
+            graph_x,
+            cur_y,
+            "Per-Core Utilization",
+            COLOR_TEXT,
+            13.0,
+        );
         cur_y += 20.0;
 
         let core_bar_h = 14.0;
@@ -1689,7 +1871,13 @@ impl ProcessExplorerState {
 
         // -- Uptime and load average --
         let uptime = format_uptime(self.system_info.uptime_secs);
-        tree.text(graph_x, cur_y, &format!("Uptime: {uptime}"), COLOR_TEXT, 12.0);
+        tree.text(
+            graph_x,
+            cur_y,
+            &format!("Uptime: {uptime}"),
+            COLOR_TEXT,
+            12.0,
+        );
         cur_y += 18.0;
 
         let load = format!(
@@ -1713,30 +1901,77 @@ impl ProcessExplorerState {
         let graph_w = w - 32.0;
         let graph_h = 100.0;
 
-        self.render_bold_text(tree, graph_x, content_y, "Network Bandwidth", COLOR_TEXT, 13.0);
+        self.render_bold_text(
+            tree,
+            graph_x,
+            content_y,
+            "Network Bandwidth",
+            COLOR_TEXT,
+            13.0,
+        );
 
         let chart_y = content_y + 20.0;
         tree.fill_rect(graph_x, chart_y, graph_w, graph_h, Color::rgb(20, 22, 28));
-        tree.stroke_rect(graph_x, chart_y, graph_w, graph_h, Color::rgb(50, 55, 65), 1.0);
+        tree.stroke_rect(
+            graph_x,
+            chart_y,
+            graph_w,
+            graph_h,
+            Color::rgb(50, 55, 65),
+            1.0,
+        );
 
         // Determine max for scaling
-        let max_bw = self.net_in_history.iter_oldest_first()
+        let max_bw = self
+            .net_in_history
+            .iter_oldest_first()
             .chain(self.net_out_history.iter_oldest_first())
             .fold(1.0f32, |acc, v| acc.max(v));
 
-        self.render_line_graph(tree, graph_x, chart_y, graph_w, graph_h, &self.net_in_history, COLOR_GRAPH_NET_IN, max_bw);
-        self.render_line_graph(tree, graph_x, chart_y, graph_w, graph_h, &self.net_out_history, COLOR_GRAPH_NET_OUT, max_bw);
+        self.render_line_graph(
+            tree,
+            graph_x,
+            chart_y,
+            graph_w,
+            graph_h,
+            &self.net_in_history,
+            COLOR_GRAPH_NET_IN,
+            max_bw,
+        );
+        self.render_line_graph(
+            tree,
+            graph_x,
+            chart_y,
+            graph_w,
+            graph_h,
+            &self.net_out_history,
+            COLOR_GRAPH_NET_OUT,
+            max_bw,
+        );
 
         // Legend
         let legend_y = chart_y + graph_h + 4.0;
         tree.fill_rect(graph_x, legend_y + 2.0, 10.0, 10.0, COLOR_GRAPH_NET_IN);
         tree.text(graph_x + 14.0, legend_y, "In", COLOR_TEXT_DIM, 10.0);
-        tree.fill_rect(graph_x + 50.0, legend_y + 2.0, 10.0, 10.0, COLOR_GRAPH_NET_OUT);
+        tree.fill_rect(
+            graph_x + 50.0,
+            legend_y + 2.0,
+            10.0,
+            10.0,
+            COLOR_GRAPH_NET_OUT,
+        );
         tree.text(graph_x + 64.0, legend_y, "Out", COLOR_TEXT_DIM, 10.0);
 
         // -- Connections table --
         let table_y = legend_y + 24.0;
-        self.render_bold_text(tree, graph_x, table_y, "Active Connections", COLOR_TEXT, 13.0);
+        self.render_bold_text(
+            tree,
+            graph_x,
+            table_y,
+            "Active Connections",
+            COLOR_TEXT,
+            13.0,
+        );
 
         let hdr_y = table_y + 20.0;
         tree.fill_rect(0.0, hdr_y, w, HEADER_HEIGHT, COLOR_HEADER_BG);
@@ -1754,20 +1989,34 @@ impl ProcessExplorerState {
         let mut nx = 0.0f32;
         for &(label, col_w) in net_cols {
             tree.text(nx + 6.0, hdr_y + 5.0, label, COLOR_TEXT_DIM, 11.0);
-            tree.fill_rect(nx + col_w - 1.0, hdr_y + 2.0, 1.0, HEADER_HEIGHT - 4.0, Color::rgb(55, 60, 70));
+            tree.fill_rect(
+                nx + col_w - 1.0,
+                hdr_y + 2.0,
+                1.0,
+                HEADER_HEIGHT - 4.0,
+                Color::rgb(55, 60, 70),
+            );
             nx += col_w;
         }
 
         // Connection rows
         let rows_y = hdr_y + HEADER_HEIGHT;
         let available_h = self.window_height as f32 - rows_y - STATUS_BAR_HEIGHT;
-        let visible_rows = if available_h > 0.0 { (available_h / ROW_HEIGHT) as usize } else { 0 };
+        let visible_rows = if available_h > 0.0 {
+            (available_h / ROW_HEIGHT) as usize
+        } else {
+            0
+        };
 
         tree.clip(0.0, rows_y, w, available_h);
 
         for (i, conn) in self.connections.iter().take(visible_rows).enumerate() {
             let ry = rows_y + i as f32 * ROW_HEIGHT;
-            let bg = if i % 2 == 0 { COLOR_ROW_EVEN } else { COLOR_ROW_ODD };
+            let bg = if i % 2 == 0 {
+                COLOR_ROW_EVEN
+            } else {
+                COLOR_ROW_ODD
+            };
             tree.fill_rect(0.0, ry, w, ROW_HEIGHT, bg);
 
             let mut cx = 0.0f32;
@@ -1811,13 +2060,26 @@ impl ProcessExplorerState {
         let proc = match self.selected_process() {
             Some(p) => p,
             None => {
-                tree.text(pad, content_y + 20.0, "No process selected. Select a process on the Processes tab.", COLOR_TEXT_DIM, 13.0);
+                tree.text(
+                    pad,
+                    content_y + 20.0,
+                    "No process selected. Select a process on the Processes tab.",
+                    COLOR_TEXT_DIM,
+                    13.0,
+                );
                 return;
             }
         };
 
         // -- Header --
-        self.render_bold_text(tree, pad, content_y, &format!("{} (PID {})", proc.name, proc.pid), COLOR_TEXT, 15.0);
+        self.render_bold_text(
+            tree,
+            pad,
+            content_y,
+            &format!("{} (PID {})", proc.name, proc.pid),
+            COLOR_TEXT,
+            15.0,
+        );
 
         let mut cur_y = content_y + 24.0;
 
@@ -1827,7 +2089,10 @@ impl ProcessExplorerState {
             ("Status", proc.status.label().to_string()),
             ("Priority", proc.priority.to_string()),
             ("User", proc.user.clone()),
-            ("Start time", format!("{}s after boot", proc.start_time_secs)),
+            (
+                "Start time",
+                format!("{}s after boot", proc.start_time_secs),
+            ),
             ("CPU time", format!("{}ms", proc.cpu_time_ms)),
             ("Threads", proc.thread_count.to_string()),
             ("CPU%", format!("{:.1}%", proc.cpu_percent)),
@@ -1871,14 +2136,35 @@ impl ProcessExplorerState {
         cur_y += 8.0;
         self.render_bold_text(tree, pad, cur_y, "Command Line", COLOR_TEXT, 12.0);
         cur_y += 18.0;
-        let cmd_display = if proc.command_line.is_empty() { "(none)" } else { &proc.command_line };
-        tree.text(pad, cur_y, cmd_display, COLOR_TEXT_DIM, 11.0);
+        let cmd_display = if proc.command_line.is_empty() {
+            "(none)"
+        } else {
+            &proc.command_line
+        };
+        // A command line is arbitrarily long and comes from the process itself,
+        // so it has to be fitted to the panel or it runs off the right edge of
+        // the window entirely.
+        tree.text_in(
+            pad,
+            cur_y,
+            (w - 2.0 * pad).max(0.0),
+            cmd_display,
+            COLOR_TEXT_DIM,
+            11.0,
+        );
         cur_y += 22.0;
 
         // -- Thread list --
         tree.fill_rect(pad, cur_y, w - 2.0 * pad, 1.0, Color::rgb(55, 60, 70));
         cur_y += 8.0;
-        self.render_bold_text(tree, pad, cur_y, &format!("Threads ({})", proc.threads.len()), COLOR_TEXT, 12.0);
+        self.render_bold_text(
+            tree,
+            pad,
+            cur_y,
+            &format!("Threads ({})", proc.threads.len()),
+            COLOR_TEXT,
+            12.0,
+        );
         cur_y += 18.0;
 
         // Thread table header
@@ -1891,7 +2177,14 @@ impl ProcessExplorerState {
         ];
         let mut tx = pad;
         for &(label, col_w) in thread_cols {
-            tree.text(tx + 6.0, cur_y + 5.0, label, COLOR_TEXT_DIM, 10.0);
+            tree.text_in(
+                tx + CELL_PAD,
+                cur_y + 5.0,
+                (col_w - CELL_PAD * 2.0).max(0.0),
+                label,
+                COLOR_TEXT_DIM,
+                10.0,
+            );
             tx += col_w;
         }
         cur_y += HEADER_HEIGHT;
@@ -1899,17 +2192,35 @@ impl ProcessExplorerState {
         let max_thread_rows = 6;
         for (ti, thread) in proc.threads.iter().take(max_thread_rows).enumerate() {
             let ry = cur_y + ti as f32 * ROW_HEIGHT;
-            let bg = if ti % 2 == 0 { COLOR_ROW_EVEN } else { COLOR_ROW_ODD };
+            let bg = if ti % 2 == 0 {
+                COLOR_ROW_EVEN
+            } else {
+                COLOR_ROW_ODD
+            };
             tree.fill_rect(pad, ry, w - 2.0 * pad, ROW_HEIGHT, bg);
 
+            // The cells walk `thread_cols` alongside the header above, so a
+            // column's width is written once. Previously each row restated
+            // 60/200/80 as literals — they agreed with the header by
+            // coincidence, and nothing would have caught them drifting apart.
+            let cells: [(String, Color); 4] = [
+                (thread.tid.to_string(), COLOR_TEXT_DIM),
+                (thread.name.clone(), COLOR_TEXT),
+                (thread.status.label().to_string(), thread.status.color()),
+                (format!("{:.1}", thread.cpu_percent), COLOR_TEXT),
+            ];
             let mut tcx = pad;
-            tree.text(tcx + 6.0, ry + 4.0, &thread.tid.to_string(), COLOR_TEXT_DIM, 10.0);
-            tcx += 60.0;
-            tree.text(tcx + 6.0, ry + 4.0, &thread.name, COLOR_TEXT, 10.0);
-            tcx += 200.0;
-            tree.text(tcx + 6.0, ry + 4.0, thread.status.label(), thread.status.color(), 10.0);
-            tcx += 80.0;
-            tree.text(tcx + 6.0, ry + 4.0, &format!("{:.1}", thread.cpu_percent), COLOR_TEXT, 10.0);
+            for (&(_, col_w), (cell, color)) in thread_cols.iter().zip(cells.iter()) {
+                tree.text_in(
+                    tcx + CELL_PAD,
+                    ry + 4.0,
+                    (col_w - CELL_PAD * 2.0).max(0.0),
+                    cell,
+                    *color,
+                    10.0,
+                );
+                tcx += col_w;
+            }
         }
         cur_y += (proc.threads.len().min(max_thread_rows) as f32) * ROW_HEIGHT + 12.0;
 
@@ -1917,18 +2228,34 @@ impl ProcessExplorerState {
         if !proc.handles.is_empty() {
             tree.fill_rect(pad, cur_y, w - 2.0 * pad, 1.0, Color::rgb(55, 60, 70));
             cur_y += 8.0;
-            self.render_bold_text(tree, pad, cur_y, &format!("Handles ({})", proc.handles.len()), COLOR_TEXT, 12.0);
+            self.render_bold_text(
+                tree,
+                pad,
+                cur_y,
+                &format!("Handles ({})", proc.handles.len()),
+                COLOR_TEXT,
+                12.0,
+            );
             cur_y += 18.0;
 
             let max_handles = 5;
             for handle in proc.handles.iter().take(max_handles) {
-                let entry = format!("#{}: [{}] {}", handle.handle_id, handle.resource_type, handle.description);
+                let entry = format!(
+                    "#{}: [{}] {}",
+                    handle.handle_id, handle.resource_type, handle.description
+                );
                 tree.text(pad + 8.0, cur_y, &entry, COLOR_TEXT_DIM, 10.0);
                 cur_y += 16.0;
             }
             if proc.handles.len() > max_handles {
                 let more = proc.handles.len() - max_handles;
-                tree.text(pad + 8.0, cur_y, &format!("... and {more} more"), COLOR_TEXT_DIM, 10.0);
+                tree.text(
+                    pad + 8.0,
+                    cur_y,
+                    &format!("... and {more} more"),
+                    COLOR_TEXT_DIM,
+                    10.0,
+                );
                 cur_y += 16.0;
             }
             cur_y += 8.0;
@@ -1938,7 +2265,14 @@ impl ProcessExplorerState {
         if !proc.environment.is_empty() {
             tree.fill_rect(pad, cur_y, w - 2.0 * pad, 1.0, Color::rgb(55, 60, 70));
             cur_y += 8.0;
-            self.render_bold_text(tree, pad, cur_y, &format!("Environment ({})", proc.environment.len()), COLOR_TEXT, 12.0);
+            self.render_bold_text(
+                tree,
+                pad,
+                cur_y,
+                &format!("Environment ({})", proc.environment.len()),
+                COLOR_TEXT,
+                12.0,
+            );
             cur_y += 18.0;
 
             let max_env = 8;
@@ -1955,7 +2289,13 @@ impl ProcessExplorerState {
             }
             if proc.environment.len() > max_env {
                 let more = proc.environment.len() - max_env;
-                tree.text(pad + 8.0, cur_y, &format!("... and {more} more"), COLOR_TEXT_DIM, 10.0);
+                tree.text(
+                    pad + 8.0,
+                    cur_y,
+                    &format!("... and {more} more"),
+                    COLOR_TEXT_DIM,
+                    10.0,
+                );
             }
         }
     }
@@ -1975,7 +2315,13 @@ impl ProcessExplorerState {
         let menu_h = item_h * item_count;
 
         // Shadow
-        tree.fill_rect(menu.x + 2.0, menu.y + 2.0, menu_w, menu_h, Color::rgba(0, 0, 0, 100));
+        tree.fill_rect(
+            menu.x + 2.0,
+            menu.y + 2.0,
+            menu_w,
+            menu_h,
+            Color::rgba(0, 0, 0, 100),
+        );
 
         // Background
         tree.fill_rect(menu.x, menu.y, menu_w, menu_h, Color::rgb(50, 54, 62));
@@ -1985,7 +2331,13 @@ impl ProcessExplorerState {
             let iy = menu.y + i as f32 * item_h;
 
             if menu.hover_index == Some(i) {
-                tree.fill_rect(menu.x + 1.0, iy, menu_w - 2.0, item_h, Color::rgb(70, 100, 160));
+                tree.fill_rect(
+                    menu.x + 1.0,
+                    iy,
+                    menu_w - 2.0,
+                    item_h,
+                    Color::rgb(70, 100, 160),
+                );
             }
 
             let text_color = if *action == ContextAction::Kill {
@@ -2105,47 +2457,205 @@ impl ProcessExplorerState {
     /// Populate the explorer with sample data for UI testing.
     pub fn load_demo_data(&mut self) {
         self.processes = vec![
-            make_demo_process(1, 0, "init", ProcessStatus::Running, 0.1, 4_194_304, 2, 0, "root"),
-            make_demo_process(2, 1, "kthread", ProcessStatus::Sleeping, 0.0, 0, 1, -20, "root"),
-            make_demo_process(100, 1, "compositor", ProcessStatus::Running, 8.5, 67_108_864, 6, 0, "system"),
-            make_demo_process(101, 1, "netd", ProcessStatus::Sleeping, 0.3, 12_582_912, 4, 0, "system"),
-            make_demo_process(200, 100, "desktop", ProcessStatus::Running, 3.2, 104_857_600, 12, 0, "user"),
-            make_demo_process(201, 200, "explorer", ProcessStatus::Running, 1.1, 52_428_800, 4, 0, "user"),
-            make_demo_process(202, 200, "terminal", ProcessStatus::Sleeping, 0.4, 20_971_520, 3, 0, "user"),
-            make_demo_process(203, 200, "editor", ProcessStatus::Running, 12.7, 157_286_400, 8, 0, "user"),
-            make_demo_process(300, 1, "httpd", ProcessStatus::Running, 2.1, 33_554_432, 16, 5, "www"),
-            make_demo_process(301, 300, "httpd-worker", ProcessStatus::Running, 5.4, 16_777_216, 1, 5, "www"),
-            make_demo_process(302, 300, "httpd-worker", ProcessStatus::Sleeping, 0.0, 16_777_216, 1, 5, "www"),
-            make_demo_process(400, 1, "sshd", ProcessStatus::Sleeping, 0.0, 8_388_608, 1, 0, "root"),
-            make_demo_process(500, 1, "zombie_proc", ProcessStatus::Zombie, 0.0, 0, 0, 0, "user"),
+            make_demo_process(
+                1,
+                0,
+                "init",
+                ProcessStatus::Running,
+                0.1,
+                4_194_304,
+                2,
+                0,
+                "root",
+            ),
+            make_demo_process(
+                2,
+                1,
+                "kthread",
+                ProcessStatus::Sleeping,
+                0.0,
+                0,
+                1,
+                -20,
+                "root",
+            ),
+            make_demo_process(
+                100,
+                1,
+                "compositor",
+                ProcessStatus::Running,
+                8.5,
+                67_108_864,
+                6,
+                0,
+                "system",
+            ),
+            make_demo_process(
+                101,
+                1,
+                "netd",
+                ProcessStatus::Sleeping,
+                0.3,
+                12_582_912,
+                4,
+                0,
+                "system",
+            ),
+            make_demo_process(
+                200,
+                100,
+                "desktop",
+                ProcessStatus::Running,
+                3.2,
+                104_857_600,
+                12,
+                0,
+                "user",
+            ),
+            make_demo_process(
+                201,
+                200,
+                "explorer",
+                ProcessStatus::Running,
+                1.1,
+                52_428_800,
+                4,
+                0,
+                "user",
+            ),
+            make_demo_process(
+                202,
+                200,
+                "terminal",
+                ProcessStatus::Sleeping,
+                0.4,
+                20_971_520,
+                3,
+                0,
+                "user",
+            ),
+            make_demo_process(
+                203,
+                200,
+                "editor",
+                ProcessStatus::Running,
+                12.7,
+                157_286_400,
+                8,
+                0,
+                "user",
+            ),
+            make_demo_process(
+                300,
+                1,
+                "httpd",
+                ProcessStatus::Running,
+                2.1,
+                33_554_432,
+                16,
+                5,
+                "www",
+            ),
+            make_demo_process(
+                301,
+                300,
+                "httpd-worker",
+                ProcessStatus::Running,
+                5.4,
+                16_777_216,
+                1,
+                5,
+                "www",
+            ),
+            make_demo_process(
+                302,
+                300,
+                "httpd-worker",
+                ProcessStatus::Sleeping,
+                0.0,
+                16_777_216,
+                1,
+                5,
+                "www",
+            ),
+            make_demo_process(
+                400,
+                1,
+                "sshd",
+                ProcessStatus::Sleeping,
+                0.0,
+                8_388_608,
+                1,
+                0,
+                "root",
+            ),
+            make_demo_process(
+                500,
+                1,
+                "zombie_proc",
+                ProcessStatus::Zombie,
+                0.0,
+                0,
+                0,
+                0,
+                "user",
+            ),
         ];
 
         // Add threads and handles to a few processes.
         if let Some(compositor) = self.processes.iter_mut().find(|p| p.pid == 100) {
             compositor.threads = vec![
-                ThreadInfo { tid: 1001, name: "render".to_string(), status: ProcessStatus::Running, cpu_percent: 5.0 },
-                ThreadInfo { tid: 1002, name: "input".to_string(), status: ProcessStatus::Sleeping, cpu_percent: 1.0 },
-                ThreadInfo { tid: 1003, name: "vsync".to_string(), status: ProcessStatus::Sleeping, cpu_percent: 2.5 },
+                ThreadInfo {
+                    tid: 1001,
+                    name: "render".to_string(),
+                    status: ProcessStatus::Running,
+                    cpu_percent: 5.0,
+                },
+                ThreadInfo {
+                    tid: 1002,
+                    name: "input".to_string(),
+                    status: ProcessStatus::Sleeping,
+                    cpu_percent: 1.0,
+                },
+                ThreadInfo {
+                    tid: 1003,
+                    name: "vsync".to_string(),
+                    status: ProcessStatus::Sleeping,
+                    cpu_percent: 2.5,
+                },
             ];
             compositor.handles = vec![
-                HandleInfo { handle_id: 1, resource_type: "channel".to_string(), description: "desktop-ipc".to_string() },
-                HandleInfo { handle_id: 2, resource_type: "vmo".to_string(), description: "framebuffer".to_string() },
-                HandleInfo { handle_id: 3, resource_type: "event".to_string(), description: "vsync-signal".to_string() },
+                HandleInfo {
+                    handle_id: 1,
+                    resource_type: "channel".to_string(),
+                    description: "desktop-ipc".to_string(),
+                },
+                HandleInfo {
+                    handle_id: 2,
+                    resource_type: "vmo".to_string(),
+                    description: "framebuffer".to_string(),
+                },
+                HandleInfo {
+                    handle_id: 3,
+                    resource_type: "event".to_string(),
+                    description: "vsync-signal".to_string(),
+                },
             ];
             compositor.environment = vec![
                 ("DISPLAY".to_string(), ":0".to_string()),
                 ("GPU_DRIVER".to_string(), "virtio-gpu".to_string()),
             ];
-            compositor.command_line = "/usr/bin/compositor --backend=virtio-gpu --vsync".to_string();
+            compositor.command_line =
+                "/usr/bin/compositor --backend=virtio-gpu --vsync".to_string();
         }
 
         self.system_info = SystemInfo {
-            total_memory: 8_589_934_592,    // 8 GiB
-            used_memory: 3_435_973_837,     // ~3.2 GiB
-            free_memory: 3_221_225_472,     // ~3 GiB
-            cached_memory: 1_932_735_283,   // ~1.8 GiB
-            swap_total: 2_147_483_648,      // 2 GiB
-            swap_used: 104_857_600,         // 100 MiB
+            total_memory: 8_589_934_592,  // 8 GiB
+            used_memory: 3_435_973_837,   // ~3.2 GiB
+            free_memory: 3_221_225_472,   // ~3 GiB
+            cached_memory: 1_932_735_283, // ~1.8 GiB
+            swap_total: 2_147_483_648,    // 2 GiB
+            swap_used: 104_857_600,       // 100 MiB
             cpu_per_core: vec![12.0, 45.0, 8.0, 67.0],
             cpu_overall: 33.0,
             uptime_secs: 86472,
@@ -2191,8 +2701,8 @@ impl ProcessExplorerState {
 
         // Push some initial history data.
         let cpu_samples = [
-            20.0, 25.0, 22.0, 30.0, 35.0, 28.0, 40.0, 38.0, 33.0, 36.0,
-            42.0, 38.0, 35.0, 30.0, 28.0, 25.0, 30.0, 33.0, 37.0, 33.0,
+            20.0, 25.0, 22.0, 30.0, 35.0, 28.0, 40.0, 38.0, 33.0, 36.0, 42.0, 38.0, 35.0, 30.0,
+            28.0, 25.0, 30.0, 33.0, 37.0, 33.0,
         ];
         for &s in &cpu_samples {
             self.cpu_history.push(s);
@@ -2308,7 +2818,10 @@ fn main() {
     let render_tree = explorer.render();
     println!("Process Explorer initialized");
     println!("  {} processes loaded", explorer.processes.len());
-    println!("  {} visible (after filter)", explorer.visible_indices.len());
+    println!(
+        "  {} visible (after filter)",
+        explorer.visible_indices.len()
+    );
     println!("  {} render commands", render_tree.len());
     println!("  Status: {}", explorer.status_message);
 
@@ -2330,7 +2843,9 @@ fn main() {
             SortDirection::Ascending => "asc",
             SortDirection::Descending => "desc",
         },
-        explorer.visible_indices.first()
+        explorer
+            .visible_indices
+            .first()
             .and_then(|&i| explorer.processes.get(i))
             .map(|p| p.name.as_str())
             .unwrap_or("(none)"),
@@ -2344,10 +2859,7 @@ fn main() {
     // Demonstrate filtering.
     explorer.filter_text = "http".to_string();
     explorer.rebuild_visible_list();
-    println!(
-        "Filter 'http': {} matches",
-        explorer.visible_indices.len()
-    );
+    println!("Filter 'http': {} matches", explorer.visible_indices.len());
 
     // Demonstrate details tab.
     explorer.filter_text.clear();
@@ -2370,6 +2882,149 @@ mod tests {
 
     use super::*;
     use guitk::event::MouseEvent;
+
+    // --- Table cells stay in their columns ---
+
+    /// The left edge of each column, derived from the same widths the renderer
+    /// uses so this cannot drift from it.
+    fn column_edges() -> Vec<(ProcessColumn, f32, f32)> {
+        let mut edges = Vec::new();
+        let mut x = 0.0f32;
+        for col in &ProcessColumn::ALL {
+            edges.push((*col, x, col.width()));
+            x += col.width();
+        }
+        edges
+    }
+
+    /// A process list whose name and user are far too long for their columns —
+    /// the case a process can create for itself just by being named that way.
+    fn app_with_a_shouting_process() -> ProcessExplorerState {
+        let mut app = ProcessExplorerState::new();
+        app.processes = vec![
+            make_demo_process(
+                1,
+                0,
+                &"W".repeat(180),
+                ProcessStatus::Running,
+                12.5,
+                4096,
+                3,
+                0,
+                &"averyveryverylongusernameindeed".repeat(3),
+            ),
+            make_demo_process(
+                2,
+                1,
+                "init",
+                ProcessStatus::Sleeping,
+                0.0,
+                2048,
+                1,
+                0,
+                "root",
+            ),
+        ];
+        app.rebuild_visible_list();
+        app
+    }
+
+    /// Render *only* the process table, not the whole window.
+    ///
+    /// Rendering the app and filtering by position does not work here: the
+    /// toolbar's "End Process" button sits at x=16, which is inside the PID
+    /// column's x-range, so a whole-window render fails a column-fit assertion
+    /// on a command that is not a table cell at all. The panel is what is under
+    /// test, so the panel is what gets rendered.
+    fn process_tab_commands(app: &ProcessExplorerState) -> Vec<RenderCommand> {
+        let mut tree = RenderTree::new();
+        app.render_process_tab(&mut tree);
+        tree.commands
+    }
+
+    /// No cell may be drawn wider than the column it belongs to. Without this,
+    /// a process can overwrite every column to its right just by having a long
+    /// name — the row becomes unreadable for the processes that did nothing
+    /// wrong, which is exactly backwards.
+    #[test]
+    fn no_process_row_cell_escapes_its_column() {
+        let app = app_with_a_shouting_process();
+        let cmds = process_tab_commands(&app);
+        let edges = column_edges();
+
+        let mut checked = 0;
+        for cmd in &cmds {
+            let RenderCommand::Text {
+                x,
+                text,
+                font_size,
+                font_weight,
+                ..
+            } = cmd
+            else {
+                continue;
+            };
+            // Find the column this command starts in.
+            let Some(&(_, col_x, col_w)) =
+                edges.iter().find(|&&(_, cx, cw)| *x >= cx && *x < cx + cw)
+            else {
+                continue;
+            };
+            let right = *x + text::measure(text, *font_size, *font_weight);
+            assert!(
+                right <= col_x + col_w + 0.5,
+                "cell {text:?} starting at {x} runs to {right}, past its column's \
+                 right edge {}",
+                col_x + col_w,
+            );
+            checked += 1;
+        }
+        assert!(
+            checked >= 8,
+            "expected a full row of cells, checked {checked}"
+        );
+    }
+
+    /// The cut has to be visible, or a truncated name is indistinguishable from
+    /// a short one and the reader has no idea they are seeing a fragment.
+    #[test]
+    fn an_overlong_process_name_is_marked_as_cut() {
+        let app = app_with_a_shouting_process();
+        let cmds = process_tab_commands(&app);
+        let cut: Vec<&String> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } if text.starts_with('W') => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(cut.len(), 1, "expected one name cell: {cut:?}");
+        assert!(
+            cut[0].ends_with('…'),
+            "the truncation must be marked, got {:?}",
+            cut[0],
+        );
+        assert!(
+            cut[0].chars().count() < 180,
+            "the name should have been shortened, got {} chars",
+            cut[0].chars().count(),
+        );
+    }
+
+    /// A name that fits is left exactly as it is — eliding is for text that
+    /// genuinely does not fit, not a blanket shortening of every cell.
+    #[test]
+    fn a_short_process_name_is_left_alone() {
+        let app = app_with_a_shouting_process();
+        let cmds = process_tab_commands(&app);
+        assert!(
+            cmds.iter().any(|c| matches!(
+                c,
+                RenderCommand::Text { text, .. } if text == "init"
+            )),
+            "a short name must be drawn verbatim",
+        );
+    }
 
     #[test]
     fn tabs_fit_their_labels() {
@@ -2410,9 +3065,7 @@ mod tests {
         let text_i = tree
             .commands
             .iter()
-            .position(
-                |c| matches!(c, RenderCommand::Text { text, .. } if *text == app.filter_text),
-            )
+            .position(|c| matches!(c, RenderCommand::Text { text, .. } if *text == app.filter_text))
             .expect("filter text not drawn");
         let origin = match tree.commands.get(text_i) {
             Some(RenderCommand::Text { x, .. }) => *x,

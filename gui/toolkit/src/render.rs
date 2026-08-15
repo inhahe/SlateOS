@@ -159,14 +159,7 @@ impl RenderTree {
         self.commands.push(cmd);
     }
 
-    pub fn fill_rect(
-        &mut self,
-        x: f32,
-        y: f32,
-        width: f32,
-        height: f32,
-        color: Color,
-    ) {
+    pub fn fill_rect(&mut self, x: f32, y: f32, width: f32, height: f32, color: Color) {
         self.push(RenderCommand::FillRect {
             x,
             y,
@@ -269,14 +262,15 @@ impl RenderTree {
         });
     }
 
-    pub fn text(
-        &mut self,
-        x: f32,
-        y: f32,
-        text: &str,
-        color: Color,
-        font_size: f32,
-    ) {
+    /// Draw text with no bound on how far right it may run.
+    ///
+    /// Correct only for text that has nothing to its right, or whose length is
+    /// fixed and known to fit. For anything variable-length drawn into a column
+    /// — a process name, a user name, a file path, anything from the wire or
+    /// from another process — use [`RenderTree::text_in`]: this method cannot
+    /// express a bound, so an over-long string is drawn straight over whatever
+    /// is beside it.
+    pub fn text(&mut self, x: f32, y: f32, text: &str, color: Color, font_size: f32) {
         self.push(RenderCommand::Text {
             x,
             y,
@@ -285,6 +279,66 @@ impl RenderTree {
             font_size,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+        });
+    }
+
+    /// Draw text fitted to `width`, marking the cut with `…` if it did not fit.
+    ///
+    /// This is the one to reach for whenever the text is variable-length and
+    /// something is drawn to the right of it. Two things happen, and both
+    /// matter:
+    ///
+    /// - The string is elided to `width` **as measured at the size it will be
+    ///   drawn at**, so it genuinely fits. A caller cannot get this right by
+    ///   counting characters: a byte or `char` budget is not a width, and the
+    ///   two only appear to agree on average-width ASCII.
+    /// - The cut is *marked*. A silently clipped string is indistinguishable
+    ///   from a short one, so the reader has no way to know they are looking at
+    ///   a fragment — which is how a truncated path or a spoofed peer name gets
+    ///   read as the whole thing.
+    ///
+    /// `max_width` is set as well, so the compositor's own clip is a backstop
+    /// if the measured face and the drawn face ever disagree.
+    pub fn text_in(
+        &mut self,
+        x: f32,
+        y: f32,
+        width: f32,
+        text: &str,
+        color: Color,
+        font_size: f32,
+    ) {
+        self.text_in_weighted(x, y, width, text, color, font_size, FontWeightHint::Regular);
+    }
+
+    /// [`RenderTree::text_in`] for text drawn at a weight other than regular.
+    ///
+    /// Separate because the weight is not cosmetic here: bold glyphs are wider
+    /// than regular ones at the same size, so measuring a bold string as
+    /// regular under-measures it and lets a real overflow through.
+    // The seven are the irreducible description of one piece of drawn text
+    // (where, how wide, what, and in which face); bundling them into a struct
+    // would only move the same seven fields to the call site, where they would
+    // read worse than positional arguments matching the sibling primitives.
+    #[allow(clippy::too_many_arguments)]
+    pub fn text_in_weighted(
+        &mut self,
+        x: f32,
+        y: f32,
+        width: f32,
+        text: &str,
+        color: Color,
+        font_size: f32,
+        font_weight: FontWeightHint,
+    ) {
+        self.push(RenderCommand::Text {
+            x,
+            y,
+            text: crate::text::elide(text, width, "…", font_size, font_weight),
+            color,
+            font_size,
+            font_weight,
+            max_width: Some(width),
         });
     }
 
@@ -335,5 +389,94 @@ impl RenderTree {
 impl Extend<RenderCommand> for RenderTree {
     fn extend<T: IntoIterator<Item = RenderCommand>>(&mut self, iter: T) {
         self.commands.extend(iter);
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
+mod tests {
+    use super::*;
+
+    fn drawn(tree: &RenderTree) -> (&str, Option<f32>) {
+        match tree.commands.first().expect("one command") {
+            RenderCommand::Text {
+                text, max_width, ..
+            } => (text.as_str(), *max_width),
+            other => panic!("expected Text, got {other:?}"),
+        }
+    }
+
+    /// The point of the primitive: what it emits genuinely fits the width it
+    /// was given, measured at the size and weight it will be drawn at.
+    #[test]
+    fn fitted_text_measures_within_its_width() {
+        for width in [20.0_f32, 60.0, 140.0, 400.0] {
+            let mut tree = RenderTree::new();
+            tree.text_in(0.0, 0.0, width, &"W".repeat(300), Color::rgb(0, 0, 0), 11.0);
+            let (text, max_width) = drawn(&tree);
+            assert_eq!(max_width, Some(width));
+            let measured = crate::text::measure(text, 11.0, FontWeightHint::Regular);
+            assert!(
+                measured <= width + 0.5,
+                "fitted text measures {measured} in a width of {width}",
+            );
+        }
+    }
+
+    /// A silent clip is the defect this exists to prevent, so the marker is
+    /// part of the contract, not a nicety.
+    #[test]
+    fn text_that_did_not_fit_is_marked() {
+        let mut tree = RenderTree::new();
+        tree.text_in(0.0, 0.0, 60.0, &"W".repeat(300), Color::rgb(0, 0, 0), 11.0);
+        assert!(drawn(&tree).0.ends_with('…'));
+    }
+
+    /// Text that fits is passed through untouched — eliding is for text that
+    /// genuinely overflows, not a blanket shortening.
+    #[test]
+    fn text_that_fits_is_left_verbatim() {
+        let mut tree = RenderTree::new();
+        tree.text_in(0.0, 0.0, 400.0, "init", Color::rgb(0, 0, 0), 11.0);
+        assert_eq!(drawn(&tree).0, "init");
+    }
+
+    /// Bold glyphs are wider than regular ones at the same size, so a bold
+    /// string measured as regular under-measures and overflows anyway. This is
+    /// why the weight-taking variant exists.
+    #[test]
+    fn a_bold_string_is_fitted_at_its_own_weight() {
+        let sample = "The quick brown fox jumps over the lazy dog";
+        let width = 120.0_f32;
+        let mut tree = RenderTree::new();
+        tree.text_in_weighted(
+            0.0,
+            0.0,
+            width,
+            sample,
+            Color::rgb(0, 0, 0),
+            13.0,
+            FontWeightHint::Bold,
+        );
+        let (text, _) = drawn(&tree);
+        let measured = crate::text::measure(text, 13.0, FontWeightHint::Bold);
+        assert!(
+            measured <= width + 0.5,
+            "bold text measures {measured} in a width of {width}",
+        );
+    }
+
+    /// A width too small even for the ellipsis must produce nothing rather than
+    /// an ellipsis that itself overflows.
+    #[test]
+    fn an_impossible_width_draws_nothing() {
+        let mut tree = RenderTree::new();
+        tree.text_in(0.0, 0.0, 0.0, "anything at all", Color::rgb(0, 0, 0), 11.0);
+        assert_eq!(drawn(&tree).0, "");
     }
 }

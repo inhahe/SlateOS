@@ -886,18 +886,23 @@ fn matches_filter(cell: &CellValue, op: &FilterOp, value: &CellValue) -> bool {
 }
 
 /// Simple LIKE pattern matcher supporting % and _ wildcards.
+///
+/// Matches over `&[char]`, not `&[u8]`. SQL's `_` is defined as exactly one
+/// *character*, and this used to walk bytes, so `_` matched one third of a
+/// kanji: `LIKE '_'` was false for a one-character CJK cell while `LIKE '___'`
+/// was true for it. Both inputs are `&str`, so decoding always succeeds.
 fn simple_like_match(text: &str, pattern: &str) -> bool {
-    let text = text.to_lowercase();
-    let pattern = pattern.to_lowercase();
-    like_match_inner(text.as_bytes(), pattern.as_bytes())
+    let text: Vec<char> = text.to_lowercase().chars().collect();
+    let pattern: Vec<char> = pattern.to_lowercase().chars().collect();
+    like_match_inner(&text, &pattern)
 }
 
-fn like_match_inner(text: &[u8], pattern: &[u8]) -> bool {
+fn like_match_inner(text: &[char], pattern: &[char]) -> bool {
     if pattern.is_empty() {
         return text.is_empty();
     }
     if let Some(&first_p) = pattern.first() {
-        if first_p == b'%' {
+        if first_p == '%' {
             // % matches any sequence
             let rest_pattern = pattern.get(1..).unwrap_or_default();
             for i in 0..=text.len() {
@@ -906,7 +911,7 @@ fn like_match_inner(text: &[u8], pattern: &[u8]) -> bool {
                 }
             }
             false
-        } else if first_p == b'_' {
+        } else if first_p == '_' {
             // _ matches exactly one character
             if text.is_empty() {
                 return false;
@@ -4479,6 +4484,76 @@ fn main() {
 )]
 mod tests {
     use super::*;
+
+    // --- LIKE pattern matching ---
+
+    #[test]
+    fn like_underscore_matches_one_character_not_one_byte() {
+        let mut checked = 0;
+        for (ch, width) in [("é", 2), ("日", 3), ("😀", 4)] {
+            assert!(
+                simple_like_match(ch, "_"),
+                "`_` should match the single character {ch:?}"
+            );
+            let many = "_".repeat(width);
+            assert!(
+                !simple_like_match(ch, &many),
+                "{width} underscores must not match the {width} bytes of {ch:?}"
+            );
+            checked += 1;
+        }
+        assert!(checked >= 3, "only {checked} checked");
+
+        assert!(simple_like_match("日本", "__"));
+        assert!(simple_like_match("日本語.txt", "___.txt"));
+        assert!(!simple_like_match("日本", "_"));
+    }
+
+    #[test]
+    fn like_percent_combined_with_underscore_counts_characters() {
+        // Literals and `%` on their own survive byte matching -- a
+        // well-formed needle can only ever match starting on a character
+        // boundary, by UTF-8 self-synchronization -- so they are not what
+        // needs pinning down here. The discriminating cases are those where
+        // `%` absorbs the slack and `_` must still count characters: under
+        // the byte matcher a single kanji had three `_`s worth of room.
+        assert!(!simple_like_match("日", "%_%_%"));
+        assert!(!simple_like_match("日本", "%_%_%_%"));
+        assert!(simple_like_match("日本", "%_%_%"));
+
+        // Sanity: non-ASCII literals and `%` still behave.
+        assert!(simple_like_match("日本語", "日%"));
+        assert!(simple_like_match("日本語", "%語"));
+        assert!(simple_like_match("日本語", "%本%"));
+        assert!(!simple_like_match("日本語", "%犬%"));
+    }
+
+    #[test]
+    fn like_on_ascii_is_unchanged() {
+        let mut checked = 0;
+        for (text, pat, want) in [
+            ("hello", "hello", true),
+            ("hello", "h%", true),
+            ("hello", "%o", true),
+            ("hello", "h_llo", true),
+            ("hello", "h__lo", true), // _ = e, _ = l
+            ("hello", "h___lo", false), // one more character than there is
+            ("hello", "%ell%", true),
+            ("hello", "%xyz%", false),
+            ("HELLO", "hello", true), // matching is case-insensitive
+            ("", "", true),
+            ("", "%", true),
+            ("a", "", false),
+        ] {
+            assert_eq!(
+                simple_like_match(text, pat),
+                want,
+                "{text:?} LIKE {pat:?}"
+            );
+            checked += 1;
+        }
+        assert!(checked >= 12, "only {checked} checked");
+    }
 
     // --- text measurement ---
 

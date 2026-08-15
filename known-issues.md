@@ -4,8 +4,8 @@
 
 **Status: FIXED 2026-08-15** (lane C, commits `f508f76cf`, `f53562a09`,
 `feb695bbd`, `8208fad9d`, `83dfaff21`, `5750232c5`, `a8d659199`, `ffbdec410`,
-`54fd94f2b`, `5305d139f`, `b3373ad17`, `db06a8c3c`, and the `apps/filesearch` commit following
-it). Found while surveying app tables for unbounded columns. Fourteen sites
+`54fd94f2b`, `5305d139f`, `b3373ad17`, `db06a8c3c`, `de378bab6`, and the dbviewer/indexer commit following
+it). Found while surveying app tables for unbounded columns. Seventeen sites
 across `apps/` and `gui/` confused a byte count with a character count, usually
 while truncating a *display* string:
 
@@ -40,8 +40,11 @@ particular apps — it is their ordinary input.
 | `apps/markdowneditor/src/main.rs` (14 sites) | `cursor_col`, the selection anchor, undo columns | **Press Down onto a line with a wide character, then type.** Aborts with the document unsaved. |
 | `apps/backup/src/main.rs:302` | the `?` glob wildcard, over path bytes | **Not a panic** — an include/exclude pattern silently stops matching, so a file the user believed was covered is not backed up. |
 | `apps/filesearch/src/main.rs` (both matchers) | every single-character construct in the glob *and* regex engines | **Not a panic** — a search over non-ASCII filenames silently returns wrong results, in both directions. |
+| `apps/dbviewer/src/main.rs:895` | SQL `LIKE`'s `_` wildcard | `LIKE '_'` was false for a one-character CJK cell and `LIKE '___'` was true for it. |
+| `apps/indexer/src/main.rs:709` | the `?` wildcard and `[...]` classes of a third glob matcher | Same as filesearch's, in the file indexer. |
+| `apps/indexer/src/main.rs:826` | `levenshtein_bounded`, the fuzzy-match edit distance | One substituted kanji cost 3 of a budget the user reads as "a couple of typos", so near-exact CJK matches were rejected. |
 
-The last seven were found while fixing the first seven and were not in the
+The last ten were found while fixing the first seven and were not in the
 original count. `gui/clipboard/src/main.rs:183` looked like another but is not:
 it already goes through `find_char_boundary`.
 
@@ -56,7 +59,7 @@ and a byte count are used interchangeably. Rust's own `format!` width is a
 character count, which makes it a natural source of the confusion.
 
 **`apps/renamer` is the one site where the byte/character confusion was also a
-*semantic* bug, and the most damaging of the fourteen.** Four rename rules —
+*semantic* bug, and the most damaging of the seventeen.** Four rename rules —
 insert-at, remove-from, number-at, datestamp-at — slice the filename stem at a
 position the *user types into the rule*, clamped only with `.min(stem.len())`,
 a byte length. `InsertPosition::At`'s own doc comment has always read "insert at
@@ -160,6 +163,42 @@ char)` instead of `.chars()`. Every comparison in both engines is by scalar
 value, so mapping each byte to the char of the same value restores the old
 behaviour exactly, at 8 call sites and with no other edit.
 
+**Asking the behavioural question then found three more sites in two more apps,
+which is the strongest evidence that the question is the right tool.** Having
+noticed that no grep finds a byte-at-a-time advance, the lane's remaining
+matchers, parsers and scanners were read with one question in mind — *does this
+walk text one unit at a time, and is that unit a byte?* Three said yes:
+
+- **`dbviewer`'s SQL `LIKE`.** Its own comment reads "`_` matches exactly one
+  character"; it consumed one byte. `LIKE '_'` was false for a one-character
+  CJK cell while `LIKE '___'` was true for it.
+- **`indexer`'s glob matcher** — a third independent copy of the same `?`-and-
+  class bug, after `backup` and `filesearch`.
+- **`indexer`'s `levenshtein_bounded`.** The most interesting of the three,
+  because it is not a wildcard at all: an *edit distance* over bytes charges up
+  to 3 for one substituted kanji. Against a `FUZZY_MAX_DISTANCE` the user reads
+  as "a couple of typos", a near-exact CJK match was rejected while a much
+  worse ASCII one was accepted — and the `abs_diff` length early-out discarded
+  candidates before the DP even ran. Fuzzy matching was effectively off for
+  non-ASCII names.
+
+That three independent glob matchers in one lane each carried the same defect
+is worth noting on its own: this is not a slip someone made once, it is what
+you get by default from reaching for `as_bytes()` to walk a pattern. The
+generalisation is not "`?` is special" but that **any construct meaning "one
+unit of text" is wrong the moment the loop's unit is a byte** — wildcards,
+classes, ranges, quantifier counts and edit costs alike.
+
+A second vacuity trap turned up here, of a kind not seen before: **a test can
+fail to discriminate because the behaviour that survives the break is genuinely
+correct.** `dbviewer`'s first percent-and-literals test passed under the
+deliberate break, not through oversight but because `%` and literal matching
+really are sound over bytes — the same self-synchronization argument that
+cleared `backup`'s `*`. Only a pattern that makes `%` absorb the slack while
+`_` must still count (`"日"` against `"%_%_%"`) can tell the two engines apart.
+Generalised: when part of a construct is provably safe, a test built from that
+part cannot witness the unsafe part, however non-ASCII its input looks.
+
 **The fix was not to hunt for char boundaries at each site.** All but one of
 these is a *display* truncation, and each already had a box to draw into, so
 each became `guitk::text::elide` / `RenderTree::text_in` (or a `guitk::table`
@@ -193,7 +232,7 @@ indicator.
 
 Grep shape, if this recurs: `&<ident>[..<literal>]` where the receiver is a
 `String`/`&str`, and its `if x.len() > N` guard. That shape found seven of the
-fourteen; the other seven needed a wider sweep for *any* mixing of the two counts.
+seventeen; the other ten needed a wider sweep for *any* mixing of the two counts.
 Three further forms showed up, none of which the grep can see: `format!` width
 (a *character* count) meeting a byte slice (videoplayer); `.min(s.len())` used
 to clamp a position the user thinks of in characters (renamer,

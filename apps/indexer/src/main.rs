@@ -703,10 +703,12 @@ fn search_content(index: &FileIndex, query: &str, limit: usize) -> Vec<SearchRes
 
 /// Simple glob pattern matching supporting *, ?, and character classes [abc].
 fn glob_match(pattern: &str, text: &str) -> bool {
-    glob_match_bytes(pattern.as_bytes(), text.as_bytes())
+    let pat: Vec<char> = pattern.chars().collect();
+    let txt: Vec<char> = text.chars().collect();
+    glob_match_chars(&pat, &txt)
 }
 
-fn glob_match_bytes(pattern: &[u8], text: &[u8]) -> bool {
+fn glob_match_chars(pattern: &[char], text: &[char]) -> bool {
     let mut pi = 0;
     let mut ti = 0;
     let mut star_pi = usize::MAX;
@@ -715,18 +717,18 @@ fn glob_match_bytes(pattern: &[u8], text: &[u8]) -> bool {
     while ti < text.len() {
         if pi < pattern.len() {
             match pattern[pi] {
-                b'*' => {
+                '*' => {
                     star_pi = pi;
                     star_ti = ti;
                     pi += 1;
                     continue;
                 }
-                b'?' => {
+                '?' => {
                     pi += 1;
                     ti += 1;
                     continue;
                 }
-                b'[' => {
+                '[' => {
                     // Character class.
                     if let Some((matched, end)) = match_char_class(&pattern[pi..], text[ti])
                         && matched {
@@ -758,21 +760,22 @@ fn glob_match_bytes(pattern: &[u8], text: &[u8]) -> bool {
     }
 
     // Consume remaining stars.
-    while pi < pattern.len() && pattern[pi] == b'*' {
+    while pi < pattern.len() && pattern[pi] == '*' {
         pi += 1;
     }
 
     pi == pattern.len()
 }
 
-/// Match a character class like [abc] or [a-z]. Returns (matched, bytes consumed).
-fn match_char_class(pattern: &[u8], ch: u8) -> Option<(bool, usize)> {
-    if pattern.is_empty() || pattern[0] != b'[' {
+/// Match a character class like [abc] or [a-z]. Returns (matched,
+/// characters consumed).
+fn match_char_class(pattern: &[char], ch: char) -> Option<(bool, usize)> {
+    if pattern.is_empty() || pattern[0] != '[' {
         return None;
     }
 
     let mut i = 1;
-    let negate = if i < pattern.len() && pattern[i] == b'!' {
+    let negate = if i < pattern.len() && pattern[i] == '!' {
         i += 1;
         true
     } else {
@@ -780,8 +783,8 @@ fn match_char_class(pattern: &[u8], ch: u8) -> Option<(bool, usize)> {
     };
 
     let mut matched = false;
-    while i < pattern.len() && pattern[i] != b']' {
-        if i + 2 < pattern.len() && pattern[i + 1] == b'-' {
+    while i < pattern.len() && pattern[i] != ']' {
+        if i + 2 < pattern.len() && pattern[i + 1] == '-' {
             // Range.
             let lo = pattern[i];
             let hi = pattern[i + 2];
@@ -797,7 +800,7 @@ fn match_char_class(pattern: &[u8], ch: u8) -> Option<(bool, usize)> {
         }
     }
 
-    if i < pattern.len() && pattern[i] == b']' {
+    if i < pattern.len() && pattern[i] == ']' {
         let consumed = i + 1; // Include the ']'.
         if negate {
             Some((!matched, consumed))
@@ -816,15 +819,22 @@ fn match_char_class(pattern: &[u8], ch: u8) -> Option<(bool, usize)> {
 
 /// Compute the Levenshtein edit distance between two strings.
 /// Uses bounded computation: returns early if distance exceeds max_distance.
+///
+/// The distance is counted in *characters*. Counting it in bytes made fuzzy
+/// matching useless for non-ASCII names: one substituted kanji costs up to 3
+/// against a `FUZZY_MAX_DISTANCE` budget the user thinks of as "a couple of
+/// typos", so a near-exact CJK match was rejected while a much worse ASCII one
+/// was accepted. The early-out on `abs_diff` of the lengths had the same
+/// problem, rejecting candidates before the DP ever ran.
 fn levenshtein(a: &str, b: &str) -> u32 {
     levenshtein_bounded(a, b, FUZZY_MAX_DISTANCE + 1)
 }
 
 fn levenshtein_bounded(a: &str, b: &str, max: u32) -> u32 {
-    let a_bytes = a.as_bytes();
-    let b_bytes = b.as_bytes();
-    let m = a_bytes.len();
-    let n = b_bytes.len();
+    let a_chars: Vec<char> = a.chars().collect();
+    let b_chars: Vec<char> = b.chars().collect();
+    let m = a_chars.len();
+    let n = b_chars.len();
 
     // Quick length check.
     let len_diff = m.abs_diff(n);
@@ -848,7 +858,7 @@ fn levenshtein_bounded(a: &str, b: &str, max: u32) -> u32 {
         let mut row_min = curr_row[0];
 
         for j in 1..=n {
-            let cost = if a_bytes[i - 1] == b_bytes[j - 1] {
+            let cost = if a_chars[i - 1] == b_chars[j - 1] {
                 0
             } else {
                 1
@@ -1896,6 +1906,75 @@ exclude_extensions = .o, .tmp
     #[test]
     fn test_levenshtein_substitution() {
         assert_eq!(levenshtein("hello", "hallo"), 1);
+    }
+
+    // ---- Byte/character confusion ----
+    //
+    // The glob matcher and the edit distance both used to walk bytes.
+
+    #[test]
+    fn a_glob_question_mark_matches_one_character_not_one_byte() {
+        let mut checked = 0;
+        for (ch, width) in [("é", 2), ("日", 3), ("😀", 4)] {
+            let name = format!("{ch}.txt");
+            assert!(glob_match("?.txt", &name), "`?` should match {name:?}");
+            let many = "?".repeat(width);
+            assert!(
+                !glob_match(&format!("{many}.txt"), &name),
+                "{width} `?`s must no longer match the {width} bytes of {name:?}"
+            );
+            checked += 1;
+        }
+        assert!(checked >= 3, "only {checked} checked");
+        assert!(glob_match("??.txt", "日本.txt"));
+    }
+
+    #[test]
+    fn a_glob_class_compares_whole_characters() {
+        // é and è share a lead byte, so a byte-wise class confused them.
+        assert!(glob_match("[é]", "é"));
+        assert!(!glob_match("[é]*", "èb"));
+        // A non-ASCII range compares scalar values now, not encoding bytes.
+        assert!(glob_match("[а-я]", "р"));
+        assert!(!glob_match("[а-я]", "z"));
+    }
+
+    #[test]
+    fn edit_distance_counts_characters_not_bytes() {
+        // One substituted kanji is one edit, not three.
+        assert_eq!(levenshtein("日本", "日水"), 1);
+        // One inserted kanji is one edit, not three.
+        assert_eq!(levenshtein("日", "日本"), 1);
+        assert_eq!(levenshtein("café", "cafe"), 1);
+        // Identical non-ASCII strings are distance 0 either way; the point is
+        // that a near miss stays inside the fuzzy budget.
+        assert!(levenshtein("日本語", "日本誤") <= FUZZY_MAX_DISTANCE);
+    }
+
+    #[test]
+    fn an_ascii_pattern_and_distance_are_unchanged() {
+        let mut checked = 0;
+        for (pat, text, want) in [
+            ("*.rs", "main.rs", true),
+            ("*.rs", "main.py", false),
+            ("?.txt", "a.txt", true),
+            ("?.txt", "ab.txt", false),
+            ("[abc]*", "batch", true),
+            ("[!abc]*", "batch", false),
+            ("src/*/mod.rs", "src/net/mod.rs", true),
+        ] {
+            assert_eq!(glob_match(pat, text), want, "{pat:?} vs {text:?}");
+            checked += 1;
+        }
+        for (a, b, want) in [
+            ("hello", "hello", 0),
+            ("helo", "hello", 1),
+            ("hello", "hallo", 1),
+        ] {
+            assert_eq!(levenshtein(a, b), want, "{a:?} vs {b:?}");
+            checked += 1;
+        }
+        assert!(checked >= 10, "only {checked} checked");
     }
 
     #[test]

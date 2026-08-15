@@ -263,13 +263,56 @@ impl<'a> Table<'a> {
         fit: Fit,
         font_weight: FontWeightHint,
     ) {
-        let width = self.width(index);
+        Self::fitted(
+            cmds,
+            self.left(index),
+            self.width(index),
+            y,
+            text,
+            color,
+            font_size,
+            fit,
+            font_weight,
+        );
+    }
+
+    /// Draw `text` fitted to an explicit box, marking any cut.
+    ///
+    /// The escape hatch for a cell whose text does not occupy the whole
+    /// column, because a decoration shares it: a colour swatch before a type
+    /// name, a badge's interior padding, a tree view's per-row indent. Derive
+    /// the box from [`Table::left`] and [`Table::width`] rather than writing
+    /// the column's numbers out again — the point of the type is that the
+    /// geometry has one home, and a hand-written `x + 12.0` paired with an
+    /// unchanged `max_width` draws twelve pixels into the next column.
+    ///
+    /// `width` is clamped at zero, which is the reason this is a function and
+    /// not arithmetic at the call site. Subtracting a decoration's width from
+    /// a *fractional* column width goes negative on a narrow panel, and
+    /// [`text::elide`] of a negative width returns the empty string — so the
+    /// cell blanks silently instead of shrinking, and a negative `max_width`
+    /// goes to the compositor besides. That has already happened once
+    /// (`apps/defrag`'s file list); clamping here means it cannot happen once
+    /// per call site.
+    #[allow(clippy::too_many_arguments)]
+    pub fn fitted(
+        cmds: &mut Vec<RenderCommand>,
+        x: f32,
+        width: f32,
+        y: f32,
+        text: &str,
+        color: Color,
+        font_size: f32,
+        fit: Fit,
+        font_weight: FontWeightHint,
+    ) {
+        let width = width.max(0.0);
         let fitted = match fit {
             Fit::Start => text::elide(text, width, ELLIPSIS, font_size, font_weight),
             Fit::End => text::elide_start(text, width, ELLIPSIS, font_size, font_weight),
         };
         cmds.push(RenderCommand::Text {
-            x: self.left(index),
+            x,
             y,
             text: fitted,
             font_size,
@@ -525,6 +568,99 @@ mod tests {
             rtext.chars().count() >= btext.chars().count(),
             "regular {rtext:?} kept less than bold {btext:?}"
         );
+    }
+
+    #[test]
+    fn a_cell_sharing_its_column_with_a_decoration_is_cut_to_what_is_left() {
+        // The failure this prevents is not "the text is too long" — it is
+        // "the text was measured against the whole column while being drawn
+        // from partway across it", which overflows by exactly the decoration's
+        // width and looks correct in the source.
+        let table = Table::new(COLUMNS, 0.0);
+        let swatch = 12.0;
+        let long = "a value that will not fit in a hundred pixels";
+        let mut cmds = Vec::new();
+        Table::fitted(
+            &mut cmds,
+            table.left(0) + swatch,
+            table.width(0) - swatch,
+            0.0,
+            long,
+            INK,
+            11.0,
+            Fit::Start,
+            FontWeightHint::Regular,
+        );
+        let (x, drawn, size, weight) = texts(&cmds)[0].clone();
+        assert!((x - (table.left(0) + swatch)).abs() < 0.01);
+        let right = x + text::measure(&drawn, size, weight);
+        assert!(
+            right <= table.right(0) + 0.01,
+            "indented cell {drawn:?} draws to {right}, past its column edge {}",
+            table.right(0)
+        );
+        assert!(drawn.ends_with(ELLIPSIS), "got {drawn:?}");
+    }
+
+    #[test]
+    fn a_decoration_wider_than_its_column_never_yields_a_negative_bound() {
+        // A fractional column minus a fixed decoration goes negative on a
+        // narrow panel. Unclamped, `text::elide` returns "" (the column blanks
+        // with no explanation) and a negative `max_width` reaches the
+        // compositor besides. Both are the caller's arithmetic, so the clamp
+        // has to live here, not at each call site.
+        const NARROW: &[Column] = &[Column {
+            label: "n",
+            width: 10.0,
+        }];
+        let table = Table::new(NARROW, 0.0);
+        let mut cmds = Vec::new();
+        Table::fitted(
+            &mut cmds,
+            table.left(0) + 40.0,
+            table.width(0) - 40.0,
+            0.0,
+            "value",
+            INK,
+            11.0,
+            Fit::Start,
+            FontWeightHint::Regular,
+        );
+        match &cmds[0] {
+            RenderCommand::Text {
+                max_width, text, ..
+            } => {
+                assert_eq!(*max_width, Some(0.0), "negative bound reached the command");
+                assert_eq!(text, "");
+            }
+            other => panic!("expected a Text command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_plain_cell_is_the_same_drawing_as_a_full_width_fitted_box() {
+        // `cell` delegates to `fitted`; if that ever stops being true the two
+        // acquire separate fitting rules and the column stops being one thing.
+        let table = Table::new(COLUMNS, 7.0);
+        let long = "a name long enough to need cutting somewhere";
+        let mut via_cell = Vec::new();
+        table.cell(&mut via_cell, 1, 3.0, long, INK, 11.0, Fit::End);
+        let mut via_box = Vec::new();
+        Table::fitted(
+            &mut via_box,
+            table.left(1),
+            table.width(1),
+            3.0,
+            long,
+            INK,
+            11.0,
+            Fit::End,
+            FontWeightHint::Regular,
+        );
+        // `RenderCommand` is not `PartialEq` — compare every field it carries
+        // via its `Debug` form rather than only the ones a helper extracts, so
+        // a divergence in `max_width` or colour is caught too.
+        assert_eq!(format!("{via_cell:?}"), format!("{via_box:?}"));
     }
 
     #[test]

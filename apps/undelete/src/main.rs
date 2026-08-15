@@ -57,6 +57,7 @@ use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
+use guitk::table::{Column, Fit, Table};
 use guitk::text;
 
 use std::collections::BTreeMap;
@@ -121,6 +122,89 @@ const BUTTON_HEIGHT: f32 = 32.0;
 const CHECKBOX_SIZE: f32 = 16.0;
 const PROGRESS_HEIGHT: f32 = 8.0;
 const STATUS_BAR_HEIGHT: f32 = 28.0;
+
+// ============================================================================
+// Recovered-file list geometry
+// ============================================================================
+
+/// The recovered-file list's columns: the field each one heads and the share
+/// of the panel it spans, left to right.
+///
+/// One array, because these were previously five quantities written twice and
+/// never the same twice. The heading row bounded Name at `width * 0.35` while
+/// the row drew it at `width * 0.33`; Type was `0.15` against `0.14`; Deleted
+/// `0.18` against `0.16`. Neither number was the column — the column was the
+/// distance to the *next* heading, which no line of code mentioned — so no cell
+/// was ever checked against the space it actually had, and every one of them
+/// clipped with no marker. On this screen that matters more than most: its
+/// whole job is to let someone pick which recovered files to restore, from
+/// names and paths carved off a damaged disk.
+///
+/// The fractions sum to 1, which is asserted by a test — a layout that adds up
+/// to less leaves dead space, and one that adds up to more runs off the panel.
+const FILE_COLUMNS: [(SortField, f32); 5] = [
+    (SortField::Filename, 0.35),
+    (SortField::Size, 0.15),
+    (SortField::FileType, 0.15),
+    (SortField::DeleteTime, 0.18),
+    (SortField::Confidence, 0.17),
+];
+
+const FILE_NAME: usize = 0;
+const FILE_SIZE: usize = 1;
+const FILE_TYPE: usize = 2;
+const FILE_DELETED: usize = 3;
+const FILE_CONFIDENCE: usize = 4;
+
+/// Gap between one column's text and the next column's left edge.
+const FILE_COL_GAP: f32 = 12.0;
+
+/// Left inset of the first column, clearing the row's selection checkbox.
+///
+/// Taken back out of the last column so the table still ends at the panel's
+/// right edge rather than [`FILE_COL_INSET`] pixels past it.
+const FILE_COL_INSET: f32 = 32.0;
+
+/// Side of the colour swatch drawn at the left of the Type column, and the gap
+/// between it and the type name.
+const TYPE_SWATCH: f32 = 8.0;
+const TYPE_SWATCH_GAP: f32 = 4.0;
+
+/// Widest the confidence badge is drawn, and its horizontal interior padding.
+const CONF_BADGE_MAX: f32 = 64.0;
+const CONF_BADGE_PAD: f32 = 8.0;
+
+/// Column widths for a recovered-file list `width` pixels wide.
+///
+/// Every width is clamped at zero: a fraction of a narrow panel minus a fixed
+/// gap goes negative, and a negative width elides to the empty string, so an
+/// unclamped column would blank rather than shrink.
+fn file_list_columns(width: f32) -> [Column; 5] {
+    let mut columns = [Column {
+        label: "",
+        width: 0.0,
+    }; 5];
+    for (column, (field, fraction)) in columns.iter_mut().zip(FILE_COLUMNS) {
+        *column = Column {
+            // The heading is the sort field's own name, so the label and the
+            // thing clicking it sorts by cannot come to disagree.
+            label: field.display_name(),
+            width: (width * fraction - FILE_COL_GAP).max(0.0),
+        };
+    }
+    if let Some(last) = columns.last_mut() {
+        last.width = (last.width - FILE_COL_INSET).max(0.0);
+    }
+    columns
+}
+
+/// Column geometry for a recovered-file list panel at `x`.
+///
+/// The anchor is pulled back by one gap so that the first column's text starts
+/// exactly [`FILE_COL_INSET`] right of the panel edge, where it has always been.
+fn file_list_table(columns: &[Column], x: f32) -> Table<'_> {
+    Table::with_gap(columns, x + FILE_COL_INSET - FILE_COL_GAP, FILE_COL_GAP)
+}
 
 // ============================================================================
 // File type / signature definitions
@@ -2508,16 +2592,16 @@ impl UndeleteApp {
             corner_radii: CornerRadii::ZERO,
         });
 
-        let columns: [(SortField, f32, f32); 5] = [
-            (SortField::Filename, x + 32.0, width * 0.35),
-            (SortField::Size, x + width * 0.35 + 32.0, width * 0.12),
-            (SortField::FileType, x + width * 0.5 + 32.0, width * 0.15),
-            (SortField::DeleteTime, x + width * 0.65 + 32.0, width * 0.18),
-            (SortField::Confidence, x + width * 0.83 + 32.0, width * 0.15),
-        ];
-
-        for (field, col_x, col_w) in &columns {
-            let label = if self.sort_field == *field {
+        // Drawn as cells rather than with `Table::header`, because a heading
+        // here is not a fixed label: the sorted column gains a direction arrow
+        // and is tinted. `cell_weighted` fits it to the same column the body
+        // uses, which is the property that was missing — a heading and its
+        // rows previously carried different widths for the same column.
+        let columns = file_list_columns(width);
+        let table = file_list_table(&columns, x);
+        for (i, (field, _)) in FILE_COLUMNS.iter().enumerate() {
+            let sorted = self.sort_field == *field;
+            let label = if sorted {
                 format!(
                     "{}{}",
                     field.display_name(),
@@ -2526,19 +2610,16 @@ impl UndeleteApp {
             } else {
                 field.display_name().to_string()
             };
-            cmds.push(RenderCommand::Text {
-                x: *col_x,
-                y: header_y + 7.0,
-                text: label,
-                color: if self.sort_field == *field {
-                    BLUE
-                } else {
-                    SUBTEXT0
-                },
-                font_size: FONT_SIZE_SMALL,
-                font_weight: FontWeightHint::Bold,
-                max_width: Some(*col_w),
-            });
+            table.cell_weighted(
+                cmds,
+                i,
+                header_y + 7.0,
+                &label,
+                if sorted { BLUE } else { SUBTEXT0 },
+                FONT_SIZE_SMALL,
+                Fit::Start,
+                FontWeightHint::Bold,
+            );
         }
 
         // File rows
@@ -2611,75 +2692,97 @@ impl UndeleteApp {
             });
         }
 
-        // Filename (two lines: name + path)
-        let name_x = x + 32.0;
-        cmds.push(RenderCommand::Text {
-            x: name_x,
-            y: y + 8.0,
-            text: file.filename.clone(),
-            color: TEXT,
-            font_size: FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(width * 0.33),
-        });
+        let columns = file_list_columns(width);
+        let table = file_list_table(&columns, x);
+
+        // Filename, and the path it was deleted from beneath it.
+        //
+        // Both are cut from the *front*. A recovered name is very often one
+        // this program generated: `RecoverableFile::from_signature` produces
+        // `recovered_{offset:08x}.{ext}` and `from_inode` produces
+        // `inode_{n}`, so a deep-scan result set is a column of names sharing
+        // a ten-character prefix and differing only in the tail. Cut the usual
+        // way they all render as `recovered_00…` — one repeated string in the
+        // list the user is choosing from. Cut at the front they keep the
+        // offset and the extension, which is the entire difference between
+        // them. The same argument, for the same reason, applies to the path:
+        // its leaf is what names it.
+        table.cell(
+            cmds,
+            FILE_NAME,
+            y + 8.0,
+            &file.filename,
+            TEXT,
+            FONT_SIZE,
+            Fit::End,
+        );
         if let Some(ref path) = file.original_path {
-            cmds.push(RenderCommand::Text {
-                x: name_x,
-                y: y + 26.0,
-                text: path.clone(),
-                color: OVERLAY0,
-                font_size: FONT_SIZE_SMALL,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(width * 0.33),
-            });
+            table.cell(
+                cmds,
+                FILE_NAME,
+                y + 26.0,
+                path,
+                OVERLAY0,
+                FONT_SIZE_SMALL,
+                Fit::End,
+            );
         }
 
         // Size
-        cmds.push(RenderCommand::Text {
-            x: x + width * 0.35 + 32.0,
-            y: y + 18.0,
-            text: file.size_display(),
-            color: SUBTEXT0,
-            font_size: FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(width * 0.12),
-        });
+        table.cell(
+            cmds,
+            FILE_SIZE,
+            y + 18.0,
+            &file.size_display(),
+            SUBTEXT0,
+            FONT_SIZE,
+            Fit::Start,
+        );
 
-        // File type with color
+        // File type: a colour swatch, then the name. The swatch's width comes
+        // out of the column rather than being added to it, so the name is cut
+        // to the room the swatch leaves it.
         cmds.push(RenderCommand::FillRect {
-            x: x + width * 0.5 + 32.0,
+            x: table.left(FILE_TYPE),
             y: y + 20.0,
-            width: 8.0,
-            height: 8.0,
+            width: TYPE_SWATCH,
+            height: TYPE_SWATCH,
             color: file.file_type.color(),
-            corner_radii: CornerRadii::all(4.0),
+            corner_radii: CornerRadii::all(TYPE_SWATCH / 2.0),
         });
-        cmds.push(RenderCommand::Text {
-            x: x + width * 0.5 + 44.0,
-            y: y + 18.0,
-            text: file.file_type.display_name().to_string(),
-            color: SUBTEXT0,
-            font_size: FONT_SIZE_SMALL,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(width * 0.14),
-        });
+        let swatch = TYPE_SWATCH + TYPE_SWATCH_GAP;
+        Table::fitted(
+            cmds,
+            table.left(FILE_TYPE) + swatch,
+            table.width(FILE_TYPE) - swatch,
+            y + 18.0,
+            file.file_type.display_name(),
+            SUBTEXT0,
+            FONT_SIZE_SMALL,
+            Fit::Start,
+            FontWeightHint::Regular,
+        );
 
         // Delete time
-        cmds.push(RenderCommand::Text {
-            x: x + width * 0.65 + 32.0,
-            y: y + 18.0,
-            text: file.delete_time_display(),
-            color: SUBTEXT0,
-            font_size: FONT_SIZE_SMALL,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(width * 0.16),
-        });
+        table.cell(
+            cmds,
+            FILE_DELETED,
+            y + 18.0,
+            &file.delete_time_display(),
+            SUBTEXT0,
+            FONT_SIZE_SMALL,
+            Fit::Start,
+        );
 
-        // Confidence badge
-        let conf_x = x + width * 0.83 + 32.0;
-        let badge_w = 64.0;
+        // Confidence badge.
+        //
+        // The pill is clamped to its column. It used to be a flat 64px drawn
+        // at `x + width * 0.83 + 32`, which is inside the panel only while the
+        // panel is wide: at width 400 the badge ended 28px past the panel's own
+        // right edge, over whatever the results screen draws beside the list.
+        let badge_w = table.width(FILE_CONFIDENCE).min(CONF_BADGE_MAX);
         cmds.push(RenderCommand::FillRect {
-            x: conf_x,
+            x: table.left(FILE_CONFIDENCE),
             y: y + 16.0,
             width: badge_w,
             height: 20.0,
@@ -2691,15 +2794,17 @@ impl UndeleteApp {
             ),
             corner_radii: CornerRadii::all(10.0),
         });
-        cmds.push(RenderCommand::Text {
-            x: conf_x + 8.0,
-            y: y + 19.0,
-            text: file.confidence.display_name().to_string(),
-            color: file.confidence.color(),
-            font_size: FONT_SIZE_SMALL,
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(badge_w - 16.0),
-        });
+        Table::fitted(
+            cmds,
+            table.left(FILE_CONFIDENCE) + CONF_BADGE_PAD,
+            badge_w - CONF_BADGE_PAD * 2.0,
+            y + 19.0,
+            file.confidence.display_name(),
+            file.confidence.color(),
+            FONT_SIZE_SMALL,
+            Fit::Start,
+            FontWeightHint::Bold,
+        );
 
         // Bottom separator
         cmds.push(RenderCommand::FillRect {
@@ -2865,9 +2970,21 @@ impl UndeleteApp {
             // its filename, the one part the user is looking for, so paths are
             // elided from the front: `…/2024/report.pdf`, not `/home/user/Doc…`.
             let fitted = if *label == "Original Path" {
-                text::elide_start(value, value_w, "…", FONT_SIZE_SMALL, FontWeightHint::Regular)
+                text::elide_start(
+                    value,
+                    value_w,
+                    "…",
+                    FONT_SIZE_SMALL,
+                    FontWeightHint::Regular,
+                )
             } else {
-                text::elide(value, value_w, "…", FONT_SIZE_SMALL, FontWeightHint::Regular)
+                text::elide(
+                    value,
+                    value_w,
+                    "…",
+                    FONT_SIZE_SMALL,
+                    FontWeightHint::Regular,
+                )
             };
             cmds.push(RenderCommand::Text {
                 x: inner_x + inner_w - value_w,
@@ -4255,7 +4372,10 @@ mod tests {
             );
             checked += 1;
         }
-        assert!(checked >= 10, "expected the panel's lines, checked {checked}");
+        assert!(
+            checked >= 10,
+            "expected the panel's lines, checked {checked}"
+        );
     }
 
     /// A path too long for its column is cut at the *front*, because its tail
@@ -4607,5 +4727,224 @@ mod tests {
     fn test_recoverable_file_delete_time_display_unknown() {
         let file = RecoverableFile::from_signature(1, FileSignatureKind::Jpeg, 0, 1024);
         assert_eq!(file.delete_time_display(), "Unknown");
+    }
+
+    // === Recovered-file list column fitting ===
+
+    const LIST_X: f32 = 40.0;
+    const LIST_Y: f32 = 100.0;
+    const LIST_W: f32 = 760.0;
+    const LIST_H: f32 = 400.0;
+
+    /// An app whose result list holds files with the long, prefix-sharing
+    /// names a real deep scan produces.
+    fn app_with_long_recovered_names() -> UndeleteApp {
+        let mut app = UndeleteApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        app.screen = UiScreen::Results;
+        app.engine.files = vec![
+            RecoverableFile::from_signature(1, FileSignatureKind::Jpeg, 0x0009_a1c4, 4_194_304),
+            RecoverableFile::from_signature(2, FileSignatureKind::Jpeg, 0x0009_a1d8, 4_194_304),
+            RecoverableFile::from_signature(3, FileSignatureKind::Png, 0x0009_a1ec, 2_097_152),
+        ];
+        for (file, path) in app.engine.files.iter_mut().zip([
+            "/home/user/Pictures/2026/Summer/Portugal/day-three/DSC_04871.jpg",
+            "/home/user/Pictures/2026/Summer/Portugal/day-three/DSC_04872.jpg",
+            "/home/user/Pictures/2026/Summer/Portugal/day-three/DSC_04873.png",
+        ]) {
+            file.original_path = Some(String::from(path));
+            file.delete_time = 1_700_000_000;
+        }
+        app
+    }
+
+    /// Every `Text` command the list draws, as `(x, text, size, weight)`.
+    fn file_list_texts(app: &UndeleteApp, w: f32) -> Vec<(f32, String, f32, FontWeightHint)> {
+        let mut cmds = Vec::new();
+        app.render_file_list(&mut cmds, LIST_X, LIST_Y, w, LIST_H);
+        cmds.iter()
+            .filter_map(|cmd| match cmd {
+                RenderCommand::Text {
+                    x,
+                    text,
+                    font_size,
+                    font_weight,
+                    ..
+                } => Some((*x, text.clone(), *font_size, *font_weight)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_file_list_columns_share_out_the_whole_panel() {
+        // Less than 1 leaves dead space at the right; more than 1 puts the
+        // last column off the panel. The old layout's numbers summed to
+        // neither, because the header's widths and the rows' widths were
+        // different sets of numbers and neither set was the column.
+        let total: f32 = FILE_COLUMNS.iter().map(|(_, fraction)| fraction).sum();
+        assert!(
+            (total - 1.0).abs() < 0.0001,
+            "column fractions sum to {total}, not 1"
+        );
+    }
+
+    #[test]
+    fn no_recovered_file_cell_escapes_its_column() {
+        let app = app_with_long_recovered_names();
+        let columns = file_list_columns(LIST_W);
+        let table = file_list_table(&columns, LIST_X);
+        let spans = table.spans();
+        let mut checked = 0usize;
+        for (x, drawn, size, weight) in file_list_texts(&app, LIST_W) {
+            let (_, right) = spans
+                .iter()
+                .copied()
+                .find(|(l, r)| x >= l - 0.01 && x <= r + 0.01)
+                .unwrap_or_else(|| panic!("cell {drawn:?} at {x} is not inside any column"));
+            let ends = x + text::measure(&drawn, size, weight);
+            assert!(
+                ends <= right + 0.01,
+                "cell {drawn:?} at {x} draws to {ends}, past its column edge {right}"
+            );
+            checked = checked.saturating_add(1);
+        }
+        // Five headings, plus name/path/size/type/time/confidence per row.
+        assert!(checked >= 5 + 3 * 6, "only {checked} cells checked");
+    }
+
+    #[test]
+    fn the_file_list_ends_inside_its_panel() {
+        // A per-cell bound says nothing about the row. The last column has to
+        // be asked separately whether it lands inside the panel it was
+        // apportioned from.
+        for w in [280.0_f32, 480.0, LIST_W, 1600.0] {
+            let columns = file_list_columns(w);
+            let table = file_list_table(&columns, LIST_X);
+            let end = table.right(FILE_CONFIDENCE);
+            assert!(
+                end <= LIST_X + w + 0.01,
+                "at width {w} the last column ends at {end}, past the panel edge {}",
+                LIST_X + w
+            );
+        }
+    }
+
+    #[test]
+    fn an_overlong_recovered_name_keeps_what_tells_it_apart() {
+        // `from_signature` names files `recovered_{offset:08x}.{ext}`, so a
+        // scan's results share a ten-character prefix. Cut at the end they all
+        // render identically, and "it was marked as cut" would still pass —
+        // which is why the assertion is that they are *distinct*.
+        let app = app_with_long_recovered_names();
+        let names: Vec<String> = app
+            .engine
+            .files
+            .iter()
+            .map(|f| f.filename.clone())
+            .collect();
+        assert!(
+            names.iter().all(|n| n.starts_with("recovered_")),
+            "test fixture no longer shares a prefix: {names:?}"
+        );
+
+        // Narrow enough that the full name cannot fit.
+        let w = 360.0;
+        let columns = file_list_columns(w);
+        let table = file_list_table(&columns, LIST_X);
+        let drawn: Vec<String> = file_list_texts(&app, w)
+            .into_iter()
+            .filter(|(x, t, ..)| (x - table.left(FILE_NAME)).abs() < 0.01 && t.ends_with(".jpg"))
+            .map(|(_, t, ..)| t)
+            .collect();
+        assert!(drawn.len() >= 2, "expected cut names, got {drawn:?}");
+        assert!(
+            drawn.iter().any(|t| t.starts_with('…')),
+            "names were not actually cut: {drawn:?}"
+        );
+        let distinct: std::collections::BTreeSet<&String> = drawn.iter().collect();
+        assert_eq!(
+            distinct.len(),
+            drawn.len(),
+            "cut names collapsed to the same string: {drawn:?}"
+        );
+    }
+
+    #[test]
+    fn the_confidence_badge_stays_inside_the_narrow_panel() {
+        // The badge was a flat 64px pill placed at `x + width * 0.83 + 32`.
+        // That is inside the panel only while the panel is wide.
+        for w in [240.0_f32, 320.0, 400.0, LIST_W] {
+            let mut cmds = Vec::new();
+            let app = app_with_long_recovered_names();
+            app.render_file_list(&mut cmds, LIST_X, LIST_Y, w, LIST_H);
+            let columns = file_list_columns(w);
+            let table = file_list_table(&columns, LIST_X);
+            let badge_left = table.left(FILE_CONFIDENCE);
+            for cmd in &cmds {
+                if let RenderCommand::FillRect {
+                    x, width: rect_w, ..
+                } = cmd
+                    && (x - badge_left).abs() < 0.01
+                {
+                    assert!(
+                        x + rect_w <= LIST_X + w + 0.01,
+                        "at width {w} the badge spans {x}..{} past the panel edge {}",
+                        x + rect_w,
+                        LIST_X + w
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_file_list_header_and_rows_agree_on_where_a_column_starts() {
+        let app = app_with_long_recovered_names();
+        let columns = file_list_columns(LIST_W);
+        let table = file_list_table(&columns, LIST_X);
+        let heading_x: Vec<f32> = file_list_texts(&app, LIST_W)
+            .into_iter()
+            .take(FILE_COLUMNS.len())
+            .map(|(x, ..)| x)
+            .collect();
+        let expected: Vec<f32> = (0..FILE_COLUMNS.len()).map(|i| table.left(i)).collect();
+        assert_eq!(heading_x.len(), expected.len());
+        for (got, want) in heading_x.iter().zip(&expected) {
+            assert!(
+                (got - want).abs() < 0.01,
+                "heading at {got}, column at {want}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_narrow_panel_does_not_give_a_column_negative_width() {
+        // A fraction of a small panel minus a fixed gap is negative, and
+        // `text::elide` of a negative width returns "" — the column would
+        // blank rather than shrink.
+        for w in [0.0_f32, 1.0, 20.0, 60.0, 120.0] {
+            for column in file_list_columns(w) {
+                assert!(
+                    column.width >= 0.0,
+                    "column {:?} is {} wide at panel width {w}",
+                    column.label,
+                    column.width
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_short_recovered_name_is_drawn_verbatim() {
+        let mut app = app_with_long_recovered_names();
+        if let Some(file) = app.engine.files.first_mut() {
+            file.filename = String::from("notes.txt");
+            file.original_path = None;
+        }
+        let drawn = file_list_texts(&app, LIST_W);
+        assert!(
+            drawn.iter().any(|(_, t, ..)| t == "notes.txt"),
+            "a name that fits was altered: {drawn:?}"
+        );
     }
 }

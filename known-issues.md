@@ -60918,6 +60918,49 @@ proved it out.
   Paths use `Fit::End`: the list is sorted by severity, so its rows are
   typically siblings under one deep directory, and cut at the end they collapse
   to one repeated prefix with every filename gone.
+- ~~`apps/undelete`~~ **done**. The widest drift found: the recovered-file list
+  wrote each column width **twice, differently**. The heading row bounded Name
+  at `width * 0.35`, Type at `0.15`, Deleted at `0.18`; the row drew the same
+  three cells at `0.33`, `0.14`, `0.16`. Neither number was the column — the
+  column is the distance to the *next* heading's `x`, which no line of code
+  mentioned — so no cell was ever measured against the space it actually had,
+  and all of them clipped unmarked. A path overran its column by 91px in the
+  regression test. This is the screen whose entire job is choosing which
+  carved-off-a-damaged-disk files to restore.
+  Reading it to fix the table turned up a second, independent bug: the
+  confidence badge was a flat 64px pill at `x + width * 0.83 + 32` — a fixed
+  size at a proportional position. That is inside the panel only while the
+  panel is wide; at width 240 the test finds it spanning 271.2..335.2 against a
+  panel ending at 280, i.e. drawn 55px outside the list entirely. It is now
+  clamped to its column. **A fixed size at a proportional position is the same
+  class of bug as a fractional width minus a constant** (`apps/defrag`): one
+  overflows the container on a narrow panel and the other underflows to
+  negative, but both are a constant mixed with a fraction, and both need a
+  clamp plus a test at small widths. Worth grepping for the shape directly:
+  a literal `+ 32.0` or `= 64.0` in the same expression as a `width * 0.`.
+  Names use `Fit::End`, and here that is not a judgement call but a fact about
+  the app: `RecoverableFile::from_signature` *generates* names as
+  `recovered_{offset:08x}.{ext}` and `from_inode` as `inode_{n}`, so a deep
+  scan's results share a ten-character prefix by construction. Cut the usual
+  way, the whole column reads `recovered_00…`. The test asserts the cut names
+  are pairwise distinct, per the partmanager lesson.
+  Two structural changes came out of it. The fractions now live in one
+  `FILE_COLUMNS: [(SortField, f32); 5]` array and **sum to 1**, which a test
+  asserts — a layout summing to less leaves dead space, one summing to more
+  runs off the panel, and neither of the old two sets of numbers summed to
+  anything meaningful. And each heading's text is taken from
+  `SortField::display_name()` rather than written out again, so the label and
+  the field that clicking it sorts by cannot come to disagree.
+  Needed one new toolkit primitive: `Table::fitted(cmds, x, width, y, …)`,
+  which fits text to an explicit box with the width clamped at zero.
+  `Table::cell` is now defined in terms of it (a test asserts the two produce
+  byte-identical commands). It is the escape hatch for a cell that shares its
+  column with a decoration — undelete needs it twice (the colour swatch before
+  the type name, the badge's interior padding) and `apps/diskanalyzer` will
+  need it for its per-row tree indent. The clamp belongs in the toolkit rather
+  than at each call site precisely because the call site's arithmetic is
+  `column_width - decoration`, which is the expression that already went
+  negative once in `apps/defrag`.
 
 The lesson that generalises past the cursor pattern: **a per-element bound is
 not a bound on the row.** Eliding each cell to its own width makes every cell

@@ -24,6 +24,7 @@ use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
+use guitk::text;
 
 // VecDeque used for potential future features (e.g., recent-notes list).
 #[allow(unused_imports)]
@@ -116,21 +117,45 @@ impl NoteColorIndex {
 
 const NOTE_COLORS: [NoteColorPalette; 8] = [
     // Yellow
-    NoteColorPalette { light: Color::from_hex(0xF9E2AF), dark: Color::from_hex(0x45420E) },
+    NoteColorPalette {
+        light: Color::from_hex(0xF9E2AF),
+        dark: Color::from_hex(0x45420E),
+    },
     // Pink
-    NoteColorPalette { light: Color::from_hex(0xF5C2E7), dark: Color::from_hex(0x452535) },
+    NoteColorPalette {
+        light: Color::from_hex(0xF5C2E7),
+        dark: Color::from_hex(0x452535),
+    },
     // Blue
-    NoteColorPalette { light: Color::from_hex(0x89B4FA), dark: Color::from_hex(0x1E2D45) },
+    NoteColorPalette {
+        light: Color::from_hex(0x89B4FA),
+        dark: Color::from_hex(0x1E2D45),
+    },
     // Green
-    NoteColorPalette { light: Color::from_hex(0xA6E3A1), dark: Color::from_hex(0x1E3A1E) },
+    NoteColorPalette {
+        light: Color::from_hex(0xA6E3A1),
+        dark: Color::from_hex(0x1E3A1E),
+    },
     // Purple
-    NoteColorPalette { light: Color::from_hex(0xCBA6F7), dark: Color::from_hex(0x2E1E45) },
+    NoteColorPalette {
+        light: Color::from_hex(0xCBA6F7),
+        dark: Color::from_hex(0x2E1E45),
+    },
     // Orange
-    NoteColorPalette { light: Color::from_hex(0xFAB387), dark: Color::from_hex(0x452A1E) },
+    NoteColorPalette {
+        light: Color::from_hex(0xFAB387),
+        dark: Color::from_hex(0x452A1E),
+    },
     // Teal
-    NoteColorPalette { light: Color::from_hex(0x94E2D5), dark: Color::from_hex(0x1E3A35) },
+    NoteColorPalette {
+        light: Color::from_hex(0x94E2D5),
+        dark: Color::from_hex(0x1E3A35),
+    },
     // Gray
-    NoteColorPalette { light: Color::from_hex(0xA6ADC8), dark: Color::from_hex(0x2A2A3A) },
+    NoteColorPalette {
+        light: Color::from_hex(0xA6ADC8),
+        dark: Color::from_hex(0x2A2A3A),
+    },
 ];
 
 pub fn note_palette(index: NoteColorIndex) -> NoteColorPalette {
@@ -270,12 +295,32 @@ impl RichLine {
 /// A text editing action that can be undone/redone.
 #[derive(Clone, Debug)]
 pub enum EditAction {
-    InsertChar { line: usize, col: usize, ch: char },
-    DeleteChar { line: usize, col: usize, ch: char },
-    InsertLine { line: usize, content: RichLine },
-    DeleteLine { line: usize, content: RichLine },
-    SetTitle { old: String, new: String },
-    ReplaceBody { old: Vec<RichLine>, new: Vec<RichLine> },
+    InsertChar {
+        line: usize,
+        col: usize,
+        ch: char,
+    },
+    DeleteChar {
+        line: usize,
+        col: usize,
+        ch: char,
+    },
+    InsertLine {
+        line: usize,
+        content: RichLine,
+    },
+    DeleteLine {
+        line: usize,
+        content: RichLine,
+    },
+    SetTitle {
+        old: String,
+        new: String,
+    },
+    ReplaceBody {
+        old: Vec<RichLine>,
+        new: Vec<RichLine>,
+    },
 }
 
 /// Undo/redo history for a note's text.
@@ -466,10 +511,11 @@ impl Note {
     /// Toggle a checkbox line's checked state.
     pub fn toggle_checkbox(&mut self, line_index: usize) -> bool {
         if let Some(line) = self.body.get_mut(line_index)
-            && let LineKind::Checkbox { checked } = &mut line.kind {
-                *checked = !*checked;
-                return true;
-            }
+            && let LineKind::Checkbox { checked } = &mut line.kind
+        {
+            *checked = !*checked;
+            return true;
+        }
         false
     }
 
@@ -482,7 +528,11 @@ impl Note {
                     LineKind::Plain => String::new(),
                     LineKind::Bullet => "* ".to_string(),
                     LineKind::Checkbox { checked } => {
-                        if *checked { "[x] ".to_string() } else { "[ ] ".to_string() }
+                        if *checked {
+                            "[x] ".to_string()
+                        } else {
+                            "[ ] ".to_string()
+                        }
                     }
                 };
                 format!("{}{}", prefix, line.plain_text())
@@ -499,32 +549,36 @@ impl Note {
     /// Insert a character at a specific line/column position.
     pub fn insert_char(&mut self, line: usize, col: usize, ch: char) {
         if let Some(rich_line) = self.body.get_mut(line)
-            && let Some(span) = rich_line.spans.first_mut() {
-                let col = col.min(span.text.len());
-                span.text.insert(col, ch);
-                self.undo_history
-                    .push(EditAction::InsertChar { line, col, ch });
-            }
+            && let Some(span) = rich_line.spans.first_mut()
+        {
+            let col = col.min(span.text.len());
+            span.text.insert(col, ch);
+            self.undo_history
+                .push(EditAction::InsertChar { line, col, ch });
+        }
     }
 
     /// Delete a character at a specific line/column position.
     pub fn delete_char(&mut self, line: usize, col: usize) -> Option<char> {
         if let Some(rich_line) = self.body.get_mut(line)
             && let Some(span) = rich_line.spans.first_mut()
-                && col < span.text.len() {
-                    let ch = span.text.remove(col);
-                    self.undo_history
-                        .push(EditAction::DeleteChar { line, col, ch });
-                    return Some(ch);
-                }
+            && col < span.text.len()
+        {
+            let ch = span.text.remove(col);
+            self.undo_history
+                .push(EditAction::DeleteChar { line, col, ch });
+            return Some(ch);
+        }
         None
     }
 
     /// Insert a new line at the given index.
     pub fn insert_line(&mut self, index: usize, content: RichLine) {
         let idx = index.min(self.body.len());
-        self.undo_history
-            .push(EditAction::InsertLine { line: idx, content: content.clone() });
+        self.undo_history.push(EditAction::InsertLine {
+            line: idx,
+            content: content.clone(),
+        });
         self.body.insert(idx, content);
     }
 
@@ -532,8 +586,10 @@ impl Note {
     pub fn delete_line(&mut self, index: usize) -> Option<RichLine> {
         if index < self.body.len() && self.body.len() > 1 {
             let removed = self.body.remove(index);
-            self.undo_history
-                .push(EditAction::DeleteLine { line: index, content: removed.clone() });
+            self.undo_history.push(EditAction::DeleteLine {
+                line: index,
+                content: removed.clone(),
+            });
             Some(removed)
         } else {
             None
@@ -551,11 +607,17 @@ pub fn parse_rich_text(text: &str) -> Vec<RichLine> {
     let mut lines = Vec::new();
     for raw in text.split('\n') {
         let trimmed = raw.trim_start();
-        if let Some(rest) = trimmed.strip_prefix("[x] ").or_else(|| trimmed.strip_prefix("[X] ")) {
+        if let Some(rest) = trimmed
+            .strip_prefix("[x] ")
+            .or_else(|| trimmed.strip_prefix("[X] "))
+        {
             lines.push(RichLine::checkbox(rest, true));
         } else if let Some(rest) = trimmed.strip_prefix("[ ] ") {
             lines.push(RichLine::checkbox(rest, false));
-        } else if let Some(rest) = trimmed.strip_prefix("* ").or_else(|| trimmed.strip_prefix("- ")) {
+        } else if let Some(rest) = trimmed
+            .strip_prefix("* ")
+            .or_else(|| trimmed.strip_prefix("- "))
+        {
             lines.push(RichLine::bullet(rest));
         } else {
             lines.push(RichLine::plain(raw));
@@ -581,7 +643,11 @@ pub fn snap_to_grid(value: f32) -> f32 {
 
 /// Optionally snap to grid if enabled.
 pub fn maybe_snap(value: f32, snap_enabled: bool) -> f32 {
-    if snap_enabled { snap_to_grid(value) } else { value }
+    if snap_enabled {
+        snap_to_grid(value)
+    } else {
+        value
+    }
 }
 
 // ============================================================================
@@ -735,11 +801,7 @@ impl NoteStore {
 
     /// Get all unique tags across all notes.
     pub fn all_tags(&self) -> Vec<String> {
-        let mut tags: Vec<String> = self
-            .notes
-            .iter()
-            .flat_map(|n| n.tags.clone())
-            .collect();
+        let mut tags: Vec<String> = self.notes.iter().flat_map(|n| n.tags.clone()).collect();
         tags.sort();
         tags.dedup();
         tags
@@ -950,7 +1012,11 @@ impl NoteStore {
     /// Find which note is at a given point (topmost by z-order, non-archived).
     pub fn note_at_point(&self, x: f32, y: f32) -> Option<NoteId> {
         // Pinned notes are always on top, then check z-order descending.
-        let mut candidates: Vec<&Note> = self.notes.iter().filter(|n| !n.archived && n.contains_point(x, y)).collect();
+        let mut candidates: Vec<&Note> = self
+            .notes
+            .iter()
+            .filter(|n| !n.archived && n.contains_point(x, y))
+            .collect();
         candidates.sort_by(|a, b| {
             // Pinned notes first, then by z-order descending.
             b.pinned.cmp(&a.pinned).then(b.z_order.cmp(&a.z_order))
@@ -967,14 +1033,15 @@ impl NoteStore {
             .map(|n| SidebarItem {
                 id: n.id,
                 title: n.title.clone(),
-                preview: n.body.first().map_or(String::new(), |l| {
-                    let text = l.plain_text();
-                    if text.len() > 40 {
-                        format!("{}...", &text[..37])
-                    } else {
-                        text
-                    }
-                }),
+                // The first body line, in full. Truncation is the sidebar's
+                // job, not the store's: `&text[..37]` aborts whenever byte 37
+                // lands inside a multi-byte character — and the `len() > 40`
+                // guard made that *more* likely rather than less, since a
+                // 13-character Japanese note is 39 bytes and so always took
+                // the truncating branch. The 40-byte budget also bore no
+                // relation to the sidebar's actual width, which the store has
+                // no way to know. `render_sidebar` elides it instead.
+                preview: n.body.first().map_or(String::new(), RichLine::plain_text),
                 color_index: n.color_index,
                 pinned: n.pinned,
                 tag_count: n.tags.len(),
@@ -1077,7 +1144,10 @@ pub fn deserialize_notes(data: &str) -> Option<NoteStore> {
             continue;
         }
         let id: NoteId = parts[0].parse().ok()?;
-        let title = parts[1].replace("\\\\", "\x00").replace("\\p", "|").replace('\x00', "\\");
+        let title = parts[1]
+            .replace("\\\\", "\x00")
+            .replace("\\p", "|")
+            .replace('\x00', "\\");
         let x: f32 = parts[2].parse().ok()?;
         let y: f32 = parts[3].parse().ok()?;
         let width: f32 = parts[4].parse().ok()?;
@@ -1095,7 +1165,8 @@ pub fn deserialize_notes(data: &str) -> Option<NoteStore> {
             .replace('\x00', "\\");
 
         let color_index = NoteColorIndex::from_usize(color_idx).unwrap_or(NoteColorIndex::Yellow);
-        let font_size = FontSizePreset::parse_label(font_size_str).unwrap_or(FontSizePreset::Medium);
+        let font_size =
+            FontSizePreset::parse_label(font_size_str).unwrap_or(FontSizePreset::Medium);
         let tags: Vec<String> = if tags_str.is_empty() {
             Vec::new()
         } else {
@@ -1161,6 +1232,11 @@ const RESIZE_HANDLE: f32 = 16.0;
 const SIDEBAR_WIDTH: f32 = 240.0;
 /// Search bar height.
 const SEARCH_BAR_HEIGHT: f32 = 36.0;
+/// Marker left on sidebar text that did not fit. Without one, a title cut by
+/// `max_width` simply looks like a shorter title.
+const ELLIPSIS: &str = "…";
+const SIDEBAR_TITLE_SIZE: f32 = 13.0;
+const SIDEBAR_PREVIEW_SIZE: f32 = 11.0;
 
 /// Generate render commands for a single sticky note.
 pub fn render_note(note: &Note, is_active: bool) -> Vec<RenderCommand> {
@@ -1388,26 +1464,44 @@ pub fn render_sidebar(store: &NoteStore, viewport_height: f32) -> Vec<RenderComm
         // Pin indicator.
         let title_prefix = if item.pinned { "[P] " } else { "" };
 
-        // Title.
+        // Title and preview are both elided here rather than clipped by
+        // `max_width`, which drops whole glyphs off the end with no marker so
+        // a cut title looks like a shorter title. The preview in particular
+        // used to arrive pre-cut at 37 *bytes* from the store, which both
+        // aborted on non-ASCII notes and had nothing to do with this width.
+        let text_x = 24.0;
+        let text_room = (SIDEBAR_WIDTH - 8.0 - text_x).max(0.0);
         cmds.push(RenderCommand::Text {
-            x: 24.0,
+            x: text_x,
             y: iy + 6.0,
-            text: format!("{}{}", title_prefix, item.title),
+            text: text::elide(
+                &format!("{}{}", title_prefix, item.title),
+                text_room,
+                ELLIPSIS,
+                SIDEBAR_TITLE_SIZE,
+                FontWeightHint::Bold,
+            ),
             color: TEXT_COLOR,
-            font_size: 13.0,
+            font_size: SIDEBAR_TITLE_SIZE,
             font_weight: FontWeightHint::Bold,
-            max_width: Some(SIDEBAR_WIDTH - 32.0),
+            max_width: Some(text_room),
         });
 
         // Preview.
         cmds.push(RenderCommand::Text {
-            x: 24.0,
+            x: text_x,
             y: iy + 24.0,
-            text: item.preview.clone(),
+            text: text::elide(
+                &item.preview,
+                text_room,
+                ELLIPSIS,
+                SIDEBAR_PREVIEW_SIZE,
+                FontWeightHint::Regular,
+            ),
             color: SUBTEXT0,
-            font_size: 11.0,
+            font_size: SIDEBAR_PREVIEW_SIZE,
             font_weight: FontWeightHint::Regular,
-            max_width: Some(SIDEBAR_WIDTH - 32.0),
+            max_width: Some(text_room),
         });
 
         // Separator line.
@@ -1425,7 +1519,11 @@ pub fn render_sidebar(store: &NoteStore, viewport_height: f32) -> Vec<RenderComm
 }
 
 /// Generate all render commands for the full sticky notes desktop.
-pub fn render_all(store: &NoteStore, viewport_width: f32, viewport_height: f32) -> Vec<RenderCommand> {
+pub fn render_all(
+    store: &NoteStore,
+    viewport_width: f32,
+    viewport_height: f32,
+) -> Vec<RenderCommand> {
     let mut cmds = Vec::new();
 
     // Desktop background.
@@ -1466,7 +1564,11 @@ pub fn render_all(store: &NoteStore, viewport_width: f32, viewport_height: f32) 
 }
 
 /// Render a small toolbar at the bottom of the screen.
-fn render_toolbar(store: &NoteStore, viewport_width: f32, viewport_height: f32) -> Vec<RenderCommand> {
+fn render_toolbar(
+    store: &NoteStore,
+    viewport_width: f32,
+    viewport_height: f32,
+) -> Vec<RenderCommand> {
     let mut cmds = Vec::new();
     let bar_h = 32.0;
     let bar_y = viewport_height - bar_h;
@@ -1526,19 +1628,31 @@ fn render_toolbar(store: &NoteStore, viewport_width: f32, viewport_height: f32) 
         x: viewport_width - 160.0,
         y: bar_y + 9.0,
         text: snap_text.to_string(),
-        color: if store.snap_to_grid_enabled() { GREEN } else { OVERLAY0 },
+        color: if store.snap_to_grid_enabled() {
+            GREEN
+        } else {
+            OVERLAY0
+        },
         font_size: 12.0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
     });
 
     // Sidebar toggle.
-    let sidebar_text = if store.sidebar_visible() { "Sidebar: ON" } else { "Sidebar: OFF" };
+    let sidebar_text = if store.sidebar_visible() {
+        "Sidebar: ON"
+    } else {
+        "Sidebar: OFF"
+    };
     cmds.push(RenderCommand::Text {
         x: viewport_width - 80.0,
         y: bar_y + 9.0,
         text: sidebar_text.to_string(),
-        color: if store.sidebar_visible() { BLUE } else { OVERLAY0 },
+        color: if store.sidebar_visible() {
+            BLUE
+        } else {
+            OVERLAY0
+        },
         font_size: 12.0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
@@ -1791,10 +1905,7 @@ mod tests {
     #[test]
     fn test_body_text_plain() {
         let mut note = Note::new(1, 0.0, 0.0);
-        note.body = vec![
-            RichLine::plain("line 1"),
-            RichLine::plain("line 2"),
-        ];
+        note.body = vec![RichLine::plain("line 1"), RichLine::plain("line 2")];
         assert_eq!(note.body_text(), "line 1\nline 2");
     }
 
@@ -1878,7 +1989,11 @@ mod tests {
     #[test]
     fn test_undo_history_push_and_pop() {
         let mut h = UndoHistory::new(10);
-        h.push(EditAction::InsertChar { line: 0, col: 0, ch: 'a' });
+        h.push(EditAction::InsertChar {
+            line: 0,
+            col: 0,
+            ch: 'a',
+        });
         assert!(h.can_undo());
         assert!(!h.can_redo());
         let action = h.pop_undo();
@@ -1890,7 +2005,11 @@ mod tests {
     #[test]
     fn test_undo_history_redo() {
         let mut h = UndoHistory::new(10);
-        h.push(EditAction::InsertChar { line: 0, col: 0, ch: 'a' });
+        h.push(EditAction::InsertChar {
+            line: 0,
+            col: 0,
+            ch: 'a',
+        });
         h.pop_undo();
         let action = h.pop_redo();
         assert!(action.is_some());
@@ -1900,27 +2019,55 @@ mod tests {
     #[test]
     fn test_undo_history_push_clears_redo() {
         let mut h = UndoHistory::new(10);
-        h.push(EditAction::InsertChar { line: 0, col: 0, ch: 'a' });
+        h.push(EditAction::InsertChar {
+            line: 0,
+            col: 0,
+            ch: 'a',
+        });
         h.pop_undo();
         assert!(h.can_redo());
-        h.push(EditAction::InsertChar { line: 0, col: 0, ch: 'b' });
+        h.push(EditAction::InsertChar {
+            line: 0,
+            col: 0,
+            ch: 'b',
+        });
         assert!(!h.can_redo());
     }
 
     #[test]
     fn test_undo_history_max_depth() {
         let mut h = UndoHistory::new(3);
-        h.push(EditAction::InsertChar { line: 0, col: 0, ch: 'a' });
-        h.push(EditAction::InsertChar { line: 0, col: 1, ch: 'b' });
-        h.push(EditAction::InsertChar { line: 0, col: 2, ch: 'c' });
-        h.push(EditAction::InsertChar { line: 0, col: 3, ch: 'd' });
+        h.push(EditAction::InsertChar {
+            line: 0,
+            col: 0,
+            ch: 'a',
+        });
+        h.push(EditAction::InsertChar {
+            line: 0,
+            col: 1,
+            ch: 'b',
+        });
+        h.push(EditAction::InsertChar {
+            line: 0,
+            col: 2,
+            ch: 'c',
+        });
+        h.push(EditAction::InsertChar {
+            line: 0,
+            col: 3,
+            ch: 'd',
+        });
         assert_eq!(h.undo_count(), 3);
     }
 
     #[test]
     fn test_undo_history_clear() {
         let mut h = UndoHistory::new(10);
-        h.push(EditAction::InsertChar { line: 0, col: 0, ch: 'x' });
+        h.push(EditAction::InsertChar {
+            line: 0,
+            col: 0,
+            ch: 'x',
+        });
         h.clear();
         assert!(!h.can_undo());
         assert!(!h.can_redo());
@@ -1940,7 +2087,10 @@ mod tests {
     fn test_store_create_colored_note() {
         let mut store = NoteStore::new();
         let id = store.create_colored_note(0.0, 0.0, NoteColorIndex::Blue);
-        assert_eq!(store.get_note(id).map(|n| n.color_index), Some(NoteColorIndex::Blue));
+        assert_eq!(
+            store.get_note(id).map(|n| n.color_index),
+            Some(NoteColorIndex::Blue)
+        );
     }
 
     #[test]
@@ -2382,9 +2532,18 @@ mod tests {
 
     #[test]
     fn test_font_size_preset_from_str() {
-        assert_eq!(FontSizePreset::parse_label("Small"), Some(FontSizePreset::Small));
-        assert_eq!(FontSizePreset::parse_label("medium"), Some(FontSizePreset::Medium));
-        assert_eq!(FontSizePreset::parse_label("Large"), Some(FontSizePreset::Large));
+        assert_eq!(
+            FontSizePreset::parse_label("Small"),
+            Some(FontSizePreset::Small)
+        );
+        assert_eq!(
+            FontSizePreset::parse_label("medium"),
+            Some(FontSizePreset::Medium)
+        );
+        assert_eq!(
+            FontSizePreset::parse_label("Large"),
+            Some(FontSizePreset::Large)
+        );
         assert_eq!(FontSizePreset::parse_label("???"), None);
     }
 
@@ -2409,10 +2568,7 @@ mod tests {
     fn test_rich_line_char_count() {
         let line = RichLine {
             kind: LineKind::Plain,
-            spans: vec![
-                TextSpan::plain("abc"),
-                TextSpan::plain("de"),
-            ],
+            spans: vec![TextSpan::plain("abc"), TextSpan::plain("de")],
         };
         assert_eq!(line.char_count(), 5);
     }
@@ -2452,7 +2608,9 @@ mod tests {
     fn test_render_active_note_has_shadow() {
         let note = Note::new(1, 50.0, 50.0);
         let cmds = render_note(&note, true);
-        let has_shadow = cmds.iter().any(|c| matches!(c, RenderCommand::BoxShadow { .. }));
+        let has_shadow = cmds
+            .iter()
+            .any(|c| matches!(c, RenderCommand::BoxShadow { .. }));
         assert!(has_shadow);
     }
 
@@ -2460,7 +2618,9 @@ mod tests {
     fn test_render_active_note_has_border() {
         let note = Note::new(1, 50.0, 50.0);
         let cmds = render_note(&note, true);
-        let has_stroke = cmds.iter().any(|c| matches!(c, RenderCommand::StrokeRect { .. }));
+        let has_stroke = cmds
+            .iter()
+            .any(|c| matches!(c, RenderCommand::StrokeRect { .. }));
         assert!(has_stroke);
     }
 
@@ -2509,5 +2669,114 @@ mod tests {
                 assert_ne!(a.dark, b.dark);
             }
         }
+    }
+
+    // -- Sidebar text is elided to the sidebar, not sliced at a byte budget --
+
+    /// Titles/bodies chosen so a naive `&text[..37]` lands mid-character.
+    ///
+    /// The 40-byte guard that used to live in `NoteStore::sidebar_items` was
+    /// anti-protective: it fired *only* for strings long enough in bytes, and
+    /// non-Latin scripts reach 40 bytes at ~13 characters, so the guard
+    /// selected for exactly the inputs whose byte 37 is a continuation byte.
+    fn adversarial_bodies() -> Vec<(String, String)> {
+        vec![
+            (
+                "\u{4ed8}\u{7b8b}\u{306e}\u{30bf}\u{30a4}\u{30c8}\u{30eb}".to_string(),
+                "\u{3053}\u{308c}\u{306f}\u{65e5}\u{672c}\u{8a9e}\u{306e}\u{9577}\u{3044}\u{30e1}\u{30e2}\u{3067}\u{3059}\u{304b}\u{3089}\u{3001}\u{30d0}\u{30a4}\u{30c8}\u{6570}\u{304c}\u{6587}\u{5b57}\u{6570}\u{3092}\u{5927}\u{304d}\u{304f}\u{4e0a}\u{56de}\u{308a}\u{307e}\u{3059}".to_string(),
+            ),
+            (
+                "\u{395}\u{3bb}\u{3bb}\u{3b7}\u{3bd}\u{3b9}\u{3ba}\u{3cc} \u{3c3}\u{3b7}\u{3bc}\u{3b5}\u{3af}\u{3c9}\u{3bc}\u{3b1}".to_string(),
+                "\u{391}\u{3c5}\u{3c4}\u{3cc} \u{3b5}\u{3af}\u{3bd}\u{3b1}\u{3b9} \u{3ad}\u{3bd}\u{3b1} \u{3c0}\u{3bf}\u{3bb}\u{3cd} \u{3bc}\u{3b1}\u{3ba}\u{3c1}\u{3cd} \u{3ba}\u{3b5}\u{3af}\u{3bc}\u{3b5}\u{3bd}\u{3bf} \u{3c3}\u{3b7}\u{3bc}\u{3b5}\u{3b9}\u{3ce}\u{3c3}\u{3b5}\u{3c9}\u{3bd}".to_string(),
+            ),
+            (
+                "\u{417}\u{430}\u{43c}\u{435}\u{442}\u{43a}\u{430} \u{43e} \u{432}\u{441}\u{451}\u{43c}".to_string(),
+                "\u{42d}\u{442}\u{43e} \u{43e}\u{447}\u{435}\u{43d}\u{44c} \u{434}\u{43b}\u{438}\u{43d}\u{43d}\u{430}\u{44f} \u{437}\u{430}\u{43c}\u{435}\u{442}\u{43a}\u{430} \u{43d}\u{430} \u{440}\u{443}\u{441}\u{441}\u{43a}\u{43e}\u{43c} \u{44f}\u{437}\u{44b}\u{43a}\u{435}".to_string(),
+            ),
+            (
+                "\u{1f4cc}\u{1f4dd}\u{1f5d2}\u{fe0f} \u{1f4a1}\u{1f9e0}\u{1f4da}".to_string(),
+                "\u{1f4cc}\u{1f4dd}\u{1f5d2}\u{fe0f}\u{1f4a1}\u{1f9e0}\u{1f4da}\u{1f4c8}\u{1f4c9}\u{1f4ca}\u{1f5c3}\u{fe0f}\u{1f4c1}\u{1f4c2}\u{1f5df}\u{fe0f}".to_string(),
+            ),
+            // Byte 37 is deliberately the middle of a two-byte U+00E9.
+            (
+                format!("{}\u{e9}{}", "T".repeat(36), "t".repeat(30)),
+                format!("{}\u{e9}{}", "a".repeat(36), "b".repeat(30)),
+            ),
+            ("Short".to_string(), "brief".to_string()),
+        ]
+    }
+
+    fn sidebar_with_adversarial_notes() -> Vec<RenderCommand> {
+        let mut store = NoteStore::new();
+        for (title, body) in adversarial_bodies() {
+            let id = store.create_note(0.0, 0.0);
+            if let Some(n) = store.get_note_mut(id) {
+                n.title = title;
+                n.set_body_from_text(&body);
+            }
+        }
+        store.set_sidebar_visible(true);
+        render_sidebar(&store, 800.0)
+    }
+
+    #[test]
+    fn a_non_ascii_note_does_not_abort_the_sidebar() {
+        let cmds = sidebar_with_adversarial_notes();
+        assert!(!cmds.is_empty());
+    }
+
+    #[test]
+    fn no_sidebar_text_escapes_the_sidebar() {
+        let cmds = sidebar_with_adversarial_notes();
+        let text_x = 24.0_f32;
+        let right_edge = SIDEBAR_WIDTH - 8.0;
+        let mut checked = 0usize;
+        for c in &cmds {
+            if let RenderCommand::Text {
+                x,
+                text: t,
+                font_size,
+                font_weight,
+                ..
+            } = c
+            {
+                // The list rows are the only text drawn at x == 24.0; the
+                // search field is at x == 10.0.
+                if (*x - text_x).abs() > f32::EPSILON {
+                    continue;
+                }
+                let w = text::measure(t, *font_size, *font_weight);
+                assert!(
+                    x + w <= right_edge + 0.5,
+                    "sidebar row {t:?} at {x} draws {w} wide, past the sidebar edge {right_edge}"
+                );
+                checked += 1;
+            }
+        }
+        // One title + one preview per note; a vacuous pass would report 0.
+        assert!(
+            checked >= adversarial_bodies().len() * 2,
+            "only checked {checked} sidebar rows"
+        );
+    }
+
+    #[test]
+    fn a_short_note_is_drawn_verbatim() {
+        let cmds = sidebar_with_adversarial_notes();
+        let drawn: Vec<&str> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text: t, .. } => Some(t.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            drawn.contains(&"Short"),
+            "short title was altered: {drawn:?}"
+        );
+        assert!(
+            drawn.contains(&"brief"),
+            "short preview was altered: {drawn:?}"
+        );
     }
 }

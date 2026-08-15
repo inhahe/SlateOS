@@ -108,7 +108,7 @@ mod tests {
                 assert_ne!(m[i], m[j]);
             }
             // All fit in a 7-bit field per DSP0236.
-            assert!(m[i] & 0x80 == 0);
+            assert_eq!(m[i] & 0x80, 0);
         }
     }
 

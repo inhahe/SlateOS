@@ -550,48 +550,115 @@ fn parse_value(input: &str) -> Result<(JsonValue, &str), String> {
     }
 }
 
+/// Parse a JSON string literal, returning the decoded value and the remaining
+/// input.
+///
+/// Literal stretches are copied out as whole `&str` slices rather than a byte
+/// at a time. This matters more here than in most JSON readers: the strings in
+/// a manifest are **file paths**, and pushing `byte as char` reads each UTF-8
+/// byte as the Latin-1 scalar of that value — so a manifest listing
+/// `写真/2024.jpg` read back as a mojibake path that no longer names any file,
+/// and restore and verify both reported it missing.
 fn parse_string(input: &str) -> Result<(JsonValue, &str), String> {
     if !input.starts_with('"') {
         return Err("expected '\"'".to_string());
     }
-    let mut result = String::new();
     let bytes = input.as_bytes();
+    let mut result = String::new();
     let mut i = 1;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'"' => return Ok((JsonValue::Str(result), &input[i + 1..])),
-            b'\\' => {
-                i += 1;
-                if i >= bytes.len() {
-                    return Err("unexpected end in string escape".to_string());
-                }
-                match bytes[i] {
-                    b'"' => result.push('"'),
-                    b'\\' => result.push('\\'),
-                    b'/' => result.push('/'),
-                    b'n' => result.push('\n'),
-                    b'r' => result.push('\r'),
-                    b't' => result.push('\t'),
-                    b'u' => {
-                        if i + 4 >= bytes.len() {
-                            return Err("incomplete unicode escape".to_string());
-                        }
-                        let hex = &input[i + 1..i + 5];
-                        let code = u16::from_str_radix(hex, 16)
-                            .map_err(|_| "invalid unicode escape".to_string())?;
-                        if let Some(c) = char::from_u32(code as u32) {
-                            result.push(c);
-                        }
-                        i += 4;
-                    }
-                    _ => result.push(bytes[i] as char),
-                }
-            }
-            b => result.push(b as char),
+    // Start of the current run of literal (unescaped) text.
+    let mut run_start = i;
+    while let Some(&b) = bytes.get(i) {
+        // `"` and `\` are ASCII, and an ASCII byte can never occur inside a
+        // multi-byte UTF-8 sequence, so `i` is always on a character boundary
+        // where a run is cut.
+        if b == b'"' {
+            result.push_str(input.get(run_start..i).ok_or("string cut mid-character")?);
+            let rest = input
+                .get(i.saturating_add(1)..)
+                .ok_or("string cut mid-character")?;
+            return Ok((JsonValue::Str(result), rest));
         }
-        i += 1;
+        if b != b'\\' {
+            i = i.saturating_add(1);
+            continue;
+        }
+        result.push_str(input.get(run_start..i).ok_or("string cut mid-character")?);
+        let after = i.saturating_add(1);
+        // Take a whole character: an unknown escape may be followed by a
+        // multi-byte one, and consuming a single byte of it would both corrupt
+        // it and strand the scan inside a UTF-8 sequence.
+        let esc = input
+            .get(after..)
+            .and_then(|s| s.chars().next())
+            .ok_or("unexpected end in string escape")?;
+        let mut next = after.saturating_add(esc.len_utf8());
+        match esc {
+            '"' => result.push('"'),
+            '\\' => result.push('\\'),
+            '/' => result.push('/'),
+            'n' => result.push('\n'),
+            'r' => result.push('\r'),
+            't' => result.push('\t'),
+            'b' => result.push('\u{08}'),
+            'f' => result.push('\u{0c}'),
+            'u' => {
+                let (c, after_escape) = parse_unicode_escape(input, next)?;
+                result.push(c);
+                next = after_escape;
+            }
+            other => {
+                // Unknown escape: keep it verbatim rather than silently
+                // dropping the backslash out of a path.
+                result.push('\\');
+                result.push(other);
+            }
+        }
+        i = next;
+        run_start = i;
     }
     Err("unterminated string".to_string())
+}
+
+/// Decode a `\u` escape whose four hex digits begin at `start` (just past the
+/// `u`), returning the character and the offset just past the escape.
+///
+/// A leading surrogate is combined with a following `\uXXXX` trailing
+/// surrogate, which is how JSON spells anything outside the BMP.
+fn parse_unicode_escape(input: &str, start: usize) -> Result<(char, usize), String> {
+    let (hi, after_hi) = parse_hex4(input, start)?;
+    let bytes = input.as_bytes();
+    if (0xD800..0xDC00).contains(&hi)
+        && bytes.get(after_hi).copied() == Some(b'\\')
+        && bytes.get(after_hi.saturating_add(1)).copied() == Some(b'u')
+        && let Ok((lo, after_lo)) = parse_hex4(input, after_hi.saturating_add(2))
+        && (0xDC00..0xE000).contains(&lo)
+        // Bounded by the two range checks above: at most 0x10000 + 0xFFC00 +
+        // 0x3FF = 0x10FFFF, so neither the shift nor the sums can overflow.
+        && let Some(c) =
+            char::from_u32(0x1_0000 + (hi.saturating_sub(0xD800) << 10) + lo.saturating_sub(0xDC00))
+    {
+        return Ok((c, after_lo));
+    }
+    // A lone surrogate has no scalar value. The old code dropped it silently,
+    // so an escaped emoji in a path simply vanished from the manifest; U+FFFD
+    // at least leaves the loss visible.
+    Ok((char::from_u32(hi).unwrap_or('\u{FFFD}'), after_hi))
+}
+
+/// Read exactly four ASCII hex digits at `start`.
+fn parse_hex4(input: &str, start: usize) -> Result<(u32, usize), String> {
+    let end = start.saturating_add(4);
+    // `get`, not a slice: the old code sliced these four bytes blindly, so a
+    // `\u` followed by multi-byte text (`"\u日本"` cuts at byte 7, inside 本)
+    // panicked while merely reading a manifest off disk.
+    let hex = input.get(start..end).ok_or("incomplete unicode escape")?;
+    if !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err("invalid unicode escape".to_string());
+    }
+    u32::from_str_radix(hex, 16)
+        .map(|v| (v, end))
+        .map_err(|_| "invalid unicode escape".to_string())
 }
 
 fn parse_object(input: &str) -> Result<(JsonValue, &str), String> {
@@ -3322,6 +3389,90 @@ mod tests {
     fn test_json_parse_string() {
         let val = json_parse(r#""hello""#).unwrap();
         assert_eq!(val.as_str(), Some("hello"));
+    }
+
+    /// The strings in a manifest are file paths. A byte-at-a-time `as char`
+    /// read turns every non-ASCII path into one that names no file, so restore
+    /// and verify both report it missing.
+    #[test]
+    fn a_non_ascii_string_survives_the_json_round_trip() {
+        for text in [
+            "写真/2024.jpg",
+            "Musique/Café/piste.flac",
+            "Ωμέγα.txt",
+            "🚀/launch.log",
+            "D:/Δοκιμή/日本語/файл.bin",
+        ] {
+            let encoded = JsonValue::Str(text.to_string()).to_string();
+            let val =
+                json_parse(&encoded).unwrap_or_else(|e| panic!("failed to parse {encoded}: {e}"));
+            assert_eq!(val.as_str(), Some(text), "path changed: {encoded}");
+        }
+    }
+
+    /// A whole manifest, not just one string: this is the path the bug actually
+    /// took, since `Manifest::serialize` is what writes the file on disk.
+    #[test]
+    fn a_manifest_of_non_ascii_paths_round_trips() {
+        let mut manifest = Manifest::new();
+        for path in ["写真/2024.jpg", "Ωμέγα.txt", "plain.txt"] {
+            manifest.files.push(FileEntry {
+                path: path.to_string(),
+                size: 7,
+                mtime: 11,
+                hash: "abc".to_string(),
+                is_symlink: false,
+                link_target: None,
+            });
+        }
+        let serialized = manifest.serialize();
+        let back = Manifest::deserialize(&serialized).expect("manifest should parse");
+        let got: Vec<&str> = back.files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(got, ["写真/2024.jpg", "Ωμέγα.txt", "plain.txt"]);
+    }
+
+    /// `\uXXXX` is what our own writer emits for control characters, and what
+    /// any other JSON writer may emit for anything at all. The old reader
+    /// dropped an astral character silently rather than pairing surrogates.
+    #[test]
+    fn unicode_escapes_including_surrogate_pairs_are_decoded() {
+        for (encoded, want) in [
+            (r#""\u0041""#, "A"),
+            (r#""\u00e9""#, "é"),
+            (r#""\u5199\u771f""#, "写真"),
+            (r#""\ud83d\ude80/launch.log""#, "🚀/launch.log"),
+            (r#""a\u0001b""#, "a\u{01}b"),
+        ] {
+            let val = json_parse(encoded).unwrap_or_else(|e| panic!("{encoded}: {e}"));
+            assert_eq!(val.as_str(), Some(want), "wrong decode of {encoded}");
+        }
+    }
+
+    /// A `\u` whose four bytes ran into a multi-byte character used to be
+    /// sliced blindly, so reading a manifest could panic on a char boundary.
+    #[test]
+    fn a_malformed_unicode_escape_is_an_error_not_a_panic() {
+        for bad in [r#""\u日本""#, r#""\u12""#, r#""\uzzzz""#, r#""\u""#] {
+            assert!(
+                json_parse(bad).is_err(),
+                "{bad} should be rejected, not accepted or panic"
+            );
+        }
+    }
+
+    /// Control: the ASCII path is byte-for-byte what it always was.
+    #[test]
+    fn ascii_json_strings_are_unchanged() {
+        for (encoded, want) in [
+            (r#""hello""#, "hello"),
+            (r#""a\"b""#, "a\"b"),
+            (r#""a\\b""#, "a\\b"),
+            (r#""a\nb\tc\/d""#, "a\nb\tc/d"),
+            (r#""""#, ""),
+        ] {
+            let val = json_parse(encoded).unwrap_or_else(|e| panic!("{encoded}: {e}"));
+            assert_eq!(val.as_str(), Some(want), "wrong parse of {encoded}");
+        }
     }
 
     #[test]

@@ -81,6 +81,46 @@ const TITLE_TEXT: f32 = 17.0;
 const BUTTON_HEIGHT: f32 = 28.0;
 const INPUT_HEIGHT: f32 = 26.0;
 
+/// Width available to an operation row's detail line in the operation list.
+const OP_DETAIL_WIDTH: f32 = SIDEBAR_WIDTH - 40.0;
+/// Font size of that detail line.
+const OP_DETAIL_SIZE: f32 = SMALL_TEXT - 1.0;
+
+/// Frame a user-typed string in developer-authored text, fitting `width`.
+///
+/// The frame is what tells the user *which* operation this is — "at start"
+/// distinguishes an insert from every other insert — so the frame always
+/// survives and the user's string is elided to whatever is left. Eliding the
+/// whole line instead would cut the frame off the end and leave two operations
+/// looking identical.
+fn framed_detail(prefix: &str, user: &str, suffix: &str, width: f32) -> String {
+    let frame_width = text::measure(
+        &format!("{prefix}{suffix}"),
+        OP_DETAIL_SIZE,
+        FontWeightHint::Regular,
+    );
+    let room = (width - frame_width).max(0.0);
+    let fitted = text::elide(user, room, "…", OP_DETAIL_SIZE, FontWeightHint::Regular);
+    format!("{prefix}{fitted}{suffix}")
+}
+
+/// Summarise a find→replace pair for a fixed-width row.
+///
+/// Both halves matter — the row exists so the user can tell one operation from
+/// the next — so each is elided against its own share of the row. Eliding the
+/// line as a whole would let a long search string push the replacement off the
+/// end entirely, which is the half that says what the rename will *do*.
+fn find_replace_detail(find: &str, replace: &str, width: f32) -> String {
+    let frame_width = text::measure(
+        "\"\" → \"\"",
+        OP_DETAIL_SIZE,
+        FontWeightHint::Regular,
+    );
+    let half = (width - frame_width).max(0.0) / 2.0;
+    let fit = |s: &str| text::elide(s, half, "…", OP_DETAIL_SIZE, FontWeightHint::Regular);
+    format!("\"{}\" → \"{}\"", fit(find), fit(replace))
+}
+
 const MAX_FILES: usize = 10_000;
 const MAX_OPERATIONS: usize = 50;
 const MAX_UNDO: usize = 100;
@@ -1138,18 +1178,21 @@ impl RenamerApp {
             });
 
             // Operation details
+            // The user-typed halves of these summaries are elided against the
+            // row's real width; the row is a fixed 34px, so wrapping is not an
+            // option and a silent cut would leave two operations looking alike.
             let detail = match op {
                 RenameOp::FindReplace { find, replace, .. } => {
-                    format!("\"{find}\" → \"{replace}\"")
+                    find_replace_detail(find, replace, OP_DETAIL_WIDTH)
                 }
-                RenameOp::Insert { text, position } => format!(
-                    "\"{text}\" at {}",
-                    match position {
-                        InsertPosition::Start => "start".into(),
-                        InsertPosition::End => "end".into(),
+                RenameOp::Insert { text, position } => {
+                    let where_ = match position {
+                        InsertPosition::Start => "start".to_string(),
+                        InsertPosition::End => "end".to_string(),
                         InsertPosition::At(n) => format!("pos {n}"),
-                    }
-                ),
+                    };
+                    framed_detail("\"", text, &format!("\" at {where_}"), OP_DETAIL_WIDTH)
+                }
                 RenameOp::ChangeCase(mode) => mode.label().into(),
                 RenameOp::Number {
                     start,
@@ -1158,8 +1201,8 @@ impl RenamerApp {
                     ..
                 } => format!("from {start} step {step} pad {padding}"),
                 RenameOp::Extension(ext_op) => match ext_op {
-                    ExtensionOp::Replace(e) => format!("→ .{e}"),
-                    ExtensionOp::Add(e) => format!("+ .{e}"),
+                    ExtensionOp::Replace(e) => framed_detail("→ .", e, "", OP_DETAIL_WIDTH),
+                    ExtensionOp::Add(e) => framed_detail("+ .", e, "", OP_DETAIL_WIDTH),
                     ExtensionOp::Remove => "remove".into(),
                     ExtensionOp::Lower => "lowercase".into(),
                     ExtensionOp::Upper => "UPPERCASE".into(),
@@ -1171,10 +1214,10 @@ impl RenamerApp {
                     x: x + 18.0,
                     y: oy + 17.0,
                     text: detail,
-                    font_size: SMALL_TEXT - 1.0,
+                    font_size: OP_DETAIL_SIZE,
                     color: OVERLAY0,
                     font_weight: FontWeightHint::Regular,
-                    max_width: Some(SIDEBAR_WIDTH - 40.0),
+                    max_width: Some(OP_DETAIL_WIDTH),
                 });
             }
 
@@ -2015,6 +2058,105 @@ mod tests {
         let app = RenamerApp::new();
         let cmds = app.render();
         assert!(!cmds.is_empty());
+    }
+
+    // --- Operation-list detail lines ---
+
+    /// The operation-list detail lines drawn for `ops`.
+    fn op_detail_lines(ops: Vec<RenameOp>) -> Vec<String> {
+        let mut app = RenamerApp::new();
+        app.operations = ops;
+        app.render()
+            .into_iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text {
+                    text, font_size, ..
+                } if (font_size - OP_DETAIL_SIZE).abs() < f32::EPSILON => Some(text),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Whatever the user typed, the detail line fits the row it is drawn in.
+    ///
+    /// The row is a fixed 34px in a fixed-width sidebar, so a `Text` command's
+    /// `max_width` would cut a long pattern silently — leaving two different
+    /// operations reading identically in the list.
+    #[test]
+    fn an_operation_detail_fits_its_row() {
+        let long = "W".repeat(120);
+        let ops = vec![
+            RenameOp::FindReplace {
+                find: long.clone(),
+                replace: long.clone(),
+                replace_all: true,
+                case_sensitive: true,
+            },
+            RenameOp::Insert {
+                text: long.clone(),
+                position: InsertPosition::Start,
+            },
+            RenameOp::Extension(ExtensionOp::Replace(long.clone())),
+            RenameOp::Extension(ExtensionOp::Add(long)),
+        ];
+        let expected = ops.len();
+        let mut checked = 0;
+        for line in op_detail_lines(ops) {
+            let measured = text::measure(&line, OP_DETAIL_SIZE, FontWeightHint::Regular);
+            assert!(
+                measured <= OP_DETAIL_WIDTH + 0.5,
+                "detail {line:?} measures {measured} in a {OP_DETAIL_WIDTH} row",
+            );
+            checked += 1;
+        }
+        assert!(checked >= expected, "expected {expected} details, saw {checked}");
+    }
+
+    /// A long search string must not push the replacement off the end: the
+    /// replacement is the half that says what the rename will actually do.
+    #[test]
+    fn a_long_search_string_does_not_hide_the_replacement() {
+        let lines = op_detail_lines(vec![RenameOp::FindReplace {
+            find: "W".repeat(120),
+            replace: "keepme".to_string(),
+            replace_all: true,
+            case_sensitive: true,
+        }]);
+        assert_eq!(lines.len(), 1, "expected one detail line: {lines:?}");
+        assert!(
+            lines[0].contains("keepme"),
+            "the replacement was elided away: {:?}",
+            lines[0],
+        );
+        assert!(lines[0].contains('…'), "expected the cut to be marked: {:?}", lines[0]);
+    }
+
+    /// The developer-authored frame survives, so an insert still says *where*
+    /// it inserts even when the inserted text is far too long for the row.
+    #[test]
+    fn a_long_insert_still_says_where_it_inserts() {
+        let lines = op_detail_lines(vec![RenameOp::Insert {
+            text: "W".repeat(120),
+            position: InsertPosition::End,
+        }]);
+        assert_eq!(lines.len(), 1, "expected one detail line: {lines:?}");
+        assert!(
+            lines[0].ends_with("\" at end"),
+            "the position was elided away: {:?}",
+            lines[0],
+        );
+    }
+
+    /// Text that already fits is left alone — no ellipsis on the common case.
+    #[test]
+    fn a_short_operation_detail_is_not_elided() {
+        let lines = op_detail_lines(vec![RenameOp::FindReplace {
+            find: "a".to_string(),
+            replace: "b".to_string(),
+            replace_all: true,
+            case_sensitive: true,
+        }]);
+        assert_eq!(lines, vec!["\"a\" → \"b\"".to_string()]);
     }
 
     #[test]

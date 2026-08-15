@@ -4050,6 +4050,7 @@ name = "guitk"
 version = "0.1.0"
 dependencies = [
  "osfont",
+ "textfmt",
 ]
 
 [[package]]
@@ -4509,6 +4510,9 @@ version = "0.1.0"
 [[package]]
 name = "indexer-app"
 version = "0.1.0"
+dependencies = [
+ "textfmt",
+]
 
 [[package]]
 name = "inetd"
@@ -10531,6 +10535,10 @@ dependencies = [
 
 [[package]]
 name = "texlive-cli"
+version = "0.1.0"
+
+[[package]]
+name = "textfmt"
 version = "0.1.0"
 
 [[package]]

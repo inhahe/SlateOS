@@ -1305,12 +1305,43 @@ pub fn self_test() -> KernelResult<()> {
     {
         let mount_path = "/mnt/ovl-cow-test";
 
+        // The mount point's parent must exist for the mount to be reachable
+        // by path lookup — `Vfs::mount` now enforces this rather than
+        // registering an unreachable mount.  Nothing creates `/mnt` at boot.
+        if !Vfs::exists("/mnt") {
+            Vfs::mkdir("/mnt")?;
+        }
+
         // Wrap the live overlay and mount it into the path tree.
         let ovl_fs = OverlayFs::new(id)?;
         Vfs::mount(mount_path, alloc::boxed::Box::new(ovl_fs))?;
 
+        // Every fallible step below is reported with the step name and the
+        // error, then unwound.  A bare `?` here would abandon the mount and
+        // the scratch tree *and* tell the reader only
+        // "Overlay filesystem self-test failed: NotFound" — with thirteen
+        // tests and four `?`s in this block, that names neither the
+        // operation that failed nor the path it failed on.
+        macro_rules! step {
+            ($what:expr, $e:expr) => {
+                match $e {
+                    Ok(v) => v,
+                    Err(err) => {
+                        serial_println!("[overlay]   ERROR: {} failed: {:?}", $what, err);
+                        let _ = Vfs::unmount(mount_path);
+                        let _ = Vfs::remove_recursive(test_base);
+                        destroy(id).ok();
+                        return Err(err);
+                    }
+                }
+            };
+        }
+
         // Read through a normal VFS path → merged view (lower layer).
-        let via_vfs = Vfs::read_file(alloc::format!("{}/file_a.txt", mount_path))?;
+        let via_vfs = step!(
+            "read of file_a.txt through the mount",
+            Vfs::read_file(alloc::format!("{}/file_a.txt", mount_path))
+        );
         if via_vfs != b"lower content A" {
             serial_println!("[overlay]   ERROR: VFS-mounted read mismatch");
             let _ = Vfs::unmount(mount_path);
@@ -1320,8 +1351,14 @@ pub fn self_test() -> KernelResult<()> {
         }
 
         // Write through a normal VFS path → copy-up into the upper layer.
-        Vfs::write_file(alloc::format!("{}/vfs_new.txt", mount_path), b"via vfs")?;
-        let back = Vfs::read_file(alloc::format!("{}/vfs_new.txt", mount_path))?;
+        step!(
+            "write of vfs_new.txt through the mount",
+            Vfs::write_file(alloc::format!("{}/vfs_new.txt", mount_path), b"via vfs")
+        );
+        let back = step!(
+            "read-back of vfs_new.txt through the mount",
+            Vfs::read_file(alloc::format!("{}/vfs_new.txt", mount_path))
+        );
         if back != b"via vfs" {
             serial_println!("[overlay]   ERROR: VFS-mounted write/read mismatch");
             let _ = Vfs::unmount(mount_path);
@@ -1331,7 +1368,7 @@ pub fn self_test() -> KernelResult<()> {
         }
 
         // The write landed in the upper layer (copy-on-write), not lower.
-        if which_layer(id, "vfs_new.txt")? != Layer::Upper {
+        if step!("which_layer(vfs_new.txt)", which_layer(id, "vfs_new.txt")) != Layer::Upper {
             serial_println!("[overlay]   ERROR: VFS write did not go to upper layer");
             let _ = Vfs::unmount(mount_path);
             let _ = Vfs::remove_recursive(test_base);
@@ -1346,7 +1383,7 @@ pub fn self_test() -> KernelResult<()> {
             return Err(KernelError::InternalError);
         }
 
-        Vfs::unmount(mount_path)?;
+        step!("unmount", Vfs::unmount(mount_path));
         serial_println!("[overlay]   VFS mount adapter (CoW routing): OK");
     }
 

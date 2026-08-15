@@ -107,10 +107,36 @@ is the ownership boundary.
 | **pkg** | package manager, content-addressed store, generations | `pkg/` |
 | **bench** | all benchmarks and performance infrastructure | `bench/` |
 
+### Worktrees — one checkout per lane
+
+**Work in your lane's own directory, not in `D:\visual studio projects\os`.**
+
+| Lane | Directory | Branch |
+|---|---|---|
+| **A** | `D:\visual studio projects\os-lane-a` | `lane-a` |
+| **B** | `D:\visual studio projects\os-lane-b` | `lane-b` |
+| **C** | `D:\visual studio projects\os-lane-c` | `lane-c` |
+| — | `D:\visual studio projects\os` | `main` — integration/merge tree only |
+
+A branch does **not** isolate a working directory: a repository has one
+checkout per worktree, so three agents sharing `os` and each "working on
+their own branch" all share one `HEAD`. When one runs `git checkout`, it
+moves everyone's HEAD and drags the others' uncommitted edits onto the
+switched-to branch. That is not hypothetical — it already happened here and
+interleaved two lanes' half-finished edits in one file. `git worktree` is
+the mechanism that actually isolates: one checkout per lane, each pinned to
+its branch, each with its own `target/`.
+
+Consequences: never `git checkout` a different branch inside your worktree
+(merge or cherry-pick instead); never edit files in `os`; never
+`git worktree remove` or `git branch -D` another lane's tree or branch —
+another agent may have uncommitted work there. See `roadmap.md` Step 0.5.
+
 ### Branch Strategy
 
-Each lane works on its own branch — `lane-a`, `lane-b`, `lane-c` — and
-merges to `main` when the work compiles and passes tests. Before merging:
+Each lane works on its own branch — `lane-a`, `lane-b`, `lane-c`, each in
+its own worktree above — and merges to `main` when the work compiles and
+passes tests. Before merging:
 
 - `git pull --rebase origin main` (rebase, never merge)
 - Run the full test suite
@@ -264,6 +290,36 @@ killed); `125` failed to launch; `130` interrupted. Prefer this over bare
 `timeout` for anything that spawns external processes, and always run
 potentially-hanging test suites through it in the background so a genuine
 deadlock is bounded and can never orphan.
+
+### Background a long run with `run_in_background: true`, never `nohup … &`
+
+Boot tests (~8 min), soaks (hours) and full workspace builds must not block
+the conversation. Background them with the Bash tool's **`run_in_background`
+parameter**. Do **not** hand-roll it with `nohup … &`, `start /b`, or a
+trailing `&` inside the command.
+
+The difference is not cosmetic. A job started with `run_in_background: true`
+is owned by the tool harness, which means:
+
+- **It appears in the operator's background-task list.** A `nohup`-detached
+  job is invisible there, so the operator sees an idle agent with no way to
+  tell that a 3-hour soak is in fact running.
+- **You get a completion notification.** A detached job cannot notify anyone
+  when it finishes. You would only discover the result by polling on a
+  timer — which wastes wake-ups, and silently loses the result entirely if
+  the loop ends before the job does.
+- **Its output is captured** to a file you can read incrementally, and the
+  job can be inspected and stopped through the harness.
+
+If a long run is *already* going as a detached process and killing it would
+throw away real work, don't restart it — background a **watcher** instead,
+which gets you the notification without losing progress:
+
+```bash
+# with run_in_background: true
+while kill -0 <pid> 2>/dev/null; do sleep 30; done
+echo "=== finished ==="; tail -20 <logfile>
+```
 
 ---
 

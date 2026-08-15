@@ -13,6 +13,17 @@
 #   ./scripts/kasan-build.sh --boot       # build, then boot-test the result
 #   ./scripts/kasan-build.sh --release    # optimized instrumented build
 #
+#   ./scripts/kasan-build.sh --boot -- --hard-lockup-watchdog --stall-secs=180
+#       everything after `--` is forwarded verbatim to boot-test.sh
+#
+# The `--` pass-through is not a convenience.  An instrumented boot runs ~20x
+# slower and is the profile *most* likely to wedge, so it is the one that most
+# needs boot-test.sh's diagnostic options — yet without pass-through this script
+# could only ever invoke the bare default.  That is precisely how
+# B-KASAN-INSTRUMENTED-BOOT-WEDGES-MID-PRINT-ON-A-PAGE-FAULT was captured with
+# no RIP: the HMP monitor is only attached under --hard-lockup-watchdog, and
+# there was no way to ask for it.
+#
 # Requires a nightly toolchain: `-Zsanitizer` and the `sanitize` attribute are
 # both unstable.
 
@@ -24,15 +35,26 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 TOOLCHAIN="${KASAN_TOOLCHAIN:-nightly}"
 BOOT=0
 PROFILE_ARGS=()
+BOOT_ARGS=()
 
-for arg in "$@"; do
-    case "$arg" in
+# Everything before `--` is ours; everything after is boot-test.sh's.  Use a
+# `while`/`shift` loop rather than `for arg in "$@"` so the separator can stop
+# the scan — a `for` loop cannot break out and collect the remainder.
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --)        shift; BOOT_ARGS=("$@"); break ;;
         --boot)    BOOT=1 ;;
         --release) PROFILE_ARGS+=("--release") ;;
-        -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
-        *) echo "unknown argument: $arg" >&2; exit 2 ;;
+        -h|--help) sed -n '2,30p' "$0"; exit 0 ;;
+        *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
+    shift
 done
+
+if [ "${#BOOT_ARGS[@]}" -gt 0 ] && [ "$BOOT" -eq 0 ]; then
+    echo "error: arguments after \`--\` are for boot-test.sh, but --boot was not given" >&2
+    exit 2
+fi
 
 # ---------------------------------------------------------------------------
 # Why `cargo rustc` and not RUSTFLAGS
@@ -155,5 +177,5 @@ python "$SCRIPT_DIR/kasan-check-preshadow.py" "$KERNEL_BIN"
 
 if [ "$BOOT" -eq 1 ]; then
     echo "=== Booting the instrumented kernel ==="
-    exec "$SCRIPT_DIR/boot-test.sh" --no-build
+    exec "$SCRIPT_DIR/boot-test.sh" --no-build ${BOOT_ARGS[@]+"${BOOT_ARGS[@]}"}
 fi

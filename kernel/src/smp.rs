@@ -131,6 +131,25 @@ static CPU_TO_APIC: [AtomicU8; MAX_CPUS] = {
 /// Whether SMP has been initialized.
 static SMP_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
+/// Whether any AP has ever been released from the trampoline.
+///
+/// This is the guard for [`fast_cpu_index`]'s tier-0 fast path: while it is
+/// `false`, exactly one CPU is executing kernel code, so the answer is
+/// provably [`BSP_CPU_INDEX`] and *no* hardware read is needed.
+///
+/// It is deliberately **not** `NUM_CPUS_ONLINE > 1`. An AP bumps that counter
+/// only after `gdt::init_for_ap` / `apic::init_ap` / `spectre::init_ap` have
+/// run (see `ap_entry`), and those paths allocate. A counter-based test would
+/// therefore report "uniprocessor" to a live AP and hand it the *BSP's*
+/// per-CPU allocator magazine — silent cross-CPU corruption.
+///
+/// Instead the **BSP** sets this to `true` before it sends the first
+/// INIT-SIPI, so it is already `true` before an AP retires its first
+/// instruction. It is monotonic: never cleared, even if an AP fails to boot
+/// or is later offlined, because a stale `true` merely costs the normal
+/// hardware read whereas a stale `false` is unsound.
+static MULTI_CPU_ACTIVE: AtomicBool = AtomicBool::new(false);
+
 /// BSP's sequential CPU index (always 0).
 const BSP_CPU_INDEX: usize = 0;
 
@@ -160,11 +179,21 @@ pub fn cpu_apic_id(cpu_index: usize) -> Option<u8> {
 ///
 /// # Performance
 ///
-/// OPT: When `rdtscp` is available (set at init), reads the CPU index
-/// directly from IA32_TSC_AUX (~20 cycles) instead of APIC MMIO
-/// (~100+ cycles under virtualization).  This is the hot path for the
-/// per-CPU heap slab cache, per-CPU frame cache, and timer ISR.
-/// Based on Linux's use of IA32_TSC_AUX for fast CPU identification.
+/// OPT: the actual lookup is [`fast_cpu_index`]'s tiered ladder — tier 0
+/// (uniprocessor: no read at all), RDPID, rdtscp, then APIC MMIO.  This is the
+/// hot path for the per-CPU heap slab cache, per-CPU frame cache, and the timer
+/// ISR.  Based on Linux's use of IA32_TSC_AUX for fast CPU identification.
+///
+/// The tiers deliberately live in **one** place.  This function used to carry
+/// its own copy of them, and the copy drifted: it never grew the RDPID tier, so
+/// on hardware that has RDPID it paid for a TSC read it discarded, and it never
+/// grew the tier-0 fast path, so on a uniprocessor emulated CPU without rdtscp
+/// every timer tick took an uncached APIC MMIO round-trip in ISR context.
+/// Delegating removes both gaps permanently.
+///
+/// The only thing this function adds over [`fast_cpu_index`] is the
+/// `SMP_INITIALIZED` gate, which covers the window before the BSP has
+/// registered itself in `APIC_TO_CPU`.
 ///
 /// This function is lock-free and safe to call from ISR context
 /// (timer interrupt, IPI handlers, etc.).
@@ -172,31 +201,9 @@ pub fn cpu_apic_id(cpu_index: usize) -> Option<u8> {
 #[inline]
 pub fn current_cpu_index() -> usize {
     if !SMP_INITIALIZED.load(Ordering::Acquire) {
-        return 0;
+        return BSP_CPU_INDEX;
     }
-
-    // Fast path: read CPU index from IA32_TSC_AUX via rdtscp.
-    // rdtscp returns TSC in EDX:EAX (discarded) and IA32_TSC_AUX in ECX.
-    if RDTSCP_AVAILABLE.load(Ordering::Relaxed) {
-        let cpu_idx: u32;
-        // SAFETY: rdtscp is available (checked above).  Reading TSC_AUX
-        // is always safe.  We wrote the CPU index there during SMP init.
-        unsafe {
-            core::arch::asm!(
-                "rdtscp",
-                out("ecx") cpu_idx,
-                out("eax") _,    // TSC low — discard
-                out("edx") _,    // TSC high — discard
-                options(nomem, nostack, preserves_flags),
-            );
-        }
-        return cpu_idx as usize;
-    }
-
-    // Fallback: APIC MMIO read (slower, always works).
-    let apic_id = crate::apic::read_id();
-    let idx = APIC_TO_CPU[apic_id as usize].load(Ordering::Relaxed);
-    if idx == 0xFF { 0 } else { idx as usize }
+    fast_cpu_index()
 }
 
 /// Fast CPU index for hot paths (heap allocator, frame allocator).
@@ -215,12 +222,31 @@ pub fn current_cpu_index() -> usize {
 /// hot path (called twice), the combined savings are ~40-100 cycles.
 ///
 /// Tiered fast paths:
+/// 0. No AP started yet → ~1 cycle (one relaxed load, perfectly predicted)
 /// 1. RDPID available → ~10 cycles (no TSC read, no serialization)
 /// 2. rdtscp available → ~30-40 cycles (reads TSC too, but no APIC MMIO)
 /// 3. APIC MMIO fallback → ~100+ cycles (always works)
+///
+/// OPT: tier 0 matters most where tier 3 is the only other option. Under
+/// `qemu64` (the boot-test CPU model) neither RDPID nor rdtscp is advertised,
+/// so *every* call used to take an uncached APIC MMIO round-trip — on a path
+/// that runs twice per frame alloc/free and twice per heap alloc/free, all of
+/// which are in the performance-critical table. Tier 0 replaces that with a
+/// relaxed bool load for the entire uniprocessor lifetime of the system,
+/// which covers all of early boot on every machine and the whole run on a
+/// single-CPU one.
 #[must_use]
 #[inline(always)]
 pub fn fast_cpu_index() -> usize {
+    // Tier 0: no AP has ever been released, so this *is* the BSP.
+    //
+    // Correct by construction rather than by luck: `init` sets the flag
+    // before the first INIT-SIPI, so any CPU that could disagree with this
+    // answer cannot have executed an instruction while it reads `false`.
+    if !MULTI_CPU_ACTIVE.load(Ordering::Relaxed) {
+        return BSP_CPU_INDEX;
+    }
+
     // Tier 1: RDPID — reads IA32_TSC_AUX directly into a GP register.
     // Cheapest option: no TSC read, no serialization.
     if RDPID_AVAILABLE.load(Ordering::Relaxed) {
@@ -256,7 +282,17 @@ pub fn fast_cpu_index() -> usize {
         return cpu_idx as usize;
     }
 
-    // Tier 3: APIC MMIO — slowest but always works.
+    // Tier 3: APIC MMIO — slowest, and only usable once the APIC is mapped.
+    //
+    // Before `apic::init` runs, reading an APIC register would dereference a
+    // null base: a `debug_assert` failure in debug builds, a wild read in
+    // release ones.  Early-boot callers do exist — the frame allocator tags
+    // frame ownership from its very first allocation, long before the APIC is
+    // up — and at that point the system is still strictly uniprocessor, so
+    // CPU 0 is the correct answer here, not a fallback guess.
+    if !crate::apic::is_ready() {
+        return 0;
+    }
     let apic_id = crate::apic::read_id();
     let idx = APIC_TO_CPU[apic_id as usize].load(Ordering::Relaxed);
     if idx == 0xFF { 0 } else { idx as usize }
@@ -971,6 +1007,14 @@ pub fn init() {
 
     // Get the AP entry point address.
     let ap_entry_virt = ap_entry as *const () as u64;
+
+    // Retire `fast_cpu_index`'s tier-0 uniprocessor fast path *before* the
+    // first INIT-SIPI goes out. Ordering is the whole point: from this store
+    // onwards a second CPU may appear at any instant, and it must never read
+    // a stale `false` and be told it is the BSP. `Release` pairs with the
+    // trampoline's own acquire of the patched data area, so the store is
+    // globally visible before any AP can run.
+    MULTI_CPU_ACTIVE.store(true, Ordering::Release);
 
     // Boot each AP.
     let mut booted_count: usize = 0;

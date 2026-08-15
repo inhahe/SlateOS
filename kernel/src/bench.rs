@@ -258,6 +258,64 @@ pub struct BenchResult {
     pub mean_ns: u64,
 }
 
+/// Time a single execution of `f`, in TSC cycles.
+///
+/// The leading read is serialised so earlier work cannot drift into the
+/// measured window; the trailing one is not, because the following
+/// instructions are the caller's arithmetic and cannot be reordered ahead of
+/// the `rdtsc` in a way that matters here.
+/// Any value the closure returns is kept alive with `black_box` *after* the
+/// clock stops, so the optimiser cannot delete the work being measured
+/// without that keep-alive landing inside the measured window.
+#[inline]
+fn timed<R, F: FnOnce() -> R>(f: F) -> u64 {
+    let start = rdtsc_serialized();
+    let produced = f();
+    let elapsed = rdtsc().saturating_sub(start);
+    core::hint::black_box(produced);
+    elapsed
+}
+
+/// Compare two alternatives by **interleaving** their iterations, returning
+/// `(min_a, min_b)` in cycles.
+///
+/// Use this instead of two `run()` calls whenever the question is "what does
+/// X cost?" rather than "how fast is X?".  Two consecutive measurement
+/// windows on a live system are not the same system: a service waking during
+/// the second window inflates it wholesale, and `min` does not rescue you —
+/// it is robust to *spikes*, not to a window that is uniformly busier than
+/// its neighbour.  This is not hypothetical; the `frame_owner` A/B below
+/// reported a 10826-cycle cost that way, and the same measurement
+/// interleaved reported a fraction of it.
+///
+/// Interleaving fixes that because the two arms run microseconds apart, so
+/// any load drifting on a scheduling timescale lifts both equally and cancels
+/// in the difference.
+///
+/// Each closure returns *its own* elapsed cycles rather than being timed from
+/// the outside, so an arm can do untimed setup (flipping a feature flag,
+/// say) before starting its own clock.  Use [`timed`] for the measured part.
+fn ab_interleaved<A, B>(rounds: u32, mut a: A, mut b: B) -> (u64, u64)
+where
+    A: FnMut() -> u64,
+    B: FnMut() -> u64,
+{
+    // Warm both arms: first-touch costs (TCG translation of the block, cold
+    // branch predictors) belong to neither measurement.
+    for _ in 0..core::cmp::max(rounds / 20, 5) {
+        let _ = a();
+        let _ = b();
+    }
+
+    let mut min_a = u64::MAX;
+    let mut min_b = u64::MAX;
+    for _ in 0..rounds {
+        min_a = min_a.min(a());
+        min_b = min_b.min(b());
+    }
+    (min_a, min_b)
+}
+
 /// Run a micro-benchmark, reporting min/mean/max cycles.
 ///
 /// Executes `f` a total of `warmup + iterations` times.  The first
@@ -453,6 +511,22 @@ static SCORECARD: Mutex<alloc::vec::Vec<ScoreEntry>> = Mutex::new(alloc::vec::Ve
 ///
 /// Call from within benchmark functions after comparing against the target.
 /// The scorecard summary is printed at the end of `run_all()`.
+/// Express a cycle count as memory accesses, to one decimal place.
+///
+/// Returns `(whole, tenths)` for printing as `{}.{}`. Plain integer division
+/// is not good enough for these diagnostics: a 282-cycle call floor against a
+/// 284-cycle access floor is 0.99 accesses and truncates to a flat `0`, which
+/// reads as "this costs nothing" in exactly the line whose job is to say where
+/// the cost lives. Rounding down to a tenth still understates, but it can no
+/// longer round a whole access away to zero.
+fn accesses(cycles: u64, floor: u64) -> (u64, u64) {
+    if floor == 0 {
+        return (0, 0);
+    }
+    let tenths = cycles.saturating_mul(10) / floor;
+    (tenths / 10, tenths % 10)
+}
+
 fn score(name: &'static str, result: &BenchResult, target_ns: u64) {
     let passed = result.min_ns <= target_ns;
     SCORECARD.lock().push(ScoreEntry {
@@ -464,6 +538,29 @@ fn score(name: &'static str, result: &BenchResult, target_ns: u64) {
 }
 
 /// Print the scorecard summary showing which benchmarks met targets.
+///
+/// Emits two things. First a machine-readable `SCORE` line for **every**
+/// entry, passing or not:
+///
+/// ```text
+/// [bench] SCORE <name> <measured_ns> <target_ns> <PASS|OVER>
+/// ```
+///
+/// `scripts/bench-history.py` parses those, appends them to
+/// `bench/history.jsonl`, and diffs the run against the previous boot **on the
+/// same host**. That diff, not the target comparison, is the signal that
+/// actually means something here: under TCG every guest memory access costs a
+/// softmmu lookup of a few hundred host cycles where hardware takes an L1 hit
+/// at 1-4, so absolute hardware targets are unreachable by construction and
+/// most of this suite reports "ABOVE TARGET" on perfectly correct code. A
+/// run-over-run comparison cancels that emulation constant; an absolute target
+/// cannot. Passing entries must therefore be printed too — a benchmark that
+/// quietly doubles while still beating its target is exactly the regression
+/// the failure-only list has always been blind to.
+///
+/// Second, the human-readable over-target list, kept because it is a useful
+/// map of where the emulator is slowest, but explicitly labelled as reference
+/// rather than as a verdict.
 #[allow(clippy::arithmetic_side_effects)]
 fn print_scorecard() {
     let entries = SCORECARD.lock();
@@ -471,10 +568,27 @@ fn print_scorecard() {
     let passed = entries.iter().filter(|e| e.passed).count();
     let failed = total.saturating_sub(passed);
 
-    serial_println!("[bench] === Scorecard: {}/{} passed ===", passed, total);
+    // Machine-readable first, so a truncated log still yields a usable record.
+    for entry in &*entries {
+        serial_println!(
+            "[bench] SCORE {} {} {} {}",
+            entry.name,
+            entry.measured_ns,
+            entry.target_ns,
+            if entry.passed { "PASS" } else { "OVER" }
+        );
+    }
+
+    serial_println!(
+        "[bench] === Scorecard: {}/{} within hardware target ===",
+        passed, total
+    );
 
     if failed > 0 {
-        serial_println!("[bench] ABOVE TARGET:");
+        serial_println!(
+            "[bench] OVER HARDWARE TARGET (reference, not a regression verdict — \
+             TCG measurements are 10-400x hardware; compare bench/history.jsonl):"
+        );
         for entry in &*entries {
             if !entry.passed {
                 let pct = if entry.target_ns > 0 {
@@ -512,6 +626,176 @@ pub fn run_all() {
     // boot under QEMU emulation.  For real hardware benchmarks, increase
     // counts 10-50x.
 
+    // --- Calibration: what one guest memory access costs in this harness ---
+    //
+    // Every threshold below this point is expressed as a multiple of this
+    // number rather than as an absolute cycle count, and that is the single
+    // most important thing about the micro-benchmarks in this file. The
+    // reason is a false alarm that cost four boots to run down.
+    //
+    // `page_alloc_free_owner_ab` reported that frame-ownership tagging cost
+    // 7660-11288 cycles per alloc+free, reproducibly, across five boots. The
+    // code it was accusing is a relaxed load, a bounds check, a byte store and
+    // a counter bump on each of `set` and `clear` — tens of cycles on
+    // hardware. Successive experiments killed every hypothesis that would have
+    // made the code guilty: interleaving the arms (ambient load), measuring a
+    // relaxed atomic RMW directly (TCG's `cpu_loop_exit_atomic` fallback), and
+    // finally splitting `set` into its early-return path and its working path.
+    //
+    // The split is what explained it, and the answer was not in `frame_owner`
+    // at all. `set`'s *work* measured 2416 cycles; a single byte store to an
+    // ordinary `.bss` static — this calibration — measured 218. `set` performs
+    // roughly half a dozen guest memory accesses (the `ENABLED` load, the
+    // length and pointer loads inside `slot`, the tag store, the per-CPU
+    // counter's load and store), and 6 x 218 is 1300, the right order. Under
+    // TCG *every* guest memory access carries a softmmu lookup costing a few
+    // hundred host cycles; on real hardware the same accesses are L1 hits at
+    // ~1-4 cycles each. So ownership tagging costs ~10 memory accesses per
+    // alloc+free, which is ~30 cycles of real machine and ~2500 cycles of
+    // emulator. Nothing regressed. The benchmark was measuring the emulator.
+    //
+    // An absolute cycle budget therefore cannot work here: it conflates the
+    // code under test with an emulation constant that varies with the host,
+    // the QEMU build and the accelerator, and it would keep failing forever on
+    // code that is correct. Measuring the constant and quoting budgets in
+    // units of it makes the check scale-invariant — and it still catches what
+    // these budgets exist to catch, because the failures worth catching (an
+    // uncached MMIO round-trip, a lock, a per-frame loop that should be one
+    // `write_bytes`) cost 10-100x a plain access on *both* hardware and TCG.
+    //
+    // Measured first so everything below can use it. A store rather than a
+    // load, to match the accesses that dominate the paths being judged, and to
+    // its own static so nothing else shares the cache line.
+    //
+    // AMPLIFIED, and that detail is load-bearing. The first version of this
+    // block timed *one* store against one empty closure, and it did not
+    // survive its first verification boot: it reported `measured=74` with
+    // `nop=1278`, while the very next block in the same run measured `nop=448`.
+    // The harness's own minimum wanders by several hundred cycles between
+    // adjacent measurements, so a single ~200-cycle access has no signal above
+    // that noise, and the clamp below silently became the answer — which then
+    // under-scaled every budget derived from it and produced a spurious SLOW.
+    // Timing N stores in a loop and dividing by N puts the signal N times above
+    // the noise floor; the wander stays absolute, so it divides away too.
+    //
+    // The loop's own overhead (counter increment, compare, branch) is inside
+    // the measurement and is NOT subtracted. That is deliberate: it can only
+    // make the floor larger, hence every budget below it looser, hence this
+    // calibration incapable of manufacturing a false alarm. Erring toward
+    // false negatives is the right direction for a check whose entire purpose
+    // is to stop crying wolf at correct code.
+    let access_floor = {
+        static CALIBRATION_BYTE: core::sync::atomic::AtomicU8 =
+            core::sync::atomic::AtomicU8::new(0);
+        const ROUNDS: u32 = 500;
+        /// Stores per timed window. The per-window delta is ~N x one access,
+        /// so at N=64 a ~200-cycle access shows up as ~13k cycles — an order
+        /// of magnitude clear of the few-hundred-cycle harness wander.
+        const N: u64 = 64;
+        let (nop, store) = ab_interleaved(
+            ROUNDS,
+            || {
+                timed(|| {
+                    let mut i = 0u64;
+                    while i < N {
+                        core::hint::black_box(i);
+                        i = i.wrapping_add(1);
+                    }
+                })
+            },
+            || {
+                timed(|| {
+                    let mut i = 0u64;
+                    while i < N {
+                        CALIBRATION_BYTE.store(core::hint::black_box(1u8), Ordering::Relaxed);
+                        i = i.wrapping_add(1);
+                    }
+                })
+            },
+        );
+        // Still clamped: if the two arms somehow land equal the budgets below
+        // must not all collapse to 0 and turn every check into a guaranteed
+        // failure. With the amplification above this should never bind, and if
+        // the printed `measured` is ever at or below it, treat the run's
+        // budget-based verdicts as unreliable rather than as findings.
+        let measured = store.saturating_sub(nop) / N;
+        let floor = core::cmp::max(measured, 100);
+        serial_println!(
+            "[bench]   memory_access_floor: {} cycles/guest byte-store (measured={} \
+             over {} stores/window: nop={} store={}, {} interleaved rounds) — budgets \
+             below are multiples of this",
+            floor, measured, N, nop, store, ROUNDS
+        );
+        floor
+    };
+
+    // --- CPU index lookup (the per-CPU-data primitive under every hot path) ---
+    //
+    // This is not an interesting operation in itself; it is benchmarked
+    // because it is a *multiplier*. `smp::fast_cpu_index` is called twice per
+    // frame alloc/free (per-CPU magazine + ownership tag) and twice per heap
+    // alloc/free, so its cost is paid several times over inside every
+    // benchmark below it, and a regression here shows up as a diffuse slowdown
+    // across the whole allocator rather than as an obvious local fault.
+    //
+    // It regressed exactly that way once: `frame_owner` tagging added a second
+    // call per alloc, and on CPU models that advertise neither RDPID nor
+    // rdtscp (`qemu64`, this harness) `fast_cpu_index` fell through to an
+    // uncached APIC MMIO read. The tier-0 uniprocessor fast path fixed it.
+    // Keeping a direct measurement here means the next such regression is
+    // visible in one line instead of being inferred from allocator noise.
+    // It is measured *against an empty closure*, not against an absolute
+    // threshold. Under TCG the harness itself (two serialized TSC reads) costs
+    // several hundred cycles, which is far more than the operation, so an
+    // absolute number mostly reports emulation overhead: a tier-0 lookup and a
+    // tier-3 APIC MMIO read would differ by well under the noise of a fixed
+    // nanosecond target. Subtracting a nop measured by the same harness in the
+    // same conditions leaves the cost of the lookup itself.
+    //
+    // The nop and the lookup are interleaved rather than run as two separate
+    // 2000-iteration windows. They were two windows to begin with, and across
+    // two boots of the *same binary* that reported 0 and then 274 cycles for
+    // an operation that is one relaxed load — the spread was ambient load in
+    // whichever window drew the busier neighbour, not the code.
+    {
+        const ROUNDS: u32 = 2000;
+        let (nop_cycles, idx_cycles) = ab_interleaved(
+            ROUNDS,
+            || timed(|| core::hint::black_box(0u64)),
+            || timed(|| core::hint::black_box(crate::smp::fast_cpu_index())),
+        );
+
+        let cost = idx_cycles.saturating_sub(nop_cycles);
+        // An APIC MMIO round-trip under emulation is a *device* access — a TCG
+        // exit and an MMIO dispatch, an order of magnitude beyond an ordinary
+        // memory access. Tier 0 and tier 1 are a load and a register read, so
+        // a healthy lookup is one access or less.
+        //
+        // The budget was an absolute 200 cycles and reported SLOW on every
+        // healthy boot after the tier-0 fix landed (274, 282), because 200 is
+        // *below this harness's floor for a single memory access* — the nop
+        // baseline alone wanders by more than that between adjacent
+        // measurements in one run. It was accusing correct code of the very
+        // regression it had just been added to prove was fixed. Four accesses
+        // sits clear of the noise while still being far under an MMIO
+        // round-trip.
+        let mmio_suspicion = access_floor.saturating_mul(4);
+        if cost <= mmio_suspicion {
+            serial_println!(
+                "[bench]   fast_cpu_index: PASS ({} cycles over an empty closure, \
+                 limit {} = 4 accesses; nop={} idx={}, {} interleaved rounds)",
+                cost, mmio_suspicion, nop_cycles, idx_cycles, ROUNDS
+            );
+        } else {
+            serial_println!(
+                "[bench]   fast_cpu_index: SLOW ({} cycles over an empty closure, \
+                 limit {} = 4 accesses; nop={} idx={}) — suspect a fallback to the \
+                 APIC MMIO path",
+                cost, mmio_suspicion, nop_cycles, idx_cycles
+            );
+        }
+    }
+
     // --- Page allocation (alloc + free cycle) ---
     {
         use crate::mm::frame;
@@ -533,6 +817,232 @@ pub fn run_all() {
                 "[bench]   page_alloc_free: ABOVE TARGET (min {}ns > target {}ns)",
                 result.min_ns, target_ns
             );
+        }
+    }
+
+    // --- Page allocation, A/B against frame-ownership tracking ---
+    //
+    // `page_alloc_free` above is an *absolute* number, and absolute numbers
+    // from this harness are close to unreadable: it runs as a deferred
+    // low-priority task on a live system, so the mean and max are dominated by
+    // preemption (maxima of ~700M cycles line up with service restarts), and
+    // under TCG even `min` carries a large emulation constant that has nothing
+    // to do with the code being measured. Comparing such a number against a
+    // baseline recorded on a different-sized kernel, months apart, cannot tell
+    // you whether a specific change cost anything.
+    //
+    // This pair can — but only if the two arms are *interleaved*. The first
+    // version of this benchmark ran 500 iterations with tagging off, then 500
+    // with it on, and reported that tagging cost 10826 cycles per alloc+free.
+    // That number was false, and the evidence was in the same output: the off
+    // window had max=129078 (nothing perturbed it) while the on window had
+    // max=635531436 and a 30x higher mean (a service woke up during it). Two
+    // consecutive windows on a live system are not the same system, and `min`
+    // does not save you — it is robust to *spikes*, not to a window that is
+    // uniformly busier than its neighbour.
+    //
+    // So the arms alternate per iteration instead (see `ab_interleaved`).
+    // Only the `ENABLED` flag differs between them, and it is flipped outside
+    // the timed region.
+    //
+    // Ordering note: tracking is restored to its entry value afterwards, so
+    // the experiment cannot leave ownership accounting silently disabled for
+    // the rest of the boot.
+    {
+        use crate::mm::{frame, frame_owner};
+
+        const ROUNDS: u32 = 400;
+        let was_enabled = frame_owner::is_enabled();
+
+        // One alloc+free cycle. Both arms call this same function, so they
+        // cannot differ by inlining or by TCG translating two distinct blocks.
+        let alloc_free = || {
+            let f = frame::alloc_frame().expect("bench: alloc");
+            // SAFETY: frame was just allocated, exclusively ours.
+            unsafe { frame::free_frame(f).expect("bench: free"); }
+        };
+
+        let (min_off, min_on) = ab_interleaved(
+            ROUNDS,
+            || {
+                frame_owner::disable();
+                timed(alloc_free)
+            },
+            || {
+                frame_owner::enable();
+                timed(alloc_free)
+            },
+        );
+
+        // Restore whatever the system was doing before the experiment.
+        if !was_enabled {
+            frame_owner::disable();
+        }
+
+        // Count what tagging actually adds, in *memory accesses*, because
+        // that is the unit this harness can measure (see the calibration
+        // block at the top of `run_all`). Per alloc+free:
+        //
+        //   2 x `is_enabled`            = 2   (one in tag_alloc, one in untag)
+        //   `current_owner`             = 2   (fast_cpu_index + the slot load)
+        //   `set`  : ENABLED, len, ptr, tag store, counter load+store = 6
+        //   `clear`: the same                                          = 6
+        //                                                              ----
+        //                                                              ~16
+        //
+        // That is the *architectural* count, and the budget is not 16-ish,
+        // because the observed healthy value is consistently 2.5-3x it: 51.7
+        // accesses (11288 cycles / 218 floor) on one boot and ~57 on the next.
+        // The multiplier is explained, not fudged. `scripts/boot-test.sh` runs
+        // a plain `cargo build`, and the workspace's `[profile.dev]` sets only
+        // `panic = "abort"` — so opt-level is 0 and the kernel under benchmark
+        // is unoptimised. At opt-level 0 nothing is inlined, so each of the
+        // half-dozen calls on this path (`is_enabled`, `slot`, `set`, `clear`,
+        // `fast_cpu_index`, `bump`) executes a real prologue and epilogue, and
+        // every spilled local and saved register on those is another guest
+        // memory access that the architectural count above does not include.
+        // A ~3x inflation over the source-level access count is exactly what an
+        // unoptimised build predicts, and exactly what two independent boots
+        // measured.
+        //
+        // The budget is therefore 150: ~3x the ~50 that healthy code actually
+        // costs here. That is deliberately generous, and the generosity is
+        // affordable because of what this check is for. It is not a stopwatch —
+        // TCG cannot support one (see the calibration block) — it is a
+        // structural tripwire, and every failure mode it exists to catch is an
+        // order-of-magnitude event, not a percentage: an APIC MMIO round-trip
+        // or a contended lock costs 10-100x a plain access, and a per-frame
+        // loop where a `write_bytes` belongs scales with `count` and leaves 150
+        // behind on the first multi-frame allocation. A tighter budget would
+        // not catch anything more; it would only resume failing on correct
+        // code, which is precisely how this check spent its first five boots.
+        //
+        // That previous budget was an absolute 500 cycles and reported SLOW on
+        // five consecutive healthy boots (7660-11288). That was not tagging
+        // being slow; it was ~16 guest memory accesses at TCG's few-hundred-
+        // cycles-each, against a budget sized for real hardware. The whole
+        // investigation is written up in known-issues.md under
+        // TD-BENCH-OWNER-AB-BUDGET-WAS-AN-ABSOLUTE-CYCLE-COUNT.
+        const OWNER_TAG_BUDGET_ACCESSES: u64 = 150; // From baselines.toml
+        let budget = access_floor.saturating_mul(OWNER_TAG_BUDGET_ACCESSES);
+        let delta = min_on.saturating_sub(min_off);
+        let (acc_whole, acc_tenth) = accesses(delta, access_floor);
+        if delta <= budget {
+            serial_println!(
+                "[bench]   page_alloc_free_owner_ab: PASS (tagging costs {} cycles/\
+                 alloc+free = {}.{} accesses, limit {} accesses; off={} on={}, {} \
+                 interleaved rounds)",
+                delta, acc_whole, acc_tenth, OWNER_TAG_BUDGET_ACCESSES,
+                min_off, min_on, ROUNDS
+            );
+        } else {
+            serial_println!(
+                "[bench]   page_alloc_free_owner_ab: SLOW (tagging costs {} cycles/\
+                 alloc+free = {}.{} accesses, limit {} accesses; off={} on={}, {} \
+                 interleaved rounds) — suspect an MMIO, a lock, or a per-frame \
+                 loop that should be one write_bytes",
+                delta, acc_whole, acc_tenth, OWNER_TAG_BUDGET_ACCESSES,
+                min_off, min_on, ROUNDS
+            );
+        }
+    }
+
+    // --- Breakdown of `frame_owner::set`, in memory accesses ---
+    //
+    // Kept as a permanent diagnostic rather than deleted with the
+    // investigation that produced it, because it is what makes the A/B above
+    // *actionable*. If `page_alloc_free_owner_ab` ever reports SLOW again,
+    // this line says immediately whether the added cost is inside `set`'s
+    // working path or somewhere else on the allocator's ownership path, which
+    // is the fork the original investigation burned four boots failing to
+    // resolve by argument.
+    //
+    // Two numbers, both against the shared `access_floor` calibration:
+    //
+    //   call_floor  `set` with tracking **off** — the early-return path. Pays
+    //               the closure, the call and one relaxed load. This is the
+    //               harness's floor for "call into `mm::frame_owner`".
+    //   work        `set` with tracking **on**, minus `call_floor`. All shared
+    //               overhead cancels, leaving the bounds check, the tag store
+    //               and the counter bump: the code the A/B accuses.
+    //
+    // Measured 278 and 2416 against an `access_floor` of 218 — i.e. `work` is
+    // ~11 accesses for a function that performs about half a dozen, which is
+    // the right order and is why the verdict was "nothing is wrong with the
+    // code, the budget was in the wrong unit". A future `work` of 50+ accesses
+    // would mean something genuinely appeared inside `set`.
+    //
+    // Controlling the `ENABLED` flag is the part an earlier version of this
+    // got wrong: without it, "the cost of `set`" silently lumps together the
+    // cost of *calling* `set` with the cost of the work it does, and those two
+    // point at opposite conclusions.
+    //
+    // A frame is held for the duration so the index being written is one this
+    // benchmark genuinely owns — scribbling a tag onto a frame in use by
+    // something else would corrupt the very diagnostic being measured. The
+    // `ENABLED` flag is restored to its entry value at the end, so the
+    // experiment cannot leave ownership accounting silently off.
+    {
+        use crate::mm::{frame, frame_owner};
+
+        match frame::alloc_frame() {
+            Ok(held) => {
+                #[allow(clippy::arithmetic_side_effects)]
+                let idx = (held.addr() / frame::FRAME_SIZE as u64) as usize;
+                const ROUNDS: u32 = 2000;
+                let was_enabled = frame_owner::is_enabled();
+
+                // (1) Early-return path: the harness floor for this call.
+                let (nop_off, set_off) = ab_interleaved(
+                    ROUNDS,
+                    || timed(|| core::hint::black_box(0u64)),
+                    || {
+                        frame_owner::disable();
+                        timed(|| frame_owner::set(idx, frame_owner::Owner::Unknown))
+                    },
+                );
+
+                // (2) Full path.
+                let (nop_on, set_on) = ab_interleaved(
+                    ROUNDS,
+                    || timed(|| core::hint::black_box(0u64)),
+                    || {
+                        frame_owner::enable();
+                        timed(|| frame_owner::set(idx, frame_owner::Owner::Unknown))
+                    },
+                );
+
+                if !was_enabled {
+                    frame_owner::disable();
+                }
+
+                let call_floor = set_off.saturating_sub(nop_off);
+                let real_work = set_on.saturating_sub(set_off);
+                let (cf_whole, cf_tenth) = accesses(call_floor, access_floor);
+                let (rw_whole, rw_tenth) = accesses(real_work, access_floor);
+                serial_println!(
+                    "[bench]   frame_owner_set_split: call_floor={} cycles ({}.{} \
+                     accesses) work={} cycles ({}.{} accesses) (nop_off={} set_off={} \
+                     nop_on={} set_on={}, {} interleaved rounds)",
+                    call_floor, cf_whole, cf_tenth,
+                    real_work, rw_whole, rw_tenth,
+                    nop_off, set_off, nop_on, set_on, ROUNDS
+                );
+
+                // Restore the tag the allocator gave it, then hand it back.
+                frame_owner::set(idx, frame_owner::Owner::Unknown);
+                // SAFETY: allocated by this block and not handed out since.
+                unsafe {
+                    let _ = frame::free_frame(held);
+                }
+            }
+            Err(e) => {
+                serial_println!(
+                    "[bench]   frame_owner_set_split: SKIPPED (no frame \
+                     available: {:?})",
+                    e
+                );
+            }
         }
     }
 

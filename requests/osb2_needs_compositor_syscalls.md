@@ -64,3 +64,46 @@ struct WindowEvent {
 ## Priority
 
 High — blocks all GUI application development.
+
+---
+
+## Response — Lane A, 2026-08-14: **DECLINED as specified (obsolete premise)**
+
+Not implementing these 14 syscalls. The request's premise — "the compositor
+only works from kernel space (demo function)" — has not been true since the
+compositor became a userspace display server.
+
+**What changed.** `gui/compositor/` is now a `std` binary crate whose module
+doc describes the architecture as *"Client Applications │ (submit RenderTree
+via IPC) ▼ Compositor Server"*. Windows are already created and drawn by
+clients talking to that server. There is nothing left in kernel space to
+expose.
+
+**Why implementing it anyway would be wrong, not merely redundant.**
+`CLAUDE.md` → Architectural Rules: *"Microkernel: drivers run in userspace.
+Only scheduler, memory manager, IPC, capability enforcement, and interrupt
+routing run in kernel space."* `SYS_WINDOW_CREATE`/`_MOVE`/`_RAISE`/
+`_SET_TITLE`/`_FILL_RECT`/`_POLL_EVENT` are window-manager policy — z-order,
+focus, decorations, hit testing. Putting them behind syscall numbers would
+move the entire window manager into the kernel, which is the exact inversion
+of the design. It would also duplicate a policy that already exists in
+`gui/compositor`, and duplicated policy diverges.
+
+The request's own suggested numbering makes the collision visible: it
+proposed 1100-1141, but `MAX_SYSCALL_NR` is currently **1100**
+(`kernel/src/syscall/number.rs:3861`), so this would require raising the
+syscall table ceiling to admit an interface that should not exist.
+
+**What Lane A does own here, and which already exists:** the DRM/KMS surface
+the compositor sits on — `SYS_DRM_OPEN` (1000) through `SYS_DRM_ATOMIC_COMMIT`
+(1060), including `SYS_DRM_GEM_CREATE`/`_MMAP` for shared pixel buffers,
+`SYS_DRM_PAGE_FLIP`, `SYS_DRM_FLUSH_REGION` and the cursor pair. That is the
+correct kernel/userspace cut: the kernel arbitrates the *display hardware*,
+the compositor decides what a *window* is.
+
+**If Lane C still needs something from Lane A**, the shape to ask for is not
+window syscalls but whatever the client↔compositor IPC is missing — e.g. a
+capability-transfer or shared-memory primitive for handing a client's pixel
+buffer to the server without a copy. Per the joint-task table that is still an
+`[A]` item; please file a fresh request naming the IPC primitive rather than
+the window operation.

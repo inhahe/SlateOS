@@ -144,11 +144,60 @@ static TABLE: [WaitEntry; TABLE_SIZE] = {
     [ENTRY; TABLE_SIZE]
 };
 
-/// Global counter: total set operations (for stats).
-static TOTAL_SETS: AtomicU64 = AtomicU64::new(0);
+/// One CPU's diagnostic counters, padded to its own cache line.
+///
+/// These were two global `AtomicU64`s incremented with `fetch_add` on every
+/// `set`/`clear` — that is, on every block and every wake. The surrounding
+/// work in both functions is two relaxed/release stores to a per-task slot,
+/// so the shared-line RMW was the most expensive thing on the path, for a
+/// counter read only by a diagnostic dump. Every CPU wrote the same line.
+///
+/// Per-CPU slots remove both the cross-CPU ping-pong on hardware and, under
+/// TCG, the atomic-RMW fallback that stops the world to re-execute the
+/// instruction. See `mm::frame_owner`, which had the identical pattern on the
+/// frame-allocation path and is fixed the same way.
+#[repr(align(64))]
+struct CpuStats {
+    /// `set()` calls made by this CPU.
+    sets: AtomicU64,
+    /// `clear()` calls made by this CPU.
+    clears: AtomicU64,
+}
 
-/// Global counter: total clear operations.
-static TOTAL_CLEARS: AtomicU64 = AtomicU64::new(0);
+/// Per-CPU set/clear counters, summed on read by [`stats`].
+static PER_CPU_STATS: [CpuStats; crate::smp::MAX_CPUS] = {
+    #[allow(clippy::declare_interior_mutable_const)]
+    const INIT: CpuStats = CpuStats {
+        sets: AtomicU64::new(0),
+        clears: AtomicU64::new(0),
+    };
+    [INIT; crate::smp::MAX_CPUS]
+};
+
+/// Add one to a counter that only the running CPU writes.
+///
+/// A relaxed load-add-store, not a `fetch_add`: the slot is per-CPU, so there
+/// is no other writer for an RMW to be atomic against, and the RMW's only
+/// remaining effect is its cost. An interrupt landing between the load and
+/// the store loses that increment, which is acceptable for a statistics
+/// counter and is far cheaper than the alternative on every block/wake.
+#[inline]
+fn bump(counter: &AtomicU64) {
+    let prev = counter.load(Ordering::Relaxed);
+    counter.store(prev.wrapping_add(1), Ordering::Relaxed);
+}
+
+/// Sum one per-CPU counter across every CPU.
+///
+/// Diagnostic-only: no snapshot, so the total can straddle concurrent
+/// updates. That is the price of keeping the hot path free of atomics.
+fn sum_per_cpu(select: fn(&CpuStats) -> &AtomicU64) -> u64 {
+    let mut total: u64 = 0;
+    for cpu in &PER_CPU_STATS {
+        total = total.wrapping_add(select(cpu).load(Ordering::Relaxed));
+    }
+    total
+}
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -168,7 +217,9 @@ pub fn set(task_id: u64, channel: WaitChannel, arg: u64) {
     let idx = task_id as usize & TABLE_MASK;
     TABLE[idx].arg.store(arg, Ordering::Relaxed);
     TABLE[idx].channel.store(channel as u8, Ordering::Release);
-    TOTAL_SETS.fetch_add(1, Ordering::Relaxed);
+    if let Some(stats) = PER_CPU_STATS.get(crate::smp::fast_cpu_index()) {
+        bump(&stats.sets);
+    }
 }
 
 /// Clear a task's wait channel (task has woken up).
@@ -177,7 +228,9 @@ pub fn clear(task_id: u64) {
     let idx = task_id as usize & TABLE_MASK;
     TABLE[idx].channel.store(WaitChannel::None as u8, Ordering::Release);
     TABLE[idx].arg.store(0, Ordering::Relaxed);
-    TOTAL_CLEARS.fetch_add(1, Ordering::Relaxed);
+    if let Some(stats) = PER_CPU_STATS.get(crate::smp::fast_cpu_index()) {
+        bump(&stats.clears);
+    }
 }
 
 /// Query what a task is waiting on.
@@ -219,8 +272,8 @@ pub fn stats() -> WchanStats {
     }
 
     WchanStats {
-        total_sets: TOTAL_SETS.load(Ordering::Relaxed),
-        total_clears: TOTAL_CLEARS.load(Ordering::Relaxed),
+        total_sets: sum_per_cpu(|c| &c.sets),
+        total_clears: sum_per_cpu(|c| &c.clears),
         currently_blocked,
         by_channel,
     }

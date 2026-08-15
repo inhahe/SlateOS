@@ -79,6 +79,211 @@ fresh measurement disagree, the measurement wins.
 
 ## Active Bugs
 
+### B-MOUNT-ACCEPTS-UNREACHABLE-MOUNT-POINTS. `Vfs::mount` succeeds when the mount point's parent does not exist, producing a filesystem nothing can reach — 2026-08-13 — ✅ FIXED 2026-08-13 (`kernel/src/fs/vfs.rs`, `kernel/src/fs/overlay.rs`)
+
+**Symptom.** The overlay filesystem self-test failed on every boot, so the boot
+test reported `Boot test FAILED (BOOT_OK reached but a self-test failed)`:
+
+```
+[overlay]   commit: OK (applied 1 changes)
+[vfs] Mounted overlay filesystem at '/mnt/ovl-cow-test' (rw)
+WARNING: Overlay filesystem self-test failed: NotFound
+```
+
+Every one of the twelve preceding overlay sub-tests passed, including
+`read lower: OK` reading the very file that then failed. The failure was the
+first VFS-routed read after the mount.
+
+**Why it looked like an overlay bug and was not.** The log line says the mount
+succeeded, so the investigation naturally went to the overlay engine and its
+VFS adapter — `normalize_rel`, `layer_join`, `OverlayFs::stat`/`metadata`, the
+page-cache route in `read_file_routed`. All correct. The mount really had
+succeeded; it was simply unreachable.
+
+`Vfs::resolve_inner` walks every non-final path component and requires each to
+exist in its containing filesystem, where "exists" includes being a mount point
+(`resolve_mount`'s longest-prefix match maps it to the mounted fs). Resolving
+`/mnt/ovl-cow-test/file_a.txt` therefore fails on the **first** component:
+nothing creates `/mnt` at boot, `/mnt` is not itself a mount point, so
+`lstat("mnt")` against the root memfs returns `NotFound` and the walk aborts
+before the mount table is ever consulted. `/proc`, `/dev` and `/sys` work
+because their parent is `/`.
+
+**Root cause.** `Vfs::mount_with_options` validated only that the path was
+absolute and not already mounted. It never checked reachability, so it happily
+registered a mount that consumed an `fs_id`, printed a success line and
+appeared in `/proc/mounts` while being addressable by nothing.
+
+**Fix.** `mount_with_options` now stats the mount point's parent and refuses
+the mount unless it is an existing directory (`NotADirectory`, or the stat's
+own error). Only the *parent* is required, not the mount point itself: Linux
+requires the mount point directory to exist, but our boot sequence mounts
+`/proc`, `/dev` and `/sys` over a root memfs that has no such directories, and
+longest-prefix matching makes the mount point itself reachable regardless.
+Requiring the parent is the weakest condition that makes "registered" and
+"reachable" mean the same thing. The check runs *before* `VFS.lock()` is taken,
+since `stat` re-enters the VFS.
+
+Overlay self-test 13 now creates `/mnt` before mounting.
+
+**Also fixed: the test hid which step failed.** Test 13 used bare `?` on four
+fallible calls, so the only diagnostic was
+`Overlay filesystem self-test failed: NotFound` — naming neither the operation
+nor the path. Each step now reports its name and error and unwinds the mount
+and the scratch tree, which is what turned this from a guessing exercise into a
+one-boot diagnosis.
+
+**Bug class.** Same shape as the `pthread_join`-returns-`Ok(0)` defect fixed the
+same day: an operation that cannot do what was asked reports success, and the
+damage surfaces later somewhere unrelated. Worth auditing other registration
+APIs that take a path and validate only its syntax.
+
+---
+
+### [A] TD-BENCHMARKS-ARE-NEVER-ACTUALLY-RUN-BY-THE-BOOT-GATE. The whole performance suite — baselines, targets, scorecard — is spawned and then killed mid-run on every boot test — 2026-08-14 — OPEN
+
+**Where:** `kernel/src/main.rs` (`deferred_bench_task`, spawn site ~5505),
+`kernel/src/bench.rs` (`run_all`, `score`, `SCORECARD`),
+`scripts/boot-test.sh` (`WAIT_MARKER`, default `BOOT_OK`),
+`bench/baselines.toml`.
+
+**The shape of it.** Benchmarks run in a deferred low-priority kernel task that
+prints `BENCH_OK` *after* `BOOT_OK`. That deferral is itself correct and well
+reasoned — the comment explains it gets init to a prompt in ~1 s instead of
+~20 s under TCG. The problem is the other half: the routine boot test waits for
+`BOOT_OK` and tears QEMU down at once, so the bench task is killed before it
+produces numbers.
+
+**Evidence.** In the clean 26094-line KASAN boot
+(`build/serial-kasan-pass.txt`), `[bench] === Kernel micro-benchmarks ===` is
+line 26092 — the **second-to-last line in the file**. The task got just far
+enough to print its own header before QEMU died. In an ordinary boot log the
+header does not appear at all. Neither log contains a single benchmark result
+or a `BENCH_OK`.
+
+**Why it matters.** This is the reason
+`B-FAST-CPU-INDEX-FELL-BACK-TO-AN-APIC-MMIO-READ-ON-EVERY-ALLOC` shipped
+unnoticed: CLAUDE.md requires benchmarking after any change to a
+performance-critical subsystem, `page_alloc_free` has a recorded QEMU baseline
+of 198 ns / 736 cycles to compare against, `score()` computes a pass/fail
+verdict — and none of that machinery has executed in the harness. A suite that
+is never run is worse than no suite, because its existence is taken as
+coverage.
+
+**Same class as `B-PATHZ-PREREQUISITE-SKIPS-ARE-SILENT`** (above): a check that
+silently did not run while the boot reported PASSED. That one was fixed by
+making the skip *loud*. The same principle applies here.
+
+**Proper fix.** `scripts/boot-test.sh --bench` already exists and does the right
+thing — it switches `WAIT_MARKER` to `BENCH_OK` and surfaces `ABOVE TARGET`
+verdicts — it simply is not part of any routine gate. Options, in preference
+order:
+
+1. Make the *absence* of benchmark results loud rather than silent, mirroring
+   the Path-Z fix: have the boot test note when it terminated with the bench
+   task still pending, so "no numbers" is visible instead of assumed-fine.
+2. Run `--bench` on a schedule rather than every boot (it roughly doubles the
+   ~405 s cycle under TCG, which is why making it the unconditional default is
+   unattractive), specifically after any change touching `mm/`, `sched/` or
+   `ipc/`.
+3. Record the scorecard to a file the harness can diff across runs, so a
+   regression is a *comparison* rather than a threshold — thresholds as loose
+   as these (1000 ns against a 198 ns baseline) would not have caught a 3-4x
+   allocator regression anyway.
+
+Note that (3) is the one that would actually have caught the bug that motivated
+this entry: a 736 → ~2500 cycle regression still passes a 3700-cycle target.
+The targets are sized against Linux, not against our own last-known-good.
+
+**Progress 2026-08-14 — (3) is DONE; (1) and (2) remain open.**
+*(Superseded later the same day: (1) and (2) are now done too — see
+"Closed 2026-08-14" at the end of this entry.)*
+
+`print_scorecard` now emits a machine-readable line for **every** entry, not
+just the failures:
+
+```text
+[bench] SCORE <name> <measured_ns> <target_ns> <PASS|OVER>
+```
+
+`scripts/bench-history.py` parses those out of the serial log, appends a
+JSON-lines record (timestamp, host, git commit, all measurements) to
+`bench/history.jsonl`, and diffs the run against the previous record **from the
+same host**, reporting anything that moved more than a threshold (default 25%)
+plus benchmarks that appeared or vanished. `boot-test.sh::print_bench_results`
+invokes it automatically, non-fatally.
+
+Three things about the design are deliberate:
+
+* **Passing entries are recorded too.** The old failure-only list was blind to
+  precisely the bug that motivated this entry — a benchmark that doubles while
+  still beating a Linux-sized target never appeared in the output at all.
+* **Diffs are same-host only.** A different machine or QEMU build moves every
+  number at once; reporting "no baseline" beats reporting a hardware difference
+  as a regression.
+* **Over-target is no longer phrased as a failure**, in the kernel output or in
+  `boot-test.sh`. It is labelled reference. That follows directly from
+  `TD-BENCH-OWNER-AB-BUDGET-WAS-AN-ABSOLUTE-CYCLE-COUNT`: under TCG the
+  hardware targets are unreachable by construction, so treating them as
+  verdicts trains the reader to ignore the whole suite — which is how a real
+  regression hid in it.
+
+`boot-test.sh` previously advised "compare against prior runs rather than
+treating this as a hard regression" while nothing stored prior runs, making the
+advice unfollowable. It is now followable.
+
+Still open: (1) making the *absence* of benchmark results loud on a routine
+non-`--bench` boot, and (2) deciding when `--bench` runs, since it roughly
+doubles the boot cycle under TCG.
+
+**Closed 2026-08-14 — (1) and (2) landed together, because (2) turned out to
+be answerable by (1) rather than by a schedule.**
+
+(1) is `report_bench_absence()` in `scripts/boot-test.sh`, called on both PASS
+paths whenever `--bench` was *not* given. It prints a `=== NO BENCHMARK
+RESULTS THIS RUN ===` block and never changes the exit code — a routine boot
+is *allowed* to skip the suite. The point is only that `PASSED` must not be
+readable as "performance was checked". It distinguishes the two states the log
+can be in: the deferred task started and was killed at `BOOT_OK`, or it never
+reached its first result.
+
+(2) as written — "run `--bench` on a schedule … after any change touching
+`mm/`, `sched/` or `ipc/`" — assumes a scheduler that does not exist here, and
+assumes someone remembers the rule at the right moment. That is the same
+failure mode as the original bug: coverage that depends on being remembered.
+Since `bench-history.py` already stamps every recorded run with its git
+commit, the harness can just *compute* the answer instead:
+
+```sh
+git diff --name-only <last_benchmarked_commit> HEAD -- kernel/src/{mm,sched,ipc,syscall} kernel/src/smp.rs
+```
+
+Non-empty ⇒ this boot contains unbenchmarked changes to code CLAUDE.md
+requires benchmarking, and the block escalates to `!! Performance-critical
+code changed since the last benchmarked commit`, naming the files. Empty ⇒ it
+says skipping the suite is reasonable here. So the nag is targeted and
+automatic rather than periodic, and it cannot be forgotten.
+
+Degenerate cases are handled explicitly rather than by silence, since the
+whole entry is about silence: no `history.jsonl` yet ⇒ "no baseline for this
+host"; a recorded commit absent from the repo (rebased away, or not fetched)
+⇒ say so rather than diffing against nothing and reporting a false all-clear.
+
+**Verified** by exercising all six branches against real and synthetic serial
+logs: suite-started-then-killed, suite-never-started, perf-critical files
+changed, nothing changed, missing history, unknown commit. On the current tree
+it correctly reports `kernel/src/syscall/{handlers,number}.rs` as changed
+since `bf26aabdb`.
+
+**Not fixed by this, and deliberately so:** the kernel still spawns the
+deferred bench task on every boot and still has it killed at `BOOT_OK`. That
+wasted work is cheap (the task prints a header and dies), and suppressing the
+spawn on non-`--bench` boots would need a kernel cmdline flag for no real
+gain. The defect was never the wasted work — it was that nobody could tell it
+had happened.
+
+---
+
 ### B-PATHZ-PREREQUISITE-SKIPS-ARE-SILENT. 26 Path-Z self-test rungs (every `tcc` rung, Parts 35–60) have been no-opping on every boot while the boot test reported PASSED — 2026-08-13 — ✅ FIXED 2026-08-13 (`kernel/src/proc/spawn.rs`, `kernel/src/main.rs`, `scripts/boot-test.sh`)
 
 **Verified fixed 2026-08-13.** `rootfs.ext4` was rebuilt with tinycc present and a
@@ -1451,7 +1656,7 @@ Without the stub `cld`, the first assertion is the only visible failure; the
 real symptom is silent corruption somewhere else entirely, which is why a direct
 test earns its keep here.
 
-### B-KASAN-INSTRUMENTED-BOOT-WEDGES-MID-PRINT-ON-A-PAGE-FAULT. The instrumented kernel spins forever with a half-printed `#PF` line, and the report path has no way to say anything more — 2026-08-12 — OPEN
+### B-KASAN-INSTRUMENTED-BOOT-WEDGES-MID-PRINT-ON-A-PAGE-FAULT. The instrumented kernel spins forever with a half-printed `#PF` line, and the report path has no way to say anything more — 2026-08-12 — WATCHLIST (did not reproduce 2026-08-14; harness now armed to capture the RIP)
 
 **Reproduce.** `./scripts/kasan-build.sh --boot`. Observed once so far, at the
 same place; not yet known whether it is deterministic.
@@ -1489,16 +1694,48 @@ got printed, and the wedge then prevents any later mechanism from reporting it.
 
 **Two separable fixes:**
 
-- **(a) Give the serial printer a re-entrancy escape.** If the lock is already
-  held by this CPU, fall back to the unlocked/polled emergency writer
-  (`emergency_println!` already exists for the hard-lockup path) instead of
-  spinning. Turns an evidence-free wedge into an interleaved-but-complete
-  report. This is the one worth doing regardless of the underlying fault, since
-  it is a diagnosis multiplier for every future wedge, not just this one.
-- **(b) Find the actual fault.** Blocked on capture: `scripts/boot-test.sh`
+- **(a) Give the serial printer a re-entrancy escape.** ✅ **DONE 2026-08-12**
+  (`58102abca`). If the lock is already held by this CPU, fall back to the
+  unlocked/polled emergency writer (`emergency_println!` already exists for the
+  hard-lockup path) instead of spinning. Turns an evidence-free wedge into an
+  interleaved-but-complete report. This is the one worth doing regardless of the
+  underlying fault, since it is a diagnosis multiplier for every future wedge,
+  not just this one. `serial::_print` now keeps a per-CPU `IN_PRINT` flag,
+  claimed *before* the lock is taken (so the window in which this CPU is merely
+  *waiting* for the lock is also covered), and a nested call from the same CPU
+  writes through `SerialPort::emergency()`. `serial::reentrancy_self_test()`
+  guards it at every boot by raising `#BP` from inside a `Display::fmt` — the
+  faithful reproduction of the failure, since the fault is taken *during the
+  formatting of an argument*, not merely during the write.
+- **(b) Find the actual fault.** Was blocked on capture: `scripts/boot-test.sh`
   attaches the HMP monitor and `capture_guest_state()` **only** when
-  `HARD_LOCKUP_WATCHDOG=1`, and this run was launched without it, so no live RIP
-  could be read from the wedged guest. Re-run with `HARD_LOCKUP_WATCHDOG=1`.
+  `HARD_LOCKUP_WATCHDOG=1`, and the original run was launched without it, so no
+  live RIP could be read from the wedged guest.
+
+  **The re-run was not merely forgotten — it was unrequestable.**
+  `kasan-build.sh --boot` `exec`'d `boot-test.sh --no-build` with a fixed,
+  empty argument list, so the instrumented profile — the one most likely to
+  wedge, and therefore the one that most needs the diagnostic options — was the
+  only profile that could not ask for them. Fixed 2026-08-14 (`2db09232a`):
+  everything after `--` is forwarded verbatim, so the capture run is now
+
+  ```bash
+  ./scripts/kasan-build.sh --boot -- --hard-lockup-watchdog --stall-secs=240
+  ```
+
+  `--stall-secs` matters as much as the watchdog here. A wedge is defined by
+  serial output *stopping*, and an instrumented boot is legitimately ~20x
+  slower, so waiting for the outer timeout to distinguish "wedged" from "slow"
+  wastes the whole budget; the stall detector calls it after 240 s of silence
+  and captures the frozen RIP on that path (`boot-test.sh:739-753`) rather than
+  only on timeout.
+
+  Note that fix (a) landed *after* the only observed occurrence, so the wedge
+  may no longer reproduce in its original evidence-destroying form: if the
+  nested print now escapes to the emergency port, the run should emit the
+  complete `#PF` line — the faulting RIP included — and then either recover or
+  fail in some new, legible way. Either outcome is progress; a silent
+  half-printed line is the one result that is now unexpected.
 
 **Not the same bug as B-KASAN-INSTRUMENTED-BUILD-PANICS-ON-ITS-OWN-REDZONE-CHECKS.**
 That one flooded `[kasan] CRITICAL` reports and panicked; this run reached 5560
@@ -1508,6 +1745,60 @@ wedge is a distinct, later failure.
 **Not caused by `mm::rawmem`.** An ordinary (uninstrumented) boot of the same
 tree — which compiles and exercises `rawmem` identically — reached `BOOT_OK` in
 273 s.
+
+---
+
+**Capture run 2026-08-14 — DID NOT REPRODUCE. Downgraded OPEN → WATCHLIST.**
+
+The re-run fix (b) asked for was finally *requestable* once `2db09232a` taught
+`kasan-build.sh` to forward flags, and it was run as:
+
+```bash
+./scripts/kasan-build.sh --boot -- --hard-lockup-watchdog --stall-secs=180
+```
+
+**Result: the instrumented kernel booted clean, end to end.** `BOOT_OK` after
+**1938 s**, 26094 lines of serial (`build/serial-kasan-pass.txt`), exit 0. This
+is, as far as the logs show, the **first complete KASAN-instrumented boot this
+project has achieved** — the shadow was live for the entire run, and the `[kasan]`
+self-test battery passed all five checks with `violations=7, shadow_frames=3,
+poisoned=112B, unpoisoned=60B, map_lock_giveups=0` (all seven violations are the
+self-test's own deliberate probes; there was not one unexpected shadow report in
+the whole boot). The instrumented kernel binary is preserved at
+`build/kernel-kasan-capture.elf` for symbolizing any future recurrence.
+
+The decisive detail is **where** it got past. The original wedge died at ~line
+5560, mid-print, inside the `ftype` test. This run printed that same test's
+result complete at line **5562** and continued for another twenty thousand
+lines.
+
+**Fix (a) did not rescue it — the fault simply did not happen.** This matters,
+because "the fix worked" and "the bug is nondeterministic" predict different
+logs and only the second one matches. Had a nested fault occurred and been
+caught by the `IN_PRINT` fallback, the emergency port would have emitted the
+*complete* `EXCEPTION: Page Fault` line; that is the entire purpose of fix (a).
+No such line exists anywhere in the 26094. The only `#PF` in the log is line
+1258, the intentional ring-3 fault-handling self-test. So the page fault that
+truncated the original run never occurred here at all.
+
+That answers the entry's own open question — *"not yet known whether it is
+deterministic"* — with **nondeterministic**, and it answers it without yielding
+a root cause. A one-in-N fault under a profile that takes ~32 min per attempt is
+not something to chase blind.
+
+**Why WATCHLIST rather than FIXED.** Nothing was diagnosed. What changed is that
+the failure is now *survivable evidence* instead of a dead end: the harness is
+armed (watchdog + `--stall-secs`), fix (a) guarantees a nested fault escapes to
+the emergency port with its RIP intact, and the matching instrumented binary is
+kept. If it recurs, one run yields the faulting instruction. Until then there is
+nothing actionable, and re-running a 32-minute boot hoping to lose a coin flip
+is not a use of the boot lock.
+
+**Secondary result — the KASAN profile is now a usable routine tool.** It had
+never survived a full boot before, so it could only ever be pointed at a
+suspected bug and hoped at. A clean 26094-line baseline means a future KASAN run
+can be *diffed* against this one, which is a categorically better instrument
+than "did it crash".
 
 ### TD-HARNESS-RUN-TIMEOUT-COULD-NOT-LAUNCH-A-SHELL-SCRIPT-AND-BARE-BASH-MEANT-WSL. The documented boot-test invocation never ran the boot test — 2026-08-12 — ✅ FIXED 2026-08-12 (`scripts/proctree.py`)
 
@@ -25344,7 +25635,7 @@ to line start (`grep -q "^$WAIT_MARKER"` / `^BOOT_OK`) in `scripts/boot-test.sh`
 so only the standalone marker line counts.  Found while validating the
 fastpy-nice (nice→priority) self-test.
 
-### TD-FRAME-OWNER-1GIB. `frame_owner` ownership array only tracks the first 1 GiB of RAM (fixed `[u8; 65536]`) — 2026-07-22 — OPEN (diagnostic-only; low severity)
+### TD-FRAME-OWNER-1GIB. `frame_owner` ownership array only tracks the first 1 GiB of RAM (fixed `[u8; 65536]`) — 2026-07-22 — ✅ RESOLVED 2026-08-14 (array made dynamic *and* wired into the allocator)
 
 **Where:** `kernel/src/mm/frame_owner.rs` — `const MAX_FRAMES: usize = 65536;`
 and the `OwnerArray([u8; MAX_FRAMES])` static; `set`/`get`/`clear` no-op when
@@ -25378,6 +25669,74 @@ carve `total_frames` bytes from the frame-allocator metadata region in
 and bounds-check `set`/`get`/`clear` against the dynamic length. The metadata
 region already reserves per-frame bytes; adding one more `total_frames`-byte
 sub-array is the same pattern used for `page_info`/`refcount`/cgroup.
+
+---
+
+**RESOLVED 2026-08-14.** Both halves were done together, exactly as the note
+above insisted — resizing the array alone would have been busywork while
+`set`/`clear` still had no callers.
+
+**1. Dynamic array.** `const MAX_FRAMES = 65536` and the
+`OwnerArray([u8; MAX_FRAMES])` static are gone. `frame::plan_metadata` now
+reserves a fourth per-frame sub-array (`owner_offset = cgroup_offset +
+total_frames`), `frame::init` zeroes it (`0` == `Owner::Free`) and publishes it
+via `frame_owner::init_storage(ptr, total_frames)`; `OWNERS_PTR`/`OWNERS_LEN`
+back a `slot()` helper that every accessor goes through. Same pattern as the
+cgroup array (BUG-CGROUP-1GIB). Boot confirms the carve:
+`[mm] Metadata: ... [page_info: 327680B, refcount: 655360B, cgroup: 327680B, owner: 327680B]`.
+
+**2. Actually wired up.** `tag_alloc_owner`/`untag_free_owner` are called from
+all six allocator choke points: both per-CPU fast paths in `alloc_frame`, the
+zero-pool pop in `alloc_frame_zeroed`, `alloc_order`, `alloc_order_constrained`,
+`free_frame` and `free_order`. The zero-pool refiller tags parked frames
+`Owner::ZeroPool`; the consumer re-tags on pop.
+
+**3. Ambient owner context.** The allocator cannot know its caller, so
+attribution comes from `OwnerScope` — a cache-line-padded per-CPU RAII guard
+that saves the previous tag and restores it on drop, so it nests correctly even
+when an IRQ handler allocates inside another subsystem's scope. Tagged so far:
+page tables (`page_table.rs` PT-page pool refill), kernel stacks (`kstack.rs`),
+slab + large heap (`heap.rs`), CoW (`cow.rs`), and user anon pages (`vma.rs`
+demand paging, `idt.rs` stack growth). Untagged allocations record
+`Owner::Unknown`, which is honest rather than wrong.
+
+Known accuracy limit, documented on `OwnerScope`: the tag is per-CPU, so a task
+preempted and migrated mid-scope restores onto the new CPU and can mis-attribute
+a handful of frames. Accepted deliberately — this is diagnostic-only, and a lock
+or a per-task field reachable from boot/IRQ contexts would cost more on the
+allocation hot path than the precision is worth.
+
+**Verified.** Boot PASSED 273s; the rewritten self-test reports:
+
+```
+[frame_owner]   Covers all 327680 frames (5120 MiB): OK
+[frame_owner]   High frame 327679 (> old 65536-frame window): OK
+[frame_owner]   Alloc/free tagging round-trip: OK
+[frame_owner]   OwnerScope nesting: OK
+[frame_owner]   summary/find_by_owner: OK
+[frame_owner]   Stats: sets=155837, clears=299809
+```
+
+The second line is the direct regression test for this bug. The nonzero
+`sets`/`clears` are the proof that the allocator now reaches this module at all.
+
+*On `clears` > `sets`:* these count **calls, not transitions**. `clear()` runs on
+every free, including frames that were never tagged — anything allocated before
+`init_storage` published the array, plus rollback paths that free via
+`free_order_inner` without a matching tagged alloc. Not a leak; the per-frame
+state is still a correct free/allocated mirror, as test 4's round-trip shows.
+
+**The self-test had to be rewritten, not just extended.** The old one wrote raw
+indices (100, 200, 300…) straight into the array. That was harmless while
+nothing populated it, but the moment the allocator went live those writes would
+corrupt *real* frames' records. It now allocates and frees actual frames for
+every check, and saves/restores around the one raw-index probe.
+
+**Side effect: found and fixed a latent bug.** Making `current_owner()` run on
+every allocation pulled `smp::fast_cpu_index()` into early boot and exposed
+B-SMP-FAST-CPU-INDEX-PANICS-BEFORE-APIC-INIT (tier-3 APIC fallback reads a null
+APIC base before `apic::init` — panic in debug, wild read in release). See that
+entry.
 
 ### BUG-CGROUP-1GIB. (RESOLVED 2026-07-22) per-frame cgroup array only covered the first 1 GiB → cgroup accounting leak above 1 GiB
 
@@ -39155,7 +39514,119 @@ the spawn helper returns.
 
 ---
 
-### B-PTHREAD-CHILD-JUMPS-TO-GARBAGE. One `pthread_create`d thread intermittently starts at a bogus RIP and is killed; the process keeps running and reports a wrong answer — PARTIALLY FIXED (defect 2 fixed 2026-08-13; defect 1 still OPEN, 1 in 10 boots) 2026-08-13
+### B-THREAD-JOIN-EXIT-RACE. `thread::join` could park forever on a thread that exited between the liveness check and the waiter registration — FIXED 2026-08-13
+
+**How it was found.** Not from a failing boot: it came out of the audit that
+followed B-PTHREAD-JOIN-LOST-CTID above, checking every piece of state
+`on_thread_exit` consults for the same "the other side registers too late"
+shape. `THREAD_JOIN_WAITERS` is the one such table registered by the *joiner*
+rather than by the spawner, so it needed the mirror-image argument.
+
+**The window.** `proc::thread::join` did:
+
+1. take `THREAD_OWNERS`, confirm the target exists and shares our process,
+   **drop the lock**;
+2. take `THREAD_JOIN_WAITERS`, insert `target -> caller`, drop it;
+3. park in a loop whose *only* exit condition is that entry being removed.
+
+`on_thread_exit` drains `THREAD_JOIN_WAITERS` (waking the joiner) **before** it
+removes the task from `THREAD_OWNERS`. So a target that exits between steps 1
+and 2 drains an empty waiter map, and the entry inserted at step 2 is one that
+nothing will ever remove — the loop at step 3 never terminates and the joiner
+is stuck for the life of the process.
+
+This is a genuine hang, but a much narrower one than the ctid bug: it needs a
+preemption inside a two-instruction-wide gap between dropping one lock and
+taking another, and it only affects the native `SYS_THREAD_JOIN` path (glibc
+`pthread_join` goes through the ctid futex instead), which is why no soak has
+caught it.
+
+**Fix.** Register-then-recheck, the same idiom `futex_wait_bitset` already uses
+for the signal-arrival race. After publishing the waiter entry, re-check
+`THREAD_OWNERS`; if the target is gone, the exit already ran, so withdraw the
+entry (only if it is still ours — a racing `on_thread_exit` may have removed it
+and issued a real wake, which must not be swallowed) and return the recorded
+outcome, or `NoSuchProcess` if none — matching what the pre-existing
+target-not-registered branch above already returns. The ordering that makes
+this correct is the one noted above: waiters are drained strictly before the
+`THREAD_OWNERS` removal, so "gone from `THREAD_OWNERS`" implies "the waiter
+drain has already happened."
+
+Neither lock is ever held while taking the other, so no new lock-order edge is
+introduced.
+
+**Files.** `kernel/src/proc/thread.rs` (`join`).
+
+---
+
+### TD-KERNEL-KILL-THREAD-DEAD-CODE. `proc::thread::kill_thread` has no callers — ✅ RESOLVED 2026-08-14 (and it was not dead code: it was an unwired bug fix) 2026-08-13
+
+`kernel/src/proc/thread.rs:kill_thread` is a `pub fn` with zero call sites
+anywhere in the tree, so the binary build emits a `dead_code` warning for it.
+Noticed while building the two fixes above; deliberately left alone rather than
+churned, because it is plausibly intended as part of the thread-teardown API
+surface. Proper resolution: either wire it into the process-teardown path that
+should be using it, or delete it and let `sched::kill_task` remain the single
+entry point. Pre-existing — it is not a regression from those fixes (verified:
+the same single occurrence, definition only, exists at commit `315a7e0ca`).
+
+**Resolution 2026-08-14 — this was filed under the wrong heading. It was a
+live bug, not tech debt.** The "either wire it up or delete it" framing above
+treats the two options as comparable. They were not, and the answer was
+written inside the function's own doc comment the whole time:
+
+> Calling `sched::kill_task` on its own — which is what the shell's `kill`
+> command **used to** do — skips every one of those and leaves the thread
+> registered forever with its joiner parked.
+
+The shell's `kill` command did not "used to" do that. It still did:
+`kshell.rs:cmd_kill` called `crate::sched::kill_task(task_id)` directly. So
+`kill_thread` was not a speculative API-surface addition — it was the fix for
+that exact defect, written but **never wired to its one caller**. Every
+`kill <tid>` typed at the kernel prompt therefore:
+
+1. leaked a `THREAD_OWNERS` entry (the thread→process mapping is never
+   removed, so the process can never reach its zombie transition through that
+   thread);
+2. left any task parked in `join()` on the victim parked forever; and
+3. recorded no `ThreadOutcome::Killed`, so a joiner that *was* woken by some
+   other path would read a fabricated normal return instead of
+   `KernelError::Cancelled` — the precise wrong-answer failure mode that
+   `B-PTHREAD-CHILD-JUMPS-TO-GARBAGE` defect 2 was fixed to prevent.
+
+**Fix:** `cmd_kill` now calls `proc::thread::kill_thread`, with a doc comment
+recording *why* it must not use the scheduler call directly (so the next
+person to "simplify" it has the reason in front of them).
+
+**Why nothing caught it.** There was no test of `kill_thread` at all — the
+existing `test_killed_thread_does_not_join_normally` exercises `record_killed`
+and `join` directly with synthetic task IDs, which covers the outcome map but
+deliberately never calls `kill_thread`. So the only evidence the function had
+no callers was a `dead_code` warning, and a warning that says "unused" reads
+as "harmless" rather than "your fix is not connected".
+
+**Test added:** `thread::test_kill_thread_cleans_up` (test 9). It spawns a
+victim and kills it **before it is ever scheduled**, which (a) makes the test
+unable to leave a runaway task behind if the kill is refused, and (b) lets the
+entry function's untouched counter prove the task never ran, so the stack
+`&counter` it was handed cannot outlive the frame. It asserts the accepted
+kill deregisters the thread and joins as `Cancelled`, and that a *second*,
+refused kill withdraws the speculative `Killed` marker (the `else` branch that
+exists only in `kill_thread`) so a later join reports `NoSuchProcess` rather
+than a death that never happened.
+
+**Deliberately left alone:** `syscall/handlers.rs:5877` also calls
+`sched::kill_task` directly, on the sibling threads of a process being torn
+down by a fatal signal. That site pairs it with an unconditional
+`thread::on_thread_exit(t)`, which `kill_thread` would skip for a thread that
+is already dead — and for a dying process, deregistering an already-dead
+sibling is the wanted behaviour. Its missing `record_killed` is immaterial
+there because the joiners are inside the same process and are being killed in
+the same loop.
+
+---
+
+### B-PTHREAD-CHILD-JUMPS-TO-GARBAGE. One `pthread_create`d thread intermittently starts at a bogus RIP and is killed; the process keeps running and reports a wrong answer — FIXED (defect 2 fixed 2026-08-13 `315a7e0ca`; defect 1 fixed 2026-08-13 `975114f54`, corroborated by a 20/20 clean soak) 2026-08-13
 
 **Symptom.** A deliberate 40-boot soak (`scripts/wedge-soak.sh`, run
 `soak-20260813-093459`) was launched to hunt an unrelated wedge. It did not
@@ -39298,12 +39769,52 @@ B-PTHREAD-YIELDBUDGET (resolved) was a silent hang, not a fault.
 soak script already treats a self-test regression as a catch and preserves
 the serial log, which is how this was captured.
 
-**Next step when picked up (defect 1).** Add a `clone`-time trace to
+**Next step when picked up (defect 1).** ~~Add a `clone`-time trace to
 `kernel/src/proc/thread_clone.rs` printing, for each child: the requested TLS
 base, the `%fs` base actually installed, and the first 8 bytes at
 `tls_base + offsetof(struct pthread, start_routine)`; then soak until it trips.
 The failure is frequent enough (1/10) that a single 20-boot soak should catch
-it with the trace attached.
+it with the trace attached.~~ **Superseded — the defect was found by static
+audit instead, see below.**
+
+**Defect 1 FIXED 2026-08-13** (`975114f54`, *seed thread `%fs`/`%gs` base
+before admission*). The planned trace was never needed: auditing the spawn
+path for the register-after-admit pattern found the mechanism directly.
+
+`clone_thread` called `thread::spawn_with_tls`, which **admitted the child to
+the run queue before writing its `%fs`/`%gs` base**. On our uniprocessor
+(TCG) build a timer preemption inside that window lets the child start with an
+unseeded `%fs`. glibc's clone entry stub loads the thread function from
+TLS — a `%fs`-relative fetch of `struct pthread`'s `start_routine` — so with a
+stale/zero `%fs` base it reads a garbage word and jumps to it. That is exactly
+the reported signature: worker `id == 0` (the first child created, i.e. the one
+most likely to be preempted before seeding) starting at a bogus RIP with
+`rip == aux == CR2`, the fault address *being* the instruction pointer.
+
+Fixed structurally rather than by reordering two statements: `thread` now
+exposes a two-phase API — `spawn_suspended_with_tls()` (create + register
+everything, including the TLS bases) followed by an explicit `admit()` — so a
+child cannot become runnable before its per-thread state exists.
+`spawn_with_tls` is retained as a thin wrapper that calls both.
+
+**Confirmation and its honest limits.** The 20-boot soak this entry asked for
+has since run (`build/hang-catches/soak-ctidfix.log`, 2026-08-13 23:02 →
+2026-08-14 01:52): **20/20 boots passed**, every one reporting
+`REAL glibc pthread (… 40000 mutex/futex ops, pthread_join, captured 48 bytes
+== expected): OK` — i.e. the exact `counter=40000 joinsum=10` assertion whose
+failure defined this bug — and zero kernel faults.
+
+That is consistent with a fix but is **not** statistically conclusive on its
+own: at the measured 1-in-10 rate, 20 clean boots would happen by chance
+`0.9^20 ≈ 12%` of the time. The confidence comes primarily from the mechanism
+being understood and closed by construction, with the soak as corroboration.
+If a `counter=30000 joinsum=9` (or the now-loud faulting variant) ever
+reappears, reopen this entry rather than assuming a new bug.
+
+**Bug class.** Third of three register-after-admit defects found in this
+subsystem, alongside B-PTHREAD-JOIN-LOST-CTID (the ctid registration) and
+B-THREAD-JOIN-EXIT-RACE (the join-waiter registration). Worth grepping for
+whenever new per-thread state is keyed on a task id.
 
 **How the defect-2 fix changes what a soak looks like.** Before, the 1-in-10
 boot that hit this produced a *quiet wrong answer* (`counter=30000
@@ -39454,6 +39965,60 @@ prime suspects are any `current_cpu_id()`/`load_current_task()` call made while
 running on a *borrowed* or already-freed stack, or an off-by-one stack write in
 the clone/exit path. The `dump_stack_scan` capture should show the exact stack
 address holding `&CURRENT_TASK_IDS[0]` relative to task 123's `rsp`.
+
+**Update 2026-08-14a — the assumed byte decode does not fit the error code, so
+the "stored qword is the cell base" story is incomplete.** Audit 2026-07-15b
+explains the `+0x2` as "the resolver rounding to the nearest preceding symbol;
+the stored qword is the cell base". That reading is doubtful:
+`scripts/resolve-rip.sh` reports *nearest preceding symbol + offset*, so a
+report of `+0x2` means RIP genuinely **was** `&CURRENT_TASK_IDS[0] + 2`, not
+the base. The natural mechanism is instead: `ret` jumped to the base, the
+instruction there executed, and the *next* instruction — at base+2 — faulted.
+
+But that does not close either. `panic_diagnostics()` reported the current task
+as 123, so CPU 0's cell held `123 = 0x7B`, i.e. bytes `7B 00 00 00 00 00 00 00`:
+
+- `base+0`: `7B 00` = `JNP rel8 +0` — whether or not the branch is taken, the
+  next instruction is at `base+2`. Consistent with the observed RIP.
+- `base+2`: `00 00` = `add byte [rax], al` — a read-modify-**write**. On a
+  not-present page x86 reports error bit 1 set, i.e. `error = 0x2`.
+
+The captured error was `0x0` (**read**). So the faulting instruction was *not*
+`add [rax], al`, and at least one of the assumptions (which cell, what it held,
+or that RIP is inside `CURRENT_TASK_IDS` at all) is wrong. A plausible
+alternative is that the resolver attributed RIP to `CURRENT_TASK_IDS` merely
+because it is the nearest *preceding* symbol — the true target may be a later,
+symbol-less location, which would invalidate the whole "per-CPU cell address"
+inference and with it the search direction of audit 2 above.
+
+**Action taken instead of more inference: the handler now dumps the raw bytes
+at RIP** (`idt.rs`, right after `dump_stack_scan`, guarded by a
+`page_table::translate` mapped-check so it cannot itself fault, and emitted
+after the scan so it can never displace it). One repro now settles what
+executed, rather than another round of decode guesswork.
+
+**Update 2026-08-14b — 20 consecutive boots, zero occurrences.** The
+confirmation soak for B-PTHREAD-JOIN-LOST-CTID ran 20 full boots
+(`build/hang-catches/soak-ctidfix.log`, 23:02–01:52) with **no `EXCEPTION:` /
+`Page Fault` / `FATAL` line at all**, on a build carrying both
+register-after-admit fixes (`%fs`-base-before-admit and
+ctid-before-admit). Against the historically recorded ~1/5 rate that is
+`0.8^20 ≈ 1.2%` likely, which is real evidence the rate has dropped.
+
+Two candidate explanations, not yet distinguished:
+
+1. **The TLS fix cured it.** B-PTHREAD-CHILD-JUMPS-TO-GARBAGE defect 1 let a
+   clone child run before its `%fs` base was seeded — itself a control-flow /
+   wild-access defect in *this exact self-test*. A shared root cause is very
+   plausible.
+2. **The rate merely drifted.** The 1/5 figure is from 2026-07-15, a month and
+   many changes ago, so the null hypothesis "unchanged rate" may already have
+   been false for unrelated reasons.
+
+Deliberately **not** downgrading this entry to FIXED on that evidence: 20 clean
+boots cannot separate "cured" from "rarer", and silently closing it would throw
+away the instrumentation's value. Keep at WATCH; if a repro appears, the new
+bytes-at-RIP dump plus the existing stack scan should close it in one capture.
 
 ### B-FORKEXEC-BOOT-HANG. Intermittent silent boot hang at the glibc `fork()`+`execl()`+`waitpid()` self-test — WATCH (rare, non-fatal to a re-run) 2026-07-15
 
@@ -43950,6 +44515,65 @@ truncation; given two recorded recurrences now, a finer-grained marker
 pass around the `mm::oom::self_test()` / `sysctl::set` lock window
 (per the F1/F4 method) is the priority diagnostic when next observed.
 
+**Mechanism identified 2026-08-14 — this is very likely the console-lock
+deadlock, already fixed twice since the last recurrence.**
+
+The entry has been carrying a *statistical* closure bar (~90 clean boots)
+because no mechanism was known. There is now a mechanism, and it makes the
+blind-soak bar the wrong instrument.
+
+Look at the fingerprint rather than the location. Serial stops **mid-token**
+— `[sysctl] mm.oom_pol…`, cut inside the sysctl name — and never resumes,
+while an immediate identical-binary re-run is clean. Truncation *mid-print* is
+the discriminator: the UART write is synchronous and takes ~87 µs/char, so a
+CPU that wedged for some unrelated reason would overwhelmingly wedge
+*between* lines, with the in-flight line already flushed. Stopping inside the
+formatting of an argument means the printing CPU itself stopped, mid-write,
+holding the `SERIAL` spin mutex. That is the same shape as
+`B-KASAN-INSTRUMENTED-BOOT-WEDGES-MID-PRINT-ON-A-PAGE-FAULT` (`EXCEPTION:
+Page Fault (#PF) at` truncated exactly where `{:#x}` would have formatted
+`frame.rip`), and it matches this entry's own long-standing assessment that
+`mm::oom::self_test()` is *the victim, not the cause* — the self-test is
+simply whatever happened to be printing.
+
+**All of W1's evidence predates every fix to that path.** W1's recurrences are
+2026-06-10 and 2026-06-12, and its last soak is 2026-06-14. `serial.rs` has
+since gained, in order:
+
+| Commit | Date | What it closed |
+|---|---|---|
+| `cac8d7624` | 2026-07-03 | lock-free `emergency_println!` (an escape hatch existed at all) |
+| `1e5c091f4` | 2026-07-15 | `cli` around the `SERIAL` critical section — same-CPU **interrupt** re-entry |
+| `58102abca` | 2026-08-12 | per-CPU `IN_PRINT` + emergency fallback — same-CPU **exception** re-entry |
+
+`1e5c091f4`'s own commit message calls it the "long-open boot-wedge" fix, and
+its in-source note describes precisely W1's symptom: *"a task holds it mid-write
+and a timer/IRQ handler on the SAME CPU then tries to print … the handler spins
+forever on the lock the interrupted task can no longer release — a hard
+single-CPU wedge."* W1 is the OOM self-test's instance of that wedge.
+
+**Consequence for the closure condition.** W1 can no longer present as a
+*silent* mid-line truncation, by construction and along both remaining paths:
+
+- if the re-entry is an interrupt, `cli` now prevents it from happening at all;
+- if it is an exception (or anything else that re-enters `_print` on this CPU),
+  the per-CPU flag routes the nested write to the lock-free emergency port, so
+  the fault **prints** instead of spinning.
+
+So the next occurrence, if any, is expected to yield a legible report rather
+than silence. Recommend **retargeting the bar from ~90 blind boots to one
+observation**: treat W1 as cured-incidentally on the reasoning above, and
+re-open it *only* on a truncation that still produces no diagnostics — which
+would falsify this analysis and be far more informative than the 83 remaining
+clean boots the old bar asks for. Note also that the recorded streak of 7 is
+stale bookkeeping, not a real count: many dozens of routine boots have passed
+since 2026-06-14 (including a 20/20 pthread soak on 2026-08-13) with no
+recurrence, and the entry's own rule counts routine boots toward the streak.
+
+Left at WATCHLIST rather than closed unilaterally, since retargeting a closure
+condition an earlier session set deliberately is the operator's call if they
+want it; the analysis above is the argument for doing so.
+
 ### W2. Deferred benchmark suite livelocks in `bench_pick_next` after `context_switch` → `BENCH_OK` never prints — ROOT-CAUSED & FIXED 2026-06-14
 
 **RESOLUTION 2026-06-14 — root cause was the mouse cursor task busy-yielding,
@@ -44116,6 +44740,314 @@ deny — are now fixed; see F8 and F9.)_
 ---
 
 ## Fixed Bugs
+
+### TD-BENCH-OWNER-AB-BUDGET-WAS-AN-ABSOLUTE-CYCLE-COUNT. Five boots of "ownership tagging costs 8500 cycles" were the emulator, not the code — 2026-08-14 — RESOLVED 2026-08-14
+
+**Where:** `kernel/src/bench.rs` (`run_all`, the `page_alloc_free_owner_ab` and
+`fast_cpu_index` budget checks) and `bench/baselines.toml`.
+
+**Symptom.** `page_alloc_free_owner_ab` reported `SLOW (tagging costs N
+cycles/alloc+free, limit 500)` on five consecutive boots: **10826 / 7660 /
+8512 / 10580 / 11288**. `fast_cpu_index` simultaneously reported `SLOW (274 /
+282 cycles, limit 200)` — on boots *after* the tier-0 fix that benchmark had
+been added to prove worked.
+
+**Why it was worth chasing rather than dismissing as noise.** The
+reproducibility. A number that lands within ±20% five times is measuring
+something. And the accused code is trivial: `frame_owner::set` is a relaxed
+load, a bounds check, a byte store and a counter bump. When a measurement and
+a static reading of the code disagree by two orders of magnitude, one of them
+is wrong, and guessing which is how people end up optimising the wrong line.
+
+**Three hypotheses, each killed by measurement rather than by argument:**
+
+1. *Ambient load / windowing.* The first version ran 500 iterations with
+   tagging off, then 500 with it on. Two consecutive windows on a live system
+   are not the same system, and `min` does not save you — it is robust to
+   *spikes*, not to a window uniformly busier than its neighbour. The evidence
+   was in the same output: the off window had `max=129078` while the on window
+   had `max=635531436` and a 30x higher mean. Fixed by alternating the arms
+   every iteration (`ab_interleaved`), microseconds apart, so drift on a
+   scheduling timescale lifts both and cancels. **The number did not move.**
+2. *TCG's atomic-RMW fallback.* TCG cannot always lower a guest atomic RMW
+   inline; `cpu_loop_exit_atomic` aborts the translation block and re-executes
+   with the world stopped — thousands of cycles for one increment. Two shared
+   `fetch_add` statistics counters sat on exactly this path. Measured directly:
+   `atomic_fetch_add_relaxed` came out at **0-238 cycles**, so the two counters
+   accounted for ~124 of ~8500. (The counters were moved to per-CPU
+   cache-line-padded slots anyway, on general principles — the file already
+   padded `CURRENT_OWNER` per-CPU with a comment about a "false-sharing storm"
+   while leaving these unpadded on the same path. That commit says explicitly
+   that it was *not* the cause.)
+3. *The halves don't add up.* A first split put `set` at 2978 cycles and
+   `current_owner` at 924 — `set + clear + current ≈ 6900` against a measured
+   8512-10580, so they did add up and the cost was genuinely inside `set`.
+   **But that split was flawed**: it never controlled the `ENABLED` flag, so
+   "2978 cycles for `set`" lumped the cost of *calling* `set` together with the
+   cost of the work `set` does — the two things that had to be told apart,
+   pointing at opposite conclusions.
+
+**What actually settled it.** A three-arm experiment: `set` with tracking
+**off** (the early-return path — the harness's floor for calling into
+`frame_owner`), `set` with tracking **on**, and a byte store to an ordinary
+`.bss` static as a control. Result:
+
+```
+frame_owner_set_split: call_floor=278 work=2416 bss_store_control=218
+```
+
+**A single byte store to plain kernel `.bss` costs 218 cycles in this
+harness.** `set` performs about half a dozen guest memory accesses (the
+`ENABLED` load, the length and pointer loads inside `slot`, the tag store, and
+the per-CPU counter's load and store); 6 × 218 ≈ 1300, the right order for the
+measured 2416. Under TCG *every* guest memory access carries a softmmu lookup
+costing a few hundred host cycles; the same accesses on real hardware are L1
+hits at ~1-4 cycles. So ownership tagging adds ~16 memory accesses per
+alloc+free — **~30 cycles of real machine, ~2500 cycles of emulator.**
+
+Nothing had regressed. The benchmark was measuring the emulator and comparing
+it to a budget sized for hardware.
+
+**The real defect, and it is a general one.** An absolute cycle budget cannot
+work in this harness. It conflates the code under test with an emulation
+constant that varies with the host, the QEMU build and the accelerator, and it
+fails permanently on code that is correct. `fast_cpu_index`'s 200-cycle budget
+was the same defect in its purest form: **200 cycles is below the harness's
+floor for a single memory access**, so *no* implementation could ever have
+passed it — the check was structurally incapable of reporting PASS, and it was
+accusing the very fix it had been added to guard.
+
+**Fix — budgets in units of measured memory accesses.** `run_all` now measures
+`memory_access_floor` first (a byte store to a dedicated `.bss` static,
+interleaved against an empty closure, clamped to a minimum of 100 so a
+noise-driven 0 cannot collapse every budget to 0) and expresses both delta
+budgets as multiples of it:
+
+* `fast_cpu_index`: 4 accesses (was 200 cycles). Clear of the noise, still far
+  under an APIC MMIO round-trip.
+* `page_alloc_free_owner_ab`: 40 accesses (was 500 cycles). The path performs
+  ~16, so 2.5x headroom absorbs variation in how many the optimiser folds.
+
+**The fix failed its own verification boot, in two ways, and both are worth
+recording because both are mistakes the *unit change* made easy to miss.**
+
+```
+memory_access_floor: 100 cycles/guest byte-store (measured=74 nop=1278 store=1352)
+fast_cpu_index: PASS (288 cycles over an empty closure, limit 400 = 4 accesses)
+page_alloc_free_owner_ab: SLOW (17176 cycles/alloc+free = 171 accesses, limit 40)
+```
+
+1. **The calibration was itself vulnerable to the noise it existed to
+   correct for.** It timed *one* store against one empty closure, and the
+   subtraction is only meaningful if the two arms' baselines agree. They did
+   not: `nop=1278` here, while the very next block in the same run measured
+   `nop=448`. A ~200-cycle access simply has no signal above a
+   several-hundred-cycle wander, so `measured=74` was noise and **the clamp
+   became the answer** — which then under-scaled every budget derived from it
+   and manufactured the SLOW below. Fixed by *amplifying*: 64 stores per timed
+   window, divided by 64. The signal scales with N, the wander does not, so it
+   divides away. The loop's own overhead is left inside the measurement
+   deliberately — it can only enlarge the floor and loosen the budgets, and for
+   a check whose whole purpose is to stop crying wolf, false negatives are the
+   safe direction. The clamp stays as a backstop, but if a run ever prints
+   `measured` at or below it, that run's budget verdicts are unreliable rather
+   than findings.
+2. **40 accesses was too tight even against a correct floor.** Honest recount:
+   ~20 architectural accesses per alloc+free (`tag_alloc_owner` = 1 is_enabled
+   + 2 current_owner + 8 set; `untag_free_owner` = 1 + 8). Observed healthy is
+   ~50-57 (11288/218 = 51.7 on one boot, ~57 on the next) — a consistent
+   2.5-3x multiplier, which has a cause rather than being slop:
+   `scripts/boot-test.sh` runs a plain `cargo build`, and the workspace's
+   `[profile.dev]` sets only `panic = "abort"`, so **opt-level is 0 and the
+   benchmarked kernel is unoptimised** (`cargo` prints `Finished dev profile
+   [unoptimized + debuginfo]`). Nothing is inlined, so each of the ~6 calls on
+   this path runs a real prologue/epilogue whose spills and saved registers are
+   memory accesses the source-level count omits. ~3x over the architectural
+   count is what an unoptimised build predicts and what two independent boots
+   measured. Budget raised to **150** ≈ 3x the observed ~50.
+
+   The temptation here was to loosen until it passes, which is the anti-pattern
+   this whole entry is about. What makes 150 legitimate is that the number is
+   derived from a *mechanism* (opt-level 0, non-inlined calls) that predicts the
+   observed multiplier independently, and that the looseness costs no detection
+   power: this is a structural tripwire, not a stopwatch, and every failure it
+   guards against is an order-of-magnitude event, not a percentage.
+
+**Verified 2026-08-14** on the boot following both follow-up fixes:
+
+```
+memory_access_floor: 284 cycles/guest byte-store (measured=284 over 64 stores/window: nop=8238 store=26474)
+fast_cpu_index: PASS (476 cycles over an empty closure, limit 1136 = 4 accesses)
+page_alloc_free_owner_ab: PASS (tagging costs 11778 cycles/alloc+free = 41 accesses, limit 150)
+frame_owner_set_split: call_floor=282 cycles work=3054 cycles
+```
+
+The amplified calibration produced `measured=284` where the single-store form
+produced `74`, so the clamp no longer binds and the floor is a real quantity.
+It cross-checks: the independently-measured `.bss` control in
+`frame_owner_set_split` came out at 218 on an earlier boot, and 284 exceeds
+that by roughly the loop overhead this deliberately declines to subtract.
+
+The detail worth keeping in view is that the absolute cycle figure — **11778** —
+sits squarely in the same 7660-11288 band that was reported as `SLOW` for five
+consecutive boots. Not one line of `frame_owner` changed between those runs and
+this one. Only the unit the budget is written in changed, which is the whole
+thesis of this entry stated as a measurement.
+
+**Follow-up wart, also fixed:** the split diagnostic printed
+`call_floor=282 cycles (0 accesses)` — 0.99 accesses truncated to `0` by
+integer division, reading as "this costs nothing" in the one line whose job is
+to say where the cost lives. Access counts now print to one decimal via a
+`accesses(cycles, floor) -> (whole, tenths)` helper.
+
+This keeps the checks doing what they exist for. The failures worth catching —
+an uncached MMIO round-trip, a contended lock, a per-frame loop where a
+`write_bytes` belongs (which scales with `count`) — cost 10-100x a plain
+access on hardware *and* under emulation, so they still blow past the budget.
+
+**Kept as a permanent diagnostic:** the `frame_owner_set_split` line, now
+reported in access units. If the A/B ever fires again it says in one line
+whether the cost is inside `set`'s working path or elsewhere — the fork this
+investigation burned four boots failing to resolve by argument.
+
+**Lesson for the next benchmark added to this file.** Any threshold on an
+in-kernel QEMU/TCG measurement must be expressed relative to something
+measured by the same harness in the same run. Absolute nanosecond and cycle
+targets taken from Linux publications belong in `baselines.toml` as *context*;
+they cannot be pass/fail gates here. The pre-existing `ABOVE TARGET` verdicts
+in this suite (e.g. `isr_latency: 233451ns, target 10000ns, 2334%`) are the
+same category of statement and should be read as "this is what the emulator
+does", not as regressions.
+
+---
+
+### B-SPAWN-SYSCALLS-NEVER-RECORDED-THE-PARENT. Every syscall-spawned child was unreapable, uncapability'd, and escaped its parent's namespace — 2026-08-14 — FIXED 2026-08-14
+
+**Where:** `kernel/src/syscall/handlers.rs` — `sys_process_spawn` (~3279) and
+`sys_process_spawn_ex` (~3397). Fallout in `kernel/src/proc/spawn.rs`
+(`SpawnOptions::parent`, steps 5b/5c) and `kernel/src/proc/pcb.rs`
+(`try_reap`, 4219-4247).
+
+**Symptom that led here.** The `ticker` service crash-looped nine times in a
+routine boot log, each time reported by init as `exited with code -400` — while
+`[ticker] Ready.` kept appearing in the same log. A process cannot both be
+dead and printing. `-400` is `KernelError::PermissionDenied`, and the only
+permission check on the wait path is `pcb::try_reap`'s
+`proc.parent != parent_pid`.
+
+**Root cause.** `SpawnOptions` has a `parent(pid)` builder, and **neither spawn
+syscall ever called it**. Both built `SpawnOptions::new(name)` and left
+`options.parent = 0`. So every process ever created through
+`SYS_PROCESS_SPAWN` / `SYS_PROCESS_SPAWN_EX` recorded the kernel (PID 0) as its
+parent. Three consequences, all silent:
+
+1. **No process could reap its own children.** `try_reap` compares the caller
+   against the recorded parent and returns `PermissionDenied`. Every spawned
+   child therefore leaked as a zombie for the life of the system, and every
+   supervisor mis-read the error as an exit status (see the lane-b request
+   `requests/a-b-init-conflates-syscall-error-with-exit-code.md` — init prints
+   `ret` from `process_try_wait` as an exit code without checking its sign,
+   which is how `-400` became "exited with code -400" and triggered a restart).
+2. **The parent was never granted a `Process` capability over the child.**
+   `spawn_process` step 5b (spawn.rs:974) is gated on `options.parent != 0`, so
+   the READ|WRITE|DELETE|WAIT|SIGNAL|DUPLICATE grant never happened. Callers
+   had no handle with which to signal or kill what they had spawned.
+3. **Sandbox escape.** Step 5c (spawn.rs:1001) inherits the parent's filesystem
+   namespace, and is gated on the same condition. A process confined to a
+   non-root namespace could spawn a child that landed in the *root* namespace.
+   This is the serious one: confinement was defeated by the single act of
+   spawning.
+
+**Why nobody noticed.** `fork` sets the parent on its own path, so every
+fork→exec→wait test passed. Nothing in the test suite spawned via the syscall
+*and then reaped*. And `SpawnOptions::parent` carried
+`#[allow(dead_code)] // Public builder API — callers use SpawnOptions::new() + chaining.`
+— a suppression that was factually wrong (there were no chaining callers) and
+that turned "this builder method has zero callers" from a compiler warning into
+a comment asserting the opposite. That is the real lesson: an `#[allow]` whose
+justification is a claim about the rest of the codebase silently rots when the
+claim stops being true.
+
+**Fix.** Both syscalls now pass `.parent(caller_pid().unwrap_or(0))`.
+`unwrap_or(0)` is correct rather than a fallback: no caller PID means the spawn
+came from the kernel, and PID 0 has implicit authority and needs no grant. The
+`#[allow(dead_code)]` on `SpawnOptions::parent` is removed — if it ever goes
+unused again that should be a warning, not a comment.
+
+**Regression test.** `test_spawn_records_parent` in `kernel/src/proc/spawn.rs`
+(registered in `spawn::self_test`) spawns with an explicit parent, asserts
+`pcb::parent(child) == Some(parent)`, then asserts `try_reap(parent, child)` is
+**not** `PermissionDenied`. It deliberately accepts "still running" as a pass:
+the bug produced a specific error code, and testing for its absence is what
+distinguishes the fix from emulator timing.
+
+### B-FAST-CPU-INDEX-FELL-BACK-TO-AN-APIC-MMIO-READ-ON-EVERY-ALLOC. A self-inflicted allocator regression, and the benchmark that should have caught it never runs — 2026-08-14 — FIXED 2026-08-14
+
+**Where:** `kernel/src/smp.rs` — `fast_cpu_index` / `current_cpu_index`.
+
+**Self-reported.** Nothing failed; I found this by re-reading my own
+`TD-FRAME-OWNER-1GIB` change against CLAUDE.md's performance-critical table.
+It is logged rather than quietly patched precisely because it was invisible.
+
+**What I did wrong.** `TD-FRAME-OWNER-1GIB` wired ownership tagging into the
+allocator, so `alloc_frame` and `free_frame` each gained a call to
+`frame_owner::current_owner()` → `smp::fast_cpu_index()`. On the boot-test CPU
+model (`qemu64`) **neither RDPID nor rdtscp is advertised**, so every one of
+those calls fell through to tier 3 — an uncached APIC MMIO read, hundreds of
+cycles under emulation. `alloc_frame` is in the performance-critical table
+(Linux buddy 100-500 ns, our target < 1 µs) and the recorded QEMU baseline for
+`page_alloc_free` is 198 ns / 736 cycles, so this was a large relative cost on
+a path CLAUDE.md explicitly says to benchmark after every change. I merged it
+without benchmarking.
+
+**The same fallback was also in ISR context.** `current_cpu_index` carried its
+own hand-copied duplicate of the tier ladder, and the copy had drifted: it
+never grew the RDPID tier, so on RDPID hardware it paid for a TSC read it threw
+away, and on `qemu64` it took the APIC MMIO round-trip **on every timer tick**.
+Its doc comment names the timer ISR as a hot path, which is what makes the
+drift notable — the duplication defeated the optimisation exactly where the
+comment claimed it mattered.
+
+**Fix — tier 0, plus deleting the duplicate.** `fast_cpu_index` gained a
+tier-0 fast path guarded by a new `MULTI_CPU_ACTIVE` flag: while no AP has ever
+been released from the trampoline, exactly one CPU is executing kernel code, so
+the answer is provably `BSP_CPU_INDEX` and no hardware read is needed at all.
+`current_cpu_index` now delegates to `fast_cpu_index` after its
+`SMP_INITIALIZED` gate, so there is one ladder instead of two and it cannot
+drift again.
+
+**The flag is deliberately not `NUM_CPUS_ONLINE > 1`,** which is the obvious
+implementation and is unsound. An AP runs `gdt::init_for_ap`, `apic::init_ap`
+and `spectre::init_ap` — all of which allocate — *before* it bumps that counter
+(`smp.rs`, `ap_entry`). A counter-based test would therefore tell a live AP it
+was the BSP and hand it the BSP's per-CPU allocator magazine: silent cross-CPU
+corruption. Instead the **BSP** sets `MULTI_CPU_ACTIVE` before it sends the
+first INIT-SIPI, so it is already true before an AP retires its first
+instruction. It is monotonic and never cleared, because a stale `true` merely
+costs the normal hardware read whereas a stale `false` is unsound.
+
+**The real finding is why no one noticed.** The project has a benchmark suite,
+`bench/baselines.toml` targets, and a pass/fail scorecard — and
+`bench::run_all()` is spawned as a *deferred low-priority task* that prints
+`BENCH_OK` only after `BOOT_OK`. The routine boot test waits for `BOOT_OK` and
+kills QEMU immediately, so the benchmarks never finish. In the 26094-line KASAN
+log, `[bench] === Kernel micro-benchmarks ===` is the **second-to-last line** —
+the task started and was killed mid-suite. In the ordinary boot log the header
+does not appear at all. So there was no gate to catch this, and there is none
+for the next one either. `boot-test.sh --bench` (which waits for `BENCH_OK` and
+surfaces `ABOVE TARGET` verdicts) exists but is not part of the routine gate.
+Tracked separately as `TD-BENCHMARKS-ARE-NEVER-ACTUALLY-RUN-BY-THE-BOOT-GATE`.
+
+**Regression guard added.** `bench::run_all` now measures `fast_cpu_index`
+directly, with a `fast_cpu_index` entry in `bench/baselines.toml`. The target
+(100 ns) is deliberately loose: it exists to detect "we fell back to the APIC
+MMIO path", not to police single cycles. It is benchmarked not for its own sake
+but because it is a *multiplier* — called twice per frame alloc/free and twice
+per heap alloc/free — so a regression in it surfaces as a diffuse slowdown
+across the whole allocator rather than as an obvious local fault, which is
+exactly how this one hid.
+
+---
 
 ### B-FTS-INSTANCE-POOL-IS-SHARED-ACROSS-THREADS. Two concurrent `fts_open` calls could be handed the *same* stream — 2026-08-13 — FIXED 2026-08-13
 
@@ -44412,6 +45344,71 @@ completion produce `PathBuf` candidates, and add an escape input (e.g. the
 no key can still be entered. Not blocked on anything; deferred because the
 editor's cursor arithmetic is `char`-indexed throughout and converting it is a
 self-contained but non-trivial rewrite.
+
+**Scoping pass 2026-08-14 — two claims above are wrong, and the real cost is
+in a different place than this entry says.** Read the code before planning
+from the paragraph above.
+
+**Correction 1: the cursor arithmetic is not `char`-indexed. It is already
+byte-indexed throughout.** `cursor` is derived from and compared against
+`buf.len()` (a *byte* length) at every site — `kshell.rs:3333, 3370, 3374,
+3376, 3395, 3410, 3509, 3531, 3554, 3573, 3582, 3586` — and the redraw path
+already slices bytes (`buf.as_bytes().get(cursor..)`, `redraw_from_cursor`,
+`kshell.rs:2955-2969`) and already emits bytes (`console::putchar(b)`).
+`replace_line` (`kshell.rs:2921-2949`) is likewise pure byte arithmetic. So
+the editor is not a UTF-8-aware editor that needs converting to bytes; it is a
+byte editor whose buffer happens to be typed `String`. Converting the four
+editor functions is close to a mechanical type change (`String`→`Vec<u8>`,
+`&str`→`&[u8]`), *not* the "non-trivial rewrite" this entry warns about.
+
+Corollary: because the arithmetic is byte-based while `String` is char-based,
+the current code is already subtly wrong for multibyte input — `String::remove`
+/`String::insert` at a non-char-boundary byte index panic. It never fires only
+because of the input guard described next.
+
+**Correction 2: the escape-input suggestion cites the wrong shell.** The
+`$'\xff'` ANSI-C quoting that "the shell already parses in word expansion" is
+**Oils/osh** — `userspace/oils/`, Lane B, userspace. This entry is about
+**kshell**, the in-kernel shell, which has no ANSI-C quoting at all (no
+`$'...'` parser exists in `kernel/src/kshell.rs`). So the escape input has to
+be *built*, not reused, and whoever picks this up should not plan around
+borrowing it.
+
+**The actual gate on typing a high byte** is a single match guard:
+`kshell.rs:3580`, `ch if ch >= 0x20 && ch < 0x7F`. Bytes ≥ 0x80 fall through
+to the `_ => {}` arm and are silently discarded. **Landmine for whoever widens
+it:** the insert on the next line is `buf.insert(cursor, ch as char)`
+(`kshell.rs:3583`). `ch` is a `u8`; `ch as char` maps 0x80..=0xFF to
+U+0080..=U+00FF, which `String::insert` then encodes as **two** UTF-8 bytes.
+Widening the guard without changing the buffer type would therefore insert two
+bytes for one keystroke and desynchronise the byte-indexed cursor from the
+buffer — a corruption bug, and a worse state than today's honest refusal. The
+type change must land first, or with it.
+
+**Where the cost actually is: the parser, not the editor.** The editor is four
+functions (`read_line` `3191-3601`, `reverse_search_mode` `3061-3190`,
+`replace_line`, `redraw_from_cursor`) with exactly **one** real caller
+(`kshell.rs:2892`; the only other is a unit test at `64187`). The expensive
+part is everything downstream of that caller, which is uniformly `&str`:
+`execute(line: &str)` (`3872`), `execute_single` (`4149`), and the sibling
+statement executors `execute_while_loop`, `execute_select`,
+`execute_until_loop`, `execute_for_loop`, `execute_cfor_loop`, `execute_case`,
+`execute_function`, `execute_input_redirect`, `execute_redirect`,
+`execute_heredoc`, `execute_pipe_chain` — plus `resolve_path(path: &str) ->
+String` (`208`), which is the ~270-call-site figure this entry quotes. History
+(`entries: Vec<String>`, `2629`) has to move to `Vec<Vec<u8>>` as well, or
+recalling a byte-bearing command re-corrupts it.
+
+**Consequence for sequencing.** A partial conversion is worse than none: if the
+editor becomes byte-clean but `execute()` still takes `&str`, the lossy step
+just moves from the keyboard to the parser entry, where it is *less* visible.
+So this should land as one coherent change over the editor **and** the
+statement executors, not as an "editor first, parser later" split. That is the
+real reason it is a big task — not the cursor arithmetic.
+
+**Status:** unblocked and in-lane; not started, because the conversion wants a
+free build machine to iterate against (a boot test was occupying QEMU during
+this scoping pass).
 
 ### TD-OILS-AN-UPPERCASE-G-WAS-READ-BY-THE-HALF-OF-THE-COMMAND-THAT-ONLY-EVER-READS-THE-LOWERCASE-ONE. `declare -Ga g=(1 2)` bound the array globally where bash keeps it in the frame — 2026-08-12 — FIXED 2026-08-12
 
@@ -48313,6 +49310,54 @@ of the frag_history hang AND zero recurrence of Active Bugs #1
 ---
 
 ## Technical Debt
+
+### TD-BOOT-RUNS-THE-ENTIRE-SELF-TEST-SUITE-AND-IS-OUTGROWING-ITS-TIMEOUT — LOGGED 2026-08-14
+
+**Where:** `kernel/src/main.rs` boot path (every subsystem's `self_test()` is
+called inline before `BOOT_OK`), and the `TIMEOUT` default in
+`scripts/boot-test.sh`.
+
+**The number.** Measured 2026-08-14 under TCG on `qemu64`: `BOOT_OK` at
+**~456 s**. The `boot-test.sh` comment describing the same figure said
+**~305 s** and the default timeout was **480 s** — a 24 s margin, i.e. ~5%.
+The in-kernel liveness detector (`sched::liveness_boot_deadline_check`, armed
+at `harness_timeout − 45 s − now`) was consequently firing
+`BOOT DEADLINE EXCEEDED` with a full task-table dump and a 17-frame backtrace
+on **every clean boot**, exactly the false positive its own doc comment says
+it was retuned to avoid.
+
+**Mitigated, not fixed.** The default timeout is now 900 s (~2× observed) and
+the stale comment carries the measured number and an instruction to re-measure.
+That buys headroom; it does not change the trajectory.
+
+**Why it is debt.** Boot time is a *linear function of the total number of
+self-tests in the tree*, and that number only goes up — the Path-Z ring-3
+toolchain tests alone each spawn a real glibc/tcc/make/dash process under
+`ld.so`. Every lane's new subsystem test lands on the critical path of every
+other lane's boot test. The failure mode when the margin runs out is
+expensive to diagnose: a healthy kernel is killed mid-boot and reported as a
+hang, and the first hypothesis is never "the clock".
+
+**What the proper fix looks like.** Stop running the full suite on every boot.
+Options, roughly in order of preference:
+
+1. **Tiered suites.** A `smoke` tier on the critical path (boot, mm, sched,
+   syscall dispatch — the things whose failure makes every later test
+   meaningless) and a `full` tier behind a cmdline flag, with the gate running
+   `full` and interactive/iteration runs running `smoke`. Needs a registry of
+   tests with tier tags rather than the current hand-written call list.
+2. **Run the suite as a deferred task after `BOOT_OK`,** the way `bench::run_all`
+   already does, with its own `SELFTEST_OK` marker. Boot latency stops growing;
+   the gate waits for the later marker. Cheapest to implement, but it decouples
+   "booted" from "tested", so a gate that only checks `BOOT_OK` would silently
+   stop testing — the marker change has to land in the same commit.
+3. **Only run the tests for subsystems whose sources changed.** Correct in
+   principle, needs build-time plumbing we do not have, and cross-subsystem
+   regressions are exactly the kind this suite exists to catch. Not recommended.
+
+**Trigger.** Do this before the next time a boot test is diagnosed as a hang
+and turns out to be a timeout — or when `BOOT_OK` passes ~600 s, whichever
+comes first.
 
 ### TD-POSIX-SLOT-POOLS-ASSUME-A-SINGLE-THREADED-PROCESS. Every fixed-size table in `posix/` claims slots with an unsynchronised check-then-set — LOGGED 2026-08-13 — FIXED 2026-08-13
 
@@ -60477,3 +61522,53 @@ rows' values follow.
 **Impact.** Wrong value and wrong diagnostic for a deprecated spelling of
 arithmetic expansion, in malformed input, reachable only through `@P`/`PS4`/
 here-doc text.
+---
+
+### [A] B-SMP-FAST-CPU-INDEX-PANICS-BEFORE-APIC-INIT. `smp::fast_cpu_index()` reads the APIC before it is mapped — `debug_assert` panic in debug, wild read in release — FIXED 2026-08-14
+
+**Where:** `kernel/src/smp.rs` — the tier-3 fallback in `fast_cpu_index()`;
+`kernel/src/apic.rs:~214` — `apic_read()`'s `debug_assert!(base != 0, "APIC not
+initialized")`.
+
+**What.** `fast_cpu_index()` has three tiers: RDPID, then `rdtscp`, then an APIC
+MMIO read. On a CPU where neither RDPID nor `rdtscp` is advertised — which is
+exactly the boot-test configuration, `qemu64,+smep,+smap,+umip` under TCG —
+every call lands in tier 3 and does `crate::apic::read_id()`. Before
+`apic::init` has run, `APIC_BASE_VIRT` is still 0, so:
+
+- **debug builds:** `debug_assert!` fires → `KERNEL PANIC: APIC not initialized`.
+- **release builds:** *worse* — the assert is compiled out and `apic_read`
+  dereferences `(0 + offset) as *const u32`, a wild read of low memory. Silent
+  garbage, or a fault, depending on what is mapped there.
+
+**How it surfaced.** Wiring `frame_owner` ownership tagging into the frame
+allocator (TD-FRAME-OWNER-1GIB) made `current_owner()` — and therefore
+`fast_cpu_index()` — run on *every* frame allocation, including the allocator's
+own boot-time self-test. That self-test runs long before `apic::init`, so the
+kernel panicked at `[mm] Running frame allocator self-test...`:
+
+```
+!!! KERNEL PANIC !!!
+panicked at kernel\src\apic.rs:214:5:
+APIC not initialized
+  Task: 0 (""), priority 0, cpu 0
+```
+
+**Why it was latent.** The pre-existing tier-3 callers were all gated behind
+flags that only go true well after APIC init — the frame allocator's own
+per-CPU cache checks `PCPU_ENABLED` first, for instance. Nothing called
+`fast_cpu_index()` early, so the landmine was never stepped on. It was a real
+bug regardless: the function's contract claims tier 3 "always works", and any
+future early-boot caller would have hit it, in release builds silently.
+
+**Fix.** Added `apic::is_ready()` (`APIC_BASE_VIRT != 0`) and made tier 3 check
+it, returning CPU 0 when the APIC is not yet mapped. That is not a fudge: before
+`apic::init` the system is strictly uniprocessor (BSP only), so 0 is the
+*correct* index, not a fallback guess. Cost is one relaxed atomic load on the
+already-slowest tier; tiers 1 and 2 are untouched, so real hardware pays
+nothing.
+
+**Lesson.** A "this can't happen yet" precondition that is enforced only by the
+accident of who happens to call the function is not enforced at all. When the
+cheap tiers of a tiered fast path are unavailable, the "always works" fallback
+is the one that runs — so it is the one that has to actually always work.

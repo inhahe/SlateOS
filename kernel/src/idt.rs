@@ -1152,12 +1152,32 @@ fn kill_userspace_task(exception_name: &str, frame: &InterruptStackFrame) -> ! {
     kill_userspace_task_with_info(exception_name, frame, None);
 }
 
-/// Kill the current task with crash information recorded in the PCB.
+/// Terminate the faulting **process** because one of its threads took an
+/// unrecoverable ring-3 exception that nothing handled.
 ///
 /// The crash info (exception code, faulting address, etc.) is stored
 /// in the process's PCB so the parent can retrieve it via
 /// `SYS_PROCESS_CRASH_INFO`.  The exit code is set to a negative
 /// value derived from the exception code (convention: crash = negative).
+///
+/// # Why the whole process, not just this thread
+///
+/// This is the *default action* point: the Linux-ABI signal path and the
+/// native SEH trampoline have both already declined to handle the fault, so
+/// there is no handler anywhere and the process's state is undefined — the
+/// thread died mid-way through whatever invariant it was maintaining, still
+/// holding whatever locks it held.  Both models we implement agree that this
+/// ends the process: an unhandled SEH exception terminates the process on
+/// Windows, and the default disposition of SIGSEGV/SIGILL/SIGFPE/SIGBUS
+/// terminates the process on Linux.
+///
+/// Killing only the faulting thread — which is what this did before — let the
+/// survivors run on and produce a **plausible-looking wrong answer**: a
+/// `pthread_join` on the killed thread returned success with a NULL result, so
+/// a worker's contribution silently vanished from the total and the program
+/// exited 0.  See `B-PTHREAD-CHILD-JUMPS-TO-GARBAGE` in `known-issues.md`,
+/// where exactly that turned a hard thread-startup bug into a quiet
+/// off-by-one-worker in the answer.
 ///
 /// This function never returns.
 fn kill_userspace_task_with_info(
@@ -1174,20 +1194,37 @@ fn kill_userspace_task_with_info(
         "  CS={:#x} RFLAGS={:#x} RSP={:#x} SS={:#x}",
         frame.cs, frame.rflags, frame.rsp, frame.ss
     );
-    // Record crash info in the PCB before killing the thread.
-    // This allows the parent process (service manager) to distinguish
-    // crashes from normal exits and get diagnostic details.
-    if let Some(info) = crash {
-        if let Some(pid) = crate::proc::thread::owner_process(task_id) {
-            serial_println!(
-                "[exception] Recording crash: pid={} exception={} rip={:#x} aux={:#x}",
-                pid, info.exception_code, info.faulting_rip, info.aux
-            );
-            let _ = crate::proc::pcb::set_crash_info(pid, info);
-        }
+
+    let owner = crate::proc::thread::owner_process(task_id);
+
+    // Record crash info in the PCB before killing anything.  This both gives
+    // the parent (service manager) the diagnostic details via
+    // `SYS_PROCESS_CRASH_INFO` and sets the process's exit code to the
+    // negative crash encoding, so the death is distinguishable from `exit(0)`.
+    if let (Some(pid), Some(info)) = (owner, crash) {
+        serial_println!(
+            "[exception] Recording crash: pid={} exception={} rip={:#x} aux={:#x}",
+            pid, info.exception_code, info.faulting_rip, info.aux
+        );
+        let _ = crate::proc::pcb::set_crash_info(pid, info);
     }
 
-    crate::proc::thread::on_thread_exit(task_id);
+    if let Some(pid) = owner {
+        // Take down every sibling thread as well.  `kill_process_threads`
+        // refuses the *current* task in the scheduler (that is `task_exit`'s
+        // job, below) but does drop its thread→process mapping, so this
+        // subsumes the `on_thread_exit(task_id)` this path used to do.
+        let killed = crate::proc::thread::kill_process_threads(pid);
+        serial_println!(
+            "[exception] Terminating process {} — unhandled ring-3 fault ({} thread(s))",
+            pid, killed
+        );
+    } else {
+        // A ring-3 task with no owning process (nothing but self-tests spawn
+        // these): there is no process to take down, so just end the task.
+        crate::proc::thread::on_thread_exit(task_id);
+    }
+
     sched::task_exit();
     cpu::halt_loop();
 }
@@ -2520,6 +2557,40 @@ extern "C" fn handle_page_fault(frame: &InterruptStackFrame, error: u64) {
     // recovers the culprit.
     crate::backtrace::dump_stack_scan(frame.rsp, 64);
 
+    // Raw bytes at RIP — decisive when RIP has landed *outside* `.text`.
+    //
+    // A control-flow hijack (B-PTHREAD-TEARDOWN-PF) leaves RIP pointing into a
+    // data region, and the whole question is then "what did those bytes decode
+    // to, and does that explain CR2 and the error code?".  Without the bytes we
+    // can only guess: the recorded 2026-07-15 capture (RIP =
+    // `sched::CURRENT_TASK_IDS+0x2`, CR2 = 0x97, error = 0x0) was read as "the
+    // cell holds a task id, so the bytes are `7B 00 00 00 …`" — but that
+    // decodes to `add [rax], al`, a read-modify-write, which would report
+    // error = 0x2 (write).  The observed error was 0x0 (read), so that story is
+    // incomplete.  Dumping the actual bytes settles it in one repro instead of
+    // another round of inference.
+    //
+    // Emitted *after* the stack scan on purpose: the scan names the hijacked
+    // caller and must never be displaced by a nested fault here.
+    {
+        // `translate` also rejects non-canonical addresses, so a wild RIP is
+        // handled here rather than faulting the read below.
+        let rip_page_ok =
+            page_table::translate(page_table::active_pml4_phys(), VirtAddr::new(frame.rip))
+                .is_some();
+        if rip_page_ok {
+            // SAFETY: the page containing `frame.rip` was just confirmed mapped
+            // in the active address space, so reading bytes from it cannot
+            // fault.  We read at most 16 bytes and stop at a page boundary, so
+            // we never touch the (possibly unmapped) following page.
+            let avail = (0x1000 - (frame.rip & 0xFFF)).min(16) as usize;
+            let bytes = unsafe { core::slice::from_raw_parts(frame.rip as *const u8, avail) };
+            serial_println!("  bytes @RIP ({avail}): {bytes:02x?}");
+        } else {
+            serial_println!("  <bytes @RIP unavailable: {:#018x} not mapped>", frame.rip);
+        }
+    }
+
     // Print task context for easier debugging (uses try_lock).
     let sched_info = sched::panic_diagnostics();
     let name_slice = sched_info.name.get(..sched_info.name_len).unwrap_or(&[]);
@@ -2638,10 +2709,15 @@ fn try_grow_user_stack(cr2: u64, error: u64, pid: u64) -> bool {
         core::arch::asm!("mov {}, cr3", out(reg) pml4_phys, options(nomem, nostack, preserves_flags));
     }
 
-    // Allocate a zeroed physical frame for the new stack page.
-    let phys_frame = match frame::alloc_frame_zeroed() {
-        Ok(f) => f,
-        Err(_) => return false, // OOM or HHDM unavailable — can't grow stack.
+    // Allocate a zeroed physical frame for the new stack page.  A grown user
+    // stack page is anonymous user memory for census purposes.
+    let phys_frame = {
+        let _own =
+            crate::mm::frame_owner::OwnerScope::new(crate::mm::frame_owner::Owner::UserAnon);
+        match frame::alloc_frame_zeroed() {
+            Ok(f) => f,
+            Err(_) => return false, // OOM or HHDM unavailable — can't grow stack.
+        }
     };
 
     // Map the frame with user read/write/no-execute permissions.

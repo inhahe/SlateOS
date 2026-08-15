@@ -53,6 +53,50 @@ do not edit anything shared; ask the operator, then add the mapping to
 `SUFFIX_TO_LANE` in `scripts/which-lane.py`. Writing outside your lane is
 the one failure mode that silently destroys another agent's work.
 
+### Step 0.5 — which *directory* am I working in?
+
+**A branch does not isolate a working directory.** This is the mistake the
+first three-lane attempt made, and it cost real work: all three agents were
+started in `D:\visual studio projects\os`, each told to "work on your own
+branch". But a repository has *one* checkout per working tree, so when lane B
+ran `git checkout lane-b`, it moved every agent's `HEAD` and carried lane C's
+uncommitted edits onto lane B's branch. Branches provided zero isolation
+while creating a convincing illusion of it — two lanes' half-finished edits
+to `kernel/src/proc/thread.rs` ended up interleaved in one file, and one
+lane's work was committed under another lane's commit message.
+
+The fix is `git worktree`: one checkout per lane, each permanently on its own
+branch, each with its own `target/`.
+
+| Lane | Work in this directory | Branch |
+|---|---|---|
+| **A** | `D:\visual studio projects\os-lane-a` | `lane-a` |
+| **B** | `D:\visual studio projects\os-lane-b` | `lane-b` |
+| **C** | `D:\visual studio projects\os-lane-c` | `lane-c` |
+| — | `D:\visual studio projects\os` | `main` — **integration tree only** |
+
+Rules that follow from this:
+
+- **Never `git checkout` another branch in your worktree.** Your worktree
+  *is* your branch. Switching branches is what caused the collision above.
+  If you need something from another lane, `git merge origin/main` or
+  cherry-pick — do not switch.
+- **Never edit files in `D:\visual studio projects\os`.** It exists to merge
+  the three lanes and run integration boot tests. Treat it as read-only
+  unless you are performing a merge.
+- **Never run `git worktree remove` on a directory that is not yours,** and
+  never `git branch -D` another lane's branch. Another agent may be mid-edit
+  in it with uncommitted work, which those commands delete.
+- If your worktree does not exist yet, create it from the integration tree
+  (`git -C "D:/visual studio projects/os" worktree add "D:/visual studio
+  projects/os-lane-<x>" lane-<x>`) and move there before doing anything else.
+  If the branch is currently checked out somewhere else, git will refuse —
+  that means another tree still holds it; resolve that first rather than
+  forcing it.
+- The first build in a fresh worktree is a full one (no shared `target/`).
+  That is the intended cost: a shared `target/` between lanes would
+  reintroduce exactly the interference the worktrees exist to remove.
+
 ### The three lanes
 
 | Lane | Name | You are this lane if `CLAUDE_CONFIG_DIR` is… | Owns (writes freely) | Never writes |
@@ -153,7 +197,9 @@ version bump there rebuilds everyone's world.
 
 ### 5. Git
 
-- Each lane works on its own branch: `lane-a`, `lane-b`, `lane-c`.
+- Each lane works on its own branch **in its own worktree** — see Step 0.5.
+  Your worktree is permanently on your branch; never `git checkout` another
+  branch inside it.
 - Rebase on `main`, never merge: `git pull --rebase origin main`.
 - Merge to `main` only when your lane's tree builds **and** a boot test
   passes. Because the boot test builds *everything*, a broken lane blocks
@@ -167,26 +213,115 @@ version bump there rebuilds everyone's world.
   means someone else landed first: `git pull --rebase`, re-test, push
   again.
 
-### 6. The build and boot test are shared, serialized resources
+### 6. The boot test is a shared, serialized resource — automatically
 
-Since Step 0.5 put each lane in its own worktree, `target/` and `build/` are
-**not** shared any more — each checkout has its own, so two lanes can build
-and can each write their own `build/serial-test.txt` without collision. What
-is still shared is the machine: a full workspace build and a QEMU boot are
-both heavy, and two at once make each other slow and flaky (and QEMU may
-contend for the same host resources outright).
+Each lane works in its **own git worktree**, and `D:/visual studio
+projects/os` is the integration/merge tree only — nobody develops there:
 
-**Protocol:** take the lock file **`D:\visual studio projects\os\build\.boot-lock`**
-— in the *integration* tree, which is the one path all three worktrees see —
-before a boot test. Write your lane letter and a timestamp into it, delete it
-when done. If it exists and is under 20 minutes old, another lane is booting:
-do something else and retry. A stale lock (>20 min) may be broken. A lock
-inside your own worktree locks nothing, which is what this said before the
-worktree split and why it never actually serialized anything.
+| Lane | Worktree | Branch |
+|---|---|---|
+| A | `D:/visual studio projects/os-lane-a` | `lane-a` |
+| B | `D:/visual studio projects/os-lane-b` | `lane-b` |
+| C | `D:/visual studio projects/os-lane-c` | `lane-c` |
+| — | `D:/visual studio projects/os` | `main` — merges only |
 
-For everyday work prefer `cargo build -p <your crate>` and
-`cargo test -p <your crate>`, which contend far less than a full workspace
-build.
+Run `git worktree list` to confirm, and always work in the one that matches
+`scripts/which-lane.py`. Committing from the wrong worktree lands your
+commits on another lane's branch — recoverable only by cherry-picking.
+
+Because of the worktree split, `target/` and `build/serial-test.txt` are
+**per-lane and no longer shared**, so builds no longer contend for a cargo
+lock and boots can no longer clobber each other's serial log. (Earlier
+revisions of this section said otherwise; that predates the split.)
+
+What *is* still shared is the machine. We boot under **TCG** — pure
+emulation, entirely CPU-bound — so two concurrent QEMUs roughly double each
+other's wall-clock boot time and can push a healthy boot past the harness
+timeout, manufacturing phantom "hang" failures. A ~480 s/iteration soak
+starts timing out when another lane boots alongside it.
+
+**This is now enforced for you.** `scripts/boot-test.sh` takes a lock
+directory at `$(git rev-parse --git-common-dir)/slateos-boot-lock` — the one
+`.git` every worktree shares — before launching QEMU, and releases it in the
+same trap that reaps QEMU. You do not need to do anything by hand.
+
+- Acquisition is `mkdir` (atomic on NTFS and POSIX).
+- A lock older than 20 min is assumed dead and broken automatically.
+- `BOOT_LOCK=0` disables locking; `BOOT_LOCK_WAIT=<sec>` caps the wait
+  (default 3600). On expiry the boot proceeds **unlocked** rather than
+  failing — a slow boot beats a spurious error.
+
+For everyday work still prefer `cargo build -p <your crate>` and
+`cargo test -p <your crate>`: they compete for CPU with the other lanes even
+though they no longer share a lock.
+
+The lock covers QEMU, not `cargo`, so the machine is still shared in every
+other respect:
+
+- Before concluding that a boot test failed, check whether another lane was
+  *building* at the same time — a full workspace build alongside a TCG boot
+  starves the boot of CPU and can miss the serial marker. Re-run once on an
+  idle machine before filing a bug.
+- If `scripts/boot-test.sh` binds a fixed host port (gdb stub, monitor,
+  network forward), pass a lane-specific port rather than editing the
+  default — the boot lock will normally prevent a collision, but not when
+  `BOOT_LOCK=0` or after a wait expiry lets a boot proceed unlocked.
+- Never kill a QEMU or `cargo` process you did not start — it is probably
+  another lane's boot test. Kill by PID, never by image name.
+
+**Provisioning a fresh lane worktree — do this before trusting a boot test.**
+A new worktree only contains *tracked* files, and the boot test's most
+valuable fixtures are git-ignored. The dangerous one is `rootfs.ext4` (the
+Path-Z glibc image, ~256 MiB): when it is absent, `boot-test.sh` simply omits
+the second virtio-blk disk and **the real-glibc self-tests silently no-op** —
+including the dynamic-execution and pthread/`pthread_join` coverage. The boot
+still prints `BOOT_OK` and the harness still reports PASSED, so a fresh
+worktree will happily green-light a change to the very code it never
+exercised.
+
+Copy it in from a provisioned worktree (or rebuild it with
+`wsl -d Ubuntu -- bash scripts/create-ext4-rootfs.sh`):
+
+```bash
+cp "D:/visual studio projects/os/rootfs.ext4" "D:/visual studio projects/os-lane-a/"
+```
+
+Give each lane its **own copy** — the kernel mounts it read-write, so lanes
+must not share one file. `build/swap.img` and `build/esp/` are recreated
+automatically and need no action.
+
+The kernel also `include_bytes!`s six **prebuilt service ELFs**, which live in
+those crates' git-ignored `target/` dirs. Without them the kernel does not
+compile at all (`error: couldn't read …/services/init/target/…/init`) — this
+half of the trap at least fails loudly. Copy them across too:
+
+```bash
+cd "D:/visual studio projects/os"
+for s in init hello ticker httpget udpget netstack; do
+    d="services/$s/target/x86_64-unknown-none/release"
+    mkdir -p "D:/visual studio projects/os-lane-a/$d"
+    cp "$d/$s" "D:/visual studio projects/os-lane-a/$d/$s"
+done
+```
+
+Copying build outputs across worktrees is fine — they are artifacts, not
+source, so this is not a cross-lane edit even though `services/**` is lane
+B's tree. Rebuild them from source instead if you need them current.
+
+Finally, `limine/` (the bootloader, `/limine/` in `.gitignore`, ~5.4 MiB) is
+an external download that no worktree gets from git. Without it staging dies
+with `cp: cannot stat '…/limine/BOOTX64.EFI'`:
+
+```bash
+cp -r "D:/visual studio projects/os/limine" "D:/visual studio projects/os-lane-a/"
+```
+
+OVMF firmware is found in the system QEMU install, not the worktree, so it
+needs nothing. In short, a fresh lane worktree needs three things copied in:
+**`rootfs.ext4`, the six service ELFs, and `limine/`.**
+
+To confirm the glibc tests actually ran, grep the serial log for
+`REAL glibc pthread` rather than trusting the PASSED line alone.
 
 ### 7. When you are blocked, you are not blocked
 
@@ -229,14 +364,30 @@ Roadmap:
 
 Known-issues (open, kernel-owned):
 
-- `B-PTHREAD-CHILD-JUMPS-TO-GARBAGE` defect 1 — clone-time TLS/`%fs` trace in
-  `kernel/src/proc/thread_clone.rs`, then a ~20-boot soak. **(defect 2 fixed
-  2026-08-13)**
-- `B-PTHREAD-TEARDOWN-PF` — kernel `#PF` @ 0x97 during clone-thread teardown
+- ~~`B-PTHREAD-CHILD-JUMPS-TO-GARBAGE` defect 1~~ — **FIXED 2026-08-13**
+  (`975114f54`): `%fs`/`%gs` are now seeded before the child is admitted
+  (`spawn_suspended_with_tls()` → register → `admit()`), so a timer preemption
+  can no longer let the child run the glibc clone entry with an unseeded `%fs`.
+  Corroborated by a 20/20 clean soak. (defect 2 fixed 2026-08-13 `315a7e0ca`.)
+- `B-PTHREAD-TEARDOWN-PF` — kernel `#PF` @ 0x97 during clone-thread teardown.
+  **Blocked on a repro**: 20 boots produced zero occurrences (vs. the stale
+  1-in-5 historical rate), and the recorded mechanism does not fit the capture
+  (assumed a write, but error=0x0 is a read — RIP was likely mis-attributed to
+  the nearest preceding symbol). A bytes-at-RIP dump is now emitted on kernel
+  `#PF` (`5431facbd`) so the next occurrence settles it.
 - `B-FORKEXEC-BOOT-HANG` — intermittent hang at the glibc fork+exec self-test
 - `B-KASAN-INSTRUMENTED-BOOT-WEDGES-MID-PRINT-ON-A-PAGE-FAULT` — re-run with
   `--hard-lockup-watchdog`
-- `TD-FRAME-OWNER-1GIB` — `frame_owner` only tracks the first 1 GiB
+- ~~`TD-FRAME-OWNER-1GIB`~~ — **RESOLVED 2026-08-14**: the owner array is no
+  longer a fixed 65536-entry static (1 GiB at 16 KiB pages); it is carved from
+  the frame-allocator metadata region alongside `page_info`/`refcount`/`cgroup`
+  and sized to `total_frames`. It is also now actually *wired in* — six hook
+  sites in `frame.rs` tag on alloc and untag on free, with an ambient per-CPU
+  `OwnerScope` RAII guard supplying the attribution. Boot-verified: the carve
+  line reports `owner: 327680B` (327680 frames = 5120 MiB tracked) and all 9
+  self-tests pass, including a direct regression test at frame index 327679.
+  Fixing this surfaced `B-SMP-FAST-CPU-INDEX-PANICS-BEFORE-APIC-INIT` (also
+  fixed 2026-08-14).
 - `W-KERNEL-COW-WRITE` — kernel-mode write fault on a user COW page
 - `TD-KSHELL-LINE-EDITOR-IS-UTF8` — byte-input escape + `PathBuf` completion
   candidates (~270 `resolve_path` call sites in `kernel/src/kshell.rs`)

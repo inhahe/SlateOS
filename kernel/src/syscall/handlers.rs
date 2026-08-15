@@ -3276,7 +3276,12 @@ pub fn sys_process_spawn(args: &SyscallArgs) -> SyscallResult {
         core::str::from_utf8(&name_bytes).unwrap_or("unnamed")
     };
 
-    let options = SpawnOptions::new(name);
+    // Record the caller as the child's parent.  See `sys_process_spawn_ex`
+    // for why omitting this is not a cosmetic bookkeeping matter.
+    // `unwrap_or(0)` means "spawned by the kernel", which is the correct
+    // answer for a spawn that has no user process behind it; PID 0 has
+    // implicit authority and needs no capability grant.
+    let options = SpawnOptions::new(name).parent(caller_pid().unwrap_or(0));
 
     match spawn_process(&elf_data, &options) {
         Ok(result) => {
@@ -3394,7 +3399,27 @@ pub fn sys_process_spawn_ex(args: &SyscallArgs) -> SyscallResult {
         alloc::vec::Vec::new()
     };
 
+    // Record the caller as the child's parent.
+    //
+    // Both spawn syscalls used to leave this at its default of 0, which is
+    // the "spawned by the kernel" sentinel, and three things in
+    // `spawn_process` are gated on `options.parent != 0`:
+    //
+    //  * Step 5b — the parent is granted a `Process` capability over the
+    //    child (WAIT/SIGNAL/DELETE/...).  Skipped, so the parent held no
+    //    authority over what it had just spawned.
+    //  * Step 5c — the child inherits the parent's filesystem namespace.
+    //    Skipped, so a process confined to a non-root namespace could spawn
+    //    a child that landed in the *root* namespace: a sandbox escape.
+    //  * `pcb::try_reap` rejects any reap whose recorded parent does not
+    //    match the caller, so every `SYS_PROCESS_WAIT`/`_TRY_WAIT` on a
+    //    spawned child returned `PermissionDenied` and no userspace process
+    //    could ever reap its own children — leaking a zombie each time.
+    //
+    // `fork` was unaffected because it sets the parent on its own path,
+    // which is why the fork→exec→reap tests passed throughout.
     let options = SpawnOptions::new(name)
+        .parent(caller_pid().unwrap_or(0))
         .fd_map(&fd_pairs)
         .argv(&argv_slices)
         .envp(&envp_slices);
@@ -5843,13 +5868,22 @@ fn terminate_current_process_for_signal(
     let exit_code = 128i32.wrapping_add(sig as i32);
     let _ = pcb::set_exit_code(pid, exit_code);
 
-    // Tear down sibling threads first. `kill_task` refuses the *current*
+    // Tear down sibling threads first. `kill_thread` refuses the *current*
     // task (it must self-terminate via `task_exit`), so we only kill the
     // others here and finish with the current thread below.
+    //
+    // Go through `thread::kill_thread` rather than `sched::kill_task` so
+    // the death is *recorded as a kill*: a `join()` on one of these
+    // threads must report `Cancelled`, not a normal return. Dying to an
+    // unhandled fatal signal is an involuntary death exactly like an
+    // unhandled ring-3 fault.
     if let Some(threads) = pcb::get_threads(pid) {
         for t in threads {
-            if t != current_task {
-                sched::kill_task(t);
+            if t != current_task && !thread::kill_thread(t) {
+                // The scheduler refused it (already Dead, or unknown).
+                // Run the death hook anyway: this is process teardown, so
+                // a half-reaped thread must not be left holding the
+                // process's thread→process mapping or a parked joiner.
                 thread::on_thread_exit(t);
             }
         }
@@ -10299,17 +10333,45 @@ pub fn sys_thread_exit(args: &SyscallArgs) -> SyscallResult {
 /// `SYS_THREAD_JOIN` — wait for a thread to exit and get its exit value.
 ///
 /// `arg0`: task ID of the thread to wait for.
+/// `arg1`: user pointer to an `i64` receiving the exit value, or null.
 ///
-/// Returns: exit value of the target thread.
+/// Returns: 0 on success, negative error on failure.  The exit value is
+/// written through `arg1` rather than returned in the result register: a
+/// thread may exit with a legitimately negative value (`pthread_exit`
+/// with `PTHREAD_CANCELED` is `(void *)-1`), which a value-in-rax ABI
+/// could not distinguish from an error code.
+///
+/// [`KernelError::Cancelled`] means the target was *killed* rather than
+/// exiting on its own, so there is no value to report — the caller must
+/// not treat that as a normal return.
 pub fn sys_thread_join(args: &SyscallArgs) -> SyscallResult {
     use crate::proc::thread;
 
     let target_task = args.arg0;
+    let out_ptr = args.arg1;
 
-    match thread::join(target_task) {
-        Ok(exit_value) => SyscallResult::ok(exit_value),
-        Err(e) => SyscallResult::err(e),
+    let exit_value = match thread::join(target_task) {
+        Ok(v) => v,
+        Err(e) => return SyscallResult::err(e),
+    };
+
+    if out_ptr != 0 {
+        let bytes = exit_value.to_ne_bytes();
+        // SAFETY: `copy_to_user` validates that the destination range lies
+        // in this process's user address space and is writable; `bytes` is
+        // a live stack array of exactly `bytes.len()` bytes.
+        if let Err(e) =
+            unsafe { crate::mm::user::copy_to_user(bytes.as_ptr(), out_ptr, bytes.len()) }
+        {
+            // The thread really has been joined and its outcome consumed,
+            // so a retry would fail with `NoSuchProcess`.  Report the
+            // fault rather than pretending the join did not happen — a
+            // bad `retval` pointer is a caller bug, not a kernel one.
+            return SyscallResult::err(e);
+        }
     }
+
+    SyscallResult::ok(0)
 }
 
 /// `SYS_THREAD_SUSPEND` — pause a thread.

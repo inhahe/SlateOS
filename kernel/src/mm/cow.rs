@@ -162,7 +162,10 @@ pub fn resolve_cow_fault(pml4_phys: u64, fault_addr: u64) -> KernelResult<()> {
     let group_virt_base = hw_page_base - (page_index as u64 * HW_PAGE_SIZE as u64);
 
     // Allocate one new 16 KiB frame for all resolved siblings.
-    let new_frame = frame::alloc_frame()?;
+    let new_frame = {
+        let _own = super::frame_owner::OwnerScope::new(super::frame_owner::Owner::Cow);
+        frame::alloc_frame()?
+    };
     let new_phys = new_frame.addr();
 
     let mut pages_resolved = 0u32;

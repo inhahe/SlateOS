@@ -2083,6 +2083,7 @@ impl Default for ClientSettings {
 
 use guitk::render::{FontWeightHint, RenderCommand};
 use guitk::style::CornerRadii;
+use guitk::table::{Column, Fit, Table};
 use guitk::text;
 
 /// Catppuccin Mocha palette
@@ -2108,67 +2109,8 @@ mod colors {
     pub const MAUVE: Color = Color::from_hex(0xCBA6F7);
 }
 
-/// One column of a detail table: its heading and its width in pixels.
-///
-/// The tables below are defined as a `&[Column]` that *both* the header row and
-/// the body rows walk. Previously each width was written three times — in the
-/// header array, in the cell's `max_width`, and again as a literal in the row's
-/// `cx +=` (300.0 / `Some(300.0)` / `308.0`). Those agreed by hand, and nothing
-/// would have caught them drifting apart.
-#[derive(Clone, Copy)]
-struct Column {
-    label: &'static str,
-    width: f32,
-}
-
-/// Gap between one column's text and the next column's left edge.
-const COL_GAP: f32 = 8.0;
-
 /// Font size used for every detail-table header and cell.
 const TABLE_FONT: f32 = 11.0;
-
-/// How an over-long cell is shortened.
-#[derive(Clone, Copy, PartialEq)]
-enum Fit {
-    /// Keep the start, mark the cut at the end. The default.
-    Start,
-    /// Keep the *end*, mark the cut at the front — for paths and URLs, whose
-    /// identifying part is the tail. A file path elided the usual way reads
-    /// `Season 1/Episode 01 - Some Very Lo…`, which names every file in the
-    /// torrent identically; elided from the front it reads `…- Some Show.mkv`.
-    End,
-}
-
-/// Draw one table cell, fitted to `width` with the cut marked.
-///
-/// Every one of these cells holds data that came off the network — peer-supplied
-/// client names, file paths and tracker URLs out of a torrent's metainfo — so
-/// its length is not ours to assume. Clipping silently would be worse than
-/// clipping visibly: a peer that names itself so the truncation reads as a
-/// different client is a spoof the user has no way to notice.
-fn table_cell(
-    cmds: &mut Vec<RenderCommand>,
-    x: f32,
-    y: f32,
-    width: f32,
-    text: &str,
-    color: guitk::Color,
-    fit: Fit,
-) {
-    let fitted = match fit {
-        Fit::Start => text::elide(text, width, "…", TABLE_FONT, FontWeightHint::Regular),
-        Fit::End => text::elide_start(text, width, "…", TABLE_FONT, FontWeightHint::Regular),
-    };
-    cmds.push(RenderCommand::Text {
-        x,
-        y,
-        text: fitted,
-        font_size: TABLE_FONT,
-        color,
-        font_weight: FontWeightHint::Regular,
-        max_width: Some(width),
-    });
-}
 
 /// Columns of the Peers detail table.
 const PEER_COLUMNS: &[Column] = &[
@@ -2237,29 +2179,6 @@ const TRACKER_COLUMNS: &[Column] = &[
         width: 40.0,
     },
 ];
-
-/// Draw a table's header row, returning the x of each column's text.
-///
-/// The returned offsets are what the body rows position their cells at, so the
-/// header and the body cannot disagree about where a column starts.
-fn table_header(cmds: &mut Vec<RenderCommand>, columns: &[Column], x: f32, y: f32) -> Vec<f32> {
-    let mut offsets = Vec::with_capacity(columns.len());
-    let mut cx = x + COL_GAP;
-    for col in columns {
-        offsets.push(cx);
-        cmds.push(RenderCommand::Text {
-            x: cx,
-            y,
-            text: col.label.to_string(),
-            font_size: TABLE_FONT,
-            color: colors::OVERLAY0,
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(col.width),
-        });
-        cx += col.width + COL_GAP;
-    }
-    offsets
-}
 
 /// Active UI tab
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -3199,7 +3118,8 @@ impl TorrentApp {
             return;
         };
 
-        let cols = table_header(cmds, PEER_COLUMNS, x, y + 4.0);
+        let table = Table::new(PEER_COLUMNS, x);
+        table.header(cmds, y + 4.0, colors::OVERLAY0, TABLE_FONT);
 
         let mut py = y + 24.0;
         for peer in &torrent.peers {
@@ -3207,9 +3127,6 @@ impl TorrentApp {
                 break;
             }
 
-            // A peer's client name is whatever the peer says it is: it arrives
-            // in the handshake from an untrusted party, so it is fitted like
-            // any other wire-supplied string.
             let mut flags = String::new();
             if !peer.am_choking {
                 flags.push('u');
@@ -3233,16 +3150,22 @@ impl TorrentApp {
                     colors::SUBTEXT1,
                     Fit::Start,
                 ),
+                // A peer's client name is whatever the peer says it is: it
+                // arrives in the handshake from an untrusted party, so it is
+                // fitted like any other wire-supplied string.
                 (peer.client_name.clone(), colors::TEXT, Fit::Start),
                 (format_speed(peer.download_rate), colors::TEAL, Fit::Start),
                 (format_speed(peer.upload_rate), colors::PEACH, Fit::Start),
                 (format_size(peer.downloaded), colors::SUBTEXT0, Fit::Start),
                 (flags, colors::SUBTEXT0, Fit::Start),
             ];
-            for ((cell, color, fit), (col, cx)) in
-                cells.iter().zip(PEER_COLUMNS.iter().zip(cols.iter()))
-            {
-                table_cell(cmds, *cx, py, col.width, cell, *color, *fit);
+            debug_assert_eq!(
+                cells.len(),
+                table.len(),
+                "a cell with no column is positioned past the table and drawn empty",
+            );
+            for (i, (cell, color, fit)) in cells.iter().enumerate() {
+                table.cell(cmds, i, py, cell, *color, TABLE_FONT, *fit);
             }
 
             py += 24.0;
@@ -3285,7 +3208,8 @@ impl TorrentApp {
             .as_ref()
             .map_or(&[] as &[TorrentFile], |m| &m.files);
 
-        let cols = table_header(cmds, FILE_COLUMNS, x, y + 4.0);
+        let table = Table::new(FILE_COLUMNS, x);
+        table.header(cmds, y + 4.0, colors::OVERLAY0, TABLE_FONT);
 
         let mut fy = y + 24.0;
         for (i, file) in meta_files.iter().enumerate() {
@@ -3314,10 +3238,13 @@ impl TorrentApp {
                 (format_size(file.length), colors::SUBTEXT1, Fit::Start),
                 (priority.to_string(), prio_color, Fit::Start),
             ];
-            for ((cell, color, fit), (col, cx)) in
-                cells.iter().zip(FILE_COLUMNS.iter().zip(cols.iter()))
-            {
-                table_cell(cmds, *cx, fy, col.width, cell, *color, *fit);
+            debug_assert_eq!(
+                cells.len(),
+                table.len(),
+                "a cell with no column is positioned past the table and drawn empty",
+            );
+            for (i, (cell, color, fit)) in cells.iter().enumerate() {
+                table.cell(cmds, i, fy, cell, *color, TABLE_FONT, *fit);
             }
 
             fy += 22.0;
@@ -3343,7 +3270,8 @@ impl TorrentApp {
             return;
         };
 
-        let cols = table_header(cmds, TRACKER_COLUMNS, x, y + 4.0);
+        let table = Table::new(TRACKER_COLUMNS, x);
+        table.header(cmds, y + 4.0, colors::OVERLAY0, TABLE_FONT);
 
         let mut ty = y + 24.0;
         for tracker in &torrent.trackers {
@@ -3369,10 +3297,13 @@ impl TorrentApp {
                 (tracker.leechers.to_string(), colors::PEACH, Fit::Start),
                 (tracker.tier.to_string(), colors::SUBTEXT0, Fit::Start),
             ];
-            for ((cell, color, fit), (col, cx)) in
-                cells.iter().zip(TRACKER_COLUMNS.iter().zip(cols.iter()))
-            {
-                table_cell(cmds, *cx, ty, col.width, cell, *color, *fit);
+            debug_assert_eq!(
+                cells.len(),
+                table.len(),
+                "a cell with no column is positioned past the table and drawn empty",
+            );
+            for (i, (cell, color, fit)) in cells.iter().enumerate() {
+                table.cell(cmds, i, ty, cell, *color, TABLE_FONT, *fit);
             }
 
             ty += 22.0;
@@ -4163,17 +4094,11 @@ mod tests {
     // that when one is shortened the cut is *marked* and the identifying end
     // of a path or URL is the end that survives.
 
-    /// The `(left, right)` x-range of each column, derived the same way
-    /// `table_header` derives it, so the test cannot disagree with the
-    /// renderer about where a column is.
+    /// The `(left, right)` x-range of each column, asked of the same `Table`
+    /// the renderer used, so the test cannot disagree with it about where a
+    /// column is.
     fn column_edges(columns: &[Column], x: f32) -> Vec<(f32, f32)> {
-        let mut edges = Vec::with_capacity(columns.len());
-        let mut cx = x + COL_GAP;
-        for col in columns {
-            edges.push((cx, cx + col.width));
-            cx += col.width + COL_GAP;
-        }
-        edges
+        Table::new(columns, x).spans()
     }
 
     /// A torrent whose every wire-supplied string is far too long for its

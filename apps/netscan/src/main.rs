@@ -29,6 +29,7 @@ use guitk::event::{Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, Mo
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
+use guitk::table::{Column, Fit, Table};
 use guitk::text;
 
 use std::collections::VecDeque;
@@ -82,6 +83,80 @@ const CHIP_TEXT: f32 = 12.0;
 /// Font size of the topology legend's labels.
 const LEGEND_TEXT: f32 = 10.0;
 
+// ============================================================================
+// Host-table geometry
+// ============================================================================
+//
+// The header and the rows used to carry two independent copies of the layout:
+// the header a list of `(x, label)` pairs with no widths at all, the rows a
+// hand-written `x:` and a separately hand-written `max_width:` per cell. So
+// nothing tied a cell's bound to the space before the next column — the ports
+// and latency cells had no bound whatsoever, and the hostname's 160 px was a
+// bare clip with no marker, on the one string in the row that comes from the
+// network rather than from this program. Both now come from one table.
+
+/// Font size of a host-table heading.
+const HEADER_TEXT: f32 = 11.0;
+/// Font size of a host-table cell holding a name or a number.
+const BODY_TEXT: f32 = 12.0;
+/// Font size of a host-table cell holding a fixed-format value.
+const SMALL_TEXT: f32 = 11.0;
+/// Diameter of the up/down dot in the status column.
+const DOT_SIZE: f32 = 8.0;
+/// The dot's preferred inset from the status column's left edge.
+const DOT_INSET: f32 = 12.0;
+
+const COL_STATUS: usize = 0;
+const COL_IP: usize = 1;
+const COL_HOSTNAME: usize = 2;
+const COL_MAC: usize = 3;
+const COL_OS: usize = 4;
+const COL_PORTS: usize = 5;
+const COL_LATENCY: usize = 6;
+
+/// Heading and share of the table for each host column.
+///
+/// Fractions rather than pixels, so the columns follow the table's width
+/// instead of being right for exactly one window size. They sum to 1.0 — see
+/// `the_host_columns_fill_the_table` — so the row ends at the table's right
+/// edge rather than short of it or past it. Hostname takes the largest share
+/// because it is the only cell whose contents this program does not choose.
+const HOST_COLUMNS: [(&str, f32); 7] = [
+    ("Status", 0.07),
+    ("IP Address", 0.17),
+    ("Hostname", 0.26),
+    ("MAC Address", 0.17),
+    ("OS", 0.13),
+    ("Ports", 0.08),
+    ("Latency", 0.12),
+];
+
+/// The host table's columns at a given table width.
+fn host_columns(width: f32) -> [Column; 7] {
+    // `PADDING` is the gap, and a table spends one before its first column and
+    // one after its last, so eight of them come off before the shares apply.
+    let usable = (width - PADDING * (HOST_COLUMNS.len() as f32 + 1.0)).max(0.0);
+    let mut columns = [Column {
+        label: "",
+        width: 0.0,
+    }; 7];
+    for (column, (label, fraction)) in columns.iter_mut().zip(HOST_COLUMNS) {
+        *column = Column {
+            label,
+            width: usable * fraction,
+        };
+    }
+    columns
+}
+
+/// The host table anchored at the table's left edge.
+///
+/// [`Table`]'s origin sits before the leading gap, so passing `x` here puts
+/// the first heading at `x + PADDING` — which is where it was drawn before.
+fn host_table(columns: &[Column], x: f32) -> Table<'_> {
+    Table::with_gap(columns, x, PADDING)
+}
+
 /// Width of the tab drawn for `tab`.
 ///
 /// The click handler and the renderer each used to derive this from
@@ -114,7 +189,9 @@ pub struct Ipv4Addr {
 
 impl Ipv4Addr {
     pub const fn new(a: u8, b: u8, c: u8, d: u8) -> Self {
-        Self { octets: [a, b, c, d] }
+        Self {
+            octets: [a, b, c, d],
+        }
     }
 
     pub fn to_u32(self) -> u32 {
@@ -142,11 +219,17 @@ impl Ipv4Addr {
     pub fn is_private(&self) -> bool {
         let o = self.octets;
         // 10.0.0.0/8
-        if o[0] == 10 { return true; }
+        if o[0] == 10 {
+            return true;
+        }
         // 172.16.0.0/12
-        if o[0] == 172 && (o[1] >= 16 && o[1] <= 31) { return true; }
+        if o[0] == 172 && (o[1] >= 16 && o[1] <= 31) {
+            return true;
+        }
         // 192.168.0.0/16
-        if o[0] == 192 && o[1] == 168 { return true; }
+        if o[0] == 192 && o[1] == 168 {
+            return true;
+        }
         false
     }
 
@@ -158,7 +241,9 @@ impl Ipv4Addr {
     /// Parse an IPv4 address from a string like "192.168.1.1".
     pub fn parse(s: &str) -> Option<Self> {
         let parts: Vec<&str> = s.trim().split('.').collect();
-        if parts.len() != 4 { return None; }
+        if parts.len() != 4 {
+            return None;
+        }
         let mut octets = [0u8; 4];
         for (i, part) in parts.iter().enumerate() {
             let val: u8 = part.parse().ok()?;
@@ -176,13 +261,17 @@ pub struct MacAddr {
 
 impl MacAddr {
     pub const fn new(a: u8, b: u8, c: u8, d: u8, e: u8, f: u8) -> Self {
-        Self { bytes: [a, b, c, d, e, f] }
+        Self {
+            bytes: [a, b, c, d, e, f],
+        }
     }
 
     pub fn display(&self) -> String {
         let b = self.bytes;
-        format!("{:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
-            b[0], b[1], b[2], b[3], b[4], b[5])
+        format!(
+            "{:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
+            b[0], b[1], b[2], b[3], b[4], b[5]
+        )
     }
 
     /// Generate a deterministic MAC from an IP (for simulation).
@@ -206,16 +295,23 @@ pub struct CidrRange {
 impl CidrRange {
     /// Number of host addresses in this CIDR range.
     pub fn host_count(&self) -> u32 {
-        if self.prefix_len >= 32 { return 1; }
+        if self.prefix_len >= 32 {
+            return 1;
+        }
         let bits = 32u32.saturating_sub(self.prefix_len as u32);
         1u32.checked_shl(bits).unwrap_or(0)
     }
 
     /// Network mask as u32.
     pub fn mask(&self) -> u32 {
-        if self.prefix_len == 0 { return 0; }
-        if self.prefix_len >= 32 { return 0xFFFF_FFFF; }
-        0xFFFF_FFFFu32.checked_shl(32u32.saturating_sub(self.prefix_len as u32))
+        if self.prefix_len == 0 {
+            return 0;
+        }
+        if self.prefix_len >= 32 {
+            return 0xFFFF_FFFF;
+        }
+        0xFFFF_FFFFu32
+            .checked_shl(32u32.saturating_sub(self.prefix_len as u32))
             .unwrap_or(0)
     }
 
@@ -238,12 +334,22 @@ impl CidrRange {
         let last = self.last_addr().to_u32();
         let mut ips = Vec::new();
         // For small ranges, include all; for /24 or bigger, skip network+broadcast
-        let start = if self.prefix_len <= 30 { first.saturating_add(1) } else { first };
-        let end = if self.prefix_len <= 30 { last.saturating_sub(1) } else { last };
+        let start = if self.prefix_len <= 30 {
+            first.saturating_add(1)
+        } else {
+            first
+        };
+        let end = if self.prefix_len <= 30 {
+            last.saturating_sub(1)
+        } else {
+            last
+        };
         let mut current = start;
         while current <= end {
             ips.push(Ipv4Addr::from_u32(current));
-            if current == u32::MAX { break; }
+            if current == u32::MAX {
+                break;
+            }
             current = current.saturating_add(1);
         }
         ips
@@ -252,10 +358,14 @@ impl CidrRange {
     /// Parse a CIDR string like "192.168.1.0/24".
     pub fn parse(s: &str) -> Option<Self> {
         let parts: Vec<&str> = s.trim().split('/').collect();
-        if parts.len() != 2 { return None; }
+        if parts.len() != 2 {
+            return None;
+        }
         let base = Ipv4Addr::parse(parts.first()?)?;
         let prefix_len: u8 = parts.get(1)?.parse().ok()?;
-        if prefix_len > 32 { return None; }
+        if prefix_len > 32 {
+            return None;
+        }
         Some(Self { base, prefix_len })
     }
 }
@@ -284,7 +394,9 @@ impl ScanTarget {
                 let mut current = s;
                 while current <= e {
                     ips.push(Ipv4Addr::from_u32(current));
-                    if current == u32::MAX { break; }
+                    if current == u32::MAX {
+                        break;
+                    }
                     current = current.saturating_add(1);
                 }
                 ips
@@ -332,7 +444,9 @@ impl PortSpec {
                 let mut p = *start;
                 while p <= *end {
                     ports.push(p);
-                    if p == u16::MAX { break; }
+                    if p == u16::MAX {
+                        break;
+                    }
                     p = p.saturating_add(1);
                 }
                 ports
@@ -354,131 +468,756 @@ pub struct ServiceMapping {
 /// The full service database (100+ entries).
 pub fn service_database() -> Vec<ServiceMapping> {
     vec![
-        ServiceMapping { port: 1, protocol: "tcp", service: "tcpmux", description: "TCP Port Multiplexer" },
-        ServiceMapping { port: 5, protocol: "tcp", service: "rje", description: "Remote Job Entry" },
-        ServiceMapping { port: 7, protocol: "tcp", service: "echo", description: "Echo Protocol" },
-        ServiceMapping { port: 9, protocol: "tcp", service: "discard", description: "Discard Protocol" },
-        ServiceMapping { port: 11, protocol: "tcp", service: "systat", description: "Active Users" },
-        ServiceMapping { port: 13, protocol: "tcp", service: "daytime", description: "Daytime Protocol" },
-        ServiceMapping { port: 17, protocol: "tcp", service: "qotd", description: "Quote of the Day" },
-        ServiceMapping { port: 19, protocol: "tcp", service: "chargen", description: "Character Generator" },
-        ServiceMapping { port: 20, protocol: "tcp", service: "ftp-data", description: "FTP Data Transfer" },
-        ServiceMapping { port: 21, protocol: "tcp", service: "ftp", description: "FTP Control" },
-        ServiceMapping { port: 22, protocol: "tcp", service: "ssh", description: "Secure Shell" },
-        ServiceMapping { port: 23, protocol: "tcp", service: "telnet", description: "Telnet" },
-        ServiceMapping { port: 25, protocol: "tcp", service: "smtp", description: "Simple Mail Transfer Protocol" },
-        ServiceMapping { port: 37, protocol: "tcp", service: "time", description: "Time Protocol" },
-        ServiceMapping { port: 42, protocol: "tcp", service: "nameserver", description: "Host Name Server" },
-        ServiceMapping { port: 43, protocol: "tcp", service: "whois", description: "WHOIS" },
-        ServiceMapping { port: 49, protocol: "tcp", service: "tacacs", description: "TACACS Login Host" },
-        ServiceMapping { port: 53, protocol: "tcp", service: "dns", description: "Domain Name System" },
-        ServiceMapping { port: 67, protocol: "udp", service: "dhcp-server", description: "DHCP Server" },
-        ServiceMapping { port: 68, protocol: "udp", service: "dhcp-client", description: "DHCP Client" },
-        ServiceMapping { port: 69, protocol: "udp", service: "tftp", description: "Trivial File Transfer" },
-        ServiceMapping { port: 70, protocol: "tcp", service: "gopher", description: "Gopher Protocol" },
-        ServiceMapping { port: 79, protocol: "tcp", service: "finger", description: "Finger Protocol" },
-        ServiceMapping { port: 80, protocol: "tcp", service: "http", description: "HTTP" },
-        ServiceMapping { port: 88, protocol: "tcp", service: "kerberos", description: "Kerberos Authentication" },
-        ServiceMapping { port: 102, protocol: "tcp", service: "iso-tsap", description: "ISO-TSAP" },
-        ServiceMapping { port: 104, protocol: "tcp", service: "dicom", description: "DICOM Medical Imaging" },
-        ServiceMapping { port: 109, protocol: "tcp", service: "pop2", description: "POP Version 2" },
-        ServiceMapping { port: 110, protocol: "tcp", service: "pop3", description: "POP Version 3" },
-        ServiceMapping { port: 111, protocol: "tcp", service: "sunrpc", description: "Sun RPC / Portmapper" },
-        ServiceMapping { port: 113, protocol: "tcp", service: "ident", description: "Identification Protocol" },
-        ServiceMapping { port: 115, protocol: "tcp", service: "sftp", description: "Simple File Transfer" },
-        ServiceMapping { port: 118, protocol: "tcp", service: "sqlserv", description: "SQL Services" },
-        ServiceMapping { port: 119, protocol: "tcp", service: "nntp", description: "Network News Transfer" },
-        ServiceMapping { port: 123, protocol: "udp", service: "ntp", description: "Network Time Protocol" },
-        ServiceMapping { port: 135, protocol: "tcp", service: "msrpc", description: "Microsoft RPC" },
-        ServiceMapping { port: 137, protocol: "udp", service: "netbios-ns", description: "NetBIOS Name Service" },
-        ServiceMapping { port: 138, protocol: "udp", service: "netbios-dgm", description: "NetBIOS Datagram" },
-        ServiceMapping { port: 139, protocol: "tcp", service: "netbios-ssn", description: "NetBIOS Session" },
-        ServiceMapping { port: 143, protocol: "tcp", service: "imap", description: "IMAP" },
-        ServiceMapping { port: 161, protocol: "udp", service: "snmp", description: "Simple Network Management" },
-        ServiceMapping { port: 162, protocol: "udp", service: "snmp-trap", description: "SNMP Trap" },
-        ServiceMapping { port: 177, protocol: "tcp", service: "xdmcp", description: "X Display Manager Control" },
-        ServiceMapping { port: 179, protocol: "tcp", service: "bgp", description: "Border Gateway Protocol" },
-        ServiceMapping { port: 194, protocol: "tcp", service: "irc", description: "Internet Relay Chat" },
-        ServiceMapping { port: 201, protocol: "tcp", service: "at-rtmp", description: "AppleTalk Routing" },
-        ServiceMapping { port: 209, protocol: "tcp", service: "qmtp", description: "Quick Mail Transfer" },
-        ServiceMapping { port: 213, protocol: "tcp", service: "ipx", description: "IPX over IP" },
-        ServiceMapping { port: 220, protocol: "tcp", service: "imap3", description: "IMAP Version 3" },
-        ServiceMapping { port: 389, protocol: "tcp", service: "ldap", description: "Lightweight Directory Access" },
-        ServiceMapping { port: 427, protocol: "tcp", service: "svrloc", description: "Service Location Protocol" },
-        ServiceMapping { port: 443, protocol: "tcp", service: "https", description: "HTTP over TLS" },
-        ServiceMapping { port: 445, protocol: "tcp", service: "smb", description: "Server Message Block" },
-        ServiceMapping { port: 464, protocol: "tcp", service: "kpasswd", description: "Kerberos Password Change" },
-        ServiceMapping { port: 465, protocol: "tcp", service: "smtps", description: "SMTP over TLS" },
-        ServiceMapping { port: 500, protocol: "udp", service: "isakmp", description: "IPsec Key Exchange" },
-        ServiceMapping { port: 502, protocol: "tcp", service: "modbus", description: "Modbus Protocol" },
-        ServiceMapping { port: 514, protocol: "tcp", service: "syslog", description: "Syslog" },
-        ServiceMapping { port: 515, protocol: "tcp", service: "lpd", description: "Line Printer Daemon" },
-        ServiceMapping { port: 520, protocol: "udp", service: "rip", description: "Routing Information Protocol" },
-        ServiceMapping { port: 521, protocol: "udp", service: "ripng", description: "RIPng for IPv6" },
-        ServiceMapping { port: 530, protocol: "tcp", service: "rpc", description: "Remote Procedure Call" },
-        ServiceMapping { port: 543, protocol: "tcp", service: "klogin", description: "Kerberos Login" },
-        ServiceMapping { port: 544, protocol: "tcp", service: "kshell", description: "Kerberos Shell" },
-        ServiceMapping { port: 546, protocol: "tcp", service: "dhcpv6-client", description: "DHCPv6 Client" },
-        ServiceMapping { port: 547, protocol: "tcp", service: "dhcpv6-server", description: "DHCPv6 Server" },
-        ServiceMapping { port: 548, protocol: "tcp", service: "afp", description: "Apple Filing Protocol" },
-        ServiceMapping { port: 554, protocol: "tcp", service: "rtsp", description: "Real Time Streaming" },
-        ServiceMapping { port: 587, protocol: "tcp", service: "submission", description: "Mail Submission" },
-        ServiceMapping { port: 593, protocol: "tcp", service: "http-rpc", description: "HTTP RPC Endpoint Map" },
-        ServiceMapping { port: 631, protocol: "tcp", service: "ipp", description: "Internet Printing Protocol" },
-        ServiceMapping { port: 636, protocol: "tcp", service: "ldaps", description: "LDAP over TLS" },
-        ServiceMapping { port: 639, protocol: "tcp", service: "msdp", description: "Multicast Source Discovery" },
-        ServiceMapping { port: 646, protocol: "tcp", service: "ldp", description: "Label Distribution Protocol" },
-        ServiceMapping { port: 691, protocol: "tcp", service: "msexch-routing", description: "MS Exchange Routing" },
-        ServiceMapping { port: 860, protocol: "tcp", service: "iscsi", description: "iSCSI" },
-        ServiceMapping { port: 873, protocol: "tcp", service: "rsync", description: "Rsync File Sync" },
-        ServiceMapping { port: 902, protocol: "tcp", service: "vmware-auth", description: "VMware Auth Daemon" },
-        ServiceMapping { port: 989, protocol: "tcp", service: "ftps-data", description: "FTPS Data" },
-        ServiceMapping { port: 990, protocol: "tcp", service: "ftps", description: "FTPS Control" },
-        ServiceMapping { port: 993, protocol: "tcp", service: "imaps", description: "IMAP over TLS" },
-        ServiceMapping { port: 995, protocol: "tcp", service: "pop3s", description: "POP3 over TLS" },
-        ServiceMapping { port: 1080, protocol: "tcp", service: "socks", description: "SOCKS Proxy" },
-        ServiceMapping { port: 1194, protocol: "udp", service: "openvpn", description: "OpenVPN" },
-        ServiceMapping { port: 1433, protocol: "tcp", service: "mssql", description: "Microsoft SQL Server" },
-        ServiceMapping { port: 1434, protocol: "udp", service: "mssql-monitor", description: "MS SQL Monitor" },
-        ServiceMapping { port: 1521, protocol: "tcp", service: "oracle", description: "Oracle Database" },
-        ServiceMapping { port: 1701, protocol: "udp", service: "l2tp", description: "L2TP VPN" },
-        ServiceMapping { port: 1723, protocol: "tcp", service: "pptp", description: "PPTP VPN" },
-        ServiceMapping { port: 1812, protocol: "udp", service: "radius", description: "RADIUS Authentication" },
-        ServiceMapping { port: 1813, protocol: "udp", service: "radius-acct", description: "RADIUS Accounting" },
-        ServiceMapping { port: 1883, protocol: "tcp", service: "mqtt", description: "MQTT Messaging" },
-        ServiceMapping { port: 1900, protocol: "udp", service: "ssdp", description: "SSDP / UPnP" },
-        ServiceMapping { port: 2049, protocol: "tcp", service: "nfs", description: "Network File System" },
-        ServiceMapping { port: 2082, protocol: "tcp", service: "cpanel", description: "cPanel" },
-        ServiceMapping { port: 2083, protocol: "tcp", service: "cpanel-ssl", description: "cPanel SSL" },
-        ServiceMapping { port: 2181, protocol: "tcp", service: "zookeeper", description: "Apache ZooKeeper" },
-        ServiceMapping { port: 2375, protocol: "tcp", service: "docker", description: "Docker REST API" },
-        ServiceMapping { port: 2376, protocol: "tcp", service: "docker-tls", description: "Docker TLS API" },
-        ServiceMapping { port: 3306, protocol: "tcp", service: "mysql", description: "MySQL Database" },
-        ServiceMapping { port: 3389, protocol: "tcp", service: "rdp", description: "Remote Desktop Protocol" },
-        ServiceMapping { port: 3690, protocol: "tcp", service: "svn", description: "Subversion" },
-        ServiceMapping { port: 4443, protocol: "tcp", service: "https-alt", description: "HTTPS Alternate" },
-        ServiceMapping { port: 5060, protocol: "tcp", service: "sip", description: "Session Initiation Protocol" },
-        ServiceMapping { port: 5222, protocol: "tcp", service: "xmpp", description: "XMPP Client" },
-        ServiceMapping { port: 5269, protocol: "tcp", service: "xmpp-server", description: "XMPP Server" },
-        ServiceMapping { port: 5432, protocol: "tcp", service: "postgresql", description: "PostgreSQL Database" },
-        ServiceMapping { port: 5672, protocol: "tcp", service: "amqp", description: "RabbitMQ / AMQP" },
-        ServiceMapping { port: 5900, protocol: "tcp", service: "vnc", description: "Virtual Network Computing" },
-        ServiceMapping { port: 5984, protocol: "tcp", service: "couchdb", description: "CouchDB" },
-        ServiceMapping { port: 6379, protocol: "tcp", service: "redis", description: "Redis" },
-        ServiceMapping { port: 6443, protocol: "tcp", service: "k8s-api", description: "Kubernetes API Server" },
-        ServiceMapping { port: 6667, protocol: "tcp", service: "irc", description: "IRC (alternate)" },
-        ServiceMapping { port: 8080, protocol: "tcp", service: "http-alt", description: "HTTP Alternate" },
-        ServiceMapping { port: 8443, protocol: "tcp", service: "https-alt", description: "HTTPS Alternate" },
-        ServiceMapping { port: 8883, protocol: "tcp", service: "mqtt-tls", description: "MQTT over TLS" },
-        ServiceMapping { port: 9090, protocol: "tcp", service: "prometheus", description: "Prometheus" },
-        ServiceMapping { port: 9092, protocol: "tcp", service: "kafka", description: "Apache Kafka" },
-        ServiceMapping { port: 9200, protocol: "tcp", service: "elasticsearch", description: "Elasticsearch HTTP" },
-        ServiceMapping { port: 9300, protocol: "tcp", service: "elasticsearch-tp", description: "Elasticsearch Transport" },
-        ServiceMapping { port: 9418, protocol: "tcp", service: "git", description: "Git Protocol" },
-        ServiceMapping { port: 11211, protocol: "tcp", service: "memcached", description: "Memcached" },
-        ServiceMapping { port: 27017, protocol: "tcp", service: "mongodb", description: "MongoDB" },
-        ServiceMapping { port: 27018, protocol: "tcp", service: "mongodb-shard", description: "MongoDB Shard" },
-        ServiceMapping { port: 50000, protocol: "tcp", service: "db2", description: "IBM DB2" },
+        ServiceMapping {
+            port: 1,
+            protocol: "tcp",
+            service: "tcpmux",
+            description: "TCP Port Multiplexer",
+        },
+        ServiceMapping {
+            port: 5,
+            protocol: "tcp",
+            service: "rje",
+            description: "Remote Job Entry",
+        },
+        ServiceMapping {
+            port: 7,
+            protocol: "tcp",
+            service: "echo",
+            description: "Echo Protocol",
+        },
+        ServiceMapping {
+            port: 9,
+            protocol: "tcp",
+            service: "discard",
+            description: "Discard Protocol",
+        },
+        ServiceMapping {
+            port: 11,
+            protocol: "tcp",
+            service: "systat",
+            description: "Active Users",
+        },
+        ServiceMapping {
+            port: 13,
+            protocol: "tcp",
+            service: "daytime",
+            description: "Daytime Protocol",
+        },
+        ServiceMapping {
+            port: 17,
+            protocol: "tcp",
+            service: "qotd",
+            description: "Quote of the Day",
+        },
+        ServiceMapping {
+            port: 19,
+            protocol: "tcp",
+            service: "chargen",
+            description: "Character Generator",
+        },
+        ServiceMapping {
+            port: 20,
+            protocol: "tcp",
+            service: "ftp-data",
+            description: "FTP Data Transfer",
+        },
+        ServiceMapping {
+            port: 21,
+            protocol: "tcp",
+            service: "ftp",
+            description: "FTP Control",
+        },
+        ServiceMapping {
+            port: 22,
+            protocol: "tcp",
+            service: "ssh",
+            description: "Secure Shell",
+        },
+        ServiceMapping {
+            port: 23,
+            protocol: "tcp",
+            service: "telnet",
+            description: "Telnet",
+        },
+        ServiceMapping {
+            port: 25,
+            protocol: "tcp",
+            service: "smtp",
+            description: "Simple Mail Transfer Protocol",
+        },
+        ServiceMapping {
+            port: 37,
+            protocol: "tcp",
+            service: "time",
+            description: "Time Protocol",
+        },
+        ServiceMapping {
+            port: 42,
+            protocol: "tcp",
+            service: "nameserver",
+            description: "Host Name Server",
+        },
+        ServiceMapping {
+            port: 43,
+            protocol: "tcp",
+            service: "whois",
+            description: "WHOIS",
+        },
+        ServiceMapping {
+            port: 49,
+            protocol: "tcp",
+            service: "tacacs",
+            description: "TACACS Login Host",
+        },
+        ServiceMapping {
+            port: 53,
+            protocol: "tcp",
+            service: "dns",
+            description: "Domain Name System",
+        },
+        ServiceMapping {
+            port: 67,
+            protocol: "udp",
+            service: "dhcp-server",
+            description: "DHCP Server",
+        },
+        ServiceMapping {
+            port: 68,
+            protocol: "udp",
+            service: "dhcp-client",
+            description: "DHCP Client",
+        },
+        ServiceMapping {
+            port: 69,
+            protocol: "udp",
+            service: "tftp",
+            description: "Trivial File Transfer",
+        },
+        ServiceMapping {
+            port: 70,
+            protocol: "tcp",
+            service: "gopher",
+            description: "Gopher Protocol",
+        },
+        ServiceMapping {
+            port: 79,
+            protocol: "tcp",
+            service: "finger",
+            description: "Finger Protocol",
+        },
+        ServiceMapping {
+            port: 80,
+            protocol: "tcp",
+            service: "http",
+            description: "HTTP",
+        },
+        ServiceMapping {
+            port: 88,
+            protocol: "tcp",
+            service: "kerberos",
+            description: "Kerberos Authentication",
+        },
+        ServiceMapping {
+            port: 102,
+            protocol: "tcp",
+            service: "iso-tsap",
+            description: "ISO-TSAP",
+        },
+        ServiceMapping {
+            port: 104,
+            protocol: "tcp",
+            service: "dicom",
+            description: "DICOM Medical Imaging",
+        },
+        ServiceMapping {
+            port: 109,
+            protocol: "tcp",
+            service: "pop2",
+            description: "POP Version 2",
+        },
+        ServiceMapping {
+            port: 110,
+            protocol: "tcp",
+            service: "pop3",
+            description: "POP Version 3",
+        },
+        ServiceMapping {
+            port: 111,
+            protocol: "tcp",
+            service: "sunrpc",
+            description: "Sun RPC / Portmapper",
+        },
+        ServiceMapping {
+            port: 113,
+            protocol: "tcp",
+            service: "ident",
+            description: "Identification Protocol",
+        },
+        ServiceMapping {
+            port: 115,
+            protocol: "tcp",
+            service: "sftp",
+            description: "Simple File Transfer",
+        },
+        ServiceMapping {
+            port: 118,
+            protocol: "tcp",
+            service: "sqlserv",
+            description: "SQL Services",
+        },
+        ServiceMapping {
+            port: 119,
+            protocol: "tcp",
+            service: "nntp",
+            description: "Network News Transfer",
+        },
+        ServiceMapping {
+            port: 123,
+            protocol: "udp",
+            service: "ntp",
+            description: "Network Time Protocol",
+        },
+        ServiceMapping {
+            port: 135,
+            protocol: "tcp",
+            service: "msrpc",
+            description: "Microsoft RPC",
+        },
+        ServiceMapping {
+            port: 137,
+            protocol: "udp",
+            service: "netbios-ns",
+            description: "NetBIOS Name Service",
+        },
+        ServiceMapping {
+            port: 138,
+            protocol: "udp",
+            service: "netbios-dgm",
+            description: "NetBIOS Datagram",
+        },
+        ServiceMapping {
+            port: 139,
+            protocol: "tcp",
+            service: "netbios-ssn",
+            description: "NetBIOS Session",
+        },
+        ServiceMapping {
+            port: 143,
+            protocol: "tcp",
+            service: "imap",
+            description: "IMAP",
+        },
+        ServiceMapping {
+            port: 161,
+            protocol: "udp",
+            service: "snmp",
+            description: "Simple Network Management",
+        },
+        ServiceMapping {
+            port: 162,
+            protocol: "udp",
+            service: "snmp-trap",
+            description: "SNMP Trap",
+        },
+        ServiceMapping {
+            port: 177,
+            protocol: "tcp",
+            service: "xdmcp",
+            description: "X Display Manager Control",
+        },
+        ServiceMapping {
+            port: 179,
+            protocol: "tcp",
+            service: "bgp",
+            description: "Border Gateway Protocol",
+        },
+        ServiceMapping {
+            port: 194,
+            protocol: "tcp",
+            service: "irc",
+            description: "Internet Relay Chat",
+        },
+        ServiceMapping {
+            port: 201,
+            protocol: "tcp",
+            service: "at-rtmp",
+            description: "AppleTalk Routing",
+        },
+        ServiceMapping {
+            port: 209,
+            protocol: "tcp",
+            service: "qmtp",
+            description: "Quick Mail Transfer",
+        },
+        ServiceMapping {
+            port: 213,
+            protocol: "tcp",
+            service: "ipx",
+            description: "IPX over IP",
+        },
+        ServiceMapping {
+            port: 220,
+            protocol: "tcp",
+            service: "imap3",
+            description: "IMAP Version 3",
+        },
+        ServiceMapping {
+            port: 389,
+            protocol: "tcp",
+            service: "ldap",
+            description: "Lightweight Directory Access",
+        },
+        ServiceMapping {
+            port: 427,
+            protocol: "tcp",
+            service: "svrloc",
+            description: "Service Location Protocol",
+        },
+        ServiceMapping {
+            port: 443,
+            protocol: "tcp",
+            service: "https",
+            description: "HTTP over TLS",
+        },
+        ServiceMapping {
+            port: 445,
+            protocol: "tcp",
+            service: "smb",
+            description: "Server Message Block",
+        },
+        ServiceMapping {
+            port: 464,
+            protocol: "tcp",
+            service: "kpasswd",
+            description: "Kerberos Password Change",
+        },
+        ServiceMapping {
+            port: 465,
+            protocol: "tcp",
+            service: "smtps",
+            description: "SMTP over TLS",
+        },
+        ServiceMapping {
+            port: 500,
+            protocol: "udp",
+            service: "isakmp",
+            description: "IPsec Key Exchange",
+        },
+        ServiceMapping {
+            port: 502,
+            protocol: "tcp",
+            service: "modbus",
+            description: "Modbus Protocol",
+        },
+        ServiceMapping {
+            port: 514,
+            protocol: "tcp",
+            service: "syslog",
+            description: "Syslog",
+        },
+        ServiceMapping {
+            port: 515,
+            protocol: "tcp",
+            service: "lpd",
+            description: "Line Printer Daemon",
+        },
+        ServiceMapping {
+            port: 520,
+            protocol: "udp",
+            service: "rip",
+            description: "Routing Information Protocol",
+        },
+        ServiceMapping {
+            port: 521,
+            protocol: "udp",
+            service: "ripng",
+            description: "RIPng for IPv6",
+        },
+        ServiceMapping {
+            port: 530,
+            protocol: "tcp",
+            service: "rpc",
+            description: "Remote Procedure Call",
+        },
+        ServiceMapping {
+            port: 543,
+            protocol: "tcp",
+            service: "klogin",
+            description: "Kerberos Login",
+        },
+        ServiceMapping {
+            port: 544,
+            protocol: "tcp",
+            service: "kshell",
+            description: "Kerberos Shell",
+        },
+        ServiceMapping {
+            port: 546,
+            protocol: "tcp",
+            service: "dhcpv6-client",
+            description: "DHCPv6 Client",
+        },
+        ServiceMapping {
+            port: 547,
+            protocol: "tcp",
+            service: "dhcpv6-server",
+            description: "DHCPv6 Server",
+        },
+        ServiceMapping {
+            port: 548,
+            protocol: "tcp",
+            service: "afp",
+            description: "Apple Filing Protocol",
+        },
+        ServiceMapping {
+            port: 554,
+            protocol: "tcp",
+            service: "rtsp",
+            description: "Real Time Streaming",
+        },
+        ServiceMapping {
+            port: 587,
+            protocol: "tcp",
+            service: "submission",
+            description: "Mail Submission",
+        },
+        ServiceMapping {
+            port: 593,
+            protocol: "tcp",
+            service: "http-rpc",
+            description: "HTTP RPC Endpoint Map",
+        },
+        ServiceMapping {
+            port: 631,
+            protocol: "tcp",
+            service: "ipp",
+            description: "Internet Printing Protocol",
+        },
+        ServiceMapping {
+            port: 636,
+            protocol: "tcp",
+            service: "ldaps",
+            description: "LDAP over TLS",
+        },
+        ServiceMapping {
+            port: 639,
+            protocol: "tcp",
+            service: "msdp",
+            description: "Multicast Source Discovery",
+        },
+        ServiceMapping {
+            port: 646,
+            protocol: "tcp",
+            service: "ldp",
+            description: "Label Distribution Protocol",
+        },
+        ServiceMapping {
+            port: 691,
+            protocol: "tcp",
+            service: "msexch-routing",
+            description: "MS Exchange Routing",
+        },
+        ServiceMapping {
+            port: 860,
+            protocol: "tcp",
+            service: "iscsi",
+            description: "iSCSI",
+        },
+        ServiceMapping {
+            port: 873,
+            protocol: "tcp",
+            service: "rsync",
+            description: "Rsync File Sync",
+        },
+        ServiceMapping {
+            port: 902,
+            protocol: "tcp",
+            service: "vmware-auth",
+            description: "VMware Auth Daemon",
+        },
+        ServiceMapping {
+            port: 989,
+            protocol: "tcp",
+            service: "ftps-data",
+            description: "FTPS Data",
+        },
+        ServiceMapping {
+            port: 990,
+            protocol: "tcp",
+            service: "ftps",
+            description: "FTPS Control",
+        },
+        ServiceMapping {
+            port: 993,
+            protocol: "tcp",
+            service: "imaps",
+            description: "IMAP over TLS",
+        },
+        ServiceMapping {
+            port: 995,
+            protocol: "tcp",
+            service: "pop3s",
+            description: "POP3 over TLS",
+        },
+        ServiceMapping {
+            port: 1080,
+            protocol: "tcp",
+            service: "socks",
+            description: "SOCKS Proxy",
+        },
+        ServiceMapping {
+            port: 1194,
+            protocol: "udp",
+            service: "openvpn",
+            description: "OpenVPN",
+        },
+        ServiceMapping {
+            port: 1433,
+            protocol: "tcp",
+            service: "mssql",
+            description: "Microsoft SQL Server",
+        },
+        ServiceMapping {
+            port: 1434,
+            protocol: "udp",
+            service: "mssql-monitor",
+            description: "MS SQL Monitor",
+        },
+        ServiceMapping {
+            port: 1521,
+            protocol: "tcp",
+            service: "oracle",
+            description: "Oracle Database",
+        },
+        ServiceMapping {
+            port: 1701,
+            protocol: "udp",
+            service: "l2tp",
+            description: "L2TP VPN",
+        },
+        ServiceMapping {
+            port: 1723,
+            protocol: "tcp",
+            service: "pptp",
+            description: "PPTP VPN",
+        },
+        ServiceMapping {
+            port: 1812,
+            protocol: "udp",
+            service: "radius",
+            description: "RADIUS Authentication",
+        },
+        ServiceMapping {
+            port: 1813,
+            protocol: "udp",
+            service: "radius-acct",
+            description: "RADIUS Accounting",
+        },
+        ServiceMapping {
+            port: 1883,
+            protocol: "tcp",
+            service: "mqtt",
+            description: "MQTT Messaging",
+        },
+        ServiceMapping {
+            port: 1900,
+            protocol: "udp",
+            service: "ssdp",
+            description: "SSDP / UPnP",
+        },
+        ServiceMapping {
+            port: 2049,
+            protocol: "tcp",
+            service: "nfs",
+            description: "Network File System",
+        },
+        ServiceMapping {
+            port: 2082,
+            protocol: "tcp",
+            service: "cpanel",
+            description: "cPanel",
+        },
+        ServiceMapping {
+            port: 2083,
+            protocol: "tcp",
+            service: "cpanel-ssl",
+            description: "cPanel SSL",
+        },
+        ServiceMapping {
+            port: 2181,
+            protocol: "tcp",
+            service: "zookeeper",
+            description: "Apache ZooKeeper",
+        },
+        ServiceMapping {
+            port: 2375,
+            protocol: "tcp",
+            service: "docker",
+            description: "Docker REST API",
+        },
+        ServiceMapping {
+            port: 2376,
+            protocol: "tcp",
+            service: "docker-tls",
+            description: "Docker TLS API",
+        },
+        ServiceMapping {
+            port: 3306,
+            protocol: "tcp",
+            service: "mysql",
+            description: "MySQL Database",
+        },
+        ServiceMapping {
+            port: 3389,
+            protocol: "tcp",
+            service: "rdp",
+            description: "Remote Desktop Protocol",
+        },
+        ServiceMapping {
+            port: 3690,
+            protocol: "tcp",
+            service: "svn",
+            description: "Subversion",
+        },
+        ServiceMapping {
+            port: 4443,
+            protocol: "tcp",
+            service: "https-alt",
+            description: "HTTPS Alternate",
+        },
+        ServiceMapping {
+            port: 5060,
+            protocol: "tcp",
+            service: "sip",
+            description: "Session Initiation Protocol",
+        },
+        ServiceMapping {
+            port: 5222,
+            protocol: "tcp",
+            service: "xmpp",
+            description: "XMPP Client",
+        },
+        ServiceMapping {
+            port: 5269,
+            protocol: "tcp",
+            service: "xmpp-server",
+            description: "XMPP Server",
+        },
+        ServiceMapping {
+            port: 5432,
+            protocol: "tcp",
+            service: "postgresql",
+            description: "PostgreSQL Database",
+        },
+        ServiceMapping {
+            port: 5672,
+            protocol: "tcp",
+            service: "amqp",
+            description: "RabbitMQ / AMQP",
+        },
+        ServiceMapping {
+            port: 5900,
+            protocol: "tcp",
+            service: "vnc",
+            description: "Virtual Network Computing",
+        },
+        ServiceMapping {
+            port: 5984,
+            protocol: "tcp",
+            service: "couchdb",
+            description: "CouchDB",
+        },
+        ServiceMapping {
+            port: 6379,
+            protocol: "tcp",
+            service: "redis",
+            description: "Redis",
+        },
+        ServiceMapping {
+            port: 6443,
+            protocol: "tcp",
+            service: "k8s-api",
+            description: "Kubernetes API Server",
+        },
+        ServiceMapping {
+            port: 6667,
+            protocol: "tcp",
+            service: "irc",
+            description: "IRC (alternate)",
+        },
+        ServiceMapping {
+            port: 8080,
+            protocol: "tcp",
+            service: "http-alt",
+            description: "HTTP Alternate",
+        },
+        ServiceMapping {
+            port: 8443,
+            protocol: "tcp",
+            service: "https-alt",
+            description: "HTTPS Alternate",
+        },
+        ServiceMapping {
+            port: 8883,
+            protocol: "tcp",
+            service: "mqtt-tls",
+            description: "MQTT over TLS",
+        },
+        ServiceMapping {
+            port: 9090,
+            protocol: "tcp",
+            service: "prometheus",
+            description: "Prometheus",
+        },
+        ServiceMapping {
+            port: 9092,
+            protocol: "tcp",
+            service: "kafka",
+            description: "Apache Kafka",
+        },
+        ServiceMapping {
+            port: 9200,
+            protocol: "tcp",
+            service: "elasticsearch",
+            description: "Elasticsearch HTTP",
+        },
+        ServiceMapping {
+            port: 9300,
+            protocol: "tcp",
+            service: "elasticsearch-tp",
+            description: "Elasticsearch Transport",
+        },
+        ServiceMapping {
+            port: 9418,
+            protocol: "tcp",
+            service: "git",
+            description: "Git Protocol",
+        },
+        ServiceMapping {
+            port: 11211,
+            protocol: "tcp",
+            service: "memcached",
+            description: "Memcached",
+        },
+        ServiceMapping {
+            port: 27017,
+            protocol: "tcp",
+            service: "mongodb",
+            description: "MongoDB",
+        },
+        ServiceMapping {
+            port: 27018,
+            protocol: "tcp",
+            service: "mongodb-shard",
+            description: "MongoDB Shard",
+        },
+        ServiceMapping {
+            port: 50000,
+            protocol: "tcp",
+            service: "db2",
+            description: "IBM DB2",
+        },
     ]
 }
 
@@ -551,8 +1290,8 @@ pub fn lookup_service(port: u16) -> Option<&'static str> {
 /// Common ports for quick scan profile.
 pub fn quick_scan_ports() -> Vec<u16> {
     vec![
-        21, 22, 23, 25, 53, 80, 110, 111, 135, 139, 143, 443, 445, 993, 995,
-        1723, 3306, 3389, 5900, 8080,
+        21, 22, 23, 25, 53, 80, 110, 111, 135, 139, 143, 443, 445, 993, 995, 1723, 3306, 3389,
+        5900, 8080,
     ]
 }
 
@@ -562,7 +1301,9 @@ pub fn well_known_ports() -> Vec<u16> {
     let mut p: u16 = 0;
     loop {
         ports.push(p);
-        if p == 1023 { break; }
+        if p == 1023 {
+            break;
+        }
         p = p.saturating_add(1);
     }
     ports
@@ -608,7 +1349,9 @@ impl ScanProfile {
                 let mut p: u16 = 1;
                 loop {
                     ports.push(p);
-                    if p == u16::MAX { break; }
+                    if p == u16::MAX {
+                        break;
+                    }
                     p = p.saturating_add(1);
                 }
                 ports
@@ -618,9 +1361,7 @@ impl ScanProfile {
         }
     }
 
-    pub const ALL: [ScanProfile; 4] = [
-        Self::Quick, Self::Full, Self::Custom, Self::Stealth,
-    ];
+    pub const ALL: [ScanProfile; 4] = [Self::Quick, Self::Full, Self::Custom, Self::Stealth];
 }
 
 /// Discovery method.
@@ -751,7 +1492,10 @@ pub struct HostResult {
 
 impl HostResult {
     pub fn open_port_count(&self) -> usize {
-        self.ports.iter().filter(|p| p.state == PortState::Open).count()
+        self.ports
+            .iter()
+            .filter(|p| p.state == PortState::Open)
+            .count()
     }
 
     pub fn display_hostname(&self) -> String {
@@ -832,7 +1576,9 @@ impl SimRng {
 
     fn next_range(&mut self, min: u32, max: u32) -> u32 {
         let range = max.saturating_sub(min).saturating_add(1);
-        if range == 0 { return min; }
+        if range == 0 {
+            return min;
+        }
         let val = self.next_u64() as u32;
         min.saturating_add(val % range)
     }
@@ -845,8 +1591,8 @@ impl SimRng {
 /// Generate a simulated hostname for an IP.
 fn simulated_hostname(ip: Ipv4Addr, rng: &mut SimRng) -> Option<String> {
     let prefixes = [
-        "desktop", "laptop", "server", "printer", "nas", "router",
-        "switch", "camera", "phone", "tablet", "tv", "iot",
+        "desktop", "laptop", "server", "printer", "nas", "router", "switch", "camera", "phone",
+        "tablet", "tv", "iot",
     ];
     if rng.next_bool(0.7) {
         let idx = (rng.next_u64() as usize) % prefixes.len();
@@ -859,7 +1605,8 @@ fn simulated_hostname(ip: Ipv4Addr, rng: &mut SimRng) -> Option<String> {
 
 /// Guess OS based on open ports.
 fn guess_os(ports: &[PortResult]) -> OsGuess {
-    let open_ports: Vec<u16> = ports.iter()
+    let open_ports: Vec<u16> = ports
+        .iter()
         .filter(|p| p.state == PortState::Open)
         .map(|p| p.port)
         .collect();
@@ -1028,7 +1775,9 @@ fn simulate_traceroute(dest: Ipv4Addr) -> Vec<TracerouteHop> {
                 timed_out: false,
             });
         }
-        if hop_num == u8::MAX { break; }
+        if hop_num == u8::MAX {
+            break;
+        }
         hop_num = hop_num.saturating_add(1);
     }
 
@@ -1069,8 +1818,15 @@ fn simulate_whois(ip: Ipv4Addr) -> WhoisInfo {
 }
 
 /// Estimate scan duration based on target range and port count.
-pub fn estimate_scan_time(host_count: u32, port_count: u32, timeout_ms: u32, concurrency: u32) -> f32 {
-    if concurrency == 0 { return 0.0; }
+pub fn estimate_scan_time(
+    host_count: u32,
+    port_count: u32,
+    timeout_ms: u32,
+    concurrency: u32,
+) -> f32 {
+    if concurrency == 0 {
+        return 0.0;
+    }
     let total_probes = (host_count as u64).saturating_mul(port_count as u64);
     let batches = total_probes.saturating_add(concurrency as u64 - 1) / (concurrency as u64);
     let time_per_batch_ms = timeout_ms as f32 * 0.3; // average case: 30% of timeout
@@ -1099,11 +1855,15 @@ pub fn export_csv(result: &ScanResult) -> String {
     for host in &result.hosts {
         let hostname = host.hostname.clone().unwrap_or_default();
         let mac_str = host.mac.map(|m| m.display()).unwrap_or_default();
-        let open_ports: Vec<String> = host.ports.iter()
+        let open_ports: Vec<String> = host
+            .ports
+            .iter()
             .filter(|p| p.state == PortState::Open)
             .map(|p| p.port.to_string())
             .collect();
-        let services: Vec<String> = host.ports.iter()
+        let services: Vec<String> = host
+            .ports
+            .iter()
             .filter(|p| p.state == PortState::Open)
             .filter_map(|p| p.service.clone())
             .collect();
@@ -1127,11 +1887,20 @@ pub fn export_json(result: &ScanResult) -> String {
     let mut json = String::from("{\n");
     json.push_str(&format!("  \"scan_id\": {},\n", result.id));
     json.push_str(&format!("  \"timestamp\": \"{}\",\n", result.timestamp));
-    json.push_str(&format!("  \"target\": \"{}\",\n", result.target_description));
+    json.push_str(&format!(
+        "  \"target\": \"{}\",\n",
+        result.target_description
+    ));
     json.push_str(&format!("  \"profile\": \"{}\",\n", result.profile.label()));
-    json.push_str(&format!("  \"duration_secs\": {:.1},\n", result.duration_secs));
+    json.push_str(&format!(
+        "  \"duration_secs\": {:.1},\n",
+        result.duration_secs
+    ));
     json.push_str(&format!("  \"total_ips\": {},\n", result.total_ips_scanned));
-    json.push_str(&format!("  \"total_ports_scanned\": {},\n", result.total_ports_scanned));
+    json.push_str(&format!(
+        "  \"total_ports_scanned\": {},\n",
+        result.total_ports_scanned
+    ));
     json.push_str("  \"hosts\": [\n");
     for (i, host) in result.hosts.iter().enumerate() {
         json.push_str("    {\n");
@@ -1150,15 +1919,24 @@ pub fn export_json(result: &ScanResult) -> String {
         for (j, port) in host.ports.iter().enumerate() {
             json.push_str("        {\n");
             json.push_str(&format!("          \"port\": {},\n", port.port));
-            json.push_str(&format!("          \"state\": \"{}\",\n", port.state.label()));
+            json.push_str(&format!(
+                "          \"state\": \"{}\",\n",
+                port.state.label()
+            ));
             if let Some(ref svc) = port.service {
                 json.push_str(&format!("          \"service\": \"{}\",\n", svc));
             }
             if let Some(ref banner) = port.banner {
-                let escaped = banner.replace('\"', "\\\"").replace('\r', "\\r").replace('\n', "\\n");
+                let escaped = banner
+                    .replace('\"', "\\\"")
+                    .replace('\r', "\\r")
+                    .replace('\n', "\\n");
                 json.push_str(&format!("          \"banner\": \"{}\",\n", escaped));
             }
-            json.push_str(&format!("          \"response_ms\": {:.1}\n", port.response_ms));
+            json.push_str(&format!(
+                "          \"response_ms\": {:.1}\n",
+                port.response_ms
+            ));
             if i < result.hosts.len().saturating_sub(1) || j < host.ports.len().saturating_sub(1) {
                 json.push_str("        },\n");
             } else {
@@ -1179,20 +1957,16 @@ pub fn export_json(result: &ScanResult) -> String {
 
 /// Compare two scan results, returning new and missing hosts.
 pub fn diff_scans(old: &ScanResult, new: &ScanResult) -> (Vec<Ipv4Addr>, Vec<Ipv4Addr>) {
-    let old_ips: Vec<Ipv4Addr> = old.hosts.iter()
-        .filter(|h| h.is_up)
-        .map(|h| h.ip)
-        .collect();
-    let new_ips: Vec<Ipv4Addr> = new.hosts.iter()
-        .filter(|h| h.is_up)
-        .map(|h| h.ip)
-        .collect();
+    let old_ips: Vec<Ipv4Addr> = old.hosts.iter().filter(|h| h.is_up).map(|h| h.ip).collect();
+    let new_ips: Vec<Ipv4Addr> = new.hosts.iter().filter(|h| h.is_up).map(|h| h.ip).collect();
 
-    let added: Vec<Ipv4Addr> = new_ips.iter()
+    let added: Vec<Ipv4Addr> = new_ips
+        .iter()
         .filter(|ip| !old_ips.contains(ip))
         .copied()
         .collect();
-    let removed: Vec<Ipv4Addr> = old_ips.iter()
+    let removed: Vec<Ipv4Addr> = old_ips
+        .iter()
         .filter(|ip| !new_ips.contains(ip))
         .copied()
         .collect();
@@ -1226,7 +2000,11 @@ impl ViewTab {
     }
 
     pub const ALL: [ViewTab; 5] = [
-        Self::Results, Self::Topology, Self::History, Self::Traceroute, Self::Whois,
+        Self::Results,
+        Self::Topology,
+        Self::History,
+        Self::Traceroute,
+        Self::Whois,
     ];
 }
 
@@ -1249,8 +2027,12 @@ pub struct ScanProgress {
 impl ScanProgress {
     pub fn fraction(&self) -> f32 {
         let total = self.total_hosts.saturating_mul(self.total_ports.max(1));
-        if total == 0 { return 0.0; }
-        let done = self.hosts_scanned.saturating_mul(self.total_ports.max(1))
+        if total == 0 {
+            return 0.0;
+        }
+        let done = self
+            .hosts_scanned
+            .saturating_mul(self.total_ports.max(1))
             .saturating_add(self.ports_scanned);
         (done as f32 / total as f32).clamp(0.0, 1.0)
     }
@@ -1343,7 +2125,9 @@ impl NetScanApp {
 
     /// Start a simulated scan with the current configuration.
     pub fn start_scan(&mut self) {
-        if self.is_scanning { return; }
+        if self.is_scanning {
+            return;
+        }
 
         let target = match ScanTarget::parse(&self.config.target_input) {
             Some(t) => t,
@@ -1351,12 +2135,13 @@ impl NetScanApp {
         };
 
         let ips = target.all_ips();
-        if ips.is_empty() { return; }
+        if ips.is_empty() {
+            return;
+        }
 
         let ports = match self.config.profile {
             ScanProfile::Custom => {
-                parse_port_spec(&self.config.port_input)
-                    .unwrap_or_else(quick_scan_ports)
+                parse_port_spec(&self.config.port_input).unwrap_or_else(quick_scan_ports)
             }
             other => other.ports(),
         };
@@ -1375,14 +2160,21 @@ impl NetScanApp {
             if let Some(host) = simulate_host_scan(*ip, &scan_ports, &mut rng) {
                 hosts.push(host);
             }
-            if hosts.len() >= MAX_HOSTS_DISPLAY { break; }
+            if hosts.len() >= MAX_HOSTS_DISPLAY {
+                break;
+            }
         }
 
         let id = self.scan_id_counter;
         self.scan_id_counter = self.scan_id_counter.saturating_add(1);
         let total_ips = ips.len() as u32;
         let total_ports = scan_ports.len() as u32;
-        let est_time = estimate_scan_time(total_ips, total_ports, self.config.timeout_ms, self.config.concurrency);
+        let est_time = estimate_scan_time(
+            total_ips,
+            total_ports,
+            self.config.timeout_ms,
+            self.config.concurrency,
+        );
 
         let result = ScanResult {
             id,
@@ -1439,12 +2231,8 @@ impl NetScanApp {
     /// Handle keyboard events.
     pub fn handle_event(&mut self, event: &Event) -> EventResult {
         match event {
-            Event::Key(key) if key.pressed => {
-                self.handle_key(key)
-            }
-            Event::Mouse(mouse) => {
-                self.handle_mouse(mouse)
-            }
+            Event::Key(key) if key.pressed => self.handle_key(key),
+            Event::Mouse(mouse) => self.handle_mouse(mouse),
             _ => EventResult::Ignored,
         }
     }
@@ -1464,9 +2252,7 @@ impl NetScanApp {
             Key::Tab if key.modifiers.ctrl => {
                 // Cycle tabs
                 let tabs = ViewTab::ALL;
-                let current_idx = tabs.iter()
-                    .position(|t| *t == self.active_tab)
-                    .unwrap_or(0);
+                let current_idx = tabs.iter().position(|t| *t == self.active_tab).unwrap_or(0);
                 let next = (current_idx.saturating_add(1)) % tabs.len();
                 self.active_tab = tabs.get(next).copied().unwrap_or(ViewTab::Results);
                 EventResult::Consumed
@@ -1478,9 +2264,10 @@ impl NetScanApp {
             }
             Key::Up => {
                 if let Some(ref idx) = self.selected_host_idx
-                    && *idx > 0 {
-                        self.selected_host_idx = Some(idx.saturating_sub(1));
-                    }
+                    && *idx > 0
+                {
+                    self.selected_host_idx = Some(idx.saturating_sub(1));
+                }
                 EventResult::Consumed
             }
             Key::Down => {
@@ -1540,8 +2327,10 @@ impl NetScanApp {
                 // Check scan button
                 let scan_btn_x = WINDOW_WIDTH - 150.0 - PADDING;
                 let scan_btn_y = TITLE_BAR_HEIGHT + PADDING;
-                if mx >= scan_btn_x && mx <= scan_btn_x + 150.0
-                    && my >= scan_btn_y && my <= scan_btn_y + BUTTON_HEIGHT
+                if mx >= scan_btn_x
+                    && mx <= scan_btn_x + 150.0
+                    && my >= scan_btn_y
+                    && my <= scan_btn_y + BUTTON_HEIGHT
                 {
                     self.start_scan();
                     return EventResult::Consumed;
@@ -1549,15 +2338,21 @@ impl NetScanApp {
 
                 // Check host row clicks in results
                 if self.active_tab == ViewTab::Results {
-                    let table_y = TITLE_BAR_HEIGHT + CONFIG_PANEL_HEIGHT + PADDING + TAB_HEIGHT + PADDING + TABLE_HEADER_HEIGHT;
+                    let table_y = TITLE_BAR_HEIGHT
+                        + CONFIG_PANEL_HEIGHT
+                        + PADDING
+                        + TAB_HEIGHT
+                        + PADDING
+                        + TABLE_HEADER_HEIGHT;
                     if my >= table_y && mx < WINDOW_WIDTH - SIDEBAR_WIDTH {
                         let row_idx = ((my - table_y) / TABLE_ROW_HEIGHT) as usize;
                         if let Some(ref result) = self.results
-                            && row_idx < result.hosts.len() {
-                                self.selected_host_idx = Some(row_idx);
-                                self.detail_port_scroll = 0.0;
-                                return EventResult::Consumed;
-                            }
+                            && row_idx < result.hosts.len()
+                        {
+                            self.selected_host_idx = Some(row_idx);
+                            self.detail_port_scroll = 0.0;
+                            return EventResult::Consumed;
+                        }
                     }
                 }
 
@@ -1565,8 +2360,10 @@ impl NetScanApp {
                 if self.active_tab == ViewTab::Results && self.results.is_some() {
                     let export_x = WINDOW_WIDTH - SIDEBAR_WIDTH + PADDING;
                     let export_y = WINDOW_HEIGHT - 50.0;
-                    if mx >= export_x && mx <= export_x + 120.0
-                        && my >= export_y && my <= export_y + BUTTON_HEIGHT
+                    if mx >= export_x
+                        && mx <= export_x + 120.0
+                        && my >= export_y
+                        && my <= export_y + BUTTON_HEIGHT
                     {
                         self.show_export_menu = !self.show_export_menu;
                         return EventResult::Consumed;
@@ -1575,8 +2372,13 @@ impl NetScanApp {
 
                 // Traceroute run button
                 if self.active_tab == ViewTab::Traceroute {
-                    let btn_y = TITLE_BAR_HEIGHT + CONFIG_PANEL_HEIGHT + TAB_HEIGHT + PADDING * 3.0 + INPUT_HEIGHT;
-                    if my >= btn_y && my <= btn_y + BUTTON_HEIGHT
+                    let btn_y = TITLE_BAR_HEIGHT
+                        + CONFIG_PANEL_HEIGHT
+                        + TAB_HEIGHT
+                        + PADDING * 3.0
+                        + INPUT_HEIGHT;
+                    if my >= btn_y
+                        && my <= btn_y + BUTTON_HEIGHT
                         && (PADDING..=PADDING + 120.0).contains(&mx)
                     {
                         self.run_traceroute();
@@ -1586,8 +2388,13 @@ impl NetScanApp {
 
                 // WHOIS run button
                 if self.active_tab == ViewTab::Whois {
-                    let btn_y = TITLE_BAR_HEIGHT + CONFIG_PANEL_HEIGHT + TAB_HEIGHT + PADDING * 3.0 + INPUT_HEIGHT;
-                    if my >= btn_y && my <= btn_y + BUTTON_HEIGHT
+                    let btn_y = TITLE_BAR_HEIGHT
+                        + CONFIG_PANEL_HEIGHT
+                        + TAB_HEIGHT
+                        + PADDING * 3.0
+                        + INPUT_HEIGHT;
+                    if my >= btn_y
+                        && my <= btn_y + BUTTON_HEIGHT
                         && (PADDING..=PADDING + 120.0).contains(&mx)
                     {
                         self.run_whois();
@@ -1599,8 +2406,10 @@ impl NetScanApp {
                 if self.active_tab == ViewTab::Results {
                     let wol_btn_x = WINDOW_WIDTH - SIDEBAR_WIDTH + PADDING;
                     let wol_btn_y = WINDOW_HEIGHT - 90.0;
-                    if mx >= wol_btn_x && mx <= wol_btn_x + 120.0
-                        && my >= wol_btn_y && my <= wol_btn_y + BUTTON_HEIGHT
+                    if mx >= wol_btn_x
+                        && mx <= wol_btn_x + 120.0
+                        && my >= wol_btn_y
+                        && my <= wol_btn_y + BUTTON_HEIGHT
                     {
                         self.send_wol();
                         return EventResult::Consumed;
@@ -1635,8 +2444,10 @@ impl NetScanApp {
 
         // Full-window background
         tree.push(RenderCommand::FillRect {
-            x: 0.0, y: 0.0,
-            width: WINDOW_WIDTH, height: WINDOW_HEIGHT,
+            x: 0.0,
+            y: 0.0,
+            width: WINDOW_WIDTH,
+            height: WINDOW_HEIGHT,
             color: BASE,
             corner_radii: CornerRadii::ZERO,
         });
@@ -1663,8 +2474,10 @@ impl NetScanApp {
     fn render_title_bar(&self, tree: &mut RenderTree) {
         // Title bar background
         tree.push(RenderCommand::FillRect {
-            x: 0.0, y: 0.0,
-            width: WINDOW_WIDTH, height: TITLE_BAR_HEIGHT,
+            x: 0.0,
+            y: 0.0,
+            width: WINDOW_WIDTH,
+            height: TITLE_BAR_HEIGHT,
             color: CRUST,
             corner_radii: CornerRadii::ZERO,
         });
@@ -1673,21 +2486,26 @@ impl NetScanApp {
         let icon_cx = 22.0;
         let icon_cy = TITLE_BAR_HEIGHT / 2.0;
         tree.push(RenderCommand::FillRect {
-            x: icon_cx - 8.0, y: icon_cy - 8.0,
-            width: 16.0, height: 16.0,
+            x: icon_cx - 8.0,
+            y: icon_cy - 8.0,
+            width: 16.0,
+            height: 16.0,
             color: BLUE,
             corner_radii: CornerRadii::all(8.0),
         });
         tree.push(RenderCommand::FillRect {
-            x: icon_cx - 3.0, y: icon_cy - 3.0,
-            width: 6.0, height: 6.0,
+            x: icon_cx - 3.0,
+            y: icon_cy - 3.0,
+            width: 6.0,
+            height: 6.0,
             color: GREEN,
             corner_radii: CornerRadii::all(3.0),
         });
 
         // Title text
         tree.push(RenderCommand::Text {
-            x: 40.0, y: 10.0,
+            x: 40.0,
+            y: 10.0,
             text: "Network Scanner".to_string(),
             color: TEXT_COLOR,
             font_size: 16.0,
@@ -1705,13 +2523,16 @@ impl NetScanApp {
         };
         let status_color = if self.is_scanning { YELLOW } else { GREEN };
         tree.push(RenderCommand::FillRect {
-            x: WINDOW_WIDTH - 200.0, y: TITLE_BAR_HEIGHT / 2.0 - 4.0,
-            width: 8.0, height: 8.0,
+            x: WINDOW_WIDTH - 200.0,
+            y: TITLE_BAR_HEIGHT / 2.0 - 4.0,
+            width: 8.0,
+            height: 8.0,
             color: status_color,
             corner_radii: CornerRadii::all(4.0),
         });
         tree.push(RenderCommand::Text {
-            x: WINDOW_WIDTH - 188.0, y: 12.0,
+            x: WINDOW_WIDTH - 188.0,
+            y: 12.0,
             text: status_text.to_string(),
             color: SUBTEXT0,
             font_size: 12.0,
@@ -1725,15 +2546,18 @@ impl NetScanApp {
 
         // Panel background
         tree.push(RenderCommand::FillRect {
-            x: 0.0, y,
-            width: WINDOW_WIDTH, height: CONFIG_PANEL_HEIGHT,
+            x: 0.0,
+            y,
+            width: WINDOW_WIDTH,
+            height: CONFIG_PANEL_HEIGHT,
             color: MANTLE,
             corner_radii: CornerRadii::ZERO,
         });
 
         // Section label
         tree.push(RenderCommand::Text {
-            x: PADDING, y: y + 8.0,
+            x: PADDING,
+            y: y + 8.0,
             text: "Scan Configuration".to_string(),
             color: LAVENDER,
             font_size: 13.0,
@@ -1750,17 +2574,24 @@ impl NetScanApp {
             let bg = if is_selected { BLUE } else { SURFACE0 };
             let fg = if is_selected { CRUST } else { TEXT_COLOR };
             tree.push(RenderCommand::FillRect {
-                x: px, y: profile_y,
-                width: pw, height: BUTTON_HEIGHT,
+                x: px,
+                y: profile_y,
+                width: pw,
+                height: BUTTON_HEIGHT,
                 color: bg,
                 corner_radii: CornerRadii::all(SMALL_RADIUS),
             });
             tree.push(RenderCommand::Text {
-                x: px + 10.0, y: profile_y + 8.0,
+                x: px + 10.0,
+                y: profile_y + 8.0,
                 text: profile.label().to_string(),
                 color: fg,
                 font_size: 12.0,
-                font_weight: if is_selected { FontWeightHint::Bold } else { FontWeightHint::Regular },
+                font_weight: if is_selected {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
                 max_width: None,
             });
             px += pw + 6.0;
@@ -1769,33 +2600,51 @@ impl NetScanApp {
         // Target input
         let input_y = profile_y + BUTTON_HEIGHT + 10.0;
         tree.push(RenderCommand::Text {
-            x: PADDING, y: input_y,
+            x: PADDING,
+            y: input_y,
             text: "Target:".to_string(),
             color: SUBTEXT0,
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
         });
-        self.render_text_field(tree, PADDING + 60.0, input_y - 2.0, 250.0, &self.config.target_input, "192.168.1.0/24");
+        self.render_text_field(
+            tree,
+            PADDING + 60.0,
+            input_y - 2.0,
+            250.0,
+            &self.config.target_input,
+            "192.168.1.0/24",
+        );
 
         // Port input (shown for custom profile)
         if self.config.profile == ScanProfile::Custom {
             tree.push(RenderCommand::Text {
-                x: PADDING + 330.0, y: input_y,
+                x: PADDING + 330.0,
+                y: input_y,
                 text: "Ports:".to_string(),
                 color: SUBTEXT0,
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
             });
-            self.render_text_field(tree, PADDING + 380.0, input_y - 2.0, 200.0, &self.config.port_input, "80,443,8080");
+            self.render_text_field(
+                tree,
+                PADDING + 380.0,
+                input_y - 2.0,
+                200.0,
+                &self.config.port_input,
+                "80,443,8080",
+            );
         }
 
         // Discovery method label
         let method_y = input_y + INPUT_HEIGHT + 6.0;
         tree.push(RenderCommand::Text {
-            x: PADDING, y: method_y,
-            text: format!("Discovery: {}  |  Timeout: {}ms  |  Concurrency: {}",
+            x: PADDING,
+            y: method_y,
+            text: format!(
+                "Discovery: {}  |  Timeout: {}ms  |  Concurrency: {}",
                 self.config.discovery_method.label(),
                 self.config.timeout_ms,
                 self.config.concurrency,
@@ -1813,16 +2662,23 @@ impl NetScanApp {
                 ScanProfile::Quick => 20u32,
                 ScanProfile::Full => 65535,
                 ScanProfile::Stealth => 20,
-                ScanProfile::Custom => {
-                    parse_port_spec(&self.config.port_input)
-                        .map(|p| p.len() as u32)
-                        .unwrap_or(20)
-                }
+                ScanProfile::Custom => parse_port_spec(&self.config.port_input)
+                    .map(|p| p.len() as u32)
+                    .unwrap_or(20),
             };
-            let est = estimate_scan_time(host_count, port_count, self.config.timeout_ms, self.config.concurrency);
+            let est = estimate_scan_time(
+                host_count,
+                port_count,
+                self.config.timeout_ms,
+                self.config.concurrency,
+            );
             tree.push(RenderCommand::Text {
-                x: PADDING + 450.0, y: method_y,
-                text: format!("Est. time: {:.1}s ({} hosts x {} ports)", est, host_count, port_count),
+                x: PADDING + 450.0,
+                y: method_y,
+                text: format!(
+                    "Est. time: {:.1}s ({} hosts x {} ports)",
+                    est, host_count, port_count
+                ),
                 color: TEAL,
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
@@ -1836,14 +2692,22 @@ impl NetScanApp {
         let btn_color = if self.is_scanning { SURFACE1 } else { GREEN };
         let btn_text_color = if self.is_scanning { SUBTEXT0 } else { CRUST };
         tree.push(RenderCommand::FillRect {
-            x: scan_btn_x, y: scan_btn_y,
-            width: 150.0, height: BUTTON_HEIGHT,
+            x: scan_btn_x,
+            y: scan_btn_y,
+            width: 150.0,
+            height: BUTTON_HEIGHT,
             color: btn_color,
             corner_radii: CornerRadii::all(SMALL_RADIUS),
         });
         tree.push(RenderCommand::Text {
-            x: scan_btn_x + 30.0, y: scan_btn_y + 9.0,
-            text: if self.is_scanning { "Scanning..." } else { "Start Scan (F5)" }.to_string(),
+            x: scan_btn_x + 30.0,
+            y: scan_btn_y + 9.0,
+            text: if self.is_scanning {
+                "Scanning..."
+            } else {
+                "Start Scan (F5)"
+            }
+            .to_string(),
             color: btn_text_color,
             font_size: 12.0,
             font_weight: FontWeightHint::Bold,
@@ -1851,24 +2715,41 @@ impl NetScanApp {
         });
     }
 
-    fn render_text_field(&self, tree: &mut RenderTree, x: f32, y: f32, width: f32, value: &str, placeholder: &str) {
+    fn render_text_field(
+        &self,
+        tree: &mut RenderTree,
+        x: f32,
+        y: f32,
+        width: f32,
+        value: &str,
+        placeholder: &str,
+    ) {
         tree.push(RenderCommand::FillRect {
-            x, y,
-            width, height: INPUT_HEIGHT,
+            x,
+            y,
+            width,
+            height: INPUT_HEIGHT,
             color: SURFACE0,
             corner_radii: CornerRadii::all(SMALL_RADIUS),
         });
         tree.push(RenderCommand::StrokeRect {
-            x, y,
-            width, height: INPUT_HEIGHT,
+            x,
+            y,
+            width,
+            height: INPUT_HEIGHT,
             color: SURFACE1,
             line_width: 1.0,
             corner_radii: CornerRadii::all(SMALL_RADIUS),
         });
         let display = if value.is_empty() { placeholder } else { value };
-        let color = if value.is_empty() { OVERLAY0 } else { TEXT_COLOR };
+        let color = if value.is_empty() {
+            OVERLAY0
+        } else {
+            TEXT_COLOR
+        };
         tree.push(RenderCommand::Text {
-            x: x + 8.0, y: y + 7.0,
+            x: x + 8.0,
+            y: y + 7.0,
             text: display.to_string(),
             color,
             font_size: 12.0,
@@ -1882,8 +2763,10 @@ impl NetScanApp {
 
         // Tab bar background
         tree.push(RenderCommand::FillRect {
-            x: 0.0, y: tab_y - 2.0,
-            width: WINDOW_WIDTH, height: TAB_HEIGHT + 4.0,
+            x: 0.0,
+            y: tab_y - 2.0,
+            width: WINDOW_WIDTH,
+            height: TAB_HEIGHT + 4.0,
             color: CRUST,
             corner_radii: CornerRadii::ZERO,
         });
@@ -1892,12 +2775,18 @@ impl NetScanApp {
         for tab in &ViewTab::ALL {
             let tw = tab_width(*tab);
             let is_active = *tab == self.active_tab;
-            let bg = if is_active { SURFACE0 } else { Color::TRANSPARENT };
+            let bg = if is_active {
+                SURFACE0
+            } else {
+                Color::TRANSPARENT
+            };
             let fg = if is_active { BLUE } else { SUBTEXT0 };
 
             tree.push(RenderCommand::FillRect {
-                x: tab_x, y: tab_y,
-                width: tw, height: TAB_HEIGHT,
+                x: tab_x,
+                y: tab_y,
+                width: tw,
+                height: TAB_HEIGHT,
                 color: bg,
                 corner_radii: CornerRadii {
                     top_left: SMALL_RADIUS,
@@ -1910,19 +2799,26 @@ impl NetScanApp {
             if is_active {
                 // Active tab underline
                 tree.push(RenderCommand::FillRect {
-                    x: tab_x, y: tab_y + TAB_HEIGHT - 2.0,
-                    width: tw, height: 2.0,
+                    x: tab_x,
+                    y: tab_y + TAB_HEIGHT - 2.0,
+                    width: tw,
+                    height: 2.0,
                     color: BLUE,
                     corner_radii: CornerRadii::ZERO,
                 });
             }
 
             tree.push(RenderCommand::Text {
-                x: tab_x + 12.0, y: tab_y + 8.0,
+                x: tab_x + 12.0,
+                y: tab_y + 8.0,
                 text: tab.label().to_string(),
                 color: fg,
                 font_size: 12.0,
-                font_weight: if is_active { FontWeightHint::Bold } else { FontWeightHint::Regular },
+                font_weight: if is_active {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
                 max_width: None,
             });
 
@@ -1948,15 +2844,20 @@ impl NetScanApp {
         let rows_y = table_top + TABLE_HEADER_HEIGHT;
         if let Some(ref result) = self.results {
             tree.push(RenderCommand::PushClip {
-                x: 0.0, y: rows_y,
+                x: 0.0,
+                y: rows_y,
                 width: table_width,
                 height: WINDOW_HEIGHT - rows_y,
             });
 
             for (i, host) in result.hosts.iter().enumerate() {
                 let row_y = rows_y + (i as f32) * TABLE_ROW_HEIGHT - self.scroll_offset;
-                if row_y + TABLE_ROW_HEIGHT < rows_y { continue; }
-                if row_y > WINDOW_HEIGHT { break; }
+                if row_y + TABLE_ROW_HEIGHT < rows_y {
+                    continue;
+                }
+                if row_y > WINDOW_HEIGHT {
+                    break;
+                }
 
                 let is_selected = self.selected_host_idx == Some(i);
                 self.render_host_row(tree, 0.0, row_y, table_width, host, is_selected, i);
@@ -1977,7 +2878,12 @@ impl NetScanApp {
                 max_width: None,
             });
             tree.push(RenderCommand::Text {
-                x: text::center_x(subline, table_width / 2.0, CHIP_TEXT, FontWeightHint::Regular),
+                x: text::center_x(
+                    subline,
+                    table_width / 2.0,
+                    CHIP_TEXT,
+                    FontWeightHint::Regular,
+                ),
                 y: rows_y + 100.0,
                 text: subline.to_string(),
                 color: SURFACE2,
@@ -1996,7 +2902,8 @@ impl NetScanApp {
         let open_ports = result.total_open_ports();
 
         tree.push(RenderCommand::Text {
-            x: PADDING, y,
+            x: PADDING,
+            y,
             text: format!(
                 "Scanned {} IPs | {} hosts up | {} open ports | {:.1}s | {}",
                 result.total_ips_scanned,
@@ -2014,39 +2921,37 @@ impl NetScanApp {
 
     fn render_table_header(&self, tree: &mut RenderTree, x: f32, y: f32, width: f32) {
         tree.push(RenderCommand::FillRect {
-            x, y,
-            width, height: TABLE_HEADER_HEIGHT,
+            x,
+            y,
+            width,
+            height: TABLE_HEADER_HEIGHT,
             color: SURFACE0,
             corner_radii: CornerRadii::ZERO,
         });
 
-        let columns = [
-            (PADDING, "Status"),
-            (60.0, "IP Address"),
-            (210.0, "Hostname"),
-            (380.0, "MAC Address"),
-            (530.0, "OS"),
-            (630.0, "Ports"),
-            (690.0, "Latency"),
-        ];
-
-        for (col_x, label) in &columns {
-            tree.push(RenderCommand::Text {
-                x: *col_x, y: y + 9.0,
-                text: label.to_string(),
-                color: LAVENDER,
-                font_size: 11.0,
-                font_weight: FontWeightHint::Bold,
-                max_width: None,
-            });
-        }
+        let columns = host_columns(width);
+        host_table(&columns, x).header_weighted(
+            &mut tree.commands,
+            y + 9.0,
+            LAVENDER,
+            HEADER_TEXT,
+            FontWeightHint::Bold,
+        );
     }
 
     // self + tree + row rect (x,y,width) + host data + selected flag + idx;
     // each is independent and used in different sub-render commands.
     #[allow(clippy::too_many_arguments)]
-    fn render_host_row(&self, tree: &mut RenderTree, x: f32, y: f32, width: f32,
-                       host: &HostResult, selected: bool, idx: usize) {
+    fn render_host_row(
+        &self,
+        tree: &mut RenderTree,
+        x: f32,
+        y: f32,
+        width: f32,
+        host: &HostResult,
+        selected: bool,
+        idx: usize,
+    ) {
         // Row background
         let bg = if selected {
             SURFACE1
@@ -2057,99 +2962,134 @@ impl NetScanApp {
         };
 
         tree.push(RenderCommand::FillRect {
-            x, y,
-            width, height: TABLE_ROW_HEIGHT,
+            x,
+            y,
+            width,
+            height: TABLE_ROW_HEIGHT,
             color: bg,
             corner_radii: CornerRadii::ZERO,
         });
 
-        // Status dot
+        let columns = host_columns(width);
+        let table = host_table(&columns, x);
+        let cmds = &mut tree.commands;
+        let text_y = y + 7.0;
+
+        // Status dot. Its inset is capped by the column, so a narrow table
+        // shrinks the dot's margin instead of pushing it into the IP address.
         let dot_color = if host.is_up { GREEN } else { RED };
-        tree.push(RenderCommand::FillRect {
-            x: PADDING + 12.0, y: y + TABLE_ROW_HEIGHT / 2.0 - 4.0,
-            width: 8.0, height: 8.0,
+        let dot_inset = DOT_INSET.min((table.width(COL_STATUS) - DOT_SIZE).max(0.0));
+        cmds.push(RenderCommand::FillRect {
+            x: table.left(COL_STATUS) + dot_inset,
+            y: y + TABLE_ROW_HEIGHT / 2.0 - DOT_SIZE / 2.0,
+            width: DOT_SIZE,
+            height: DOT_SIZE,
             color: dot_color,
-            corner_radii: CornerRadii::all(4.0),
+            corner_radii: CornerRadii::all(DOT_SIZE / 2.0),
         });
 
-        // IP Address
-        tree.push(RenderCommand::Text {
-            x: 60.0, y: y + 7.0,
-            text: host.ip.display(),
-            color: TEXT_COLOR,
-            font_size: 12.0,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(140.0),
-        });
+        // IP address. Hosts on one subnet share a long prefix and differ in
+        // the last octet, so a cut has to come off the front to leave the
+        // rows telling each other apart.
+        table.cell(
+            cmds,
+            COL_IP,
+            text_y,
+            &host.ip.display(),
+            TEXT_COLOR,
+            BODY_TEXT,
+            Fit::End,
+        );
 
-        // Hostname
+        // Hostname — reverse DNS, so this is the one column holding a string
+        // the network chose rather than the app. It is also the one that
+        // reads left-to-right: `desktop-01.corp.example.com` and
+        // `desktop-02.corp.example.com` differ at the *start*, so unlike the
+        // address above, the cut belongs at the end.
         let hostname = host.hostname.clone().unwrap_or_else(|| "-".to_string());
-        tree.push(RenderCommand::Text {
-            x: 210.0, y: y + 7.0,
-            text: hostname,
-            color: SUBTEXT0,
-            font_size: 12.0,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(160.0),
-        });
+        table.cell(
+            cmds,
+            COL_HOSTNAME,
+            text_y,
+            &hostname,
+            SUBTEXT0,
+            BODY_TEXT,
+            Fit::Start,
+        );
 
-        // MAC
-        let mac_str = host.mac.map(|m| m.display()).unwrap_or_else(|| "-".to_string());
-        tree.push(RenderCommand::Text {
-            x: 380.0, y: y + 7.0,
-            text: mac_str,
-            color: SUBTEXT0,
-            font_size: 11.0,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(140.0),
-        });
+        // MAC — the leading bytes are the vendor OUI and repeat across a
+        // vendor's devices; the tail is what identifies the host.
+        let mac_str = host
+            .mac
+            .map(|m| m.display())
+            .unwrap_or_else(|| "-".to_string());
+        table.cell(
+            cmds,
+            COL_MAC,
+            text_y,
+            &mac_str,
+            SUBTEXT0,
+            SMALL_TEXT,
+            Fit::End,
+        );
 
-        // OS
-        tree.push(RenderCommand::Text {
-            x: 530.0, y: y + 7.0,
-            text: host.os_guess.label().to_string(),
-            color: PEACH,
-            font_size: 11.0,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(90.0),
-        });
+        table.cell(
+            cmds,
+            COL_OS,
+            text_y,
+            host.os_guess.label(),
+            PEACH,
+            SMALL_TEXT,
+            Fit::Start,
+        );
 
         // Open ports count
         let open_count = host.open_port_count();
-        let port_color = if open_count > 5 { YELLOW } else if open_count > 0 { GREEN } else { OVERLAY0 };
-        tree.push(RenderCommand::Text {
-            x: 630.0, y: y + 7.0,
-            text: format!("{}", open_count),
-            color: port_color,
-            font_size: 12.0,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-        });
+        let port_color = if open_count > 5 {
+            YELLOW
+        } else if open_count > 0 {
+            GREEN
+        } else {
+            OVERLAY0
+        };
+        table.cell(
+            cmds,
+            COL_PORTS,
+            text_y,
+            &open_count.to_string(),
+            port_color,
+            BODY_TEXT,
+            Fit::Start,
+        );
 
-        // Latency
-        tree.push(RenderCommand::Text {
-            x: 690.0, y: y + 7.0,
-            text: format!("{:.1}ms", host.latency_ms),
-            color: SUBTEXT0,
-            font_size: 11.0,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-        });
+        table.cell(
+            cmds,
+            COL_LATENCY,
+            text_y,
+            &format!("{:.1}ms", host.latency_ms),
+            SUBTEXT0,
+            SMALL_TEXT,
+            Fit::Start,
+        );
     }
 
     fn render_sidebar(&self, tree: &mut RenderTree, x: f32, top_y: f32) {
         // Sidebar background
         tree.push(RenderCommand::FillRect {
-            x, y: top_y,
-            width: SIDEBAR_WIDTH, height: WINDOW_HEIGHT - top_y,
+            x,
+            y: top_y,
+            width: SIDEBAR_WIDTH,
+            height: WINDOW_HEIGHT - top_y,
             color: MANTLE,
             corner_radii: CornerRadii::ZERO,
         });
 
         // Left border
         tree.push(RenderCommand::FillRect {
-            x, y: top_y,
-            width: 1.0, height: WINDOW_HEIGHT - top_y,
+            x,
+            y: top_y,
+            width: 1.0,
+            height: WINDOW_HEIGHT - top_y,
             color: SURFACE0,
             corner_radii: CornerRadii::ZERO,
         });
@@ -2159,7 +3099,8 @@ impl NetScanApp {
         } else {
             // Overview panel
             tree.push(RenderCommand::Text {
-                x: x + PADDING, y: top_y + PADDING,
+                x: x + PADDING,
+                y: top_y + PADDING,
                 text: "Host Details".to_string(),
                 color: LAVENDER,
                 font_size: 14.0,
@@ -2167,7 +3108,8 @@ impl NetScanApp {
                 max_width: None,
             });
             tree.push(RenderCommand::Text {
-                x: x + PADDING, y: top_y + PADDING + 24.0,
+                x: x + PADDING,
+                y: top_y + PADDING + 24.0,
                 text: "Select a host to view details".to_string(),
                 color: OVERLAY0,
                 font_size: 12.0,
@@ -2178,26 +3120,42 @@ impl NetScanApp {
             // WOL section
             let wol_y = WINDOW_HEIGHT - 100.0;
             tree.push(RenderCommand::Text {
-                x: x + PADDING, y: wol_y,
+                x: x + PADDING,
+                y: wol_y,
                 text: "Wake-on-LAN".to_string(),
                 color: LAVENDER,
                 font_size: 12.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
             });
-            self.render_text_field(tree, x + PADDING, wol_y + 18.0, SIDEBAR_WIDTH - PADDING * 3.0, &self.wol_target_mac, "AA:BB:CC:DD:EE:FF");
+            self.render_text_field(
+                tree,
+                x + PADDING,
+                wol_y + 18.0,
+                SIDEBAR_WIDTH - PADDING * 3.0,
+                &self.wol_target_mac,
+                "AA:BB:CC:DD:EE:FF",
+            );
 
             // WOL Send button
             let wol_btn_y = wol_y + 50.0;
             tree.push(RenderCommand::FillRect {
-                x: x + PADDING, y: wol_btn_y,
-                width: 120.0, height: BUTTON_HEIGHT,
+                x: x + PADDING,
+                y: wol_btn_y,
+                width: 120.0,
+                height: BUTTON_HEIGHT,
                 color: MAUVE,
                 corner_radii: CornerRadii::all(SMALL_RADIUS),
             });
             tree.push(RenderCommand::Text {
-                x: x + PADDING + 20.0, y: wol_btn_y + 9.0,
-                text: if self.wol_sent { "Packet Sent!" } else { "Send WOL" }.to_string(),
+                x: x + PADDING + 20.0,
+                y: wol_btn_y + 9.0,
+                text: if self.wol_sent {
+                    "Packet Sent!"
+                } else {
+                    "Send WOL"
+                }
+                .to_string(),
                 color: CRUST,
                 font_size: 12.0,
                 font_weight: FontWeightHint::Bold,
@@ -2208,13 +3166,16 @@ impl NetScanApp {
             let export_y = WINDOW_HEIGHT - 50.0;
             if self.results.is_some() {
                 tree.push(RenderCommand::FillRect {
-                    x: x + PADDING, y: export_y,
-                    width: 120.0, height: BUTTON_HEIGHT,
+                    x: x + PADDING,
+                    y: export_y,
+                    width: 120.0,
+                    height: BUTTON_HEIGHT,
                     color: TEAL,
                     corner_radii: CornerRadii::all(SMALL_RADIUS),
                 });
                 tree.push(RenderCommand::Text {
-                    x: x + PADDING + 20.0, y: export_y + 9.0,
+                    x: x + PADDING + 20.0,
+                    y: export_y + 9.0,
                     text: "Export...".to_string(),
                     color: CRUST,
                     font_size: 12.0,
@@ -2227,21 +3188,28 @@ impl NetScanApp {
             if self.show_export_menu {
                 let menu_y = export_y - 60.0;
                 tree.push(RenderCommand::BoxShadow {
-                    x: x + PADDING, y: menu_y,
-                    width: 120.0, height: 56.0,
-                    offset_x: 0.0, offset_y: 2.0,
-                    blur: 8.0, spread: 0.0,
+                    x: x + PADDING,
+                    y: menu_y,
+                    width: 120.0,
+                    height: 56.0,
+                    offset_x: 0.0,
+                    offset_y: 2.0,
+                    blur: 8.0,
+                    spread: 0.0,
                     color: Color::rgba(0, 0, 0, 120),
                     corner_radii: CornerRadii::all(SMALL_RADIUS),
                 });
                 tree.push(RenderCommand::FillRect {
-                    x: x + PADDING, y: menu_y,
-                    width: 120.0, height: 56.0,
+                    x: x + PADDING,
+                    y: menu_y,
+                    width: 120.0,
+                    height: 56.0,
                     color: SURFACE0,
                     corner_radii: CornerRadii::all(SMALL_RADIUS),
                 });
                 tree.push(RenderCommand::Text {
-                    x: x + PADDING + 10.0, y: menu_y + 8.0,
+                    x: x + PADDING + 10.0,
+                    y: menu_y + 8.0,
                     text: "Export as CSV".to_string(),
                     color: TEXT_COLOR,
                     font_size: 12.0,
@@ -2249,7 +3217,8 @@ impl NetScanApp {
                     max_width: None,
                 });
                 tree.push(RenderCommand::Text {
-                    x: x + PADDING + 10.0, y: menu_y + 32.0,
+                    x: x + PADDING + 10.0,
+                    y: menu_y + 32.0,
                     text: "Export as JSON".to_string(),
                     color: TEXT_COLOR,
                     font_size: 12.0,
@@ -2265,7 +3234,8 @@ impl NetScanApp {
 
         // Host title
         tree.push(RenderCommand::Text {
-            x, y,
+            x,
+            y,
             text: host.display_hostname(),
             color: BLUE,
             font_size: 14.0,
@@ -2278,9 +3248,20 @@ impl NetScanApp {
         // Detail fields
         let fields = [
             ("IP Address:", host.ip.display()),
-            ("Hostname:", host.hostname.clone().unwrap_or_else(|| "N/A".to_string())),
-            ("MAC:", host.mac.map(|m| m.display()).unwrap_or_else(|| "N/A".to_string())),
-            ("Vendor:", host.vendor.clone().unwrap_or_else(|| "Unknown".to_string())),
+            (
+                "Hostname:",
+                host.hostname.clone().unwrap_or_else(|| "N/A".to_string()),
+            ),
+            (
+                "MAC:",
+                host.mac
+                    .map(|m| m.display())
+                    .unwrap_or_else(|| "N/A".to_string()),
+            ),
+            (
+                "Vendor:",
+                host.vendor.clone().unwrap_or_else(|| "Unknown".to_string()),
+            ),
             ("OS Guess:", host.os_guess.label().to_string()),
             ("TTL:", host.ttl.to_string()),
             ("Latency:", format!("{:.1} ms", host.latency_ms)),
@@ -2289,7 +3270,8 @@ impl NetScanApp {
 
         for (label, value) in &fields {
             tree.push(RenderCommand::Text {
-                x, y: dy,
+                x,
+                y: dy,
                 text: label.to_string(),
                 color: OVERLAY0,
                 font_size: 11.0,
@@ -2297,7 +3279,8 @@ impl NetScanApp {
                 max_width: None,
             });
             tree.push(RenderCommand::Text {
-                x: x + 85.0, y: dy,
+                x: x + 85.0,
+                y: dy,
                 text: value.to_string(),
                 color: TEXT_COLOR,
                 font_size: 11.0,
@@ -2310,14 +3293,17 @@ impl NetScanApp {
         // Port list header
         dy += 8.0;
         tree.push(RenderCommand::FillRect {
-            x, y: dy,
-            width: w, height: 1.0,
+            x,
+            y: dy,
+            width: w,
+            height: 1.0,
             color: SURFACE1,
             corner_radii: CornerRadii::ZERO,
         });
         dy += 6.0;
         tree.push(RenderCommand::Text {
-            x, y: dy,
+            x,
+            y: dy,
             text: "Port Details".to_string(),
             color: LAVENDER,
             font_size: 12.0,
@@ -2328,30 +3314,38 @@ impl NetScanApp {
 
         // Port mini-table header
         tree.push(RenderCommand::Text {
-            x, y: dy,
+            x,
+            y: dy,
             text: "Port".to_string(),
-            color: OVERLAY0, font_size: 10.0,
+            color: OVERLAY0,
+            font_size: 10.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
         });
         tree.push(RenderCommand::Text {
-            x: x + 55.0, y: dy,
+            x: x + 55.0,
+            y: dy,
             text: "State".to_string(),
-            color: OVERLAY0, font_size: 10.0,
+            color: OVERLAY0,
+            font_size: 10.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
         });
         tree.push(RenderCommand::Text {
-            x: x + 115.0, y: dy,
+            x: x + 115.0,
+            y: dy,
             text: "Service".to_string(),
-            color: OVERLAY0, font_size: 10.0,
+            color: OVERLAY0,
+            font_size: 10.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
         });
         tree.push(RenderCommand::Text {
-            x: x + 200.0, y: dy,
+            x: x + 200.0,
+            y: dy,
             text: "Response".to_string(),
-            color: OVERLAY0, font_size: 10.0,
+            color: OVERLAY0,
+            font_size: 10.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
         });
@@ -2360,40 +3354,54 @@ impl NetScanApp {
         // Clipped port list
         let clip_height = WINDOW_HEIGHT - dy - 20.0;
         tree.push(RenderCommand::PushClip {
-            x, y: dy,
-            width: w, height: clip_height.max(0.0),
+            x,
+            y: dy,
+            width: w,
+            height: clip_height.max(0.0),
         });
 
         for port in &host.ports {
             let port_y = dy - self.detail_port_scroll;
-            if port_y + 16.0 < dy { continue; }
-            if port_y > dy + clip_height { break; }
+            if port_y + 16.0 < dy {
+                continue;
+            }
+            if port_y > dy + clip_height {
+                break;
+            }
 
             tree.push(RenderCommand::Text {
-                x, y: port_y,
+                x,
+                y: port_y,
                 text: port.port.to_string(),
-                color: TEXT_COLOR, font_size: 10.0,
+                color: TEXT_COLOR,
+                font_size: 10.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
             });
             tree.push(RenderCommand::Text {
-                x: x + 55.0, y: port_y,
+                x: x + 55.0,
+                y: port_y,
                 text: port.state.label().to_string(),
-                color: port.state.color(), font_size: 10.0,
+                color: port.state.color(),
+                font_size: 10.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
             });
             tree.push(RenderCommand::Text {
-                x: x + 115.0, y: port_y,
+                x: x + 115.0,
+                y: port_y,
                 text: port.service.clone().unwrap_or_else(|| "-".to_string()),
-                color: SUBTEXT0, font_size: 10.0,
+                color: SUBTEXT0,
+                font_size: 10.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(80.0),
             });
             tree.push(RenderCommand::Text {
-                x: x + 200.0, y: port_y,
+                x: x + 200.0,
+                y: port_y,
                 text: format!("{:.1}ms", port.response_ms),
-                color: SUBTEXT0, font_size: 10.0,
+                color: SUBTEXT0,
+                font_size: 10.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
             });
@@ -2401,7 +3409,8 @@ impl NetScanApp {
             // Show banner if present
             if let Some(ref banner) = port.banner {
                 let banner_line = if banner.len() > 35 {
-                    let end = banner.char_indices()
+                    let end = banner
+                        .char_indices()
                         .nth(35)
                         .map(|(i, _)| i)
                         .unwrap_or(banner.len());
@@ -2426,14 +3435,17 @@ impl NetScanApp {
 
         // Background
         tree.push(RenderCommand::FillRect {
-            x: PADDING, y: content_y,
-            width: area_w, height: area_h,
+            x: PADDING,
+            y: content_y,
+            width: area_w,
+            height: area_h,
             color: CRUST,
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
 
         tree.push(RenderCommand::Text {
-            x: PADDING + 12.0, y: content_y + 12.0,
+            x: PADDING + 12.0,
+            y: content_y + 12.0,
             text: "Network Topology".to_string(),
             color: LAVENDER,
             font_size: 14.0,
@@ -2462,13 +3474,16 @@ impl NetScanApp {
             let gateway_size = 36.0;
 
             tree.push(RenderCommand::FillRect {
-                x: center_x - gateway_size / 2.0, y: center_y - gateway_size / 2.0,
-                width: gateway_size, height: gateway_size,
+                x: center_x - gateway_size / 2.0,
+                y: center_y - gateway_size / 2.0,
+                width: gateway_size,
+                height: gateway_size,
                 color: PEACH,
                 corner_radii: CornerRadii::all(gateway_size / 2.0),
             });
             tree.push(RenderCommand::Text {
-                x: center_x - 20.0, y: center_y + gateway_size / 2.0 + 4.0,
+                x: center_x - 20.0,
+                y: center_y + gateway_size / 2.0 + 4.0,
                 text: "Gateway".to_string(),
                 color: PEACH,
                 font_size: 10.0,
@@ -2492,8 +3507,10 @@ impl NetScanApp {
 
                 // Line from gateway to node
                 tree.push(RenderCommand::Line {
-                    x1: center_x, y1: center_y + gateway_size / 2.0,
-                    x2: node_x, y2: node_y - node_size / 2.0,
+                    x1: center_x,
+                    y1: center_y + gateway_size / 2.0,
+                    x2: node_x,
+                    y2: node_y - node_size / 2.0,
                     color: SURFACE2,
                     width: 1.0,
                 });
@@ -2510,8 +3527,10 @@ impl NetScanApp {
                 };
 
                 tree.push(RenderCommand::FillRect {
-                    x: node_x - node_size / 2.0, y: node_y - node_size / 2.0,
-                    width: node_size, height: node_size,
+                    x: node_x - node_size / 2.0,
+                    y: node_y - node_size / 2.0,
+                    width: node_size,
+                    height: node_size,
                     color: node_color,
                     corner_radii: CornerRadii::all(node_size / 2.0),
                 });
@@ -2519,7 +3538,8 @@ impl NetScanApp {
                 // IP label
                 let short_ip = format!(".{}", host.ip.octets[3]);
                 tree.push(RenderCommand::Text {
-                    x: node_x - 12.0, y: node_y + node_size / 2.0 + 2.0,
+                    x: node_x - 12.0,
+                    y: node_y + node_size / 2.0 + 2.0,
                     text: short_ip,
                     color: SUBTEXT0,
                     font_size: 9.0,
@@ -2531,19 +3551,26 @@ impl NetScanApp {
             // Legend
             let legend_y = content_y + area_h - 50.0;
             let legend_items = [
-                (GREEN, "Linux"), (BLUE, "Windows"), (MAUVE, "macOS"),
-                (PEACH, "Router"), (YELLOW, "Printer"), (TEAL, "IoT"),
+                (GREEN, "Linux"),
+                (BLUE, "Windows"),
+                (MAUVE, "macOS"),
+                (PEACH, "Router"),
+                (YELLOW, "Printer"),
+                (TEAL, "IoT"),
             ];
             let mut lx = PADDING + 12.0;
             for (color, label) in &legend_items {
                 tree.push(RenderCommand::FillRect {
-                    x: lx, y: legend_y,
-                    width: 10.0, height: 10.0,
+                    x: lx,
+                    y: legend_y,
+                    width: 10.0,
+                    height: 10.0,
                     color: *color,
                     corner_radii: CornerRadii::all(5.0),
                 });
                 tree.push(RenderCommand::Text {
-                    x: lx + 14.0, y: legend_y - 1.0,
+                    x: lx + 14.0,
+                    y: legend_y - 1.0,
                     text: label.to_string(),
                     color: SUBTEXT0,
                     font_size: LEGEND_TEXT,
@@ -2571,7 +3598,8 @@ impl NetScanApp {
         let content_y = TITLE_BAR_HEIGHT + CONFIG_PANEL_HEIGHT + PADDING + TAB_HEIGHT + PADDING;
 
         tree.push(RenderCommand::Text {
-            x: PADDING, y: content_y,
+            x: PADDING,
+            y: content_y,
             text: "Scan History".to_string(),
             color: LAVENDER,
             font_size: 14.0,
@@ -2581,7 +3609,8 @@ impl NetScanApp {
 
         if self.history.is_empty() {
             tree.push(RenderCommand::Text {
-                x: PADDING, y: content_y + 30.0,
+                x: PADDING,
+                y: content_y + 30.0,
                 text: "No scan history yet".to_string(),
                 color: OVERLAY0,
                 font_size: 12.0,
@@ -2594,8 +3623,10 @@ impl NetScanApp {
         // History table header
         let header_y = content_y + 24.0;
         tree.push(RenderCommand::FillRect {
-            x: PADDING, y: header_y,
-            width: WINDOW_WIDTH - PADDING * 2.0, height: TABLE_HEADER_HEIGHT,
+            x: PADDING,
+            y: header_y,
+            width: WINDOW_WIDTH - PADDING * 2.0,
+            height: TABLE_HEADER_HEIGHT,
             color: SURFACE0,
             corner_radii: CornerRadii::ZERO,
         });
@@ -2611,7 +3642,8 @@ impl NetScanApp {
         ];
         for (cx, label) in &hist_cols {
             tree.push(RenderCommand::Text {
-                x: *cx, y: header_y + 9.0,
+                x: *cx,
+                y: header_y + 9.0,
                 text: label.to_string(),
                 color: LAVENDER,
                 font_size: 11.0,
@@ -2624,57 +3656,86 @@ impl NetScanApp {
         let rows_y = header_y + TABLE_HEADER_HEIGHT;
         for (i, entry) in self.history.iter().enumerate() {
             let row_y = rows_y + (i as f32) * TABLE_ROW_HEIGHT;
-            if row_y > WINDOW_HEIGHT { break; }
+            if row_y > WINDOW_HEIGHT {
+                break;
+            }
 
-            let bg = if i % 2 == 0 { BASE } else { Color::rgba(49, 50, 68, 80) };
+            let bg = if i % 2 == 0 {
+                BASE
+            } else {
+                Color::rgba(49, 50, 68, 80)
+            };
             tree.push(RenderCommand::FillRect {
-                x: PADDING, y: row_y,
-                width: WINDOW_WIDTH - PADDING * 2.0, height: TABLE_ROW_HEIGHT,
+                x: PADDING,
+                y: row_y,
+                width: WINDOW_WIDTH - PADDING * 2.0,
+                height: TABLE_ROW_HEIGHT,
                 color: bg,
                 corner_radii: CornerRadii::ZERO,
             });
 
             tree.push(RenderCommand::Text {
-                x: PADDING + 4.0, y: row_y + 7.0,
+                x: PADDING + 4.0,
+                y: row_y + 7.0,
                 text: entry.id.to_string(),
-                color: OVERLAY0, font_size: 11.0,
-                font_weight: FontWeightHint::Regular, max_width: None,
+                color: OVERLAY0,
+                font_size: 11.0,
+                font_weight: FontWeightHint::Regular,
+                max_width: None,
             });
             tree.push(RenderCommand::Text {
-                x: PADDING + 40.0, y: row_y + 7.0,
+                x: PADDING + 40.0,
+                y: row_y + 7.0,
                 text: entry.timestamp.clone(),
-                color: SUBTEXT0, font_size: 11.0,
-                font_weight: FontWeightHint::Regular, max_width: Some(160.0),
+                color: SUBTEXT0,
+                font_size: 11.0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(160.0),
             });
             tree.push(RenderCommand::Text {
-                x: PADDING + 210.0, y: row_y + 7.0,
+                x: PADDING + 210.0,
+                y: row_y + 7.0,
                 text: entry.target_description.clone(),
-                color: TEXT_COLOR, font_size: 11.0,
-                font_weight: FontWeightHint::Regular, max_width: Some(180.0),
+                color: TEXT_COLOR,
+                font_size: 11.0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(180.0),
             });
             tree.push(RenderCommand::Text {
-                x: PADDING + 400.0, y: row_y + 7.0,
+                x: PADDING + 400.0,
+                y: row_y + 7.0,
                 text: entry.profile.label().to_string(),
-                color: PEACH, font_size: 11.0,
-                font_weight: FontWeightHint::Regular, max_width: None,
+                color: PEACH,
+                font_size: 11.0,
+                font_weight: FontWeightHint::Regular,
+                max_width: None,
             });
             tree.push(RenderCommand::Text {
-                x: PADDING + 510.0, y: row_y + 7.0,
+                x: PADDING + 510.0,
+                y: row_y + 7.0,
                 text: entry.hosts_up().to_string(),
-                color: GREEN, font_size: 11.0,
-                font_weight: FontWeightHint::Regular, max_width: None,
+                color: GREEN,
+                font_size: 11.0,
+                font_weight: FontWeightHint::Regular,
+                max_width: None,
             });
             tree.push(RenderCommand::Text {
-                x: PADDING + 600.0, y: row_y + 7.0,
+                x: PADDING + 600.0,
+                y: row_y + 7.0,
                 text: entry.total_open_ports().to_string(),
-                color: YELLOW, font_size: 11.0,
-                font_weight: FontWeightHint::Regular, max_width: None,
+                color: YELLOW,
+                font_size: 11.0,
+                font_weight: FontWeightHint::Regular,
+                max_width: None,
             });
             tree.push(RenderCommand::Text {
-                x: PADDING + 700.0, y: row_y + 7.0,
+                x: PADDING + 700.0,
+                y: row_y + 7.0,
                 text: format!("{:.1}s", entry.duration_secs),
-                color: SUBTEXT0, font_size: 11.0,
-                font_weight: FontWeightHint::Regular, max_width: None,
+                color: SUBTEXT0,
+                font_size: 11.0,
+                font_weight: FontWeightHint::Regular,
+                max_width: None,
             });
         }
 
@@ -2687,9 +3748,18 @@ impl NetScanApp {
                 if let (Some(new_scan), Some(old_scan)) = (newest, previous) {
                     let (added, removed) = diff_scans(old_scan, new_scan);
                     tree.push(RenderCommand::Text {
-                        x: PADDING, y: diff_y,
-                        text: format!("Diff vs previous: +{} new hosts, -{} missing hosts", added.len(), removed.len()),
-                        color: if added.is_empty() && removed.is_empty() { OVERLAY0 } else { YELLOW },
+                        x: PADDING,
+                        y: diff_y,
+                        text: format!(
+                            "Diff vs previous: +{} new hosts, -{} missing hosts",
+                            added.len(),
+                            removed.len()
+                        ),
+                        color: if added.is_empty() && removed.is_empty() {
+                            OVERLAY0
+                        } else {
+                            YELLOW
+                        },
                         font_size: 12.0,
                         font_weight: FontWeightHint::Bold,
                         max_width: None,
@@ -2703,7 +3773,8 @@ impl NetScanApp {
         let content_y = TITLE_BAR_HEIGHT + CONFIG_PANEL_HEIGHT + PADDING + TAB_HEIGHT + PADDING;
 
         tree.push(RenderCommand::Text {
-            x: PADDING, y: content_y,
+            x: PADDING,
+            y: content_y,
             text: "Traceroute".to_string(),
             color: LAVENDER,
             font_size: 14.0,
@@ -2714,25 +3785,36 @@ impl NetScanApp {
         // Target input
         let input_y = content_y + 22.0;
         tree.push(RenderCommand::Text {
-            x: PADDING, y: input_y + 5.0,
+            x: PADDING,
+            y: input_y + 5.0,
             text: "Target:".to_string(),
             color: SUBTEXT0,
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
         });
-        self.render_text_field(tree, PADDING + 60.0, input_y, 200.0, &self.traceroute_target, "8.8.8.8");
+        self.render_text_field(
+            tree,
+            PADDING + 60.0,
+            input_y,
+            200.0,
+            &self.traceroute_target,
+            "8.8.8.8",
+        );
 
         // Run button
         let btn_y = input_y + INPUT_HEIGHT + 8.0;
         tree.push(RenderCommand::FillRect {
-            x: PADDING, y: btn_y,
-            width: 120.0, height: BUTTON_HEIGHT,
+            x: PADDING,
+            y: btn_y,
+            width: 120.0,
+            height: BUTTON_HEIGHT,
             color: BLUE,
             corner_radii: CornerRadii::all(SMALL_RADIUS),
         });
         tree.push(RenderCommand::Text {
-            x: PADDING + 16.0, y: btn_y + 9.0,
+            x: PADDING + 16.0,
+            y: btn_y + 9.0,
             text: "Run Traceroute".to_string(),
             color: CRUST,
             font_size: 12.0,
@@ -2746,8 +3828,10 @@ impl NetScanApp {
 
             // Header
             tree.push(RenderCommand::FillRect {
-                x: PADDING, y: table_y,
-                width: WINDOW_WIDTH - PADDING * 2.0, height: TABLE_HEADER_HEIGHT,
+                x: PADDING,
+                y: table_y,
+                width: WINDOW_WIDTH - PADDING * 2.0,
+                height: TABLE_HEADER_HEIGHT,
                 color: SURFACE0,
                 corner_radii: CornerRadii::ZERO,
             });
@@ -2759,59 +3843,88 @@ impl NetScanApp {
             ];
             for (cx, label) in &hop_cols {
                 tree.push(RenderCommand::Text {
-                    x: *cx, y: table_y + 9.0,
+                    x: *cx,
+                    y: table_y + 9.0,
                     text: label.to_string(),
-                    color: LAVENDER, font_size: 11.0,
-                    font_weight: FontWeightHint::Bold, max_width: None,
+                    color: LAVENDER,
+                    font_size: 11.0,
+                    font_weight: FontWeightHint::Bold,
+                    max_width: None,
                 });
             }
 
             let rows_y = table_y + TABLE_HEADER_HEIGHT;
             for (i, hop) in hops.iter().enumerate() {
                 let row_y = rows_y + (i as f32) * TABLE_ROW_HEIGHT;
-                if row_y > WINDOW_HEIGHT { break; }
+                if row_y > WINDOW_HEIGHT {
+                    break;
+                }
 
-                let bg = if i % 2 == 0 { BASE } else { Color::rgba(49, 50, 68, 80) };
+                let bg = if i % 2 == 0 {
+                    BASE
+                } else {
+                    Color::rgba(49, 50, 68, 80)
+                };
                 tree.push(RenderCommand::FillRect {
-                    x: PADDING, y: row_y,
-                    width: WINDOW_WIDTH - PADDING * 2.0, height: TABLE_ROW_HEIGHT,
+                    x: PADDING,
+                    y: row_y,
+                    width: WINDOW_WIDTH - PADDING * 2.0,
+                    height: TABLE_ROW_HEIGHT,
                     color: bg,
                     corner_radii: CornerRadii::ZERO,
                 });
 
                 tree.push(RenderCommand::Text {
-                    x: PADDING + 4.0, y: row_y + 7.0,
+                    x: PADDING + 4.0,
+                    y: row_y + 7.0,
                     text: hop.hop_number.to_string(),
-                    color: OVERLAY0, font_size: 11.0,
-                    font_weight: FontWeightHint::Regular, max_width: None,
+                    color: OVERLAY0,
+                    font_size: 11.0,
+                    font_weight: FontWeightHint::Regular,
+                    max_width: None,
                 });
 
                 if hop.timed_out {
                     tree.push(RenderCommand::Text {
-                        x: PADDING + 50.0, y: row_y + 7.0,
+                        x: PADDING + 50.0,
+                        y: row_y + 7.0,
                         text: "* * * (timed out)".to_string(),
-                        color: RED, font_size: 11.0,
-                        font_weight: FontWeightHint::Regular, max_width: None,
+                        color: RED,
+                        font_size: 11.0,
+                        font_weight: FontWeightHint::Regular,
+                        max_width: None,
                     });
                 } else {
-                    let ip_str = hop.ip.map(|ip| ip.display()).unwrap_or_else(|| "???".to_string());
+                    let ip_str = hop
+                        .ip
+                        .map(|ip| ip.display())
+                        .unwrap_or_else(|| "???".to_string());
                     tree.push(RenderCommand::Text {
-                        x: PADDING + 50.0, y: row_y + 7.0,
+                        x: PADDING + 50.0,
+                        y: row_y + 7.0,
                         text: ip_str,
-                        color: TEXT_COLOR, font_size: 11.0,
-                        font_weight: FontWeightHint::Regular, max_width: None,
+                        color: TEXT_COLOR,
+                        font_size: 11.0,
+                        font_weight: FontWeightHint::Regular,
+                        max_width: None,
                     });
                     tree.push(RenderCommand::Text {
-                        x: PADDING + 220.0, y: row_y + 7.0,
+                        x: PADDING + 220.0,
+                        y: row_y + 7.0,
                         text: hop.hostname.clone().unwrap_or_else(|| "-".to_string()),
-                        color: SUBTEXT0, font_size: 11.0,
-                        font_weight: FontWeightHint::Regular, max_width: Some(220.0),
+                        color: SUBTEXT0,
+                        font_size: 11.0,
+                        font_weight: FontWeightHint::Regular,
+                        max_width: Some(220.0),
                     });
                     tree.push(RenderCommand::Text {
-                        x: PADDING + 450.0, y: row_y + 7.0,
+                        x: PADDING + 450.0,
+                        y: row_y + 7.0,
                         text: format!("{:.1} ms", hop.rtt_ms),
-                        color: TEAL, font_size: 11.0,
-                        font_weight: FontWeightHint::Regular, max_width: None,
+                        color: TEAL,
+                        font_size: 11.0,
+                        font_weight: FontWeightHint::Regular,
+                        max_width: None,
                     });
                 }
 
@@ -2820,8 +3933,10 @@ impl NetScanApp {
                     let bar_max = 200.0;
                     let bar_width = (hop.rtt_ms / 100.0 * bar_max).clamp(2.0, bar_max);
                     tree.push(RenderCommand::FillRect {
-                        x: PADDING + 530.0, y: row_y + 8.0,
-                        width: bar_width, height: 12.0,
+                        x: PADDING + 530.0,
+                        y: row_y + 8.0,
+                        width: bar_width,
+                        height: 12.0,
                         color: Color::rgba(137, 180, 250, 120),
                         corner_radii: CornerRadii::all(2.0),
                     });
@@ -2834,7 +3949,8 @@ impl NetScanApp {
         let content_y = TITLE_BAR_HEIGHT + CONFIG_PANEL_HEIGHT + PADDING + TAB_HEIGHT + PADDING;
 
         tree.push(RenderCommand::Text {
-            x: PADDING, y: content_y,
+            x: PADDING,
+            y: content_y,
             text: "WHOIS Lookup".to_string(),
             color: LAVENDER,
             font_size: 14.0,
@@ -2845,25 +3961,36 @@ impl NetScanApp {
         // Target input
         let input_y = content_y + 22.0;
         tree.push(RenderCommand::Text {
-            x: PADDING, y: input_y + 5.0,
+            x: PADDING,
+            y: input_y + 5.0,
             text: "IP:".to_string(),
             color: SUBTEXT0,
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
         });
-        self.render_text_field(tree, PADDING + 30.0, input_y, 200.0, &self.whois_target, "8.8.8.8");
+        self.render_text_field(
+            tree,
+            PADDING + 30.0,
+            input_y,
+            200.0,
+            &self.whois_target,
+            "8.8.8.8",
+        );
 
         // Run button
         let btn_y = input_y + INPUT_HEIGHT + 8.0;
         tree.push(RenderCommand::FillRect {
-            x: PADDING, y: btn_y,
-            width: 120.0, height: BUTTON_HEIGHT,
+            x: PADDING,
+            y: btn_y,
+            width: 120.0,
+            height: BUTTON_HEIGHT,
             color: MAUVE,
             corner_radii: CornerRadii::all(SMALL_RADIUS),
         });
         tree.push(RenderCommand::Text {
-            x: PADDING + 18.0, y: btn_y + 9.0,
+            x: PADDING + 18.0,
+            y: btn_y + 9.0,
             text: "Lookup WHOIS".to_string(),
             color: CRUST,
             font_size: 12.0,
@@ -2876,14 +4003,18 @@ impl NetScanApp {
             let card_y = btn_y + BUTTON_HEIGHT + 16.0;
 
             tree.push(RenderCommand::FillRect {
-                x: PADDING, y: card_y,
-                width: 500.0, height: 220.0,
+                x: PADDING,
+                y: card_y,
+                width: 500.0,
+                height: 220.0,
                 color: SURFACE0,
                 corner_radii: CornerRadii::all(CORNER_RADIUS),
             });
             tree.push(RenderCommand::StrokeRect {
-                x: PADDING, y: card_y,
-                width: 500.0, height: 220.0,
+                x: PADDING,
+                y: card_y,
+                width: 500.0,
+                height: 220.0,
                 color: SURFACE1,
                 line_width: 1.0,
                 corner_radii: CornerRadii::all(CORNER_RADIUS),
@@ -2902,7 +4033,8 @@ impl NetScanApp {
             let mut fy = card_y + 14.0;
             for (label, value) in &fields {
                 tree.push(RenderCommand::Text {
-                    x: PADDING + 14.0, y: fy,
+                    x: PADDING + 14.0,
+                    y: fy,
                     text: label.to_string(),
                     color: OVERLAY0,
                     font_size: 12.0,
@@ -2910,7 +4042,8 @@ impl NetScanApp {
                     max_width: None,
                 });
                 tree.push(RenderCommand::Text {
-                    x: PADDING + 140.0, y: fy,
+                    x: PADDING + 140.0,
+                    y: fy,
                     text: value.to_string(),
                     color: TEXT_COLOR,
                     font_size: 12.0,
@@ -2927,8 +4060,10 @@ impl NetScanApp {
 
         // Background
         tree.push(RenderCommand::FillRect {
-            x: 0.0, y,
-            width: WINDOW_WIDTH, height: PROGRESS_BAR_HEIGHT,
+            x: 0.0,
+            y,
+            width: WINDOW_WIDTH,
+            height: PROGRESS_BAR_HEIGHT,
             color: SURFACE0,
             corner_radii: CornerRadii::ZERO,
         });
@@ -2936,16 +4071,20 @@ impl NetScanApp {
         // Fill
         let frac = progress.fraction();
         tree.push(RenderCommand::FillRect {
-            x: 0.0, y,
-            width: WINDOW_WIDTH * frac, height: PROGRESS_BAR_HEIGHT,
+            x: 0.0,
+            y,
+            width: WINDOW_WIDTH * frac,
+            height: PROGRESS_BAR_HEIGHT,
             color: Color::rgba(137, 180, 250, 100),
             corner_radii: CornerRadii::ZERO,
         });
 
         // Text
         tree.push(RenderCommand::Text {
-            x: PADDING, y: y + 8.0,
-            text: format!("{} - {:.0}% ({} hosts found, {:.1}s elapsed)",
+            x: PADDING,
+            y: y + 8.0,
+            text: format!(
+                "{} - {:.0}% ({} hosts found, {:.1}s elapsed)",
                 progress.phase.label(),
                 frac * 100.0,
                 progress.hosts_found,
@@ -2966,7 +4105,9 @@ impl NetScanApp {
 /// Parse a port specification string like "80", "80-100", "80,443,8080".
 fn parse_port_spec(s: &str) -> Option<Vec<u16>> {
     let trimmed = s.trim();
-    if trimmed.is_empty() { return None; }
+    if trimmed.is_empty() {
+        return None;
+    }
 
     let mut ports = Vec::new();
     for part in trimmed.split(',') {
@@ -2978,7 +4119,9 @@ fn parse_port_spec(s: &str) -> Option<Vec<u16>> {
             let mut current = start;
             while current <= end {
                 ports.push(current);
-                if current == u16::MAX { break; }
+                if current == u16::MAX {
+                    break;
+                }
                 current = current.saturating_add(1);
             }
         } else {
@@ -2993,7 +4136,9 @@ fn parse_port_spec(s: &str) -> Option<Vec<u16>> {
 /// Parse a MAC address string like "AA:BB:CC:DD:EE:FF".
 fn parse_mac(s: &str) -> Option<MacAddr> {
     let parts: Vec<&str> = s.trim().split(':').collect();
-    if parts.len() != 6 { return None; }
+    if parts.len() != 6 {
+        return None;
+    }
     let mut bytes = [0u8; 6];
     for (i, part) in parts.iter().enumerate() {
         bytes[i] = u8::from_str_radix(part, 16).ok()?;
@@ -3304,8 +4449,20 @@ mod tests {
     #[test]
     fn test_guess_os_windows() {
         let ports = vec![
-            PortResult { port: 135, state: PortState::Open, service: None, banner: None, response_ms: 1.0 },
-            PortResult { port: 445, state: PortState::Open, service: None, banner: None, response_ms: 1.0 },
+            PortResult {
+                port: 135,
+                state: PortState::Open,
+                service: None,
+                banner: None,
+                response_ms: 1.0,
+            },
+            PortResult {
+                port: 445,
+                state: PortState::Open,
+                service: None,
+                banner: None,
+                response_ms: 1.0,
+            },
         ];
         assert_eq!(guess_os(&ports), OsGuess::Windows);
     }
@@ -3313,8 +4470,20 @@ mod tests {
     #[test]
     fn test_guess_os_linux() {
         let ports = vec![
-            PortResult { port: 22, state: PortState::Open, service: None, banner: None, response_ms: 1.0 },
-            PortResult { port: 80, state: PortState::Open, service: None, banner: None, response_ms: 1.0 },
+            PortResult {
+                port: 22,
+                state: PortState::Open,
+                service: None,
+                banner: None,
+                response_ms: 1.0,
+            },
+            PortResult {
+                port: 80,
+                state: PortState::Open,
+                service: None,
+                banner: None,
+                response_ms: 1.0,
+            },
         ];
         assert_eq!(guess_os(&ports), OsGuess::Linux);
     }
@@ -3389,9 +4558,11 @@ mod tests {
                 mac: Some(MacAddr::new(0, 0, 0, 0, 0, 1)),
                 os_guess: OsGuess::Linux,
                 ports: vec![PortResult {
-                    port: 22, state: PortState::Open,
+                    port: 22,
+                    state: PortState::Open,
                     service: Some("ssh".to_string()),
-                    banner: None, response_ms: 1.5,
+                    banner: None,
+                    response_ms: 1.5,
                 }],
                 latency_ms: 1.2,
                 is_up: true,
@@ -3430,19 +4601,34 @@ mod tests {
     #[test]
     fn test_diff_scans_new_host() {
         let old = ScanResult {
-            id: 1, timestamp: String::new(), target_description: String::new(),
-            profile: ScanProfile::Quick, hosts: vec![],
-            total_ips_scanned: 0, total_ports_scanned: 0, duration_secs: 0.0,
+            id: 1,
+            timestamp: String::new(),
+            target_description: String::new(),
+            profile: ScanProfile::Quick,
+            hosts: vec![],
+            total_ips_scanned: 0,
+            total_ports_scanned: 0,
+            duration_secs: 0.0,
         };
         let new = ScanResult {
-            id: 2, timestamp: String::new(), target_description: String::new(),
+            id: 2,
+            timestamp: String::new(),
+            target_description: String::new(),
             profile: ScanProfile::Quick,
             hosts: vec![HostResult {
                 ip: Ipv4Addr::new(10, 0, 0, 1),
-                hostname: None, mac: None, os_guess: OsGuess::Unknown,
-                ports: vec![], latency_ms: 1.0, is_up: true, ttl: 64, vendor: None,
+                hostname: None,
+                mac: None,
+                os_guess: OsGuess::Unknown,
+                ports: vec![],
+                latency_ms: 1.0,
+                is_up: true,
+                ttl: 64,
+                vendor: None,
             }],
-            total_ips_scanned: 1, total_ports_scanned: 0, duration_secs: 0.0,
+            total_ips_scanned: 1,
+            total_ports_scanned: 0,
+            duration_secs: 0.0,
         };
         let (added, removed) = diff_scans(&old, &new);
         assert_eq!(added.len(), 1);
@@ -3452,19 +4638,34 @@ mod tests {
     #[test]
     fn test_diff_scans_missing_host() {
         let old = ScanResult {
-            id: 1, timestamp: String::new(), target_description: String::new(),
+            id: 1,
+            timestamp: String::new(),
+            target_description: String::new(),
             profile: ScanProfile::Quick,
             hosts: vec![HostResult {
                 ip: Ipv4Addr::new(10, 0, 0, 1),
-                hostname: None, mac: None, os_guess: OsGuess::Unknown,
-                ports: vec![], latency_ms: 1.0, is_up: true, ttl: 64, vendor: None,
+                hostname: None,
+                mac: None,
+                os_guess: OsGuess::Unknown,
+                ports: vec![],
+                latency_ms: 1.0,
+                is_up: true,
+                ttl: 64,
+                vendor: None,
             }],
-            total_ips_scanned: 1, total_ports_scanned: 0, duration_secs: 0.0,
+            total_ips_scanned: 1,
+            total_ports_scanned: 0,
+            duration_secs: 0.0,
         };
         let new = ScanResult {
-            id: 2, timestamp: String::new(), target_description: String::new(),
-            profile: ScanProfile::Quick, hosts: vec![],
-            total_ips_scanned: 0, total_ports_scanned: 0, duration_secs: 0.0,
+            id: 2,
+            timestamp: String::new(),
+            target_description: String::new(),
+            profile: ScanProfile::Quick,
+            hosts: vec![],
+            total_ips_scanned: 0,
+            total_ports_scanned: 0,
+            duration_secs: 0.0,
         };
         let (added, removed) = diff_scans(&old, &new);
         assert_eq!(added.len(), 0);
@@ -3661,13 +4862,36 @@ mod tests {
     fn test_host_result_open_port_count() {
         let host = HostResult {
             ip: Ipv4Addr::new(10, 0, 0, 1),
-            hostname: None, mac: None, os_guess: OsGuess::Linux,
+            hostname: None,
+            mac: None,
+            os_guess: OsGuess::Linux,
             ports: vec![
-                PortResult { port: 22, state: PortState::Open, service: None, banner: None, response_ms: 1.0 },
-                PortResult { port: 80, state: PortState::Open, service: None, banner: None, response_ms: 1.0 },
-                PortResult { port: 443, state: PortState::Closed, service: None, banner: None, response_ms: 1.0 },
+                PortResult {
+                    port: 22,
+                    state: PortState::Open,
+                    service: None,
+                    banner: None,
+                    response_ms: 1.0,
+                },
+                PortResult {
+                    port: 80,
+                    state: PortState::Open,
+                    service: None,
+                    banner: None,
+                    response_ms: 1.0,
+                },
+                PortResult {
+                    port: 443,
+                    state: PortState::Closed,
+                    service: None,
+                    banner: None,
+                    response_ms: 1.0,
+                },
             ],
-            latency_ms: 1.0, is_up: true, ttl: 64, vendor: None,
+            latency_ms: 1.0,
+            is_up: true,
+            ttl: 64,
+            vendor: None,
         };
         assert_eq!(host.open_port_count(), 2);
     }
@@ -3677,16 +4901,26 @@ mod tests {
         let host = HostResult {
             ip: Ipv4Addr::new(10, 0, 0, 1),
             hostname: Some("server-1".to_string()),
-            mac: None, os_guess: OsGuess::Linux,
-            ports: vec![], latency_ms: 1.0, is_up: true, ttl: 64, vendor: None,
+            mac: None,
+            os_guess: OsGuess::Linux,
+            ports: vec![],
+            latency_ms: 1.0,
+            is_up: true,
+            ttl: 64,
+            vendor: None,
         };
         assert_eq!(host.display_hostname(), "server-1");
 
         let host2 = HostResult {
             ip: Ipv4Addr::new(10, 0, 0, 2),
             hostname: None,
-            mac: None, os_guess: OsGuess::Unknown,
-            ports: vec![], latency_ms: 1.0, is_up: true, ttl: 64, vendor: None,
+            mac: None,
+            os_guess: OsGuess::Unknown,
+            ports: vec![],
+            latency_ms: 1.0,
+            is_up: true,
+            ttl: 64,
+            vendor: None,
         };
         assert_eq!(host2.display_hostname(), "10.0.0.2");
     }
@@ -3696,21 +4930,37 @@ mod tests {
     #[test]
     fn test_scan_result_hosts_up() {
         let result = ScanResult {
-            id: 1, timestamp: String::new(), target_description: String::new(),
+            id: 1,
+            timestamp: String::new(),
+            target_description: String::new(),
             profile: ScanProfile::Quick,
             hosts: vec![
                 HostResult {
-                    ip: Ipv4Addr::new(10, 0, 0, 1), hostname: None, mac: None,
-                    os_guess: OsGuess::Linux, ports: vec![], latency_ms: 1.0,
-                    is_up: true, ttl: 64, vendor: None,
+                    ip: Ipv4Addr::new(10, 0, 0, 1),
+                    hostname: None,
+                    mac: None,
+                    os_guess: OsGuess::Linux,
+                    ports: vec![],
+                    latency_ms: 1.0,
+                    is_up: true,
+                    ttl: 64,
+                    vendor: None,
                 },
                 HostResult {
-                    ip: Ipv4Addr::new(10, 0, 0, 2), hostname: None, mac: None,
-                    os_guess: OsGuess::Unknown, ports: vec![], latency_ms: 1.0,
-                    is_up: false, ttl: 64, vendor: None,
+                    ip: Ipv4Addr::new(10, 0, 0, 2),
+                    hostname: None,
+                    mac: None,
+                    os_guess: OsGuess::Unknown,
+                    ports: vec![],
+                    latency_ms: 1.0,
+                    is_up: false,
+                    ttl: 64,
+                    vendor: None,
                 },
             ],
-            total_ips_scanned: 2, total_ports_scanned: 20, duration_secs: 0.5,
+            total_ips_scanned: 2,
+            total_ports_scanned: 20,
+            duration_secs: 0.5,
         };
         assert_eq!(result.hosts_up(), 1);
     }
@@ -3736,9 +4986,12 @@ mod tests {
     fn test_scan_progress_fraction_zero_total() {
         let progress = ScanProgress {
             phase: ScanPhase::Discovery,
-            hosts_scanned: 0, total_hosts: 0,
-            ports_scanned: 0, total_ports: 0,
-            hosts_found: 0, elapsed_secs: 0.0,
+            hosts_scanned: 0,
+            total_hosts: 0,
+            ports_scanned: 0,
+            total_ports: 0,
+            hosts_found: 0,
+            elapsed_secs: 0.0,
         };
         assert_eq!(progress.fraction(), 0.0);
     }
@@ -3806,7 +5059,11 @@ mod tests {
                 kind: MouseEventKind::Press(MouseButton::Left),
             };
             assert_eq!(app.handle_mouse(&ev), EventResult::Consumed);
-            assert_eq!(app.active_tab, *tab, "clicking {:?} selected {:?}", tab, app.active_tab);
+            assert_eq!(
+                app.active_tab, *tab,
+                "clicking {:?} selected {:?}",
+                tab, app.active_tab
+            );
             x += w + 4.0;
         }
     }
@@ -3830,7 +5087,11 @@ mod tests {
     fn tab_labels_fit_their_tabs() {
         for tab in &ViewTab::ALL {
             let drawn = text::measure(tab.label(), CHIP_TEXT, FontWeightHint::Bold);
-            assert!(drawn + 24.0 <= tab_width(*tab) + 0.01, "{:?} overflows its tab", tab);
+            assert!(
+                drawn + 24.0 <= tab_width(*tab) + 0.01,
+                "{:?} overflows its tab",
+                tab
+            );
         }
     }
 
@@ -3852,5 +5113,255 @@ mod tests {
             assert_eq!(app.config.profile, *profile);
             x += w + 6.0;
         }
+    }
+
+    // --- Host-table layout ---
+
+    /// The width the host table actually gets.
+    const TABLE_WIDTH: f32 = WINDOW_WIDTH - SIDEBAR_WIDTH;
+
+    fn host(ip: [u8; 4], hostname: Option<&str>) -> HostResult {
+        HostResult {
+            ip: Ipv4Addr::new(ip[0], ip[1], ip[2], ip[3]),
+            hostname: hostname.map(str::to_string),
+            mac: Some(MacAddr::new(0x00, 0x1B, 0x44, 0x11, 0x3A, ip[3])),
+            os_guess: OsGuess::Linux,
+            ports: Vec::new(),
+            latency_ms: 12.5,
+            is_up: true,
+            ttl: 64,
+            vendor: None,
+        }
+    }
+
+    /// Hosts on one subnet whose names share a domain suffix — the shape that
+    /// makes a cut at the wrong end turn several rows into the same string.
+    ///
+    /// The shared suffix is deliberately longer than the hostname column can
+    /// show. A suffix shorter than the column would leave the tail of each
+    /// name carrying a character or two of the distinguishing label, and the
+    /// distinctness assertion below would then pass for a cut at *either*
+    /// end — which is exactly the vacuous pass it exists to rule out.
+    fn crowded_hosts() -> Vec<HostResult> {
+        vec![
+            host(
+                [192, 168, 1, 101],
+                Some("alpha.engineering.datacenter.example.com"),
+            ),
+            host(
+                [192, 168, 1, 102],
+                Some("bravo.engineering.datacenter.example.com"),
+            ),
+            host(
+                [192, 168, 1, 103],
+                Some("charlie.engineering.datacenter.example.com"),
+            ),
+            host([192, 168, 1, 104], None),
+        ]
+    }
+
+    /// A drawn cell: where it starts, what it says, and the size and weight it
+    /// is drawn at — the last two decide how wide it really is.
+    type Cell = (f32, String, f32, FontWeightHint);
+
+    fn texts_of(tree: RenderTree) -> Vec<Cell> {
+        tree.commands
+            .into_iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text {
+                    x,
+                    text,
+                    font_size,
+                    font_weight,
+                    ..
+                } => Some((x, text, font_size, font_weight)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Every text command one screenful of rows draws, without the heading.
+    ///
+    /// Kept apart from the heading because a heading shares its column's left
+    /// edge with the cells under it: a test that gathers a column by x and
+    /// then counts distinct values would count the heading as a fifth row.
+    fn host_row_texts(width: f32, hosts: &[HostResult]) -> Vec<Cell> {
+        let app = NetScanApp::new();
+        let mut tree = RenderTree::new();
+        for (i, h) in hosts.iter().enumerate() {
+            let y = 40.0 + i as f32 * TABLE_ROW_HEIGHT;
+            app.render_host_row(&mut tree, 0.0, y, width, h, false, i);
+        }
+        texts_of(tree)
+    }
+
+    /// The heading and the rows together.
+    fn host_table_texts(width: f32, hosts: &[HostResult]) -> Vec<Cell> {
+        let app = NetScanApp::new();
+        let mut tree = RenderTree::new();
+        app.render_table_header(&mut tree, 0.0, 0.0, width);
+        let mut cells = texts_of(tree);
+        cells.extend(host_row_texts(width, hosts));
+        cells
+    }
+
+    /// The distinct strings drawn in one column by the rows.
+    fn column_values(
+        width: f32,
+        hosts: &[HostResult],
+        col: usize,
+    ) -> std::collections::BTreeSet<String> {
+        let columns = host_columns(width);
+        let left = host_table(&columns, 0.0).left(col);
+        host_row_texts(width, hosts)
+            .into_iter()
+            .filter(|(x, _, _, _)| (x - left).abs() < 0.01)
+            .map(|(_, t, _, _)| t)
+            .collect()
+    }
+
+    /// The shares are shares of the whole table, so they add up to it. A set
+    /// that summed to less would leave a strip of the table permanently blank;
+    /// one that summed to more would push the last column off the edge, and
+    /// only at some window widths.
+    #[test]
+    fn the_host_columns_fill_the_table() {
+        let sum: f32 = HOST_COLUMNS.iter().map(|(_, f)| f).sum();
+        assert!((sum - 1.0).abs() < 0.001, "shares sum to {sum}, not 1");
+
+        for width in [320.0_f32, 480.0, TABLE_WIDTH, 1400.0] {
+            let columns = host_columns(width);
+            let table = host_table(&columns, 0.0);
+            let right = table.right(COL_LATENCY);
+            assert!(
+                (right - (width - PADDING)).abs() < 0.01,
+                "at width {width} the row ends at {right}, not at the margin {}",
+                width - PADDING
+            );
+        }
+    }
+
+    /// Every heading fits its own column at the width the table really gets.
+    /// A heading that does not fit is not a rendering accident to be clipped
+    /// away — it means the share is wrong.
+    #[test]
+    fn every_host_heading_fits_its_column() {
+        let columns = host_columns(TABLE_WIDTH);
+        for column in &columns {
+            let drawn = text::measure(column.label, HEADER_TEXT, FontWeightHint::Bold);
+            assert!(
+                drawn <= column.width + 0.01,
+                "{:?} needs {drawn} px but its column is {} wide",
+                column.label,
+                column.width
+            );
+        }
+    }
+
+    /// No cell, heading or body, may draw past the column it starts in.
+    #[test]
+    fn no_host_cell_escapes_its_column() {
+        let hosts = crowded_hosts();
+        let mut checked = 0;
+        for width in [320.0_f32, 480.0, TABLE_WIDTH, 1400.0] {
+            let columns = host_columns(width);
+            let spans = host_table(&columns, 0.0).spans();
+            for (x, text, size, weight) in host_table_texts(width, &hosts) {
+                let Some(&(left, right)) = spans.iter().find(|(l, _)| (l - x).abs() < 0.01) else {
+                    panic!("cell {text:?} starts at {x}, which is no column's left edge");
+                };
+                let drawn = x + text::measure(&text, size, weight);
+                assert!(
+                    drawn <= right + 0.01,
+                    "at width {width} cell {text:?} at {left} draws to {drawn}, past {right}"
+                );
+                checked += 1;
+            }
+        }
+        // Seven headings and six cells per row, at four widths.
+        assert!(checked >= 4 * (7 + 4 * 6), "only {checked} cells checked");
+    }
+
+    /// The hostname is reverse DNS: this program does not choose it, and the
+    /// names on one network share a domain suffix. Cutting the front would
+    /// render three different machines as the same string, so the cut goes at
+    /// the end and the rows stay distinguishable.
+    #[test]
+    fn long_hostnames_stay_distinct_when_cut() {
+        let hosts = crowded_hosts();
+        let drawn = column_values(TABLE_WIDTH, &hosts, COL_HOSTNAME);
+        assert_eq!(drawn.len(), 4, "the hostname column collapsed to {drawn:?}");
+        assert!(
+            drawn.iter().any(|t| t.contains('…')),
+            "these names do not fit, so the test is not exercising the cut: {drawn:?}"
+        );
+    }
+
+    /// The same argument for the address column, which cuts the other way:
+    /// hosts on a subnet differ in the last octet.
+    #[test]
+    fn subnet_addresses_stay_distinct_when_cut() {
+        let hosts = crowded_hosts();
+        // A width at which the address column is too small for a full dotted
+        // quad, so the elision actually happens.
+        let drawn = column_values(300.0, &hosts, COL_IP);
+        assert_eq!(drawn.len(), 4, "the address column collapsed to {drawn:?}");
+    }
+
+    /// The status dot is a fixed size at a fixed inset — the combination that
+    /// overflows a column once the column is narrow enough.
+    #[test]
+    fn the_status_dot_stays_inside_its_column() {
+        let app = NetScanApp::new();
+        let h = host([10, 0, 0, 1], None);
+        let mut checked = 0;
+        for width in [0.0_f32, 40.0, 120.0, 300.0, TABLE_WIDTH] {
+            let columns = host_columns(width);
+            let table = host_table(&columns, 0.0);
+            let (left, right) = (table.left(COL_STATUS), table.right(COL_STATUS));
+            let mut tree = RenderTree::new();
+            app.render_host_row(&mut tree, 0.0, 0.0, width, &h, false, 0);
+            let dot = tree
+                .commands
+                .iter()
+                .find_map(|c| match *c {
+                    RenderCommand::FillRect {
+                        x,
+                        width: w,
+                        height,
+                        ..
+                    } if (height - DOT_SIZE).abs() < 0.01 => Some((x, w)),
+                    _ => None,
+                })
+                .expect("the row draws a status dot");
+            // A column narrower than the dot itself cannot contain it; what
+            // must hold there is that the dot has not been pushed past where
+            // the column would have ended had it been big enough.
+            assert!(
+                dot.0 >= left - 0.01 && dot.0 + dot.1 <= right.max(left + DOT_SIZE) + 0.01,
+                "at width {width} the dot spans {}..{} outside its column {left}..{right}",
+                dot.0,
+                dot.0 + dot.1
+            );
+            checked += 1;
+        }
+        assert_eq!(checked, 5);
+    }
+
+    /// A value that fits is shown whole: the fitting must not mark a cut on
+    /// text that was never cut.
+    #[test]
+    fn a_short_host_cell_is_drawn_verbatim() {
+        let hosts = vec![host([10, 0, 0, 7], Some("nas"))];
+        let texts: Vec<String> = host_table_texts(TABLE_WIDTH, &hosts)
+            .into_iter()
+            .map(|(_, t, _, _)| t)
+            .collect();
+        for t in &texts {
+            assert!(!t.contains('…'), "{t:?} was cut but had room");
+        }
+        assert!(texts.iter().any(|t| t == "10.0.0.7"), "{texts:?}");
+        assert!(texts.iter().any(|t| t == "nas"), "{texts:?}");
+        assert!(texts.iter().any(|t| t == "12.5ms"), "{texts:?}");
     }
 }

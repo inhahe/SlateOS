@@ -60989,6 +60989,42 @@ proved it out.
   only thing on the row saying whether it opens, would be the first thing
   removed. A decoration that must survive cannot be concatenated onto text
   that will be cut; give it its own box.
+- ~~`apps/netscan` host table~~ **done**. The clearest case yet of *two
+  independent copies of one layout*: `render_table_header` held a list of
+  `(x, label)` pairs with **no widths at all** and every heading
+  `max_width: None`, while `render_host_row` hand-wrote an `x:` and, several
+  lines away, a `max_width:` that came from nowhere in particular. Nothing
+  connected a cell's bound to the distance to the next column — Ports and
+  Latency simply had no bound, and Hostname had `Some(160.0)`, a bare clip
+  with no marker, on the **one string in the row this program does not
+  choose**: it is reverse DNS. Both are now one `guitk::table` whose seven
+  shares sum to 1.0, so the row ends at the table's right edge.
+
+  Two things worth carrying forward. First, this row cuts in **both**
+  directions, and which end is right is a fact about the data, not a taste:
+  the IP address and the MAC keep their *tails* (a subnet shares its leading
+  octets, a vendor shares its OUI prefix), while the hostname keeps its
+  *head* (`alpha.engineering.example.com` and `bravo.engineering.example.com`
+  differ at the start). A single house style of "always elide the end" would
+  have rendered every host on a /24 as `192.…`.
+
+  Second, and the sharper lesson: **a distinctness test is only as strong as
+  the fixture's shared prefix is long.** The first version of the hostname
+  fixture used `workstation-alpha.engineering.corp.example.com` and friends,
+  and the test *passed with the cut deliberately flipped to the wrong end* —
+  because the shared suffix was a little shorter than the column, so the
+  visible tail still carried one character of the distinguishing label
+  (`…a.engineering…` vs `…o.engineering…`). The assertion was true for both
+  cut directions, i.e. it was measuring nothing. The fixture now uses a shared
+  suffix comfortably longer than the column can show, and the flipped-cut run
+  fails as it should. When a test's premise is "these values are
+  indistinguishable once cut", check that they really are — by breaking the
+  code and watching it fail, not by reading the strings and assuming.
+
+  A related trap in the same tests: a heading shares its column's left edge
+  with the cells beneath it, so gathering "a column" by x picks up the heading
+  as an extra row and a `len() == 4` assertion fails at 5 for a reason that
+  has nothing to do with the layout. Gather rows and headings separately.
 - ~~`apps/jsonviewer` statistics view~~ **done**. Found by the grep the
   undelete badge suggested — a literal constant in the same expression as a
   fraction of the width — and it is the worst instance of that shape so far

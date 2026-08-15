@@ -52,6 +52,84 @@ const FUZZY_MAX_DISTANCE: u32 = 2;
 // Configuration
 // ============================================================================
 
+/// Which repeated-key list a config key feeds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ListKey {
+    IndexPath,
+    ExcludePath,
+    IncludeExtension,
+    ExcludeExtension,
+}
+
+/// Escape a value so it survives being written as one config line and read
+/// back through the parser's `trim`.
+///
+/// Note what `\s` is for. The parser trims the value, which is the right
+/// leniency for a hand-edited file, but it means an escape may not *end* in
+/// whitespace: writing a trailing space as `\ ` would leave the file ending
+/// `...\` once trimmed, decoding to a stray backslash. Spelling the space as a
+/// letter sidesteps that entirely. Only leading and trailing spaces need it —
+/// interior ones survive the trim untouched, and escaping them would make an
+/// ordinary path unreadable.
+fn escape_value(s: &str) -> String {
+    let lead = s.len().saturating_sub(s.trim_start().len());
+    let trail_start = s.trim_end().len();
+    let mut out = String::with_capacity(s.len());
+    for (i, c) in s.char_indices() {
+        let edge = i < lead || i >= trail_start;
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            ' ' if edge => out.push_str("\\s"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Decode a value written by [`escape_value`], in one left-to-right pass.
+///
+/// A chain of `replace` calls cannot do this: decoding `\n` before `\\` turns
+/// the two-character text `\n` — which is a perfectly legal filename here —
+/// into a real newline. A single pass never re-examines what it has produced,
+/// so it structurally cannot make that mistake.
+///
+/// An unrecognised escape yields the character after the backslash, so a
+/// hand-written path degrades predictably rather than being rejected.
+fn unescape_value(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.next() {
+                Some('n') => out.push('\n'),
+                Some('r') => out.push('\r'),
+                Some('t') => out.push('\t'),
+                Some('s') => out.push(' '),
+                Some(other) => out.push(other),
+                None => out.push('\\'),
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Write a list as one `key = value` line per entry, or as the empty plural
+/// form when there is nothing to write.
+fn push_list(out: &mut String, key: &str, plural_key: &str, values: &[String]) {
+    if values.is_empty() {
+        out.push_str(&format!("{plural_key} = \n"));
+        return;
+    }
+    for value in values {
+        out.push_str(&format!("{key} = {}\n", escape_value(value)));
+    }
+}
+
 #[derive(Debug, Clone)]
 struct Config {
     index_paths: Vec<String>,
@@ -105,6 +183,10 @@ impl Config {
 
     fn parse(content: &str) -> Self {
         let mut cfg = Self::default();
+        // Which repeated keys have already replaced their default. The first
+        // `index_path` line in a file replaces the built-in list; the rest add
+        // to it. Without this a config could only ever grow the defaults.
+        let mut replaced: Vec<&str> = Vec::new();
 
         for line in content.lines() {
             let line = line.trim();
@@ -114,11 +196,51 @@ impl Config {
             if let Some((key, value)) = line.split_once('=') {
                 let key = key.trim();
                 let value = value.trim();
-                cfg.set_field(key, value);
+                if Self::list_for_key(key).is_some() {
+                    let first = !replaced.contains(&key);
+                    if first {
+                        replaced.push(key);
+                    }
+                    cfg.push_field(key, value, first);
+                } else {
+                    cfg.set_field(key, value);
+                }
             }
         }
 
         cfg
+    }
+
+    /// Whether `key` is one of the repeated single-value keys, and which list
+    /// it feeds. Returning the discriminant rather than a bool keeps the set of
+    /// repeated keys defined in exactly one place.
+    fn list_for_key(key: &str) -> Option<ListKey> {
+        match key {
+            "index_path" => Some(ListKey::IndexPath),
+            "exclude_path" => Some(ListKey::ExcludePath),
+            "include_extension" => Some(ListKey::IncludeExtension),
+            "exclude_extension" => Some(ListKey::ExcludeExtension),
+            _ => None,
+        }
+    }
+
+    /// Append one value to a repeated-key list, clearing the defaults first
+    /// time round.
+    fn push_field(&mut self, key: &str, value: &str, first: bool) {
+        let Some(which) = Self::list_for_key(key) else {
+            return;
+        };
+        let decoded = unescape_value(value);
+        let list = match which {
+            ListKey::IndexPath => &mut self.index_paths,
+            ListKey::ExcludePath => &mut self.exclude_paths,
+            ListKey::ExcludeExtension => &mut self.exclude_extensions,
+            ListKey::IncludeExtension => self.include_extensions.get_or_insert_with(Vec::new),
+        };
+        if first {
+            list.clear();
+        }
+        list.push(decoded);
     }
 
     fn set_field(&mut self, key: &str, value: &str) {
@@ -156,33 +278,76 @@ impl Config {
         }
     }
 
+    /// Parse a legacy comma-separated list, as hand-written configs still use.
+    ///
+    /// Retained for the plural keys only. It cannot represent a path
+    /// containing a comma, which is why the writer no longer emits this form
+    /// -- see [`Config::serialize`].
     fn parse_list(value: &str) -> Vec<String> {
         value
             .split(',')
-            .map(|s| s.trim().to_string())
+            .map(|s| unescape_value(s.trim()))
             .filter(|s| !s.is_empty())
             .collect()
     }
 
     /// Serialize configuration to the config file format.
+    ///
+    /// Paths and extensions get **one line each**, escaped, rather than being
+    /// joined with commas. On this system a path may contain any byte except
+    /// `/` and NUL, so the comma that used to separate them is an ordinary
+    /// filename character — and the failure it caused was not cosmetic:
+    ///
+    /// * `exclude_paths` decides what the indexer does *not* read. Excluding
+    ///   `/home/u/Private, Ltd` used to serialise as two entries,
+    ///   `/home/u/Private` and `Ltd`, neither of which matches the directory
+    ///   the user actually named. With `index_contents` on, the contents of a
+    ///   directory the user explicitly excluded then went into the index.
+    /// * `index_paths` decides what it does read, so the same split silently
+    ///   pointed the scanner at directories nobody chose.
+    ///
+    /// A newline in a path would have been worse still — it could write a
+    /// whole config line, including `enabled = false` — so line breaks are
+    /// escaped rather than rejected: every path is representable and nothing
+    /// has to be silently dropped.
+    ///
+    /// An empty list is written in the legacy plural form with no value, which
+    /// is the one thing repeated keys cannot express: no lines at all is
+    /// indistinguishable from "key absent", which means "keep the defaults".
     fn serialize(&self) -> String {
         let mut out = String::new();
-        out.push_str("# Slate OS File Indexer Configuration\n\n");
+        out.push_str("# Slate OS File Indexer Configuration\n");
+        out.push_str("#\n");
+        out.push_str("# Paths and extensions take one line each. Values are escaped:\n");
+        out.push_str("#   \\\\  backslash    \\n  newline    \\r  return\n");
+        out.push_str("#   \\t  tab          \\s  a leading or trailing space\n");
+        out.push_str("# A path may contain any byte but `/` and NUL, commas included,\n");
+        out.push_str("# so the list is not comma-separated.\n\n");
         out.push_str(&format!("enabled = {}\n", self.enabled));
-        out.push_str(&format!("index_paths = {}\n", self.index_paths.join(", ")));
-        out.push_str(&format!(
-            "exclude_paths = {}\n",
-            self.exclude_paths.join(", ")
-        ));
-        if let Some(ref exts) = self.include_extensions {
-            out.push_str(&format!("include_extensions = {}\n", exts.join(", ")));
-        } else {
-            out.push_str("include_extensions = \n");
+        push_list(&mut out, "index_path", "index_paths", &self.index_paths);
+        push_list(
+            &mut out,
+            "exclude_path",
+            "exclude_paths",
+            &self.exclude_paths,
+        );
+        match self.include_extensions {
+            // Absent entirely means "no filter"; an empty list means the same
+            // after parsing, so both round-trip to `None`.
+            Some(ref exts) => push_list(
+                &mut out,
+                "include_extension",
+                "include_extensions",
+                exts.as_slice(),
+            ),
+            None => out.push_str("include_extensions = \n"),
         }
-        out.push_str(&format!(
-            "exclude_extensions = {}\n",
-            self.exclude_extensions.join(", ")
-        ));
+        push_list(
+            &mut out,
+            "exclude_extension",
+            "exclude_extensions",
+            &self.exclude_extensions,
+        );
         out.push_str(&format!("max_file_size = {}\n", self.max_file_size));
         out.push_str(&format!(
             "scan_interval_secs = {}\n",
@@ -1581,6 +1746,121 @@ exclude_extensions = .o, .tmp
         let content = "# This is a comment\nenabled = true\n# Another comment\n";
         let cfg = Config::parse(content);
         assert!(cfg.enabled);
+    }
+
+    /// Paths that are legal on this system -- any byte but `/` and NUL -- and
+    /// that the comma-joined format could not carry.
+    const HOSTILE_PATHS: &[&str] = &[
+        "/home/u/Private, Ltd",
+        "/home/u/a,b,c",
+        "/home/u/trailing space ",
+        "/home/u/ leading space",
+        "/home/u/tab\there",
+        "/home/u/new\nline",
+        "/home/u/enabled = false",
+        r"/home/u/back\slash",
+        r"/home/u/\n",
+        r"/home/u/\s",
+        "/home/u/# not a comment",
+        "/home/u/has = equals",
+    ];
+
+    #[test]
+    fn a_path_containing_a_comma_stays_one_path() {
+        // The security-relevant case: `exclude_paths` decides what is *not*
+        // read, so a path that splits leaves the directory the user named
+        // unexcluded and its contents indexed.
+        for path in HOSTILE_PATHS {
+            let cfg = Config {
+                index_paths: vec![(*path).to_string()],
+                exclude_paths: vec![(*path).to_string()],
+                ..Config::default()
+            };
+            let parsed = Config::parse(&cfg.serialize());
+            assert_eq!(
+                parsed.exclude_paths,
+                vec![(*path).to_string()],
+                "exclusion was rewritten: {path:?}"
+            );
+            assert_eq!(
+                parsed.index_paths,
+                vec![(*path).to_string()],
+                "index path was rewritten: {path:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_path_cannot_forge_a_config_line() {
+        // A newline in a path could otherwise write any setting it liked --
+        // `enabled = false` silently turns the indexer off.
+        let cfg = Config {
+            enabled: true,
+            index_contents: true,
+            index_paths: vec![
+                "/a\nenabled = false".to_string(),
+                "/b\nindex_contents = false\nmax_file_size = 1".to_string(),
+            ],
+            max_file_size: 999,
+            ..Config::default()
+        };
+        let parsed = Config::parse(&cfg.serialize());
+        assert!(parsed.enabled, "a path turned the indexer off");
+        assert!(parsed.index_contents, "a path changed a setting");
+        assert_eq!(parsed.max_file_size, 999, "a path changed a setting");
+        assert_eq!(parsed.index_paths.len(), 2, "a path forged an entry");
+    }
+
+    #[test]
+    fn every_list_round_trips_exactly() {
+        let cfg = Config {
+            index_paths: HOSTILE_PATHS.iter().map(|s| (*s).to_string()).collect(),
+            exclude_paths: HOSTILE_PATHS.iter().map(|s| (*s).to_string()).collect(),
+            include_extensions: Some(vec![".a,b".to_string(), " .c ".to_string()]),
+            exclude_extensions: vec![".x\ny".to_string()],
+            ..Config::default()
+        };
+        let parsed = Config::parse(&cfg.serialize());
+        assert_eq!(parsed.index_paths, cfg.index_paths);
+        assert_eq!(parsed.exclude_paths, cfg.exclude_paths);
+        assert_eq!(parsed.include_extensions, cfg.include_extensions);
+        assert_eq!(parsed.exclude_extensions, cfg.exclude_extensions);
+        // Serialising the reparsed config must give the same file back, or the
+        // format has a state it cannot express.
+        assert_eq!(parsed.serialize(), cfg.serialize());
+    }
+
+    #[test]
+    fn an_empty_list_stays_empty_rather_than_reverting_to_defaults() {
+        // The one thing repeated keys cannot say: no lines is indistinguishable
+        // from "key absent", which means keep the defaults.
+        let cfg = Config {
+            index_paths: Vec::new(),
+            exclude_paths: Vec::new(),
+            exclude_extensions: Vec::new(),
+            ..Config::default()
+        };
+        let parsed = Config::parse(&cfg.serialize());
+        assert!(parsed.index_paths.is_empty());
+        assert!(parsed.exclude_paths.is_empty());
+        assert!(parsed.exclude_extensions.is_empty());
+    }
+
+    #[test]
+    fn a_repeated_key_replaces_the_defaults_once_then_appends() {
+        let cfg = Config::parse("index_path = /one\nindex_path = /two\nindex_path = /three\n");
+        assert_eq!(cfg.index_paths, vec!["/one", "/two", "/three"]);
+        // The built-in default must be gone, not appended to.
+        assert!(!cfg.index_paths.iter().any(|p| p == "/home"));
+    }
+
+    #[test]
+    fn a_backslash_before_an_n_survives_the_round_trip() {
+        // The replace-chain decoder's signature failure, and `\n` is a legal
+        // directory name here.
+        for text in [r"\n", r"\\n", r"\s", r"\\", "real\nnewline", "  pad  "] {
+            assert_eq!(unescape_value(&escape_value(text)), text, "{text:?}");
+        }
     }
 
     #[test]

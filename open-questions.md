@@ -307,88 +307,30 @@ for loud breakage in every port that calls it informationally.
    flip from advisory to enforcing is boot-test-visible and lands with QEMU
    free.
 
-## Q45 — Text clipped by `max_width` is cut mid-glyph with no ellipsis. Should `RenderCommand::Text` carry an overflow policy? — Status: **ANSWERED 2026-08-15 — Lane C to record in `design-decisions.md`**
+## Q45 — Text clipped by `max_width` is cut mid-glyph with no ellipsis. Should `RenderCommand::Text` carry an overflow policy? — Status: **RESOLVED 2026-08-15 → design-decisions.md §427**
 
-### ANSWER 2026-08-15 — option **A**: `RenderCommand::Text` gets an `overflow` field
+**Answer: A — `RenderCommand::Text` gets an `overflow: TextOverflow` field
+(`Clip` | `Ellipsis`), and the compositor draws the ellipsis.** Decided by the
+operator ("q45: a."); Claude raised the question and recommended this option.
 
-The operator answered in a Lane B session. Verbatim: **"q45: a."** That is
-Claude's own recommendation, so nothing about the plan changes — but it is a
-decision now, not a proposal.
+A is the only option that makes the mistake *unrepresentable*: after it, a text
+command cannot exist without having answered "and what if it doesn't fit?". The
+operator was told the churn was several hundred call sites and chose it on that
+ground anyway. Rejected: **B** (a second `RenderCommand` variant) splits a match
+arm in every renderer and test forever to encode one boolean; **C** (a builder)
+leaves the wrong struct-literal form available; **D** (sweep `text::elide`
+across today's bad call sites) fixes today's hundred and not the
+hundred-and-first.
 
-**What was chosen.** Add an `overflow: TextOverflow` field (`Clip` | `Ellipsis`)
-to `RenderCommand::Text`, and let the **compositor** draw the ellipsis, because
-it is the only party that knows exactly where the glyphs ran out. One
-measurement instead of two, and the policy is visible at every call site.
+Two things the entry in §427 carries that this summary does not: the site count
+turned out to be **4517 across 208 files**, so the edit is scripted rather than
+hand-made; and the sites that already set a `max_width` default to `Ellipsis`
+rather than to the behaviour-preserving `Clip`, because today's behaviour *is*
+the reported bug. That sub-decision is Claude's and is written down in §427 to
+be overruled if the operator disagrees.
 
-**The cost that was accepted, so it is on the record.** Rust has no default for
-a struct-variant field, so this edits **every construction of `Text` in the
-tree** — several hundred sites across `gui/**` and `apps/**`. The question said
-so, and the answer is still A. Two consequences follow:
-
-- **Land it as its own commit with nothing else in flight.** A several-hundred-
-  site mechanical diff conflicts with anything else touching rendering, and this
-  is the same trap `§310` (the rustfmt reformat) was about — a wide mechanical
-  change entangled with real work cannot be separated afterwards.
-- **`gui/**` and `apps/**` are Lane C's tree.** Lane B is recording the answer,
-  not implementing it. Filed as
-  `requests/b-c-operator-answered-q45-and-c-q1.md`.
-
-**Recording:** `design-decisions.md` under Lane C's §400–499 range. Lane B has
-deliberately not written it there — inventing a section number from another
-lane's range is how two lanes collide after a merge. Also close
-`known-issues.md` → `TD-GUI-CLIPPED-TEXT-IS-NOT-MARKED` when it lands.
-
-**Raised by Claude** (2026-08-14), falling out of the pass that closed
-`known-issues.md` → `TD-GUI-TEXT-COMMAND-DOES-NOT-WRAP`. Logged there as
-`TD-GUI-CLIPPED-TEXT-IS-NOT-MARKED`.
-
-**The situation.** `max_width` on a `Text` command clips: the compositor walks
-glyphs and stops before the first one that would cross the limit, drawing no
-mark. A label that does not fit therefore ends mid-word and ends *plausibly* —
-"Gateway 192.168.1.1 res" looks like a complete string to a reader who cannot
-see the field it was cut from. A caller that wants the cut marked must call
-`text::elide` first, which measures the string a second time to answer a
-question the compositor is about to answer again while drawing it. Well over a
-hundred single-line labels across `gui/**` and `apps/**` pass `max_width`
-without eliding; most are safe only because their values are short and
-app-authored, and the ones that bite carry user or network data — file names,
-SSIDs, error strings, host names.
-
-**Why this needs you rather than me.** Every option is a different tax on the
-same several-hundred call sites, and the cheapest-to-write one is the one that
-does not actually stop the mistake recurring. That is a taste call about the
-API's shape, and it lands across three lanes' in-flight work.
-
-- **A — add an `overflow: TextOverflow` field to `RenderCommand::Text`**
-  (`Clip` | `Ellipsis`), and let the compositor draw the mark, since it is the
-  only party that knows exactly where the glyphs ran out. *Pro:* one
-  calculation, right by construction, and the policy is visible at every call
-  site. *Con:* Rust has no default for a struct-variant field, so this edits
-  every construction of `Text` in the tree — several hundred, mechanical but
-  wide, and it conflicts with anything else in flight that touches rendering.
-- **B — a second variant** (`TextClipped` / `TextElided`). *Pro:* no churn at
-  existing call sites. *Con:* splits the match arms in every renderer and every
-  test that walks a command list, forever, to encode one boolean.
-- **C — a constructor/builder** (`RenderCommand::text(..).elided()`), leaving
-  the struct literal as it is. *Pro:* no churn; opt in where it matters.
-  *Con:* the literal form stays available and stays wrong, so it prevents
-  nothing — it is documentation with a return type.
-- **D — sweep `text::elide` across the data-bearing call sites** and leave the
-  command alone. *Pro:* smallest diff, fixes the sites that actually bite.
-  *Con:* keeps the double measurement, and the next label someone adds has the
-  bug again.
-
-**Claude's recommendation.** **A**, done as its own commit with nothing else in
-flight, because it is the only option that makes the mistake unrepresentable —
-and the churn is mechanical, which is the cheap kind. **D** is the sensible
-answer if you would rather not spend a wide diff on this now; in that case it
-should be scoped to labels carrying user or network data rather than swept
-blindly.
-
-**Where it bites:** `gui/toolkit/src/render.rs` (`RenderCommand::Text`),
-`gui/compositor/src/main.rs` (`draw_text`, the `break` at the limit),
-`gui/toolkit/src/text.rs` (`elide` / `elide_start`), and every `max_width:
-Some(..)` in `gui/**` and `apps/**`.
+**Execution constraint:** its own commit, nothing else in flight — see §310.
+Closes `known-issues.md` → `TD-GUI-CLIPPED-TEXT-IS-NOT-MARKED`.
 
 ## A-Q1 — Install the GNAT/SPARK and LLVM toolchains? — Status: **FULLY ANSWERED 2026-08-15 — Lane A to record in `design-decisions.md`**
 
@@ -632,100 +574,30 @@ The two tests asserting the current UTC fallback
 failing the day the data lands** — that is the signal it worked, not a
 regression.
 
-## C-Q1 — Should normalization consult font coverage? The last 339 sweep disagreements are all this one question — Status: **ANSWERED 2026-08-15 — Lane C to record in `design-decisions.md`**
+## C-Q1 — Should normalization consult font coverage? The last 339 sweep disagreements are all this one question — Status: **RESOLVED 2026-08-15 → design-decisions.md §428**
 
-### ANSWER 2026-08-15 — option **C**: keep `nfc` pure, let `fit_to_face` decompose what it cannot draw
+**Answer: C — keep `nfc` font-blind; let `fit_to_face` decompose a composed
+character the face cannot draw when the pieces are drawable.** Decided by the
+operator ("c-q1: c."); Claude raised the question and recommended this option.
 
-The operator answered in a Lane B session. Verbatim: **"c-q1: c."** That is
-Lane C's own recommendation, so the plan is unchanged — but it is now a decision
-and needs recording.
+`norm.rs`'s layering principle stands: `nfc` answers a question about *text* and
+never looks at a font, `fit_to_face` answers a question about the *font*. The
+fallback goes in the second stage, where `split_undrawable` already lives and
+already has that shape. The 339 residual HarfBuzz sweep disagreements — 255 of
+them `\u1e09`, 57 `\u212b` — should move to `agree` without `nfc` ever taking a
+face as input.
 
-**What was chosen.** The layering principle in `norm.rs`'s module doc **stands**:
-`nfc` answers a question about *text* and never looks at a font; `fit_to_face`
-answers a question about the *font*. The narrow fallback goes in the second
-stage — when `fit_to_face` meets a composed character the face cannot draw, and
-the *pieces* are drawable, it decomposes. `split_undrawable` already exists and
-already has this shape, which is why C was the recommendation.
+Rejected: **A** (change nothing) draws a missing-glyph box where HarfBuzz draws
+correct text, and the user does not care which stage was principled. **B**
+(adopt HarfBuzz's font-aware recomposition wholesale) makes normalization a
+function of `(text, face)` — no longer hoistable, cacheable, or testable without
+a font in hand. §428 keeps B's argument written out, because it is what has to
+be beaten if some future case cannot be fixed inside `fit_to_face`.
 
-Result for the 339 residual sweep disagreements: they should move to `agree`
-without `nfc` ever taking a face as input.
-
-**The cost that was accepted.** Two mechanisms where HarfBuzz has one — we agree
-with HarfBuzz on output while diverging on structure. The concrete risk the
-question named is **mark reordering after a late decomposition**, which HarfBuzz
-gets right by construction and we would not. Treat that as the thing to test
-rather than assume: the sweep is the instrument, and any ordering case it
-surfaces is this decision's bill, not a surprise.
-
-**Not chosen, and why it matters later:** **B** (adopt HarfBuzz's font-aware
-recomposition) was refused because it makes normalization a function of
-`(text, face)` — no longer hoistable, no longer cacheable per string, not
-reasonable about without a font in hand. If a future case cannot be fixed inside
-`fit_to_face`, that is the argument that has to be beaten, not re-litigated from
-scratch.
-
-**Recording:** `design-decisions.md` under Lane C's §400–499 range — Lane C's own
-question, Lane C's own range, so Lane B has recorded the answer here only. Filed
-as `requests/b-c-operator-answered-q45-and-c-q1.md`.
-
-**Raised by Claude (Lane C)** (2026-08-15), on finishing `known-issues.md` →
-`TD-FONT-HAS-A-HANGUL-SHAPER-NOTHING-CALLS`. That fix took the HarfBuzz
-differential sweep from 892 disagreements to 339, and the 339 that remain are
-**one question asked 339 times**, not a scatter of unrelated bugs: `\u1e09`
-(ḉ — c with cedilla and acute) 255 cases, `\u212b` (Å angstrom sign) 57,
-`été` 10, and a short tail.
-
-**Question.** `norm.rs` is layered on a deliberate principle, written into its
-module doc: **`nfc` answers a question about *text* and knows nothing about
-fonts; `fit_to_face` answers a question about the *font* and does not
-renormalize.** Unicode composition is a property of the string, so it is
-decided before any face is consulted. HarfBuzz does the opposite — it
-decomposes to NFD, then *recomposes only where the face has a glyph*, so the
-same string normalizes differently in two fonts. Which layering do we want?
-
-Concretely, for `\u1e09` in a face that has `c`, the cedilla and the acute but
-no precomposed ḉ: we emit one missing-glyph box, HarfBuzz emits three glyphs
-that stack into the right-looking character.
-
-**Options.**
-
-- **A — keep the current layering** (`nfc` is pure Unicode; font coverage is
-  `fit_to_face`'s problem). *Pro:* each stage has one job and one input, which
-  is why the module reads clearly and why the Hangul work above was four small
-  edits rather than a rewrite; normalization is reproducible without a font in
-  hand, so it can be tested, cached, and shared across faces. *Con:* we draw a
-  box where HarfBuzz draws correct text, on real strings, in real fonts. The
-  user does not care which stage was principled.
-- **B — adopt HarfBuzz's font-aware recomposition.** *Pro:* matches the
-  reference implementation and every other shaper, closes the sweep's residue
-  to near zero, and is strictly better output on faces with partial coverage.
-  *Con:* normalization becomes a function of `(text, face)`, so it can no
-  longer be hoisted, cached per string, or reasoned about without a font;
-  `norm.rs`'s layering claim becomes false and its doc has to be rewritten to
-  say the opposite.
-- **C — a narrow fallback: keep `nfc` pure, but let `fit_to_face` decompose a
-  composed character it cannot draw when the parts *are* drawable.** *Pro:*
-  gets B's user-visible outcome for exactly the failing case while keeping
-  A's layering, because the decomposition happens in the stage that already
-  owns "what can this face draw" — `split_undrawable` is already that
-  function and already takes this shape. *Con:* it is two mechanisms where
-  HarfBuzz has one, so we would agree with HarfBuzz on output while diverging
-  on structure, and the sweep may surface ordering cases (mark reordering
-  after a late decomposition) that HarfBuzz gets right by construction.
-
-**My recommendation: C**, and I have *not* implemented it. It is the only
-option that does not require choosing between correct pixels and a coherent
-module boundary, and `split_undrawable` already exists as the hook. But it is
-a user-visible rendering-policy change on a design principle that was written
-down deliberately, so it is yours rather than mine. Meanwhile the behaviour is
-A (unchanged) and the residue is documented, not silently tolerated.
-
-**Where it bites:** `gui/font/src/norm.rs` (`nfc`, `normalize`,
-`decompose_once`, `split_undrawable`, `fit_to_face`, and the module doc's
-layering paragraph), `gui/font/src/scaled.rs::shape` (call order), and
-`gui/font/tools/harfbuzz_sweep.py` (the 339 would move to `agree`). Reference:
-HarfBuzz `src/hb-ot-shape-normalize.cc`,
-`HB_OT_SHAPE_NORMALIZATION_MODE_COMPOSED_DIACRITICS_NO_SHORT_CIRCUIT`.
+**The bill to watch for:** mark reordering after a late decomposition, which
+HarfBuzz gets right by construction and we would not. The sweep is the
+instrument; an ordering case it surfaces is this decision's cost coming due, not
+a surprise.
 
 ---
 

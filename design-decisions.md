@@ -13119,3 +13119,177 @@ work (*"the first fastpy utility clears both bars"*), so the person who causes
 the event is the person reading the file's subject matter at that moment. If
 that proves optimistic, the escalation is a check in the task-completion
 checklist, not a bigger file.
+
+## §427 — Text that does not fit carries an overflow policy on the draw command, and the compositor draws the ellipsis
+
+**Date:** 2026-08-15
+**Decided by:** Operator (answering `open-questions.md` Q45 — "q45: a."; Claude
+raised the question and recommended A)
+**Zone:** gui-core, gui-toolkit, apps
+
+**In short.** When a piece of text is too wide for the space it was given, we
+currently just stop drawing it — no "…", no mark of any kind. So a label reading
+`Gateway 192.168.1.1 res` looks like a complete sentence rather than a truncated
+one, and a reader has no way to tell that anything was cut. The fix is to make
+every text-drawing instruction say up front what should happen when the text
+does not fit — either cut it silently or end it with "…" — so that the question
+can no longer be left unanswered by accident. The cost is that every place in
+the codebase that draws text has to be edited to say which it wants.
+
+**Context.** `RenderCommand::Text` carries an optional `max_width`. The
+compositor honours it in `draw_text` by walking glyphs and breaking before the
+first one that would cross the limit. Nothing is drawn to mark the break. A
+caller who wants the cut marked has to call `text::elide` beforehand — which
+measures the string to find the cut point, and then the compositor measures it
+again while drawing it, answering the same question twice with two
+implementations that can disagree.
+
+The result is the failure mode in `known-issues.md` →
+`TD-GUI-CLIPPED-TEXT-IS-NOT-MARKED`: well over a hundred single-line labels
+across `gui/**` and `apps/**` pass `max_width` without eliding. Most are safe
+only because their values are short and app-authored. The ones that bite carry
+user or network data — file names, SSIDs, error strings, host names — where a
+plausible-looking truncation is indistinguishable from the real value.
+
+**Options.**
+
+1. **`overflow: TextOverflow` (`Clip` | `Ellipsis`) as a field on
+   `RenderCommand::Text`; the compositor draws the ellipsis.** *What changes:*
+   text cut by `max_width` ends in "…" wherever a caller asks for it, and the
+   ellipsis is placed by the party that knows exactly where the glyphs ran out.
+   *Cost:* Rust has no per-field default in a struct variant, so this edits
+   **every** construction of `Text` in the tree.
+2. **A second variant, `RenderCommand::ElidedText`.** *What changes:* the same
+   visible outcome, with no edit to existing call sites. *Cost:* every renderer,
+   every test and every match on `RenderCommand` splits an arm forever to encode
+   one boolean.
+3. **A builder — `Text::new(..).ellipsis()`.** *What changes:* the same outcome,
+   opt-in. *Cost:* the struct-literal form stays available and stays wrong, so
+   the next label someone writes still has the bug.
+4. **Sweep `text::elide` across the call sites that need it.** *What changes:*
+   today's hundred-odd bad labels get fixed. *Cost:* nothing prevents the
+   hundred-and-first, and the double-measurement stays.
+
+**The decision: option 1.** It is the only option that makes the mistake
+*unrepresentable* — after it, a `Text` command cannot exist without having
+answered "and what if it doesn't fit?". The operator was told the churn was
+several hundred sites and chose A anyway, on exactly that ground. (Measured
+afterwards: **4517 `RenderCommand::Text {` sites across 208 files**, well above
+the estimate. That does not reopen the decision — the decision was about
+representability, not diff size — but it does mean the edit is *scripted*, not
+made by hand.)
+
+**Execution constraint, and it is load-bearing.** This lands as **its own commit
+with nothing else in flight.** A four-thousand-site mechanical diff entangled
+with real work cannot be separated afterwards; that is precisely the trap §310
+(the repo-wide rustfmt) exists to document, and it cost a revert-and-redo cycle
+in `posix` when it happened there.
+
+**A sub-decision left to Claude, recorded here so it can be overruled.** For the
+sites that pass `max_width: None`, the choice is vacuous and they get `Clip`.
+For the sites that *do* set a `max_width`, the mechanical translation would be
+`Clip` — that preserves today's behaviour exactly. It is nonetheless the wrong
+default: today's behaviour *is* the reported bug, and a scripted sweep that
+faithfully preserves a bug at four thousand sites has done nothing. Those sites
+default to **`Ellipsis`**. The consequence is that some labels which currently
+fill their box to the last pixel will end in "…" one glyph earlier; that is the
+intended change, not a regression. Sites where clipping is genuinely correct —
+a progress bar's fill, a decorative rule — are those that should be
+individually set back to `Clip` afterwards, because they are the rare case and
+can be argued for one at a time.
+
+**Where it lands.** `gui/toolkit/src/render.rs` (`RenderCommand::Text`, the
+`RenderTree::text()` helper), `gui/compositor/src/main.rs` (`draw_text` — the
+`break` at the limit becomes the place the ellipsis is drawn),
+`gui/toolkit/src/text.rs` (`elide` / `elide_start`, which now overlap the
+compositor's job and need reconciling rather than deleting — they still serve
+callers who need the *string*, not the pixels), and every `max_width: Some(..)`
+in `gui/**` and `apps/**`. Closes `known-issues.md` →
+`TD-GUI-CLIPPED-TEXT-IS-NOT-MARKED`.
+
+## §428 — Normalization stays font-blind; the font-fitting stage decomposes what the face cannot draw
+
+**Date:** 2026-08-15
+**Decided by:** Operator (answering `open-questions.md` C-Q1 — "c-q1: c.";
+Claude raised the question and recommended C)
+**Zone:** gui-core
+
+**In short.** Some accented letters can be written two ways: as one character
+(`ḉ`) or as a plain `c` with two accent marks stacked on it. A font may contain
+the pieces but not the single combined character. Today, when that happens, we
+draw an empty box — the "missing character" rectangle — where other systems draw
+the letter correctly by falling back to the pieces. The question was *which part
+of our code should notice*. We chose: the part that already knows what the font
+contains, rather than the part that converts text into its canonical spelling.
+The visible result is that those letters render correctly; the text-conversion
+step keeps knowing nothing about fonts, which is what lets it be tested and
+cached on its own.
+
+**Context.** `gui/font/src/norm.rs` is layered on a principle written into its
+module doc: **`nfc` answers a question about *text*** — NFC is the Unicode rule
+that spells `e` + `´` as the single character `é` — **and never looks at a font;
+`fit_to_face` answers a question about the *font*** and does not renormalize.
+Composition is a property of the string, so it is decided before any face
+(a font file as loaded for rendering) is consulted.
+
+HarfBuzz — the reference text shaper (the library that turns characters into
+positioned glyphs), which we run a differential sweep against — does the
+opposite. It decomposes to NFD (the fully-separated spelling) and then
+*recomposes only where the face has a glyph*, so the same string normalizes
+differently in two different fonts.
+
+The question surfaced as the entire residue of that sweep. Fixing
+`TD-FONT-HAS-A-HANGUL-SHAPER-NOTHING-CALLS` took the disagreement count from 892
+to 339, and the remaining 339 are **one question asked 339 times**, not a
+scatter: `\u1e09` (ḉ, c with cedilla and acute) 255 cases, `\u212b` (Å, the
+angstrom sign) 57, `été` 10, and a short tail. Concretely, for `\u1e09` in a
+face holding `c`, the cedilla and the acute but no precomposed `ḉ`: we emit one
+missing-glyph box, HarfBuzz emits three glyphs that stack into the right-looking
+character.
+
+**Options.**
+
+- **A — keep the current layering unchanged.** *What changes:* nothing; we keep
+  drawing a box where HarfBuzz draws correct text. *Pro:* each stage has one job
+  and one input. *Con:* the user does not care which stage was principled.
+- **B — adopt HarfBuzz's font-aware recomposition wholesale.** *What changes:*
+  the sweep residue goes to near zero and partial-coverage faces render
+  correctly. *Con:* normalization becomes a function of `(text, face)` — no
+  longer hoistable out of a loop, no longer cacheable per string, not reasonable
+  about without a font in hand; `norm.rs`'s layering claim becomes false.
+- **C — a narrow fallback: `nfc` stays pure, but `fit_to_face` decomposes a
+  composed character it cannot draw when the pieces *are* drawable.** *What
+  changes:* the same visible outcome as B for exactly the failing case, with A's
+  layering intact. *Con:* two mechanisms where HarfBuzz has one — we agree with
+  it on output while diverging on structure.
+
+**The decision: option C.** The decomposition happens in the stage that already
+owns "what can this face draw", and `split_undrawable` already exists with
+exactly that shape — which is why C was the recommendation rather than a
+compromise between the other two. Expected result: the 339 disagreements move to
+`agree` without `nfc` ever taking a face as input.
+
+**The cost accepted, and what to actually test.** Running two mechanisms where
+HarfBuzz runs one means we can match its output while diverging on how we got
+there, and divergence in structure eventually shows up as divergence in output.
+The concrete risk named in the question is **mark reordering after a late
+decomposition** — when several accents attach to one letter, their order matters,
+and HarfBuzz gets it right by construction because it decomposes before
+reordering, whereas we would decompose after. Treat that as the thing to verify
+rather than assume: the sweep is the instrument, and any ordering case it
+surfaces is this decision's bill coming due, not a surprise.
+
+**Why B is worth keeping written down.** If a future case cannot be fixed inside
+`fit_to_face`, B is the argument that has to be beaten, and it should not be
+re-litigated from scratch. It was refused for one reason: it makes normalization
+depend on the font, and everything we do with normalized text — caching it,
+hoisting it out of a render loop, testing it without a font — depends on it not
+doing that.
+
+**Where it lands.** `gui/font/src/norm.rs` (`fit_to_face`, `split_undrawable`,
+and the module doc's layering paragraph, which now needs a sentence saying the
+fallback exists and why it does not violate the principle),
+`gui/font/src/scaled.rs::shape` (call order), and
+`gui/font/tools/harfbuzz_sweep.py` (the 339 should move to `agree`). Reference:
+HarfBuzz `src/hb-ot-shape-normalize.cc`,
+`HB_OT_SHAPE_NORMALIZATION_MODE_COMPOSED_DIACRITICS_NO_SHORT_CIRCUIT`.

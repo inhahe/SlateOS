@@ -1837,6 +1837,94 @@ mod tests {
     }
 
     // ====================================================================
+    // Non-ASCII source
+    // ====================================================================
+    //
+    // Every tokenizer here scans `line.as_bytes()` and advances one byte in
+    // its default branch. Token ranges are byte ranges, so a boundary landing
+    // inside a character would panic any caller that slices by them --
+    // including `tokens_of` above, and including the renderer if highlighting
+    // is ever wired up (see known-issues.md). Most boundaries should be sound
+    // by UTF-8 self-synchronization, since they are decided by ASCII
+    // delimiters, but "should be" is not "is": these check every language.
+
+    /// Every language, with non-ASCII text in each construct a tokenizer
+    /// treats specially: a string literal, a comment, and a bare identifier.
+    fn non_ascii_lines() -> Vec<(Language, &'static str)> {
+        vec![
+            (Language::Rust, "let 変数 = \"日本語\"; // コメント"),
+            (Language::Rust, "/* 日本語 */ fn αβγ() {}"),
+            (Language::Rust, "let s = \"emoji 😀 in a string\";"),
+            (Language::C, "int главная = 0; /* комментарий */"),
+            (Language::C, "char *s = \"日本語\"; // コメント"),
+            (Language::Python, "变量 = \"日本語\"  # コメント"),
+            (Language::Python, "s = '''日本語 multi'''"),
+            (Language::JavaScript, "const 変数 = `日本語 ${x}`; // コメント"),
+            (Language::JavaScript, "let s = \"emoji 😀\"; /* κόσμε */"),
+            (Language::Html, "<p class=\"日本語\">κόσμε</p><!-- コメント -->"),
+            (Language::Css, ".日本語 { content: \"κόσμε\"; } /* コメント */"),
+            (Language::Shell, "echo \"日本語\" # コメント"),
+            (Language::Toml, "名前 = \"日本語\" # コメント"),
+            (Language::Yaml, "名前: \"日本語\" # コメント"),
+            (Language::Json, "{\"名前\": \"日本語\"}"),
+            (Language::Markdown, "# 見出し **太字** `コード` [リンク](url)"),
+            (Language::Plain, "日本語 κόσμε 😀"),
+        ]
+    }
+
+    #[test]
+    fn no_tokenizer_splits_a_character() {
+        let mut checked = 0;
+        for (lang, line) in non_ascii_lines() {
+            let mut state = HighlightState::Normal;
+            let toks = highlight_line(line, lang, &mut state);
+            for t in &toks {
+                // Checked before slicing so a failure names the offending
+                // offset instead of aborting inside `str::index`.
+                assert!(
+                    t.start <= t.end && t.end <= line.len(),
+                    "{lang:?}: token range {}..{} out of bounds for {line:?}",
+                    t.start,
+                    t.end
+                );
+                assert!(
+                    line.is_char_boundary(t.start),
+                    "{lang:?}: token start {} is inside a character in {line:?}",
+                    t.start
+                );
+                assert!(
+                    line.is_char_boundary(t.end),
+                    "{lang:?}: token end {} is inside a character in {line:?}",
+                    t.end
+                );
+            }
+            // And the slice itself, which is what `tokens_of` does.
+            let _ = tokens_of(line, lang);
+            checked += 1;
+        }
+        assert!(checked >= 17, "only {checked} lines checked");
+    }
+
+    #[test]
+    fn multi_line_state_survives_non_ascii() {
+        // Carrying a block comment across lines is the path where a tokenizer
+        // resumes mid-construct, re-entering the byte loop at an offset it
+        // did not choose itself.
+        let mut state = HighlightState::Normal;
+        let mut checked = 0;
+        for line in ["/* 日本語", "まだコメント 😀", "終わり */ let x = 1;"] {
+            let toks = highlight_line(line, Language::Rust, &mut state);
+            for t in &toks {
+                assert!(line.is_char_boundary(t.start), "{line:?} @ {}", t.start);
+                assert!(line.is_char_boundary(t.end), "{line:?} @ {}", t.end);
+            }
+            checked += 1;
+        }
+        assert_eq!(checked, 3);
+        assert_eq!(state, HighlightState::Normal, "comment should have closed");
+    }
+
+    // ====================================================================
     // Language detection
     // ====================================================================
 

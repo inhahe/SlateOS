@@ -285,6 +285,51 @@ scaffolding, not the tree.
 Violates `CLAUDE.md` self-review item 7 (never force UTF-8 assumptions on
 OS-boundary data) and trips the workspace's `clippy::indexing_slicing` warn.
 
+## `apps/editor`'s syntax highlighter is complete, tested, and not connected (lane C)
+
+**Status: OPEN 2026-08-15** (lane C). Found while sweeping for byte-at-a-time
+text walkers — `highlight.rs`'s tokenizers step bytes, so it was on the list to
+audit, and the audit turned up something larger: the module is not reachable
+from the running program.
+
+`apps/editor/src/main.rs` declares `mod highlight;` and then never names
+anything from it. There is no `use crate::highlight::…`, no `highlight::`
+path anywhere outside the module, and `highlight_line` — the only public entry
+point — is called exclusively from `highlight.rs`'s own `#[cfg(test)]` block.
+That is 2328 lines implementing Rust, Python, C, JavaScript and Markdown
+tokenizers, with a large and genuinely passing test suite, wired to nothing.
+The editor's own module doc still advertises "Syntax highlighting for common
+languages".
+
+**Why the compiler did not catch it:** `highlight.rs` line 11 is
+`#![allow(dead_code)]`. Without it, every public item in the module would be
+reported unused in this binary crate. The suppression is doing real damage
+here — it is the only thing standing between this state and a build warning.
+
+**What the proper fix looks like.** Wire `highlight_line` into the text
+rendering path so a line is drawn as a run of per-token coloured spans instead
+of one uniform string, threading `HighlightState` down the visible-line loop so
+multi-line constructs (block comments, multi-line strings) carry over — the
+state machine for that already exists and is tested. Then delete the
+module-level `#![allow(dead_code)]` and fix whatever it was masking. Check
+`syntree.rs` is unaffected: it *is* wired up (`use syntree::{Pos, SyntaxTree}`),
+so this is specific to highlighting.
+
+**The byte-stepping was audited first, and it is clean — this prerequisite is
+already done.** The tokenizers scan `line.as_bytes()` and advance one byte in
+their default branches, so a token boundary landing mid-character would panic
+the moment a caller sliced by the range, and a renderer would slice on every
+keystroke. `no_tokenizer_splits_a_character` now runs all twelve languages over
+non-ASCII source — CJK, Greek, Cyrillic and emoji inside string literals,
+comments and bare identifiers — and asserts `is_char_boundary` on both ends of
+every token before slicing; `multi_line_state_survives_non_ascii` covers a
+block comment carried across three lines, the path where a tokenizer resumes at
+an offset it did not choose. Both pass: every boundary really is decided by an
+ASCII delimiter, so UTF-8 self-synchronization holds throughout. Verified
+non-vacuous by making one `push_token` emit `len - 1`, which the assertion
+catches. So wiring highlighting up is now purely a rendering job, with no
+character-boundary work left to do.
+
 
 Running list of unsolved bugs and technical debt.  Each entry should
 have enough context to act on later: what the bug or debt is, where in

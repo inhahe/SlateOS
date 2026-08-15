@@ -115,7 +115,14 @@ mod tests {
     #[test]
     fn test_severity_dense_0_to_7() {
         let s = [
-            LOG_EMERG, LOG_ALERT, LOG_CRIT, LOG_ERR, LOG_WARNING, LOG_NOTICE, LOG_INFO, LOG_DEBUG,
+            LOG_EMERG,
+            LOG_ALERT,
+            LOG_CRIT,
+            LOG_ERR,
+            LOG_WARNING,
+            LOG_NOTICE,
+            LOG_INFO,
+            LOG_DEBUG,
         ];
         for (i, &v) in s.iter().enumerate() {
             assert_eq!(v as usize, i);
@@ -168,7 +175,9 @@ mod tests {
 
     #[test]
     fn test_openlog_flags_low_6_bits_dense() {
-        let o = [LOG_PID, LOG_CONS, LOG_ODELAY, LOG_NDELAY, LOG_NOWAIT, LOG_PERROR];
+        let o = [
+            LOG_PID, LOG_CONS, LOG_ODELAY, LOG_NDELAY, LOG_NOWAIT, LOG_PERROR,
+        ];
         let mut or = 0u32;
         for (i, v) in o.iter().enumerate() {
             assert_eq!(*v, 1 << i);

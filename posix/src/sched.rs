@@ -4,10 +4,7 @@
 // `sched_param`/`sched_attr` fields that are kernel-validated before
 // any further use.  Bounds are established locally but clippy cannot
 // see across the check.
-#![allow(
-    clippy::indexing_slicing,
-    clippy::arithmetic_side_effects,
-)]
+#![allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 
 //! POSIX scheduling functions (`<sched.h>`).
 //!
@@ -217,7 +214,9 @@ pub extern "C" fn sched_setparam(pid: i32, param: *const SchedParam) -> i32 {
 /// rejected with `-1/EINVAL`, matching Linux behaviour.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sched_get_priority_min(policy: i32) -> i32 {
-    if let Some((lo, _)) = priority_range(policy) { lo } else {
+    if let Some((lo, _)) = priority_range(policy) {
+        lo
+    } else {
         errno::set_errno(errno::EINVAL);
         -1
     }
@@ -230,7 +229,9 @@ pub extern "C" fn sched_get_priority_min(policy: i32) -> i32 {
 /// policies are rejected with `-1/EINVAL`, matching Linux.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sched_get_priority_max(policy: i32) -> i32 {
-    if let Some((_, hi)) = priority_range(policy) { hi } else {
+    if let Some((_, hi)) = priority_range(policy) {
+        hi
+    } else {
         errno::set_errno(errno::EINVAL);
         -1
     }
@@ -1884,8 +1885,8 @@ mod tests {
         }
         impl CapGuard {
             fn snapshot() -> Self {
-            let (lo, hi) = crate::sys_capability::current_caps_effective();
-            Self { lo, hi }
+                let (lo, hi) = crate::sys_capability::current_caps_effective();
+                Self { lo, hi }
             }
         }
         impl Drop for CapGuard {
@@ -2177,16 +2178,14 @@ mod tests {
         const CAP_SYS_NICE: u32 = crate::sys_capability::CAP_SYS_NICE;
 
         struct CapGuard {
-
             lo: u32,
 
             hi: u32,
-
         }
         impl CapGuard {
             fn snapshot() -> Self {
-            let (lo, hi) = crate::sys_capability::current_caps_effective();
-            Self { lo, hi }
+                let (lo, hi) = crate::sys_capability::current_caps_effective();
+                Self { lo, hi }
             }
         }
         impl Drop for CapGuard {

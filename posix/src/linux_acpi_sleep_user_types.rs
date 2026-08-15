@@ -90,7 +90,12 @@ mod tests {
 
     #[test]
     fn test_state_strings_distinct_short() {
-        let s = [PM_STATE_FREEZE, PM_STATE_STANDBY, PM_STATE_MEM, PM_STATE_DISK];
+        let s = [
+            PM_STATE_FREEZE,
+            PM_STATE_STANDBY,
+            PM_STATE_MEM,
+            PM_STATE_DISK,
+        ];
         for i in 0..s.len() {
             for j in (i + 1)..s.len() {
                 assert_ne!(s[i], s[j]);

@@ -73,8 +73,7 @@ mod tests {
         // forward-compatibility (newer fields appended).
         assert_eq!(VFIO_DEVICE_INFO_CAP_ZPCI_BASE_VERSION, 1);
         assert!(
-            VFIO_DEVICE_INFO_CAP_ZPCI_GROUP_VERSION_2
-                > VFIO_DEVICE_INFO_CAP_ZPCI_GROUP_VERSION
+            VFIO_DEVICE_INFO_CAP_ZPCI_GROUP_VERSION_2 > VFIO_DEVICE_INFO_CAP_ZPCI_GROUP_VERSION
         );
     }
 

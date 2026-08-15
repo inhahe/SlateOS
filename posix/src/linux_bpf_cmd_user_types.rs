@@ -112,9 +112,6 @@ mod tests {
     #[test]
     fn test_get_fd_by_id_pair() {
         // BPF_PROG_GET_FD_BY_ID and BPF_MAP_GET_FD_BY_ID are adjacent.
-        assert_eq!(
-            BPF_MAP_GET_FD_BY_ID - BPF_PROG_GET_FD_BY_ID,
-            1
-        );
+        assert_eq!(BPF_MAP_GET_FD_BY_ID - BPF_PROG_GET_FD_BY_ID, 1);
     }
 }

@@ -19,8 +19,7 @@ pub const PKEY_DISABLE_WRITE: u32 = 1 << 1;
 pub const PKEY_DISABLE_EXECUTE: u32 = 1 << 2;
 
 /// Mask of every documented access-rights bit.
-pub const PKEY_ACCESS_MASK: u32 =
-    PKEY_DISABLE_ACCESS | PKEY_DISABLE_WRITE | PKEY_DISABLE_EXECUTE;
+pub const PKEY_ACCESS_MASK: u32 = PKEY_DISABLE_ACCESS | PKEY_DISABLE_WRITE | PKEY_DISABLE_EXECUTE;
 
 // ---------------------------------------------------------------------------
 // Number of protection keys exposed by the architecture
@@ -62,7 +61,11 @@ mod tests {
 
     #[test]
     fn test_disable_bits_single_bit_low_3() {
-        let d = [PKEY_DISABLE_ACCESS, PKEY_DISABLE_WRITE, PKEY_DISABLE_EXECUTE];
+        let d = [
+            PKEY_DISABLE_ACCESS,
+            PKEY_DISABLE_WRITE,
+            PKEY_DISABLE_EXECUTE,
+        ];
         let mut or = 0u32;
         for (i, &v) in d.iter().enumerate() {
             assert!(v.is_power_of_two());

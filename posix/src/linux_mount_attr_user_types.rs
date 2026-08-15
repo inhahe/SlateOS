@@ -107,7 +107,10 @@ mod tests {
         for v in p {
             assert!(v.is_power_of_two());
         }
-        assert_eq!((MS_UNBINDABLE | MS_PRIVATE | MS_SLAVE | MS_SHARED) >> 17, 0xF);
+        assert_eq!(
+            (MS_UNBINDABLE | MS_PRIVATE | MS_SLAVE | MS_SHARED) >> 17,
+            0xF
+        );
     }
 
     #[test]

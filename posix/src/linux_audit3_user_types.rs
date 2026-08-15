@@ -123,10 +123,7 @@ mod tests {
         }
         // Composite ops are bitwise unions of the primitives.
         assert_eq!(AUDIT_BIT_TEST, AUDIT_BIT_MASK | AUDIT_EQUAL);
-        assert_eq!(
-            AUDIT_LESS_THAN_OR_EQUAL,
-            AUDIT_LESS_THAN | AUDIT_EQUAL
-        );
+        assert_eq!(AUDIT_LESS_THAN_OR_EQUAL, AUDIT_LESS_THAN | AUDIT_EQUAL);
         assert_eq!(
             AUDIT_GREATER_THAN_OR_EQUAL,
             AUDIT_GREATER_THAN | AUDIT_EQUAL

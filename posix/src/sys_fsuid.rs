@@ -372,7 +372,6 @@ mod tests {
         let after = setfsuid(original as u32);
         assert_eq!(after, 65534);
         assert_eq!(current_fsuid(), 1000);
-
     }
 
     #[test]
@@ -427,8 +426,8 @@ mod tests {
         }
         impl CapGuard {
             fn snapshot() -> Self {
-            let (lo, hi) = crate::sys_capability::current_caps_effective();
-            Self { lo, hi }
+                let (lo, hi) = crate::sys_capability::current_caps_effective();
+                Self { lo, hi }
             }
         }
         impl Drop for CapGuard {
@@ -694,7 +693,6 @@ mod tests {
             let restored = setfsuid(1000);
             assert_eq!(restored, 1000);
             assert_eq!(current_fsuid(), 1000);
-
         }
 
         // -- Buggy-caller --------------------------------------------------

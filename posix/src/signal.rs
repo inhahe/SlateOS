@@ -4,10 +4,7 @@
 // be in `1..=NSIG` before these helpers are called.  The arithmetic
 // is `signum - 1` (signum ≥ 1) and `1 << bit` where `bit < 64` — no
 // overflow path exists.
-#![allow(
-    clippy::indexing_slicing,
-    clippy::arithmetic_side_effects,
-)]
+#![allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 
 //! POSIX signal handling layer.
 //!
@@ -980,11 +977,8 @@ pub extern "C" fn kill(pid: i32, sig: i32) -> i32 {
             // member?".  The kernel answers it on the same path a real
             // group send takes, so the probe cannot report a group the
             // send would then fail to find.
-            let ret = crate::syscall::syscall2(
-                crate::syscall::SYS_SIGNAL_SEND,
-                sign_extend_pid(pid),
-                0,
-            );
+            let ret =
+                crate::syscall::syscall2(crate::syscall::SYS_SIGNAL_SEND, sign_extend_pid(pid), 0);
             if ret < 0 {
                 errno::set_errno(signal_send_errno(ret));
                 return -1;
@@ -3023,8 +3017,8 @@ mod tests {
         }
         impl CapGuard {
             pub(super) fn snapshot() -> Self {
-            let (lo, hi) = crate::sys_capability::current_caps_effective();
-            Self { lo, hi }
+                let (lo, hi) = crate::sys_capability::current_caps_effective();
+                Self { lo, hi }
             }
         }
         impl Drop for CapGuard {

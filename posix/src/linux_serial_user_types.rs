@@ -70,8 +70,7 @@ pub const ASYNC_BUGGY_UART: u32 = 1 << 14;
 pub const ASYNC_SPD_WARP: u32 = 1 << 15;
 
 /// Mask of speed-override bits.
-pub const ASYNC_SPD_MASK: u32 =
-    ASYNC_SPD_HI | ASYNC_SPD_VHI | ASYNC_SPD_SHI | ASYNC_SPD_WARP;
+pub const ASYNC_SPD_MASK: u32 = ASYNC_SPD_HI | ASYNC_SPD_VHI | ASYNC_SPD_SHI | ASYNC_SPD_WARP;
 
 // ---------------------------------------------------------------------------
 // xmit_fifo_size defaults

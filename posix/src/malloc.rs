@@ -425,7 +425,9 @@ pub extern "C" fn pvalloc(size: usize) -> *mut u8 {
     }
     const PAGE_SIZE: usize = 16384;
     // Round up to the next page-size multiple.
-    let rounded = if let Some(v) = size.checked_add(PAGE_SIZE.wrapping_sub(1)) { v & !PAGE_SIZE.wrapping_sub(1) } else {
+    let rounded = if let Some(v) = size.checked_add(PAGE_SIZE.wrapping_sub(1)) {
+        v & !PAGE_SIZE.wrapping_sub(1)
+    } else {
         crate::errno::set_errno(crate::errno::ENOMEM);
         return core::ptr::null_mut();
     };

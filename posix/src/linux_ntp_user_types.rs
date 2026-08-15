@@ -160,9 +160,14 @@ mod tests {
     fn test_sta_rdonly_is_top_byte_plus_pps() {
         // Read-only bits are the PPS-monitor and high-state bits the kernel
         // sets on its own.
-        let expected =
-            STA_PPSSIGNAL | STA_PPSJITTER | STA_PPSWANDER | STA_PPSERROR |
-            STA_CLOCKERR | STA_NANO | STA_MODE | STA_CLK;
+        let expected = STA_PPSSIGNAL
+            | STA_PPSJITTER
+            | STA_PPSWANDER
+            | STA_PPSERROR
+            | STA_CLOCKERR
+            | STA_NANO
+            | STA_MODE
+            | STA_CLK;
         assert_eq!(STA_RONLY, expected);
     }
 

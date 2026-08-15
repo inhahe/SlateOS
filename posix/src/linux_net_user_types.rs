@@ -100,13 +100,7 @@ mod tests {
 
     #[test]
     fn test_sock_types_dense_1_to_5() {
-        let s = [
-            SOCK_STREAM,
-            SOCK_DGRAM,
-            SOCK_RAW,
-            SOCK_RDM,
-            SOCK_SEQPACKET,
-        ];
+        let s = [SOCK_STREAM, SOCK_DGRAM, SOCK_RAW, SOCK_RDM, SOCK_SEQPACKET];
         for (i, &v) in s.iter().enumerate() {
             assert_eq!(v as usize, i + 1);
         }
@@ -183,8 +177,16 @@ mod tests {
         assert_eq!(NR_SETSOCKOPT, 54);
         assert_eq!(NR_GETSOCKOPT, 55);
         for w in [
-            NR_SOCKET, NR_CONNECT, NR_ACCEPT, NR_SENDTO, NR_RECVFROM, NR_SENDMSG, NR_RECVMSG,
-            NR_SHUTDOWN, NR_BIND, NR_LISTEN,
+            NR_SOCKET,
+            NR_CONNECT,
+            NR_ACCEPT,
+            NR_SENDTO,
+            NR_RECVFROM,
+            NR_SENDMSG,
+            NR_RECVMSG,
+            NR_SHUTDOWN,
+            NR_BIND,
+            NR_LISTEN,
         ]
         .windows(2)
         {

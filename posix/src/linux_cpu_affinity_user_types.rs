@@ -89,7 +89,10 @@ mod tests {
     fn test_syscall_numbers_paired() {
         // get == set + 1 on every architecture.
         assert_eq!(NR_SCHED_GETAFFINITY_X86_64, NR_SCHED_SETAFFINITY_X86_64 + 1);
-        assert_eq!(NR_SCHED_GETAFFINITY_AARCH64, NR_SCHED_SETAFFINITY_AARCH64 + 1);
+        assert_eq!(
+            NR_SCHED_GETAFFINITY_AARCH64,
+            NR_SCHED_SETAFFINITY_AARCH64 + 1
+        );
         assert_eq!(NR_SCHED_GETAFFINITY_I386, NR_SCHED_SETAFFINITY_I386 + 1);
     }
 
@@ -115,7 +118,12 @@ mod tests {
 
     #[test]
     fn test_sys_cpu_paths_under_devices_system_cpu() {
-        for p in [SYS_CPU_ONLINE, SYS_CPU_OFFLINE, SYS_CPU_POSSIBLE, SYS_CPU_PRESENT] {
+        for p in [
+            SYS_CPU_ONLINE,
+            SYS_CPU_OFFLINE,
+            SYS_CPU_POSSIBLE,
+            SYS_CPU_PRESENT,
+        ] {
             assert!(p.starts_with(SYS_DEVICES_SYSTEM_CPU));
         }
     }

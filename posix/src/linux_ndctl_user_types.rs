@@ -139,9 +139,7 @@ mod tests {
         assert!(ND_SMART_NON_CRITICAL_HEALTH < ND_SMART_CRITICAL_HEALTH);
         assert!(ND_SMART_CRITICAL_HEALTH < ND_SMART_FATAL_HEALTH);
         assert_eq!(
-            ND_SMART_NON_CRITICAL_HEALTH
-                | ND_SMART_CRITICAL_HEALTH
-                | ND_SMART_FATAL_HEALTH,
+            ND_SMART_NON_CRITICAL_HEALTH | ND_SMART_CRITICAL_HEALTH | ND_SMART_FATAL_HEALTH,
             0x7
         );
     }

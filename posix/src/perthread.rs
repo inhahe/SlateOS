@@ -235,7 +235,7 @@ pub fn current() -> *mut PerThread {
 
 #[cfg(test)]
 mod tests {
-    use super::{current, PerThread, BLOCK_SIZE};
+    use super::{BLOCK_SIZE, PerThread, current};
 
     #[test]
     fn block_size_is_a_multiple_of_sixteen() {

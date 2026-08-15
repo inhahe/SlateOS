@@ -134,8 +134,8 @@ pub(crate) type RlimitTable = [Rlimit; RLIMIT_NLIMITS];
 /// for the rule and the alternatives considered.
 mod limit_store {
     use super::{
-        Rlimit, RlimitTable, RLIMIT_CORE, RLIMIT_NLIMITS, RLIMIT_NOFILE, RLIMIT_STACK,
-        RLIM_INFINITY,
+        RLIM_INFINITY, RLIMIT_CORE, RLIMIT_NLIMITS, RLIMIT_NOFILE, RLIMIT_STACK, Rlimit,
+        RlimitTable,
     };
 
     /// Cold-start limits, stated once for both builds.
@@ -175,7 +175,7 @@ mod limit_store {
     // kernel is the authoritative store (see `kernel_get_nice`).
     #[cfg(target_os = "none")]
     mod imp {
-        use super::{RlimitTable, RLIMITS_INIT};
+        use super::{RLIMITS_INIT, RlimitTable};
         static mut RLIMITS: RlimitTable = RLIMITS_INIT;
         pub(super) fn rlimits() -> *mut RlimitTable {
             &raw mut RLIMITS
@@ -184,7 +184,7 @@ mod limit_store {
 
     #[cfg(not(target_os = "none"))]
     mod imp {
-        use super::{RlimitTable, RLIMITS_INIT};
+        use super::{RLIMITS_INIT, RlimitTable};
         use core::cell::{Cell, UnsafeCell};
 
         std::thread_local! {
@@ -2076,8 +2076,8 @@ mod tests {
         }
         impl CapGuard {
             fn snapshot() -> Self {
-            let (lo, hi) = crate::sys_capability::current_caps_effective();
-            Self { lo, hi }
+                let (lo, hi) = crate::sys_capability::current_caps_effective();
+                Self { lo, hi }
             }
         }
         impl Drop for CapGuard {
@@ -2384,8 +2384,8 @@ mod tests {
         }
         impl CapGuard {
             fn snapshot() -> Self {
-            let (lo, hi) = crate::sys_capability::current_caps_effective();
-            Self { lo, hi }
+                let (lo, hi) = crate::sys_capability::current_caps_effective();
+                Self { lo, hi }
             }
         }
         impl Drop for CapGuard {
@@ -2713,8 +2713,8 @@ mod tests {
         }
         impl CapGuard {
             fn snapshot() -> Self {
-            let (lo, hi) = crate::sys_capability::current_caps_effective();
-            Self { lo, hi }
+                let (lo, hi) = crate::sys_capability::current_caps_effective();
+                Self { lo, hi }
             }
         }
         impl Drop for CapGuard {

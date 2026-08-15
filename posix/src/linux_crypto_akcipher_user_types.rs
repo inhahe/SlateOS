@@ -118,12 +118,7 @@ mod tests {
 
     #[test]
     fn test_op_codes_dense_0_to_3() {
-        let o = [
-            ALG_OP_DECRYPT,
-            ALG_OP_ENCRYPT,
-            ALG_OP_SIGN,
-            ALG_OP_VERIFY,
-        ];
+        let o = [ALG_OP_DECRYPT, ALG_OP_ENCRYPT, ALG_OP_SIGN, ALG_OP_VERIFY];
         for (i, &v) in o.iter().enumerate() {
             assert_eq!(v as usize, i);
         }

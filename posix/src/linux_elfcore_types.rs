@@ -87,13 +87,7 @@ mod tests {
         // The XSTATE / TLS / IOPERM note types must not collide with
         // the canonical NT_PR* notes; debuggers select handlers by
         // exact match.
-        let standard = [
-            NT_PRSTATUS,
-            NT_PRFPREG,
-            NT_PRPSINFO,
-            NT_TASKSTRUCT,
-            NT_AUXV,
-        ];
+        let standard = [NT_PRSTATUS, NT_PRFPREG, NT_PRPSINFO, NT_TASKSTRUCT, NT_AUXV];
         let arch = [NT_PRXFPREG, NT_X86_XSTATE, NT_386_TLS, NT_386_IOPERM];
         for &a in &arch {
             for &s in &standard {

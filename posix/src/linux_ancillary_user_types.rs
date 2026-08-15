@@ -128,9 +128,6 @@ mod tests {
         assert_eq!(cmsg_align(0), 0);
         assert_eq!(cmsg_align(1), CMSG_ALIGN_BYTES);
         assert_eq!(cmsg_align(CMSG_ALIGN_BYTES), CMSG_ALIGN_BYTES);
-        assert_eq!(
-            cmsg_align(CMSG_ALIGN_BYTES + 1),
-            CMSG_ALIGN_BYTES * 2
-        );
+        assert_eq!(cmsg_align(CMSG_ALIGN_BYTES + 1), CMSG_ALIGN_BYTES * 2);
     }
 }

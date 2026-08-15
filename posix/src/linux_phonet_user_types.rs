@@ -95,7 +95,12 @@ mod tests {
 
     #[test]
     fn test_pnpipe_sockopts_dense_1_to_4() {
-        let o = [PNPIPE_ENCAP, PNPIPE_IFINDEX, PNPIPE_HANDLE, PNPIPE_INITSTATE];
+        let o = [
+            PNPIPE_ENCAP,
+            PNPIPE_IFINDEX,
+            PNPIPE_HANDLE,
+            PNPIPE_INITSTATE,
+        ];
         for (i, &v) in o.iter().enumerate() {
             assert_eq!(v as usize, i + 1);
         }

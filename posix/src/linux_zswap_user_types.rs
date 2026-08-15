@@ -138,11 +138,7 @@ mod tests {
 
     #[test]
     fn test_zpool_names_distinct_and_default_zsmalloc() {
-        let z = [
-            ZSWAP_ZPOOL_ZBUD,
-            ZSWAP_ZPOOL_Z3FOLD,
-            ZSWAP_ZPOOL_ZSMALLOC,
-        ];
+        let z = [ZSWAP_ZPOOL_ZBUD, ZSWAP_ZPOOL_Z3FOLD, ZSWAP_ZPOOL_ZSMALLOC];
         for i in 0..z.len() {
             for j in (i + 1)..z.len() {
                 assert_ne!(z[i], z[j]);

@@ -116,11 +116,7 @@ mod tests {
 
     #[test]
     fn test_getrandom_syscall_numbers_distinct() {
-        let n = [
-            NR_GETRANDOM_X86_64,
-            NR_GETRANDOM_AARCH64,
-            NR_GETRANDOM_I386,
-        ];
+        let n = [NR_GETRANDOM_X86_64, NR_GETRANDOM_AARCH64, NR_GETRANDOM_I386];
         for (i, &x) in n.iter().enumerate() {
             for &y in &n[i + 1..] {
                 assert_ne!(x, y);

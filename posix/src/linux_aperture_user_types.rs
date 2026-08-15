@@ -67,7 +67,12 @@ mod tests {
 
     #[test]
     fn test_fb_driver_names_distinct() {
-        let n = [FB_NAME_EFIFB, FB_NAME_VESAFB, FB_NAME_SIMPLEDRM, FB_NAME_VGACON];
+        let n = [
+            FB_NAME_EFIFB,
+            FB_NAME_VESAFB,
+            FB_NAME_SIMPLEDRM,
+            FB_NAME_VGACON,
+        ];
         for (i, &a) in n.iter().enumerate() {
             for &b in &n[i + 1..] {
                 assert_ne!(a, b);

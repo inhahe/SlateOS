@@ -1698,13 +1698,13 @@ type PopenTable = [Option<PopenEntry>; MAX_POPEN];
 /// any concurrent popen test could free a slot or consume one.  See
 /// design-decisions.md §110.
 mod popen_store {
-    use super::{PopenTable, MAX_POPEN};
+    use super::{MAX_POPEN, PopenTable};
 
     const POPEN_INIT: PopenTable = [const { None }; MAX_POPEN];
 
     #[cfg(target_os = "none")]
     mod imp {
-        use super::{PopenTable, POPEN_INIT};
+        use super::{POPEN_INIT, PopenTable};
         static mut POPEN_TABLE: PopenTable = POPEN_INIT;
         pub(super) fn table() -> *mut PopenTable {
             &raw mut POPEN_TABLE
@@ -1713,7 +1713,7 @@ mod popen_store {
 
     #[cfg(not(target_os = "none"))]
     mod imp {
-        use super::{PopenTable, POPEN_INIT};
+        use super::{POPEN_INIT, PopenTable};
         use core::cell::UnsafeCell;
 
         std::thread_local! {
@@ -1784,11 +1784,12 @@ fn popen_unregister(stream: *mut u8) -> Option<i32> {
         let table = popen_store::table();
         for slot in &mut (*table) {
             if let Some(entry) = slot
-                && core::ptr::eq(entry.stream, stream) {
-                    let pid = entry.child_pid;
-                    *slot = None;
-                    return Some(pid);
-                }
+                && core::ptr::eq(entry.stream, stream)
+            {
+                let pid = entry.child_pid;
+                *slot = None;
+                return Some(pid);
+            }
         }
     }
     None
@@ -2352,7 +2353,10 @@ mod tests {
         f.buf_pos = 64;
         __fpurge(core::ptr::addr_of_mut!(f).cast::<u8>());
         assert_eq!(f.fd, 42, "fd must be untouched");
-        assert_eq!(f.buf_mode, BUF_MODE_LINE, "buffering mode must be untouched");
+        assert_eq!(
+            f.buf_mode, BUF_MODE_LINE,
+            "buffering mode must be untouched"
+        );
     }
 
     #[test]

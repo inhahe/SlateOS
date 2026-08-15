@@ -98,7 +98,12 @@ mod tests {
     #[test]
     fn test_syscall_numbers_in_range_for_x86_64() {
         // All four were added in 5.x; they all live in the 4xx range.
-        let n = [NR_PIDFD_SEND_SIGNAL, NR_PIDFD_OPEN, NR_PIDFD_GETFD, NR_CLONE3];
+        let n = [
+            NR_PIDFD_SEND_SIGNAL,
+            NR_PIDFD_OPEN,
+            NR_PIDFD_GETFD,
+            NR_CLONE3,
+        ];
         for &v in n.iter() {
             assert!(v >= 424 && v <= 438);
         }

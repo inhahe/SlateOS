@@ -884,7 +884,8 @@ fn find_getdents_cache(fd: i32) -> Option<*mut GetdentsCache> {
         return None;
     }
     // SAFETY: `GETDENTS_POOL_LOCK` is a `static`, so it outlives the guard.
-    let _guard = unsafe { crate::perprocess::lock_pool((&raw const GETDENTS_POOL_LOCK).cast_mut()) };
+    let _guard =
+        unsafe { crate::perprocess::lock_pool((&raw const GETDENTS_POOL_LOCK).cast_mut()) };
     // SAFETY: the guard is held, and every scan of the pool takes it.
     unsafe {
         let base = core::ptr::addr_of_mut!(GETDENTS_POOL).cast::<GetdentsCache>();
@@ -910,7 +911,8 @@ fn find_getdents_cache(fd: i32) -> Option<*mut GetdentsCache> {
 /// run with the pool lock released.
 fn claim_getdents_cache() -> *mut GetdentsCache {
     // SAFETY: `GETDENTS_POOL_LOCK` is a `static`, so it outlives the guard.
-    let _guard = unsafe { crate::perprocess::lock_pool((&raw const GETDENTS_POOL_LOCK).cast_mut()) };
+    let _guard =
+        unsafe { crate::perprocess::lock_pool((&raw const GETDENTS_POOL_LOCK).cast_mut()) };
     // SAFETY: the guard is held, and every scan of the pool takes it.
     unsafe {
         let base = core::ptr::addr_of_mut!(GETDENTS_POOL).cast::<GetdentsCache>();
@@ -940,7 +942,8 @@ fn publish_getdents_cache(slot: *mut GetdentsCache, fd: i32) {
         return;
     }
     // SAFETY: `GETDENTS_POOL_LOCK` is a `static`, so it outlives the guard.
-    let _guard = unsafe { crate::perprocess::lock_pool((&raw const GETDENTS_POOL_LOCK).cast_mut()) };
+    let _guard =
+        unsafe { crate::perprocess::lock_pool((&raw const GETDENTS_POOL_LOCK).cast_mut()) };
     // SAFETY: the caller owns `slot` (it holds the only claim on it) and the
     // guard excludes every concurrent scan.
     unsafe {
@@ -959,7 +962,8 @@ fn free_getdents_cache(slot: *mut GetdentsCache) {
         return;
     }
     // SAFETY: `GETDENTS_POOL_LOCK` is a `static`, so it outlives the guard.
-    let _guard = unsafe { crate::perprocess::lock_pool((&raw const GETDENTS_POOL_LOCK).cast_mut()) };
+    let _guard =
+        unsafe { crate::perprocess::lock_pool((&raw const GETDENTS_POOL_LOCK).cast_mut()) };
     // SAFETY: caller guarantees `slot` points into GETDENTS_POOL, and the
     // guard excludes every concurrent scan of it.
     unsafe {

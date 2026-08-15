@@ -108,13 +108,8 @@ mod tests {
             assert!(v.is_power_of_two());
         }
         // High byte of flags covers ATF_* bits 1..=7 -> 0xFE.
-        let or = ATF_COM
-            | ATF_PERM
-            | ATF_PUBL
-            | ATF_USETRAILERS
-            | ATF_NETMASK
-            | ATF_DONTPUB
-            | ATF_MAGIC;
+        let or =
+            ATF_COM | ATF_PERM | ATF_PUBL | ATF_USETRAILERS | ATF_NETMASK | ATF_DONTPUB | ATF_MAGIC;
         assert_eq!(or, 0xFE);
     }
 

@@ -35,10 +35,8 @@ pub const MOVE_MOUNT_T_MASK: u32 =
     MOVE_MOUNT_T_SYMLINKS | MOVE_MOUNT_T_AUTOMOUNTS | MOVE_MOUNT_T_EMPTY_PATH;
 
 /// All defined flags.
-pub const MOVE_MOUNT_ALL: u32 = MOVE_MOUNT_F_MASK
-    | MOVE_MOUNT_T_MASK
-    | MOVE_MOUNT_SET_GROUP
-    | MOVE_MOUNT_BENEATH;
+pub const MOVE_MOUNT_ALL: u32 =
+    MOVE_MOUNT_F_MASK | MOVE_MOUNT_T_MASK | MOVE_MOUNT_SET_GROUP | MOVE_MOUNT_BENEATH;
 
 // ---------------------------------------------------------------------------
 // Syscall numbers (x86_64, Linux 5.2+)

@@ -89,7 +89,10 @@ mod tests {
 
     #[test]
     fn test_smart_inject_flags_distinct_powers_of_two() {
-        let flags = [PDSM_SMART_INJECT_HEALTH_FATAL, PDSM_SMART_INJECT_BAD_SHUTDOWN];
+        let flags = [
+            PDSM_SMART_INJECT_HEALTH_FATAL,
+            PDSM_SMART_INJECT_BAD_SHUTDOWN,
+        ];
         for &f in &flags {
             assert!(f.is_power_of_two());
         }

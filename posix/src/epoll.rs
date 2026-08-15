@@ -14,10 +14,7 @@
 // across the check.  The defensive lints would only become useful here
 // if we accepted user-supplied integer indices into these tables, which
 // we do not.
-#![allow(
-    clippy::indexing_slicing,
-    clippy::arithmetic_side_effects,
-)]
+#![allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 
 //! Linux-specific I/O multiplexing and fd-based notification.
 //!
@@ -61,12 +58,12 @@
 use crate::errno;
 use crate::fdtable::{self, HandleKind};
 use crate::perprocess::process_global;
+use crate::syscall::{SYS_CLOCK_MONOTONIC, SYS_SLEEP, syscall0, syscall1, syscall3};
 #[cfg(target_os = "none")]
 use crate::syscall::{
     SYS_EVENTFD_CLOSE, SYS_EVENTFD_CREATE, SYS_EVENTFD_READ, SYS_EVENTFD_TRY_READ,
     SYS_EVENTFD_WRITE, syscall2,
 };
-use crate::syscall::{SYS_CLOCK_MONOTONIC, SYS_SLEEP, syscall0, syscall1, syscall3};
 
 /// Events for `epoll_ctl`.
 pub const EPOLLIN: u32 = 0x001;
@@ -463,13 +460,14 @@ pub extern "C" fn epoll_ctl(epfd: i32, op: i32, fd: i32, event: *mut EpollEvent)
             let res = with_instance_mut(idx, |inst| {
                 for slot in &mut inst.entries {
                     if let Some(entry) = slot.as_mut()
-                        && entry.fd == fd {
-                            entry.events = events_val;
-                            entry.data = data_val;
-                            // Re-arm oneshot per Linux semantics.
-                            entry.oneshot_fired = false;
-                            return Ok(());
-                        }
+                        && entry.fd == fd
+                    {
+                        entry.events = events_val;
+                        entry.data = data_val;
+                        // Re-arm oneshot per Linux semantics.
+                        entry.oneshot_fired = false;
+                        return Ok(());
+                    }
                 }
                 Err(errno::ENOENT)
             });
@@ -489,10 +487,11 @@ pub extern "C" fn epoll_ctl(epfd: i32, op: i32, fd: i32, event: *mut EpollEvent)
             let res = with_instance_mut(idx, |inst| {
                 for slot in &mut inst.entries {
                     if let Some(entry) = slot.as_ref()
-                        && entry.fd == fd {
-                            *slot = None;
-                            return Ok(());
-                        }
+                        && entry.fd == fd
+                    {
+                        *slot = None;
+                        return Ok(());
+                    }
                 }
                 Err(errno::ENOENT)
             });
@@ -588,29 +587,30 @@ pub unsafe extern "C" fn epoll_wait(
             while i < MAX_EPOLL_ENTRIES && count < limit {
                 if let Some(entry) = inst.entries.get_mut(i)
                     && let Some(watched) = entry.as_mut()
-                        && !watched.oneshot_fired {
-                            let revents = compute_revents(watched.fd, watched.events);
-                            if revents != 0 {
-                                // Write event into the caller's buffer.
-                                // SAFETY: caller asserts events is valid
-                                // for maxevents entries; count < limit.
-                                #[allow(clippy::cast_sign_loss)]
-                                let slot_ptr = unsafe { events.add(count as usize) };
-                                let out = EpollEvent {
-                                    events: revents,
-                                    data: watched.data,
-                                };
-                                // SAFETY: slot_ptr is in-bounds (count
-                                // < maxevents) and writable per caller.
-                                unsafe {
-                                    core::ptr::write_unaligned(slot_ptr, out);
-                                }
-                                if watched.events & EPOLLONESHOT != 0 {
-                                    watched.oneshot_fired = true;
-                                }
-                                count = count.wrapping_add(1);
-                            }
+                    && !watched.oneshot_fired
+                {
+                    let revents = compute_revents(watched.fd, watched.events);
+                    if revents != 0 {
+                        // Write event into the caller's buffer.
+                        // SAFETY: caller asserts events is valid
+                        // for maxevents entries; count < limit.
+                        #[allow(clippy::cast_sign_loss)]
+                        let slot_ptr = unsafe { events.add(count as usize) };
+                        let out = EpollEvent {
+                            events: revents,
+                            data: watched.data,
+                        };
+                        // SAFETY: slot_ptr is in-bounds (count
+                        // < maxevents) and writable per caller.
+                        unsafe {
+                            core::ptr::write_unaligned(slot_ptr, out);
                         }
+                        if watched.events & EPOLLONESHOT != 0 {
+                            watched.oneshot_fired = true;
+                        }
+                        count = count.wrapping_add(1);
+                    }
+                }
                 i = i.wrapping_add(1);
             }
             count
@@ -1929,10 +1929,12 @@ pub fn inotify_instance_close(idx: u64) {
         let _guard = unsafe { crate::perprocess::lock_pool(inotify_table_lock()) };
         let _ = with_inotify_mut(idx, |inst| {
             for (i, w) in inst.watches.iter().enumerate() {
-                if w.in_use && w.kernel_id != 0
-                    && let Some(slot) = to_close.get_mut(i) {
-                        *slot = w.kernel_id;
-                    }
+                if w.in_use
+                    && w.kernel_id != 0
+                    && let Some(slot) = to_close.get_mut(i)
+                {
+                    *slot = w.kernel_id;
+                }
             }
             *inst = INOTIFY_INSTANCE_INIT;
         });
@@ -2115,9 +2117,10 @@ fn make_event(wd: i32, mask: u32, name: &[u8]) -> InotifyPending {
     ev.mask = mask;
     let n = core::cmp::min(name.len(), INOTIFY_NAME_MAX - 1);
     if let Some(dst) = ev.name.get_mut(..n)
-        && let Some(src) = name.get(..n) {
-            dst.copy_from_slice(src);
-        }
+        && let Some(src) = name.get(..n)
+    {
+        dst.copy_from_slice(src);
+    }
     ev.name_len = n as u8;
     ev
 }
@@ -2294,12 +2297,18 @@ fn translate_kernel_event(
                 if inotify_mask & IN_MOVED_FROM != 0
                     && let Rel::Child(name) = relative_name(watched, affected)
                 {
-                    push_tr(&mut t, pending_with_cookie(wd, IN_MOVED_FROM | isdir, cookie, name));
+                    push_tr(
+                        &mut t,
+                        pending_with_cookie(wd, IN_MOVED_FROM | isdir, cookie, name),
+                    );
                 }
                 if inotify_mask & IN_MOVED_TO != 0
                     && let Rel::Child(name) = relative_name(watched, new_path)
                 {
-                    push_tr(&mut t, pending_with_cookie(wd, IN_MOVED_TO | isdir, cookie, name));
+                    push_tr(
+                        &mut t,
+                        pending_with_cookie(wd, IN_MOVED_TO | isdir, cookie, name),
+                    );
                 }
             }
         }
@@ -2393,8 +2402,9 @@ fn pump_one_watch(idx: u64, wd: i32, kernel_id: u64, mask: u32, watched: &[u8]) 
             } else {
                 0
             };
-            let tr =
-                translate_kernel_event(watched, mask, wd, etype, affected, new_path, cookie, is_dir);
+            let tr = translate_kernel_event(
+                watched, mask, wd, etype, affected, new_path, cookie, is_dir,
+            );
             let _ = with_inotify_mut(idx, |inst| {
                 for k in 0..tr.count {
                     if let Some(ev) = tr.events.get(k) {
@@ -2579,16 +2589,18 @@ pub fn inotify_read(idx: u64, buf: &mut [u8]) -> Result<usize, i32> {
             }
             // Name (NUL-padded).
             if name_field > 0
-                && let Some(dst) = buf.get_mut(written + 16..written + 16 + name_field) {
-                    for b in dst.iter_mut() {
-                        *b = 0;
-                    }
-                    let copy_n = core::cmp::min(raw_name, name_field - 1);
-                    if let Some(src) = ev.name.get(..copy_n)
-                        && let Some(dst2) = buf.get_mut(written + 16..written + 16 + copy_n) {
-                            dst2.copy_from_slice(src);
-                        }
+                && let Some(dst) = buf.get_mut(written + 16..written + 16 + name_field)
+            {
+                for b in dst.iter_mut() {
+                    *b = 0;
                 }
+                let copy_n = core::cmp::min(raw_name, name_field - 1);
+                if let Some(src) = ev.name.get(..copy_n)
+                    && let Some(dst2) = buf.get_mut(written + 16..written + 16 + copy_n)
+                {
+                    dst2.copy_from_slice(src);
+                }
+            }
             written += record_size;
         }
     });
@@ -4046,7 +4058,16 @@ mod tests {
     #[test]
     fn test_translate_grandchild_ignored() {
         // A create deep under the watch must not surface (non-recursive).
-        let t = translate_kernel_event(b"/w", IN_CREATE, 1, KEV_CREATED, b"/w/sub/deep", b"", 0, false);
+        let t = translate_kernel_event(
+            b"/w",
+            IN_CREATE,
+            1,
+            KEV_CREATED,
+            b"/w/sub/deep",
+            b"",
+            0,
+            false,
+        );
         assert_eq!(t.count, 0);
     }
 

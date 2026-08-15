@@ -141,8 +141,17 @@ mod tests {
     #[test]
     fn test_mode_phase_ioctls_distinct() {
         let ops = [
-            PPDATADIR, PPNEGOT, PPWCTLONIRQ, PPCLRIRQ, PPSETMODE, PPGETMODE,
-            PPSETPHASE, PPGETPHASE, PPGETMODES, PPSETFLAGS, PPGETFLAGS,
+            PPDATADIR,
+            PPNEGOT,
+            PPWCTLONIRQ,
+            PPCLRIRQ,
+            PPSETMODE,
+            PPGETMODE,
+            PPSETPHASE,
+            PPGETPHASE,
+            PPGETMODES,
+            PPSETFLAGS,
+            PPGETFLAGS,
         ];
         for i in 0..ops.len() {
             for j in (i + 1)..ops.len() {

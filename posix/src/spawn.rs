@@ -8,10 +8,7 @@
 //
 // Bounds are established locally but clippy cannot see across the
 // check.
-#![allow(
-    clippy::indexing_slicing,
-    clippy::arithmetic_side_effects,
-)]
+#![allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 
 //! POSIX process spawning functions.
 //!
@@ -922,17 +919,18 @@ fn build_fd_map(
     let mut flat_idx = 0usize;
     while flat_idx < MAX_FD_MAP {
         if let Some((handle_type, handle)) = virt[flat_idx]
-            && count < MAX_FD_MAP {
-                #[allow(clippy::cast_possible_wrap)]
-                let fd = flat_idx as i32;
-                out[count] = FdMapEntry {
-                    fd,
-                    handle_type,
-                    _pad: [0; 3],
-                    handle,
-                };
-                count = count.wrapping_add(1);
-            }
+            && count < MAX_FD_MAP
+        {
+            #[allow(clippy::cast_possible_wrap)]
+            let fd = flat_idx as i32;
+            out[count] = FdMapEntry {
+                fd,
+                handle_type,
+                _pad: [0; 3],
+                handle,
+            };
+            count = count.wrapping_add(1);
+        }
         flat_idx = flat_idx.wrapping_add(1);
     }
 
@@ -1059,10 +1057,7 @@ pub extern "C" fn posix_spawn(
     };
 
     // Spawn the process with the extended args struct.
-    let ret = syscall1(
-        SYS_PROCESS_SPAWN_EX,
-        (&raw const spawn_args) as u64,
-    );
+    let ret = syscall1(SYS_PROCESS_SPAWN_EX, (&raw const spawn_args) as u64);
 
     // Free the ELF buffer (must use alloc_size, not data_size, to
     // unmap the entire mmap'd region and avoid memory leaks).

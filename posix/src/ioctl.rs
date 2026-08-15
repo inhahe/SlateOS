@@ -398,10 +398,8 @@ fn get_kernel_termios() -> Option<Termios> {
     #[cfg(target_os = "none")]
     {
         let mut buf = [0u8; KERNEL_TERMIOS_BYTES];
-        let ret = crate::syscall::syscall1(
-            crate::syscall::SYS_TTY_GET_TERMIOS,
-            buf.as_mut_ptr() as u64,
-        );
+        let ret =
+            crate::syscall::syscall1(crate::syscall::SYS_TTY_GET_TERMIOS, buf.as_mut_ptr() as u64);
         if errno::translate(ret) < 0 {
             return None;
         }
@@ -445,7 +443,7 @@ fn set_kernel_termios(t: &Termios) -> bool {
 // the kernel agrees about the layout; that is the ring-3 fixture's job.
 #[cfg(not(target_os = "none"))]
 mod host_termios {
-    use super::{default_termios, termios_to_wire, KERNEL_TERMIOS_BYTES};
+    use super::{KERNEL_TERMIOS_BYTES, default_termios, termios_to_wire};
     use core::cell::Cell;
 
     std::thread_local! {

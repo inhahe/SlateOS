@@ -46,8 +46,8 @@ pub const SMCCC_RET_INVALID_PARAMETER: i64 = -3;
 // PSCI version (owner=STANDARD, FAST_CALL, num=0)
 // ---------------------------------------------------------------------------
 
-pub const PSCI_FN_VERSION: u32 = SMCCC_FUNC_FAST_CALL
-    | (SMCCC_OWNER_STANDARD << SMCCC_FUNC_OWNER_SHIFT);
+pub const PSCI_FN_VERSION: u32 =
+    SMCCC_FUNC_FAST_CALL | (SMCCC_OWNER_STANDARD << SMCCC_FUNC_OWNER_SHIFT);
 pub const PSCI_VERSION_1_1: u32 = 0x0001_0001;
 pub const PSCI_VERSION_1_0: u32 = 0x0001_0000;
 

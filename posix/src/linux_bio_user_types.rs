@@ -50,8 +50,7 @@ pub const REQ_POLLED: u32 = 1 << 24;
 // Convenience composites
 // ---------------------------------------------------------------------------
 
-pub const REQ_FAILFAST_MASK: u32 =
-    REQ_FAILFAST_DEV | REQ_FAILFAST_TRANSPORT | REQ_FAILFAST_DRIVER;
+pub const REQ_FAILFAST_MASK: u32 = REQ_FAILFAST_DEV | REQ_FAILFAST_TRANSPORT | REQ_FAILFAST_DRIVER;
 
 pub const REQ_NOMERGE_FLAGS: u32 = REQ_NOMERGE | REQ_PREFLUSH | REQ_FUA;
 
@@ -162,10 +161,7 @@ mod tests {
 
     #[test]
     fn test_nomerge_flags_block_three_bits() {
-        assert_eq!(
-            REQ_NOMERGE_FLAGS,
-            REQ_NOMERGE | REQ_PREFLUSH | REQ_FUA
-        );
+        assert_eq!(REQ_NOMERGE_FLAGS, REQ_NOMERGE | REQ_PREFLUSH | REQ_FUA);
         // Any of these three blocks the block layer from merging the
         // request with adjacent I/O.
         assert_eq!(REQ_NOMERGE_FLAGS.count_ones(), 3);

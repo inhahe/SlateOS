@@ -86,7 +86,13 @@ mod tests {
 
     #[test]
     fn test_hli_types_dense_0_to_4() {
-        let h = [ATM_HL_NONE, ATM_HL_ISO, ATM_HL_USER, ATM_HL_HLP, ATM_HL_VENDOR];
+        let h = [
+            ATM_HL_NONE,
+            ATM_HL_ISO,
+            ATM_HL_USER,
+            ATM_HL_HLP,
+            ATM_HL_VENDOR,
+        ];
         for (i, &v) in h.iter().enumerate() {
             assert_eq!(v as usize, i);
         }

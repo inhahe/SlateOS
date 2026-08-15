@@ -3439,7 +3439,11 @@ mod tests {
         let text = "1.000000059604644830901776231257827021181583404541015625";
         let s = wide(text);
         let val = unsafe { wcstof(s.as_ptr(), core::ptr::null_mut()) };
-        assert_eq!(val.to_bits(), 0x3f80_0001, "expected the successor of 1.0f32");
+        assert_eq!(
+            val.to_bits(),
+            0x3f80_0001,
+            "expected the successor of 1.0f32"
+        );
         assert_eq!(val, text.parse::<f32>().unwrap());
     }
 

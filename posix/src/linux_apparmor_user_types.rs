@@ -89,7 +89,11 @@ mod tests {
         assert!(APPARMOR_POLICY_REPLACE.starts_with(APPARMOR_SECURITYFS));
         assert!(APPARMOR_POLICY_REMOVE.starts_with(APPARMOR_SECURITYFS));
         // Dotfile policy entry-points (load/replace/remove) are distinct.
-        for a in [APPARMOR_POLICY_LOAD, APPARMOR_POLICY_REPLACE, APPARMOR_POLICY_REMOVE] {
+        for a in [
+            APPARMOR_POLICY_LOAD,
+            APPARMOR_POLICY_REPLACE,
+            APPARMOR_POLICY_REMOVE,
+        ] {
             assert!(a.contains("/."));
         }
     }

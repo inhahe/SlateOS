@@ -162,16 +162,16 @@ mod tests {
         // Red Hat 0x1AF4 — see PCI ID database.
         assert_eq!(VIRTIO_PCI_VENDOR_ID, 0x1AF4);
         // Modern range 0x1040..0x107F, legacy range 0x1000..0x103F.
-        assert_eq!(VIRTIO_PCI_MODERN_DEVICE_BASE - VIRTIO_PCI_LEGACY_DEVICE_BASE, 0x40);
+        assert_eq!(
+            VIRTIO_PCI_MODERN_DEVICE_BASE - VIRTIO_PCI_LEGACY_DEVICE_BASE,
+            0x40
+        );
     }
 
     #[test]
     fn test_modern_pci_device_id_for_net_is_0x1041() {
         // Modern PCI device id = 0x1040 + virtio_id.
-        assert_eq!(
-            VIRTIO_PCI_MODERN_DEVICE_BASE + VIRTIO_ID_NET as u16,
-            0x1041
-        );
+        assert_eq!(VIRTIO_PCI_MODERN_DEVICE_BASE + VIRTIO_ID_NET as u16, 0x1041);
         // Legacy for block was 0x1001.
         assert_eq!(
             VIRTIO_PCI_LEGACY_DEVICE_BASE + VIRTIO_ID_BLOCK as u16,

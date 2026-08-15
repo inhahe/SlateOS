@@ -65,9 +65,7 @@ mod tests {
     #[test]
     fn test_procfs_paths_consistent() {
         assert_eq!(PROC_BINFMT_MISC, "/proc/sys/fs/binfmt_misc");
-        assert!(
-            PROC_BINFMT_MISC_REGISTER.starts_with(PROC_BINFMT_MISC)
-        );
+        assert!(PROC_BINFMT_MISC_REGISTER.starts_with(PROC_BINFMT_MISC));
         assert!(PROC_BINFMT_MISC_STATUS.starts_with(PROC_BINFMT_MISC));
         assert!(PROC_BINFMT_MISC_REGISTER.ends_with("/register"));
         assert!(PROC_BINFMT_MISC_STATUS.ends_with("/status"));

@@ -131,7 +131,12 @@ mod tests {
 
     #[test]
     fn test_dash_positions_inside_36_char_string() {
-        for p in [UUID_DASH_POS_1, UUID_DASH_POS_2, UUID_DASH_POS_3, UUID_DASH_POS_4] {
+        for p in [
+            UUID_DASH_POS_1,
+            UUID_DASH_POS_2,
+            UUID_DASH_POS_3,
+            UUID_DASH_POS_4,
+        ] {
             assert!(p < UUID_STR_LEN);
         }
         // Each successive dash is 5 chars apart (4 hex + 1 dash).

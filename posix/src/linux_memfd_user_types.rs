@@ -101,8 +101,7 @@ mod tests {
         assert_eq!(MFD_HUGE_2MB >> MFD_HUGE_SHIFT, 21);
         assert_eq!(MFD_HUGE_1GB >> MFD_HUGE_SHIFT, 30);
         // Flag bits must not collide with the size field.
-        let all_flags =
-            MFD_CLOEXEC | MFD_ALLOW_SEALING | MFD_HUGETLB | MFD_NOEXEC_SEAL | MFD_EXEC;
+        let all_flags = MFD_CLOEXEC | MFD_ALLOW_SEALING | MFD_HUGETLB | MFD_NOEXEC_SEAL | MFD_EXEC;
         assert_eq!(all_flags & (MFD_HUGE_MASK << MFD_HUGE_SHIFT), 0);
     }
 

@@ -43,8 +43,7 @@ pub const OOM_DISABLE: i32 = -17;
 // ---------------------------------------------------------------------------
 
 pub const SYSCTL_PANIC_ON_OOM: &str = "/proc/sys/vm/panic_on_oom";
-pub const SYSCTL_OOM_KILL_ALLOCATING_TASK: &str =
-    "/proc/sys/vm/oom_kill_allocating_task";
+pub const SYSCTL_OOM_KILL_ALLOCATING_TASK: &str = "/proc/sys/vm/oom_kill_allocating_task";
 pub const SYSCTL_OOM_DUMP_TASKS: &str = "/proc/sys/vm/oom_dump_tasks";
 pub const SYSCTL_OVERCOMMIT_MEMORY: &str = "/proc/sys/vm/overcommit_memory";
 pub const SYSCTL_OVERCOMMIT_RATIO: &str = "/proc/sys/vm/overcommit_ratio";

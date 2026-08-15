@@ -192,12 +192,7 @@ mod tests {
 
     #[test]
     fn test_ioctls_distinct() {
-        let i = [
-            BLKTRACESETUP,
-            BLKTRACESTART,
-            BLKTRACESTOP,
-            BLKTRACETEARDOWN,
-        ];
+        let i = [BLKTRACESETUP, BLKTRACESTART, BLKTRACESTOP, BLKTRACETEARDOWN];
         for x in 0..i.len() {
             for y in (x + 1)..i.len() {
                 assert_ne!(i[x], i[y]);

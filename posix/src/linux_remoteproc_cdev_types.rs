@@ -75,10 +75,7 @@ mod tests {
 
     #[test]
     fn test_ioctls_distinct() {
-        assert_ne!(
-            RPROC_SET_SHUTDOWN_ON_RELEASE,
-            RPROC_GET_SHUTDOWN_ON_RELEASE
-        );
+        assert_ne!(RPROC_SET_SHUTDOWN_ON_RELEASE, RPROC_GET_SHUTDOWN_ON_RELEASE);
     }
 
     #[test]

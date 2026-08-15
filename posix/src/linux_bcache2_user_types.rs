@@ -93,17 +93,9 @@ mod tests {
     fn test_version_numbers_ordered() {
         // Versions form an ordered sequence; v2 is reserved (skipped).
         assert!(BCACHE_SB_VERSION_CDEV < BCACHE_SB_VERSION_BDEV);
-        assert!(
-            BCACHE_SB_VERSION_BDEV < BCACHE_SB_VERSION_CDEV_WITH_UUID
-        );
-        assert!(
-            BCACHE_SB_VERSION_CDEV_WITH_UUID
-                < BCACHE_SB_VERSION_BDEV_WITH_OFFSET
-        );
-        assert_eq!(
-            BCACHE_SB_MAX_VERSION,
-            BCACHE_SB_VERSION_BDEV_WITH_OFFSET
-        );
+        assert!(BCACHE_SB_VERSION_BDEV < BCACHE_SB_VERSION_CDEV_WITH_UUID);
+        assert!(BCACHE_SB_VERSION_CDEV_WITH_UUID < BCACHE_SB_VERSION_BDEV_WITH_OFFSET);
+        assert_eq!(BCACHE_SB_MAX_VERSION, BCACHE_SB_VERSION_BDEV_WITH_OFFSET);
         // Reserved version 2 left a gap.
         assert_eq!(BCACHE_SB_VERSION_CDEV_WITH_UUID - BCACHE_SB_VERSION_BDEV, 2);
     }

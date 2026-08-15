@@ -13,10 +13,7 @@
 // across the check.  These lints would only be meaningful here if we
 // accepted attacker-controlled integer indices into the pool/stack,
 // which we do not.
-#![allow(
-    clippy::indexing_slicing,
-    clippy::arithmetic_side_effects,
-)]
+#![allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 
 //! `<fts.h>` — file tree traversal (FreeBSD-style).
 //!

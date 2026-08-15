@@ -24,7 +24,6 @@
 // casting its `*mut u8` to `*mut *mut u8` is safe.  See `search.rs` for
 // the full rationale.
 #![allow(clippy::cast_ptr_alignment)]
-
 // Indexing and arithmetic operate on:
 //
 //  - The stack walk's `walks` counter (bounded by the caller-supplied
@@ -37,10 +36,7 @@
 //
 // All bounds are established locally but clippy cannot see across the
 // check.
-#![allow(
-    clippy::indexing_slicing,
-    clippy::arithmetic_side_effects,
-)]
+#![allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 
 use crate::file;
 

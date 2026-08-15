@@ -107,7 +107,12 @@ mod tests {
     #[test]
     fn test_wq_flags_dense_bits_1_to_7() {
         let f = [
-            WQ_UNBOUND, WQ_FREEZABLE, WQ_MEM_RECLAIM, WQ_HIGHPRI, WQ_CPU_INTENSIVE, WQ_SYSFS,
+            WQ_UNBOUND,
+            WQ_FREEZABLE,
+            WQ_MEM_RECLAIM,
+            WQ_HIGHPRI,
+            WQ_CPU_INTENSIVE,
+            WQ_SYSFS,
             WQ_POWER_EFFICIENT,
         ];
         for (i, &v) in f.iter().enumerate() {

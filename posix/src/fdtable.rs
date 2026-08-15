@@ -230,7 +230,7 @@ mod fd_store {
 
     #[cfg(target_os = "none")]
     mod imp {
-        use super::{FdTable, FDS_INIT};
+        use super::{FDS_INIT, FdTable};
 
         static mut FD_TABLE: FdTable = FDS_INIT;
 
@@ -241,7 +241,7 @@ mod fd_store {
 
     #[cfg(not(target_os = "none"))]
     mod imp {
-        use super::{FdTable, FDS_INIT};
+        use super::{FDS_INIT, FdTable};
         use core::cell::UnsafeCell;
 
         std::thread_local! {
@@ -596,13 +596,13 @@ pub(crate) type PathLens = [u16; MAX_FDS];
 /// suite that otherwise runs in ~2 s.  The lazy `Box` is paid only by the
 /// handful of threads that actually run a `*at`/`fchdir` test.
 mod path_store {
-    use super::{PathLens, PathSlot, FD_PATH_MAX, MAX_FDS};
+    use super::{FD_PATH_MAX, MAX_FDS, PathLens, PathSlot};
 
     const LENS_INIT: PathLens = [0u16; MAX_FDS];
 
     #[cfg(target_os = "none")]
     mod imp {
-        use super::{PathLens, PathSlot, FD_PATH_MAX, LENS_INIT, MAX_FDS};
+        use super::{FD_PATH_MAX, LENS_INIT, MAX_FDS, PathLens, PathSlot};
 
         static mut FD_PATH_TABLE: [PathSlot; MAX_FDS] = [[0u8; FD_PATH_MAX]; MAX_FDS];
         static mut FD_PATH_LENS: PathLens = LENS_INIT;
@@ -618,7 +618,7 @@ mod path_store {
 
     #[cfg(not(target_os = "none"))]
     mod imp {
-        use super::{PathLens, PathSlot, FD_PATH_MAX, LENS_INIT, MAX_FDS};
+        use super::{FD_PATH_MAX, LENS_INIT, MAX_FDS, PathLens, PathSlot};
         use core::cell::UnsafeCell;
 
         /// Allocate one thread's zeroed path table on the heap.
@@ -807,7 +807,9 @@ pub fn copy_fd_path(src_fd: i32, dst_fd: i32) {
     // Both indices are < MAX_FDS.
     unsafe {
         let lens = &mut *path_lens_ptr();
-        let Some(&src_len) = lens.get(src_idx) else { return };
+        let Some(&src_len) = lens.get(src_idx) else {
+            return;
+        };
         if let Some(dst_len) = lens.get_mut(dst_idx) {
             *dst_len = src_len;
         }
@@ -820,7 +822,9 @@ pub fn copy_fd_path(src_fd: i32, dst_fd: i32) {
         let len = src_len as usize;
         let mut i = 0;
         while i < len {
-            let Some(&byte) = table.get(src_idx).and_then(|s| s.get(i)) else { break };
+            let Some(&byte) = table.get(src_idx).and_then(|s| s.get(i)) else {
+                break;
+            };
             if let Some(dst_slot) = table.get_mut(dst_idx).and_then(|s| s.get_mut(i)) {
                 *dst_slot = byte;
             }

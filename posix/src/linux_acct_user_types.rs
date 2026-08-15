@@ -74,7 +74,12 @@ mod tests {
 
     #[test]
     fn test_versions_dense_0_to_3() {
-        let v = [ACCT_VERSION_V0, ACCT_VERSION_V1, ACCT_VERSION_V2, ACCT_VERSION_V3];
+        let v = [
+            ACCT_VERSION_V0,
+            ACCT_VERSION_V1,
+            ACCT_VERSION_V2,
+            ACCT_VERSION_V3,
+        ];
         for (i, &x) in v.iter().enumerate() {
             assert_eq!(x as usize, i);
         }

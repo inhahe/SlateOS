@@ -115,8 +115,14 @@ mod tests {
     #[test]
     fn test_pid_specifiers_case_pair() {
         // Lowercase = namespace-relative; uppercase = init namespace.
-        assert_eq!(COREDUMP_FMT_PID_NS.to_ascii_uppercase(), COREDUMP_FMT_PID_INIT);
-        assert_eq!(COREDUMP_FMT_TID_NS.to_ascii_uppercase(), COREDUMP_FMT_TID_INIT);
+        assert_eq!(
+            COREDUMP_FMT_PID_NS.to_ascii_uppercase(),
+            COREDUMP_FMT_PID_INIT
+        );
+        assert_eq!(
+            COREDUMP_FMT_TID_NS.to_ascii_uppercase(),
+            COREDUMP_FMT_TID_INIT
+        );
     }
 
     #[test]

@@ -5,10 +5,7 @@
 // caller-supplied name buffers validated against `NAME_MAX` before any
 // indexing.  Bounds are established locally but clippy cannot see
 // across the check.
-#![allow(
-    clippy::indexing_slicing,
-    clippy::arithmetic_side_effects,
-)]
+#![allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 
 //! POSIX semaphore implementation.
 //!
@@ -498,7 +495,9 @@ fn find_named_sem(name: *const u8, len: usize) -> Option<usize> {
         }
         // SAFETY: caller-provided name has at least `len` bytes.
         let in_name = unsafe { core::slice::from_raw_parts(name, len) };
-        let Some(stored) = slot.name.get(..len) else { continue };
+        let Some(stored) = slot.name.get(..len) else {
+            continue;
+        };
         if stored == in_name {
             return Some(i);
         }

@@ -93,10 +93,7 @@ mod tests {
     fn test_statx_sync_type_mask() {
         // STATX_SYNC_TYPE is the bitwise OR of the two force/dont-sync
         // bits — the mask that extracts the sync-mode field.
-        assert_eq!(
-            AT_STATX_SYNC_TYPE,
-            AT_STATX_FORCE_SYNC | AT_STATX_DONT_SYNC
-        );
+        assert_eq!(AT_STATX_SYNC_TYPE, AT_STATX_FORCE_SYNC | AT_STATX_DONT_SYNC);
         // SYNC_AS_STAT is the "default" — zero.
         assert_eq!(AT_STATX_SYNC_AS_STAT, 0);
     }

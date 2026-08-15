@@ -47,10 +47,7 @@ pub const IOC_READ: u32 = 2;
 /// `_IOC(dir, type, nr, size)` — kernel-canonical ioctl encoding.
 #[must_use]
 pub const fn ioc(dir: u32, type_: u32, nr: u32, size: u32) -> u32 {
-    (dir << IOC_DIRSHIFT)
-        | (type_ << IOC_TYPESHIFT)
-        | (nr << IOC_NRSHIFT)
-        | (size << IOC_SIZESHIFT)
+    (dir << IOC_DIRSHIFT) | (type_ << IOC_TYPESHIFT) | (nr << IOC_NRSHIFT) | (size << IOC_SIZESHIFT)
 }
 
 /// `_IO(type, nr)` — no data.

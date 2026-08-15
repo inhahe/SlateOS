@@ -194,7 +194,8 @@ impl TlsImage {
     #[must_use]
     pub const fn thread_pointer(&self, base: u64, stack_size: u64) -> u64 {
         round_up(
-            base.wrapping_add(stack_size).wrapping_add(self.block_size()),
+            base.wrapping_add(stack_size)
+                .wrapping_add(self.block_size()),
             self.tp_align(),
         )
     }
@@ -335,7 +336,7 @@ static TP_INSTALLED: core::sync::atomic::AtomicBool = core::sync::atomic::Atomic
 /// `__thread` variable).
 #[cfg(target_os = "none")]
 pub fn install(tp: u64) -> bool {
-    use crate::syscall::{syscall6, SYS_SET_FS_BASE};
+    use crate::syscall::{SYS_SET_FS_BASE, syscall6};
     let ok = syscall6(SYS_SET_FS_BASE, tp, 0, 0, 0, 0, 0) == 0;
     if ok {
         // Release: everything this thread wrote into its own TCB/TLS block
@@ -396,7 +397,7 @@ pub fn thread_pointer() -> u64 {
 /// stack-protected function runs.
 #[cfg(target_os = "none")]
 pub unsafe fn setup_main_thread() -> bool {
-    use crate::syscall::{syscall6, SYS_MMAP};
+    use crate::syscall::{SYS_MMAP, syscall6};
 
     let img = image();
     // PROT_READ|PROT_WRITE = 3, MAP_PRIVATE|MAP_ANONYMOUS = 0x22, fd = -1.
@@ -418,7 +419,7 @@ pub unsafe fn setup_main_thread() -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalise_align, round_up, TlsImage, TCB_SIZE};
+    use super::{TCB_SIZE, TlsImage, normalise_align, round_up};
 
     /// Everything the reservation must fit *above* the thread pointer: the
     /// TCB itself plus the libc's per-thread block, which lives immediately

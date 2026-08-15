@@ -244,10 +244,15 @@ pub enum Unclosed {
     /// it too.
     Backquote {
         /// The construct as written, from the backquote to the end of the text.
-        /// It is also the `%s`, which here is `string + t_index` — only the text
-        /// from the backquote on, where the other reporter echoes the whole
-        /// of it.
         src: Str,
+        /// The `%s`, which here is `string + t_index` — only the text from the
+        /// backquote on, where the other reporter echoes the whole of it. It
+        /// parts company with `src` only where the text this scan ran over is
+        /// itself a stretch of a longer string bash never carved out — the
+        /// `' … '` run of an arithmetic fragment, whose quotes are ordinary
+        /// characters to the expander — and there it runs on to the end of the
+        /// fragment. See `parser::name_unclosed_after_the_fragment`.
+        text: Str,
     },
 }
 
@@ -257,7 +262,7 @@ impl Unclosed {
     #[must_use]
     pub fn src(&self) -> BStr<'_> {
         match self {
-            Self::BadSubst { src, .. } | Self::Backquote { src } => src,
+            Self::BadSubst { src, .. } | Self::Backquote { src, .. } => src,
         }
     }
 }
@@ -5281,9 +5286,27 @@ impl Lexer {
                 '`' => {
                     flush_lit(&mut segs, &mut lit);
                     self.pos += 1;
-                    let (raw, src) = self.read_backtick(false)?;
-                    let close = self.cur_line();
-                    segs.push(Seg::CmdSub(raw, close, SubBody::Backtick(src)));
+                    match self.read_backtick(false) {
+                        Ok((raw, src)) => {
+                            let close = self.cur_line();
+                            segs.push(Seg::CmdSub(raw, close, SubBody::Backtick(src)));
+                        }
+                        // With no mate in text no parser read, this is
+                        // `param_expand`'s failure and not a lexing one — the
+                        // same standing the `$` arm below gives a `${` or a
+                        // `$((`, and for the same reason. bash's parser stops
+                        // at the `'` opening a run and resumes at its mate, so
+                        // a backquote inside one is text as far as any parse is
+                        // concerned, and is met only by `string_extract (…,
+                        // SX_REQMATCH)` when the string is expanded
+                        // (subst.c:11269). Without this the whole *script* is
+                        // rejected where bash runs it.
+                        Err(e) => {
+                            segs.push(self.unclosed_seg(e)?);
+                            self.here_text = outside;
+                            return Ok(segs);
+                        }
+                    }
                 }
                 // A backslash inside quotes reaches only as far as double
                 // quoting itself does: the four characters that stay live there,
@@ -8260,7 +8283,8 @@ impl Lexer {
                     // is the top level of the text.
                     return Err(if self.here_text {
                         let src = bfmt![b"`", &self.slice(start, self.chars.len())];
-                        e.unclosed(UnreadEof::Subst(Unclosed::Backquote { src }))
+                        let text = src.clone();
+                        e.unclosed(UnreadEof::Subst(Unclosed::Backquote { src, text }))
                     } else {
                         e
                     });

@@ -8060,8 +8060,76 @@ fn attach_subscript_reads(
     // scope for the ones that are not (a `name[sub]=v` left-hand side).
     if any {
         crate::unparse::attach_comsub_tails(w);
+        name_unclosed_after_the_fragment(w);
     }
     Ok(())
+}
+
+/// Give a construct the interior parse left open the **fragment** to name,
+/// rather than the interior it was parsed out of.
+///
+/// The interior is a string of osh's making, not of bash's: `Q_DOUBLE_QUOTES` is
+/// set for an arithmetic fragment, so `expand_word_internal` never treats the
+/// `'` as an opener and walks straight through it — there is one string here and
+/// it is the whole fragment. Both "no closing" diagnostics echo the string the
+/// scan was handed (`report_error (…, string)`, subst.c:1498 and subst.c:1972),
+/// so that is what they must echo here. Measured against bash 5.2.37, with
+/// `a=(0 1 2)`:
+///
+/// ```text
+/// echo "[${a['x${m:-']}]"   ->   bad substitution: no closing `}' in 'x${m:-'
+/// echo "[${a['x$[1 ']}]"    ->   bad substitution: no closing `]' in 'x$[1 '
+/// ```
+///
+/// — the quotes included, where the interior alone would have been `x${m:-`.
+///
+/// Only the run's own level is renamed. A `" … "` inside the interior is a run
+/// of this same string and `string_extract_double_quoted` carves it out as its
+/// own, so a fault found in *there* names the run, exactly as one found in a
+/// double-quoted run written a character to the left of the `'` would.
+///
+/// The backquote reporter is widened the same way but from a different place,
+/// because its `%s` is `string + t_index` (subst.c:11269) and not `string`: it
+/// runs from the backquote to the end of the fragment, so what is glued on is
+/// the run's own closing quote and whatever follows it. Measured:
+///
+/// ```text
+/// echo "[${a['x`fi'y]}]"     ->   bad substitution: no closing "`" in `fi'y
+/// echo "[${a['x`fi''q']}]"   ->   bad substitution: no closing "`" in `fi''q'
+/// ```
+fn name_unclosed_after_the_fragment(w: &mut Word) {
+    use crate::lexer::Unclosed;
+    let frag = crate::unparse::word_src(w);
+    // Where each part's source begins in the fragment, for the reporter that
+    // names only the text from its own construct on.
+    let mut starts: Vec<usize> = Vec::with_capacity(w.parts.len());
+    let mut at = 0usize;
+    for p in &w.parts {
+        starts.push(at);
+        at = at.saturating_add(crate::unparse::part_src(p).len());
+    }
+    for (part, start) in w.parts.iter_mut().zip(starts) {
+        let WordPart::SingleQuoted { parts: Some(inner), .. } = part else {
+            continue;
+        };
+        // Everything the fragment holds past the run's interior: its closing
+        // quote, where it has one, and then the rest of the fragment. A scan
+        // that gave up ran to the end of that interior, so this is the whole of
+        // what its own `src` is short of. The `1` is the opening quote.
+        let after = start
+            .saturating_add(1)
+            .saturating_add(crate::unparse::parts_src(inner).len());
+        let tail = frag.get(after..).unwrap_or_default();
+        for p in inner.iter_mut() {
+            match p {
+                WordPart::Unclosed(Unclosed::BadSubst { text, .. }) => text.clone_from(&frag),
+                WordPart::Unclosed(Unclosed::Backquote { src, text }) => {
+                    *text = bfmt![&*src, tail];
+                }
+                _ => {}
+            }
+        }
+    }
 }
 
 /// The word `expand_word_internal` reads out of `s` — [`word_verbatim_from_source_at`]

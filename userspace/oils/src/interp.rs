@@ -31438,6 +31438,33 @@ impl Shell {
         }
         match u {
             Unclosed::BadSubst { close, src, text } => {
+                // A `${ … }` that ran out is not necessarily the missing brace.
+                // `parameter_brace_expand` reads the *name* first (subst.c:9545)
+                // and judges it (subst.c:9694, 9803) before it ever calls
+                // `extract_dollar_brace_string` (subst.c:9891), so a name that
+                // swallowed the rest of the text — or one no variable could be
+                // called — is a plain "bad substitution" raised where the brace
+                // has not yet been missed. Which it is turns on the name alone;
+                // see [`Shell::unterminated_brace_kind`], which the arithmetic
+                // scanner already asks the same question of.
+                //
+                // This runs ahead of the reads below because bash's do: the
+                // nested `$( … )` of `a${m$(fi) b` is inside the *name*, which
+                // `string_extract` walks over without parsing, so bash names the
+                // bad substitution and never sees the `fi`.
+                if *close == '}' {
+                    match Self::unterminated_brace_kind(src.get(2..).unwrap_or_default()) {
+                        UntermBrace::BadSub => return self.unclosed_bad_substitution(text),
+                        UntermBrace::Indir(name) => {
+                            // The pointer is resolved in the missing brace's
+                            // place, and its own failures come out instead.
+                            if !self.arith_indir_resolves(&name) {
+                                return Str::new();
+                            }
+                        }
+                        UntermBrace::NoClosing => {}
+                    }
+                }
                 // The scan reported everything it read before it ran out of
                 // text to read; only then is there a brace with nothing to
                 // close on. See [`Shell::unclosed_brace_reads`] — and note the
@@ -31492,11 +31519,11 @@ impl Shell {
                     b"\n"
                 ]);
             }
-            Unclosed::Backquote { src } => {
+            Unclosed::Backquote { text, .. } => {
                 self.emit_stderr(&bfmt![
                     self.err_prefix(),
                     b"bad substitution: no closing \"`\" in ",
-                    src,
+                    text,
                     b"\n"
                 ]);
                 if self.prompt_expanding {
@@ -31514,6 +31541,29 @@ impl Shell {
         // `echo after=$?` after `cat <<E`/`${x:-a`/`E`, while `set -e` does not.
         self.note_shell_error(FatalWhen::ErrexitOnly);
         Str::new()
+    }
+
+    /// The "bad substitution" of a `${ … }` in unread text whose *name* scan is
+    /// what gave up — see [`Shell::unterminated_brace_kind`].
+    ///
+    /// `text` is bash's `string`, and `string` is what the report echoes
+    /// (`report_error ("%s: bad substitution", string)`, subst.c:10029), so it is
+    /// named outright rather than left to whatever word context happens to be
+    /// standing: a here-document body names the body, and an arithmetic fragment
+    /// names the fragment, in both cases including the text around the
+    /// construct.
+    fn unclosed_bad_substitution(&mut self, text: &Str) -> Str {
+        if self.prompt_expanding {
+            // `no_longjmp_on_fatal_error` costs the expansion nothing but its
+            // value here — the same arm the missing-brace spelling takes below.
+            self.emit_stderr(&bfmt![self.err_prefix(), text, b": bad substitution\n"]);
+            self.prompt_failed = true;
+            return Str::new();
+        }
+        let saved = self.bad_sub_word.replace(text.clone());
+        let out = self.bad_substitution_with(text, false);
+        self.bad_sub_word = saved;
+        out
     }
 
     /// The fatal "bad substitution" raised by an unrecognised `@` transform

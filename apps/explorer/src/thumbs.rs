@@ -233,30 +233,26 @@ struct ImageDimensions {
 /// Read a little-endian u32 from a byte slice at `offset`.
 /// Returns `None` if out of bounds.
 fn read_le_u32(data: &[u8], offset: usize) -> Option<u32> {
-    data.get(offset..offset + 4).map(|b| {
-        u32::from_le_bytes([b[0], b[1], b[2], b[3]])
-    })
+    data.get(offset..offset + 4)
+        .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
 }
 
 /// Read a big-endian u32 from a byte slice at `offset`.
 fn read_be_u32(data: &[u8], offset: usize) -> Option<u32> {
-    data.get(offset..offset + 4).map(|b| {
-        u32::from_be_bytes([b[0], b[1], b[2], b[3]])
-    })
+    data.get(offset..offset + 4)
+        .map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
 }
 
 /// Read a big-endian u16 from a byte slice at `offset`.
 fn read_be_u16(data: &[u8], offset: usize) -> Option<u16> {
-    data.get(offset..offset + 2).map(|b| {
-        u16::from_be_bytes([b[0], b[1]])
-    })
+    data.get(offset..offset + 2)
+        .map(|b| u16::from_be_bytes([b[0], b[1]]))
 }
 
 /// Read a little-endian u16 from a byte slice at `offset`.
 fn read_le_u16(data: &[u8], offset: usize) -> Option<u16> {
-    data.get(offset..offset + 2).map(|b| {
-        u16::from_le_bytes([b[0], b[1]])
-    })
+    data.get(offset..offset + 2)
+        .map(|b| u16::from_le_bytes([b[0], b[1]]))
 }
 
 /// Parse BMP header to extract dimensions.
@@ -421,7 +417,11 @@ fn box_filter_downscale(
     let expected_len = (src_w as usize) * (src_h as usize) * 4;
     if src.len() < expected_len {
         // Incomplete pixel data — return a blank thumbnail.
-        return (vec![0u8; (dst_w as usize) * (dst_h as usize) * 4], dst_w, dst_h);
+        return (
+            vec![0u8; (dst_w as usize) * (dst_h as usize) * 4],
+            dst_w,
+            dst_h,
+        );
     }
 
     let mut dst = vec![0u8; (dst_w as usize) * (dst_h as usize) * 4];
@@ -431,9 +431,11 @@ fn box_filter_downscale(
             // Source region that maps to this destination pixel.
             let sx0 = (dx as u64 * src_w as u64 / dst_w as u64) as u32;
             let sy0 = (dy as u64 * src_h as u64 / dst_h as u64) as u32;
-            let sx1 = ((dx as u64 + 1) * src_w as u64).div_ceil(dst_w as u64)
+            let sx1 = ((dx as u64 + 1) * src_w as u64)
+                .div_ceil(dst_w as u64)
                 .min(src_w as u64) as u32;
-            let sy1 = ((dy as u64 + 1) * src_h as u64).div_ceil(dst_h as u64)
+            let sy1 = ((dy as u64 + 1) * src_h as u64)
+                .div_ceil(dst_h as u64)
                 .min(src_h as u64) as u32;
 
             let mut r_acc: u64 = 0;
@@ -534,8 +536,8 @@ impl ThumbCategory {
         match ext.to_lowercase().as_str() {
             "bmp" | "png" | "jpg" | "jpeg" | "gif" | "svg" | "webp" | "ico" => Self::Image,
             "txt" | "log" | "md" | "rst" | "rs" | "py" | "c" | "h" | "cpp" | "js" | "ts"
-            | "html" | "css" | "java" | "go" | "toml" | "yaml" | "json" | "xml" | "sh"
-            | "cfg" | "ini" | "conf" => Self::Text,
+            | "html" | "css" | "java" | "go" | "toml" | "yaml" | "json" | "xml" | "sh" | "cfg"
+            | "ini" | "conf" => Self::Text,
             "pdf" => Self::Pdf,
             "mp3" | "wav" | "ogg" | "flac" | "aac" | "m4a" => Self::Audio,
             "mp4" | "avi" | "mkv" | "webm" | "mov" | "flv" => Self::Video,
@@ -549,9 +551,9 @@ impl ThumbCategory {
     /// placeholder thumbnails rendered as text).
     fn icon_label(self) -> &'static str {
         match self {
-            Self::Image => "\u{1F5BC}",     // framed picture
-            Self::Text => "\u{1F4C4}",      // page
-            Self::Folder => "\u{1F4C1}",    // folder
+            Self::Image => "\u{1F5BC}",  // framed picture
+            Self::Text => "\u{1F4C4}",   // page
+            Self::Folder => "\u{1F4C1}", // folder
             Self::Pdf => "PDF",
             Self::Audio => "\u{1F3B5}",     // musical note
             Self::Video => "\u{1F3AC}",     // clapper board
@@ -564,15 +566,15 @@ impl ThumbCategory {
     /// Accent color for the placeholder icon background.
     fn accent_color(self) -> Color {
         match self {
-            Self::Image => Color::rgb(76, 175, 80),      // green
-            Self::Text => Color::rgb(158, 158, 158),     // gray
-            Self::Folder => Color::rgb(255, 193, 7),     // amber
-            Self::Pdf => Color::rgb(211, 47, 47),        // red
-            Self::Audio => Color::rgb(156, 39, 176),     // purple
-            Self::Video => Color::rgb(33, 150, 243),     // blue
-            Self::Archive => Color::rgb(121, 85, 72),    // brown
-            Self::Executable => Color::rgb(96, 125, 139),// blue-gray
-            Self::Unknown => Color::rgb(189, 189, 189),  // light gray
+            Self::Image => Color::rgb(76, 175, 80),       // green
+            Self::Text => Color::rgb(158, 158, 158),      // gray
+            Self::Folder => Color::rgb(255, 193, 7),      // amber
+            Self::Pdf => Color::rgb(211, 47, 47),         // red
+            Self::Audio => Color::rgb(156, 39, 176),      // purple
+            Self::Video => Color::rgb(33, 150, 243),      // blue
+            Self::Archive => Color::rgb(121, 85, 72),     // brown
+            Self::Executable => Color::rgb(96, 125, 139), // blue-gray
+            Self::Unknown => Color::rgb(189, 189, 189),   // light gray
         }
     }
 }
@@ -623,10 +625,13 @@ fn generate_image_thumbnail(path: &Path, config: &ThumbConfig, mtime: u64) -> Th
     };
 
     // For BMP we can attempt to read raw pixel data (uncompressed 32-bit).
-    if header.len() >= 2 && header[0] == b'B' && header[1] == b'M'
-        && let Some(thumb) = try_bmp_thumbnail(path, dims, config, mtime) {
-            return thumb;
-        }
+    if header.len() >= 2
+        && header[0] == b'B'
+        && header[1] == b'M'
+        && let Some(thumb) = try_bmp_thumbnail(path, dims, config, mtime)
+    {
+        return thumb;
+    }
 
     // For other formats: create an aspect-ratio-correct color swatch since we
     // don't have a full decoder.  The swatch color is derived from the format.
@@ -1008,20 +1013,48 @@ fn generate_default_thumbnail(
 /// included; unknown chars render as a blank space.
 fn glyph_bitmap(ch: char) -> [u8; 7] {
     match ch {
-        'P' => [0b11110, 0b10001, 0b10001, 0b11110, 0b10000, 0b10000, 0b10000],
-        'D' => [0b11100, 0b10010, 0b10001, 0b10001, 0b10001, 0b10010, 0b11100],
-        'F' => [0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b10000],
-        '0' => [0b01110, 0b10001, 0b10011, 0b10101, 0b11001, 0b10001, 0b01110],
-        '1' => [0b00100, 0b01100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110],
-        '2' => [0b01110, 0b10001, 0b00001, 0b00010, 0b00100, 0b01000, 0b11111],
-        '3' => [0b01110, 0b10001, 0b00001, 0b00110, 0b00001, 0b10001, 0b01110],
-        '4' => [0b00010, 0b00110, 0b01010, 0b10010, 0b11111, 0b00010, 0b00010],
-        '5' => [0b11111, 0b10000, 0b11110, 0b00001, 0b00001, 0b10001, 0b01110],
-        '6' => [0b01110, 0b10000, 0b11110, 0b10001, 0b10001, 0b10001, 0b01110],
-        '7' => [0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b01000, 0b01000],
-        '8' => [0b01110, 0b10001, 0b10001, 0b01110, 0b10001, 0b10001, 0b01110],
-        '9' => [0b01110, 0b10001, 0b10001, 0b01111, 0b00001, 0b00010, 0b01100],
-        _   => [0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00000],
+        'P' => [
+            0b11110, 0b10001, 0b10001, 0b11110, 0b10000, 0b10000, 0b10000,
+        ],
+        'D' => [
+            0b11100, 0b10010, 0b10001, 0b10001, 0b10001, 0b10010, 0b11100,
+        ],
+        'F' => [
+            0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b10000,
+        ],
+        '0' => [
+            0b01110, 0b10001, 0b10011, 0b10101, 0b11001, 0b10001, 0b01110,
+        ],
+        '1' => [
+            0b00100, 0b01100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110,
+        ],
+        '2' => [
+            0b01110, 0b10001, 0b00001, 0b00010, 0b00100, 0b01000, 0b11111,
+        ],
+        '3' => [
+            0b01110, 0b10001, 0b00001, 0b00110, 0b00001, 0b10001, 0b01110,
+        ],
+        '4' => [
+            0b00010, 0b00110, 0b01010, 0b10010, 0b11111, 0b00010, 0b00010,
+        ],
+        '5' => [
+            0b11111, 0b10000, 0b11110, 0b00001, 0b00001, 0b10001, 0b01110,
+        ],
+        '6' => [
+            0b01110, 0b10000, 0b11110, 0b10001, 0b10001, 0b10001, 0b01110,
+        ],
+        '7' => [
+            0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b01000, 0b01000,
+        ],
+        '8' => [
+            0b01110, 0b10001, 0b10001, 0b01110, 0b10001, 0b10001, 0b01110,
+        ],
+        '9' => [
+            0b01110, 0b10001, 0b10001, 0b01111, 0b00001, 0b00010, 0b01100,
+        ],
+        _ => [
+            0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00000,
+        ],
     }
 }
 
@@ -1393,7 +1426,12 @@ pub fn render_placeholder(
     let text = label.unwrap_or(category.icon_label());
     let font_size = display_size / 3.0;
     cmds.push(RenderCommand::Text {
-        x: guitk::text::center_x(text, x + display_size / 2.0, font_size, FontWeightHint::Bold),
+        x: guitk::text::center_x(
+            text,
+            x + display_size / 2.0,
+            font_size,
+            FontWeightHint::Bold,
+        ),
         y: y + display_size / 2.0 - font_size / 2.0,
         text: text.to_owned(),
         color: Color::WHITE,
@@ -1598,7 +1636,10 @@ mod tests {
         assert_eq!(ThumbCategory::from_extension("mp3"), ThumbCategory::Audio);
         assert_eq!(ThumbCategory::from_extension("mkv"), ThumbCategory::Video);
         assert_eq!(ThumbCategory::from_extension("zip"), ThumbCategory::Archive);
-        assert_eq!(ThumbCategory::from_extension("exe"), ThumbCategory::Executable);
+        assert_eq!(
+            ThumbCategory::from_extension("exe"),
+            ThumbCategory::Executable
+        );
         assert_eq!(ThumbCategory::from_extension("???"), ThumbCategory::Unknown);
     }
 
@@ -1616,7 +1657,11 @@ mod tests {
             ThumbCategory::Unknown,
         ];
         for cat in categories {
-            assert!(!cat.icon_label().is_empty(), "icon label empty for {:?}", cat);
+            assert!(
+                !cat.icon_label().is_empty(),
+                "icon label empty for {:?}",
+                cat
+            );
         }
     }
 
@@ -1684,10 +1729,10 @@ mod tests {
         let h = 4u32;
         let mut src = vec![0u8; (w * h * 4) as usize];
         for i in 0..(w * h) as usize {
-            src[i * 4] = 255;     // A
+            src[i * 4] = 255; // A
             src[i * 4 + 1] = 255; // R
-            src[i * 4 + 2] = 0;   // G
-            src[i * 4 + 3] = 0;   // B
+            src[i * 4 + 2] = 0; // G
+            src[i * 4 + 3] = 0; // B
         }
 
         let (dst, dw, dh) = box_filter_downscale(&src, w, h, 2);

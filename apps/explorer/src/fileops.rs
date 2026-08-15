@@ -163,14 +163,9 @@ pub enum FileOpEvent {
         policy: ConflictPolicy,
     },
     /// A per-file error occurred.
-    Error {
-        path: PathBuf,
-        error: String,
-    },
+    Error { path: PathBuf, error: String },
     /// The operation finished.
-    Complete {
-        summary: OperationSummary,
-    },
+    Complete { summary: OperationSummary },
     /// An undo operation is now available.
     UndoAvailable(u64),
 }
@@ -270,10 +265,7 @@ impl OperationPlan {
     }
 
     /// Build a plan for deleting `sources` permanently.
-    pub fn plan_delete(
-        sources: &[PathBuf],
-        error_policy: ErrorPolicy,
-    ) -> io::Result<Self> {
+    pub fn plan_delete(sources: &[PathBuf], error_policy: ErrorPolicy) -> io::Result<Self> {
         let mut actions = Vec::new();
         let mut index: u32 = 0;
         let mut total_bytes: u64 = 0;
@@ -483,7 +475,11 @@ impl UndoStack {
     }
 
     /// Push a new undo record and return its id.
-    pub fn push(&mut self, operation: FileOperation, entries: Vec<(PathBuf, Option<PathBuf>)>) -> u64 {
+    pub fn push(
+        &mut self,
+        operation: FileOperation,
+        entries: Vec<(PathBuf, Option<PathBuf>)>,
+    ) -> u64 {
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1);
         self.records.push(UndoRecord {
@@ -652,7 +648,11 @@ impl OperationExecutor {
         self.plan
             .actions
             .iter()
-            .find_map(|a| a.dest.as_ref().and_then(|d| d.parent().map(Path::to_path_buf)))
+            .find_map(|a| {
+                a.dest
+                    .as_ref()
+                    .and_then(|d| d.parent().map(Path::to_path_buf))
+            })
             .unwrap_or_else(|| PathBuf::from("."))
     }
 
@@ -674,7 +674,8 @@ impl OperationExecutor {
             if journal.is_complete(action.index) {
                 if !action.is_dir {
                     self.progress.completed_files += 1;
-                    self.progress.copied_bytes = self.progress.copied_bytes.saturating_add(action.size);
+                    self.progress.copied_bytes =
+                        self.progress.copied_bytes.saturating_add(action.size);
                 }
                 continue;
             }
@@ -747,10 +748,8 @@ impl OperationExecutor {
                                     }
                                     if !action.is_dir {
                                         self.progress.completed_files += 1;
-                                        self.progress.copied_bytes = self
-                                            .progress
-                                            .copied_bytes
-                                            .saturating_add(action.size);
+                                        self.progress.copied_bytes =
+                                            self.progress.copied_bytes.saturating_add(action.size);
                                     }
                                     retried = true;
                                     break;
@@ -768,7 +767,8 @@ impl OperationExecutor {
             if let Some(start) = self.started {
                 self.progress.update_rates(start.elapsed());
             }
-            self.events.push(FileOpEvent::Progress(self.progress.clone()));
+            self.events
+                .push(FileOpEvent::Progress(self.progress.clone()));
         }
 
         // For Move: after all copies succeed, delete sources.
@@ -797,10 +797,7 @@ impl OperationExecutor {
         }
 
         let elapsed = self.started.map_or(Duration::ZERO, |s| s.elapsed());
-        let succeeded = self
-            .progress
-            .completed_files
-            .saturating_sub(self.skipped);
+        let succeeded = self.progress.completed_files.saturating_sub(self.skipped);
 
         self.events.push(FileOpEvent::Complete {
             summary: OperationSummary {
@@ -827,14 +824,18 @@ impl OperationExecutor {
         conflict: ConflictPolicy,
     ) -> io::Result<ActionOutcome> {
         let dest = action.dest.as_ref().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "copy action has no destination")
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "copy action has no destination",
+            )
         })?;
 
         if action.is_dir {
             if !dest.exists() {
                 fs::create_dir_all(dest)?;
             }
-            self.undo_entries.push((action.src.clone(), Some(dest.clone())));
+            self.undo_entries
+                .push((action.src.clone(), Some(dest.clone())));
             return Ok(ActionOutcome::Done);
         }
 
@@ -868,7 +869,8 @@ impl OperationExecutor {
         }
 
         self.atomic_copy_file(&action.src, dest)?;
-        self.undo_entries.push((action.src.clone(), Some(dest.clone())));
+        self.undo_entries
+            .push((action.src.clone(), Some(dest.clone())));
         Ok(ActionOutcome::Done)
     }
 
@@ -884,7 +886,10 @@ impl OperationExecutor {
 
     fn execute_recycle_action(&mut self, action: &PlannedAction) -> io::Result<ActionOutcome> {
         let dest = action.dest.as_ref().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "recycle action has no destination")
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "recycle action has no destination",
+            )
         })?;
         if action.is_dir {
             if !dest.exists() {
@@ -896,13 +901,17 @@ impl OperationExecutor {
             }
             fs::rename(&action.src, dest)?;
         }
-        self.undo_entries.push((action.src.clone(), Some(dest.clone())));
+        self.undo_entries
+            .push((action.src.clone(), Some(dest.clone())));
         Ok(ActionOutcome::Done)
     }
 
     fn execute_restore_action(&mut self, action: &PlannedAction) -> io::Result<ActionOutcome> {
         let dest = action.dest.as_ref().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "restore action has no destination")
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "restore action has no destination",
+            )
         })?;
         if action.is_dir {
             if !dest.exists() {
@@ -914,7 +923,8 @@ impl OperationExecutor {
             }
             fs::rename(&action.src, dest)?;
         }
-        self.undo_entries.push((action.src.clone(), Some(dest.clone())));
+        self.undo_entries
+            .push((action.src.clone(), Some(dest.clone())));
         Ok(ActionOutcome::Done)
     }
 
@@ -936,11 +946,12 @@ impl OperationExecutor {
 
         // Attempt to preserve modification timestamp.
         if let Ok(src_meta) = fs::metadata(src)
-            && let Ok(mtime) = src_meta.modified() {
-                // Best-effort: not all platforms support filetime setting in
-                // std, but our OS will.
-                let _ = set_file_mtime(&tmp_path, mtime);
-            }
+            && let Ok(mtime) = src_meta.modified()
+        {
+            // Best-effort: not all platforms support filetime setting in
+            // std, but our OS will.
+            let _ = set_file_mtime(&tmp_path, mtime);
+        }
 
         // Atomic rename into final position.
         fs::rename(&tmp_path, dest)?;
@@ -1014,7 +1025,10 @@ impl RecycleBin {
         let home = std::env::var("HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from("/tmp"));
-        Self::new(home.join(".recycle"), Duration::from_secs(30 * 24 * 60 * 60))
+        Self::new(
+            home.join(".recycle"),
+            Duration::from_secs(30 * 24 * 60 * 60),
+        )
     }
 
     /// Move `path` into the recycle bin and return the entry id.
@@ -1157,11 +1171,10 @@ impl RecycleBin {
         let content = fs::read_to_string(&meta_path)?;
         let mut lines = content.lines();
 
-        let original_path = PathBuf::from(
-            lines
-                .next()
-                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing path in meta"))?,
-        );
+        let original_path =
+            PathBuf::from(lines.next().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "missing path in meta")
+            })?);
         let ts_secs: u64 = lines
             .next()
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing timestamp in meta"))?
@@ -1216,36 +1229,39 @@ pub fn execute_undo(record: &UndoRecord) -> io::Result<()> {
             // Move files back from destination to source.
             for (src, dest) in &record.entries {
                 if let Some(d) = dest
-                    && d.exists() {
-                        if let Some(parent) = src.parent() {
-                            fs::create_dir_all(parent)?;
-                        }
-                        fs::rename(d, src)?;
+                    && d.exists()
+                {
+                    if let Some(parent) = src.parent() {
+                        fs::create_dir_all(parent)?;
                     }
+                    fs::rename(d, src)?;
+                }
             }
         }
         FileOperation::Delete | FileOperation::Recycle => {
             // Restore: entries are (original_path, recycle_dest).
             for (src, dest) in &record.entries {
                 if let Some(d) = dest
-                    && d.exists() {
-                        if let Some(parent) = src.parent() {
-                            fs::create_dir_all(parent)?;
-                        }
-                        fs::rename(d, src)?;
+                    && d.exists()
+                {
+                    if let Some(parent) = src.parent() {
+                        fs::create_dir_all(parent)?;
                     }
+                    fs::rename(d, src)?;
+                }
             }
         }
         FileOperation::Restore => {
             // Undo restore = recycle again: move from original back to bin.
             for (src, dest) in &record.entries {
                 if let Some(d) = dest
-                    && src.exists() {
-                        if let Some(parent) = d.parent() {
-                            fs::create_dir_all(parent)?;
-                        }
-                        fs::rename(src, d)?;
+                    && src.exists()
+                {
+                    if let Some(parent) = d.parent() {
+                        fs::create_dir_all(parent)?;
                     }
+                    fs::rename(src, d)?;
+                }
             }
         }
     }
@@ -1356,11 +1372,8 @@ mod tests {
         write_file(&src_dir.join("data").join("x.txt"), "xxxx");
         write_file(&src_dir.join("data").join("y.txt"), "yy");
 
-        let plan = OperationPlan::plan_delete(
-            &[src_dir.join("data")],
-            ErrorPolicy::StopOnFirst,
-        )
-        .unwrap();
+        let plan =
+            OperationPlan::plan_delete(&[src_dir.join("data")], ErrorPolicy::StopOnFirst).unwrap();
 
         assert_eq!(plan.total_files, 2);
         assert_eq!(plan.total_bytes, 6);
@@ -1471,7 +1484,9 @@ mod tests {
         let events = executor.execute();
 
         // Should complete without error.
-        let complete = events.iter().find(|e| matches!(e, FileOpEvent::Complete { .. }));
+        let complete = events
+            .iter()
+            .find(|e| matches!(e, FileOpEvent::Complete { .. }));
         assert!(complete.is_some());
 
         let _ = fs::remove_dir_all(&src_dir);
@@ -1818,7 +1833,10 @@ mod tests {
         assert!(dst_dir.join("mydir").join("a.txt").exists());
         assert!(dst_dir.join("mydir").join("sub").join("b.txt").exists());
         assert_eq!(read_file(&dst_dir.join("mydir").join("a.txt")), "aaa");
-        assert_eq!(read_file(&dst_dir.join("mydir").join("sub").join("b.txt")), "bb");
+        assert_eq!(
+            read_file(&dst_dir.join("mydir").join("sub").join("b.txt")),
+            "bb"
+        );
 
         let _ = fs::remove_dir_all(&src_dir);
         let _ = fs::remove_dir_all(&dst_dir);
@@ -1855,11 +1873,8 @@ mod tests {
         write_file(&dir.join("delme").join("x.txt"), "xxx");
         write_file(&dir.join("delme").join("y.txt"), "yy");
 
-        let plan = OperationPlan::plan_delete(
-            &[dir.join("delme")],
-            ErrorPolicy::StopOnFirst,
-        )
-        .unwrap();
+        let plan =
+            OperationPlan::plan_delete(&[dir.join("delme")], ErrorPolicy::StopOnFirst).unwrap();
 
         let mut executor = OperationExecutor::new(plan);
         executor.execute();

@@ -421,9 +421,7 @@ impl ColumnManager {
         if let Some(def) = self.all_columns.get_mut(&id) {
             def.width = match def.width {
                 ColumnWidth::Fixed(_) => ColumnWidth::Fixed(width.max(20.0)),
-                ColumnWidth::Flexible { min, max } => {
-                    ColumnWidth::Fixed(width.clamp(min, max))
-                }
+                ColumnWidth::Flexible { min, max } => ColumnWidth::Fixed(width.clamp(min, max)),
             };
         }
     }
@@ -444,9 +442,10 @@ impl ColumnManager {
         } else {
             // Clear previous column's sort indicator.
             if let Some(prev) = self.sort_column
-                && let Some(def) = self.all_columns.get_mut(&prev) {
-                    def.sort_order = SortOrder::None;
-                }
+                && let Some(def) = self.all_columns.get_mut(&prev)
+            {
+                def.sort_order = SortOrder::None;
+            }
             self.sort_column = Some(id);
             self.sort_direction = SortOrder::Ascending;
         }
@@ -517,8 +516,8 @@ impl ColumnManager {
             match ext.as_str() {
                 "png" | "jpg" | "jpeg" | "gif" | "bmp" | "svg" => has_image = true,
                 "mp3" | "wav" | "flac" | "ogg" => has_audio = true,
-                "rs" | "c" | "cpp" | "h" | "py" | "js" | "ts" | "java" | "go" | "rb"
-                | "html" | "css" | "toml" | "yaml" | "json" | "xml" => has_code = true,
+                "rs" | "c" | "cpp" | "h" | "py" | "js" | "ts" | "java" | "go" | "rb" | "html"
+                | "css" | "toml" | "yaml" | "json" | "xml" => has_code = true,
                 "zip" | "tar" | "gz" | "7z" | "rar" => has_archive = true,
                 _ => {}
             }
@@ -583,7 +582,10 @@ impl StandardColumns {
         ColumnDef {
             id: ColumnId::NAME,
             label: String::new(), // replaced at runtime
-            width: ColumnWidth::Flexible { min: 120.0, max: 500.0 },
+            width: ColumnWidth::Flexible {
+                min: 120.0,
+                max: 500.0,
+            },
             alignment: Alignment::Left,
             sortable: true,
             sort_order: SortOrder::None,
@@ -644,7 +646,14 @@ impl StandardColumns {
 
     /// Build the runtime column defs with labels filled in.
     fn make_defs() -> Vec<ColumnDef> {
-        let labels = ["Name", "Size", "Date Modified", "Type", "Date Created", "Attributes"];
+        let labels = [
+            "Name",
+            "Size",
+            "Date Modified",
+            "Type",
+            "Date Created",
+            "Attributes",
+        ];
         Self::DEFS
             .iter()
             .zip(labels.iter())
@@ -809,7 +818,10 @@ impl AudioColumns {
             ColumnDef {
                 id: ColumnId::ARTIST,
                 label: "Artist".to_string(),
-                width: ColumnWidth::Flexible { min: 80.0, max: 200.0 },
+                width: ColumnWidth::Flexible {
+                    min: 80.0,
+                    max: 200.0,
+                },
                 alignment: Alignment::Left,
                 sortable: true,
                 sort_order: SortOrder::None,
@@ -819,7 +831,10 @@ impl AudioColumns {
             ColumnDef {
                 id: ColumnId::ALBUM,
                 label: "Album".to_string(),
-                width: ColumnWidth::Flexible { min: 80.0, max: 200.0 },
+                width: ColumnWidth::Flexible {
+                    min: 80.0,
+                    max: 200.0,
+                },
                 alignment: Alignment::Left,
                 sortable: true,
                 sort_order: SortOrder::None,
@@ -829,7 +844,10 @@ impl AudioColumns {
             ColumnDef {
                 id: ColumnId::TITLE,
                 label: "Title".to_string(),
-                width: ColumnWidth::Flexible { min: 80.0, max: 250.0 },
+                width: ColumnWidth::Flexible {
+                    min: 80.0,
+                    max: 250.0,
+                },
                 alignment: Alignment::Left,
                 sortable: true,
                 sort_order: SortOrder::None,
@@ -940,18 +958,15 @@ impl ColumnProvider for CodeColumns {
                 // Stub: would read and count newlines. Return placeholder.
                 ColumnValue::Number(0)
             }
-            ColumnId::LANGUAGE => {
-                ColumnValue::Text(Self::language_for_ext(&ext).to_string())
-            }
+            ColumnId::LANGUAGE => ColumnValue::Text(Self::language_for_ext(&ext).to_string()),
             _ => ColumnValue::Empty,
         }
     }
 
     fn supported_extensions(&self) -> &[&str] {
         &[
-            "rs", "c", "h", "cpp", "cc", "cxx", "hpp", "py", "js", "ts",
-            "java", "go", "rb", "html", "htm", "css", "toml", "yaml", "yml",
-            "json", "xml", "sh", "bash",
+            "rs", "c", "h", "cpp", "cc", "cxx", "hpp", "py", "js", "ts", "java", "go", "rb",
+            "html", "htm", "css", "toml", "yaml", "yml", "json", "xml", "sh", "bash",
         ]
     }
 }
@@ -1055,10 +1070,7 @@ const CHOOSER_PAD: f32 = 4.0;
 ///
 /// Returns render commands for a header bar at `y=0` across `total_width`,
 /// with labels, sort arrows, and column separators.
-pub fn render_column_header(
-    manager: &ColumnManager,
-    total_width: f32,
-) -> Vec<RenderCommand> {
+pub fn render_column_header(manager: &ColumnManager, total_width: f32) -> Vec<RenderCommand> {
     let mut cmds = Vec::new();
 
     // Background bar.
@@ -1088,12 +1100,18 @@ pub fn render_column_header(
         // Label text.
         let text_x = match def.alignment {
             Alignment::Left => x + 4.0,
-            Alignment::Right => {
-                text::right_x(&def.label, x + w - 4.0, HEADER_FONT_SIZE, FontWeightHint::Bold)
-            }
-            Alignment::Center => {
-                text::center_x(&def.label, x + w / 2.0, HEADER_FONT_SIZE, FontWeightHint::Bold)
-            }
+            Alignment::Right => text::right_x(
+                &def.label,
+                x + w - 4.0,
+                HEADER_FONT_SIZE,
+                FontWeightHint::Bold,
+            ),
+            Alignment::Center => text::center_x(
+                &def.label,
+                x + w / 2.0,
+                HEADER_FONT_SIZE,
+                FontWeightHint::Bold,
+            ),
         };
         cmds.push(RenderCommand::Text {
             x: text_x,
@@ -1216,11 +1234,7 @@ pub fn render_column_values(
 ///
 /// Shows all known columns with checkboxes indicating visibility.
 /// `x`, `y` is the top-left corner of the dropdown.
-pub fn render_column_chooser(
-    manager: &ColumnManager,
-    x: f32,
-    y: f32,
-) -> Vec<RenderCommand> {
+pub fn render_column_chooser(manager: &ColumnManager, x: f32, y: f32) -> Vec<RenderCommand> {
     let mut cmds = Vec::new();
 
     let all_defs = {
@@ -1279,7 +1293,11 @@ pub fn render_column_chooser(
             y: cb_y,
             width: cb_size,
             height: cb_size,
-            color: if is_active { ColumnColors::CHECK_ON } else { ColumnColors::CHECK_OFF },
+            color: if is_active {
+                ColumnColors::CHECK_ON
+            } else {
+                ColumnColors::CHECK_OFF
+            },
             line_width: 1.0,
             corner_radii: CornerRadii::all(2.0),
         });
@@ -1362,9 +1380,10 @@ fn resolve_widths(manager: &ColumnManager, total_width: f32) -> Vec<f32> {
         for (i, &col_id) in active.iter().enumerate() {
             if let Some(def) = manager.column_def(col_id)
                 && let ColumnWidth::Flexible { min, max } = def.width
-                    && let Some(w) = widths.get_mut(i) {
-                        *w = per_flex.clamp(min, max);
-                    }
+                && let Some(w) = widths.get_mut(i)
+            {
+                *w = per_flex.clamp(min, max);
+            }
         }
     }
 
@@ -1376,9 +1395,7 @@ fn path_extension(path: &str) -> String {
     // Only treat text after the last '.' as an extension if the path
     // actually contains a dot and the dot is not the first character.
     match path.rfind('.') {
-        Some(pos) if pos > 0 && pos + 1 < path.len() => {
-            path[pos + 1..].to_lowercase()
-        }
+        Some(pos) if pos > 0 && pos + 1 < path.len() => path[pos + 1..].to_lowercase(),
         _ => String::new(),
     }
 }
@@ -1520,8 +1537,7 @@ mod tests {
                         _ => None,
                     })
                     .expect("header label not drawn");
-                let end =
-                    drawn + text::measure(&def.label, HEADER_FONT_SIZE, FontWeightHint::Bold);
+                let end = drawn + text::measure(&def.label, HEADER_FONT_SIZE, FontWeightHint::Bold);
                 assert!(
                     (end - (x + w - 4.0)).abs() < 0.01,
                     "{} ends at {end}, column edge is {}",
@@ -1738,8 +1754,14 @@ mod tests {
     fn test_auto_detect_images() {
         let mut mgr = ColumnManager::with_defaults();
         let files = [
-            FileInfo { path: "photo.png", extension: "png" },
-            FileInfo { path: "readme.txt", extension: "txt" },
+            FileInfo {
+                path: "photo.png",
+                extension: "png",
+            },
+            FileInfo {
+                path: "readme.txt",
+                extension: "txt",
+            },
         ];
         mgr.auto_detect_columns(&files);
         assert!(mgr.is_visible(ColumnId::DIMENSIONS));
@@ -1749,9 +1771,10 @@ mod tests {
     #[test]
     fn test_auto_detect_audio() {
         let mut mgr = ColumnManager::with_defaults();
-        let files = [
-            FileInfo { path: "song.mp3", extension: "mp3" },
-        ];
+        let files = [FileInfo {
+            path: "song.mp3",
+            extension: "mp3",
+        }];
         mgr.auto_detect_columns(&files);
         assert!(mgr.is_visible(ColumnId::DURATION));
         assert!(mgr.is_visible(ColumnId::ARTIST));
@@ -1762,8 +1785,14 @@ mod tests {
     fn test_auto_detect_code() {
         let mut mgr = ColumnManager::with_defaults();
         let files = [
-            FileInfo { path: "main.rs", extension: "rs" },
-            FileInfo { path: "lib.py", extension: "py" },
+            FileInfo {
+                path: "main.rs",
+                extension: "rs",
+            },
+            FileInfo {
+                path: "lib.py",
+                extension: "py",
+            },
         ];
         mgr.auto_detect_columns(&files);
         assert!(mgr.is_visible(ColumnId::LINE_COUNT));
@@ -1773,9 +1802,10 @@ mod tests {
     #[test]
     fn test_auto_detect_archives() {
         let mut mgr = ColumnManager::with_defaults();
-        let files = [
-            FileInfo { path: "backup.zip", extension: "zip" },
-        ];
+        let files = [FileInfo {
+            path: "backup.zip",
+            extension: "zip",
+        }];
         mgr.auto_detect_columns(&files);
         assert!(mgr.is_visible(ColumnId::COMPRESSED_SIZE));
         assert!(mgr.is_visible(ColumnId::FILE_COUNT_INSIDE));
@@ -1785,10 +1815,22 @@ mod tests {
     fn test_auto_detect_mixed() {
         let mut mgr = ColumnManager::with_defaults();
         let files = [
-            FileInfo { path: "photo.png", extension: "png" },
-            FileInfo { path: "song.mp3", extension: "mp3" },
-            FileInfo { path: "main.rs", extension: "rs" },
-            FileInfo { path: "backup.zip", extension: "zip" },
+            FileInfo {
+                path: "photo.png",
+                extension: "png",
+            },
+            FileInfo {
+                path: "song.mp3",
+                extension: "mp3",
+            },
+            FileInfo {
+                path: "main.rs",
+                extension: "rs",
+            },
+            FileInfo {
+                path: "backup.zip",
+                extension: "zip",
+            },
         ];
         mgr.auto_detect_columns(&files);
         assert!(mgr.is_visible(ColumnId::DIMENSIONS));
@@ -1801,8 +1843,14 @@ mod tests {
     fn test_auto_detect_no_special() {
         let mut mgr = ColumnManager::with_defaults();
         let files = [
-            FileInfo { path: "readme.txt", extension: "txt" },
-            FileInfo { path: "notes.doc", extension: "doc" },
+            FileInfo {
+                path: "readme.txt",
+                extension: "txt",
+            },
+            FileInfo {
+                path: "notes.doc",
+                extension: "doc",
+            },
         ];
         mgr.auto_detect_columns(&files);
         // Only standard columns.
@@ -2014,7 +2062,10 @@ mod tests {
 
     #[test]
     fn test_column_width_resolve_flexible() {
-        let flex = ColumnWidth::Flexible { min: 80.0, max: 300.0 };
+        let flex = ColumnWidth::Flexible {
+            min: 80.0,
+            max: 300.0,
+        };
         assert_eq!(flex.resolve(200.0), 200.0);
         assert_eq!(flex.resolve(50.0), 80.0);
         assert_eq!(flex.resolve(500.0), 300.0);

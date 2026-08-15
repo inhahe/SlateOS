@@ -347,7 +347,25 @@ def canary_is_contaminated(canary):
 
 
 def print_canary_summary(canary):
-    """Print the current run's canary verdict and what it does and does not mean.
+    """Print the current run's canary verdict, and return it.
+
+    Returns the `CANARY_*` verdict so the caller can store it on the history
+    record without recomputing it.
+
+    **The return value is why this docstring has a second half.** When this
+    function was extracted from `main()`, the `verdict = canary_verdict(canary)`
+    binding came with it -- and `main()` still referenced `verdict` 250 lines
+    further down, to write `record["canary_verdict"]`. That is a `NameError` on
+    the recording path, so from the extraction commit onward *every* `--bench`
+    boot crashed the recorder after printing its summary and wrote no history
+    record at all. It went unnoticed for four commits because `boot-test.sh`
+    ignored this tool's exit status and printed "Boot test PASSED" over the
+    traceback.
+
+    Returning the verdict, rather than leaving the caller to call
+    `canary_verdict` a second time, is what makes the coupling explicit: there
+    is now no way to use this function's output without receiving the value
+    `main()` needs.
 
     # Why this is a function
 
@@ -367,7 +385,7 @@ def print_canary_summary(canary):
     if verdict == CANARY_ABSENT:
         print("  Contamination canary: absent (log predates it) - unknown, "
               "not clean.")
-        return
+        return verdict
 
     if "spread" in canary:
         detail = (f"spread {canary['spread']}% over {canary['samples']} "
@@ -426,6 +444,30 @@ def print_canary_summary(canary):
         print("  That is a *sampled* check, ~1 sample per 8 benchmarks. It "
               "does not mean individual benchmarks ran undisturbed - see the "
               "dispersion line below.")
+
+    return verdict
+
+
+def display_path(path):
+    """`path` relative to the repo when that is possible, else as given.
+
+    Cosmetic, and that is the entire point: `os.path.relpath` raises
+    `ValueError` on Windows when the two paths sit on different drives, so the
+    bare call this replaces could abort the tool *after* the record had already
+    been appended -- a non-zero exit and a traceback on a run that had in fact
+    succeeded. Prettifying a path in a success message must not be able to fail
+    the run it is reporting on.
+
+    Not hypothetical: it fired the first time anything drove `main()` with a
+    `--history` outside the repo tree (the end-to-end test's temp directory,
+    which lands on C: while the checkout is on D:). Any operator passing an
+    explicit `--history` on another volume would have hit the same thing.
+    """
+    try:
+        return os.path.relpath(path, REPO_ROOT)
+    except ValueError:
+        # Different drive on Windows; there is no relative form to give.
+        return path
 
 
 def git_commit():
@@ -1173,8 +1215,11 @@ def main(argv=None):
                        records=records, host=host, profile=args.profile)
 
     # Reported *after* the comparison, so it qualifies the verdict the reader
-    # has just seen rather than being buried above it.
-    print_canary_summary(canary)
+    # has just seen rather than being buried above it. The verdict is *taken
+    # from* the printer rather than recomputed here: the two must agree, and a
+    # second `canary_verdict(canary)` call is a place where they could silently
+    # stop agreeing.
+    verdict = print_canary_summary(canary)
 
     report_dispersion(current_entries)
 
@@ -1222,7 +1267,7 @@ def main(argv=None):
             record["canary_verdict"] = verdict
         if append_record(args.history, record):
             print(f"  Recorded {len(current_entries)} benchmarks to "
-                  f"{os.path.relpath(args.history, REPO_ROOT)}")
+                  f"{display_path(args.history)}")
 
     if regressed and args.fail_on_regression:
         return 1

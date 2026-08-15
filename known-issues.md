@@ -62908,3 +62908,104 @@ threshold can be fitted to the gap between them.
 
 Until then `CANARY_TOLERANCE_PCT` stays at 25 and stays labelled a placeholder.
 Changing it now would be a guess dressed as a measurement.
+
+---
+
+### B-BENCH-RECORDER-CRASHED-FOR-FOUR-COMMITS-AND-THE-BOOT-GATE-PRINTED-PASSED — 2026-08-14 — ✅ FIXED 2026-08-14 (`scripts/bench-history.py`, `scripts/boot-test.sh`, `scripts/test-bench-history.py`)
+
+**Symptom.** Every `--bench` boot from `368c128fd` onward wrote **no history
+record at all**. The kernel measured correctly, the serial log was complete, the
+tool printed its full comparison and a correct canary summary — and then died:
+
+```
+Traceback (most recent call last):
+  File "scripts\bench-history.py", line 1233, in <module>
+    sys.exit(main())
+  File "scripts\bench-history.py", line 1222, in main
+    record["canary_verdict"] = verdict
+                               ^^^^^^^
+NameError: name 'verdict' is not defined
+=== Boot test PASSED ===
+```
+
+Note the last line. That is the whole bug.
+
+**Cause 1 — the extraction took a binding with it.** `368c128fd` moved 55 lines
+of canary-summary printing out of `main()` into `print_canary_summary()`, to make
+the wording assertable from the test suite. The moved block began
+`verdict = canary_verdict(canary)`, so the binding left with it — while `main()`
+went on referencing `verdict` 250 lines further down. Python does not diagnose
+this until the line runs.
+
+**Why the refactor's own evidence could not see it.** That commit justified
+itself with a measured behaviour-preservation check: assertions went 106 → 117,
+none lost. That check was sound and remains true. It simply could not cover this,
+because it can only cover functions that *have* tests, and `main()` had none —
+the only code path in the tool that actually writes to `history.jsonl` was the
+one path with no test. Extracting code out of an untested caller moves the
+tested part and leaves the untested part holding a dangling reference; a test
+suite that grows in the extracted half reports success either way.
+
+**Cause 2, and the worse one — the boot gate discarded the exit status.**
+`boot-test.sh` invoked the recorder as `python bench-history.py … || true`,
+reasoning in a comment that "a missing python or a write failure must not turn a
+healthy boot into a failed one". Both of those are true and both are already
+handled elsewhere: python's absence by the `command -v` branch, a write failure
+by the tool reporting it without exiting non-zero. What `|| true` actually
+suppressed was the case nobody had in mind — the recorder *crashing*. So the
+traceback scrolled past and `=== Boot test PASSED ===` was printed directly over
+it, four commits running.
+
+This is the project's recurring shape, one level up from where it usually
+appears: **a check that cannot fail is indistinguishable from a check that
+passes.** Here the check was the tool's own exit status, and it had been
+explicitly disarmed.
+
+**Cause 3, found by the new test on its first run.** `main()` finished by
+printing `os.path.relpath(args.history, REPO_ROOT)`. On Windows `relpath` raises
+`ValueError` when the two paths are on different drives, so any `--history`
+outside the checkout's volume aborted the tool *after* the record had already
+been appended — a traceback and a non-zero exit on a run that had in fact
+succeeded. Cosmetic path-prettifying must not be able to fail the run it reports
+on.
+
+**Fix.**
+
+* `print_canary_summary` returns its verdict on all four paths, and `main()`
+  takes the value from it rather than recomputing `canary_verdict(canary)`. The
+  coupling is now explicit: there is no way to use the printer's output without
+  receiving the value `main()` needs, and no second call site where the printed
+  prose and the stored verdict could drift apart.
+* `display_path()` falls back to the path as given when no relative form exists.
+* `boot-test.sh` captures the recorder's status into `BENCH_RECORDER_STATUS`.
+  This invocation passes no `--fail-on-regression`, so the tool has no legitimate
+  non-zero exit here — any non-zero status is a fault in the tooling.
+* New `finish_pass()` is the **only** place that prints the PASSED banner. The
+  two success paths (the poll loop spotting the marker; the post-loop check
+  finding it after QEMU exited) each carried their own verbatim copy of the
+  pass sequence, so a condition added to one would silently not apply to the
+  other. A run whose recorder failed now ends `=== Boot test INCOMPLETE ===`
+  with **exit 3** — distinct from 1 (kernel/self-test failure) and 2 (wedge),
+  because conflating "the kernel is broken" with "our tooling is broken" sends
+  the reader to the wrong tree.
+* `boot-test.sh`'s header now documents exit codes 2 and 3. 2 has existed since
+  the stall detector landed while the header still claimed only 0 and 1 were
+  possible; a status a caller cannot know about is a status the caller cannot
+  handle.
+* `test_main_records_end_to_end` drives `main()` to an appended record and
+  asserts the record's contents, both canary paths, and all four of the
+  printer's return values.
+
+**Positive controls, because a regression test that cannot fail is the same bug
+again.** Re-deleting the `verdict =` assignment reproduces the identical
+`NameError` through the new test. Driving the real `finish_pass()` text with a
+recorder stubbed to crash yields exit 3 and no PASSED banner; with a healthy
+stub it yields exit 0 and PASSED. One further control was needed on the test
+itself: the four return-path assertions were originally written *inside* the
+`redirect_stdout` block that silences the printer, which posted their own
+PASS/FAIL lines into the discarded buffer — four assertions running and
+reporting nothing. They now collect under the redirect and assert outside it.
+
+**Cost.** Four commits of `--bench` boots produced no data: roughly 9 minutes of
+QEMU each, and — more expensively — the P21 baseline measured during this thread
+had to be re-measured, because the run that produced it recorded nothing.

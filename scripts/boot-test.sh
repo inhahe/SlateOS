@@ -4,6 +4,19 @@
 # Exit codes:
 #   0 — success marker detected AND no self-test failures
 #   1 — Timeout, PANIC, or a non-fatal self-test failure detected
+#   2 — Wedge: the serial log stopped growing for --stall-secs with the marker
+#       still absent (opt-in; distinct from 1 because a wedge is a hang to be
+#       debugged with the captured RIP, not a test that reported a failure)
+#   3 — The kernel booted cleanly but the run did not produce the artefact it
+#       was asked for: --bench was given and the benchmark recorder failed, so
+#       nothing was written to bench/history.jsonl.  Distinct from 1 because the
+#       fault is in our tooling, not in the kernel.
+#
+# 2 and 3 are listed here because they were not: exit 2 has existed since the
+# stall detector landed and this header still claimed the script only ever
+# returned 0 or 1, so any caller branching on the documented set treated a wedge
+# as an ordinary failure.  A status a caller cannot know about is a status the
+# caller cannot handle.
 #
 # Usage:
 #   ./scripts/boot-test.sh              # full build + test (waits for BOOT_OK)
@@ -587,6 +600,11 @@ resolve_kernel_symbol() {
 # run to bench/history.jsonl and diffs against the previous one.  This used to
 # say "compare against prior runs" without anything storing them, which made
 # the advice unfollowable.
+
+# Non-zero if the benchmark recorder failed on this run.  Read by finish_pass,
+# which is the only place allowed to print the PASSED banner.
+BENCH_RECORDER_STATUS=0
+
 print_bench_results() {
     local file="$1"
     [ -f "$file" ] || return 0
@@ -599,21 +617,79 @@ print_bench_results() {
         | grep -v -E '^\[bench\] (SCORE|CANARY) ' \
         || echo "(no [bench] lines found)"
 
-    # Record and diff.  Never fatal: a missing python or a write failure must
-    # not turn a healthy boot into a failed one.
+    # Record and diff.
     #
     # --profile stamps the record with the build profile it was measured on.
     # Numbers from different profiles are not comparable — opt-level 0 vs 3 on
     # this code is a multiple, not a percentage — so the comparator must never
     # diff across the boundary.  The 5 records written before 2026-08-14 carry
     # no profile field and are read as "debug".
+    #
+    # The exit status is CAPTURED, not discarded.  It used to end in `|| true`
+    # on the reasoning that "a missing python or a write failure must not turn a
+    # healthy boot into a failed one" — which is true, and which those two cases
+    # already satisfy without it: python's absence is handled by the `command
+    # -v` branch below, and a write failure is reported by the tool without a
+    # non-zero exit.  What `|| true` actually suppressed was the third case
+    # nobody had in mind: the recorder *crashing*.  A refactor left a `NameError`
+    # on the recording path, and for four commits every `--bench` boot printed a
+    # traceback, wrote no history record, and was immediately overprinted with
+    # "=== Boot test PASSED ===" — the run silently produced no data at all.
+    #
+    # Note this invocation passes no --fail-on-regression, so the tool has no
+    # legitimate non-zero exit here: any non-zero status is a fault in the tool
+    # itself.  See the docstring on bench-history.py's print_canary_summary.
+    local rc=0
     if command -v python &>/dev/null; then
-        python "$SCRIPT_DIR/bench-history.py" --serial "$file" --profile "$BENCH_PROFILE" || true
+        python "$SCRIPT_DIR/bench-history.py" --serial "$file" --profile "$BENCH_PROFILE" || rc=$?
     elif command -v python3 &>/dev/null; then
-        python3 "$SCRIPT_DIR/bench-history.py" --serial "$file" --profile "$BENCH_PROFILE" || true
+        python3 "$SCRIPT_DIR/bench-history.py" --serial "$file" --profile "$BENCH_PROFILE" || rc=$?
     else
         echo "(python not found; skipping benchmark history diff)"
+        return 0
     fi
+
+    if [ "$rc" -ne 0 ]; then
+        echo "=== BENCHMARK RECORDER FAILED (exit $rc) ==="
+        echo "    The kernel's numbers are in $file, but they were NOT recorded"
+        echo "    to bench/history.jsonl, so this run cannot be compared against"
+        echo "    later ones.  This is a bug in scripts/bench-history.py, not in"
+        echo "    the kernel: the boot itself is unaffected."
+        BENCH_RECORDER_STATUS=$rc
+    fi
+}
+
+# The single place that decides a boot passed, and the only place that prints
+# the PASSED banner.
+#
+# It is a function because there are two ways to reach a successful boot -- the
+# poll loop notices the marker, or the post-loop check finds it after QEMU has
+# already exited -- and both used to carry their own verbatim copy of this
+# sequence.  Two copies of "what counts as a pass" is one copy too many: any
+# condition added to one silently does not apply to the other, and the failure
+# mode is a boot that reports PASSED down whichever path the copy was not
+# applied to.
+#
+# Exit codes: 0 pass; 3 the kernel booted but the run did not produce the
+# artefact it was asked for.  3 is deliberately distinct from 1 (kernel/self-test
+# failure) and 2 (hang/wedge) -- conflating "the kernel is broken" with "our
+# tooling is broken" sends the reader to the wrong tree.
+finish_pass() {
+    local file="$1"
+    if [ "$BENCH" -eq 1 ]; then
+        print_bench_results "$file"
+    else
+        report_bench_absence "$file"
+    fi
+    report_pathz_skips "$file"
+
+    if [ "$BENCH_RECORDER_STATUS" -ne 0 ]; then
+        echo "=== Boot test INCOMPLETE ($WAIT_MARKER reached, but --bench recorded nothing) ==="
+        exit 3
+    fi
+
+    echo "=== Boot test PASSED ==="
+    exit 0
 }
 
 # Find QEMU
@@ -952,14 +1028,7 @@ while kill -0 "$QEMU_PID" 2>/dev/null && [ "$ELAPSED" -lt "$TIMEOUT" ]; do
             echo "=== Boot test FAILED ($WAIT_MARKER reached but a self-test failed) ==="
             exit 1
         fi
-        if [ "$BENCH" -eq 1 ]; then
-            print_bench_results "$SERIAL_FILE"
-        else
-            report_bench_absence "$SERIAL_FILE"
-        fi
-        report_pathz_skips "$SERIAL_FILE"
-        echo "=== Boot test PASSED ==="
-        exit 0
+        finish_pass "$SERIAL_FILE"
     fi
 
     # Serial-stall wedge detection (opt-in).  A wedged kernel stops writing to
@@ -1008,14 +1077,7 @@ if [ -f "$SERIAL_FILE" ]; then
             echo "=== Boot test FAILED ($WAIT_MARKER reached but a self-test failed) ==="
             exit 1
         fi
-        if [ "$BENCH" -eq 1 ]; then
-            print_bench_results "$SERIAL_FILE"
-        else
-            report_bench_absence "$SERIAL_FILE"
-        fi
-        report_pathz_skips "$SERIAL_FILE"
-        echo "=== Boot test PASSED ==="
-        exit 0
+        finish_pass "$SERIAL_FILE"
     elif grep -q "PANIC\|FATAL" "$SERIAL_FILE"; then
         echo "KERNEL PANIC detected!"
         grep "PANIC\|FATAL\|EXCEPTION" "$SERIAL_FILE" || true

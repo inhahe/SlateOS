@@ -856,6 +856,118 @@ def test_tracked_benchmarks_round_trip(bh, tmpdir):
           "2 tracked without a target" in out, True)
 
 
+def test_main_records_end_to_end(bh, tmpdir):
+    """Drive `main()` all the way to an appended record.
+
+    # Why this test exists
+
+    Every other test in this file calls one function. `main()` is the only code
+    path that actually *writes* to `history.jsonl`, and it had no test at all --
+    so the one thing this tool exists to do was the one thing nothing checked.
+
+    That gap was not theoretical. Extracting the 55-line canary summary out of
+    `main()` and into `print_canary_summary` took the `verdict = ...` binding
+    with it, while `main()` went on referencing `verdict` 250 lines further down
+    to write `record["canary_verdict"]`. Every `--bench` boot from that commit
+    onward raised `NameError` *after* printing a complete, correct-looking
+    summary, and wrote no record. It survived four commits, because the
+    refactor's own evidence of safety -- an assertion count that went from 106
+    to 117 -- could only ever cover the functions that had tests, and `main()`
+    was not one of them. `boot-test.sh` then printed "Boot test PASSED" over the
+    traceback, so nothing anywhere said the run had produced no data.
+
+    So the assertion that matters most below is the dullest one: that `main()`
+    returns at all. A `NameError` is not a wrong answer to be compared against
+    an expected value; it is an exception, and the only test that catches it is
+    one that runs the function.
+    """
+    import io
+    import json
+    import contextlib
+
+    log = write(tmpdir, "serial.txt", "\n".join([
+        "[bench] SCORE syscall_dispatch 120 200 PASS 130 1000",
+        "[bench] SCORE vfs_stat_breakdown_ns 263 - TRACK 310 500",
+        # start end pct min max spread samples invalid min_centi max_centi:
+        # a quiet host, resolvable, well inside tolerance -> CLEAN.
+        "[bench] CANARY 8 8 100 8 9 12 11 0 800 900",
+    ]) + "\n")
+    history = os.path.join(tmpdir, "history.jsonl")
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = bh.main(["--serial", log, "--history", history,
+                      "--profile", "release"])
+    out = buf.getvalue()
+
+    check("main() returns from the recording path", rc, 0)
+    check("main() appended a history file", os.path.exists(history), True)
+
+    lines = [l for l in open(history, encoding="utf-8").read().splitlines()
+             if l.strip()]
+    check("exactly one record was appended", len(lines), 1)
+    record = json.loads(lines[0])
+
+    check("both benchmarks were recorded", record["entries"],
+          {"syscall_dispatch": 120, "vfs_stat_breakdown_ns": 263})
+    check("the untargeted benchmark is not counted as over target",
+          record["over_target"], 0)
+    check("the record is stamped with its profile", record["profile"],
+          "release")
+    check("the canary was stored for later re-judging",
+          record["canary"]["spread"], 12)
+    check("the stored verdict is the printed one",
+          record["canary_verdict"], bh.CANARY_CLEAN)
+    check("a clean canary is not stored as contamination",
+          record["contaminated"], False)
+    # The stored verdict and the printed prose come from one call now; assert
+    # they agree, because storing a verdict that contradicts the summary above
+    # it is worse than storing none.
+    check("the summary printed the verdict that was stored",
+          "Canary OK" in out, True)
+
+    # The other return path: a log with no canary at all. `main()` must still
+    # record, and must not invent a verdict for a run whose load state is
+    # simply unknown.
+    bare = write(tmpdir, "serial-nocanary.txt",
+                 "[bench] SCORE syscall_dispatch 120 200 PASS 130 1000\n")
+    history2 = os.path.join(tmpdir, "history2.jsonl")
+    with contextlib.redirect_stdout(io.StringIO()):
+        rc2 = bh.main(["--serial", bare, "--history", history2,
+                       "--profile", "release"])
+    check("main() returns when the log carries no canary", rc2, 0)
+    record2 = json.loads(open(history2, encoding="utf-8").read().strip())
+    check("a canary-less run stores no canary", "canary" in record2, False)
+    check("...and invents no verdict for it",
+          "canary_verdict" in record2, False)
+
+    # Pin each of the printer's return paths directly, so a future edit that
+    # drops one shows up here rather than 250 lines away in `main()`.
+    #
+    # The verdict is collected under the redirect and asserted OUTSIDE it. The
+    # obvious form -- calling `check` inside the `with` block -- silently posts
+    # its own PASS/FAIL lines into the discarded buffer, so four assertions run
+    # and report nothing. That is this suite's own subject matter reproduced in
+    # the suite: a check you cannot see is a check you cannot trust.
+    def verdict_of(canary):
+        with contextlib.redirect_stdout(io.StringIO()):
+            return bh.print_canary_summary(canary)
+
+    check("the absent-canary path returns its verdict",
+          verdict_of(None), bh.CANARY_ABSENT)
+    check("the clean path returns its verdict",
+          verdict_of(bh.parse_canary(log)), bh.CANARY_CLEAN)
+    check("the contaminated path returns its verdict",
+          verdict_of({"start": 8, "end": 20, "pct": 250, "min": 8, "max": 30,
+                      "spread": 275, "samples": 10, "invalid": 0,
+                      "min_centi": 800, "max_centi": 3000}),
+          bh.CANARY_CONTAMINATED)
+    check("the broken path returns its verdict",
+          verdict_of({"start": 0, "end": 0, "pct": 0, "min": 0, "max": 0,
+                      "spread": 0, "samples": 0, "invalid": 10}),
+          bh.CANARY_BROKEN)
+
+
 def test_baselines_is_valid_toml():
     """`bench/baselines.toml` must actually be TOML, with no duplicate tables.
 

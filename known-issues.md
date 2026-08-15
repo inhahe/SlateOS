@@ -60662,11 +60662,50 @@ Intersecting both signals (a prose-named field **and** a constant advance
 within 14 lines) reduces the whole tree to 18 sites, listed here so the next
 pass starts from a triaged list rather than re-deriving one:
 
-*Probably real — the text is user- or device-supplied free prose:*
+~~*Probably real — the text is user- or device-supplied free prose:*
 `apps/systemrestore` snapshot descriptions (`:2891`, `y += 20.0`),
 `apps/sysmonitor` alert messages (`:1708`, `alert_y += 16.0`),
 `apps/renamer` operation detail (`:1173`, `oy += 34.0`),
-`apps/undelete` (`:2931`), `apps/passwordgen` pattern descriptions (`:1546`).
+`apps/undelete` (`:2931`), `apps/passwordgen` pattern descriptions
+(`:1546`).~~ — **all five done** (`ea8f2b468`, `ff2590275`, `eaadf231a`,
+`8e64f088c`, `3b8bcd668`). Three were the predicted clipping bug and were fixed
+as predicted: systemrestore's description now wraps to two measured lines,
+renamer's operation details elide the *user's* substring inside a
+developer-authored frame (so `"…" → "…"` still shows both halves and the arrow),
+and undelete's metadata column elides from the **front** for `Original Path`,
+because a path's identifying end is its filename.
+
+**Two of the five were false positives for clipping — and both concealed a
+different, real defect of the same family.** `sysmonitor:1708` and
+`passwordgen:1546` draw bounded developer-authored strings into wide boxes, so
+nothing was being cut. What both *were* doing was silently dropping whole items:
+sysmonitor showed `.take(5)` of an unbounded alert list, and passwordgen's
+pattern list had no bound at all (the number of patterns is a property of the
+password — one per run of repeated characters — so an adversarial password draws
+hundreds of rows straight through the bottom of the panel). passwordgen's
+history list had a bound that tested the row's *top*, so the last row could
+start one pixel inside the panel and be drawn 31 px outside it.
+
+Three lessons worth carrying forward:
+
+- **Triage that clears a site of the bug you were looking for is not triage
+  that clears the site.** Both false positives were found by asking "what
+  happens to the cursor afterwards" — the same question that finds the wrap bug
+  finds the overflow bug, because both are a running cursor escaping its
+  container. Finish reading the site.
+- **A bounded surface needs a *counted* overflow, not a silent one.** A panel
+  showing 5 of 12 alerts and saying nothing tells the user there are 5 problems.
+  Every one of these now spends its last fitting row on a `+N more` marker. The
+  trade is right: one fewer item plus an accurate count beats one more item plus
+  a silent lie.
+- **Derive the row count and the container height from one calculation.**
+  sysmonitor's card height and its `.take(5)` were two constants free to drift;
+  passwordgen's pattern list now lives in a function that *returns the cursor it
+  ended at* rather than advancing a caller's `&mut cy`. Same
+  two-calculations-for-one-quantity shape as the notes below. Count rows with a
+  loop (`rows_that_fit`) rather than dividing — no float-to-int cast to get
+  wrong at the boundary, and a negative gap yields 0 instead of a wrapped count.
+
 ~~`gui/desktop/src/notification_settings.rs` (`:1137`)~~ — **done** in
 `19ee5234e`. It was the interesting one, and it did count bytes. Chasing it
 turned up two more copies of the same helper in the same shell —

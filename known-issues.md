@@ -60989,6 +60989,52 @@ proved it out.
   only thing on the row saying whether it opens, would be the first thing
   removed. A decoration that must survive cannot be concatenated onto text
   that will be cut; give it its own box.
+- ~~`apps/jsonviewer` statistics view~~ **done**. Found by the grep the
+  undelete badge suggested — a literal constant in the same expression as a
+  fraction of the width — and it is the worst instance of that shape so far
+  because of the size of the constant:
+
+  ```rust
+  let bar_max_width = width * 0.5 - 250.0;
+  ```
+
+  The panel is the window minus a 320px sidebar, so `width < 500` is an
+  ordinary window, not an extreme. Below it the value is **negative**, and it
+  was used twice: as a `FillRect` width — a negative-width rect, which is not
+  a small bar but an ill-formed drawing command — and as a *position*, in
+  `x: 180.0 + bar_max_width + 8.0` for the percentage label. So the label did
+  not merely sit on a stunted bar; it walked **left** of the bar's own origin
+  and landed on top of the count cell at `x: 120.0`. Two cells rendering the
+  same pixels, with no clipping to hint at it.
+
+  The deeper mistake is that the bar was *anchored* at an absolute `x: 180.0`
+  while being *sized* from `width * 0.5`: its width had no relationship to the
+  space actually left beside it. That is the general form of this bug —
+  **mixing an absolute coordinate system with a proportional one in the same
+  element.** A fraction of the panel is a valid width only if it is measured
+  from a position that is also a fraction of the panel. Grep shape: an
+  absolute `x:` literal in a rect whose `width:` mentions `width *`.
+
+  Both sections are now `guitk::table`s: label/value inside the general-stats
+  card, and label/count/bar/percentage across the type-distribution row, every
+  column a fraction of the room that is really there (`TYPE_FRACTIONS` sums to
+  1.0, asserted). The percentage is a column, so it is right of the bar by
+  construction rather than by arithmetic that can invert.
+
+  Two notes for the next conversion. First, **`Table`'s origin sits before the
+  leading gap** — `left(0)` is `x + gap`, and `total_width` counts a leading
+  *and* a trailing gap. Passing the desired inset straight to `with_gap` shifts
+  every column by one gap, which is invisible in a same-table comparison
+  (all columns move together, header and rows still agree) and shows up only
+  as a wrong margin at the far end. `the_type_rows_fill_the_panel` caught it;
+  a test that only checks cells against their own columns never would.
+  Second, **a percentage/short-numeric column legitimately elides to nothing**
+  on a very narrow panel, so a test that finds those cells by matching a
+  trailing `'%'` finds zero of them and fails for the wrong reason. Find such
+  cells by *position* (`table.left(col)`), which is the property under test
+  anyway, and add a separate assertion that the text survives once the panel is
+  wide enough — otherwise "the percentage is right of its bar" passes vacuously
+  for a column that always renders empty.
 
 The lesson that generalises past the cursor pattern: **a per-element bound is
 not a bound on the row.** Eliding each cell to its own width makes every cell

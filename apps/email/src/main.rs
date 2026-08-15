@@ -98,6 +98,26 @@ impl EmailAddress {
     pub fn address(&self) -> String {
         format!("{}@{}", self.local_part, self.domain)
     }
+
+    /// Render as an RFC 5322 mailbox, safe to write into a header.
+    ///
+    /// Separate from [`fmt::Display`] on purpose: `Display` is what the UI
+    /// shows, where a name is drawn into a text run and any character in it is
+    /// harmless. A header is a grammar, so the display name is quoted when it
+    /// needs quoting and control characters are folded out — one rendering per
+    /// destination, rather than one rendering trusted to suit both.
+    #[must_use]
+    pub fn to_header(&self) -> String {
+        let addr = format!(
+            "{}@{}",
+            header_text(&self.local_part).replace(['<', '>', ' '], ""),
+            header_text(&self.domain).replace(['<', '>', ' '], ""),
+        );
+        match self.display_name {
+            Some(ref name) => format!("{} <{addr}>", display_phrase(name)),
+            None => addr,
+        }
+    }
 }
 
 impl fmt::Display for EmailAddress {
@@ -1148,6 +1168,196 @@ pub struct MessageThread {
 
 // ─── Email Composition ───────────────────────────────────────────────
 
+// ─── Header safety ───────────────────────────────────────────────────
+//
+// Everything an outgoing message writes into a header goes through one of the
+// four helpers below. They exist because RFC 5322 gives a header field no way
+// to contain a line break: the field *ends* at CRLF, and folding -- a CRLF
+// followed by whitespace -- is a continuation the serialiser chooses, not
+// something a value can ask for. So a CR or LF inside a value does not get
+// escaped; it terminates the header, and the receiving MTA reads whatever
+// follows as a header of its own.
+//
+// That is header injection, and its worst form here is silent: a subject
+// carrying "\r\nBcc: someone@example.com" adds a recipient that appears
+// nowhere in the sender's compose window or their Sent copy. The message goes
+// where the user cannot see it went.
+//
+// The inbound parser is *not* the hole -- `Headers::parse` unfolds
+// continuations into spaces, so no value read off the wire can carry a CR or
+// LF, and a hostile Message-ID cannot ride into a reply's In-Reply-To. The
+// reachable inputs are the locally composed ones: the subject and recipients
+// the user types or pastes, and attachment filenames, which on SlateOS are a
+// real concern rather than a theoretical one -- the design spec allows every
+// byte except '/' and NUL in a path, so a newline in a filename is legal here
+// even where other systems forbid it.
+//
+// Since the format cannot represent the character at all, each field is either
+// sanitised or rejected, per the rule this audit keeps arriving at. Advisory
+// prose (subject, display names) is sanitised. Recipients are load-bearing --
+// quietly rewriting one could deliver the mail somewhere the user did not
+// intend -- so they are rejected and reported instead.
+
+/// Fold a value so it is safe to write as one header line.
+///
+/// Every control character becomes a space: this is for the advisory,
+/// human-readable fields, where losing exotic whitespace is a fair price and
+/// there is nothing else the grammar permits.
+fn header_text(s: &str) -> String {
+    s.chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect()
+}
+
+/// Whether an address can be written into a recipient header unchanged.
+///
+/// Deliberately a predicate rather than a sanitiser. A recipient decides where
+/// the message goes, so an address the serialiser cannot write verbatim is
+/// reported to the caller rather than repaired into some other address.
+fn is_writable_address(s: &str) -> bool {
+    !s.trim().is_empty() && !s.chars().any(char::is_control)
+}
+
+/// Sanitise a value written inside angle brackets (`Message-ID`, `Content-ID`).
+///
+/// Angle brackets delimit the value and have no escape, so they are dropped
+/// along with control characters and whitespace.
+fn angle_token(s: &str) -> String {
+    s.chars()
+        .filter(|c| !c.is_control() && !matches!(c, '<' | '>' | ' ' | '\t'))
+        .collect()
+}
+
+/// Render a value as an RFC 2045 quoted-string.
+///
+/// Unlike a header body this *does* have an escape sequence — a quoted-string
+/// may contain `\"` and `\\` — so a quote in the value is escaped rather than
+/// dropped. Without that, a filename containing a quote closes the parameter
+/// early and the remainder of the name is read as further parameters.
+/// Control characters still have no representation and are dropped.
+fn quoted_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len().saturating_add(2));
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' | '\\' => {
+                out.push('\\');
+                out.push(c);
+            }
+            c if c.is_control() => {}
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// Render a display name as an RFC 5322 phrase, quoting it when it needs it.
+fn display_phrase(s: &str) -> String {
+    let cleaned = header_text(s);
+    let is_atext = |c: char| {
+        c.is_ascii_alphanumeric()
+            || matches!(
+                c,
+                ' ' | '!'
+                    | '#'
+                    | '$'
+                    | '%'
+                    | '&'
+                    | '\''
+                    | '*'
+                    | '+'
+                    | '-'
+                    | '/'
+                    | '='
+                    | '?'
+                    | '^'
+                    | '_'
+                    | '`'
+                    | '{'
+                    | '|'
+                    | '}'
+                    | '~'
+            )
+    };
+    if cleaned.chars().all(is_atext) {
+        cleaned
+    } else {
+        quoted_string(&cleaned)
+    }
+}
+
+/// Validate a media type, falling back to the generic binary type.
+///
+/// A `Content-Type` value is a token, not a quoted string — it has no escaping
+/// whatsoever, so a recorded type containing a quote, a space or a semicolon
+/// rewrites the rest of the header. There is nothing to sanitise it *into*: a
+/// mangled media type is not a media type. `application/octet-stream` is what a
+/// receiver is supposed to assume for content it cannot identify, which is
+/// exactly the situation.
+fn media_type_or_default(s: &str) -> &str {
+    fn is_token(part: &str) -> bool {
+        !part.is_empty()
+            && part.chars().all(|c| {
+                c.is_ascii_alphanumeric()
+                    || matches!(
+                        c,
+                        '!' | '#'
+                            | '$'
+                            | '%'
+                            | '&'
+                            | '\''
+                            | '*'
+                            | '+'
+                            | '-'
+                            | '.'
+                            | '^'
+                            | '_'
+                            | '`'
+                            | '|'
+                            | '~'
+                    )
+            })
+    }
+    match s.split_once('/') {
+        Some((ty, sub)) if is_token(ty) && is_token(sub) => s,
+        _ => "application/octet-stream",
+    }
+}
+
+/// Choose a multipart boundary that does not occur in the content it delimits.
+///
+/// RFC 2046 requires the boundary to appear nowhere inside an encapsulated
+/// part, and a hardcoded one cannot promise that. It is a correctness bug
+/// rather than a stylistic one: a body containing the delimiter — which a user
+/// produces just by quoting a previous multipart mail — ends the part there,
+/// and every attachment after that point silently disappears from the message.
+///
+/// Lengthening the candidate on collision terminates, because a finite string
+/// cannot contain an arbitrarily long substring. The first candidate is the
+/// boundary that was previously hardcoded, so ordinary mail is unchanged.
+fn choose_boundary(content: &str) -> String {
+    let mut boundary = String::from("----=_Part_Boundary_001");
+    while content.contains(&boundary) {
+        boundary.push('x');
+    }
+    boundary
+}
+
+/// A serialised message, plus anything the serialiser refused to write.
+///
+/// The rejected list is part of the return type rather than a silent omission
+/// for the same reason `M3uExport` reports skipped tracks: a recipient that was
+/// dropped is precisely the thing a sender must be told about, and a function
+/// returning a bare `String` has nowhere to say it.
+#[derive(Debug, Clone, Default)]
+pub struct BuiltMessage {
+    /// The RFC 5322 message text.
+    pub text: String,
+    /// Addresses omitted because they could not be written as a header value.
+    pub rejected_recipients: Vec<String>,
+}
+
 /// Attachment for outgoing email
 #[derive(Debug, Clone)]
 pub struct Attachment {
@@ -1285,29 +1495,69 @@ impl EmailDraft {
         }
     }
 
-    /// Build RFC 5322 email message
+    /// Build an RFC 5322 message, reporting any recipient it could not write.
+    ///
+    /// Every interpolated value passes through the header-safety helpers above;
+    /// see the note there for why a raw one is a header-injection bug rather
+    /// than a formatting blemish.
     #[must_use]
-    pub fn build_message(&self, from: &EmailAddress) -> String {
+    pub fn build_message(&self, from: &EmailAddress) -> BuiltMessage {
         let mut msg = String::new();
+        let mut rejected: Vec<String> = Vec::new();
 
-        msg.push_str(&format!("From: {from}\r\n"));
-        if !self.to.is_empty() {
-            msg.push_str(&format!("To: {}\r\n", self.to.join(", ")));
+        // Recipients are load-bearing: partition rather than sanitise, so a
+        // bad address is reported instead of being turned into a different
+        // one.
+        let accept = |addrs: &[String], rejected: &mut Vec<String>| -> Vec<String> {
+            addrs
+                .iter()
+                .filter(|a| {
+                    if is_writable_address(a) {
+                        true
+                    } else {
+                        rejected.push((*a).clone());
+                        false
+                    }
+                })
+                .cloned()
+                .collect()
+        };
+        let to = accept(&self.to, &mut rejected);
+        let cc = accept(&self.cc, &mut rejected);
+        let bcc = accept(&self.bcc, &mut rejected);
+
+        msg.push_str(&format!("From: {}\r\n", from.to_header()));
+        if !to.is_empty() {
+            msg.push_str(&format!("To: {}\r\n", to.join(", ")));
         }
-        if !self.cc.is_empty() {
-            msg.push_str(&format!("Cc: {}\r\n", self.cc.join(", ")));
+        if !cc.is_empty() {
+            msg.push_str(&format!("Cc: {}\r\n", cc.join(", ")));
         }
-        if !self.bcc.is_empty() {
-            msg.push_str(&format!("Bcc: {}\r\n", self.bcc.join(", ")));
+        if !bcc.is_empty() {
+            msg.push_str(&format!("Bcc: {}\r\n", bcc.join(", ")));
         }
-        msg.push_str(&format!("Subject: {}\r\n", self.subject));
+        msg.push_str(&format!("Subject: {}\r\n", header_text(&self.subject)));
         msg.push_str("MIME-Version: 1.0\r\n");
 
+        // These come from the message being replied to, so they are the one
+        // header input with a remote origin. `Headers::parse` unfolds
+        // continuations and so cannot hand us a CR or LF, but the angle
+        // brackets it does *not* strip would still let a Message-ID close the
+        // addr-spec early, so sanitise here rather than rely on that.
         if let Some(ref reply_to) = self.in_reply_to {
-            msg.push_str(&format!("In-Reply-To: <{reply_to}>\r\n"));
+            let id = angle_token(reply_to);
+            if !id.is_empty() {
+                msg.push_str(&format!("In-Reply-To: <{id}>\r\n"));
+            }
         }
-        if !self.references.is_empty() {
-            let refs: Vec<String> = self.references.iter().map(|r| format!("<{r}>")).collect();
+        let refs: Vec<String> = self
+            .references
+            .iter()
+            .map(|r| angle_token(r))
+            .filter(|r| !r.is_empty())
+            .map(|r| format!("<{r}>"))
+            .collect();
+        if !refs.is_empty() {
             msg.push_str(&format!("References: {}\r\n", refs.join(" ")));
         }
 
@@ -1339,8 +1589,10 @@ impl EmailDraft {
             msg.push_str("\r\n");
             msg.push_str(&full_body);
         } else {
-            // Multipart mixed
-            let boundary = "----=_Part_Boundary_001";
+            // Multipart mixed. The boundary is derived from the body rather
+            // than fixed, so a body that happens to quote this delimiter
+            // cannot truncate the message and drop the attachments below it.
+            let boundary = choose_boundary(&full_body);
             msg.push_str(&format!(
                 "Content-Type: multipart/mixed; boundary=\"{boundary}\"\r\n"
             ));
@@ -1367,17 +1619,18 @@ impl EmailDraft {
                 } else {
                     "attachment"
                 };
+                let name = quoted_string(&att.filename);
                 msg.push_str(&format!(
-                    "Content-Type: {}; name=\"{}\"\r\n",
-                    att.mime_type, att.filename
+                    "Content-Type: {}; name={name}\r\n",
+                    media_type_or_default(&att.mime_type),
                 ));
-                msg.push_str(&format!(
-                    "Content-Disposition: {disp}; filename=\"{}\"\r\n",
-                    att.filename
-                ));
+                msg.push_str(&format!("Content-Disposition: {disp}; filename={name}\r\n"));
                 msg.push_str("Content-Transfer-Encoding: base64\r\n");
                 if let Some(ref cid) = att.content_id {
-                    msg.push_str(&format!("Content-ID: <{cid}>\r\n"));
+                    let cid = angle_token(cid);
+                    if !cid.is_empty() {
+                        msg.push_str(&format!("Content-ID: <{cid}>\r\n"));
+                    }
                 }
                 msg.push_str("\r\n");
                 // Wrap base64 at 76 chars per line
@@ -1394,7 +1647,10 @@ impl EmailDraft {
             msg.push_str(&format!("--{boundary}--\r\n"));
         }
 
-        msg
+        BuiltMessage {
+            text: msg,
+            rejected_recipients: rejected,
+        }
     }
 }
 
@@ -2999,11 +3255,263 @@ mod tests {
         draft.subject = "Test Subject".to_string();
         draft.body = "Hello".to_string();
         let from = EmailAddress::parse("alice@example.com").unwrap();
-        let msg = draft.build_message(&from);
+        let msg = draft.build_message(&from).text;
         assert!(msg.contains("From: alice@example.com"));
         assert!(msg.contains("To: bob@example.com"));
         assert!(msg.contains("Subject: Test Subject"));
         assert!(msg.contains("Hello"));
+    }
+
+    // -- header injection ----------------------------------------------------
+
+    /// The header block a receiving MTA would see: everything before the first
+    /// empty line, with folded continuations joined as RFC 5322 requires.
+    ///
+    /// The tests below must count *headers*, not substrings. Correctly escaped
+    /// output legitimately contains the payload -- a quoted display name
+    /// contains the text `Bcc: x@evil.test` -- so `msg.contains("Bcc:")` would
+    /// fail on output that is perfectly safe, and a test written that way
+    /// tells you nothing about whether the defence works. This is the same
+    /// trap the CSV and SQL tests hit; parse, then count.
+    fn header_names(msg: &str) -> Vec<String> {
+        let mut names = Vec::new();
+        for line in msg.split("\r\n") {
+            if line.is_empty() {
+                break;
+            }
+            if line.starts_with(' ') || line.starts_with('\t') {
+                continue; // folded continuation of the previous header
+            }
+            if let Some((name, _)) = line.split_once(':') {
+                names.push(name.trim().to_lowercase());
+            }
+        }
+        names
+    }
+
+    fn count_header(msg: &str, name: &str) -> usize {
+        header_names(msg).iter().filter(|n| n == &name).count()
+    }
+
+    /// Split on any line terminator, not just CRLF.
+    ///
+    /// RFC 5322 says CRLF, but receivers are famously lenient and many treat a
+    /// bare LF -- and some a bare CR -- as ending the line. A defence that only
+    /// stops CRLF is not a defence, so the test that checks it must not be
+    /// stricter than the attacker is.
+    fn any_lines(msg: &str) -> Vec<&str> {
+        msg.split(['\r', '\n']).collect()
+    }
+
+    /// Count lines *anywhere* in the message that a parser would read as the
+    /// named header.
+    ///
+    /// Deliberately not limited to the top-level header block: a MIME part has
+    /// its own headers, after the blank line that ends the main block, so a
+    /// check that stops at that blank line cannot see an attachment filename
+    /// forging one. An earlier version of these tests made exactly that
+    /// mistake and could never have failed.
+    ///
+    /// Counting only line *starts* is what keeps this honest in the other
+    /// direction: a correctly quoted display name legitimately contains the
+    /// text `Bcc: mallory@evil.test`, and a substring search would flag it.
+    fn forged_header_lines(msg: &str, name: &str) -> usize {
+        let prefix = format!("{name}:");
+        any_lines(msg)
+            .iter()
+            .filter(|l| l.to_lowercase().starts_with(&prefix))
+            .count()
+    }
+
+    fn injection_draft(field: &str) -> (EmailDraft, EmailAddress) {
+        let mut draft = EmailDraft::new(1);
+        draft.to = vec!["bob@example.com".to_string()];
+        draft.subject = field.to_string();
+        draft.body = "Hello".to_string();
+        (draft, EmailAddress::parse("alice@example.com").unwrap())
+    }
+
+    #[test]
+    fn a_subject_cannot_add_a_bcc_recipient() {
+        // The one that matters most: a Bcc added this way appears nowhere in
+        // the compose window or the sender's Sent copy.
+        let (draft, from) = injection_draft("Lunch?\r\nBcc: mallory@evil.test");
+        let msg = draft.build_message(&from).text;
+        assert_eq!(
+            forged_header_lines(&msg, "bcc"),
+            0,
+            "subject forged a Bcc:\n{msg}"
+        );
+        assert_eq!(count_header(&msg, "subject"), 1);
+    }
+
+    #[test]
+    fn a_subject_cannot_end_the_header_block_early() {
+        // A bare CRLF CRLF would terminate the headers and make the rest of
+        // the subject the message body.
+        let (draft, from) = injection_draft("Hi\r\n\r\nnot the real body");
+        let msg = draft.build_message(&from).text;
+        assert_eq!(
+            count_header(&msg, "content-type"),
+            1,
+            "headers cut short:\n{msg}"
+        );
+        assert!(msg.contains("Hello"), "real body lost:\n{msg}");
+    }
+
+    #[test]
+    fn a_lone_cr_or_lf_in_a_subject_is_also_neutralised() {
+        // Not every MTA needs a full CRLF; a bare LF ends the line for many.
+        for payload in ["a\nBcc: m@evil.test", "a\rBcc: m@evil.test"] {
+            let (draft, from) = injection_draft(payload);
+            let msg = draft.build_message(&from).text;
+            assert_eq!(
+                forged_header_lines(&msg, "bcc"),
+                0,
+                "{payload:?} forged a Bcc:\n{msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unwritable_recipient_is_reported_not_silently_dropped() {
+        let mut draft = EmailDraft::new(1);
+        draft.to = vec![
+            "bob@example.com".to_string(),
+            "eve@example.com\r\nBcc: mallory@evil.test".to_string(),
+        ];
+        let from = EmailAddress::parse("alice@example.com").unwrap();
+        let built = draft.build_message(&from);
+        assert_eq!(forged_header_lines(&built.text, "bcc"), 0);
+        assert_eq!(
+            built.rejected_recipients.len(),
+            1,
+            "a dropped recipient must be reported to the sender"
+        );
+        assert!(built.text.contains("bob@example.com"), "good address lost");
+    }
+
+    #[test]
+    fn a_display_name_cannot_forge_a_header() {
+        let mut from = EmailAddress::parse("alice@example.com").unwrap();
+        from.display_name = Some("Alice\r\nBcc: mallory@evil.test".to_string());
+        let (draft, _) = injection_draft("Hi");
+        let msg = draft.build_message(&from).text;
+        assert_eq!(
+            forged_header_lines(&msg, "bcc"),
+            0,
+            "display name forged a Bcc:\n{msg}"
+        );
+        assert_eq!(count_header(&msg, "from"), 1);
+    }
+
+    #[test]
+    fn a_hostile_message_id_cannot_forge_a_header_on_reply() {
+        let mut draft = EmailDraft::new(1);
+        draft.to = vec!["bob@example.com".to_string()];
+        draft.in_reply_to = Some("x>\r\nBcc: mallory@evil.test\r\nX: <y".to_string());
+        draft.references = vec!["a>\r\nBcc: mallory@evil.test\r\n<b".to_string()];
+        let from = EmailAddress::parse("alice@example.com").unwrap();
+        let msg = draft.build_message(&from).text;
+        assert_eq!(
+            forged_header_lines(&msg, "bcc"),
+            0,
+            "Message-ID forged a Bcc:\n{msg}"
+        );
+    }
+
+    // -- attachment parameters ------------------------------------------------
+
+    #[test]
+    fn a_quote_in_a_filename_cannot_end_the_parameter() {
+        let mut draft = EmailDraft::new(1);
+        draft.to = vec!["bob@example.com".to_string()];
+        draft.attachments.push(Attachment::new(
+            "in\"voice.txt",
+            "text/plain",
+            b"x".to_vec(),
+        ));
+        let from = EmailAddress::parse("alice@example.com").unwrap();
+        let msg = draft.build_message(&from).text;
+        // A quoted-string escapes an internal quote; it must not appear bare.
+        for line in msg
+            .split("\r\n")
+            .filter(|l| l.starts_with("Content-Disposition"))
+        {
+            let bare_quotes = line
+                .char_indices()
+                .filter(|&(i, c)| c == '"' && !line.get(..i).is_some_and(|p| p.ends_with('\\')))
+                .count();
+            assert_eq!(bare_quotes, 2, "parameter not properly quoted: {line}");
+        }
+    }
+
+    #[test]
+    fn a_newline_in_a_filename_cannot_forge_a_header() {
+        // Our own filesystem permits every byte but '/' and NUL in a path, so
+        // this filename is legal on SlateOS rather than merely hypothetical.
+        let mut draft = EmailDraft::new(1);
+        draft.to = vec!["bob@example.com".to_string()];
+        draft.attachments.push(Attachment::new(
+            "ok.txt\r\nBcc: mallory@evil.test",
+            "text/plain",
+            b"x".to_vec(),
+        ));
+        let from = EmailAddress::parse("alice@example.com").unwrap();
+        let msg = draft.build_message(&from).text;
+        assert_eq!(
+            forged_header_lines(&msg, "bcc"),
+            0,
+            "filename forged a Bcc:\n{msg}"
+        );
+    }
+
+    #[test]
+    fn a_mangled_media_type_falls_back_to_octet_stream() {
+        let mut draft = EmailDraft::new(1);
+        draft.to = vec!["bob@example.com".to_string()];
+        draft.attachments.push(Attachment::new(
+            "x.txt",
+            "text/plain\r\nBcc: mallory@evil.test",
+            b"x".to_vec(),
+        ));
+        let from = EmailAddress::parse("alice@example.com").unwrap();
+        let msg = draft.build_message(&from).text;
+        assert_eq!(
+            forged_header_lines(&msg, "bcc"),
+            0,
+            "media type forged a Bcc:\n{msg}"
+        );
+        assert!(
+            msg.contains("application/octet-stream"),
+            "no fallback:\n{msg}"
+        );
+    }
+
+    #[test]
+    fn a_body_quoting_the_boundary_cannot_drop_the_attachments() {
+        let mut draft = EmailDraft::new(1);
+        draft.to = vec!["bob@example.com".to_string()];
+        // Exactly what forwarding a previous multipart mail puts in a body.
+        draft.body = "quoted:\r\n----=_Part_Boundary_001--\r\ntrailing".to_string();
+        draft
+            .attachments
+            .push(Attachment::new("x.txt", "text/plain", b"x".to_vec()));
+        let from = EmailAddress::parse("alice@example.com").unwrap();
+        let msg = draft.build_message(&from).text;
+        let boundary = msg
+            .split("boundary=\"")
+            .nth(1)
+            .and_then(|s| s.split('"').next())
+            .expect("a multipart message declares its boundary");
+        assert!(
+            !draft.body.contains(boundary),
+            "boundary {boundary} occurs in the body it delimits"
+        );
+        // The attachment part must still be reachable: two delimiters plus the
+        // closing one.
+        let delims = msg.matches(&format!("--{boundary}")).count();
+        assert!(delims >= 3, "attachment part lost:\n{msg}");
     }
 
     #[test]
@@ -3018,7 +3526,7 @@ mod tests {
             b"file content".to_vec(),
         ));
         let from = EmailAddress::parse("alice@example.com").unwrap();
-        let msg = draft.build_message(&from);
+        let msg = draft.build_message(&from).text;
         assert!(msg.contains("multipart/mixed"));
         assert!(msg.contains("test.txt"));
     }

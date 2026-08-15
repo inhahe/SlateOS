@@ -60446,7 +60446,7 @@ stripped pattern would have matched `axb` and does not), the embedded quote that
 puts the bit back, the replacement side, and the `$*`/list rows that show what
 `Q_PATQUOTE` does keep.
 
-### TD-POSIX-CAPS-ARE-NOT-THE-KERNEL'S. libc's Linux capability words start as "all caps held" and are never seeded from the process's real kernel capabilities — 2026-08-12
+### TD-POSIX-CAPS-ARE-NOT-THE-KERNEL'S. libc's Linux capability words start as "all caps held" and are never seeded from the process's real kernel capabilities — 🔷 **Q44 ANSWERED 2026-08-15 → §312; implementation staged, step 1 is Lane A's** — 2026-08-12
 
 **What.** `posix/src/sys_capability.rs` keeps the three Linux capability sets
 (effective/permitted/inheritable) in its own store and initialises them from
@@ -60497,9 +60497,10 @@ of **per-object** authority, not Linux's 41 **ambient** numbered bits, so
 someone has to define which kernel rights imply which `CAP_*` — and
 `CAP_SYS_ADMIN`, which is 20 of the 63 gate sites, has no natural preimage at
 all. That mapping decides what a Linux port is allowed to conclude about our
-capability model, so it is an operator decision: **asked as `open-questions.md`
-Q44** (2026-08-12), with four options and a recommendation. It moves to
-`design-decisions.md` once answered.
+capability model, so it was an operator decision: **asked as
+`open-questions.md` Q44** (2026-08-12) and **answered 2026-08-15 — option A**,
+recorded as `design-decisions.md` **§312**. See "The answer and what is left"
+below.
 
 **CORRECTED 2026-08-12.** An earlier version of this section named
 `SYS_CAP_QUERY` (400) as the syscall to seed the words from. **It cannot serve
@@ -60511,10 +60512,36 @@ entries"), and its only consumer today is `userspace/strace`'s syscall-name
 table. So an **enumerating** query syscall has to be built first, under any
 answer to Q44. Do not start the libc side expecting 400 to hand you the set.
 
-Until Q44 is answered the optimistic answer stays. The honest alternative —
-`capget` failing rather than answering confidently — would break Linux ports
-that call it informationally, which is worse for a compatibility layer than a
-documented-safe wrong answer.
+**The answer, and what is left — 2026-08-15.** Q44 was answered **A —
+conservative projection** (`design-decisions.md` §312). Each `CAP_*` is derived
+from a specific `(ResourceType, Rights)` predicate and reports **not held**
+whenever no rule matches, so the default is *deny*: `CAP_SYS_RAWIO` ⇐ a `PortIo`
+handle with `READ|WRITE`, `CAP_KILL` ⇐ `Process` with `SIGNAL`, `CAP_SYS_PTRACE`
+⇐ `Process` with `DEBUG`, `CAP_SYS_NICE` ⇐ `Thread` with `IO_REALTIME`.
+`CAP_SYS_ADMIN` — 20 of the 63 sites — is deliberately **not** derived: it gets an
+explicit hand-maintained union with a comment per member, because Linux's junk
+drawer has no preimage in a per-object model and any derived rule would be either
+permanently false or broad enough to re-grant everything.
+
+Rejected, and worth not re-litigating: **B** (`ResourceType::PosixCapability`)
+was refused as ambient authority wearing a capability costume — process-wide
+authority tied to no object — even though it is the option that would have made
+`CAP_SYS_ADMIN` easy. **D** (`capget()` failing outright) was refused because
+Linux ports call it informationally, so it trades one silent wrong answer for
+loud breakage everywhere; that argument still stands and is why the optimistic
+answer is allowed to persist through steps 1–2 below rather than being turned off
+first.
+
+**This entry stays open until step 3.** The three steps, in order, from §312:
+
+1. **An enumerating query syscall must exist** (see the CORRECTED note above —
+   400 returns a count). **Lane A's tree**, filed as
+   `requests/b-a-cap-enumerating-query-syscall.md`. Nothing changes behaviourally
+   when it lands.
+2. **libc seeds its three words from that query** instead of `CAPS_DEFAULT`.
+   Still no behavioural flip: the gates remain advisory.
+3. **The gates stop being advisory** — the boot-test-visible step, gated on the
+   fixture grants in the paragraph below.
 
 **Do not make a gate truthful without freeing QEMU first.** Fixtures depend on
 the permissive behaviour: `services/ctest-jobctl` (documented in its own doc

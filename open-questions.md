@@ -296,155 +296,43 @@ Two caveats for whoever reads the result:
   was built on, so budget ~24 h for the full 250.
 
 
-## Q44 — libc reports "all Linux capabilities held" to every process because nothing maps our `(ResourceType, Rights)` handles onto `CAP_*` bits. Which mapping do you want? — Status: OPEN
+## Q44 — libc reports "all Linux capabilities held" to every process because nothing maps our `(ResourceType, Rights)` handles onto `CAP_*` bits. Which mapping do you want? — Status: **RESOLVED 2026-08-15 → design-decisions.md §312**
 
-**Raised by Claude** (2026-08-12), from the survey behind
-`known-issues.md` → `TD-POSIX-CAPS-ARE-NOT-THE-KERNEL'S`.
+**Answer: A — conservative projection.** Decided by the operator; Claude
+recommended this option.
 
-**The situation.** `posix/src/sys_capability.rs` keeps Linux's three capability
-words in libc's own memory and initialises them from `CAPS_DEFAULT` — *every*
-bit set. Nothing ever asks the kernel what the process actually holds, so
-`capget()` reports the full set to a process that was spawned with
-`capabilities: &[]`, and every libc-side gate passes. It is safe today only by
-accident: the kernel re-checks every privileged operation itself, so libc's
-optimistic answer can never *grant* anything. The failure is silent, not loud —
-a port that trusts `capget()` to decide what to attempt, or to drop privileges,
-gets a confidently wrong answer with no error anywhere.
+Each Linux `CAP_*` bit is derived from a specific `(ResourceType, Rights)`
+predicate over the capabilities the process actually holds, and reports **not
+held** whenever no rule matches — the default is *deny*, so an unmapped `CAP_*`
+is false, never true. `CAP_SYS_RAWIO` ⇐ a `PortIo` handle with `READ|WRITE`;
+`CAP_KILL` ⇐ a `Process` handle with `SIGNAL`; `CAP_SYS_PTRACE` ⇐ `Process`
+with `DEBUG`; `CAP_SYS_NICE` ⇐ `Thread` with `IO_REALTIME`.
 
-**Why this needs you rather than me.** The plumbing is easy; the *mapping* is a
-policy decision. The two models are not the same shape and do not have an
-obviously-correct correspondence:
+`CAP_SYS_ADMIN` is the deliberate exception: an **explicit hand-maintained
+union** of what its 20 gate sites actually need, one commented member each. It
+is Linux's junk drawer and has no natural preimage in a per-object model, so a
+derived rule would be either permanently false (breaking 20 sites) or broad
+enough to re-grant everything, which is the bug being fixed.
 
-- **Kernel:** 25 `ResourceType` variants (`Channel`, `Pipe`, `SharedMemory`,
-  `EventFd`, `CompletionPort`, `Process`, `Thread`, `PortIo`, `DeviceIrq`,
-  `File`, `Socket`, `Timer`, `IoScheduler`, `Service`, `Namespace`,
-  `StreamSocket`, `MemFd`, `Epoll`, `SignalFd`, `Timerfd`, `Inotify`,
-  `AlsaPcm`, `Drm`, `NetRaw`, `NetSocket`) × 12 `Rights` bits (`READ`, `WRITE`,
-  `EXECUTE`, `CREATE`, `DELETE`, `METADATA`, `TRANSFER`, `DUPLICATE`, `WAIT`,
-  `SIGNAL`, `IO_REALTIME`, `DEBUG`) — a *per-object* model with no ambient
-  authority, which is the whole point of the design.
-- **Linux:** 41 numbered, *ambient*, process-wide bits. Our libc currently
-  gates on 22 distinct ones across **63 production sites**, all inside
-  `posix/` (0 in `userspace/`, `services/`, `apps/`): `CAP_SYS_ADMIN` (20),
-  `CAP_SYS_NICE` (6), `CAP_SYS_PTRACE` (5), `CAP_SYS_TIME`/`CAP_SYS_MODULE`/
-  `CAP_SETGID`/`CAP_KILL`/`CAP_CHOWN` (3 each), then a long tail of 1–2.
+Rejected: **B** (`ResourceType::PosixCapability`) is ambient authority wearing a
+capability costume — process-wide authority tied to no object, spelled as a
+handle — and it was rejected even though it is the option that would have made
+`CAP_SYS_ADMIN` easy. **C** (stay optimistic, document `capget()` as "the
+ceiling, not the grant") leaves the silent-wrong-answer trap open, which is why
+the entry was logged. **D** (`capget()` fails) trades one silent wrong answer
+for loud breakage in every port that calls it informationally.
 
-Deciding which kernel rights *imply* `CAP_SYS_ADMIN` is deciding what a Linux
-port is permitted to conclude about our capability model — that is a design
-statement about the POSIX layer's honesty, not an implementation detail.
+**How it lands, in order** (from §312):
 
-**A blocker the note did not know about.** The existing "proper fix" pointed at
-`SYS_CAP_QUERY` (400) as the source of truth. It cannot serve: the handler
-(`kernel/src/syscall/handlers.rs`, `sys_cap_query`) returns only a *count* of
-the caller's capabilities, and its own doc comment says "a future extension
-will support filling a user-space buffer with detailed capability entries."
-Its sole consumer today is `userspace/strace`'s syscall name table. So **every**
-option below needs an enumerating query syscall built first; that part is not
-in dispute and I can do it under any answer.
-
-**Options.**
-- **A — conservative projection.** Derive each `CAP_*` from a specific
-  `(ResourceType, Rights)` predicate, and report *not held* whenever no rule
-  matches. E.g. `CAP_SYS_RAWIO` ⇐ any `PortIo` handle with `READ|WRITE`;
-  `CAP_KILL` ⇐ a `Process` handle with `SIGNAL`; `CAP_SYS_PTRACE` ⇐ `Process`
-  with `DEBUG`; `CAP_SYS_NICE` ⇐ `Thread` with `IO_REALTIME`.
-  *Pro:* `capget()` becomes truthful, the gates start meaning something, and
-  the mapping is auditable rule by rule. *Con:* `CAP_SYS_ADMIN` — 20 of the 63
-  sites — has no natural preimage; it is Linux's junk drawer and would have to
-  be either a hand-maintained union or permanently false. And every fixture
-  spawned with `capabilities: &[]` starts failing gates that pass today (see
-  blast radius).
-- **B — capability-per-CAP.** Add `ResourceType::PosixCapability` and grant
-  Linux bits explicitly at spawn, leaving the native model untouched.
-  *Pro:* exact, no lossy projection, and the two models stay cleanly separated.
-  *Con:* imports Linux's ambient-authority model into a design whose stated
-  first principle is that there is none — the thing `design.txt` deliberately
-  rejected.
-- **C — keep libc optimistic, but stop pretending.** Leave the words as they
-  are and make the dishonesty explicit: document `capget()` as "reports the
-  ceiling, not the grant", and treat libc-side gates as advisory only, with the
-  kernel as the sole authority. *Pro:* zero risk, matches how it already
-  behaves, and no fixture breaks. *Con:* the silent-wrong-answer trap for
-  future ports stays open, which is exactly why the entry was logged.
-- **D — make `capget()` fail** (`ENOSYS`/`EOPNOTSUPP`) rather than answer
-  wrongly. *Pro:* the most honest option; no caller can be silently misled.
-  *Con:* Linux software calls `capget()` informationally and often does not
-  expect failure, so this trades a silent wrong answer for loud breakage in
-  ports — probably the worst outcome for a compatibility layer.
-
-**Claude's recommendation.** **A**, with `CAP_SYS_ADMIN` as an explicit
-hand-maintained union rather than a derived rule, and staged: build the
-enumerating query syscall, seed the words from it, but keep the libc gates
-advisory until the fixtures are given real capabilities. I lean against **B**
-because it contradicts the no-ambient-authority principle for the benefit of
-compatibility shims only, and against **D** because loud breakage in ports is
-worse than the current documented-safe optimism. **C** is the honest do-nothing
-and is a perfectly reasonable answer if you would rather this wait.
-
-**Blast radius you should know about before answering A or B.** Making any gate
-truthful breaks fixtures that currently rely on the permissive behaviour.
-`services/ctest-jobctl`'s doc comment already says so out loud — "our libc's own
-`CAP_KILL` gate reads the process capability words, which start out with every
-capability held" — which is why it needs no capabilities to make a real
-cross-process signal send. `self_test_cctty` and `self_test_cpgroup` spawn with
-`capabilities: &[]` and would need real grants too. That is a boot-test-visible
-change, so it should land with QEMU free.
-
-**Where it bites:** `posix/src/sys_capability.rs` (`CAPS_DEFAULT` ~line 251),
-the 63 gate sites led by `posix/src/process.rs` (13) and `posix/src/unistd.rs`
-(10), `kernel/src/cap/mod.rs` + `kernel/src/cap/rights.rs` (the model being
-projected), `kernel/src/syscall/handlers.rs` (`sys_cap_query`), and
-`known-issues.md` → `TD-POSIX-CAPS-ARE-NOT-THE-KERNEL'S`.
-
-### UPDATE 2026-08-15 — operator asked what "ambient" means; still OPEN
-
-The operator's reply to this question was not an answer but a question:
-*"i forget what 'ambient' means in 'no ambient authority'..?"* Answered in
-session and recorded here so the term is not a barrier next time.
-
-**Ambient authority = permission you have merely by *being* you, rather than by
-*holding* something.** The authority sits in the surrounding environment (the
-process's identity), so any code running in that process can exercise it just by
-asking, without having to present anything.
-
-- **Unix uid is the classic case.** `open("/etc/shadow")` succeeds because the
-  process is root, not because it produced a token for that file. The *name* is
-  the only thing supplied, and the name is not the authority.
-- **Linux capabilities are the same shape, just finer-grained.** `CAP_SYS_ADMIN`
-  is a bit in a process-wide word. If it is set, *every* instruction in that
-  address space can perform every `CAP_SYS_ADMIN` operation — including a linked
-  library, a ported binary, or injected shellcode. Nothing has to be passed
-  around, so nothing can be withheld.
-- **Our model is the opposite.** Authority lives *only* in a handle: to write a
-  file you must possess a `File` handle carrying `Rights::WRITE`. Code that was
-  never given the handle cannot do it, even in the same process, even as the
-  same user. That is what "no ambient authority" in `design.txt` means — there
-  is no set of permissions you get for free by existing.
-
-**Why the distinction is load-bearing here** (and not just vocabulary): it is
-what makes the *confused deputy* structurally impossible. A deputy holding
-ambient authority can be talked into using it on the caller's behalf — pass it a
-path and it opens the file with *its* privileges. A deputy that must be handed
-the actual handle can only act on objects the caller could already reach, so
-there is nothing to trick it into.
-
-**And it is the whole of the objection to option B.** Option B adds
-`ResourceType::PosixCapability` — a handle meaning "may do `CAP_SYS_ADMIN`
-things", process-wide, not tied to any object. That is ambient authority wearing
-a capability costume: it reproduces exactly the property `design.txt` rejected,
-while looking like it complies because it is spelled as a handle. Options A, C
-and D do not have that problem; the choice among *them* is the real question,
-and it is still open.
-
-**Restating the actual decision** so it is not lost behind the terminology:
-**A** = derive each `CAP_*` from a `(ResourceType, Rights)` predicate and report
-*not held* when no rule matches (truthful, auditable, but `CAP_SYS_ADMIN` has no
-natural preimage and fixtures spawned with `capabilities: &[]` start failing);
-**C** = keep libc optimistic but document `capget()` as "the ceiling, not the
-grant" and treat libc gates as advisory (zero risk, silent-wrong-answer trap
-stays open); **D** = make `capget()` fail outright (most honest, but trades a
-silent wrong answer for loud breakage in ports). Claude still recommends **A**,
-staged, with `CAP_SYS_ADMIN` as a hand-maintained union.
+1. **The enumerating query syscall first.** `SYS_CAP_QUERY` (400) returns only a
+   *count*; nothing can be seeded from it. That handler is **Lane A's tree** —
+   filed as `requests/b-a-cap-enumerating-query-syscall.md`.
+2. libc seeds its three words from that query rather than from `CAPS_DEFAULT`.
+3. **The libc gates stay advisory until the fixtures hold real capabilities.**
+   `services/ctest-jobctl`, `self_test_cctty` and `self_test_cpgroup` all spawn
+   with `capabilities: &[]` and pass today only because every bit is set. The
+   flip from advisory to enforcing is boot-test-visible and lands with QEMU
+   free.
 
 ## Q45 — Text clipped by `max_width` is cut mid-glyph with no ellipsis. Should `RenderCommand::Text` carry an overflow policy? — Status: OPEN
 
@@ -500,7 +388,59 @@ blindly.
 `gui/toolkit/src/text.rs` (`elide` / `elide_start`), and every `max_width:
 Some(..)` in `gui/**` and `apps/**`.
 
-## A-Q1 — Install the GNAT/SPARK and LLVM toolchains? Two Lane A roadmap items are blocked on them, and nothing else in Lane A is — Status: OPEN
+## A-Q1 — Install the GNAT/SPARK and LLVM toolchains? — Status: **A ANSWERED 2026-08-15 (Lane A to record in `design-decisions.md`) — B STILL OPEN**
+
+### ANSWER 2026-08-15 — option **A**, including `gnatprove`. Option **B** was not answered.
+
+The operator answered in a Lane B session. Verbatim:
+
+> q44: a, including gratprove.
+
+The `q44` label is a typo for this question — it arrived in the same message as
+the real Q44 answer, immediately after it, and Q44 has no option "including
+gnatprove". Read as **A-Q1: A**.
+
+**What was decided: install GNAT/SPARK *with the prover*.** The "including
+gnatprove" is the load-bearing half, and it closes the correction in the
+`UPDATE 2026-08-15` block below — the prover is part of the definition of done,
+not an optional extra, because Ada-without-SPARK is just another systems
+language and we already have a memory-safe one.
+
+**Consequences that follow directly from "including gnatprove":**
+
+- **The install route cannot be MSYS2.** `mingw-w64-x86_64-gcc-ada` ships
+  `gnat` and `gprbuild` and no `gnatprove`, and MSYS2 has no such package.
+  Taking the easy route would buy the entire cost of the feature and none of its
+  justification. The route must be **Alire** (`alr toolchain --select`, then the
+  `gnatprove` crate) or **AdaCore's own download**.
+- **The prover stack is a further install:** Why3 + Alt-Ergo, optionally Z3 and
+  CVC5. `gnatprove` without a solver proves nothing.
+- **GPL is not a problem here.** The toolchain is a tool we *run*, not something
+  we link; it does not reach our output.
+
+**Two sub-decisions this answer does not settle.** Both are Lane A's to make or
+to escalate:
+
+- **Which GNAT distribution.** The FSF-via-Alire route now looks clearly
+  preferable to GNAT Pro precisely because it carries `gnatprove`, but nobody
+  has said so as a decision.
+- **The restricted runtime: ZFP vs light.** A freestanding kernel cannot use the
+  full Ada runtime, which wants an OS underneath it. This is configuration work
+  with real content, not part of the install.
+
+**Option B (clang + lld, for LLVM CFI) was not answered and is still open.**
+This question says out loud that A and B "are separable, so please answer them
+independently", and only A came back. B remains as written: cheap and
+uncontroversial to install, but its payoff is currently small (C is used only
+for ports, and the C in `scripts/create-ext4-rootfs.sh` is built with gcc and is
+Lane B's tree), and CFI wants LTO, which changes build times and link behaviour
+everywhere it reaches.
+
+**Recording:** the decision belongs in `design-decisions.md` under Lane A's
+§200–299 range. Lane B has deliberately **not** written it there — inventing a
+§2xx number from another lane is how two lanes end up with the same section
+number after a merge. See `requests/b-a-operator-answered-a-q1.md`.
+
 
 *(Renumbered from `Q40` on 2026-08-15 by Lane B. It collided with the pre-split `Q40` above, and the operator's one-word answer "q40: b" was genuinely ambiguous between the two. Lane-prefixed per `roadmap.md`'s convention, as `B-Q1`/`C-Q1` already are.)*
 

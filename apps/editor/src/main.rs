@@ -108,58 +108,45 @@ pub struct Document {
     hl_entry: RefCell<Vec<HighlightState>>,
 }
 
-/// An edit action for undo/redo.
-#[derive(Clone, Debug)]
-pub enum EditAction {
-    Insert {
-        line: usize,
-        col: usize,
-        text: String,
-    },
-    Delete {
-        line: usize,
-        col: usize,
-        text: String,
-    },
-    InsertLine {
-        line: usize,
-        text: String,
-    },
-    DeleteLine {
-        line: usize,
-        text: String,
-    },
-}
-
-impl EditAction {
-    /// The first line the action changes when it is applied or reverted.
-    ///
-    /// Every variant names one, and the syntax memo needs it: undoing an edit
-    /// changes the file from that line down, exactly as making it did.
-    const fn first_line(&self) -> usize {
-        match *self {
-            Self::Insert { line, .. }
-            | Self::Delete { line, .. }
-            | Self::InsertLine { line, .. }
-            | Self::DeleteLine { line, .. } => line,
-        }
-    }
-}
-
-/// Remove `len` **bytes** starting at byte offset `at`, doing nothing if that
-/// range is not a whole number of characters or does not lie inside `s`.
+/// One undoable edit, recorded as *what the affected lines were* and *what they
+/// became*.
 ///
-/// The undo stack stores the *text* an edit inserted, and reverting it means
-/// taking those bytes back out. Doing that with `String::remove` in a loop —
-/// which is what this replaces — mistook the byte count for a character count,
-/// so undoing the insertion of an `e`-acute (one character, two bytes) removed
-/// **two** characters, silently eating the letter after it. It showed only on
-/// non-ASCII text, which is the sort of bug an ASCII test suite never sees.
-fn remove_bytes(s: &mut String, at: usize, len: usize) {
-    let end = at.saturating_add(len);
-    if end <= s.len() && s.is_char_boundary(at) && s.is_char_boundary(end) {
-        s.replace_range(at..end, "");
-    }
+/// This deliberately does not describe the edit — no "inserted this character
+/// at this column", no per-operation variant. It stores the two states of a
+/// contiguous run of lines, so undo is `after → before` and redo is
+/// `before → after`, and both are exact by construction.
+///
+/// The previous design was a four-variant enum naming the operation, and it was
+/// wrong in three separate ways at once, all of them the same mistake: an
+/// operation's *description* has to be kept in agreement with what the
+/// operation actually does, and nothing enforces that agreement.
+///
+/// - Pressing Enter recorded `Insert { text: "\n" }`, and undo reverted it by
+///   deleting one byte from the line — but by then the newline was not in any
+///   line, the split had already moved the tail into a new entry. Undo deleted
+///   an unrelated character and left the file split.
+/// - Enter's auto-indent copied the previous line's leading whitespace into the
+///   new line and recorded nothing at all, so those bytes could not be undone.
+/// - `InsertLine` was matched by both `undo` and `redo` and constructed by
+///   nothing, which is exactly the state a describe-the-operation model rots
+///   into.
+///
+/// Storing the text costs two copies of each touched line per edit. For a
+/// 1000-entry stack of single-character edits on 80-column lines that is on the
+/// order of 100 KiB — the price of an undo stack that cannot disagree with the
+/// buffer, which is the only property that matters here.
+#[derive(Clone, Debug)]
+pub struct EditAction {
+    /// Index of the first line the edit replaced.
+    line: usize,
+    /// The lines occupying `line..line + before.len()` before the edit.
+    before: Vec<String>,
+    /// The lines occupying `line..line + after.len()` after it.
+    after: Vec<String>,
+    /// Caret position before the edit; where undo puts it back.
+    cursor_before: (usize, usize),
+    /// Caret position after the edit; where redo puts it back.
+    cursor_after: (usize, usize),
 }
 
 /// Line ending style.
@@ -544,48 +531,111 @@ impl Document {
     // Editing operations
     // ======================================================================
 
+    /// Run `edit`, recording what it did to `lines[line..]` so it can be undone
+    /// exactly.
+    ///
+    /// `before_count` is how many lines starting at `line` the edit may touch —
+    /// 1 for an edit within a line, 2 for one that joins two. The count
+    /// *afterwards* is not asked for, because it is not something a caller
+    /// should have to get right: it is derived from how the buffer's total
+    /// length changed, which is a fact rather than a claim. That is the whole
+    /// discipline here — every call site states only what it is about to touch,
+    /// and the recording is taken from the buffer itself, so an edit cannot
+    /// describe itself incorrectly.
+    ///
+    /// This is also where the redo stack is cleared, so it happens for every
+    /// edit rather than only the ones whose author remembered. Before, only
+    /// `insert_char` cleared it, and a backspace after an undo left a redo
+    /// entry that would re-apply an edit on top of a buffer that had moved on.
+    fn record_edit<R>(
+        &mut self,
+        line: usize,
+        before_count: usize,
+        edit: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        let cursor_before = (self.cursor_line, self.cursor_col);
+        let before = Self::snapshot(&self.lines, line, before_count);
+        let old_len = self.lines.len();
+
+        let result = edit(self);
+
+        // The edit replaced `before_count` lines with however many the buffer
+        // grew or shrank by, relative to that.
+        let after_count = before
+            .len()
+            .saturating_add(self.lines.len())
+            .saturating_sub(old_len);
+        let after = Self::snapshot(&self.lines, line, after_count);
+
+        self.modified = true;
+        self.invalidate_highlight(line);
+        self.redo_stack.clear();
+        self.push_undo(EditAction {
+            line,
+            before,
+            after,
+            cursor_before,
+            cursor_after: (self.cursor_line, self.cursor_col),
+        });
+        result
+    }
+
+    /// `lines[at..at + count]`, clamped, cloned.
+    fn snapshot(lines: &[String], at: usize, count: usize) -> Vec<String> {
+        let start = at.min(lines.len());
+        let end = start.saturating_add(count).min(lines.len());
+        lines.get(start..end).unwrap_or_default().to_vec()
+    }
+
+    /// Replace `lines[at..at + remove]` with `insert`.
+    fn splice_lines(&mut self, at: usize, remove: usize, insert: &[String]) {
+        let start = at.min(self.lines.len());
+        let end = start.saturating_add(remove).min(self.lines.len());
+        self.lines
+            .splice(start..end, insert.iter().cloned())
+            .for_each(drop);
+        self.invalidate_highlight(at);
+    }
+
     /// Insert a character at the cursor position.
     pub fn insert_char(&mut self, ch: char) {
         let line = self.cursor_line;
         let col = self.cursor_col;
 
-        if ch == '\n' {
-            // Split line
-            let current_line = self.lines.get(line).cloned().unwrap_or_default();
-            let (before, after) = current_line.split_at(col.min(current_line.len()));
-            self.lines[line] = before.to_string();
-            self.lines.insert(line + 1, after.to_string());
-            self.cursor_line += 1;
-            self.cursor_col = 0;
+        self.record_edit(line, 1, |doc| {
+            if ch == '\n' {
+                // Split the line. `col` is a byte offset and is snapped first,
+                // because `split_at` panics rather than rounds when it lands
+                // inside a character.
+                let current_line = doc.lines.get(line).cloned().unwrap_or_default();
+                let at = snap_to_boundary(&current_line, col);
+                let (head, tail) = current_line.split_at(at);
 
-            // Auto-indent: copy leading whitespace from previous line
-            let indent: String = self.lines[line]
-                .chars()
-                .take_while(|c| c.is_whitespace())
-                .collect();
-            if !indent.is_empty() {
-                self.lines[line + 1] = format!("{indent}{}", self.lines[line + 1]);
-                self.cursor_col = indent.len();
+                // Auto-indent: the new line starts with the old line's leading
+                // whitespace. This is part of the same recorded edit, so undo
+                // takes it back with the split rather than leaving it behind.
+                let indent: String = head.chars().take_while(|c| c.is_whitespace()).collect();
+                doc.cursor_col = indent.len();
+                let tail = format!("{indent}{tail}");
+
+                if let Some(slot) = doc.lines.get_mut(line) {
+                    slot.truncate(at);
+                }
+                doc.lines.insert(line.saturating_add(1), tail);
+                doc.cursor_line = line.saturating_add(1);
+            } else if ch == '\t' && doc.use_spaces {
+                // Insert spaces instead of a tab.
+                let spaces = " ".repeat(doc.tab_width.saturating_sub(col % doc.tab_width));
+                if let Some(current_line) = doc.lines.get_mut(line) {
+                    let at = snap_to_boundary(current_line, col);
+                    current_line.insert_str(at, &spaces);
+                    doc.cursor_col = at.saturating_add(spaces.len());
+                }
+            } else if let Some(current_line) = doc.lines.get_mut(line) {
+                let at = snap_to_boundary(current_line, col);
+                current_line.insert(at, ch);
+                doc.cursor_col = at.saturating_add(ch.len_utf8());
             }
-        } else if ch == '\t' && self.use_spaces {
-            // Insert spaces instead of tab
-            let spaces = " ".repeat(self.tab_width - (col % self.tab_width));
-            let current_line = self.lines.get_mut(line).unwrap();
-            current_line.insert_str(col.min(current_line.len()), &spaces);
-            self.cursor_col += spaces.len();
-        } else {
-            let current_line = self.lines.get_mut(line).unwrap();
-            current_line.insert(col.min(current_line.len()), ch);
-            self.cursor_col += ch.len_utf8();
-        }
-
-        self.modified = true;
-        self.invalidate_highlight(line);
-        self.redo_stack.clear();
-        self.push_undo(EditAction::Insert {
-            line,
-            col,
-            text: ch.to_string(),
         });
     }
 
@@ -596,28 +646,27 @@ impl Document {
             // Step back by the character's width in bytes, not by one:
             // `cursor_col` is a byte offset, and `String::remove` panics on an
             // offset that is not a character boundary.
-            self.cursor_col -= ch.len_utf8();
-            let col = self.cursor_col;
-            let current_line = self.lines.get_mut(line).unwrap();
-            let removed = current_line.remove(col);
-            self.modified = true;
-            self.invalidate_highlight(line);
-            self.push_undo(EditAction::Delete {
-                line,
-                col,
-                text: removed.to_string(),
+            let col = self.cursor_col.saturating_sub(ch.len_utf8());
+            self.record_edit(line, 1, |doc| {
+                if let Some(current_line) = doc.lines.get_mut(line)
+                    && col < current_line.len()
+                    && current_line.is_char_boundary(col)
+                {
+                    current_line.remove(col);
+                }
+                doc.cursor_col = col;
             });
         } else if self.cursor_line > 0 {
-            // Join with previous line
-            let current_text = self.lines.remove(self.cursor_line);
-            self.cursor_line -= 1;
-            self.cursor_col = self.lines[self.cursor_line].len();
-            self.lines[self.cursor_line].push_str(&current_text);
-            self.modified = true;
-            self.invalidate_highlight(self.cursor_line);
-            self.push_undo(EditAction::DeleteLine {
-                line: self.cursor_line + 1,
-                text: current_text,
+            // Join with the previous line. Both lines are in the recorded
+            // range, because the join changes both of them.
+            let line = self.cursor_line.saturating_sub(1);
+            self.record_edit(line, 2, |doc| {
+                let current_text = doc.lines.remove(doc.cursor_line);
+                doc.cursor_line = line;
+                doc.cursor_col = doc.lines.get(line).map_or(0, String::len);
+                if let Some(previous) = doc.lines.get_mut(line) {
+                    previous.push_str(&current_text);
+                }
             });
         }
     }
@@ -625,27 +674,24 @@ impl Document {
     /// Delete the character at the cursor (delete key).
     pub fn delete_forward(&mut self) {
         let line = self.cursor_line;
-        let current_line = &self.lines[line];
+        let col = self.cursor_col;
+        let line_len = self.lines.get(line).map_or(0, String::len);
 
-        if self.cursor_col < current_line.len() {
-            let current_line = self.lines.get_mut(line).unwrap();
-            let removed = current_line.remove(self.cursor_col);
-            self.modified = true;
-            self.invalidate_highlight(line);
-            self.push_undo(EditAction::Delete {
-                line,
-                col: self.cursor_col,
-                text: removed.to_string(),
+        if col < line_len {
+            self.record_edit(line, 1, |doc| {
+                if let Some(current_line) = doc.lines.get_mut(line)
+                    && current_line.is_char_boundary(col)
+                {
+                    current_line.remove(col);
+                }
             });
-        } else if line + 1 < self.lines.len() {
-            // Join with next line
-            let next_text = self.lines.remove(line + 1);
-            self.lines[line].push_str(&next_text);
-            self.modified = true;
-            self.invalidate_highlight(line);
-            self.push_undo(EditAction::DeleteLine {
-                line: line + 1,
-                text: next_text,
+        } else if line.saturating_add(1) < self.lines.len() {
+            // Join with the next line; again both lines are recorded.
+            self.record_edit(line, 2, |doc| {
+                let next_text = doc.lines.remove(line.saturating_add(1));
+                if let Some(current_line) = doc.lines.get_mut(line) {
+                    current_line.push_str(&next_text);
+                }
             });
         }
     }
@@ -653,29 +699,9 @@ impl Document {
     /// Undo the last action.
     pub fn undo(&mut self) {
         if let Some(action) = self.undo_stack.pop_back() {
-            self.invalidate_highlight(action.first_line());
-            match &action {
-                EditAction::Insert { line, col, text } => {
-                    let current = self.lines.get_mut(*line).unwrap();
-                    remove_bytes(current, *col, text.len());
-                    self.cursor_line = *line;
-                    self.cursor_col = *col;
-                }
-                EditAction::Delete { line, col, text } => {
-                    let current = self.lines.get_mut(*line).unwrap();
-                    current.insert_str(*col, text);
-                    self.cursor_line = *line;
-                    self.cursor_col = col + text.len();
-                }
-                EditAction::InsertLine { line, .. } => {
-                    self.lines.remove(*line);
-                    self.cursor_line = line.saturating_sub(1);
-                }
-                EditAction::DeleteLine { line, text } => {
-                    self.lines.insert(*line, text.clone());
-                    self.cursor_line = *line;
-                }
-            }
+            self.splice_lines(action.line, action.after.len(), &action.before);
+            (self.cursor_line, self.cursor_col) = action.cursor_before;
+            self.clamp_cursor();
             self.redo_stack.push_back(action);
             self.modified = true;
         }
@@ -684,32 +710,27 @@ impl Document {
     /// Redo the last undone action.
     pub fn redo(&mut self) {
         if let Some(action) = self.redo_stack.pop_back() {
-            self.invalidate_highlight(action.first_line());
-            match &action {
-                EditAction::Insert { line, col, text } => {
-                    let current = self.lines.get_mut(*line).unwrap();
-                    current.insert_str(*col, text);
-                    self.cursor_line = *line;
-                    self.cursor_col = col + text.len();
-                }
-                EditAction::Delete { line, col, text } => {
-                    let current = self.lines.get_mut(*line).unwrap();
-                    remove_bytes(current, *col, text.len());
-                    self.cursor_line = *line;
-                    self.cursor_col = *col;
-                }
-                EditAction::InsertLine { line, text } => {
-                    self.lines.insert(*line, text.clone());
-                    self.cursor_line = *line;
-                }
-                EditAction::DeleteLine { line, .. } => {
-                    self.lines.remove(*line);
-                    self.cursor_line = line.saturating_sub(1);
-                }
-            }
+            self.splice_lines(action.line, action.before.len(), &action.after);
+            (self.cursor_line, self.cursor_col) = action.cursor_after;
+            self.clamp_cursor();
             self.undo_stack.push_back(action);
             self.modified = true;
         }
+    }
+
+    /// Pull the caret back inside the buffer and onto a character boundary.
+    ///
+    /// A recorded caret position was valid against the buffer state that is
+    /// being restored, so this should never have anything to do — but "should
+    /// never" is not a guarantee, and every later edit indexes a `String` by
+    /// `cursor_col`, where being wrong is a panic rather than a wrong answer.
+    fn clamp_cursor(&mut self) {
+        self.cursor_line = self.cursor_line.min(self.lines.len().saturating_sub(1));
+        let col = self.cursor_col;
+        self.cursor_col = self
+            .lines
+            .get(self.cursor_line)
+            .map_or(0, |line| snap_to_boundary(line, col.min(line.len())));
     }
 
     fn push_undo(&mut self, action: EditAction) {
@@ -2249,6 +2270,221 @@ mod highlight_render_tests {
             doc.lines[0], "ab",
             "undo removed the character after the one it inserted"
         );
+    }
+}
+
+// ============================================================================
+// Undo/redo
+// ============================================================================
+
+#[cfg(test)]
+mod undo_tests {
+    use super::*;
+
+    fn doc_with(lines: &[&str], line: usize, col: usize) -> Document {
+        let mut doc = Document::new();
+        doc.lines = lines.iter().map(|s| (*s).to_string()).collect();
+        doc.cursor_line = line;
+        doc.cursor_col = col;
+        doc
+    }
+
+    /// The bug this module exists for. Enter used to be recorded as "inserted
+    /// the text `\n` at this column", and undo reverted it by deleting one byte
+    /// from that line — but the split had already moved the newline out of every
+    /// line, so undo deleted an unrelated character and left the file split.
+    #[test]
+    fn undoing_enter_puts_the_line_back_together() {
+        let mut doc = doc_with(&["abcd"], 0, 2);
+        doc.insert_char('\n');
+        assert_eq!(doc.lines, vec!["ab".to_string(), "cd".to_string()]);
+
+        doc.undo();
+        assert_eq!(
+            doc.lines,
+            vec!["abcd".to_string()],
+            "undoing Enter must rejoin the line it split, not delete a character"
+        );
+        assert_eq!((doc.cursor_line, doc.cursor_col), (0, 2));
+    }
+
+    /// Enter's auto-indent is part of the same edit, so undo has to take it back
+    /// with the split. Recording only the newline left the copied whitespace
+    /// behind with nothing on the stack that could remove it.
+    #[test]
+    fn undoing_enter_also_takes_back_the_auto_indent() {
+        let mut doc = doc_with(&["    body();"], 0, 11);
+        doc.insert_char('\n');
+        assert_eq!(
+            doc.lines,
+            vec!["    body();".to_string(), "    ".to_string()],
+            "a new line starts at the previous line's indent"
+        );
+        assert_eq!(doc.cursor_col, 4);
+
+        doc.undo();
+        assert_eq!(doc.lines, vec!["    body();".to_string()]);
+    }
+
+    #[test]
+    fn undoing_a_join_restores_both_lines() {
+        let mut doc = doc_with(&["one", "two"], 1, 0);
+        doc.backspace();
+        assert_eq!(doc.lines, vec!["onetwo".to_string()]);
+
+        doc.undo();
+        assert_eq!(doc.lines, vec!["one".to_string(), "two".to_string()]);
+        assert_eq!((doc.cursor_line, doc.cursor_col), (1, 0));
+    }
+
+    #[test]
+    fn undoing_a_forward_join_restores_both_lines() {
+        let mut doc = doc_with(&["one", "two"], 0, 3);
+        doc.delete_forward();
+        assert_eq!(doc.lines, vec!["onetwo".to_string()]);
+
+        doc.undo();
+        assert_eq!(doc.lines, vec!["one".to_string(), "two".to_string()]);
+    }
+
+    /// Only `insert_char` used to clear the redo stack, so a backspace after an
+    /// undo left a redo entry describing an edit against a buffer that had since
+    /// moved on — pressing redo then re-applied it at a stale position.
+    #[test]
+    fn a_new_edit_after_an_undo_clears_the_redo_stack() {
+        let mut doc = doc_with(&["ab"], 0, 2);
+        doc.insert_char('c');
+        doc.undo();
+        assert_eq!(doc.redo_stack.len(), 1);
+
+        doc.backspace();
+        assert!(
+            doc.redo_stack.is_empty(),
+            "an edit made after an undo invalidates the redo stack, whatever the edit was"
+        );
+    }
+
+    /// Every editing operation, applied in sequence to a document with
+    /// non-ASCII text and indentation, then undone one step at a time and
+    /// redone one step at a time.
+    ///
+    /// The assertion is against a snapshot taken *between* every pair of steps,
+    /// not just at the ends: an undo stack can arrive back at the original text
+    /// while having been wrong at every intermediate point, and it is the
+    /// intermediate points the user actually looks at.
+    #[test]
+    fn every_edit_operation_round_trips_one_step_at_a_time() {
+        type Step = (&'static str, fn(&mut Document));
+        const STEPS: &[Step] = &[
+            ("insert ascii", |d| {
+                d.cursor_line = 0;
+                d.cursor_col = 3;
+                d.insert_char('X');
+            }),
+            ("insert two-byte char", |d| {
+                d.cursor_line = 0;
+                d.cursor_col = 1;
+                d.insert_char('\u{e9}');
+            }),
+            ("insert four-byte char", |d| {
+                d.cursor_line = 1;
+                d.cursor_col = 0;
+                d.insert_char('\u{1f600}');
+            }),
+            ("split a line", |d| {
+                d.cursor_line = 0;
+                d.cursor_col = 2;
+                d.insert_char('\n');
+            }),
+            ("split an indented line (auto-indent)", |d| {
+                d.cursor_line = 2;
+                d.cursor_col = d.lines[2].len();
+                d.insert_char('\n');
+            }),
+            ("tab expanded to spaces", |d| {
+                d.cursor_line = 0;
+                d.cursor_col = 0;
+                d.use_spaces = true;
+                d.insert_char('\t');
+            }),
+            ("backspace over a character", |d| {
+                d.cursor_line = 1;
+                d.cursor_col = d.lines[1].len();
+                d.backspace();
+            }),
+            ("backspace joining two lines", |d| {
+                d.cursor_line = 1;
+                d.cursor_col = 0;
+                d.backspace();
+            }),
+            ("delete forward over a character", |d| {
+                d.cursor_line = 0;
+                d.cursor_col = 0;
+                d.delete_forward();
+            }),
+            ("delete forward joining two lines", |d| {
+                d.cursor_line = 0;
+                d.cursor_col = d.lines[0].len();
+                d.delete_forward();
+            }),
+        ];
+
+        let mut doc = doc_with(
+            &["  caf\u{e9} au lait", "\u{4e2d}\u{6587}", "    if x:"],
+            0,
+            0,
+        );
+
+        // `history[i]` is the buffer *before* step `i` ran.
+        let mut history = vec![doc.lines.clone()];
+        for (name, step) in STEPS {
+            step(&mut doc);
+            assert!(
+                !doc.lines.iter().any(|l| l.contains('\n')),
+                "{name} left a newline inside a line; the buffer is one string per line"
+            );
+            history.push(doc.lines.clone());
+        }
+
+        for (i, (name, _)) in STEPS.iter().enumerate().rev() {
+            doc.undo();
+            assert_eq!(
+                doc.lines, history[i],
+                "undoing {name:?} (step {i}) did not restore the buffer"
+            );
+        }
+
+        for (i, (name, _)) in STEPS.iter().enumerate() {
+            doc.redo();
+            assert_eq!(
+                doc.lines,
+                history[i + 1],
+                "redoing {name:?} (step {i}) did not re-apply it"
+            );
+        }
+    }
+
+    /// Undo must never leave the caret inside a character or past the end of the
+    /// buffer, because every later edit indexes a `String` by `cursor_col` and
+    /// being wrong there is a panic rather than a wrong answer.
+    #[test]
+    fn undo_leaves_the_caret_on_a_character_boundary() {
+        let mut doc = doc_with(&["\u{4e2d}\u{6587}"], 0, 0);
+        doc.cursor_col = 3;
+        doc.insert_char('\u{e9}');
+        doc.undo();
+        doc.redo();
+        for _ in 0..4 {
+            doc.undo();
+        }
+        let line = &doc.lines[doc.cursor_line];
+        assert!(
+            line.is_char_boundary(doc.cursor_col),
+            "caret at byte {} is inside a character of {line:?}",
+            doc.cursor_col
+        );
+        // The caret being valid is only useful if editing there does not panic.
+        doc.insert_char('z');
     }
 }
 

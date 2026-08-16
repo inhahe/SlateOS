@@ -627,6 +627,93 @@ impl ShapedRun {
         previous.map_or(0.0, |(from, upto)| self.trailing_edge(from, upto))
     }
 
+    /// The boxes to paint to highlight the source bytes `from..to`, as
+    /// `(left, width)` pairs in pixels across the run, ordered left to right
+    /// and never overlapping. `end` is the source string's length.
+    ///
+    /// A selection is one *logical* range but it is not one region on the
+    /// screen. Selecting `bH` of `abHRcd`, where `HR` is right to left, selects
+    /// two characters that are drawn with a third between them: the highlight
+    /// is two boxes with a gap, and no single rectangle can describe it. This
+    /// is why a caller cannot get by with two [`x_of`](Self::x_of) calls and
+    /// the distance between them — that number is the width of a region that
+    /// includes characters the user did not select.
+    ///
+    /// A cluster is highlighted whole if the range touches it at all. Half a
+    /// ligature is not a thing that can be painted: the glyph has no interior
+    /// boundary, which is the same reason [`x_of`](Self::x_of) will not put a
+    /// caret inside one.
+    ///
+    /// An empty range selects nothing and yields no boxes. That is a caret, and
+    /// [`x_of`](Self::x_of) is what draws it.
+    ///
+    /// # Why a `Vec` and not an iterator
+    ///
+    /// Laziness would buy nothing. The walk is in drawn order, and whether the
+    /// *leftmost* box is open cannot be known until every cluster's byte range
+    /// has been tested — a cluster drawn first may be the last one logically.
+    /// So the whole logical-to-selected map must exist before the first box can
+    /// be emitted, and an iterator would only hide the allocation that builds
+    /// it behind a borrow the caller has to keep alive.
+    #[must_use]
+    pub fn selection_rects(&self, from: usize, to: usize, end: usize) -> Vec<(f32, f32)> {
+        let mut rects = Vec::new();
+        if from >= to || self.glyphs.is_empty() {
+            return rects;
+        }
+        // Which glyphs are selected, by *logical* index. Marked cluster by
+        // cluster: a cluster is in the selection when its byte range overlaps
+        // the range at all, which for a cluster spanning `start..next` is
+        // `start < to && next > from`.
+        let mut selected = alloc::vec![false; self.glyphs.len()];
+        let mut i = 0usize;
+        while i < self.glyphs.len() {
+            let upto = self.group_end(i);
+            let start = self.glyphs.get(i).map_or(end, |g| g.cluster);
+            let next = self.glyphs.get(upto).map_or(end, |g| g.cluster);
+            if start < to && next > from {
+                for slot in selected.get_mut(i..upto).unwrap_or_default() {
+                    *slot = true;
+                }
+            }
+            i = upto;
+        }
+        // Now sweep the run as it is drawn, accumulating the pen position, and
+        // close a box wherever the selection stops. Merging happens for free:
+        // two selected clusters that are drawn side by side are consecutive
+        // slots and never open a second box, whichever order they are read in.
+        //
+        // The sweep is in slot space rather than pixel space on purpose. The
+        // alternative — collecting each cluster's box and coalescing those that
+        // touch — has to compare two sums of the same advances made in
+        // different orders, and floating-point addition is not associative, so
+        // "these boxes touch" would need a tolerance. Adjacency of integers
+        // needs none.
+        let mut x = 0.0f32;
+        let mut open: Option<(f32, f32)> = None;
+        for (slot, glyph) in self.draw_order().enumerate() {
+            let logical = if self.visual.is_empty() {
+                slot
+            } else {
+                self.visual
+                    .get(slot)
+                    .and_then(|&v| usize::try_from(v).ok())
+                    .unwrap_or(slot)
+            };
+            if selected.get(logical).copied().unwrap_or(false) {
+                let box_ = open.get_or_insert((x, 0.0));
+                box_.1 += glyph.advance;
+            } else if let Some(done) = open.take() {
+                rects.push(done);
+            }
+            x += glyph.advance;
+        }
+        if let Some(done) = open.take() {
+            rects.push(done);
+        }
+        rects
+    }
+
     /// The width of everything before byte offset `at`, in pixels. `end` is
     /// the source string's length.
     ///
@@ -1055,5 +1142,109 @@ mod tests {
         assert!((r.x_of(1, 3, Affinity::Downstream) - 20.0).abs() < f32::EPSILON);
         assert!((r.x_of(2, 3, Affinity::Downstream) - 20.0).abs() < f32::EPSILON);
         assert!((r.x_of(2, 3, Affinity::Upstream) - 10.0).abs() < f32::EPSILON);
+    }
+
+    /// `(left, width)` pairs compared at a tolerance. Spelled as an assertion
+    /// rather than a conversion so a failure prints both lists of boxes: the
+    /// interesting failures here are off-by-one-box, and a boolean would not
+    /// say which box.
+    fn assert_boxes(rects: &[(f32, f32)], want: &[(f32, f32)]) {
+        let same = rects.len() == want.len()
+            && rects
+                .iter()
+                .zip(want)
+                .all(|(g, w)| (g.0 - w.0).abs() < 0.001 && (g.1 - w.1).abs() < 0.001);
+        assert!(same, "got {rects:?}, want {want:?}");
+    }
+
+    #[test]
+    fn a_selection_of_left_to_right_text_is_one_box() {
+        let r = run(4);
+        assert_boxes(&r.selection_rects(1, 3, 4), &[(10.0, 20.0)]);
+        assert_boxes(&r.selection_rects(0, 4, 4), &[(0.0, 40.0)]);
+        // An empty range is a caret, not a selection.
+        assert!(r.selection_rects(2, 2, 4).is_empty());
+        assert!(r.selection_rects(3, 1, 4).is_empty());
+        assert!(run(0).selection_rects(0, 4, 4).is_empty());
+    }
+
+    /// The reason this method exists: a selection that is one range in the
+    /// text is two rectangles with a gap on the screen, and the gap holds a
+    /// character the user did not select.
+    #[test]
+    fn a_selection_across_a_direction_boundary_is_two_boxes() {
+        let r = bidi_run();
+        // Drawn `abRHcd`. Selecting `bH` — logically adjacent — highlights the
+        // `b` at 10..20 and the `H` at 30..40, leaving the `R` at 20..30 out.
+        assert_boxes(&r.selection_rects(1, 3, 6), &[(10.0, 10.0), (30.0, 10.0)]);
+        // Which is exactly what two carets cannot describe: the caret at byte 1
+        // is at 10 and the one at byte 3 is at 30, and the 20 px between them
+        // is not the 20 px that is selected.
+        assert!((r.x_of(1, 6, Affinity::Downstream) - 10.0).abs() < f32::EPSILON);
+        assert!((r.x_of(3, 6, Affinity::Downstream) - 30.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn a_selection_of_a_whole_right_to_left_word_is_one_box_again() {
+        let r = bidi_run();
+        // `HR` is drawn as `RH` from 20 to 40 — reversed, but contiguous, so
+        // the two clusters merge into a single box rather than two touching
+        // ones. The merge is what the slot-space sweep buys.
+        assert_boxes(&r.selection_rects(2, 4, 6), &[(20.0, 20.0)]);
+        // The Latin either side, and the whole line.
+        assert_boxes(&r.selection_rects(0, 2, 6), &[(0.0, 20.0)]);
+        assert_boxes(&r.selection_rects(4, 6, 6), &[(40.0, 20.0)]);
+        assert_boxes(&r.selection_rects(0, 6, 6), &[(0.0, 60.0)]);
+        // A range that reaches past the end still stops at the run.
+        assert_boxes(&r.selection_rects(4, 99, 6), &[(40.0, 20.0)]);
+    }
+
+    /// Every box a selection paints must lie inside the run, the boxes must be
+    /// ordered and disjoint, and their widths must add up to the width of the
+    /// characters selected — which for a contiguous logical range is
+    /// `width_upto(to) - width_upto(from)`, the one thing the prefix width is
+    /// still good for.
+    #[test]
+    fn selection_boxes_are_ordered_disjoint_and_add_up() {
+        let r = bidi_run();
+        for from in 0..=6 {
+            for to in from..=6 {
+                let rects = r.selection_rects(from, to, 6);
+                let mut edge = 0.0f32;
+                let mut total = 0.0f32;
+                for &(left, width) in &rects {
+                    assert!(width > 0.0, "empty box in {from}..{to}");
+                    assert!(left >= edge, "boxes out of order in {from}..{to}");
+                    assert!(left + width <= r.width() + 0.001, "box past the run");
+                    edge = left + width;
+                    total += width;
+                }
+                let want = r.width_upto(to, 6) - r.width_upto(from, 6);
+                assert!(
+                    (total - want).abs() < 0.001,
+                    "{from}..{to}: painted {total} for {want} of text"
+                );
+            }
+        }
+    }
+
+    /// A ligature has no interior boundary, so a range that touches it paints
+    /// the whole glyph — the same rule that stops a caret being drawn inside
+    /// one.
+    #[test]
+    fn a_selection_paints_a_ligature_whole() {
+        // "office": o, ffi (one glyph, three chars), c, e.
+        let r = ShapedRun::new(alloc::vec![
+            ShapedGlyph { key: GlyphKey::bitmap('o'), cluster: 0, advance: 10.0, kern_next: 0.0, offset: (0.0, 0.0) },
+            ShapedGlyph { key: GlyphKey::bitmap('\u{FB03}'), cluster: 1, advance: 20.0, kern_next: 0.0, offset: (0.0, 0.0) },
+            ShapedGlyph { key: GlyphKey::bitmap('c'), cluster: 4, advance: 10.0, kern_next: 0.0, offset: (0.0, 0.0) },
+            ShapedGlyph { key: GlyphKey::bitmap('e'), cluster: 5, advance: 10.0, kern_next: 0.0, offset: (0.0, 0.0) },
+        ]);
+        // Selecting just the `f` of `ffi` paints all 20 px of the ligature.
+        assert_boxes(&r.selection_rects(1, 2, 6), &[(10.0, 20.0)]);
+        assert_boxes(&r.selection_rects(2, 3, 6), &[(10.0, 20.0)]);
+        // And it does not bleed into the neighbours.
+        assert_boxes(&r.selection_rects(0, 1, 6), &[(0.0, 10.0)]);
+        assert_boxes(&r.selection_rects(4, 5, 6), &[(30.0, 10.0)]);
     }
 }

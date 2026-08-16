@@ -32,6 +32,7 @@
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use osfont::select::Query;
+pub use osfont::shape::Affinity;
 use osfont::system::{Family, FontCache, Weight};
 
 use crate::color::Color;
@@ -707,11 +708,152 @@ impl<'a> Paragraph<'a> {
     }
 }
 
+/// Where a caret is: a byte offset into the text, plus which of that offset's
+/// screen positions the caret belongs at.
+///
+/// One byte offset is one place in the *text* but not always one place on the
+/// *screen*. Where a left-to-right stretch meets a right-to-left one, the
+/// boundary between them is a single offset drawn at two separate x
+/// coordinates — the end of the one run and the start of the other — and
+/// neither is more correct than the other. Which one a caret goes to depends on
+/// how the caret got there, so it is a property of the cursor rather than of
+/// the text, and has to be carried in the cursor's state.
+///
+/// [`Affinity::Downstream`] is the default and the right answer for a caller
+/// with no opinion: it means the caret belongs to the character that *starts*
+/// at the offset. `TextCursor::from(byte)` builds one. On text that runs in a
+/// single direction the two affinities name the same point, so the choice costs
+/// nothing to get wrong there — which is most of the UI, most of the time.
+///
+/// Deliberately not `Ord`: two cursors at the same offset with different
+/// affinities are the same place in the text and two places on the screen, so
+/// neither "comes first" in any sense a caller could rely on. Code that wants
+/// an order — a selection's start and end, say — is asking about the text, and
+/// should compare [`TextCursor::byte`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct TextCursor {
+    /// Byte offset into the text. Always on a character boundary.
+    pub byte: usize,
+    /// Which of the offset's two screen positions the caret is at.
+    pub affinity: Affinity,
+}
+
+impl From<usize> for TextCursor {
+    /// A cursor with no opinion about direction boundaries, which is what every
+    /// caller that has only ever had a byte offset means.
+    fn from(byte: usize) -> Self {
+        Self {
+            byte,
+            affinity: Affinity::Downstream,
+        }
+    }
+}
+
+impl TextCursor {
+    /// The offset alone, for the arithmetic that only ever cared about the
+    /// text: inserting, deleting, slicing.
+    #[must_use]
+    pub fn byte(self) -> usize {
+        self.byte
+    }
+}
+
+/// Where to draw the caret for `at`, in pixels from the start of `text`.
+///
+/// The replacement for measuring the width of the text before the cursor. Those
+/// are the same number only while the text runs in one direction; as soon as it
+/// does not, the width of a prefix and the position of that prefix's end on the
+/// screen are different quantities, and this is the one that puts the caret
+/// where the user is looking.
+pub fn caret_x(text: &str, at: TextCursor, size: f32, weight: FontWeightHint) -> f32 {
+    caret_x_in(text, at, size, weight, FontFamily::Ui)
+}
+
+/// The family-aware form of [`caret_x`]. A caller drawing inside a
+/// [`RenderCommand::PushFont`] scope must place its caret with the same family
+/// it pushed.
+pub fn caret_x_in(
+    text: &str,
+    at: TextCursor,
+    size: f32,
+    weight: FontWeightHint,
+    family: FontFamily,
+) -> f32 {
+    with_font(size, weight, family, |font| {
+        font.shape(text).x_of(at.byte, text.len(), at.affinity)
+    })
+}
+
+/// The boxes to paint to highlight `from..to`, as `(left, width)` pairs in
+/// pixels from the start of `text`, ordered left to right.
+///
+/// There is more than one box exactly when the range spans a change of
+/// direction: a run of text that is contiguous in the *string* need not be
+/// contiguous on the *screen*, and the gap between two of these boxes holds
+/// characters the user did not select. That is why this returns a list and not
+/// a rectangle — the two-edge form a caller would otherwise write, `x_of(to) -
+/// x_of(from)`, describes a region that includes them.
+pub fn selection_boxes(
+    text: &str,
+    from: usize,
+    to: usize,
+    size: f32,
+    weight: FontWeightHint,
+) -> Vec<(f32, f32)> {
+    selection_boxes_in(text, from, to, size, weight, FontFamily::Ui)
+}
+
+/// The family-aware form of [`selection_boxes`].
+pub fn selection_boxes_in(
+    text: &str,
+    from: usize,
+    to: usize,
+    size: f32,
+    weight: FontWeightHint,
+    family: FontFamily,
+) -> Vec<(f32, f32)> {
+    with_font(size, weight, family, |font| {
+        font.shape(text).selection_rects(from, to, text.len())
+    })
+}
+
+/// The cursor a click at `offset` pixels from the start of `text` produces —
+/// byte offset *and* the affinity the click implies.
+///
+/// [`char_index_at`] is the same query for callers that count characters and
+/// draw nothing; this is the one whose result can be stored in a cursor and
+/// handed back to [`caret_x`] to draw the caret where the user clicked. Round
+/// tripping is the property that matters: `caret_x(cursor_at(x))` returns to
+/// the edge that was aimed at, which is not true of the byte offset alone.
+pub fn cursor_at(text: &str, offset: f32, size: f32, weight: FontWeightHint) -> TextCursor {
+    cursor_at_in(text, offset, size, weight, FontFamily::Ui)
+}
+
+/// The family-aware form of [`cursor_at`].
+pub fn cursor_at_in(
+    text: &str,
+    offset: f32,
+    size: f32,
+    weight: FontWeightHint,
+    family: FontFamily,
+) -> TextCursor {
+    let hit = with_font(size, weight, family, |font| {
+        font.shape(text).offset_at(offset, text.len())
+    });
+    TextCursor {
+        byte: hit.offset,
+        affinity: hit.affinity,
+    }
+}
+
 /// The character index in `text` nearest to `offset` pixels from its start.
 ///
 /// This is what a click on a line of text means: the caret goes to the closest
 /// gap between characters, not to the one the click landed inside, so clicking
 /// the right half of a letter puts the caret after it.
+///
+/// Counts *characters*, and so cannot describe a caret: see [`cursor_at`] for
+/// the query that can.
 pub fn char_index_at(text: &str, offset: f32, size: f32, weight: FontWeightHint) -> usize {
     if offset <= 0.0 {
         return 0;
@@ -802,6 +944,73 @@ mod tests {
                 max += 1.0;
             }
         }
+    }
+
+    /// The property that makes [`cursor_at`] worth having over
+    /// [`char_index_at`]: what it returns can be handed straight back to
+    /// [`caret_x`] and lands where the user aimed. A character index cannot do
+    /// that, because it has already thrown the affinity away.
+    #[test]
+    fn a_cursor_from_a_click_draws_its_caret_back_where_the_click_was() {
+        let text = "AVATAR Types";
+        let full = measure(text, 16.0, FontWeightHint::Regular);
+        let mut offset = 0.0_f32;
+        while offset <= full {
+            let cursor = cursor_at(text, offset, 16.0, FontWeightHint::Regular);
+            assert!(text.is_char_boundary(cursor.byte), "byte {} splits a character", cursor.byte);
+            let x = caret_x(text, cursor, 16.0, FontWeightHint::Regular);
+            assert!(
+                (x - offset).abs() <= 16.0,
+                "clicked at {offset}, caret drawn at {x} (byte {})",
+                cursor.byte
+            );
+            offset += 1.0;
+        }
+    }
+
+    /// A byte offset alone still names a caret, because the default affinity is
+    /// the answer a caller with no opinion wants. This is what keeps every
+    /// existing `cursor = n` call site correct.
+    #[test]
+    fn a_bare_byte_offset_is_still_a_cursor() {
+        let text = "hello";
+        assert_eq!(TextCursor::from(3).byte(), 3);
+        assert_eq!(TextCursor::from(3).affinity, Affinity::Downstream);
+        assert_eq!(TextCursor::default(), TextCursor::from(0));
+        // On single-direction text the two affinities name the same point, so
+        // the choice cannot go wrong there — which is most of the UI.
+        let down = TextCursor { byte: 3, affinity: Affinity::Downstream };
+        let up = TextCursor { byte: 3, affinity: Affinity::Upstream };
+        let dx = caret_x(text, down, 16.0, FontWeightHint::Regular);
+        let ux = caret_x(text, up, 16.0, FontWeightHint::Regular);
+        assert!((dx - ux).abs() < 0.001, "{dx} vs {ux}");
+    }
+
+    /// On text that runs one way a selection is one box, and it is exactly the
+    /// stretch between the two carets — the case the old single-rectangle code
+    /// got right, and which must keep working.
+    #[test]
+    fn a_left_to_right_selection_is_one_box_between_its_carets() {
+        let text = "AVATAR Types";
+        for (from, to) in [(0usize, 5usize), (2, 9), (0, text.len()), (6, 7)] {
+            let boxes = selection_boxes(text, from, to, 16.0, FontWeightHint::Regular);
+            assert_eq!(boxes.len(), 1, "{from}..{to} gave {boxes:?}");
+            let lo = caret_x(text, from.into(), 16.0, FontWeightHint::Regular);
+            let hi = caret_x(text, to.into(), 16.0, FontWeightHint::Regular);
+            let (bx, bw) = boxes[0];
+            assert!((bx - lo).abs() < 0.001 && (bx + bw - hi).abs() < 0.001, "{boxes:?} vs {lo}..{hi}");
+        }
+    }
+
+    /// An empty or backwards range paints nothing — a caret is not a selection,
+    /// and a zero-width highlight rectangle is a visible artefact on some
+    /// rasterisers.
+    #[test]
+    fn an_empty_selection_paints_nothing() {
+        let text = "AVATAR Types";
+        assert!(selection_boxes(text, 3, 3, 16.0, FontWeightHint::Regular).is_empty());
+        assert!(selection_boxes(text, 5, 2, 16.0, FontWeightHint::Regular).is_empty());
+        assert!(selection_boxes("", 0, 0, 16.0, FontWeightHint::Regular).is_empty());
     }
 
     /// A click and the caret it produces must land in the same place.

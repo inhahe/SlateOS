@@ -398,7 +398,7 @@ fresh measurement disagree, the measurement wins.
 
 ## Active Bugs
 
-### B-BASH-SLATEOS-ELF-WAS-EXEMPT-FROM-THE-STALENESS-GATE. The one artifact that exercises our libc hardest was the one artifact allowed to be out of date — 2026-08-16 — ✅ GATE FIXED 2026-08-16 by lane B (`scripts/create-ext4-rootfs.sh`); the stale binary itself still needs a relink
+### B-BASH-SLATEOS-ELF-WAS-EXEMPT-FROM-THE-STALENESS-GATE. The one artifact that exercises our libc hardest was the one artifact allowed to be out of date — 2026-08-16 — ✅ RESOLVED 2026-08-16 by lane B (gate in `scripts/create-ext4-rootfs.sh`; stale binary relinked; boot-verified green on `main`)
 
 **In short:** The image build refuses to ship a ring-3 test program that is
 older than the C library it was compiled against, because such a program tests
@@ -439,13 +439,23 @@ consumer is `kernel/src/proc/spawn.rs::self_test_bash_on_slateos_libc`.
 | absent | warning, boot green | warning, boot green | A skip reports nothing **and says so**; the harness already prints `PATH-Z COVERAGE INCOMPLETE`. Unlike a fixture it cannot be rebuilt from a one-line command, so failing a fresh checkout would be punitive. |
 | present, older than `libc.a` | staged silently | **exit 1** | A stale binary reports OK and is wrong. This is the `ctest-*` rule verbatim; `ALLOW_STALE_FIXTURES=1` downgrades it, since a host that cannot rebuild the fixtures certainly cannot relink bash. |
 
-**Still open.** `os/build/spike/bash-slateos.elf` is dated 2026-08-12 and must be
-relinked against the current sysroot
-(`wsl -d Ubuntu -- bash scripts/bash-spike/slatelink.sh`) before the next image
-built from `os` will pass. That is now *enforced* rather than hoped for, which
-is the point of the change — but it does mean the next `main` rootfs build will
-fail loudly until someone relinks it. That is the intended behaviour and is
-strictly better than the silent pass it replaces.
+**~~Still open~~ — CLOSED 2026-08-16, same day, and the relink proved the point.**
+`os/build/spike/bash-slateos.elf` was dated 2026-08-12 and had to be relinked
+against the current sysroot before any image built from `os` would pass the new
+gate. Done: `wsl -d Ubuntu -- bash scripts/bash-spike/slatelink.sh` exited 0 with
+**zero undefined symbols**, and the artifact went from 5,349,720 to 5,398,808
+bytes — **+49,088 bytes of libc that the shipped binary did not previously
+contain.** That size delta is the evidence the entry was arguing for in the
+abstract: the library really had moved underneath it, so every boot from `main`
+between 08-12 and today reported "bash on our libc: OK" about a libc four days
+old. `os`'s nine `ctest-*` fixtures were rebuilt alongside it (they were 08-14,
+and its `ctest-jobctl.elf` predated the 33 new `waitid` checks), and the rootfs
+rebuilt clean — zero staleness warnings, bash staged, 9 fixtures staged.
+
+Boot-verified on `main` the same day: BOOT_OK in 291 s, with
+`GNU bash 5.2 on our own libc.a (ring 3 …): OK` — this time about the *current*
+libc — and no `PATH-Z COVERAGE INCOMPLETE` line, which is what the previous
+run's log had flagged and what led here in the first place.
 
 **Worth generalising, again.** This is the third instance of the pattern
 `B-PATHZ-PREREQUISITE-SKIPS-ARE-SILENT` names: the check was not wrong, it just

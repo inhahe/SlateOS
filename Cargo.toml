@@ -36,6 +36,16 @@ members = [
     # member-not-exclude rationale as `yamldoc`; unlike `textfmt` it does not
     # even need `alloc`, since it only ever returns byte ranges.
     "textfind",
+    # Shared no_std reading of fixed-width fields out of a byte slice, where
+    # the bound is stated at the read rather than twenty lines above it. Every
+    # binary-format parser in the tree had written the same `if len < N` /
+    # `data[k]` pair by hand — the BMP decoders in `explorer` and `paint`, the
+    # MP4/Matroska/AVI parsers in `imageviewer` — which between them made over
+    # a hundred separate unchecked claims about offsets read out of the file
+    # being parsed. Same member-not-exclude rationale as `yamldoc`; like
+    # `textfind` it needs no `alloc`, since every function returns a scalar or
+    # borrows from the caller's slice.
+    "byteread",
 ]
 # Default members: only the crates that build under the workspace-root
 # target (x86_64-unknown-none). A plain `cargo build` from the project

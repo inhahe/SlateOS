@@ -1,0 +1,18 @@
+[package]
+name = "byteread"
+version = "0.1.0"
+edition = "2024"
+description = "Reading fixed-width fields out of a byte slice, where the bound is stated at the read."
+
+[lib]
+path = "src/lib.rs"
+
+# Intentionally dependency-free, and `no_std` with no `alloc`: every function
+# here either returns a scalar or borrows from the caller's slice, so there is
+# nothing to allocate. Mirrors `textfind` in being reachable by the headless
+# components (the indexer, the backup tool, the package manager) as well as the
+# GUI ones, which is the reason it is not a module of `guitk`.
+[dependencies]
+
+[lints]
+workspace = true

@@ -339,8 +339,43 @@ promotes this to B immediately. Claude will not decide between A and B
 unilaterally because B changes the default cost and diagnostics of every boot
 test the other two lanes run, which is theirs to feel as much as Lane A's.
 
-**In the meantime** Claude is implementing the `--bench` → release change and
-the `profile` history field, which is common to all three options.
+**Update 2026-08-15 — the common work is done, and it moved the tradeoff.**
+The `--bench` → release change and the `profile` history field are in
+(`880c3bfe5`, `c1806720b`). Two things changed since the options were written:
+
+1. **`scripts/boot-test.sh --profile=debug|release` now exists**, decoupling the
+   build profile from the serial marker being awaited. So "run a release boot
+   test" is one flag, on any run, by any lane. **Option C's only real objection
+   — "another mode to maintain" — is gone; the mode is already built and
+   tested.** What C still lacks is a *trigger*, which remains the honest
+   objection to it.
+2. **Release is not the slow build the options assumed it would be at the boot
+   level.** Measured this session on the full bench suite: release QEMU window
+   142 s vs debug 615 s. The release *build* is slower, but the release *boot*
+   is ~4× faster because the kernel executes ~40× fewer instructions under TCG.
+   Option B's "*Against: slower rebuilds on every iteration*" is real, but its
+   implied "slower boot tests" is backwards — B would make the run-time half of
+   every cycle substantially quicker.
+
+Neither point decides A vs B; both are still cost claims and B still changes
+what the other two lanes feel on every boot. But the question is now cheaper to
+answer either way, and if the answer is C, it is already implemented and needs
+only a trigger (Claude's suggestion for one, if C is chosen: a release boot test
+before any lane merges to `main`, since that is already the moment a lane runs
+the slow verification anyway).
+
+*What changes, restated as observable differences:*
+- **A:** `./scripts/boot-test.sh` keeps taking ~405 s and keeps printing
+  readable panics; the shipped (optimised) kernel is only ever booted on
+  `--bench` runs.
+- **B:** every boot test builds longer but boots faster, and a panic prints
+  optimised, harder-to-read frames.
+- **C:** as A day-to-day, plus one extra release boot at merge time.
+
+*If never answered:* current behaviour (A) is safe and nothing is blocked — the
+gap is that release-only defects surface only on bench runs. It does not get
+worse with time, but it does get *more* likely to matter as more kernel code
+lands unexercised in optimised form.
 
 ---
 

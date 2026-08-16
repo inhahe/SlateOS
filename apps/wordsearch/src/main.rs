@@ -171,39 +171,34 @@ impl Category {
     fn words(self) -> &'static [&'static str] {
         match self {
             Self::Animals => &[
-                "TIGER", "EAGLE", "SHARK", "HORSE", "WHALE", "SNAKE", "PANDA",
-                "ZEBRA", "CAMEL", "OTTER", "FALCON", "PARROT", "RABBIT",
-                "TURTLE", "MONKEY", "LIZARD", "SALMON", "DOLPHIN", "GIRAFFE",
-                "PENGUIN", "JAGUAR", "COYOTE", "BADGER", "BISON", "CRANE",
+                "TIGER", "EAGLE", "SHARK", "HORSE", "WHALE", "SNAKE", "PANDA", "ZEBRA", "CAMEL",
+                "OTTER", "FALCON", "PARROT", "RABBIT", "TURTLE", "MONKEY", "LIZARD", "SALMON",
+                "DOLPHIN", "GIRAFFE", "PENGUIN", "JAGUAR", "COYOTE", "BADGER", "BISON", "CRANE",
                 "RAVEN", "VIPER", "MOOSE", "KOALA", "LLAMA",
             ],
             Self::Colors => &[
-                "AZURE", "CORAL", "GREEN", "IVORY", "KHAKI", "LILAC",
-                "MAUVE", "OLIVE", "PEACH", "ROUGE", "TAUPE", "AMBER",
-                "BLACK", "BROWN", "CREAM", "EBONY", "FROST", "GREY",
-                "HAZEL", "LEMON", "MELON", "PEARL", "PLUM", "RUBY",
-                "SAGE", "SAND", "TEAL", "WHEAT", "WHITE", "WINE",
+                "AZURE", "CORAL", "GREEN", "IVORY", "KHAKI", "LILAC", "MAUVE", "OLIVE", "PEACH",
+                "ROUGE", "TAUPE", "AMBER", "BLACK", "BROWN", "CREAM", "EBONY", "FROST", "GREY",
+                "HAZEL", "LEMON", "MELON", "PEARL", "PLUM", "RUBY", "SAGE", "SAND", "TEAL",
+                "WHEAT", "WHITE", "WINE",
             ],
             Self::Food => &[
-                "BREAD", "CHEESE", "GRAPE", "LEMON", "MELON", "OLIVE",
-                "PEACH", "PIZZA", "SALAD", "STEAK", "SUSHI", "TACOS",
-                "TOAST", "MANGO", "CREPE", "PASTA", "CURRY", "BACON",
-                "BERRY", "CANDY", "CHIPS", "DONUT", "HONEY", "JUICE",
-                "MAPLE", "ONION", "RICE", "SOUP", "BASIL", "THYME",
+                "BREAD", "CHEESE", "GRAPE", "LEMON", "MELON", "OLIVE", "PEACH", "PIZZA", "SALAD",
+                "STEAK", "SUSHI", "TACOS", "TOAST", "MANGO", "CREPE", "PASTA", "CURRY", "BACON",
+                "BERRY", "CANDY", "CHIPS", "DONUT", "HONEY", "JUICE", "MAPLE", "ONION", "RICE",
+                "SOUP", "BASIL", "THYME",
             ],
             Self::Science => &[
-                "ATOM", "CELL", "FORCE", "LASER", "ORBIT", "PRISM",
-                "QUARK", "SOLAR", "VAPOR", "XENON", "DIODE", "FIELD",
-                "GAMMA", "HELIX", "IONIC", "JOULE", "KELVIN", "LOGIC",
-                "MOLAR", "NERVE", "OPTIC", "PHASE", "RADAR", "SIGMA",
-                "TESLA", "ALLOY", "DECAY", "FLORA", "GENES", "HERTZ",
+                "ATOM", "CELL", "FORCE", "LASER", "ORBIT", "PRISM", "QUARK", "SOLAR", "VAPOR",
+                "XENON", "DIODE", "FIELD", "GAMMA", "HELIX", "IONIC", "JOULE", "KELVIN", "LOGIC",
+                "MOLAR", "NERVE", "OPTIC", "PHASE", "RADAR", "SIGMA", "TESLA", "ALLOY", "DECAY",
+                "FLORA", "GENES", "HERTZ",
             ],
             Self::Geography => &[
-                "DELTA", "FJORD", "RIDGE", "BASIN", "CLIFF", "DUNES",
-                "GORGE", "PLAIN", "RIVER", "TIDAL", "ATLAS", "COAST",
-                "GROVE", "MARSH", "OASIS", "PEAKS", "SHOAL", "TROPIC",
-                "VALLEY", "BAYOU", "CANAL", "GULLY", "ISLAND", "NORTH",
-                "SOUTH", "OCEAN", "POLAR", "STEPPE", "TUNDRA", "CREEK",
+                "DELTA", "FJORD", "RIDGE", "BASIN", "CLIFF", "DUNES", "GORGE", "PLAIN", "RIVER",
+                "TIDAL", "ATLAS", "COAST", "GROVE", "MARSH", "OASIS", "PEAKS", "SHOAL", "TROPIC",
+                "VALLEY", "BAYOU", "CANAL", "GULLY", "ISLAND", "NORTH", "SOUTH", "OCEAN", "POLAR",
+                "STEPPE", "TUNDRA", "CREEK",
             ],
         }
     }
@@ -599,9 +594,10 @@ impl WordSearchApp {
 
     fn handle_event(&mut self, event: &Event) {
         if let Event::Key(key_event) = event
-            && key_event.pressed {
-                self.handle_key(key_event);
-            }
+            && key_event.pressed
+        {
+            self.handle_key(key_event);
+        }
     }
 
     fn handle_key(&mut self, key: &KeyEvent) {
@@ -627,22 +623,18 @@ impl WordSearchApp {
         // Non-modifier keys
         if key.modifiers == Modifiers::NONE {
             match key.key {
-                Key::Up
-                    if self.cursor_row > 0 => {
-                        self.cursor_row -= 1;
-                    }
-                Key::Down
-                    if self.cursor_row + 1 < self.grid_size => {
-                        self.cursor_row += 1;
-                    }
-                Key::Left
-                    if self.cursor_col > 0 => {
-                        self.cursor_col -= 1;
-                    }
-                Key::Right
-                    if self.cursor_col + 1 < self.grid_size => {
-                        self.cursor_col += 1;
-                    }
+                Key::Up if self.cursor_row > 0 => {
+                    self.cursor_row -= 1;
+                }
+                Key::Down if self.cursor_row + 1 < self.grid_size => {
+                    self.cursor_row += 1;
+                }
+                Key::Left if self.cursor_col > 0 => {
+                    self.cursor_col -= 1;
+                }
+                Key::Right if self.cursor_col + 1 < self.grid_size => {
+                    self.cursor_col += 1;
+                }
                 Key::Enter => {
                     self.handle_enter();
                 }
@@ -760,7 +752,12 @@ impl WordSearchApp {
         cmds.push(RenderCommand::Text {
             x: PADDING + 140.0,
             y: y + 18.0,
-            text: format!("{} ({}x{})", self.difficulty.label(), self.grid_size, self.grid_size),
+            text: format!(
+                "{} ({}x{})",
+                self.difficulty.label(),
+                self.grid_size,
+                self.grid_size
+            ),
             font_size: LABEL_FONT_SIZE,
             color: self.difficulty.color(),
             font_weight: FontWeightHint::Regular,
@@ -789,7 +786,11 @@ impl WordSearchApp {
             y,
             text: format!("Hints: {}", self.hints_remaining),
             font_size: STATUS_FONT_SIZE,
-            color: if self.hints_remaining > 0 { PEACH } else { OVERLAY0 },
+            color: if self.hints_remaining > 0 {
+                PEACH
+            } else {
+                OVERLAY0
+            },
             font_weight: FontWeightHint::Regular,
             max_width: Some(100.0),
             overflow: TextOverflow::Ellipsis,
@@ -831,10 +832,8 @@ impl WordSearchApp {
             SelectionState::Selecting {
                 start_row,
                 start_col,
-            } => {
-                cells_between(start_row, start_col, self.cursor_row, self.cursor_col)
-                    .unwrap_or_default()
-            }
+            } => cells_between(start_row, start_col, self.cursor_row, self.cursor_col)
+                .unwrap_or_default(),
         };
 
         for row in 0..self.grid_size {
@@ -850,9 +849,10 @@ impl WordSearchApp {
                     SelectionState::Selecting { start_row, start_col }
                     if start_row == row && start_col == col
                 );
-                let is_hint = self.hint_highlight.as_ref().is_some_and(|h| {
-                    h.row == row && h.col == col && h.ticks > 0
-                });
+                let is_hint = self
+                    .hint_highlight
+                    .as_ref()
+                    .is_some_and(|h| h.row == row && h.col == col && h.ticks > 0);
 
                 // Cell background color
                 let bg_color = if is_hint {
@@ -968,8 +968,8 @@ impl WordSearchApp {
                 // through, so it is measured in the weight the word was drawn
                 // at rather than guessed from its byte count — and clamped to
                 // the same width the word itself is clipped to.
-                let text_w = text::measure(&pw.word, WORD_LIST_FONT_SIZE, weight)
-                    .min(WORD_LIST_MAX_WIDTH);
+                let text_w =
+                    text::measure(&pw.word, WORD_LIST_FONT_SIZE, weight).min(WORD_LIST_MAX_WIDTH);
                 cmds.push(RenderCommand::Line {
                     x1: list_x,
                     y1: wy + 7.0,
@@ -1002,9 +1002,7 @@ impl WordSearchApp {
             SelectionState::None => {
                 "Arrows:Move  Enter:Select  H:Hint  D:Difficulty  C:Category  F2:New"
             }
-            SelectionState::Selecting { .. } => {
-                "Arrows:Move to end  Enter:Confirm  Esc:Cancel"
-            }
+            SelectionState::Selecting { .. } => "Arrows:Move to end  Enter:Confirm  Esc:Cancel",
         };
 
         cmds.push(RenderCommand::Text {
@@ -1357,7 +1355,10 @@ mod tests {
         for _ in 0..5 {
             cat = cat.next();
         }
-        assert_eq!(cat, start, "Category cycle should return to start after 5 steps");
+        assert_eq!(
+            cat, start,
+            "Category cycle should return to start after 5 steps"
+        );
     }
 
     #[test]
@@ -1835,7 +1836,11 @@ mod tests {
         let (er, ec) = cells[0];
 
         let result = app.check_selection(sr, sc, er, ec);
-        assert!(result.is_some(), "Should find word '{}' in reverse", pw.word);
+        assert!(
+            result.is_some(),
+            "Should find word '{}' in reverse",
+            pw.word
+        );
     }
 
     #[test]
@@ -2074,7 +2079,10 @@ mod tests {
     fn test_render_produces_commands() {
         let app = WordSearchApp::new();
         let cmds = app.render();
-        assert!(!cmds.is_empty(), "Render should produce at least one command");
+        assert!(
+            !cmds.is_empty(),
+            "Render should produce at least one command"
+        );
     }
 
     #[test]
@@ -2127,9 +2135,9 @@ mod tests {
         }
         let cmds = app.render();
         // Should contain "YOU WIN!" text.
-        let has_win = cmds.iter().any(|c| {
-            matches!(c, RenderCommand::Text { text, .. } if text.contains("WIN"))
-        });
+        let has_win = cmds
+            .iter()
+            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("WIN")));
         assert!(has_win, "Won state should display win message");
     }
 
@@ -2166,8 +2174,14 @@ mod tests {
     fn test_directions_cover_all_angles() {
         // Should have all combinations of -1, 0, 1 for dr and dc, except (0,0).
         let expected: Vec<(i32, i32)> = vec![
-            (0, 1), (0, -1), (1, 0), (-1, 0),
-            (1, 1), (1, -1), (-1, 1), (-1, -1),
+            (0, 1),
+            (0, -1),
+            (1, 0),
+            (-1, 0),
+            (1, 1),
+            (1, -1),
+            (-1, 1),
+            (-1, -1),
         ];
         for dir in &expected {
             assert!(
@@ -2245,8 +2259,16 @@ mod tests {
         let app = WordSearchApp::new_with_seed(42);
         for pw in &app.placed_words {
             for (r, c) in pw.cells() {
-                assert!(r < app.grid_size, "Row {r} out of bounds for grid size {}", app.grid_size);
-                assert!(c < app.grid_size, "Col {c} out of bounds for grid size {}", app.grid_size);
+                assert!(
+                    r < app.grid_size,
+                    "Row {r} out of bounds for grid size {}",
+                    app.grid_size
+                );
+                assert!(
+                    c < app.grid_size,
+                    "Col {c} out of bounds for grid size {}",
+                    app.grid_size
+                );
             }
         }
     }

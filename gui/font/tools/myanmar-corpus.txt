@@ -1,0 +1,136 @@
+# Corpus for `MyanmarProbe.ttf` (see `gen_myanmar_probe.py`), swept with
+#
+#     python gui/font/tools/harfbuzz_sweep.py \
+#         --fonts gui/font/tools/myanmar-probe \
+#         --corpus gui/font/tools/myanmar-corpus.txt
+#
+# One string per edge of the Myanmar shaper rather than sampled text. On this
+# face every feature announces itself by appending a marker glyph, so each line
+# below asks two questions at once: did the syllable come out in the right
+# order, and did the right features reach each of its glyphs in the right
+# order. The second question is the one no installed face can be asked — only
+# two of the 556 here register `mym2` at all.
+#
+# The escapes are `harfbuzz_sweep.py`'s, the same ones `shape_dump.rs` reads.
+
+# --- the six stages, which is what the probe exists for ---
+# ka KA alone: one glyph, one syllable, every feature. Its marker run spells
+# out the whole application order backwards, and because the feature blocks are
+# written into the font in reverse that order cannot be an accident of lookup
+# numbering. The control for every line below.
+\u1000
+# The dotted circle a broken cluster is given, which is inside the syllable and
+# takes the syllable's features like any other glyph.
+\u1039
+# A syllable with something in every slot, so the markers have to survive the
+# sort as well as be applied: KA, MEDIAL RA, VOWEL E, VOWEL I, DOT BELOW. Each
+# marker inherits its base's position and must travel with it.
+\u1000\u103c\u1031\u102d\u1037
+
+# --- per-syllable confinement, and the four global features that are not ---
+# ka SPACE ka. The space is its own syllable, so the chain rule `SPACE KA'`
+# spans a boundary: `mk_xsyl_blwf` must be absent and `mk_xsyl_blws` present.
+# Getting confinement wrong shows as the first marker appearing.
+\u1000 \u1000
+# The same rule reached with nothing before the space, to show that the marker
+# tracks the rule and not the position in the run.
+ \u1000
+# Two consonants with no space between them: adjacent, two syllables, and no
+# chain rule that could fire. The control for the pair above.
+\u1000\u1000
+
+# --- the joiners, whose two halves answer differently ---
+# A chain rule's *context* steps over a ZWNJ exactly when the feature is not
+# `F_MANUAL_ZWNJ`, and Myanmar's are not -- so `mk_zwnj` must appear here.
+# Give Myanmar Khmer's `F_MANUAL_JOINERS` by mistake and it stops appearing.
+\u200c\u104e
+ \u200c\u104e
+# The same slot with a ZWJ, which a context ignores unconditionally, and with
+# nothing at all. All three must produce `mk_zwnj`; only the first can fail.
+ \u200d\u104e
+ \u104e
+# A ligature's *input* is not a context, so there `auto_zwj` is the whole
+# answer. LITTLE SECTION + SECTION ligate under `calt`, which Myanmar leaves
+# automatic, so the ZWJ is stepped over and `mk_lig_calt` appears.
+\u104a\u104b
+\u104a\u200d\u104b
+# LOCATIVE + COMPLETED ligate under `psts`, which Myanmar marks
+# `F_MANUAL_ZWJ`. The bare pair ligates; the pair with a ZWJ in it must not,
+# and that one line is the only place in this font where `F_MANUAL_ZWJ` is
+# observable at all.
+\u104c\u104d
+\u104c\u200d\u104d
+# A ZWNJ in a ligature's input is never stepped over, automatic or not, so
+# neither pair ligates. The control that separates "the joiner was read" from
+# "the lookup did not match".
+\u104a\u200c\u104b
+\u104c\u200c\u104d
+
+# --- the reordering, now with a marker on every glyph that moves ---
+# `mranma` -- "Myanmar". MA, MEDIAL RA, NA, ASAT, MA, AA: the medial is written
+# after its consonant and drawn wrapped around its left side.
+\u1019\u103c\u1014\u103a\u1019\u102c
+# `mranma bhasa` -- "the Myanmar language", where a systematic breakage shows
+# as more than an edge case.
+\u1019\u103c\u1014\u103a\u1019\u102c\u1018\u102c\u101e\u102c
+# KA + VOWEL E, then KA + MEDIAL RA + VOWEL E. Both move to the front, and the
+# second settles which goes furthest left -- the vowel, not the medial.
+\u1000\u1031
+\u1000\u103c\u1031
+# Kinzi: NGA, ASAT, VIRAMA before a consonant, recognised only at the very
+# start of a syllable. `angga` and the same three with something in front of
+# them are different questions, and the second is the one that catches a base
+# search started in the wrong place.
+\u1021\u1004\u103a\u1039\u1002
+\u1004\u103a\u1039\u1000
+\u1000\u1004\u103a\u1039\u1000
+# A kinzi with nothing after it: the base search runs off the end, which is the
+# one input where `base` stays past the syllable.
+\u1004\u103a\u1039
+# The four medials in grammar order -- YA, RA, WA, HA -- the longest medial run
+# a syllable can have.
+\u1000\u103b\u103c\u103d\u103e
+\u1000\u103d\u103e
+# MEDIAL MON LA and MON-only MEDIAL YA, categories reached only from Mon text.
+\u1000\u1060
+\u1000\u105e
+# A vowel above and a vowel below on one base, then the same with a DOT BELOW:
+# the sort has to keep the below-base group in grammar order, not written order.
+\u1000\u102d\u102f
+\u1000\u102d\u102f\u1037
+# ASAT after a consonant, and ASAT after a below vowel -- the `(DB As?)` tail.
+\u1000\u103a
+\u1000\u1037\u103a
+# A post-base vowel then MEDIAL HA, which the grammar allows only in the post
+# vowel group; the same two the other way round are a different parse.
+\u1000\u102c\u103e
+\u1000\u103e\u102c
+# A pwo tone, a visarga and a Shan tone: three categories that all land at the
+# very end of the sort.
+\u1000\u1063
+\u1000\u1038
+\u1000\u1087
+# A stacked pair -- KA, VIRAMA, KA -- the one place Myanmar writes a subscript
+# the way Khmer does; then the AI vowel, whose category is `A` rather than a
+# vowel of its own; then the anusvara.
+\u1000\u1039\u1000
+\u1000\u1032
+\u1000\u1036
+# A variation selector after a consonant, which the Myanmar grammar names
+# explicitly, and one behind a vowel that moves -- the selector has to take the
+# position of the glyph before it or it is left behind by the sort.
+\u1000\ufe00
+\u1000\u1031\ufe00
+# Broken clusters, which get a dotted circle to hang from. The circle is in the
+# lookups' coverage, so it collects markers like a letter and a difference here
+# is a difference in when it was inserted.
+\u1039\u1000
+\u103c\u1000
+# Myanmar digits and the section marks, which reach no syllable rule. The
+# digits take markers; the section marks are the quiet glyphs and take none.
+\u1041\u1042\u1043
+\u104a\u104b\u104c
+# Myanmar Extended-A and Extended-B letters, which are in the coverage because
+# the shaper's category table reaches them.
+\ua9e0\ua9e5
+\uaa60\uaa7c

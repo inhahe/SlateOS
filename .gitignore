@@ -115,8 +115,10 @@ __pycache__/
 
 # Synthetic oracle faces for the HarfBuzz sweep. Each is regenerated in one
 # command from the tracked generator beside it — `gen_thai_legacy.py`,
-# `gen_khmer_probe.py` — and is a build artifact of that script, not a source
-# file. Tracking them would put a few hundred KB of binary in history that no
-# reader can diff and that any change to the generator immediately stales.
+# `gen_khmer_probe.py`, `gen_myanmar_probe.py` — and is a build artifact of that
+# script, not a source file. Tracking them would put a few hundred KB of binary
+# in history that no reader can diff and that any change to the generator
+# immediately stales.
 /gui/font/tools/thai-legacy/
 /gui/font/tools/khmer-probe/
+/gui/font/tools/myanmar-probe/

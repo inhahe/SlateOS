@@ -247,20 +247,53 @@ fn push_token(tokens: &mut Vec<StyledToken>, start: usize, end: usize, kind: Tok
     }
 }
 
-/// Advance `i` past the current byte and return the new position.
+/// Advance `i` past the whole UTF-8 character starting there.
+///
+/// The `.min(bytes.len())` is defensive, not a bug fix, and the distinction
+/// is worth stating because `scan_string` right below carries the *same*
+/// clamp for a bug that is live. It cannot trigger on today's callers: every
+/// one of them derives `bytes` from a `&str`, so a lead byte always has its
+/// continuation bytes present and the unclamped sum never exceeds the length.
+/// It is here because the signature promises less than the callers deliver —
+/// this takes `&[u8]`, where a truncated sequence is representable — and
+/// because returning a past-the-end offset is not a benign error here:
+/// callers use the result as a token boundary, which panics when the renderer
+/// slices it. Removing the clamp breaks no test; that is the point.
 fn advance(bytes: &[u8], i: usize) -> usize {
-    i + 1 + bytes.get(i).map_or(0, |b| match b {
-        0x00..=0x7F => 0,
+    let extra = at(bytes, i).map_or(0, |b| match b {
         0xC0..=0xDF => 1,
         0xE0..=0xEF => 2,
         0xF0..=0xFF => 3,
         _ => 0,
-    })
+    });
+    i.saturating_add(1).saturating_add(extra).min(bytes.len())
 }
 
 /// Check if `bytes[i..]` starts with the given ASCII slice.
 fn starts_with_at(bytes: &[u8], i: usize, needle: &[u8]) -> bool {
-    bytes.get(i..i + needle.len()) == Some(needle)
+    bytes.get(i..i.saturating_add(needle.len())) == Some(needle)
+}
+
+/// The byte at `i`, or `None` at or past the end of the line.
+///
+/// Every scanner in this file is a loop of the shape "while the byte here is
+/// X, advance". Written as `i < bytes.len() && bytes[i] == X` that states the
+/// bound *twice* — once in the guard and once again, invisibly, inside the
+/// index — and the two can drift apart when the loop body later changes how
+/// far `i` moves. `at(bytes, i).is_some_and(...)` states it once, in the only
+/// place that can be wrong, and the compiler stops us writing the second one.
+fn at(bytes: &[u8], i: usize) -> Option<u8> {
+    bytes.get(i).copied()
+}
+
+/// True when the bytes at `i` and `i + 1` are exactly `first` then `second`.
+///
+/// Two-byte lookahead (`/*`, `*/`, `//`, `->`, `==`) is the most common test
+/// here, and the hand-written form has to get both the `i + 1 < len` guard and
+/// the two indices right every time. Naming it removes thirty-odd chances to
+/// get one of them wrong.
+fn is_pair(bytes: &[u8], i: usize, first: u8, second: u8) -> bool {
+    at(bytes, i) == Some(first) && at(bytes, i.saturating_add(1)) == Some(second)
 }
 
 /// Check whether `word` is in the given sorted keyword list.
@@ -276,82 +309,70 @@ fn is_ident_byte(b: u8) -> bool {
 /// Scan an identifier/word starting at `i` and return (end_offset, word).
 fn scan_word(bytes: &[u8], i: usize) -> (usize, &str) {
     let mut end = i;
-    while end < bytes.len() && is_ident_byte(bytes[end]) {
-        end += 1;
+    while at(bytes, end).is_some_and(is_ident_byte) {
+        end = end.saturating_add(1);
     }
-    // Safety: we only accepted ASCII bytes, so this is valid UTF-8.
-    let word = std::str::from_utf8(&bytes[i..end]).unwrap_or("");
+    // We only accepted ASCII bytes, so this is valid UTF-8; the `unwrap_or`
+    // is unreachable rather than a fallback.
+    let word = bytes
+        .get(i..end)
+        .and_then(|w| std::str::from_utf8(w).ok())
+        .unwrap_or("");
     (end, word)
 }
 
 /// Scan a number literal (int or float, with optional 0x/0o/0b prefix).
 fn scan_number(bytes: &[u8], i: usize) -> usize {
+    /// Advance `end` over every byte matching `accept`.
+    fn take_while(bytes: &[u8], end: &mut usize, accept: impl Fn(u8) -> bool) {
+        while at(bytes, *end).is_some_and(&accept) {
+            *end = end.saturating_add(1);
+        }
+    }
+
     let mut end = i;
-    // Hex/oct/bin prefix
-    if end + 1 < bytes.len() && bytes[end] == b'0' {
-        match bytes.get(end + 1) {
-            Some(b'x' | b'X') => {
-                end += 2;
-                while end < bytes.len()
-                    && (bytes[end].is_ascii_hexdigit() || bytes[end] == b'_')
-                {
-                    end += 1;
-                }
-                return end;
-            }
-            Some(b'o' | b'O') => {
-                end += 2;
-                while end < bytes.len()
-                    && (bytes[end].is_ascii_digit() || bytes[end] == b'_')
-                {
-                    end += 1;
-                }
-                return end;
-            }
-            Some(b'b' | b'B') => {
-                end += 2;
-                while end < bytes.len()
-                    && (bytes[end] == b'0' || bytes[end] == b'1' || bytes[end] == b'_')
-                {
-                    end += 1;
-                }
-                return end;
-            }
-            _ => {}
+    // Hex/oct/bin prefix. `radix_digit` is the acceptor for whichever base the
+    // second byte named; picking it here keeps the three arms from being three
+    // near-identical loops that can drift.
+    if at(bytes, end) == Some(b'0') {
+        let radix_digit: Option<fn(u8) -> bool> = match at(bytes, end.saturating_add(1)) {
+            Some(b'x' | b'X') => Some(|b: u8| b.is_ascii_hexdigit() || b == b'_'),
+            Some(b'o' | b'O') => Some(|b: u8| b.is_ascii_digit() || b == b'_'),
+            Some(b'b' | b'B') => Some(|b: u8| matches!(b, b'0' | b'1' | b'_')),
+            _ => None,
+        };
+        if let Some(accept) = radix_digit {
+            end = end.saturating_add(2);
+            take_while(bytes, &mut end, accept);
+            return end;
         }
     }
     // Decimal digits
-    while end < bytes.len() && (bytes[end].is_ascii_digit() || bytes[end] == b'_') {
-        end += 1;
-    }
-    // Decimal point + fraction
-    if end < bytes.len() && bytes[end] == b'.' {
-        let after_dot = end + 1;
-        if after_dot < bytes.len() && bytes[after_dot].is_ascii_digit() {
+    take_while(bytes, &mut end, |b| b.is_ascii_digit() || b == b'_');
+    // Decimal point + fraction. The point only belongs to the number if a
+    // digit follows it, so `1..2` stays a range and `1.` stays an integer.
+    if at(bytes, end) == Some(b'.') {
+        let after_dot = end.saturating_add(1);
+        if at(bytes, after_dot).is_some_and(|b| b.is_ascii_digit()) {
             end = after_dot;
-            while end < bytes.len() && (bytes[end].is_ascii_digit() || bytes[end] == b'_') {
-                end += 1;
-            }
+            take_while(bytes, &mut end, |b| b.is_ascii_digit() || b == b'_');
         }
     }
-    // Exponent
-    if end < bytes.len() && (bytes[end] == b'e' || bytes[end] == b'E') {
-        let mut exp = end + 1;
-        if exp < bytes.len() && (bytes[exp] == b'+' || bytes[exp] == b'-') {
-            exp += 1;
+    // Exponent — likewise only consumed if it is actually followed by digits,
+    // so the `e` in `1e` stays a type suffix.
+    if at(bytes, end).is_some_and(|b| b == b'e' || b == b'E') {
+        let mut exp = end.saturating_add(1);
+        if at(bytes, exp).is_some_and(|b| b == b'+' || b == b'-') {
+            exp = exp.saturating_add(1);
         }
-        if exp < bytes.len() && bytes[exp].is_ascii_digit() {
+        if at(bytes, exp).is_some_and(|b| b.is_ascii_digit()) {
             end = exp;
-            while end < bytes.len() && (bytes[end].is_ascii_digit() || bytes[end] == b'_') {
-                end += 1;
-            }
+            take_while(bytes, &mut end, |b| b.is_ascii_digit() || b == b'_');
         }
     }
     // Type suffix (u8, i32, f64, usize, ...)
-    if end < bytes.len() && bytes[end].is_ascii_alphabetic() {
-        while end < bytes.len() && bytes[end].is_ascii_alphanumeric() {
-            end += 1;
-        }
+    if at(bytes, end).is_some_and(|b| b.is_ascii_alphabetic()) {
+        take_while(bytes, &mut end, |b| b.is_ascii_alphanumeric());
     }
     end
 }
@@ -360,18 +381,55 @@ fn scan_number(bytes: &[u8], i: usize) -> usize {
 /// quote character).  Returns the end offset (past the closing quote).
 /// Handles `\"` escapes inside the string.
 fn scan_string(bytes: &[u8], i: usize, quote: u8) -> usize {
-    let mut end = i + 1; // skip the opening quote
-    while end < bytes.len() {
-        if bytes[end] == b'\\' {
-            end += 2; // skip escaped character
-        } else if bytes[end] == quote {
-            end += 1; // include closing quote
-            return end;
+    let mut end = i.saturating_add(1); // skip the opening quote
+    while let Some(b) = at(bytes, end) {
+        if b == b'\\' {
+            // Skip the escaped character — but a backslash in the *last* byte
+            // of the line escapes nothing, so clamp rather than stepping to
+            // `len + 1`. Every caller feeds this straight into `push_token`,
+            // and a token whose `end` exceeds the line panics the moment the
+            // renderer slices it. Clamping here fixes it for all ten callers.
+            end = end.saturating_add(2).min(bytes.len());
+        } else if b == quote {
+            return end.saturating_add(1); // include closing quote
         } else {
-            end += 1;
+            end = end.saturating_add(1);
         }
     }
     end // unterminated — extends to end of line
+}
+
+/// Scan forward through a `/* … */` block comment already known to be open.
+///
+/// `i` is the first byte *inside* the comment (past the opening `/*` for a
+/// comment that starts on this line; `0` for one resumed from the line
+/// above). `depth` is how many `/*` are currently open, always ≥ 1 on entry.
+/// Returns the offset just past where the comment ended and the depth still
+/// open there — a returned depth of `0` means it closed on this line, and any
+/// other value is what belongs in `HighlightState::BlockComment`.
+///
+/// `nested` distinguishes Rust, where `/* /* */ */` is one comment, from C,
+/// JavaScript and CSS, where the first `*/` closes it whatever came before.
+/// Passing `false` makes an inner `/*` ordinary comment text.
+///
+/// This existed as six near-copies — an open-it-here and a resume-from-above
+/// arm in each of three tokenizers — which is six places for the `i + 1 < len`
+/// guard and the two-byte step to disagree.
+fn scan_block_comment(bytes: &[u8], mut i: usize, mut depth: usize, nested: bool) -> (usize, usize) {
+    while depth > 0 {
+        if nested && is_pair(bytes, i, b'/', b'*') {
+            depth = depth.saturating_add(1);
+            i = i.saturating_add(2);
+        } else if is_pair(bytes, i, b'*', b'/') {
+            depth = depth.saturating_sub(1);
+            i = i.saturating_add(2);
+        } else if i < bytes.len() {
+            i = i.saturating_add(1);
+        } else {
+            break; // ran off the end with the comment still open
+        }
+    }
+    (i.min(bytes.len()), depth)
 }
 
 const OPERATOR_BYTES: &[u8] = b"+-*/%=!<>&|^~?@";
@@ -413,26 +471,14 @@ fn highlight_rust(line: &str, state: &mut HighlightState) -> Vec<StyledToken> {
     // Continue multi-line state from previous line.
     match state {
         HighlightState::BlockComment { depth } => {
-            let start = 0;
-            while i + 1 < len {
-                if bytes[i] == b'/' && bytes[i + 1] == b'*' {
-                    *depth += 1;
-                    i += 2;
-                } else if bytes[i] == b'*' && bytes[i + 1] == b'/' {
-                    *depth -= 1;
-                    i += 2;
-                    if *depth == 0 {
-                        push_token(&mut tokens, start, i, Token::Comment);
-                        *state = HighlightState::Normal;
-                        break;
-                    }
-                } else {
-                    i += 1;
-                }
-            }
-            if *state != HighlightState::Normal {
-                // Still inside block comment — consume the rest of the line.
-                push_token(&mut tokens, start, len, Token::Comment);
+            let (end, remaining) = scan_block_comment(bytes, i, *depth, true);
+            i = end;
+            push_token(&mut tokens, 0, i, Token::Comment);
+            if remaining == 0 {
+                *state = HighlightState::Normal;
+            } else {
+                // Still inside the comment — it consumed the whole line.
+                *depth = remaining;
                 return tokens;
             }
         }
@@ -468,33 +514,17 @@ fn highlight_rust(line: &str, state: &mut HighlightState) -> Vec<StyledToken> {
         let b = bytes[i];
 
         // Line comment
-        if b == b'/' && i + 1 < len && bytes[i + 1] == b'/' {
+        if is_pair(bytes, i, b'/', b'/') {
             push_token(&mut tokens, i, len, Token::Comment);
             return tokens;
         }
 
         // Block comment
-        if b == b'/' && i + 1 < len && bytes[i + 1] == b'*' {
+        if is_pair(bytes, i, b'/', b'*') {
             let start = i;
-            let mut depth: usize = 1;
-            i += 2;
-            while i + 1 < len {
-                if bytes[i] == b'/' && bytes[i + 1] == b'*' {
-                    depth += 1;
-                    i += 2;
-                } else if bytes[i] == b'*' && bytes[i + 1] == b'/' {
-                    depth -= 1;
-                    i += 2;
-                    if depth == 0 {
-                        break;
-                    }
-                } else {
-                    i += 1;
-                }
-            }
+            let (end, depth) = scan_block_comment(bytes, i.saturating_add(2), 1, true);
+            i = end;
             if depth > 0 {
-                // Consume last byte if we stopped due to `i + 1 >= len`.
-                i = len;
                 *state = HighlightState::BlockComment { depth };
             }
             push_token(&mut tokens, start, i, Token::Comment);
@@ -932,60 +962,51 @@ fn highlight_c(line: &str, state: &mut HighlightState) -> Vec<StyledToken> {
 
     // Continue block comment from previous line.
     if let HighlightState::BlockComment { .. } = state {
-        let start = 0;
-        while i + 1 < len {
-            if bytes[i] == b'*' && bytes[i + 1] == b'/' {
-                i += 2;
-                push_token(&mut tokens, start, i, Token::Comment);
-                *state = HighlightState::Normal;
-                break;
-            }
-            i += 1;
-        }
-        if *state != HighlightState::Normal {
-            push_token(&mut tokens, start, len, Token::Comment);
+        // C comments do not nest: the first `*/` closes it, so `nested` is
+        // false and the depth is only ever 1 or 0.
+        let (end, depth) = scan_block_comment(bytes, i, 1, false);
+        i = end;
+        push_token(&mut tokens, 0, i, Token::Comment);
+        if depth == 0 {
+            *state = HighlightState::Normal;
+        } else {
             return tokens;
         }
     }
 
     // Preprocessor directive — if first non-whitespace is `#`.
     // Only check when we haven't already consumed a block comment prefix.
-    if i == 0 {
-        let trimmed_start = bytes.iter().position(|&b| b != b' ' && b != b'\t');
-        if let Some(ts) = trimmed_start
-            && bytes[ts] == b'#' {
-                push_token(&mut tokens, 0, len, Token::Preprocessor);
-                return tokens;
-            }
+    if i == 0
+        && bytes
+            .iter()
+            .find(|&&b| b != b' ' && b != b'\t')
+            .is_some_and(|&b| b == b'#')
+    {
+        push_token(&mut tokens, 0, len, Token::Preprocessor);
+        return tokens;
     }
 
     while i < len {
         let b = bytes[i];
 
         // Line comment
-        if b == b'/' && i + 1 < len && bytes[i + 1] == b'/' {
+        if is_pair(bytes, i, b'/', b'/') {
             push_token(&mut tokens, i, len, Token::Comment);
             return tokens;
         }
 
-        // Block comment
-        if b == b'/' && i + 1 < len && bytes[i + 1] == b'*' {
+        // Block comment. The old form here decided whether the comment had
+        // closed by reading the two bytes *behind* the cursor, which is both
+        // hard to read and one `i >= 2` guard away from a panic; the helper
+        // returns the answer directly.
+        if is_pair(bytes, i, b'/', b'*') {
             let start = i;
-            i += 2;
-            while i + 1 < len {
-                if bytes[i] == b'*' && bytes[i + 1] == b'/' {
-                    i += 2;
-                    push_token(&mut tokens, start, i, Token::Comment);
-                    break;
-                }
-                i += 1;
-            }
-            // Check if comment was closed.
-            if i + 1 >= len && !(i >= 2 && bytes[i - 2] == b'*' && bytes[i - 1] == b'/') {
-                i = len;
+            let (end, depth) = scan_block_comment(bytes, i.saturating_add(2), 1, false);
+            i = end;
+            if depth > 0 {
                 *state = HighlightState::BlockComment { depth: 1 };
-                push_token(&mut tokens, start, len, Token::Comment);
             }
+            push_token(&mut tokens, start, i, Token::Comment);
             continue;
         }
 
@@ -1083,43 +1104,39 @@ fn highlight_javascript(line: &str, state: &mut HighlightState) -> Vec<StyledTok
 
     // Continue block comment from previous line.
     if let HighlightState::BlockComment { .. } = state {
-        let start = 0;
-        while i + 1 < len {
-            if bytes[i] == b'*' && bytes[i + 1] == b'/' {
-                i += 2;
-                push_token(&mut tokens, start, i, Token::Comment);
-                *state = HighlightState::Normal;
-                break;
-            }
-            i += 1;
-        }
-        if *state != HighlightState::Normal {
-            push_token(&mut tokens, start, len, Token::Comment);
+        // JavaScript comments do not nest, so `nested` is false.
+        let (end, depth) = scan_block_comment(bytes, i, 1, false);
+        i = end;
+        push_token(&mut tokens, 0, i, Token::Comment);
+        if depth == 0 {
+            *state = HighlightState::Normal;
+        } else {
             return tokens;
         }
     }
 
-    // Continue template literal from previous line.
+    // Continue template literal from previous line. This is `scan_string`'s
+    // loop with the opening quote already consumed on an earlier line, so it
+    // is spelled the same way — including clamping the escape step, since a
+    // line ending in `\` inside a template literal has the same overshoot.
     if let HighlightState::MultiLineString {
         delimiter: StringDelimiter::Backtick,
     } = state
     {
-        let start = 0;
-        while i < len {
-            if bytes[i] == b'\\' {
-                i += 2;
-                continue;
-            }
-            if bytes[i] == b'`' {
-                i += 1;
-                push_token(&mut tokens, start, i, Token::String);
+        while let Some(b) = at(bytes, i) {
+            if b == b'\\' {
+                i = i.saturating_add(2).min(len);
+            } else if b == b'`' {
+                i = i.saturating_add(1);
+                push_token(&mut tokens, 0, i, Token::String);
                 *state = HighlightState::Normal;
                 break;
+            } else {
+                i = i.saturating_add(1);
             }
-            i += 1;
         }
         if *state != HighlightState::Normal {
-            push_token(&mut tokens, start, len, Token::String);
+            push_token(&mut tokens, 0, len, Token::String);
             return tokens;
         }
     }
@@ -1128,26 +1145,17 @@ fn highlight_javascript(line: &str, state: &mut HighlightState) -> Vec<StyledTok
         let b = bytes[i];
 
         // Line comment
-        if b == b'/' && i + 1 < len && bytes[i + 1] == b'/' {
+        if is_pair(bytes, i, b'/', b'/') {
             push_token(&mut tokens, i, len, Token::Comment);
             return tokens;
         }
 
         // Block comment
-        if b == b'/' && i + 1 < len && bytes[i + 1] == b'*' {
+        if is_pair(bytes, i, b'/', b'*') {
             let start = i;
-            i += 2;
-            let mut closed = false;
-            while i + 1 < len {
-                if bytes[i] == b'*' && bytes[i + 1] == b'/' {
-                    i += 2;
-                    closed = true;
-                    break;
-                }
-                i += 1;
-            }
-            if !closed {
-                i = len;
+            let (end, depth) = scan_block_comment(bytes, i.saturating_add(2), 1, false);
+            i = end;
+            if depth > 0 {
                 *state = HighlightState::BlockComment { depth: 1 };
             }
             push_token(&mut tokens, start, i, Token::Comment);
@@ -1902,6 +1910,98 @@ mod tests {
             checked += 1;
         }
         assert!(checked >= 17, "only {checked} lines checked");
+    }
+
+    /// Every language, so a new one cannot be added without being swept by
+    /// the truncation test below.
+    const ALL_LANGUAGES: &[Language] = &[
+        Language::Plain,
+        Language::Rust,
+        Language::C,
+        Language::Python,
+        Language::JavaScript,
+        Language::Html,
+        Language::Css,
+        Language::Shell,
+        Language::Toml,
+        Language::Yaml,
+        Language::Json,
+        Language::Markdown,
+    ];
+
+    #[test]
+    fn no_tokenizer_runs_off_the_end_of_a_truncated_line() {
+        // Regression: `scan_string` stepped two bytes past a backslash without
+        // checking that there was a second byte to step over, so a line ending
+        // in `\` produced a token whose `end` was `line.len() + 1`. Nothing
+        // clamped it in any of the ten call sites, so the first `line[..end]`
+        // in the renderer panicked. `advance` had the identical bug for a
+        // multi-byte character truncated by the end of the line.
+        //
+        // A line ending mid-construct is not exotic — it is what the buffer
+        // holds for the whole time the user is typing the construct.
+        let endings = [
+            "\\",       // dangling escape
+            "\"\\",     // open string, dangling escape
+            "'\\",      // open char, dangling escape
+            "\"",       // unterminated string
+            "/*",       // unterminated block comment
+            "/",        // half an operator or comment
+            "0x",       // radix prefix with no digits
+            "1e",       // exponent with no digits
+            "1.",       // decimal point with no fraction
+            "r#\"",     // unterminated Rust raw string
+            "`",        // unterminated JS template literal
+            "<",        // unterminated HTML tag
+            "&",        // unterminated HTML entity
+            "$",        // shell expansion with no name
+        ];
+        // Prefixes put the ending somewhere other than offset 0, and the
+        // non-ASCII ones also exercise `advance`'s truncation clamp.
+        let prefixes = ["", "let x = ", "日本語", "😀", "a\u{300}"];
+
+        let mut checked = 0_usize;
+        for &lang in ALL_LANGUAGES {
+            for prefix in prefixes {
+                for ending in endings {
+                    let line = format!("{prefix}{ending}");
+                    // Fresh state, and again resuming from each multi-line
+                    // state, since those re-enter the scanners mid-construct.
+                    for mut state in [
+                        HighlightState::Normal,
+                        HighlightState::BlockComment { depth: 1 },
+                    ] {
+                        let toks = highlight_line(&line, lang, &mut state);
+                        for t in &toks {
+                            assert!(
+                                t.start <= t.end && t.end <= line.len(),
+                                "{lang:?}: token {}..{} out of bounds for {line:?} \
+                                 (len {})",
+                                t.start,
+                                t.end,
+                                line.len()
+                            );
+                            assert!(
+                                line.is_char_boundary(t.start)
+                                    && line.is_char_boundary(t.end),
+                                "{lang:?}: token {}..{} splits a character in \
+                                 {line:?}",
+                                t.start,
+                                t.end
+                            );
+                            // The slice itself — the operation that panicked.
+                            let _ = &line[t.start..t.end];
+                        }
+                        checked = checked.saturating_add(1);
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            checked,
+            ALL_LANGUAGES.len() * prefixes.len() * endings.len() * 2,
+            "sweep did not cover every combination"
+        );
     }
 
     #[test]

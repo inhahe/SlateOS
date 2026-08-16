@@ -262,7 +262,7 @@ pub(crate) const CAPS_DEFAULT: CapWords = CapWords {
 #[cfg(target_os = "none")]
 mod store {
     use super::{CAPS_DEFAULT, CapWords};
-    use core::sync::atomic::{AtomicU32, Ordering};
+    use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
     // effective / permitted / inheritable, each (low, high) word. Seeded
     // from `CAPS_DEFAULT` so both builds share one statement of the
@@ -273,6 +273,39 @@ mod store {
     static CAP_PRM_HI: AtomicU32 = AtomicU32::new(CAPS_DEFAULT.prm_hi);
     static CAP_INH_LO: AtomicU32 = AtomicU32::new(CAPS_DEFAULT.inh_lo);
     static CAP_INH_HI: AtomicU32 = AtomicU32::new(CAPS_DEFAULT.inh_hi);
+
+    // The kernel's own answer, projected onto Linux's words (§312).  Absent
+    // until `kernel_view::refresh` succeeds, which is why it needs a validity
+    // flag rather than a sentinel value: "no capabilities at all" and "never
+    // asked" are different states and must not collapse into each other — the
+    // first is a true empty set, the second means we still do not know.
+    static PROJ_VALID: AtomicBool = AtomicBool::new(false);
+    static PROJ_LO: AtomicU32 = AtomicU32::new(0);
+    static PROJ_HI: AtomicU32 = AtomicU32::new(0);
+
+    pub(super) fn load_projection() -> Option<(u32, u32)> {
+        // Acquire pairs with the Release store below so a reader that sees
+        // the flag also sees the two words it describes.
+        if PROJ_VALID.load(Ordering::Acquire) {
+            Some((
+                PROJ_LO.load(Ordering::Relaxed),
+                PROJ_HI.load(Ordering::Relaxed),
+            ))
+        } else {
+            None
+        }
+    }
+
+    pub(super) fn store_projection(lo: u32, hi: u32) {
+        PROJ_LO.store(lo, Ordering::Relaxed);
+        PROJ_HI.store(hi, Ordering::Relaxed);
+        PROJ_VALID.store(true, Ordering::Release);
+    }
+
+    #[cfg(test)]
+    pub(super) fn clear_projection() {
+        PROJ_VALID.store(false, Ordering::Release);
+    }
 
     /// Read all six words.  Relaxed and word-by-word, so a concurrent
     /// `capset` can in principle be observed half-applied; that matches
@@ -309,6 +342,30 @@ mod store {
     std::thread_local! {
         static CAPS: core::cell::Cell<CapWords> =
             const { core::cell::Cell::new(CAPS_DEFAULT) };
+
+        /// The kernel's projected set (§312), or `None` if never seeded.
+        ///
+        /// Per-thread for the same reason `CAPS` is: the projection tests set
+        /// it and then assert on `capget`, and a process-global slot would
+        /// make each of those a race against every other test in the suite.
+        /// On the target this is a process-global pair of atomics, which is
+        /// what the model actually calls for — capabilities belong to the
+        /// process, not the thread.
+        static PROJECTION: core::cell::Cell<Option<(u32, u32)>> =
+            const { core::cell::Cell::new(None) };
+    }
+
+    pub(super) fn load_projection() -> Option<(u32, u32)> {
+        PROJECTION.try_with(core::cell::Cell::get).unwrap_or(None)
+    }
+
+    pub(super) fn store_projection(lo: u32, hi: u32) {
+        let _ = PROJECTION.try_with(|cell| cell.set(Some((lo, hi))));
+    }
+
+    #[cfg(test)]
+    pub(super) fn clear_projection() {
+        let _ = PROJECTION.try_with(|cell| cell.set(None));
     }
 
     /// Falls back to the cold-boot default if the thread's TLS is already
@@ -358,6 +415,404 @@ pub fn has_capability(cap: u32) -> bool {
         lo & (1u32 << cap) != 0
     } else {
         hi & (1u32 << (cap.wrapping_sub(32))) != 0
+    }
+}
+
+/// The effective set as `capget()` reports it: the kernel's view, narrowed by
+/// anything this process has since dropped.
+///
+/// Returns the raw stored words unchanged until [`kernel_view::refresh`] has
+/// succeeded at least once — on a host (test) build that is never, so the
+/// existing behaviour is bit-for-bit preserved there.
+///
+/// # Why an intersection rather than a replacement
+///
+/// The two words answer different questions and both are binding.  The
+/// projection says *what the kernel would let this process do*; the stored
+/// words say *what this process has asked to keep* (`capset` can only drop).
+/// A capability is genuinely held only when both agree, so the reported set is
+/// their AND.  Replacing the stored words outright would silently undo a
+/// voluntary privilege drop on the next refresh — turning `capset` into a
+/// suggestion — and reporting only the stored words is the fiction §312 exists
+/// to remove.
+fn reported_caps_effective() -> (u32, u32) {
+    let (lo, hi) = current_caps_effective();
+    match store::load_projection() {
+        Some((plo, phi)) => (lo & plo, hi & phi),
+        None => (lo, hi),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The kernel's view: projecting real capabilities onto Linux's words (§312)
+// ---------------------------------------------------------------------------
+
+/// Derives Linux's capability words from the capabilities the kernel actually
+/// granted this process.
+///
+/// **In short:** libc used to invent this answer. It kept Linux's three
+/// capability words in its own memory, initialised to *every bit set*, and
+/// never asked the kernel anything — so `capget()` cheerfully reported full
+/// privilege to a process spawned with no capabilities at all. That was safe
+/// only by accident (the kernel re-checks every privileged operation itself,
+/// so the lie could never *grant* anything), but it is the silent kind of
+/// wrong: a port that calls `capget()` to decide what to attempt, or to drop
+/// privileges it believes it has, gets a confidently false answer with no
+/// error anywhere. This module replaces the invention with a derivation.
+///
+/// # The rule
+///
+/// Each Linux `CAP_*` bit is the value of a specific predicate over the
+/// `(ResourceType, Rights)` pairs the process holds, and **the default is
+/// deny**: a `CAP_*` with no rule is reported as *not held*, never as held.
+/// Under-reporting is recoverable — the caller tries the operation and the
+/// kernel decides — whereas over-reporting is the bug being fixed.
+///
+/// Decided in `design-decisions.md` §312 (operator; `open-questions.md` Q44).
+/// The enumerating syscall this reads is lane A's `SYS_CAP_QUERY`; its ABI is
+/// documented in `requests/a-b-cap-query-enumeration-landed.md`.
+///
+/// # Staging — the gates are still advisory
+///
+/// [`refresh`] feeds [`capget`] only. The 63 libc gate sites still consult the
+/// stored words through [`has_capability`], which on the target still start
+/// out permissive. That is deliberate: making the gates truthful in the same
+/// change would break every fixture spawned with `capabilities: &[]`
+/// (`services/ctest-jobctl`, `self_test_cctty`, `self_test_cpgroup` — the
+/// first says so in its own doc comment), which is boot-test-visible. §312
+/// step 3 flips them once the fixtures carry real capabilities; the flip is
+/// pointing `has_capability` at [`reported_caps_effective`] instead of
+/// [`current_caps_effective`].
+pub mod kernel_view {
+    use super::{
+        CAP_KILL, CAP_NET_RAW, CAP_SYS_ADMIN, CAP_SYS_NICE, CAP_SYS_PTRACE, CAP_SYS_RAWIO,
+        CAP_LAST_CAP, store,
+    };
+
+    /// Kernel `ResourceType` discriminants.
+    ///
+    /// Mirrors `kernel/src/cap/mod.rs`'s `#[repr(u16)] enum ResourceType`.
+    /// Only the variants this module projects are listed; adding a predicate
+    /// means adding its type here too.
+    pub mod res {
+        /// A process, for kill / wait / inspect operations.
+        pub const PROCESS: u16 = 6;
+        /// A thread, for suspend / resume / priority change.
+        pub const THREAD: u16 = 7;
+        /// I/O port access, for userspace drivers.
+        pub const PORT_IO: u16 = 8;
+        /// Filesystem access.
+        pub const FILE: u16 = 10;
+        /// I/O scheduler privilege (the Realtime priority class).
+        pub const IO_SCHEDULER: u16 = 13;
+        /// A process namespace.
+        pub const NAMESPACE: u16 = 15;
+        /// Raw network access (`AF_PACKET`, raw sockets).
+        pub const NET_RAW: u16 = 24;
+    }
+
+    /// Kernel `Rights` bits.
+    ///
+    /// Mirrors `kernel/src/cap/rights.rs`. `Rights` is a **`u64`** — twelve
+    /// bits are defined today, which is exactly why nothing here may narrow it
+    /// to `u32`: the width is the ABI, not the current occupancy.
+    pub mod rights {
+        /// Read data from the resource.
+        pub const READ: u64 = 1 << 0;
+        /// Write data to the resource.
+        pub const WRITE: u64 = 1 << 1;
+        /// Create child objects within the resource.
+        pub const CREATE: u64 = 1 << 3;
+        /// Modify metadata (permissions, attributes, …).
+        pub const METADATA: u64 = 1 << 5;
+        /// Transfer (delegate) the capability to another task.
+        pub const TRANSFER: u64 = 1 << 6;
+        /// Signal the resource.
+        pub const SIGNAL: u64 = 1 << 9;
+        /// Permission to use the Realtime I/O priority class.
+        pub const IO_REALTIME: u64 = 1 << 16;
+        /// Unilateral introspection authority over a process.
+        pub const DEBUG: u64 = 1 << 17;
+    }
+
+    /// One capability, as `SYS_CAP_QUERY` writes it.
+    ///
+    /// Layout is fixed by `kernel/src/cap/mod.rs::CapEntryInfo`: 24 bytes,
+    /// 8-aligned. `_reserved` is not padding-by-another-name — it is written
+    /// as zero and exists so the struct has *no* implicit padding, because
+    /// implicit padding is uninitialised bytes crossing a trust boundary.
+    ///
+    /// The handle value is deliberately absent: an enumeration answers what
+    /// authority exists, not which slot holds it, and a list is where a stale
+    /// handle survives longest.
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct CapEntryInfo {
+        /// `ResourceType` discriminant — see [`res`].
+        pub resource_type: u16,
+        /// Reserved; always zero.
+        pub reserved: [u16; 3],
+        /// `Rights` bits — see [`rights`].
+        pub rights: u64,
+        /// Kernel-internal identifier of the resource. Names the object, not
+        /// the caller's access to it, and is not usable as a handle.
+        pub resource_id: u64,
+    }
+
+    // A mismatch here is an ABI break that would otherwise show up as
+    // garbage rights bits, so fail the build instead.
+    const _: () = {
+        assert!(core::mem::size_of::<CapEntryInfo>() == 24);
+        assert!(core::mem::align_of::<CapEntryInfo>() == 8);
+    };
+
+    /// Entries enumerated without touching the allocator.
+    ///
+    /// A real process holds single digits of capabilities; the kernel's table
+    /// caps out at 4096, which at 24 bytes each is 96 KiB and far too much for
+    /// the startup stack. So the common case is inline and the rare one falls
+    /// back to `malloc`.
+    const INLINE_ENTRIES: usize = 64;
+
+    /// Bound on the probe/enumerate retry loop.
+    ///
+    /// The count can grow between the probe and the fetch — a thread granting
+    /// itself a capability in between is enough — and the kernel answers that
+    /// with `ERANGE` rather than a truncated list. Retrying re-probes, so it
+    /// converges; the bound is only there so a pathological grant storm cannot
+    /// spin the startup path forever.
+    const MAX_ATTEMPTS: u32 = 4;
+
+    /// Ask the kernel how many capabilities the caller holds, writing nothing.
+    fn probe() -> Option<usize> {
+        let n = crate::syscall::syscall2(crate::syscall::SYS_CAP_QUERY, 0, 0);
+        usize::try_from(n).ok()
+    }
+
+    /// Fill `buf`; `Ok(n)` wrote `n` entries, `Err(())` means try again bigger.
+    fn enumerate_into(buf: &mut [CapEntryInfo]) -> Result<usize, ()> {
+        if buf.is_empty() {
+            return Err(());
+        }
+        let n = crate::syscall::syscall2(
+            crate::syscall::SYS_CAP_QUERY,
+            buf.as_mut_ptr() as u64,
+            buf.len() as u64,
+        );
+        usize::try_from(n).ok().filter(|&n| n <= buf.len()).ok_or(())
+    }
+
+    /// Does the process hold any capability of type `ty`?
+    fn holds(entries: &[CapEntryInfo], ty: u16) -> bool {
+        entries.iter().any(|e| e.resource_type == ty)
+    }
+
+    /// Does the process hold a capability of type `ty` carrying **any** of
+    /// `any_of`?
+    ///
+    /// Any-of rather than all-of because the predicates in §312 read that way
+    /// ("any `PortIo` handle with `READ` **or** `WRITE`"), and because a
+    /// single-bit mask makes the two identical anyway.
+    fn holds_with(entries: &[CapEntryInfo], ty: u16, any_of: u64) -> bool {
+        entries
+            .iter()
+            .any(|e| e.resource_type == ty && (e.rights & any_of) != 0)
+    }
+
+    /// A 64-bit capability set being assembled, as Linux's two `u32` words.
+    #[derive(Clone, Copy, Default)]
+    struct Mask {
+        lo: u32,
+        hi: u32,
+    }
+
+    impl Mask {
+        fn set(&mut self, cap: u32) {
+            debug_assert!(cap <= CAP_LAST_CAP);
+            if cap < 32 {
+                self.lo |= 1u32 << cap;
+            } else if cap <= CAP_LAST_CAP {
+                self.hi |= 1u32 << (cap.wrapping_sub(32));
+            }
+        }
+    }
+
+    /// Project a set of held capabilities onto Linux's capability words.
+    ///
+    /// Pure and total: the whole point of splitting it out from [`refresh`] is
+    /// that the mapping can be tested exhaustively on the host, where no
+    /// kernel exists to enumerate anything.
+    ///
+    /// Everything not named below reports **false**. That is the decision, not
+    /// an omission — see the module docs.
+    #[must_use]
+    pub fn project(entries: &[CapEntryInfo]) -> (u32, u32) {
+        let mut m = Mask::default();
+
+        // --- the derived bits (design-decisions.md §312) ------------------
+
+        // Port I/O is the whole of what CAP_SYS_RAWIO gates for us
+        // (`sys_io.rs::ioperm`/`iopl`), and PortIo handles name it exactly.
+        if holds_with(entries, res::PORT_IO, rights::READ | rights::WRITE) {
+            m.set(CAP_SYS_RAWIO);
+        }
+        // SIGNAL on a Process is precisely "may signal that process"; kill(2)
+        // to a process we hold no handle for is what CAP_KILL overrides.
+        if holds_with(entries, res::PROCESS, rights::SIGNAL) {
+            m.set(CAP_KILL);
+        }
+        // DEBUG is unilateral introspection — the target does not consent —
+        // which is the authority ptrace(2) actually is.
+        if holds_with(entries, res::PROCESS, rights::DEBUG) {
+            m.set(CAP_SYS_PTRACE);
+        }
+        // Raising priority is the only direction CAP_SYS_NICE gates, and
+        // IO_REALTIME is the kernel's name for permission to do so.
+        if holds_with(entries, res::THREAD, rights::IO_REALTIME) {
+            m.set(CAP_SYS_NICE);
+        }
+        // A NetRaw handle *is* raw-socket authority; there is no narrower
+        // right to ask for, so type alone is the predicate.
+        if holds(entries, res::NET_RAW) {
+            m.set(CAP_NET_RAW);
+        }
+
+        if project_sys_admin(entries) {
+            m.set(CAP_SYS_ADMIN);
+        }
+
+        (m.lo, m.hi)
+    }
+
+    /// `CAP_SYS_ADMIN` — the hand-maintained union, member by member.
+    ///
+    /// Not derived, on purpose. `CAP_SYS_ADMIN` is Linux's junk drawer: it has
+    /// no natural preimage in a per-object capability model, and it gates 21
+    /// of libc's call sites that have nothing in common with each other. Any
+    /// single derived rule would be either permanently false (breaking all 21)
+    /// or broad enough to re-grant everything (which is the bug §312 fixes).
+    /// So it is an explicit list, and every member below names the call sites
+    /// it exists for.
+    ///
+    /// # Sites deliberately left uncovered
+    ///
+    /// - `sethostname` / `setdomainname` (`unistd.rs`) — system identity is
+    ///   global state with no object behind it. Inventing a handle for it
+    ///   would be the ambient-authority-in-a-capability-costume that §312
+    ///   rejected as option B.
+    /// - `seccomp` (`linux_seccomp.rs`), `landlock_add_rule` /
+    ///   `landlock_restrict_self` (`linux_landlock.rs`) — these *restrict the
+    ///   caller*. Linux gates them on `CAP_SYS_ADMIN` only as a stand-in for
+    ///   `no_new_privs`, i.e. to stop a setuid binary confusing itself. That
+    ///   is not an authority at all, so there is nothing to project; the
+    ///   `no_new_privs` path needs no capability and is the one to use.
+    fn project_sys_admin(entries: &[CapEntryInfo]) -> bool {
+        // Namespace family: clone(CLONE_NEW*), clone3, unshare (process.rs),
+        // setns (process.rs).  CREATE makes a namespace, WRITE/TRANSFER joins
+        // or hands one over.
+        holds_with(
+            entries,
+            res::NAMESPACE,
+            rights::CREATE | rights::WRITE | rights::TRANSFER,
+        )
+        // Mount tree and on-disk administration: mount, umount, umount2
+        // (process.rs), swapon, swapoff (unistd.rs), quotactl (sys_quota.rs).
+        // All of them reshape the filesystem rather than read or write within
+        // it, which is what METADATA on a File capability names.
+        || holds_with(entries, res::FILE, rights::METADATA)
+        // ioprio_set(IOPRIO_CLASS_RT) (process.rs) — the one site with an
+        // exact preimage: IO_REALTIME on the I/O scheduler is literally the
+        // permission being requested.
+        || holds_with(entries, res::IO_SCHEDULER, rights::IO_REALTIME)
+        // Cross-process observation: bpf (linux_bpf.rs), perf_event_open
+        // (linux_perf_event.rs), fanotify_init (linux_fanotify.rs).  Each
+        // watches processes other than the caller without their consent,
+        // which is DEBUG on a Process handle.
+        || holds_with(entries, res::PROCESS, rights::DEBUG)
+        // madvise(MADV_HWPOISON | MADV_SOFT_OFFLINE) (mman.rs) — retiring a
+        // physical page is hardware authority, not memory-management
+        // authority, so it rides on raw port access rather than on any
+        // memory-shaped capability.
+        || holds_with(entries, res::PORT_IO, rights::WRITE)
+    }
+
+    /// Ask the kernel what this process holds and record the projection.
+    ///
+    /// Returns `true` if the projection was updated. `false` means the query
+    /// was unavailable (a host build, where the syscall stub returns
+    /// `ENOSYS`) or did not converge; in that case the previous state is left
+    /// alone and `capget()` keeps reporting the stored words.
+    ///
+    /// Failing that way — neither granting nor denying — is right *while the
+    /// gates are advisory*: an unanswered query means "we do not know", and
+    /// the kernel still re-checks every real operation. §312 step 3, which
+    /// makes the gates binding, has to revisit it and fail closed, because at
+    /// that point "we do not know" and "you may" stop being the same thing.
+    pub fn refresh() -> bool {
+        let mut inline = [CapEntryInfo {
+            resource_type: 0,
+            reserved: [0; 3],
+            rights: 0,
+            resource_id: 0,
+        }; INLINE_ENTRIES];
+
+        for _ in 0..MAX_ATTEMPTS {
+            let Some(count) = probe() else {
+                return false; // syscall unavailable — nothing to project.
+            };
+            if count == 0 {
+                // A real empty set, not an error: the process holds nothing,
+                // so every derived bit is false.  Recording it is the point —
+                // this is exactly the fixture case §312 was written about.
+                store::store_projection(0, 0);
+                return true;
+            }
+
+            // `None` is exactly the `count > INLINE_ENTRIES` case, so the
+            // bound is expressed once, by the slice, rather than restated as
+            // a comparison that could drift from the array's length.
+            if let Some(slot) = inline.get_mut(..count) {
+                if let Ok(n) = enumerate_into(slot) {
+                    let (lo, hi) = project(slot.get(..n).unwrap_or(&[]));
+                    store::store_projection(lo, hi);
+                    return true;
+                }
+            } else if refresh_heap(count) {
+                return true;
+            }
+            // ERANGE: the set grew under us.  Re-probe and try again.
+        }
+        false
+    }
+
+    /// The `count > INLINE_ENTRIES` path, kept separate so the common case
+    /// never mentions the allocator.
+    fn refresh_heap(count: usize) -> bool {
+        let Some(bytes) = count.checked_mul(core::mem::size_of::<CapEntryInfo>()) else {
+            return false;
+        };
+        let p = crate::malloc::malloc(bytes).cast::<CapEntryInfo>();
+        if p.is_null() {
+            return false;
+        }
+        // SAFETY: `malloc` returned `bytes` = `count * size_of::<CapEntryInfo>()`
+        // usable bytes.  `CapEntryInfo` is 8-aligned and malloc's blocks are at
+        // least that; the slice is written by the kernel before it is read, and
+        // the type has no padding and no invalid bit patterns, so every byte
+        // pattern the kernel can write is a valid value.
+        let buf = unsafe { core::slice::from_raw_parts_mut(p, count) };
+        let ok = match enumerate_into(buf) {
+            Ok(n) => {
+                let (lo, hi) = project(buf.get(..n).unwrap_or(&[]));
+                store::store_projection(lo, hi);
+                true
+            }
+            Err(()) => false,
+        };
+        // SAFETY: `p` came from `malloc` above, is non-null, and `buf` (the
+        // only alias) is dead by here.
+        unsafe { crate::malloc::free(p.cast::<u8>()) };
+        ok
     }
 }
 
@@ -469,13 +924,19 @@ pub extern "C" fn capget(hdrp: *mut CapUserHeader, datap: *mut CapUserData) -> i
     }
 
     let CapWords {
-        eff_lo,
-        eff_hi,
+        eff_lo: _,
+        eff_hi: _,
         prm_lo,
         prm_hi,
         inh_lo,
         inh_hi,
     } = current_caps();
+    // The effective set is the one callers act on, so it is the one that has
+    // to be true: it comes from the kernel's own answer narrowed by whatever
+    // this process has dropped (§312).  Permitted and inheritable stay as
+    // stored — they are libc-side bookkeeping that `capset` owns, and the
+    // kernel has no corresponding notion to project them from.
+    let (eff_lo, eff_hi) = reported_caps_effective();
     // SAFETY: caller guarantees datap points to `tocopy` writable
     // CapUserData entries — 1 for V1 (low word only), 2 for V2/V3.
     unsafe {
@@ -593,6 +1054,243 @@ pub extern "C" fn capset(hdrp: *mut CapUserHeader, datap: *const CapUserData) ->
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod projection_tests {
+    use super::kernel_view::{CapEntryInfo, project, res, rights};
+    use super::*;
+
+    /// A capability of `ty` carrying `r`.
+    fn cap(ty: u16, r: u64) -> CapEntryInfo {
+        CapEntryInfo {
+            resource_type: ty,
+            reserved: [0; 3],
+            rights: r,
+            resource_id: 1,
+        }
+    }
+
+    /// Is `cap` set in a projected `(lo, hi)` pair?
+    fn is_set((lo, hi): (u32, u32), c: u32) -> bool {
+        if c < 32 {
+            lo & (1u32 << c) != 0
+        } else {
+            hi & (1u32 << (c - 32)) != 0
+        }
+    }
+
+    #[test]
+    fn test_cap_entry_info_matches_kernel_abi() {
+        // 24 bytes / 8-aligned is the wire format `SYS_CAP_QUERY` writes
+        // (kernel/src/cap/mod.rs::CapEntryInfo, which self-tests the same
+        // numbers at boot).  A mismatch would not fail loudly — it would
+        // shift `rights` and `resource_id` and silently produce plausible
+        // garbage, which is why this is asserted on both sides.
+        assert_eq!(core::mem::size_of::<CapEntryInfo>(), 24);
+        assert_eq!(core::mem::align_of::<CapEntryInfo>(), 8);
+        // `rights` is a u64 because kernel `Rights` is.  Twelve bits are
+        // defined today; the width is the ABI, not the occupancy.
+        assert_eq!(core::mem::size_of_val(&cap(res::PROCESS, 0).rights), 8);
+    }
+
+    #[test]
+    fn test_empty_capability_set_projects_to_nothing() {
+        // The case §312 exists for: a process spawned `capabilities: &[]`
+        // used to be told it held every capability Linux defines.
+        let (lo, hi) = project(&[]);
+        assert_eq!(lo, 0);
+        assert_eq!(hi, 0);
+    }
+
+    #[test]
+    fn test_default_is_deny_for_unmapped_caps() {
+        // Holding a rich set of real capabilities must not light up a
+        // `CAP_*` that has no rule.  Deny-by-default is the decision, and
+        // this is the test that fails if someone "helpfully" widens a
+        // predicate to cover a gate site rather than adding a rule for it.
+        let held = [
+            cap(res::PROCESS, rights::SIGNAL | rights::DEBUG),
+            cap(res::PORT_IO, rights::READ | rights::WRITE),
+            cap(res::NET_RAW, 0),
+            cap(res::FILE, rights::METADATA),
+            cap(res::NAMESPACE, rights::CREATE),
+            cap(res::THREAD, rights::IO_REALTIME),
+            cap(res::IO_SCHEDULER, rights::IO_REALTIME),
+        ];
+        let w = project(&held);
+        for unmapped in [
+            CAP_CHOWN,
+            CAP_DAC_OVERRIDE,
+            CAP_SETUID,
+            CAP_SETGID,
+            CAP_SETPCAP,
+            CAP_NET_BIND_SERVICE,
+            CAP_NET_ADMIN,
+            CAP_IPC_LOCK,
+            CAP_SYS_MODULE,
+            CAP_SYS_CHROOT,
+            CAP_SYS_BOOT,
+            CAP_SYS_RESOURCE,
+            CAP_SYS_TIME,
+            CAP_MKNOD,
+            CAP_SYSLOG,
+            CAP_BPF,
+            CAP_PERFMON,
+            CAP_CHECKPOINT_RESTORE,
+        ] {
+            assert!(
+                !is_set(w, unmapped),
+                "cap {unmapped} has no rule but projected as held"
+            );
+        }
+    }
+
+    #[test]
+    fn test_derived_bits_from_312_table() {
+        assert!(is_set(
+            project(&[cap(res::PORT_IO, rights::READ)]),
+            CAP_SYS_RAWIO
+        ));
+        assert!(is_set(
+            project(&[cap(res::PORT_IO, rights::WRITE)]),
+            CAP_SYS_RAWIO
+        ));
+        assert!(is_set(
+            project(&[cap(res::PROCESS, rights::SIGNAL)]),
+            CAP_KILL
+        ));
+        assert!(is_set(
+            project(&[cap(res::PROCESS, rights::DEBUG)]),
+            CAP_SYS_PTRACE
+        ));
+        assert!(is_set(
+            project(&[cap(res::THREAD, rights::IO_REALTIME)]),
+            CAP_SYS_NICE
+        ));
+        // NetRaw is the one predicate keyed on type alone: the handle *is*
+        // the authority, there is no narrower right to ask for.
+        assert!(is_set(project(&[cap(res::NET_RAW, 0)]), CAP_NET_RAW));
+    }
+
+    #[test]
+    fn test_rights_are_required_not_just_the_type() {
+        // Holding a Process handle you may only wait on is not permission to
+        // signal it, and holding a port you may not touch is not raw I/O.
+        // The predicates are (type, rights) pairs precisely so that a
+        // read-only handle cannot be mistaken for authority over the object.
+        let inert = [
+            cap(res::PROCESS, rights::READ),
+            cap(res::PORT_IO, 0),
+            cap(res::THREAD, rights::READ | rights::WRITE),
+        ];
+        let w = project(&inert);
+        assert!(!is_set(w, CAP_KILL));
+        assert!(!is_set(w, CAP_SYS_PTRACE));
+        assert!(!is_set(w, CAP_SYS_RAWIO));
+        assert!(!is_set(w, CAP_SYS_NICE));
+    }
+
+    #[test]
+    fn test_predicates_do_not_leak_across_resource_types() {
+        // SIGNAL on an eventfd is not CAP_KILL; IO_REALTIME on a thread is
+        // not CAP_SYS_ADMIN's io-scheduler member.  Getting this wrong is
+        // the easy bug — the rights bits are shared across every type, so a
+        // predicate that forgets to check the type reads as true far too
+        // often.
+        const EVENTFD: u16 = 4;
+        let w = project(&[cap(EVENTFD, rights::SIGNAL | rights::DEBUG)]);
+        assert!(!is_set(w, CAP_KILL));
+        assert!(!is_set(w, CAP_SYS_PTRACE));
+        assert!(!is_set(w, CAP_SYS_ADMIN));
+
+        // Thread + IO_REALTIME is CAP_SYS_NICE, and must not also satisfy
+        // the IoScheduler member of the CAP_SYS_ADMIN union.
+        let w = project(&[cap(res::THREAD, rights::IO_REALTIME)]);
+        assert!(is_set(w, CAP_SYS_NICE));
+        assert!(!is_set(w, CAP_SYS_ADMIN));
+    }
+
+    #[test]
+    fn test_sys_admin_union_members() {
+        // Each member on its own must suffice — the union is an OR, and a
+        // member that never fires is a gate site with no way to pass.
+        for member in [
+            cap(res::NAMESPACE, rights::CREATE),
+            cap(res::NAMESPACE, rights::WRITE),
+            cap(res::NAMESPACE, rights::TRANSFER),
+            cap(res::FILE, rights::METADATA),
+            cap(res::IO_SCHEDULER, rights::IO_REALTIME),
+            cap(res::PROCESS, rights::DEBUG),
+            cap(res::PORT_IO, rights::WRITE),
+        ] {
+            assert!(
+                is_set(project(&[member]), CAP_SYS_ADMIN),
+                "union member {}/{:#x} did not grant CAP_SYS_ADMIN",
+                member.resource_type,
+                member.rights
+            );
+        }
+    }
+
+    #[test]
+    fn test_sys_admin_is_not_granted_by_ordinary_file_access() {
+        // The File member is METADATA — reshaping the filesystem — and must
+        // not be satisfied by a process that merely holds read/write access
+        // to files, which is nearly every process there is.  If this fires,
+        // CAP_SYS_ADMIN is universal again and §312 has been undone.
+        let w = project(&[cap(
+            res::FILE,
+            rights::READ | rights::WRITE | rights::CREATE,
+        )]);
+        assert!(!is_set(w, CAP_SYS_ADMIN));
+    }
+
+    #[test]
+    fn test_projection_narrows_capget_and_capset_still_drops() {
+        // The reported effective set is the AND of what the kernel grants
+        // and what the process has kept.  Both halves are load-bearing:
+        // without the projection `capget` reports libc's fiction, and
+        // without the stored words a refresh would silently undo a
+        // voluntary privilege drop.
+        let saved = current_caps();
+        store::clear_projection();
+
+        // No projection yet: the stored words are reported verbatim, which
+        // is the pre-§312 behaviour every existing test relies on.
+        assert_eq!(reported_caps_effective(), current_caps_effective());
+
+        // Kernel grants exactly CAP_KILL.
+        let (plo, phi) = project(&[cap(res::PROCESS, rights::SIGNAL)]);
+        store::store_projection(plo, phi);
+        let (lo, hi) = reported_caps_effective();
+        assert!(is_set((lo, hi), CAP_KILL));
+        assert!(!is_set((lo, hi), CAP_SYS_RAWIO), "not granted by the kernel");
+
+        // Now the process drops CAP_KILL itself.  Still not held.
+        let mut c = current_caps();
+        c.eff_lo &= !(1u32 << CAP_KILL);
+        set_current_caps(c);
+        assert!(!is_set(reported_caps_effective(), CAP_KILL));
+
+        store::clear_projection();
+        set_current_caps(saved);
+    }
+
+    #[test]
+    fn test_refresh_on_host_is_a_no_op() {
+        // The host build has no kernel: `syscall2` returns the ENOSYS
+        // sentinel, so `refresh` must report failure and change nothing.
+        // This is what keeps every pre-existing capability test in this
+        // crate meaningful — they assert against the permissive default and
+        // would be silently vacuous if the host started projecting.
+        let saved = current_caps();
+        store::clear_projection();
+        assert!(!super::kernel_view::refresh());
+        assert!(store::load_projection().is_none());
+        assert_eq!(reported_caps_effective(), current_caps_effective());
+        set_current_caps(saved);
+    }
+}
 
 #[cfg(test)]
 mod tests {

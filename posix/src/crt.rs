@@ -688,6 +688,19 @@ pub unsafe extern "C" fn __libc_start_main(
     // Until this runs the kernel applies signal default actions itself.
     crate::signal::init_signals();
 
+    // Ask the kernel which capabilities this process actually holds and
+    // project them onto Linux's capability words, so `capget()` reports the
+    // truth rather than libc's optimistic all-bits-set default
+    // (design-decisions.md §312).  It has to run before the ELF constructors:
+    // a constructor is entitled to call `capget()` to decide what to set up,
+    // and an answer that changes underneath it afterwards is worse than
+    // either answer on its own.
+    //
+    // A failure here is deliberately not fatal — see `kernel_view::refresh`.
+    // The libc gates are still advisory (§312 step 3), so an unanswered query
+    // leaves behaviour exactly as it was before this call existed.
+    let _ = crate::sys_capability::kernel_view::refresh();
+
     // Run ELF global constructors (.preinit_array then .init_array) and
     // arrange for destructors (.fini_array) to run at exit.  Constructors
     // must run after environ/signal setup (they may call getenv, install

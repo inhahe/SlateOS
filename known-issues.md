@@ -22473,7 +22473,33 @@ commit).
 TD-OILS-COND-ERROR-NEAR-IGNORES-THE-ALIAS-TEXT.
 
 
-### TD-POSIX-CAPS-ARE-NOT-THE-KERNEL'S. libc's Linux capability words start as "all caps held" and are never seeded from the process's real kernel capabilities — 🔷 **Q44 ANSWERED 2026-08-15 → §312; implementation staged, step 1 is Lane A's** — 2026-08-12
+### TD-POSIX-CAPS-ARE-NOT-THE-KERNEL'S. libc's Linux capability words start as "all caps held" and are never seeded from the process's real kernel capabilities — 🔷 **Q44 ANSWERED 2026-08-15 → §312; steps 1–2 DONE, step 3 (flipping the gates) OPEN** — 2026-08-12
+
+**Status: steps 1 and 2 of §312 are done; step 3 is the remainder and is what
+keeps this entry open.**
+
+- **Step 1 — an enumerating query syscall** (lane A). `SYS_CAP_QUERY` (400)
+  gained an enumerate mode: `arg0` a `CapEntryInfo` array, `arg1` its capacity
+  in entries, truncation reported as `BufferTooSmall`/`ERANGE` with nothing
+  written rather than as a short list. See
+  `requests/a-b-cap-query-enumeration-landed.md`.
+- **Step 2 — libc seeds its words from it** (lane B, 2026-08-16).
+  `posix/src/sys_capability.rs` → `mod kernel_view`: an ABI mirror of
+  `CapEntryInfo`, the `(ResourceType, Rights)` predicate table from §312, the
+  hand-written `CAP_SYS_ADMIN` union, and `refresh()`, which
+  `__libc_start_main` calls before the ELF constructors. `capget()` now reports
+  the kernel's answer **intersected with** whatever the process has dropped, so
+  a real `capset()` drop still binds and a later refresh cannot undo it.
+- **Step 3 — the gates are still advisory, and that is what is left.** The 63
+  libc gate sites still read the stored words through `has_capability()`, which
+  on the target still starts permissive. Flipping them is a one-line change
+  (point `has_capability` at `reported_caps_effective`), but it breaks every
+  fixture spawned `capabilities: &[]` — `services/ctest-jobctl`,
+  `self_test_cctty`, `self_test_cpgroup` — so it lands together with giving
+  those fixtures real capabilities, with QEMU free. `refresh()`'s
+  fail-soft-on-error behaviour also has to become fail-closed at that point:
+  while the gates are advisory, "we could not ask" and "you may" are the same
+  thing; once they are binding, they stop being.
 
 **What.** `posix/src/sys_capability.rs` keeps the three Linux capability sets
 (effective/permitted/inheritable) in its own store and initialises them from

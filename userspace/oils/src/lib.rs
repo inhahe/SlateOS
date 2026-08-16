@@ -28,7 +28,12 @@ pub mod bind_keys;
 pub mod bind_tables;
 pub mod brace;
 pub mod bytes;
-pub mod ere;
+/// The regex engine `[[ str =~ re ]]` matches with. It was a module here until
+/// `grep`, `sed`, `awk` and `expr` each turned out to be matching regular
+/// expressions with `str::contains`; it is now the `ere` crate, so the shell
+/// and the utilities cannot disagree about what a pattern means. Re-exported
+/// under its old path because that is still where a reader of osh looks.
+pub use ::ere;
 pub(crate) mod escape;
 pub mod histexpand;
 pub mod interp;

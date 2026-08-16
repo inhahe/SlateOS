@@ -1,0 +1,488 @@
+//! POSIX **Basic** Regular Expressions, by translation to Extended ones.
+//!
+//! BRE is what `grep`, `sed` and `expr` match when no `-E` is given, and it is
+//! not a subset of ERE — it is a different spelling of an overlapping language:
+//!
+//! | written | BRE means | ERE means |
+//! |---|---|---|
+//! | `a+b` | three literal characters | one-or-more `a`, then `b` |
+//! | `\(x\)` | a group | a literal `(x)` |
+//! | `(x)` | three literal characters | a group |
+//! | `a\{2\}` | two `a`s | a literal `a{2}` |
+//! | `*ab` | a literal `*`, then `ab` | invalid — nothing to repeat |
+//! | `a^b` | a literal `^` | an anchor that can never match |
+//!
+//! So a program cannot serve both dialects by having one parser be lenient.
+//! Translating is the cheaper half of the choice: the rules above are entirely
+//! syntactic, they are testable in isolation (a translation is a string, and a
+//! test can name the string it expects), and the *matching* — the part with the
+//! ReDoS bound and the leftmost-greedy rule and the byte-safe character model —
+//! stays in one engine with one set of behaviours.
+//!
+//! ## Where a translator has to be careful
+//!
+//! * **`*` is a literal where nothing precedes it** — at the start of the
+//!   pattern, right after `\(`, right after `\|`, and right after an anchoring
+//!   `^`. `grep '*'` searches for an asterisk; it is not an error.
+//! * **`^` anchors only at the start, `$` only at the end** (or against the
+//!   inside of a `\(…\)` / either side of a `\|`). `a^b` and `a$b` match those
+//!   characters literally, and famously match nothing else.
+//! * **Backslash is *not* special inside `[...]`.** `[\]` is a bracket holding
+//!   a backslash. The ERE engine this hands off to does honour escapes there,
+//!   so a backslash copied out of a bracket expression is doubled on the way.
+//! * **Backreferences (`\1`–`\9`) are refused, not mistranslated.** The engine
+//!   is a Pike VM, which cannot express them at all (that is the same property
+//!   that makes it immune to catastrophic backtracking). Passing `\1` through
+//!   would reach [`crate::engine`]'s escape rule and quietly become a literal
+//!   `1` — a wrong answer with no diagnostic, which is worse than a refusal.
+//!
+//! ## GNU spellings that are accepted
+//!
+//! `\|`, `\+` and `\?` are GNU extensions to BRE, not POSIX; `\w`, `\W`, `\s`
+//! and `\S` likewise. They are accepted because every `sed` script and `grep`
+//! pattern written in the last thirty years uses them, and because refusing
+//! them would leave no way at all to write alternation in a BRE. `\<`, `\>`,
+//! `\b` and `\B` are *refused* rather than accepted, because unlike the others
+//! they need a matcher feature (word boundaries) that the engine does not have,
+//! and there is no spelling that would quietly do the wrong thing.
+
+use crate::ch::{BStr, Ch, Str, chars};
+use crate::engine::{EreError, Regex};
+
+/// Compile a BRE, with `ci` selecting case-insensitive matching.
+///
+/// # Errors
+/// Returns the translation's error, or the ERE engine's, whichever stops first.
+pub fn compile(pattern: BStr<'_>, ci: bool) -> Result<Regex, EreError> {
+    let ere = to_ere(pattern)?;
+    Regex::new_flags(&ere, ci)
+}
+
+/// Translate a POSIX BRE into the equivalent ERE.
+///
+/// The result is a pattern for [`crate::engine`], not something to show a user:
+/// it is the same language, respelled.
+///
+/// # Errors
+/// Returns [`EreError`] for a trailing backslash, an unmatched `\(`, `\{` or
+/// `[`, a quantifier with nothing to repeat, or a construct the engine cannot
+/// express (a backreference or a word boundary).
+#[allow(clippy::too_many_lines)] // One flat dispatch over BRE's characters; splitting it would hide the table.
+pub fn to_ere(pattern: BStr<'_>) -> Result<Str, EreError> {
+    let cs: Vec<Ch> = chars(pattern).collect();
+    let mut out = Str::new();
+    let mut i = 0usize;
+    // Whether a quantifier written here would have something to apply to. This
+    // single flag carries both BRE rules that depend on position: `*` is a
+    // literal when it is false, and `^` anchors only when it is false.
+    let mut prev_atom = false;
+    // How deep in `\(` we are, so an unmatched one is reported rather than
+    // handed to the engine as a stray `(`.
+    let mut depth = 0usize;
+
+    while let Some(&c) = cs.get(i) {
+        match c.as_ascii() {
+            Some('\\') => {
+                let Some(&e) = cs.get(i.saturating_add(1)) else {
+                    return Err(EreError(b"trailing backslash in regex".to_vec()));
+                };
+                i = i.saturating_add(2);
+                match e.as_ascii() {
+                    Some('(') => {
+                        out.push(b'(');
+                        depth = depth.saturating_add(1);
+                        prev_atom = false;
+                    }
+                    Some(')') => {
+                        if depth == 0 {
+                            return Err(EreError(br"unmatched \)".to_vec()));
+                        }
+                        out.push(b')');
+                        depth = depth.saturating_sub(1);
+                        prev_atom = true;
+                    }
+                    Some('{') => {
+                        if !prev_atom {
+                            return Err(EreError(br"nothing to repeat before \{".to_vec()));
+                        }
+                        i = copy_interval(&cs, i, &mut out)?;
+                    }
+                    Some('}') => return Err(EreError(br"unmatched \}".to_vec())),
+                    Some('|') => {
+                        out.push(b'|');
+                        prev_atom = false;
+                    }
+                    Some(q @ ('+' | '?')) => {
+                        if !prev_atom {
+                            return Err(EreError(
+                                [b"nothing to repeat before \\".as_slice(), &[q as u8]].concat(),
+                            ));
+                        }
+                        out.push(q as u8);
+                    }
+                    // Perl-ish shorthands, written out as the bracket
+                    // expressions they abbreviate so the engine needs no new
+                    // syntax and the semantics are POSIX's own classes.
+                    Some('w') => {
+                        out.extend_from_slice(b"[[:alnum:]_]");
+                        prev_atom = true;
+                    }
+                    Some('W') => {
+                        out.extend_from_slice(b"[^[:alnum:]_]");
+                        prev_atom = true;
+                    }
+                    Some('s') => {
+                        out.extend_from_slice(b"[[:space:]]");
+                        prev_atom = true;
+                    }
+                    Some('S') => {
+                        out.extend_from_slice(b"[^[:space:]]");
+                        prev_atom = true;
+                    }
+                    Some(w @ ('<' | '>' | 'b' | 'B')) => {
+                        return Err(EreError(
+                            [
+                                b"word boundary \\".as_slice(),
+                                &[w as u8],
+                                b" is not supported",
+                            ]
+                            .concat(),
+                        ));
+                    }
+                    Some(d @ '1'..='9') => {
+                        return Err(EreError(
+                            [
+                                b"backreference \\".as_slice(),
+                                &[d as u8],
+                                b" is not supported",
+                            ]
+                            .concat(),
+                        ));
+                    }
+                    // Every other escape denotes a literal, and stays escaped so
+                    // that the engine reads it as one too.
+                    _ => {
+                        out.push(b'\\');
+                        e.push_to(&mut out);
+                        prev_atom = true;
+                    }
+                }
+            }
+            Some('^') => {
+                if prev_atom {
+                    out.extend_from_slice(br"\^");
+                    prev_atom = true;
+                } else {
+                    out.push(b'^');
+                    // An anchor is not an atom: `^*` is a literal asterisk.
+                    prev_atom = false;
+                }
+                i = i.saturating_add(1);
+            }
+            Some('$') => {
+                if ends_here(&cs, i) {
+                    out.push(b'$');
+                    prev_atom = false;
+                } else {
+                    out.extend_from_slice(br"\$");
+                    prev_atom = true;
+                }
+                i = i.saturating_add(1);
+            }
+            Some('*') => {
+                if prev_atom {
+                    out.push(b'*');
+                } else {
+                    out.extend_from_slice(br"\*");
+                    prev_atom = true;
+                }
+                i = i.saturating_add(1);
+            }
+            Some('.') => {
+                out.push(b'.');
+                prev_atom = true;
+                i = i.saturating_add(1);
+            }
+            Some('[') => {
+                i = copy_bracket(&cs, i, &mut out)?;
+                prev_atom = true;
+            }
+            // Plain characters in BRE that are metacharacters in ERE. They have
+            // to be escaped on the way out or the engine would read a group, a
+            // quantifier or an alternation that the pattern never wrote.
+            Some(m @ ('(' | ')' | '{' | '}' | '+' | '?' | '|')) => {
+                out.push(b'\\');
+                out.push(m as u8);
+                prev_atom = true;
+                i = i.saturating_add(1);
+            }
+            _ => {
+                c.push_to(&mut out);
+                prev_atom = true;
+                i = i.saturating_add(1);
+            }
+        }
+    }
+
+    if depth != 0 {
+        return Err(EreError(br"unmatched \(".to_vec()));
+    }
+    Ok(out)
+}
+
+/// Whether the `$` at `i` is in the position that makes it an anchor: the end
+/// of the pattern, or immediately before `\)` or `\|`.
+fn ends_here(cs: &[Ch], i: usize) -> bool {
+    let next = i.saturating_add(1);
+    match (cs.get(next), cs.get(next.saturating_add(1))) {
+        (None, _) => true,
+        (Some(a), Some(b)) => {
+            a.as_ascii() == Some('\\') && matches!(b.as_ascii(), Some(')' | '|'))
+        }
+        _ => false,
+    }
+}
+
+/// Copy a `\{m,n\}` interval starting at the `\{` whose backslash is at
+/// `i - 2`, emitting the ERE `{m,n}`. Returns the index just past the `\}`.
+///
+/// `cs[i]` is the character after `\{`. The contents are copied rather than
+/// parsed into numbers: the engine validates the interval (and enforces its
+/// repetition cap), and doing it twice would give two places for the rules to
+/// disagree.
+fn copy_interval(cs: &[Ch], i: usize, out: &mut Str) -> Result<usize, EreError> {
+    let mut j = i;
+    let mut body = Str::new();
+    loop {
+        let Some(&c) = cs.get(j) else {
+            return Err(EreError(br"unmatched \{".to_vec()));
+        };
+        if c.as_ascii() == Some('\\') && cs.get(j.saturating_add(1)).and_then(|n| n.as_ascii()) == Some('}') {
+            out.push(b'{');
+            out.extend_from_slice(&body);
+            out.push(b'}');
+            return Ok(j.saturating_add(2));
+        }
+        c.push_to(&mut body);
+        j = j.saturating_add(1);
+    }
+}
+
+/// Copy a bracket expression starting at the `[` at `i`, verbatim except that a
+/// backslash inside it is doubled. Returns the index just past the closing `]`.
+///
+/// The doubling is the whole reason this is not a plain copy. POSIX says
+/// backslash is an ordinary character inside a bracket expression — `[\]` holds
+/// one — but [`crate::engine`] reads escapes there, so an undoubled backslash
+/// would make `[\]]` a bracket holding `]` instead of a bracket holding `\`
+/// followed by a literal `]`.
+///
+/// `]` as the first member (`[]abc]`, `[^]abc]`) is a literal, and `[:alpha:]`,
+/// `[.coll.]` and `[=equiv=]` may contain a `]` of their own — all three are
+/// why the end of a bracket expression cannot be found by scanning for `]`.
+fn copy_bracket(cs: &[Ch], i: usize, out: &mut Str) -> Result<usize, EreError> {
+    let unmatched = || EreError(b"unmatched [ in regex".to_vec());
+    let mut j = i.saturating_add(1);
+    out.push(b'[');
+    if cs.get(j).and_then(|c| c.as_ascii()) == Some('^') {
+        out.push(b'^');
+        j = j.saturating_add(1);
+    }
+    if cs.get(j).and_then(|c| c.as_ascii()) == Some(']') {
+        out.push(b']');
+        j = j.saturating_add(1);
+    }
+    loop {
+        let Some(&c) = cs.get(j) else { return Err(unmatched()) };
+        match c.as_ascii() {
+            Some(']') => {
+                out.push(b']');
+                return Ok(j.saturating_add(1));
+            }
+            Some('[') => {
+                // `[:class:]` and friends: only when the delimiter is one of
+                // the three POSIX ones, else `[` is just a member.
+                let delim = cs.get(j.saturating_add(1)).and_then(|c| c.as_ascii());
+                if let Some(d @ (':' | '.' | '=')) = delim {
+                    j = copy_class(cs, j, d, out).ok_or_else(unmatched)?;
+                } else {
+                    out.push(b'[');
+                    j = j.saturating_add(1);
+                }
+            }
+            Some('\\') => {
+                out.extend_from_slice(br"\\");
+                j = j.saturating_add(1);
+            }
+            _ => {
+                c.push_to(out);
+                j = j.saturating_add(1);
+            }
+        }
+    }
+}
+
+/// Copy a `[:class:]` / `[.coll.]` / `[=equiv=]` starting at the `[` at `j`.
+/// Returns the index just past its `]`, or `None` if it never closes.
+fn copy_class(cs: &[Ch], j: usize, delim: char, out: &mut Str) -> Option<usize> {
+    let mut k = j.saturating_add(2);
+    let mut body = Str::new();
+    loop {
+        let &c = cs.get(k)?;
+        if c.as_ascii() == Some(delim) && cs.get(k.saturating_add(1)).and_then(|n| n.as_ascii()) == Some(']') {
+            out.push(b'[');
+            out.push(delim as u8);
+            out.extend_from_slice(&body);
+            out.push(delim as u8);
+            out.push(b']');
+            return Some(k.saturating_add(2));
+        }
+        c.push_to(&mut body);
+        k = k.saturating_add(1);
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::panic)]
+mod tests {
+    use super::*;
+
+    fn t(bre: &str) -> String {
+        String::from_utf8(to_ere(bre.as_bytes()).unwrap()).unwrap()
+    }
+
+    fn err(bre: &str) -> String {
+        String::from_utf8(to_ere(bre.as_bytes()).unwrap_err().0).unwrap()
+    }
+
+    fn m(bre: &str, subject: &str) -> bool {
+        compile(bre.as_bytes(), false).unwrap().is_match(subject.as_bytes())
+    }
+
+    #[test]
+    fn ere_metacharacters_are_literal_in_a_bre() {
+        assert_eq!(t("a+b"), r"a\+b");
+        assert_eq!(t("a?b"), r"a\?b");
+        assert_eq!(t("a|b"), r"a\|b");
+        assert_eq!(t("(x)"), r"\(x\)");
+        assert_eq!(t("a{2}"), r"a\{2\}");
+        assert!(m("a+b", "a+b"));
+        assert!(!m("a+b", "aab"));
+    }
+
+    #[test]
+    fn backslashed_metacharacters_are_the_operators() {
+        assert_eq!(t(r"\(ab\)\{2\}"), "(ab){2}");
+        assert_eq!(t(r"a\|b"), "a|b");
+        assert_eq!(t(r"a\+"), "a+");
+        assert_eq!(t(r"a\?"), "a?");
+        assert!(m(r"\(ab\)\{2\}", "xababy"));
+        assert!(!m(r"\(ab\)\{2\}", "xabay"));
+        assert!(m(r"^ab\|^cd", "cdx"));
+    }
+
+    #[test]
+    fn a_star_with_nothing_before_it_is_an_asterisk() {
+        // Every position where BRE says there is nothing to repeat.
+        assert_eq!(t("*ab"), r"\*ab");
+        assert_eq!(t("^*ab"), r"^\*ab");
+        assert_eq!(t(r"\(*a\)"), r"(\*a)");
+        assert_eq!(t(r"a\|*b"), r"a|\*b");
+        assert!(m("*", "a*b"));
+        assert!(!m("*", "ab"));
+        // …and where there is one, it is the quantifier.
+        assert_eq!(t("ab*c"), "ab*c");
+        assert!(m("ab*c", "ac"));
+    }
+
+    #[test]
+    fn anchors_anchor_only_at_the_ends() {
+        assert_eq!(t("^ab$"), "^ab$");
+        assert_eq!(t("a^b"), r"a\^b");
+        assert_eq!(t("a$b"), r"a\$b");
+        assert!(m("a^b", "xa^by"));
+        assert!(m("a$b", "xa$by"));
+        assert!(!m("^posix", "xposix"));
+        assert!(m("^posix", "posix on"));
+        // Against the inside of a group, and either side of an alternation,
+        // they are anchors again.
+        assert_eq!(t(r"\(^a$\)"), "(^a$)");
+        assert_eq!(t(r"a$\|^b"), "a$|^b");
+    }
+
+    #[test]
+    fn a_bracket_expression_is_copied_with_its_own_rules() {
+        assert_eq!(t("[a-z]"), "[a-z]");
+        assert_eq!(t("[^]a]"), "[^]a]");
+        assert_eq!(t("[]a]"), "[]a]");
+        assert_eq!(t("[[:digit:]]"), "[[:digit:]]");
+        // `+` and `*` inside a bracket are members, not operators, so they must
+        // not pick up the escaping the outside gets.
+        assert_eq!(t("[+*]"), "[+*]");
+        assert!(m("[ax]bc", "abc"));
+        assert!(m("[ax]bc", "xbc"));
+        assert!(!m("[ax]bc", "zbc"));
+        assert!(m("^[[:space:]]*x", "   x"));
+    }
+
+    #[test]
+    fn a_backslash_inside_a_bracket_is_a_member() {
+        // POSIX: no escapes inside `[...]`. The engine has them, so the
+        // translation doubles it — `[\]` is a bracket holding a backslash and
+        // `[\]]` is that followed by a literal `]`.
+        assert_eq!(t(r"[\]"), r"[\\]");
+        assert!(m(r"[\]", r"a\b"));
+        assert!(!m(r"[\]", "ab"));
+    }
+
+    #[test]
+    fn shorthand_classes_expand_to_posix_ones() {
+        assert_eq!(t(r"\w\+"), "[[:alnum:]_]+");
+        assert_eq!(t(r"\s"), "[[:space:]]");
+        assert_eq!(t(r"\W"), "[^[:alnum:]_]");
+        assert_eq!(t(r"\S"), "[^[:space:]]");
+        assert!(m(r"^\w\w*$", "ab_1"));
+        assert!(!m(r"^\w\w*$", "a b"));
+    }
+
+    #[test]
+    fn what_the_engine_cannot_express_is_refused_not_mistranslated() {
+        // A backreference would otherwise reach the engine's escape rule and
+        // become a literal digit — a wrong answer with no diagnostic.
+        assert!(err(r"\(a\)\1").contains("backreference"));
+        assert!(err(r"\<word\>").contains("word boundary"));
+        assert!(err(r"a\").contains("trailing backslash"));
+        assert!(err(r"\(a").contains(r"unmatched \("));
+        assert!(err(r"a\)").contains(r"unmatched \)"));
+        assert!(err(r"a\{2").contains(r"unmatched \{"));
+        assert!(err("[a").contains("unmatched ["));
+        assert!(err(r"\{2\}").contains("nothing to repeat"));
+        assert!(err(r"\+x").contains("nothing to repeat"));
+    }
+
+    #[test]
+    fn an_escaped_ordinary_character_stays_a_literal() {
+        assert_eq!(t(r"a\.c"), r"a\.c");
+        assert_eq!(t(r"a\\c"), r"a\\c");
+        assert!(m(r"a\.c", "a.c"));
+        assert!(!m(r"a\.c", "axc"));
+        assert!(m(r"a\\c", r"a\c"));
+    }
+
+    #[test]
+    fn a_pattern_that_is_not_text_survives_the_translation() {
+        // The subject and the pattern are both byte strings; an undecodable
+        // byte is one character and denotes itself.
+        let pat = b"a\xffb*";
+        let re = compile(pat, false).unwrap();
+        assert!(re.is_match(b"xa\xffbbby"));
+        assert!(re.is_match(b"a\xff"));
+        assert!(!re.is_match(b"ab"));
+    }
+
+    #[test]
+    fn case_folding_reaches_the_translated_pattern() {
+        assert!(compile(b"^[a-z]*$", true).unwrap().is_match(b"ABC"));
+        assert!(compile(br"\(ab\)\{2\}", true).unwrap().is_match(b"ABAB"));
+    }
+}

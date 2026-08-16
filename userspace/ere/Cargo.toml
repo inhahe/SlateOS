@@ -1,0 +1,19 @@
+[package]
+name = "ere"
+version = "0.1.0"
+edition = "2024"
+description = "POSIX regular expressions (BRE and ERE) over byte strings, for the shell and the utilities that must agree with it."
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+# The same `bstr` the shell uses, for one thing only: `char_indices`, whose
+# lossy decode plus the span it covers is what lets `ch` tell "the value really
+# holds U+FFFD" apart from "this byte decodes to nothing". Re-deriving that by
+# hand would be a second UTF-8 decoder that has to agree with the shell's
+# exactly, which is the kind of divergence this crate exists to prevent.
+bstr = { version = "1.13.0", default-features = false, features = ["std"] }
+
+[lints]
+workspace = true

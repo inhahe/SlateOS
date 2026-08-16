@@ -2845,6 +2845,13 @@ name = "epicgames-cli"
 version = "0.1.0"
 
 [[package]]
+name = "ere"
+version = "0.1.0"
+dependencies = [
+ "bstr",
+]
+
+[[package]]
 name = "erlang-cli"
 version = "0.1.0"
 
@@ -7223,6 +7230,7 @@ name = "oils"
 version = "0.1.0"
 dependencies = [
  "bstr",
+ "ere",
  "tzrules",
 ]
 

@@ -76,7 +76,7 @@ fn substitute(face: &Face, script: Option<ScriptTags>, gids: &[u16]) -> Vec<SubG
         .enumerate()
         .map(|(i, &gid)| SubGlyph::new(gid, i))
         .collect();
-    face.substitute(script, &mut glyphs);
+    face.substitute(script, None, &mut glyphs);
     glyphs
 }
 

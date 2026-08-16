@@ -38,6 +38,28 @@
 //! script then names no features at all — script selection and feature
 //! selection are separate steps, and only the first falls back.
 //!
+//! # Language selection
+//!
+//! A script table holds a *default* language system and any number of named
+//! ones, and the named ones are how a face says "Turkish is different here".
+//! [`select`] takes the run's language, and inside the chosen script prefers
+//! that language's LangSysRecord over the default.
+//!
+//! Only the *script* falls back. If the run names a language the chosen script
+//! does not register, the default language system of that script answers — not
+//! the same language under some other script, and not `DFLT`'s. This is
+//! HarfBuzz's order in `hb_ot_layout_table_select_script` /
+//! `hb_ot_layout_script_select_language`, and it is the only order that makes
+//! sense: a face that files Turkish rules under `latn` is talking about Latin
+//! text, and reaching them from a Cyrillic run would apply them to the wrong
+//! alphabet.
+//!
+//! Selections identical to their script's default are not stored. On the
+//! development host's 581 faces, 3031 LangSysRecords exist and only 996 of
+//! them change a feature this crate asks for; keeping the other two thirds
+//! would cost memory to answer every query with the default anyway. Falling
+//! through to the default entry gives the same answer.
+//!
 //! # Feature masks
 //!
 //! Every lookup comes back paired with a mask saying which of the requested
@@ -50,16 +72,6 @@
 //!
 //! # What is not here
 //!
-//! **Language selection.** Only the DefaultLangSys of the chosen script is
-//! used; the LangSysRecords, which hold the per-language overrides (Turkish
-//! dotless i, Serbian Cyrillic italics), are skipped. That needs a language
-//! to come down from the caller, which nothing above this crate tracks yet.
-//! Tracked as `TD-FONT-IGNORES-LANGSYS-OVERRIDES`.
-//!
-//! **Required features.** A LangSys may name one feature as required, outside
-//! its feature index list. Nothing in the tag sets this crate asks for is ever
-//! registered that way in practice, but skipping it is a real gap.
-//!
 //! **Script selection for `GPOS`.** Only `GSUB` selects per run, through
 //! [`ByScript`]. Kerning and mark attachment take the union over every script,
 //! through [`feature_subtables`], because they are consulted a glyph pair at a
@@ -68,8 +80,22 @@
 
 use alloc::vec::Vec;
 
+use crate::lang::Lang;
 use crate::script::ScriptTags;
 use crate::sfnt::{u16_at, u32_at};
+
+/// The key under which a script's *default* language system is filed in
+/// [`ByScript::scripts`].
+///
+/// Four NUL bytes, which no [`Lang`] can be — it only accepts printable ASCII
+/// — so a font that registered a LangSysRecord tagged with NULs could not
+/// collide with it even in principle. Sorting first within a script is
+/// incidental but convenient: the default is what the binary search for
+/// "is this script registered at all?" looks for.
+const DEFAULT_LANG: [u8; 4] = [0; 4];
+
+/// `requiredFeatureIndex`'s "there isn't one" value.
+const NO_REQUIRED_FEATURE: u16 = 0xFFFF;
 
 /// A lookup, named by number, and the mask of the feature tags that reached
 /// it.
@@ -79,27 +105,34 @@ use crate::sfnt::{u16_at, u32_at};
 /// translation happens exactly once, at the end of [`ByScript::parse`].
 type Masked = (u16, u64);
 
-/// One script's tag and the lookups it selects, each with its mask.
-type Selection = ([u8; 4], Vec<Masked>);
+/// A script tag paired with a language system tag, or [`DEFAULT_LANG`] for the
+/// script's default language system.
+type Key = ([u8; 4], [u8; 4]);
 
-/// A resolved script: where its DefaultLangSys is, and where the FeatureList
-/// that its indices point into begins.
+/// One (script, language) pair and the lookups it selects, each with its mask.
+type Selection = (Key, Vec<Masked>);
+
+/// A resolved script and language: where the governing LangSys is, and where
+/// the FeatureList that its indices point into begins.
 ///
-/// `lang_sys` is `None` when the script table was found but names no default
-/// language system. That is not the same as not finding the script at all: the
-/// script *was* chosen, and having chosen it the run gets the features it
-/// names, which is none. See [`select`].
+/// `lang_sys` is `None` when the script table was found but names no language
+/// system that answers — no record for the language asked for, and no
+/// DefaultLangSys either. That is not the same as not finding the script at
+/// all: the script *was* chosen, and having chosen it the run gets the features
+/// it names, which is none. See [`select`].
 #[derive(Clone, Copy, Debug)]
 struct LangSys {
     lang_sys: Option<usize>,
     feature_list: usize,
 }
 
-/// Find the LangSys that governs a run of `script`, following OpenType's
-/// fallback chain.
+/// Find the LangSys that governs a run of `script` written in `lang`, following
+/// OpenType's fallback chain.
 ///
 /// `script` is `None` for a run with no script of its own — all digits and
-/// punctuation — which goes straight to the default entries.
+/// punctuation — which goes straight to the default entries. `lang` is `None`
+/// for text that names no language, which is the default and is what every
+/// caller that does not know better passes.
 ///
 /// The chain stops at the first script tag the ScriptList *has*, whether or not
 /// that script table turns out to offer anything. Selecting the script and
@@ -109,8 +142,18 @@ struct LangSys {
 /// under `MOL ` and `ROM ` alone — is saying its Latin text gets no features,
 /// not that its Latin text should be shaped as `DFLT`. Reading on to `DFLT`
 /// there would attach marks the font deliberately declines to attach.
-fn select(data: &[u8], base: usize, script: Option<ScriptTags>) -> Option<LangSys> {
-    let script_list = base.checked_add(usize::from(u16_at(data, base.checked_add(4)?)?))?;
+///
+/// The language does not move the script chain along either. A run of Turkish
+/// in a face whose `latn` script registers no `TRK ` gets `latn`'s default
+/// language system, not `DFLT`'s and not some other script's `TRK `: the face
+/// has said its Latin text has no Turkish variation, and that is an answer.
+fn select(
+    data: &[u8],
+    base: usize,
+    script: Option<ScriptTags>,
+    lang: Option<Lang>,
+) -> Option<LangSys> {
+    let script_list = script_list(data, base)?;
     let feature_list = base.checked_add(usize::from(u16_at(data, base.checked_add(6)?)?))?;
 
     // Order matters and is the whole of the policy: the run's own script
@@ -122,14 +165,21 @@ fn select(data: &[u8], base: usize, script: Option<ScriptTags>) -> Option<LangSy
         let Some(script_table) = find_script(data, script_list, &want) else {
             continue;
         };
-        // A script table may exist and still have no default language system.
-        // The run has been placed under this script all the same, and gets the
-        // no features that its default language system names.
-        let off = u16_at(data, script_table)?;
+        // The named language system if the script registers one, and otherwise
+        // the script's default. A script table may have neither: the run has
+        // been placed under this script all the same, and gets the no features
+        // that answers.
+        let lang_sys = match lang.and_then(|l| find_lang_sys(data, script_table, &l.tag())) {
+            found @ Some(_) => found,
+            None => {
+                let off = u16_at(data, script_table)?;
+                (off != 0)
+                    .then(|| script_table.checked_add(usize::from(off)))
+                    .flatten()
+            }
+        };
         return Some(LangSys {
-            lang_sys: (off != 0)
-                .then(|| script_table.checked_add(usize::from(off)))
-                .flatten(),
+            lang_sys,
             feature_list,
         });
     }
@@ -165,6 +215,11 @@ fn fallback_chain(script: Option<ScriptTags>) -> impl Iterator<Item = [u8; 4]> {
     .flatten()
 }
 
+/// Where a `GSUB`/`GPOS` table's ScriptList begins.
+fn script_list(data: &[u8], base: usize) -> Option<usize> {
+    base.checked_add(usize::from(u16_at(data, base.checked_add(4)?)?))
+}
+
 /// Where the ScriptTable for `want` begins, if the ScriptList has one.
 fn find_script(data: &[u8], script_list: usize, want: &[u8; 4]) -> Option<usize> {
     let count = u16_at(data, script_list)?;
@@ -176,6 +231,53 @@ fn find_script(data: &[u8], script_list: usize, want: &[u8; 4]) -> Option<usize>
         return script_list.checked_add(usize::from(u16_at(data, rec.checked_add(4)?)?));
     }
     None
+}
+
+/// Where the LangSys table `want` names begins, if this script table registers
+/// it.
+///
+/// A ScriptTable is a 2-byte offset to its DefaultLangSys, a 2-byte count, and
+/// then that many 6-byte records of tag-plus-offset. The spec requires the
+/// records to be sorted by tag, and this scans them linearly anyway: fonts that
+/// violate it exist, the lists are a handful of entries, and this runs once per
+/// script per face rather than per run.
+fn find_lang_sys(data: &[u8], script_table: usize, want: &[u8; 4]) -> Option<usize> {
+    let count = u16_at(data, script_table.checked_add(2)?)?;
+    for i in 0..usize::from(count) {
+        let rec = script_table.checked_add(4)?.checked_add(i.checked_mul(6)?)?;
+        if data.get(rec..rec.checked_add(4)?)? != want.as_slice() {
+            continue;
+        }
+        return script_table.checked_add(usize::from(u16_at(data, rec.checked_add(4)?)?));
+    }
+    None
+}
+
+/// Every language system tag a script table registers, in file order.
+///
+/// Only [`ByScript::parse`] needs this: it resolves every language a face
+/// offers up front, so that shaping a run is a binary search rather than a
+/// walk of the ScriptList.
+fn lang_sys_tags(data: &[u8], script_table: usize) -> Vec<[u8; 4]> {
+    let Some(count) = script_table
+        .checked_add(2)
+        .and_then(|at| u16_at(data, at))
+    else {
+        return Vec::new();
+    };
+    let mut out = Vec::with_capacity(usize::from(count));
+    for i in 0..usize::from(count) {
+        let Some(tag) = script_table
+            .checked_add(4)
+            .and_then(|o| i.checked_mul(6).and_then(|d| o.checked_add(d)))
+            .and_then(|rec| rec.checked_add(4).and_then(|e| data.get(rec..e)))
+            .and_then(|s| <[u8; 4]>::try_from(s).ok())
+        else {
+            continue;
+        };
+        out.push(tag);
+    }
+    out
 }
 
 /// A limit on how many subtables are followed in total, so that a corrupt or
@@ -314,10 +416,17 @@ pub(crate) struct ByScript {
     /// Every lookup any script reaches, in LookupList order — which is the
     /// order they must be applied in.
     lookups: Vec<Lookup>,
-    /// Script tag to the positions in `lookups` it selects, each with the
-    /// mask of the feature tags that reached it; sorted by tag so a run can
-    /// find its own with a binary search. Positions are ascending, so applying
-    /// them in order is applying them in LookupList order.
+    /// (script tag, language tag) to the positions in `lookups` it selects,
+    /// each with the mask of the feature tags that reached it; sorted by key so
+    /// a run can find its own with a binary search. Positions are ascending, so
+    /// applying them in order is applying them in LookupList order.
+    ///
+    /// Every script the face registers has an entry under [`DEFAULT_LANG`],
+    /// even when it selects nothing — that entry is what says the script
+    /// exists, and stops the fallback chain. A named language appears only
+    /// when it selects something *different* from that default; two thirds of
+    /// the LangSysRecords on the development host do not, and storing them
+    /// would be storing a second copy of the answer already there.
     ///
     /// The mask is per *script* rather than stored on the [`Lookup`] because
     /// one lookup may be reached by different features under different
@@ -350,23 +459,43 @@ impl ByScript {
         let lookup_list = lookup_list(data, base)?;
         let lookup_count = u16_at(data, lookup_list)?;
 
-        // Which lookups each script selects, and the union of all of them.
+        // Which lookups each (script, language) selects, and the union of all
+        // of them.
+        let script_list = script_list(data, base)?;
         let mut selected: Vec<Selection> = Vec::new();
         let mut union: Vec<u16> = Vec::new();
         for tag in script_tags(data, base)? {
             // A script is asked for under its own tag exactly: the fallback
             // chain belongs to the *run*, in `for_script`, and applying it
             // here would file `DFLT`'s lookups under every script's name.
-            let Some((_, indices)) = lookup_indices(data, base, tags, Some(ScriptTags::exactly(tag))) else {
+            let exactly = Some(ScriptTags::exactly(tag));
+            let Some((_, default)) = lookup_indices(data, base, tags, exactly, None) else {
                 continue;
             };
-            union.extend(
-                indices
-                    .iter()
-                    .map(|&(i, _)| i)
-                    .filter(|&i| i < lookup_count),
-            );
-            selected.push((tag, indices));
+            union.extend(default.iter().map(|&(i, _)| i).filter(|&i| i < lookup_count));
+
+            // Then every language this script names, skipping the ones that
+            // come out identical to the default — which is most of them, and
+            // which `for_script` answers from the default entry anyway.
+            for lang in find_script(data, script_list, &tag)
+                .map(|table| lang_sys_tags(data, table))
+                .unwrap_or_default()
+            {
+                if lang == DEFAULT_LANG {
+                    continue;
+                }
+                let Some((_, indices)) =
+                    lookup_indices(data, base, tags, exactly, Some(Lang::from_tag(lang)))
+                else {
+                    continue;
+                };
+                if indices == default {
+                    continue;
+                }
+                union.extend(indices.iter().map(|&(i, _)| i).filter(|&i| i < lookup_count));
+                selected.push(((tag, lang), indices));
+            }
+            selected.push(((tag, DEFAULT_LANG), default));
         }
         union.sort_unstable();
         union.dedup();
@@ -405,7 +534,7 @@ impl ByScript {
         }
 
         let mut scripts: Vec<Selection> = Vec::new();
-        for (tag, indices) in selected {
+        for (key, indices) in selected {
             // `indices` is ascending and deduplicated, and `at` ascends in
             // both columns, so the result is ascending and unique too.
             let positions: Vec<Masked> = indices
@@ -420,12 +549,12 @@ impl ByScript {
             // nothing: having been chosen, the script's own answer — none —
             // is the run's answer, and reading on to `DFLT` would apply rules
             // the font filed under another script entirely.
-            scripts.push((tag, positions));
+            scripts.push((key, positions));
         }
         if lookups.is_empty() {
             return None;
         }
-        scripts.sort_unstable_by_key(|&(tag, _)| tag);
+        scripts.sort_unstable_by_key(|&(key, _)| key);
         Some(Self { lookups, scripts })
     }
 
@@ -437,8 +566,8 @@ impl ByScript {
         &self.lookups
     }
 
-    /// The lookups that apply to a run of `script`, in the order they run,
-    /// each with the mask of the feature tags that reached it.
+    /// The lookups that apply to a run of `script` written in `lang`, in the
+    /// order they run, each with the mask of the feature tags that reached it.
     ///
     /// Follows the same fallback chain as [`select`]: the run's script, its
     /// older OpenType spelling, then the two default tags — and stops at the
@@ -446,24 +575,47 @@ impl ByScript {
     /// anything. An empty iterator means this face has nothing for the run,
     /// which is a normal answer — and the right one, since the alternative is
     /// applying another script's rules to it.
+    ///
+    /// `lang` is looked up only *within* the chosen script, and a script that
+    /// does not register it answers with its default. See the module's
+    /// "Language selection" for why the language must not move the chain along.
     pub(crate) fn for_script(
         &self,
         script: Option<ScriptTags>,
+        lang: Option<Lang>,
     ) -> impl Iterator<Item = (&Lookup, u64)> {
+        let want_lang = lang.map_or(DEFAULT_LANG, Lang::tag);
         let positions = fallback_chain(script)
-            .find_map(|want| {
-                self.scripts
-                    .binary_search_by_key(&want, |&(tag, _)| tag)
-                    .ok()
-                    .and_then(|i| self.scripts.get(i))
-                    .map(|(_, positions)| positions.as_slice())
-            })
+            .find_map(|want| self.selection(want, want_lang))
             .unwrap_or(&[]);
         positions
             .iter()
             .filter_map(|&(at, mask)| Some((self.lookups.get(usize::from(at))?, mask)))
     }
 
+    /// What script `tag` selects for a run in `lang`, or `None` if this face
+    /// does not register that script at all.
+    ///
+    /// The two searches are not interchangeable. The first decides whether the
+    /// *script* answers, and so whether the caller's fallback chain stops here;
+    /// only then does the second ask whether this script has anything specific
+    /// to say about the language. A face registering `latn` but no `TRK ` under
+    /// it stops the chain and answers with `latn`'s default — it has said its
+    /// Latin text does not vary by language.
+    fn selection(&self, tag: [u8; 4], lang: [u8; 4]) -> Option<&[Masked]> {
+        let default = self
+            .scripts
+            .binary_search_by_key(&(tag, DEFAULT_LANG), |&(key, _)| key)
+            .ok()?;
+        if lang != DEFAULT_LANG
+            && let Ok(i) = self
+                .scripts
+                .binary_search_by_key(&(tag, lang), |&(key, _)| key)
+        {
+            return self.scripts.get(i).map(|(_, p)| p.as_slice());
+        }
+        self.scripts.get(default).map(|(_, p)| p.as_slice())
+    }
 }
 
 /// The tag a table whose ScriptList names `names` is chosen under for a run of
@@ -502,7 +654,7 @@ pub(crate) fn chosen_from(names: &[[u8; 4]], script: Option<ScriptTags>) -> Opti
 
 /// Every script tag the table's ScriptList registers, in file order.
 pub(crate) fn script_tags(data: &[u8], base: usize) -> Option<Vec<[u8; 4]>> {
-    let script_list = base.checked_add(usize::from(u16_at(data, base.checked_add(4)?)?))?;
+    let script_list = script_list(data, base)?;
     let count = u16_at(data, script_list)?;
     let mut out = Vec::with_capacity(usize::from(count));
     for i in 0..usize::from(count) {
@@ -554,6 +706,50 @@ pub(crate) fn lookup_at(
     read_lookup(data, lookup, want, extension, budget)
 }
 
+/// The FeatureList indices one LangSys names, required feature first.
+///
+/// A LangSys is `lookupOrder` (reserved), `requiredFeatureIndex`,
+/// `featureIndexCount`, then that many indices. The required feature is named
+/// *outside* the list and is nothing like the others: it is on unconditionally
+/// for this language, it cannot be turned off, and a shaper that reads only the
+/// list never sees it. `0xFFFF` means there is none, which is the overwhelming
+/// majority.
+///
+/// It comes back first because it is applied like any other feature once found
+/// — the caller sorts by lookup index anyway — and putting it first is the only
+/// order that reads as "this one is not optional".
+///
+/// Empty for `None`, which is a script that names no language system at all.
+fn feature_indices(data: &[u8], lang_sys: Option<usize>) -> Vec<u16> {
+    let Some(at) = lang_sys else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    if let Some(req) = at.checked_add(2).and_then(|o| u16_at(data, o))
+        && req != NO_REQUIRED_FEATURE
+    {
+        out.push(req);
+    }
+    let count = at
+        .checked_add(4)
+        .and_then(|o| u16_at(data, o))
+        .unwrap_or(0);
+    out.reserve(usize::from(count));
+    for i in 0..usize::from(count) {
+        // A truncated array is corruption, not a reason to abandon what was
+        // read: the entries before the cut are still the font's own answer.
+        let Some(idx) = at
+            .checked_add(6)
+            .and_then(|o| i.checked_mul(2).and_then(|d| o.checked_add(d)))
+            .and_then(|o| u16_at(data, o))
+        else {
+            continue;
+        };
+        out.push(idx);
+    }
+    out
+}
+
 /// Which lookups the features tagged `tags` use, each with the mask of the
 /// tags that reached it, and where the LookupList is.
 ///
@@ -573,29 +769,21 @@ fn lookup_indices(
     base: usize,
     tags: &[&[u8; 4]],
     script: Option<ScriptTags>,
+    lang: Option<Lang>,
 ) -> Option<(usize, Vec<Masked>)> {
     let lookup_list = lookup_list(data, base)?;
     let LangSys {
         lang_sys,
         feature_list,
-    } = select(data, base, script)?;
+    } = select(data, base, script, lang)?;
 
     // The LangSys names features by index into the FeatureList, and *only*
     // those features apply to this run. This indirection is the whole point of
     // the ScriptList: the FeatureList is the font's whole inventory, and a
     // language system picks its subset out of it. No LangSys at all means the
     // script names no features, which is an answer and not a failure.
-    let feature_count = lang_sys
-        .and_then(|at| at.checked_add(4))
-        .and_then(|at| u16_at(data, at))
-        .unwrap_or(0);
     let mut indices = Vec::new();
-    for i in 0..usize::from(feature_count) {
-        let Some(lang_sys) = lang_sys else { break };
-        let at = lang_sys.checked_add(6)?.checked_add(i.checked_mul(2)?)?;
-        let Some(feature_index) = u16_at(data, at) else {
-            continue;
-        };
+    for feature_index in feature_indices(data, lang_sys) {
         let Some(rec) = feature_list
             .checked_add(2)
             .and_then(|o| o.checked_add(usize::from(feature_index).checked_mul(6)?))

@@ -55,6 +55,8 @@ mod indic_tables;
 mod joining;
 mod joining_tables;
 mod kern;
+pub mod lang;
+mod lang_tables;
 mod mark;
 mod norm;
 mod norm_tables;

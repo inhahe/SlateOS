@@ -48,6 +48,7 @@ use alloc::vec::Vec;
 use crate::bidi::{self, Class};
 use crate::gsub::{ALL_FEATURES, SubGlyph, Substitutions, feature_bit, feature_bits};
 use crate::indic::{Category, Char, Position, Syllable, syllables};
+use crate::lang::Lang;
 use crate::script::ScriptTags;
 
 /// One of the nine scripts this shaper shapes.
@@ -252,6 +253,9 @@ pub(crate) struct Probe<'a> {
     subs: Option<&'a Substitutions>,
     /// The script to look features up under.
     tags: Option<ScriptTags>,
+    /// The language to look them up under inside that script, or `None` for
+    /// the script's default language system. See [`lang`](crate::lang).
+    lang: Option<Lang>,
     /// Which script tag the face's `GSUB` ScriptList was chosen under, or
     /// `None` when it names none of the ones this run would accept.
     ///
@@ -263,19 +267,21 @@ pub(crate) struct Probe<'a> {
 }
 
 impl<'a> Probe<'a> {
-    /// A probe over `subs`, asking about a run of `tags` in a face whose
-    /// `GSUB` was chosen under `chosen`.
+    /// A probe over `subs`, asking about a run of `tags` in `lang` in a face
+    /// whose `GSUB` was chosen under `chosen`.
     #[must_use]
     pub(crate) fn new(
         data: &'a [u8],
         subs: Option<&'a Substitutions>,
         tags: Option<ScriptTags>,
+        lang: Option<Lang>,
         chosen: Option<[u8; 4]>,
     ) -> Self {
         Self {
             data,
             subs,
             tags,
+            lang,
             chosen,
         }
     }
@@ -357,7 +363,7 @@ impl<'a> Plan<'a> {
         let mask = |tag: &[u8; 4]| {
             probe
                 .subs
-                .map_or(0, |subs| subs.feature_mask(probe.tags, tag))
+                .map_or(0, |subs| subs.feature_mask(probe.tags, probe.lang, tag))
         };
         Self {
             probe,
@@ -396,13 +402,15 @@ impl<'a> Plan<'a> {
         self.config.blwf_mode
     }
 
-    /// Would the feature `tag` substitute `glyphs`, on this run's script?
+    /// Would the feature `tag` substitute `glyphs`, on this run's script and
+    /// language?
     #[must_use]
     pub(crate) fn would(&self, tag: &[u8; 4], glyphs: &[u16]) -> bool {
         self.probe.subs.is_some_and(|subs| {
             subs.would_substitute(
                 self.probe.data,
                 self.probe.tags,
+                self.probe.lang,
                 tag,
                 glyphs,
                 self.zero_context,
@@ -1576,6 +1584,7 @@ pub(crate) fn shape(
     data: &[u8],
     subs: Option<&Substitutions>,
     tags: Option<ScriptTags>,
+    lang: Option<Lang>,
     chosen: Option<[u8; 4]>,
     script: Script,
     glyphs: &mut Vec<SubGlyph>,
@@ -1584,7 +1593,7 @@ pub(crate) fn shape(
     if glyphs.is_empty() {
         return;
     }
-    let plan = Plan::new(script, Probe::new(data, subs, tags, chosen), &glyph);
+    let plan = Plan::new(script, Probe::new(data, subs, tags, lang, chosen), &glyph);
     let global = feature_bits(&GLOBAL);
     for g in glyphs.iter_mut() {
         g.mask |= global;
@@ -1624,7 +1633,7 @@ pub(crate) fn shape(
         final_reordering(&plan, glyphs);
         return;
     };
-    subs.apply_stages(data, tags, &stages, per_syllable, glyphs, |stage, glyphs| {
+    subs.apply_stages(data, tags, lang, &stages, per_syllable, glyphs, |stage, glyphs| {
         if stage == 0 {
             initial_reordering(&plan, glyphs, dotted, &mut order);
         } else if stage == BASIC.len() {
@@ -1950,7 +1959,7 @@ mod tests {
         let run = Some(tags(script));
         Plan::new(
             script,
-            Probe::new(data, Some(subs), run, chosen(data, run)),
+            Probe::new(data, Some(subs), run, None, chosen(data, run)),
             |_| Some(VIRAMA),
         )
     }
@@ -2035,7 +2044,7 @@ mod tests {
         let run = Some(tags(Script::Devanagari));
         let plan = Plan::new(
             Script::Devanagari,
-            Probe::new(&data, Some(&subs), run, chosen(&data, run)),
+            Probe::new(&data, Some(&subs), run, None, chosen(&data, run)),
             |_| None,
         );
         assert_eq!(plan.consonant_position(CONSONANT), Position::BaseC);
@@ -2124,7 +2133,7 @@ mod tests {
         let run = Some(ScriptTags::exactly(*tag));
         let plan = Plan::new(
             script,
-            Probe::new(&data, Some(&subs), run, chosen(&data, run)),
+            Probe::new(&data, Some(&subs), run, None, chosen(&data, run)),
             |_| Some(VIRAMA),
         );
         f(&plan);
@@ -2619,9 +2628,16 @@ mod tests {
     fn a_face_with_no_gsub_is_still_reordered() {
         let mut glyphs = run("\u{939}\u{93f}");
         let tags = Some(ScriptTags::exactly(*b"dev2"));
-        shape(&[], None, tags, None, Script::Devanagari, &mut glyphs, |ch| {
-            (ch == '\u{25CC}').then_some(CIRCLE)
-        });
+        shape(
+            &[],
+            None,
+            tags,
+            None,
+            None,
+            Script::Devanagari,
+            &mut glyphs,
+            |ch| (ch == '\u{25CC}').then_some(CIRCLE),
+        );
         assert_eq!(order_of(&glyphs), [1, 0]);
     }
 
@@ -2630,7 +2646,9 @@ mod tests {
     fn an_empty_run_is_shaped_into_nothing() {
         let mut glyphs: Vec<SubGlyph> = Vec::new();
         let tags = Some(ScriptTags::exactly(*b"dev2"));
-        shape(&[], None, tags, None, Script::Devanagari, &mut glyphs, |_| None);
+        shape(&[], None, tags, None, None, Script::Devanagari, &mut glyphs, |_| {
+            None
+        });
         assert!(glyphs.is_empty());
     }
 }

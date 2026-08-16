@@ -37,6 +37,7 @@ use crate::hangul;
 use crate::indic::Char;
 use crate::indic_shape::{Script, continues_word};
 use crate::joining::{self, Form};
+use crate::lang::Lang;
 use crate::norm;
 use crate::raster::{GlyphMask, rasterize};
 use crate::script::{self, ScriptTags};
@@ -450,8 +451,38 @@ impl ScaledFont {
     /// Does not rasterize anything and does not touch the glyph cache: this
     /// needs `cmap`, `hmtx` and the layout tables only, which is what lets a
     /// widget measure its label without paying to draw it.
+    ///
+    /// Names no language, so every face answers with each script's default
+    /// rules. [`shape_lang`](Self::shape_lang) is the same call for a caller
+    /// that knows one.
     #[must_use]
     pub fn shape(&self, text: &str) -> ShapedRun {
+        self.shape_lang(text, None)
+    }
+
+    /// The glyphs `text` turns into when it is known to be in `lang`.
+    ///
+    /// The same as [`shape`](Self::shape) in every respect but which of a
+    /// face's rules apply: a font may spell one language differently from the
+    /// rest of the writing system it shares, and this is how it is told which
+    /// one it is looking at. Turkish suppresses the `fi` ligature, because the
+    /// dotless `ı` makes the dot meaningful; Serbian Cyrillic italics draw `б`,
+    /// `г`, `д`, `п` and `т` with different strokes from Russian's; Romanian
+    /// wants a comma below `ș` where the Unicode chart shows a cedilla. On this
+    /// crate's development host, 230 of 581 installed faces carry at least one
+    /// such rule.
+    ///
+    /// `lang` is a [`Lang`], which is a BCP 47 tag that survived
+    /// [`Lang::new`] — `tr`, `sr-Cyrl`, `ro-MD`. `None` selects each script's
+    /// default rules, and so does any language a face has said nothing special
+    /// about, which is the great majority. Pass `None` rather than a guess: a
+    /// *wrong* language is worse than none, since shaping English as Turkish
+    /// throws away ligatures the reader expects.
+    ///
+    /// The language never changes which script a run is shaped as, nor which
+    /// characters there are; see [`lang`](crate::lang).
+    #[must_use]
+    pub fn shape_lang(&self, text: &str, lang: Option<Lang>) -> ShapedRun {
         // Six passes, because each one needs all of the previous one's
         // output. Bidi settles which characters are mirrored and where the
         // direction boundaries are, and it reads the string as typed;
@@ -637,7 +668,7 @@ impl ScaledFont {
             tabs.push(tab);
         }
 
-        let segments = self.substitute_runs(&runs, &mut glyphs, &mut tabs);
+        let segments = self.substitute_runs(&runs, lang, &mut glyphs, &mut tabs);
 
         // The same question the piece loop asked, re-asked per *glyph*, because
         // the two are no longer the same list: a stretch that ligated is
@@ -661,7 +692,7 @@ impl ScaledFont {
         for segment in &segments {
             let applies = self.applies_gpos(segment.script);
             let answer = !applies;
-            let kern = legacy && (!applies || !self.face.gpos_kerns(segment.script));
+            let kern = legacy && (!applies || !self.face.gpos_kerns(segment.script, lang));
             for slot in synth_at
                 .get_mut(segment.start..segment.end)
                 .unwrap_or_default()
@@ -717,7 +748,8 @@ impl ScaledFont {
             .iter()
             .map(|g| i32::from(self.face.advance(g.gid).unwrap_or(0)))
             .collect();
-        let adjusted = self.position_segments(&segments, &glyphs, &advances, &marks, &levels);
+        let adjusted =
+            self.position_segments(&segments, lang, &glyphs, &advances, &marks, &levels);
         // Whether pairs still have to be kerned one at a time here. They do
         // only where the run's kerning is the legacy `kern` table's, which the
         // positioning pass cannot read; pairs the pass has already charged must
@@ -909,6 +941,7 @@ impl ScaledFont {
     fn substitute_runs(
         &self,
         runs: &[(usize, Option<ScriptTags>)],
+        lang: Option<Lang>,
         glyphs: &mut Vec<SubGlyph>,
         tabs: &mut Vec<bool>,
     ) -> Vec<Segment> {
@@ -924,6 +957,7 @@ impl ScaledFont {
         fn flush(
             font: &ScaledFont,
             script: Option<ScriptTags>,
+            lang: Option<Lang>,
             run: &mut Vec<SubGlyph>,
             out: &mut Vec<SubGlyph>,
             out_tabs: &mut Vec<bool>,
@@ -932,7 +966,7 @@ impl ScaledFont {
             if run.is_empty() {
                 return;
             }
-            font.face.substitute(script, run);
+            font.face.substitute(script, lang, run);
             let start = out.len();
             segments.push(Segment {
                 start,
@@ -957,7 +991,7 @@ impl ScaledFont {
             // Ends are exclusive: `end == i` means the run stopped *before*
             // this glyph, so the stretch closes and `i` opens the next one.
             if runs.get(at).is_some_and(|&(end, _)| end <= i) {
-                flush(self, open, &mut run, &mut out, &mut out_tabs, &mut segments);
+                flush(self, open, lang, &mut run, &mut out, &mut out_tabs, &mut segments);
                 while runs.get(at).is_some_and(|&(end, _)| end <= i) {
                     at = at.saturating_add(1);
                 }
@@ -969,7 +1003,7 @@ impl ScaledFont {
                 }
                 continue;
             }
-            flush(self, open, &mut run, &mut out, &mut out_tabs, &mut segments);
+            flush(self, open, lang, &mut run, &mut out, &mut out_tabs, &mut segments);
             if let Some(glyph) = glyphs.get(i) {
                 out.push(*glyph);
                 out_tabs.push(true);
@@ -1015,6 +1049,7 @@ impl ScaledFont {
     fn position_segments(
         &self,
         segments: &[Segment],
+        lang: Option<Lang>,
         glyphs: &[SubGlyph],
         advances: &[i32],
         marks: &[bool],
@@ -1056,6 +1091,7 @@ impl ScaledFont {
                 marks: is_mark,
                 rtl,
                 script: segment.script,
+                lang,
             }) else {
                 continue;
             };

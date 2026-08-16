@@ -30,6 +30,7 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
+use crate::lang::Lang;
 use crate::raster::GlyphMask;
 use crate::scaled::{ScaledFont, ScaledFontError, Target, blit_mask, pixel_coord};
 use crate::sfnt::{Face, SfntError};
@@ -163,10 +164,24 @@ impl SystemFont {
     /// drawing, hit-testing and truncating all read the same run, so they
     /// cannot disagree about where a character sits. See
     /// [`shape`](crate::shape).
+    ///
+    /// Names no language, so a face answers with each script's default rules.
+    /// [`shape_lang`](Self::shape_lang) is the same call for a caller that
+    /// knows one.
     #[must_use]
     pub fn shape(&self, text: &str) -> ShapedRun {
+        self.shape_lang(text, None)
+    }
+
+    /// The glyphs `text` turns into when it is known to be in `lang`.
+    ///
+    /// See [`ScaledFont::shape_lang`]. The bitmap fallback is a fixed grid with
+    /// no layout tables at all, so for it this is [`shape`](Self::shape): a
+    /// face that states no rules has none to vary by language.
+    #[must_use]
+    pub fn shape_lang(&self, text: &str, lang: Option<Lang>) -> ShapedRun {
         match &self.backend {
-            Backend::Outline(f) => f.shape(text),
+            Backend::Outline(f) => f.shape_lang(text, lang),
             // The bitmap face is a fixed grid: one glyph per character, no
             // kerning to apply and no substitutions to make. It still shapes
             // rather than being special-cased at every call site, so that the

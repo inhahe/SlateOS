@@ -123,6 +123,7 @@ use alloc::vec::Vec;
 use crate::context::{MAX_NESTING, Matched, Nested, chain_match, context_match, read_records};
 use crate::indic::Char;
 use crate::joining::Form;
+use crate::lang::Lang;
 use crate::otl::{
     ByScript, Lookup, MAX_SUBTABLES, coverage_index, lookup_at, lookup_list,
 };
@@ -736,8 +737,8 @@ impl Substitutions {
         })
     }
 
-    /// Apply every lookup this face offers a run of `script` to `glyphs`, in
-    /// order, rewriting it in place.
+    /// Apply every lookup this face offers a run of `script` in `lang` to
+    /// `glyphs`, in order, rewriting it in place.
     ///
     /// `glyphs` is one substitution run and the lookups may join anything in
     /// it, so a caller that does not want a ligature to form across some
@@ -746,13 +747,18 @@ impl Substitutions {
     /// such a boundary, and the reason `script` is a parameter rather than a
     /// property of the face: applying Arabic's `liga` to a Latin word is how a
     /// face that supports both silently corrupts one of them.
+    ///
+    /// `lang` picks the language system inside that script — `None`, and any
+    /// language the script does not register, take its default one. See
+    /// [`lang`](crate::lang).
     pub(crate) fn apply(
         &self,
         data: &[u8],
         script: Option<ScriptTags>,
+        lang: Option<Lang>,
         glyphs: &mut Vec<SubGlyph>,
     ) {
-        self.apply_stages(data, script, &[ALL_FEATURES], 0, glyphs, |_, _| {});
+        self.apply_stages(data, script, lang, &[ALL_FEATURES], 0, glyphs, |_, _| {});
     }
 
     /// Apply the lookups in several passes, one per entry of `stages`.
@@ -792,6 +798,7 @@ impl Substitutions {
         &self,
         data: &[u8],
         script: Option<ScriptTags>,
+        lang: Option<Lang>,
         stages: &[u64],
         per_syllable: u64,
         glyphs: &mut Vec<SubGlyph>,
@@ -810,7 +817,7 @@ impl Substitutions {
         // lookup, and Devanagari text is nothing but syllables.
         let mut piece: Vec<SubGlyph> = Vec::new();
         for (i, &stage) in stages.iter().enumerate() {
-            for (lookup, mask) in self.lookups.for_script(script) {
+            for (lookup, mask) in self.lookups.for_script(script, lang) {
                 let mask = mask & stage;
                 if mask == 0 {
                     continue;
@@ -826,8 +833,8 @@ impl Substitutions {
         }
     }
 
-    /// The bit that selects `tag`'s lookups on a run of `script`, or `0` if
-    /// this face reaches none.
+    /// The bit that selects `tag`'s lookups on a run of `script` in `lang`, or
+    /// `0` if this face reaches none.
     ///
     /// HarfBuzz's `get_1_mask`, and the difference from
     /// [`feature_bit`] is the whole point of having it: `feature_bit` says
@@ -835,17 +842,22 @@ impl Substitutions {
     /// anything to select. The Indic shaper reads it as a yes-or-no — "does
     /// this font form a reph at all?" — and then, when the answer is yes, as
     /// the bit to set on the glyphs that should get one.
-    pub(crate) fn feature_mask(&self, script: Option<ScriptTags>, tag: &[u8; 4]) -> u64 {
+    pub(crate) fn feature_mask(
+        &self,
+        script: Option<ScriptTags>,
+        lang: Option<Lang>,
+        tag: &[u8; 4],
+    ) -> u64 {
         let bit = feature_bit(tag);
-        if bit != 0 && self.lookups.for_script(script).any(|(_, m)| m & bit != 0) {
+        if bit != 0 && self.lookups.for_script(script, lang).any(|(_, m)| m & bit != 0) {
             bit
         } else {
             0
         }
     }
 
-    /// Would the feature tagged `tag`, on a run of `script`, substitute
-    /// exactly the glyph sequence `glyphs`?
+    /// Would the feature tagged `tag`, on a run of `script` in `lang`,
+    /// substitute exactly the glyph sequence `glyphs`?
     ///
     /// This is a question, not an instruction: nothing is rewritten, and
     /// `glyphs` need not be — and for its callers never is — part of any run.
@@ -863,6 +875,7 @@ impl Substitutions {
         &self,
         data: &[u8],
         script: Option<ScriptTags>,
+        lang: Option<Lang>,
         tag: &[u8; 4],
         glyphs: &[u16],
         zero_context: bool,
@@ -872,7 +885,7 @@ impl Substitutions {
             return false;
         }
         self.lookups
-            .for_script(script)
+            .for_script(script, lang)
             .filter(|&(_, mask)| mask & bit != 0)
             .any(|(lookup, _)| would_apply(data, lookup, glyphs, zero_context))
     }
@@ -2123,7 +2136,7 @@ mod tests {
             .enumerate()
             .map(|(i, &gid)| SubGlyph::new(gid, i))
             .collect();
-        subs.apply(data, None, &mut glyphs);
+        subs.apply(data, None, None, &mut glyphs);
         glyphs.iter().map(|g| g.gid).collect()
     }
 
@@ -2134,7 +2147,7 @@ mod tests {
             .enumerate()
             .map(|(i, &gid)| SubGlyph::new(gid, i))
             .collect();
-        subs.apply(data, None, &mut glyphs);
+        subs.apply(data, None, None, &mut glyphs);
         glyphs.iter().map(|g| g.cluster).collect()
     }
 
@@ -2219,6 +2232,7 @@ mod tests {
         subs.apply_stages(
             data,
             None,
+            None,
             &[ALL_FEATURES],
             ALL_FEATURES,
             &mut glyphs,
@@ -2281,7 +2295,7 @@ mod tests {
             .enumerate()
             .map(|(i, &gid)| SubGlyph::new(gid, i))
             .collect();
-        subs.apply_stages(&data, None, &[0], 0, &mut glyphs, |_, _| {});
+        subs.apply_stages(&data, None, None, &[0], 0, &mut glyphs, |_, _| {});
         assert_eq!(glyphs.iter().map(|g| g.gid).collect::<Vec<_>>(), [10, 11]);
     }
 
@@ -2300,6 +2314,7 @@ mod tests {
         subs.apply_stages(
             &data,
             None,
+            None,
             &[0, ALL_FEATURES],
             0,
             &mut glyphs,
@@ -2311,7 +2326,7 @@ mod tests {
     /// Would `tag` substitute `gids`, under the strict rule that a chaining
     /// rule with any context does not answer?
     fn would(data: &[u8], subs: &Substitutions, tag: &[u8; 4], gids: &[u16]) -> bool {
-        subs.would_substitute(data, None, tag, gids, true)
+        subs.would_substitute(data, None, None, tag, gids, true)
     }
 
     #[test]
@@ -2389,13 +2404,13 @@ mod tests {
         let sub = chain_context3(&[&[9]], &[&[10], &[11]], &[], &[(0, 0)]);
         let data = gsub_table(b"liga", LOOKUP_CHAIN_CONTEXT, &sub);
         let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
-        assert!(!subs.would_substitute(&data, None, b"liga", &[10, 11], true));
+        assert!(!subs.would_substitute(&data, None, None, b"liga", &[10, 11], true));
         // With the strict rule off — which is what the old Indic
         // specification and Malayalam need — the context is ignored rather
         // than failed, and the input alone decides.
-        assert!(subs.would_substitute(&data, None, b"liga", &[10, 11], false));
+        assert!(subs.would_substitute(&data, None, None, b"liga", &[10, 11], false));
         // Ignored, not matched: the input still has to be right.
-        assert!(!subs.would_substitute(&data, None, b"liga", &[10, 12], false));
+        assert!(!subs.would_substitute(&data, None, None, b"liga", &[10, 12], false));
     }
 
     #[test]
@@ -2403,9 +2418,9 @@ mod tests {
         let sub = chain_context3(&[], &[&[10], &[11]], &[], &[(0, 0)]);
         let data = gsub_table(b"liga", LOOKUP_CHAIN_CONTEXT, &sub);
         let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
-        assert!(subs.would_substitute(&data, None, b"liga", &[10, 11], true));
-        assert!(subs.would_substitute(&data, None, b"liga", &[10, 11], false));
-        assert!(!subs.would_substitute(&data, None, b"liga", &[10, 11, 12], true));
+        assert!(subs.would_substitute(&data, None, None, b"liga", &[10, 11], true));
+        assert!(subs.would_substitute(&data, None, None, b"liga", &[10, 11], false));
+        assert!(!subs.would_substitute(&data, None, None, b"liga", &[10, 11, 12], true));
     }
 
     #[test]
@@ -2437,8 +2452,8 @@ mod tests {
         let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
         let latn = ScriptTags::exactly(*b"latn");
         let arab = ScriptTags::exactly(*b"arab");
-        assert!(subs.would_substitute(&data, Some(latn), b"liga", &[10, 11], true));
-        assert!(!subs.would_substitute(&data, Some(arab), b"liga", &[10, 11], true));
+        assert!(subs.would_substitute(&data, Some(latn), None, b"liga", &[10, 11], true));
+        assert!(!subs.would_substitute(&data, Some(arab), None, b"liga", &[10, 11], true));
     }
 
     const IGNORE_MARKS: u16 = 0x0008;
@@ -2458,7 +2473,7 @@ mod tests {
             .enumerate()
             .map(|(i, &gid)| SubGlyph::new(gid, i))
             .collect();
-        subs.apply(data, None, &mut glyphs);
+        subs.apply(data, None, None, &mut glyphs);
         glyphs
             .iter()
             .map(|g| (g.gid, g.lig.id, g.lig.comp()))
@@ -2473,7 +2488,7 @@ mod tests {
             .enumerate()
             .map(|(i, &gid)| SubGlyph::new(gid, i))
             .collect();
-        subs.apply(data, None, &mut glyphs);
+        subs.apply(data, None, None, &mut glyphs);
         glyphs.iter().map(|g| g.lig.components()).collect()
     }
 
@@ -2732,7 +2747,7 @@ mod tests {
             .enumerate()
             .map(|(i, &(gid, form))| SubGlyph::cursive(gid, i, form))
             .collect();
-        subs.apply(data, None, &mut glyphs);
+        subs.apply(data, None, None, &mut glyphs);
         glyphs.iter().map(|g| g.gid).collect()
     }
 
@@ -2848,31 +2863,187 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_feature_only_a_language_system_reaches_is_not_applied() {
-        // The other half of the same question. A `locl` registered under
-        // `TRK ` is Turkish, not the default, and reaching it would hand a
-        // reader who never asked for Turkish its dotless `i`. The gap this
-        // pins down is deliberate and tracked as
-        // `TD-FONT-IGNORES-LANGSYS-OVERRIDES`: only DefaultLangSys is read,
-        // so a face whose *only* route to a feature is a language system
-        // contributes nothing at all.
-        let mut scripts = Vec::new();
-        scripts.extend_from_slice(&be16(1)); // scriptCount
-        scripts.extend_from_slice(b"latn");
-        scripts.extend_from_slice(&be16(8)); // the Script table follows
-        scripts.extend_from_slice(&be16(0)); // no DefaultLangSys
-        scripts.extend_from_slice(&be16(1)); // langSysCount
-        scripts.extend_from_slice(b"TRK ");
-        scripts.extend_from_slice(&be16(10)); // LangSys, from the Script
-        scripts.extend_from_slice(&be16(0)); // lookupOrder, always zero
-        scripts.extend_from_slice(&be16(0xFFFF)); // no required feature
-        scripts.extend_from_slice(&be16(1)); // featureIndexCount
-        scripts.extend_from_slice(&be16(0)); // feature 0
+    /// One language system, as a font writes it: the index of the feature it
+    /// *requires* — `NO_REQUIRED` for none — and the features its index list
+    /// names.
+    type Sys<'a> = (u16, &'a [u16]);
 
+    /// `requiredFeatureIndex`'s "there is no required feature" value.
+    const NO_REQUIRED: u16 = 0xFFFF;
+
+    /// One script: its tag, its DefaultLangSys if it has one, and the language
+    /// systems it names beside the default.
+    type Script<'a> = (&'a [u8; 4], Option<Sys<'a>>, &'a [(&'a [u8; 4], Sys<'a>)]);
+
+    /// A ScriptList spelling out each script's DefaultLangSys *and* the named
+    /// language systems beside it.
+    ///
+    /// [`fixture::script_list`](crate::fixture::script_list) can express
+    /// neither a script without a default nor a script with a named language,
+    /// and those two shapes are what the tests below are about. Every offset
+    /// inside is relative to the ScriptList's own start, as the format
+    /// requires.
+    fn languages(scripts: &[Script<'_>]) -> Vec<u8> {
+        fn body((required, features): Sys<'_>) -> Vec<u8> {
+            let mut out = Vec::new();
+            out.extend_from_slice(&be16(0)); // lookupOrder, always zero
+            out.extend_from_slice(&be16(required));
+            out.extend_from_slice(&be16(u16::try_from(features.len()).unwrap()));
+            for f in features {
+                out.extend_from_slice(&be16(*f));
+            }
+            out
+        }
+        let mut records = Vec::new();
+        let mut tables = Vec::new();
+        // The Script tables follow the ScriptRecords.
+        let mut at = 2 + scripts.len() * 6;
+        for (tag, default, langs) in scripts {
+            records.extend_from_slice(*tag);
+            records.extend_from_slice(&be16(u16::try_from(at).unwrap()));
+
+            // One Script table: a header of the default's offset, the count
+            // and the LangSysRecords, then every LangSys the script owns —
+            // the default first, when it has one.
+            let header = 4 + langs.len() * 6;
+            let mut bodies = Vec::new();
+            let mut lang_records = Vec::new();
+            let mut off = header;
+            let default_off = match default {
+                Some(sys) => {
+                    let block = body(*sys);
+                    off += block.len();
+                    bodies.extend_from_slice(&block);
+                    u16::try_from(header).unwrap()
+                }
+                // Zero, not an offset: a script may have no default at all,
+                // and that is not the same as one naming no features.
+                None => 0,
+            };
+            for (lang, sys) in *langs {
+                lang_records.extend_from_slice(*lang);
+                lang_records.extend_from_slice(&be16(u16::try_from(off).unwrap()));
+                let block = body(*sys);
+                off += block.len();
+                bodies.extend_from_slice(&block);
+            }
+            tables.extend_from_slice(&be16(default_off));
+            tables.extend_from_slice(&be16(u16::try_from(langs.len()).unwrap()));
+            tables.extend_from_slice(&lang_records);
+            tables.extend_from_slice(&bodies);
+            at += off;
+        }
+        let mut out = Vec::new();
+        out.extend_from_slice(&be16(u16::try_from(scripts.len()).unwrap()));
+        out.extend_from_slice(&records);
+        out.extend_from_slice(&tables);
+        out
+    }
+
+    /// Shape glyph 10 alone under `script` and `lang`, and report what it
+    /// became.
+    fn one(data: &[u8], subs: &Substitutions, script: Option<ScriptTags>, lang: &str) -> u16 {
+        let lang = (!lang.is_empty())
+            .then(|| Lang::new(lang).expect("the tests name real languages"));
+        let mut glyphs = vec![SubGlyph::new(10, 0)];
+        subs.apply(data, script, lang, &mut glyphs);
+        glyphs.first().map_or(0, |g| g.gid)
+    }
+
+    /// A `locl` registered under `TRK ` and nowhere else — the Turkish dotless
+    /// `i`, and the commonest per-language rule there is: 140 of the 996
+    /// language overrides on the development host are this shape.
+    ///
+    /// Reaching it from a run that never asked for Turkish would hand its
+    /// reader a spelling they did not ask for; *not* reaching it from a run
+    /// that did ask is what `TD-FONT-IGNORES-LANGSYS-OVERRIDES` was.
+    #[test]
+    fn a_feature_only_a_language_system_reaches_applies_only_to_that_language() {
+        let scripts = languages(&[(b"latn", None, &[(b"TRK ", (NO_REQUIRED, &[0]))])]);
         let sub = single_delta(&[10], 5);
         let data = gsub_from_scripts(&scripts, &[b"locl"], LOOKUP_SINGLE, &[&sub]);
-        assert!(Substitutions::parse(&data, Some(span(0, data.len())), None).is_none());
+        let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
+
+        assert_eq!(one(&data, &subs, LATIN, "tr"), 15);
+        assert_eq!(one(&data, &subs, LATIN, "tr-TR"), 15);
+        // This script has no default language system at all, so every other
+        // run reaches nothing — including one that names no language, which is
+        // what a caller who does not know says.
+        for lang in ["", "en", "de", "az"] {
+            assert_eq!(one(&data, &subs, LATIN, lang), 10, "{lang:?}");
+        }
+    }
+
+    /// A LangSysRecord *replaces* its script's feature list rather than adding
+    /// to it, which is why a language can take a feature away as well as add
+    /// one.
+    #[test]
+    fn a_language_system_replaces_its_scripts_features_rather_than_adding_to_them() {
+        let scripts = languages(&[(
+            b"latn",
+            Some((NO_REQUIRED, &[0])),
+            &[(b"TRK ", (NO_REQUIRED, &[]))],
+        )]);
+        let sub = single_delta(&[10], 5);
+        let data = gsub_from_scripts(&scripts, &[b"locl"], LOOKUP_SINGLE, &[&sub]);
+        let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
+
+        assert_eq!(one(&data, &subs, LATIN, ""), 15);
+        assert_eq!(one(&data, &subs, LATIN, "en"), 15);
+        assert_eq!(one(&data, &subs, LATIN, "tr"), 10);
+    }
+
+    /// A language system names one feature *outside* its index list, and it is
+    /// as binding as the ones inside: `requiredFeatureIndex` is how a font says
+    /// "this one is not optional".
+    #[test]
+    fn a_required_feature_is_applied_like_any_other() {
+        // Neither language lists a feature; the Turkish one requires it.
+        let scripts = languages(&[(
+            b"latn",
+            Some((NO_REQUIRED, &[])),
+            &[(b"TRK ", (0, &[]))],
+        )]);
+        let sub = single_delta(&[10], 5);
+        let data = gsub_from_scripts(&scripts, &[b"locl"], LOOKUP_SINGLE, &[&sub]);
+        let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
+        assert_eq!(one(&data, &subs, LATIN, "tr"), 15);
+        assert_eq!(one(&data, &subs, LATIN, ""), 10);
+
+        // And the same field on a DefaultLangSys, which every run reads.
+        let scripts = languages(&[(b"latn", Some((0, &[])), &[])]);
+        let data = gsub_from_scripts(&scripts, &[b"locl"], LOOKUP_SINGLE, &[&sub]);
+        let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
+        assert_eq!(one(&data, &subs, LATIN, ""), 15);
+    }
+
+    /// Only the *script* falls back. A run whose script is registered but whose
+    /// language is not takes that script's default rules — not the same
+    /// language's rules under some other script.
+    ///
+    /// HarfBuzz's order, in `hb_ot_layout_table_select_script` followed by
+    /// `hb_ot_layout_script_select_language`: the script is chosen first and
+    /// the language is looked up only inside it.
+    #[test]
+    fn language_selection_does_not_fall_back_to_another_script() {
+        // `DFLT` has the Turkish rule; `latn` is registered and says nothing.
+        let scripts = languages(&[
+            (
+                b"DFLT",
+                Some((NO_REQUIRED, &[])),
+                &[(b"TRK ", (NO_REQUIRED, &[0]))],
+            ),
+            (b"latn", Some((NO_REQUIRED, &[])), &[]),
+        ]);
+        let sub = single_delta(&[10], 5);
+        let data = gsub_from_scripts(&scripts, &[b"locl"], LOOKUP_SINGLE, &[&sub]);
+        let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
+
+        // A Latin run stops the chain at `latn`, and `latn` has no Turkish.
+        assert_eq!(one(&data, &subs, LATIN, "tr"), 10);
+        // A run with no script of its own starts at `DFLT`, where it is.
+        assert_eq!(one(&data, &subs, None, "tr"), 15);
+        assert_eq!(one(&data, &subs, None, ""), 10);
     }
 
     #[test]
@@ -3018,11 +3189,11 @@ mod tests {
     fn a_run_gets_only_its_own_scripts_features() {
         let (data, subs) = two_script_font();
         let mut latin_run = vec![SubGlyph::new(10, 0)];
-        subs.apply(&data, LATIN, &mut latin_run);
+        subs.apply(&data, LATIN, None, &mut latin_run);
         assert_eq!(latin_run.first().map(|g| g.gid), Some(60));
 
         let mut arabic_run = vec![SubGlyph::new(10, 0)];
-        subs.apply(&data, ARABIC, &mut arabic_run);
+        subs.apply(&data, ARABIC, None, &mut arabic_run);
         assert_eq!(arabic_run.first().map(|g| g.gid), Some(50));
     }
 
@@ -3046,12 +3217,12 @@ mod tests {
         // empty-handed.
         let (data, subs) = two_script_font();
         let mut glyphs = vec![SubGlyph::new(10, 0)];
-        subs.apply(&data, hebrew, &mut glyphs);
+        subs.apply(&data, hebrew, None, &mut glyphs);
         assert_eq!(glyphs.first().map(|g| g.gid), Some(60));
         // A run with no script of its own asks for `DFLT` first, which this
         // face does not register either, and lands in the same place.
         let mut none = vec![SubGlyph::new(10, 0)];
-        subs.apply(&data, None, &mut none);
+        subs.apply(&data, None, None, &mut none);
         assert_eq!(none.first().map(|g| g.gid), Some(60));
 
         // A face with no `latn` and no default really does say nothing.
@@ -3061,10 +3232,10 @@ mod tests {
         )]);
         let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
         let mut glyphs = vec![SubGlyph::new(10, 0)];
-        subs.apply(&data, hebrew, &mut glyphs);
+        subs.apply(&data, hebrew, None, &mut glyphs);
         assert_eq!(glyphs.first().map(|g| g.gid), Some(10));
         let mut none = vec![SubGlyph::new(10, 0)];
-        subs.apply(&data, None, &mut none);
+        subs.apply(&data, None, None, &mut none);
         assert_eq!(none.first().map(|g| g.gid), Some(10));
     }
 
@@ -3076,7 +3247,7 @@ mod tests {
         let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
         for script in [LATIN, ARABIC, None] {
             let mut glyphs = vec![SubGlyph::new(10, 0)];
-            subs.apply(&data, script, &mut glyphs);
+            subs.apply(&data, script, None, &mut glyphs);
             assert_eq!(
                 glyphs.first().map(|g| g.gid),
                 Some(42),
@@ -3134,7 +3305,7 @@ mod tests {
             SubGlyph::new(10, 0),
             SubGlyph::new(11, 1),
         ];
-        subs.apply(&out, LATIN, &mut glyphs);
+        subs.apply(&out, LATIN, None, &mut glyphs);
         assert_eq!(
             glyphs.iter().map(|g| g.gid).collect::<Vec<_>>(),
             [10, 60],
@@ -3354,7 +3525,7 @@ mod tests {
             lig: Lig::at(3, 2, 0),
             ..SubGlyph::new(10, 0)
         }];
-        subs.apply(&data, None, &mut glyphs);
+        subs.apply(&data, None, None, &mut glyphs);
         assert_eq!(glyphs.len(), 2);
         for g in &glyphs {
             assert_eq!(g.lig.id, 3);
@@ -3374,7 +3545,7 @@ mod tests {
             lig: Lig::at(3, 2, 0),
             ..SubGlyph::new(10, 0)
         }];
-        subs.apply(&data, None, &mut glyphs);
+        subs.apply(&data, None, None, &mut glyphs);
         assert_eq!(glyphs.len(), 1);
         assert!(!glyphs[0].lig.multiplied());
         assert!(glyphs[0].lig.ligated_and_didnt_multiply());

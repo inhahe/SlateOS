@@ -2237,9 +2237,12 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] program_invocation_name/program_invocation_short_name/__progname/__progname_full: program name globals
   - [x] dirent additions: rewinddir, seekdir/telldir, dirfd (-1 stub), alphasort comparator
   - [x] waitid: extended wait (P_PID/P_ALL/P_PGID with Linux's per-idtype id
-    validation; fills the caller's `siginfo_t`; built on waitpid). Three
-    kernel-shaped gaps remain — `WNOWAIT`, pgid 1, and `si_uid` — see
-    `known-issues.md` → `TD-POSIX-WAITID-IS-NARROWER-THAN-THE-KERNEL-COULD-MAKE-IT`
+    validation; fills the caller's `siginfo_t`; built on waitpid). Covered on
+    target by `ctest-jobctl` checks 100-111 / 120-132 / 140-147 — the only
+    place the `wstatus` → `siginfo_t` decoding is testable, since `waitpid`'s
+    syscall arm is compiled out on the host. Three kernel-shaped gaps remain —
+    `WNOWAIT`, pgid 1, and `si_uid` — see `known-issues.md` →
+    `TD-POSIX-WAITID-IS-NARROWER-THAN-THE-KERNEL-COULD-MAKE-IT`
   - [x] copy_file_range: cross-file copy (userspace read+write loop), offset tracking
   - [x] epoll stubs: epoll_create/create1/ctl/wait/pwait (all ENOSYS), EpollEvent struct, EPOLLIN/OUT/ERR/HUP/ET constants
   - [x] strftime/strptime expansion: 22 additional format specifiers (%C/%y/%e/%w/%u/%U/%W/%I/%k/%l/%P/%D/%F/%T/%R/%r/%x/%X/%z/%Z/%s + ISO 8601 %V/%G/%g), strptime month/weekday name parsing (%b/%B/%a/%A case-insensitive)

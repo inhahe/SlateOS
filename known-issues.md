@@ -71289,3 +71289,37 @@ The same applies to `scripts/run-timeout.py` and any other harness file, and it
 is *most* dangerous for exactly the files worth improving — the long-running
 harnesses, which are running precisely when you have the idle window that
 tempts you to improve them.
+
+#### P16 control arm — second reading, now spanning both build profiles; and why today's two failing boots do NOT grade it
+
+The debug boot at `6deaa847e` (2026-08-15) printed:
+
+```
+[spawn]   sleep clocks: HPET 119276000 ns vs TSC/clock_realtime 120088295 ns
+          across the child's lifetime (HPET/TSC = 0.99x)
+```
+
+**This is a control reading, not a grading run** — the child reported 120 ms,
+far above P16's < 40 ms trigger, so nothing anomalous existed for the clocks to
+disagree about.
+
+What it adds is that the control arm now spans **both build profiles**: 1.00x on
+a release boot (84.3 ms child) and 0.99x on a debug boot (120.1 ms child). The
+child's lifetime differs by 43% between the two — debug is slower, as expected —
+and the two oscillators tracked each other through both. That is a stronger
+statement than one profile could make: HPET-vs-TSC agreement is not an artefact
+of a particular build's timing, so a divergence on a failing boot remains
+attributable to the failure.
+
+**Two boots failed today and neither one grades P16.** Break-tests #1 and #2
+(deliberate mutations of `test_valid_entries` and `CapEntryInfo`) both died in
+the capability self-test at serial line ~1071 — roughly 5 500 lines *before* the
+spawn phase, so neither boot ever ran the sleep test at all. Counting them as
+"failing boots" toward P16 would be precisely the error this entry already
+records against the P20 load run: treating a failure as evidence about the
+hypothesis it happens to sit near, rather than the one it actually exercises.
+P16 needs a boot where **the sleep test itself** fails; a boot that failed
+earlier for an unrelated, self-inflicted reason is not a sample of that
+population.
+
+P16 accordingly remains **unresolved and awaiting a qualifying failing boot**.

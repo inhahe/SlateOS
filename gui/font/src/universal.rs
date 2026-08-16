@@ -47,11 +47,18 @@
 //!   between a consonant and an independent vowel that Unicode says may not
 //!   follow it. That is a table of its own and a separate pass; this crate has
 //!   neither, for USE or for Indic.
-//! * **`compose_use`.** HarfBuzz refuses to recompose a split matra during
-//!   normalization by declining any composition whose first character is a
-//!   mark. This crate has no per-shaper composition hook and no USE split-matra
-//!   decomposition to undo, so there is nothing for it to refuse. Khmer's
-//!   [`split_matras`](crate::khmer::split_matras) has the same note.
+//! * **`compose_use` as a hook of this shaper's own.** HarfBuzz refuses to
+//!   recompose a split matra during normalization by declining any composition
+//!   whose first character is a mark, and hangs that refusal off each shaper's
+//!   vtable. The rule *is* implemented, but not here: it lives in
+//!   [`norm`](crate::norm) as `SplitVowels::LeaveApart`, one switch the drawing
+//!   path always sets and the text path never does, rather than a copy per
+//!   shaper. It is safe as a global because the 47 characters it can affect all
+//!   belong to Indic or USE scripts — `norm`'s
+//!   `only_indic_and_use_compose_from_a_mark` is what fails if a table
+//!   regeneration changes that. See `design-decisions.md` §439. Khmer's
+//!   [`split_matras`](crate::khmer::split_matras) is the same rule for the
+//!   decompositions Unicode does *not* record.
 //!
 //! # The categories and the machine
 //!

@@ -54140,3 +54140,29 @@ FAILs).  Reversible (pure translator change; no PCB/state).
 ##     DO INSTEAD, for anything whose exit code is the point:
 ##         ./scripts/boot-test.sh --bench; echo "=== EXIT=$? ==="
 ##     unpiped, backgrounded via run_in_background, and read the .output file.
+
+## ---------------------------------------------------------------------------
+## [C] 2026-08-16 -- A USE probe font, so the 81 unmeasured scripts are measured
+## ---------------------------------------------------------------------------
+## The Universal Shaping Engine covers eighty-eight scripts. This host declares
+## faces for seven of them (tibt, java, bali, sinh, tfng, cham, bugi), so the
+## sweep agrees on the rest of `gui/font/tools/use-corpus.txt` -- Tai Tham,
+## Batak, Brahmi, the Egyptian hieroglyphs -- for the reason a question nobody
+## asks is never answered wrong: both sides draw notdef boxes.
+##
+## This is exactly the situation design-decisions.md 431 was written for, and
+## the two times it has been applied (gen_khmer_probe.py, gen_myanmar_probe.py)
+## it found real bugs that 556 real faces had hidden for months. The fix is
+## `gui/font/tools/gen_use_probe.py` on the same pattern: one lookup per feature
+## rewriting every glyph as *itself followed by a marker glyph unique to that
+## feature*, zero-advance markers, so a glyph run spells out which features
+## reached it and in what order. USE needs more feature slots than Khmer did
+## (rphf, pref, abvf, blwf, half, pstf, vatu, cjct, and the four topographical
+## isol/init/medi/fina) and needs coverage for at least one script per cluster
+## shape the machine can produce, not per script.
+##
+## Not blocking: the shaper agrees with HarfBuzz on every string the host can
+## actually falsify (556 faces x 58 strings, differ 0). This raises the ceiling
+## on what "agree" is worth, it does not patch a known divergence.
+##
+## Where: gui/font/tools/gen_use_probe.py (new), harfbuzz_sweep.py --fonts.

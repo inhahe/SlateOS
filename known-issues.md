@@ -656,6 +656,26 @@ them.
 Still degenerate, not yet migrated: `dots`, `hangman`, `life`, `lightsout`,
 `match3`, `maze`, `memory`, `pinball`, `sudoku`, `tetris`, `wordle`.
 
+**Those eleven are deliberately parked, not merely pending.** Every one of them
+is a game, and as of 2026-08-16 no game is reachable from the desktop:
+`gui/desktop/src/launcher.rs` hardcodes eighteen entries, not one of which is an
+`apps/` game, and its `Category` enum (`Application`, `System`, `Setting`,
+`File`, `Command`) has no games variant to put one in. No game name appears
+anywhere outside `apps/`. Running one requires knowing the binary name and
+typing it into a shell, so the audience for these eleven defects is currently
+zero — which is the ground the migration was stopped on at fourteen of 27, not
+any technical one.
+
+**Trigger to resume: the first time a game gets a launcher entry, fix the
+remaining eleven before shipping that entry.** The moment a game is discoverable
+it has players, and this defect lands hardest exactly where a player would
+notice — a fixed piece order in `tetris`, a fixed word in `wordle`/`hangman`, a
+fixed layout in `maze`/`sudoku`. The already-fixed cases show the ceiling:
+`simon` dealt Green-Red-Yellow-Blue for ever at every seed, and `sliding`
+produced two distinct boards across 499 seeds. Each remaining crate is a
+measure-migrate-test cycle of the same shape as the fourteen already done, so
+the whole tail is a few hours of work rather than a project.
+
 **`breakout` is the case for not clearing a crate because its bound has an odd
 factor.** Its only bound was 1000, and by the rule of thumb above the factor 125
 should have restored the period — the *values* are uniform and a histogram of

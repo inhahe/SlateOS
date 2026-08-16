@@ -177,6 +177,35 @@ CORPUS = [
     "\\u17e1\\u17e2\\u17e3",
     # Scriptless text, which selects the font's default features.
     "123 456",
+    # --- default ignorables, which shape and are then erased ---
+    #
+    # A joiner, a soft hyphen, a bidi control and a variation selector are
+    # instructions to the shaper, not letters. They have to reach it -- a
+    # joiner is what makes some faces' ligature fire -- and must not reach the
+    # screen, so a shaper hides them at the end: the face's space glyph if it
+    # has one, deletion if it does not.
+    #
+    # The soft hyphen is the one that makes this a correctness question rather
+    # than a tidiness one. Faces routinely map U+00AD to a *visible hyphen*
+    # glyph, so a word carrying a discretionary break renders with a hyphen in
+    # the middle of it. Both halves are here: the word alone as the control,
+    # and the word with the breaks in it.
+    "supercalifragilistic",
+    "super\\u00adcali\\u00adfragi\\u00adlistic",
+    # ZWJ and ZWNJ between two letters that would otherwise ligate. The joiner
+    # changes what the face does *and* leaves nothing behind, which is two
+    # claims one string checks at once.
+    "f\\u200di",
+    "f\\u200ci",
+    # A variation selector, which selects a glyph and is never itself drawn.
+    "a\\ufe0fb",
+    # The word joiner and the zero-width space, which are different characters
+    # hidden the same way.
+    "a\\u2060b",
+    "a\\u200bb",
+    # A combining grapheme joiner, which is ignorable *and* a combining mark.
+    # The two properties are not exclusive, and the mark path must not keep it.
+    "a\\u034fb",
     # --- language ---
     #
     # A language selects a LangSysRecord in place of the script's default

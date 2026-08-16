@@ -29,6 +29,13 @@ members = [
     # ones that must not depend on a widget library, and had each grown their
     # own subtly-wrong copy. Same member-not-exclude rationale as `yamldoc`.
     "textfmt",
+    # Shared no_std substring search that reports offsets into the string the
+    # caller searched, rather than into a lowercased copy of it. Eight
+    # applications plus two widgets in the toolkit had each written the same
+    # search and made the same three mistakes with the offsets. Same
+    # member-not-exclude rationale as `yamldoc`; unlike `textfmt` it does not
+    # even need `alloc`, since it only ever returns byte ranges.
+    "textfind",
 ]
 # Default members: only the crates that build under the workspace-root
 # target (x86_64-unknown-none). A plain `cargo build` from the project

@@ -64,6 +64,13 @@ pub mod widget;
 // is not a reason to touch all of them.
 pub use textfmt::{csv, escape, fold, kv};
 
+// Case-insensitive substring search lives in `textfind` for the same reason:
+// the headless components search text too, and the applications that need it
+// reach it through the toolkit they already depend on. Re-exported so a call
+// site can say `guitk::textfind::matches(…)` without its crate growing a
+// second path entry for a crate `guitk` already links.
+pub use textfind;
+
 pub use color::Color;
 pub use event::{Event, KeyEvent, MouseButton, MouseEvent};
 pub use layout::{Axis, FlexAlign, FlexDirection, FlexWrap, LayoutBox, Size};

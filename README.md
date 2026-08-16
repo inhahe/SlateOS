@@ -61,11 +61,15 @@ Typical loops:
 # Build the kernel (custom target configured via .cargo/config.toml)
 cargo build
 
-# Boot the kernel in QEMU and check for the serial success marker
-./scripts/boot-test.sh            # bash
-# or, on Windows:
-powershell ./boot-test.ps1
-powershell ./scripts/run-qemu.ps1 # interactive QEMU run
+# Boot the kernel in QEMU and check for the serial success marker.
+# This is the only supported boot test, on every platform: it derives its own
+# worktree, stages the rootfs, and takes the cross-worktree lock that keeps
+# three lanes from running QEMU at once.
+./scripts/boot-test.sh
+
+# Interactive QEMU run (PowerShell). Note it does NOT take the boot lock, so
+# don't start one while a lane's boot test is running.
+powershell ./scripts/run-qemu.ps1
 ```
 
 ```bash

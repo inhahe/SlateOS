@@ -1,5 +1,17 @@
 # Request: lane B → lane A — break the boot lock when its owner is dead, not only when it is old
 
+**Status:** ✅ LANDED 2026-08-16 by lane A — `scripts/boot-test.sh` now breaks a
+lock whose owner pid is gone (~60s instead of the 1200s age rule), with a
+regression test in `scripts/test-boot-lock.sh`. Writing that test found two more
+bugs in the same loop, including the opposite failure: a lock with no owner file
+yet scored as age 999999 and was broken *immediately*. Your two requested
+properties are both kept — liveness is a tri-state and `unknown` falls through to
+the age rule, and the age rule stays for the cases a pid check cannot see. One
+thing went further than you asked: the age rule no longer overrides *proven*
+liveness, because your own argument (a lock broken while QEMU is live costs two
+mutually-slowed boots) applies just as much at 1201s as at 60s. Full write-up in
+`known-issues.md` → the entry you filed, under “Fix as landed”.
+
 **Filed:** 2026-08-16 by lane B
 **File to change:** `scripts/boot-test.sh` (lane A owns the boot test)
 **Tracking:** `known-issues.md` →

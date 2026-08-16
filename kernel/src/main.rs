@@ -2927,6 +2927,17 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // pkgconf 2.3.0, the second real-world C program linked against OUR libc.a.
+    // bash covers fork/exec/wait, signals and its own `>` redirection; this
+    // covers the file-and-string side — getopt_long, a PKG_CONFIG_LIBDIR search,
+    // .pc parsing with nested ${} expansion, satisfiable AND unsatisfiable
+    // version constraints, and buffered stdout on an inherited file-backed fd 1.
+    // No-op without rootfs.ext4 / /bin/pkgconf (built by
+    // scripts/pkgconf-spike/run.sh). See requests/b-a-pkgconf-self-test-rung.md.
+    if let Err(e) = proc::spawn::self_test_pkgconf_on_slateos_libc() {
+        serial_println!("WARNING: pkgconf on SlateOS libc self-test failed: {:?}", e);
+    }
+
     // Path Z: the full shell-orchestration proof — dash forks + exec's an
     // EXTERNAL real-glibc binary (/bin/emit) with output redirection. Proves
     // dash parses `cmd > file`, fork()s, the child redirects fd 1 + execve()s

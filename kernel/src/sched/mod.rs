@@ -1031,6 +1031,41 @@ static EXIT_HOOKS: [AtomicU64; MAX_EXIT_HOOKS] = {
 /// boot).
 static EXIT_HOOK_COUNT: AtomicU8 = AtomicU8::new(0);
 
+/// Set while a self-test is deliberately overfilling the hook table, so the
+/// rejection it provokes is not logged as a `WARNING`.
+///
+/// `test_exit_hooks` step 6 fills the table to `MAX_EXIT_HOOKS` and registers
+/// once more to prove the rejection path works.  That made every *passing*
+/// boot log carry `WARNING: exit hook table full (8 slots)` at serial line
+/// ~284 — a line that describes a resource being exhausted, is specific
+/// enough to sound like a real lead rather than noise, and sits thousands of
+/// lines above anything interesting.  It cost lane B a full investigative
+/// pass while diagnosing an unrelated boot hang, which is a real cost paid by
+/// a reader who did nothing wrong: the log's reader is not the test's author,
+/// and has no way to know a warning was provoked on purpose.
+///
+/// Bracketing the warning with an "expect one of these next" line was the
+/// obvious cheap fix and is not enough — `grep WARNING` returns the warning
+/// line *without* its bracket, which is exactly how the log is read when
+/// hunting an unrelated failure.  So the distinction has to be on the line
+/// itself, and the expected case must not contain the word `WARNING` at all,
+/// leaving a healthy boot with none.
+///
+/// Deliberately not `#[cfg(test)]`: the self-tests run in the real kernel on
+/// the real boot path, so there is no test build to hide this in.  The cost
+/// is one relaxed load on a path already committed to a serial write, i.e.
+/// nothing measurable.  Genuine exhaustion still warns — a silent failure to
+/// register an exit hook would be far worse than a confusing log line.
+static EXIT_HOOK_FULL_EXPECTED: AtomicBool = AtomicBool::new(false);
+
+/// Mark deliberate `register_exit_hook` rejections as expected, for the
+/// duration of a self-test's provocation.  Returns the previous value so a
+/// caller can restore it; callers must always restore, or a later genuine
+/// exhaustion goes unwarned.
+pub(crate) fn set_exit_hook_full_expected(expected: bool) -> bool {
+    EXIT_HOOK_FULL_EXPECTED.swap(expected, Ordering::Relaxed)
+}
+
 /// Register an exit hook that will be called when any task dies.
 ///
 /// Returns the slot index (0..MAX_EXIT_HOOKS-1) on success, or `None`
@@ -1069,10 +1104,19 @@ pub fn register_exit_hook(hook: fn(TaskId)) -> Option<usize> {
         }
     }
 
-    serial_println!(
-        "[sched] WARNING: exit hook table full ({} slots)",
-        MAX_EXIT_HOOKS
-    );
+    if EXIT_HOOK_FULL_EXPECTED.load(Ordering::Relaxed) {
+        // Note the absence of the word "WARNING": a passing boot must not
+        // leave one in the log for the next person to chase.
+        serial_println!(
+            "[sched]   (expected) exit hook table full ({} slots) — provoked by a self-test",
+            MAX_EXIT_HOOKS
+        );
+    } else {
+        serial_println!(
+            "[sched] WARNING: exit hook table full ({} slots)",
+            MAX_EXIT_HOOKS
+        );
+    }
     None
 }
 
@@ -7960,9 +8004,21 @@ fn test_exit_hooks() -> KernelResult<()> {
         }
     }
 
-    // One more should fail.
-    if register_exit_hook(exit_hook_test_cb).is_some() {
+    // One more should fail.  Mark the rejection as expected across exactly
+    // this one call, so the log line it prints does not read as a genuine
+    // resource exhaustion to someone grepping a passing boot for `WARNING`.
+    // Restored immediately and on every exit path below: leaving it set would
+    // silence a *real* exhaustion later in the boot, which is the one failure
+    // mode worse than the confusing line this removes.
+    let prev_expected = set_exit_hook_full_expected(true);
+    let overfilled = register_exit_hook(exit_hook_test_cb);
+    set_exit_hook_full_expected(prev_expected);
+    if let Some(extra) = overfilled {
         serial_println!("[sched]   FAIL: registered beyond MAX_EXIT_HOOKS");
+        // Release the slot we should never have been given, too — otherwise a
+        // failing run leaves a hook pointing at a test callback for the rest
+        // of the boot.
+        unregister_exit_hook(extra);
         for s in &hook_slots {
             unregister_exit_hook(*s);
         }

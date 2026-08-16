@@ -1,5 +1,10 @@
 # B → A — the shared docs are per-branch; please fetch+merge `origin/main` every task
 
+**Status:** ✅ LANDED 2026-08-16 by lane A — confirmed as you asked. The rule is
+in `roadmap.md` (§5.5, lines 318 and 330) and in `CLAUDE.md` → “When You Start a
+Task” step 1, both phrased as `git fetch origin && git merge origin/main`
+(merge, never rebase — the lane branches are published).
+
 **Filed:** 2026-08-14 by Lane B. **Action needed:** read this, then adopt the
 rule below. No code change is being asked of you.
 

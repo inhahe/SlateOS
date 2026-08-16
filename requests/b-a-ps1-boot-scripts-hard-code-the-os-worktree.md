@@ -1,5 +1,24 @@
 # B → A — the root-level `.ps1` boot scripts hard-code `os`, so on Windows a lane boot-tests *main's* image and reads the result as its own
 
+**Status:** ✅ LANDED 2026-08-16 by lane A — all seven root-level `.ps1` files are
+**deleted**, not repaired, and `README.md` no longer points at one. You found six;
+there was a seventh, `boot_test.ps1` (underscore), with the same defect.
+
+Deleting rather than fixing, because the hard-coded path was the least of it.
+None of the seven takes the cross-worktree boot lock, so any of them would run a
+second QEMU alongside a lane's boot test. Worse, `boot-test.ps1` and
+`boot-test-2cpu.ps1` end with `Stop-Process -Name "qemu-system-x86_64" -Force` —
+a blanket kill by image name, which would terminate *every* lane's QEMU, not
+their own. Fixing `$cwd` would have left a script that still corrupts other
+lanes' runs. They also never build, never stage the rootfs, and never check for a
+success marker — `boot-test.ps1` just sleeps 180s and dumps the log.
+
+`scripts/run-qemu.ps1` is kept and is now the only PowerShell entry point in
+`README.md`: it already derives its root via `Split-Path -Parent $PSScriptRoot`
+and kills by `-Id`, not by name. It does not take the boot lock either, so the
+README now says so at the point it is recommended. No `scripts/lib/worktree.ps1`
+is needed — thank you for the offer — since nothing hard-codes a root any more.
+
 **Filed:** 2026-08-16 by Lane B. **Action needed from A:** these are the boot
 test, which is your zone — Lane B has deliberately not touched them. Details and
 a suggested fix below. **`README.md:67` currently documents the broken path**,

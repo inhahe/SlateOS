@@ -1327,6 +1327,15 @@ if [ "${BOOT_LOCK:-1}" != "0" ]; then
     fi
 fi
 
+# The region between the two BOOT-LOCK-REGION markers below is extracted
+# verbatim and executed by `scripts/test-boot-lock.sh`, which is the only test
+# this logic has: the acquire loop runs *after* the kernel build, so reaching it
+# through a normal `boot-test.sh` run costs a full build (~7 min) per case, and
+# the interesting cases need a second lane holding the lock.  Keep the markers
+# in place, and keep everything between them free of dependencies on the build
+# steps above — the harness supplies only PROJECT_ROOT, BOOT_LOCK_DIR and the
+# `which-lane.py` it points at.
+# --- BEGIN BOOT-LOCK-REGION ---
 # Release is idempotent and safe to call when we never acquired: we only remove
 # the lock if the owner file still names THIS process, so we can never delete a
 # lock that another lane acquired after we broke/released ours.
@@ -1343,16 +1352,82 @@ if [ -n "$BOOT_LOCK_DIR" ]; then
     BOOT_LOCK_OWNER="lane-${BOOT_LOCK_OWNER:-?}/pid-$$/$(date +%s)"
     _lock_wait="${BOOT_LOCK_WAIT:-3600}"
     _lock_waited=0
+    # Can we ask whether a pid is alive at all?  Probe on ourselves, where the
+    # answer is known: if `kill -0 $$` fails, `kill` is unusable here and every
+    # owner would look dead, which would break live locks on every poll.  In
+    # that case we disable the liveness breaker entirely and fall back to the
+    # age rule.  This is the "stay conservative when the answer is unknown"
+    # half of requests/b-a-boot-lock-survives-its-dead-owner.md.
+    if kill -0 $$ 2>/dev/null; then _lock_pidcheck=1; else _lock_pidcheck=0; fi
     while ! mkdir "$BOOT_LOCK_DIR" 2>/dev/null; do
-        # Break a stale lock: >20 min old means the holder died without
-        # releasing (hard kill, power loss).  20 min > our longest healthy
-        # boot (~8 min) with a wide margin, so this cannot steal a live lock.
+        # Age of the lock, for the stale breaker below.
+        #
+        # The owner file is written a moment AFTER the `mkdir` that acquires,
+        # so a waiter polling inside that window sees a lock directory with no
+        # owner file.  That is a *young* lock, not an old one — treating the
+        # missing file as "infinitely old" (which this did, via 999999) let a
+        # waiter delete a lock another lane had just legitimately taken, and
+        # then both would boot QEMU at once.  So fall back to the directory's
+        # own mtime, which `mkdir` stamps at acquisition, and only claim
+        # ignorance when neither can be stat'd.
         _lock_age=999999
-        if [ -f "$BOOT_LOCK_DIR/owner" ]; then
-            _lock_mtime="$(date -r "$BOOT_LOCK_DIR/owner" +%s 2>/dev/null || echo 0)"
-            [ "$_lock_mtime" -gt 0 ] && _lock_age=$(( $(date +%s) - _lock_mtime ))
+        _lock_mtime="$(date -r "$BOOT_LOCK_DIR/owner" +%s 2>/dev/null \
+                       || date -r "$BOOT_LOCK_DIR" +%s 2>/dev/null || echo 0)"
+        [ "$_lock_mtime" -gt 0 ] && _lock_age=$(( $(date +%s) - _lock_mtime ))
+        # Break a dead lock: the owner string carries the holder's pid, and all
+        # lanes run this script under the same MSYS bash, so `kill -0` answers
+        # across worktrees.  A run killed by `run-timeout.py`'s Job Object is
+        # torn down without executing any exit path, so `release_boot_lock`
+        # never fires and the lock outlives its owner by up to the 20 minutes
+        # the age rule needs — landing on whichever lane runs next as a stall
+        # indistinguishable from a hung boot.
+        #
+        # The 60s floor is deliberate.  A pid that cannot be seen is only
+        # evidence of death if the lock has existed long enough for the owner
+        # to be observable at all; below that we would be acting on a lock
+        # taken seconds ago, where a transient (an owner file not yet flushed,
+        # a pid not yet visible) is likelier than a real death.  A healthy boot
+        # holds the lock for minutes, so the floor costs a waiter nothing and
+        # still cuts the worst case from 1200s to ~60s.
+        #
+        # Liveness is a tri-state — alive / dead / unknown — and all three
+        # answers matter.  Collapsing "unknown" into either of the other two is
+        # how this goes wrong: into "dead" and we break live locks whenever
+        # `kill` is unavailable, into "alive" and we never break anything.
+        _lock_alive="unknown"
+        if [ "$_lock_pidcheck" = "1" ]; then
+            _lock_pid="$(sed -n 's#.*/pid-\([0-9][0-9]*\)/.*#\1#p' \
+                         "$BOOT_LOCK_DIR/owner" 2>/dev/null || echo "")"
+            if [ -n "$_lock_pid" ]; then
+                if kill -0 "$_lock_pid" 2>/dev/null; then
+                    _lock_alive="yes"
+                elif [ "$_lock_age" -ge 60 ]; then
+                    _lock_alive="no"
+                fi
+            fi
         fi
-        if [ "$_lock_age" -gt 1200 ]; then
+        if [ "$_lock_alive" = "no" ]; then
+            echo "=== Breaking boot lock: owner pid $_lock_pid is gone (held by $(cat "$BOOT_LOCK_DIR/owner" 2>/dev/null || echo unknown), age ${_lock_age}s) ==="
+            rm -rf "$BOOT_LOCK_DIR" 2>/dev/null || true
+            continue
+        fi
+        # The age rule is the backstop for everything the pid check cannot
+        # see: a recycled pid now belonging to something unrelated, an owner
+        # from a previous Windows session, an owner whose pid lives in a
+        # different MSYS instance's process table, an unparseable owner
+        # string, and the case where `kill` itself is unavailable.
+        #
+        # It deliberately does NOT apply to an owner we can prove is alive.
+        # It was written when liveness was unknowable, so age was the only
+        # available proxy for death and 1200s was picked as "longer than any
+        # healthy boot".  But a boot that outlives that estimate is not dead,
+        # it is slow — a cold host, a QEMU stalled on I/O — and breaking its
+        # lock starts a second QEMU alongside the first, which is the one
+        # outcome worse than waiting: two mutually-slowed runs, either of
+        # which may now fail for reasons that have nothing to do with the
+        # code under test.  Waiting on a live owner is bounded anyway by
+        # BOOT_LOCK_WAIT, which proceeds rather than failing.
+        if [ "$_lock_alive" != "yes" ] && [ "$_lock_age" -gt 1200 ]; then
             echo "=== Breaking stale boot lock (age ${_lock_age}s, held by $(cat "$BOOT_LOCK_DIR/owner" 2>/dev/null || echo unknown)) ==="
             rm -rf "$BOOT_LOCK_DIR" 2>/dev/null || true
             continue
@@ -1374,6 +1449,7 @@ if [ -n "$BOOT_LOCK_DIR" ]; then
         echo "=== Boot lock acquired: $BOOT_LOCK_OWNER ==="
     fi
 fi
+# --- END BOOT-LOCK-REGION ---
 
 # Step 4: Boot QEMU
 echo "=== Booting QEMU (timeout: ${TIMEOUT}s, cpu: $QEMU_CPU) ==="

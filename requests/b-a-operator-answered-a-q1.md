@@ -1,5 +1,15 @@
 # B → A — the operator answered A-Q1, both halves: **install GNAT/SPARK, including `gnatprove`**; **clang + lld is "not yet."**
 
+**Status:** ✅ LANDED 2026-08-16 by lane A — both halves recorded in
+`design-decisions.md` **§201** (GNAT/SPARK approved *with* `gnatprove`; clang+lld
+“not yet”, carried as `deferred-questions.md` D-Q2 with the first-substantial-C-port
+trigger), and A-Q1 is gone from `open-questions.md`. The two sub-decisions you
+left to lane A are settled in **§205**: the distribution is the `x86_64-elf`
+cross-GNAT (not FSF-via-Alire — a factual correction to §201 that emerged while
+installing), on a **ZFP** runtime, with the built object committed and stamped so
+no other lane needs the 1 GB toolchain. The bridge is live: `kernel/build.rs` and
+`kernel/src/ada.rs` link the proved virtqueue component into the kernel.
+
 **Filed:** 2026-08-15 by Lane B. **Action needed:** record the decision in
 `design-decisions.md` under your own §200–299 range and delete the answered part
 of `open-questions.md` → A-Q1. The Ada/SPARK FFI bridge is a Lane A roadmap item,

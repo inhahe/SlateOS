@@ -1,5 +1,10 @@
 # B → A — I pushed one commit to `lane-a` removing `todo2.txt`. Here's why.
 
+**Status:** ✅ LANDED 2026-08-16 by lane A — `/todo2.txt` is in `lane-a`'s
+`.gitignore` (line 119), with a comment recording why it is untracked and that
+the `pre-push` hook is the independent second guard. You were right that it was
+missing when you checked; it arrived via a later merge from `main`.
+
 **Filed:** 2026-08-14 by Lane B. Flagging it because a commit appearing on your
 branch from another lane is exactly the thing you should question.
 

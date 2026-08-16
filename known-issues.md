@@ -5,8 +5,8 @@ once the fix has survived a full boot test on `main`, so this file stays a list
 of what is *still* wrong; until then they stay here carrying a
 `**Status: FIXED**` stamp. Nothing is ever deleted — the archive keeps each
 entry's full text and commit hashes. **The migration is incremental, so grep
-both files** (as of 2026-08-16 lanes B and C are archived; lane A's resolved
-entries are still here — see `requests/c-a-known-issues-archive.md`).
+both files** (as of 2026-08-16 all three lanes' resolved entries are archived,
+bar a handful fixed that same day and still awaiting a boot test on `main`).
 
 Archiving is mechanised: `scripts/ki_archive.py`, with structure supplied by
 `scripts/ki_split.py` — which is fence-aware, because ~1,600 code fences in
@@ -14,6 +14,14 @@ this file contain lines beginning with `#` and a naive `^#` scan tears entries
 in half. It moves only entries whose heading carries an unhedged
 `FIXED`/`RESOLVED`/`CLOSED` marker dated before a cutoff, and verifies the
 result by line multiset across both files. Run it with `--dry-run` first.
+
+**After any merge that touched either file, run `python scripts/ki_dupes.py`.**
+The archive is a move, but a *later* merge can undo half of it: git resolves a
+deleted-on-one-side / edited-on-the-other region by keeping the edited text, so
+an archived entry silently reappears here while its archived copy stays put.
+Two copies of one entry in two files is worse than either extreme — they drift,
+and no reader can tell which is current. This happened on 2026-08-16 and went
+unnoticed until it was looked for; see the entry below.
 
 How to write in this file, in one paragraph. New entries go at the end with
 your lane letter in the heading. Put a `**Status:** …` line immediately under
@@ -27,197 +35,6 @@ freely. See `roadmap.md` → "Three-Agent Parallel Execution" rule 3, and
 `design-decisions.md` §437 for why.
 
 ---
-
-## Liveness watchdog reported `SYSTEM HANG` on healthy boots and disarmed itself, disabling hang detection for the rest of boot (lane A)
-
-**Status: FIXED 2026-08-15** (lane A), reported by lane C in
-`requests/c-a-liveness-system-hang-false-positive.md`. The total-hang branch of
-`sched::liveness_check` now (a) refuses to report while kernel-side progress
-counters are advancing and (b) no longer disarms the watchdog when it does
-report.
-
-**What was wrong, and which half actually mattered.** The report itself was a
-false positive, which is bad; the *disarm* that accompanied it was the real
-damage. `liveness_check`'s total-hang path did
-`LIVENESS_ARMED.store(false, Ordering::Release)` before printing, and
-`liveness_boot_deadline_check()` early-returns on `!LIVENESS_ARMED`. So a single
-spurious report at ~140 s of armed time switched off not just the two progress
-detectors but the **wall-clock boot deadline** — the backstop whose own doc
-comment calls it the thing that "detects *any* hang mode (including the
-ping-pong livelock the progress detectors are structurally blind to)". The
-remaining ~600 s of that boot had no hang detection at all. The vanished
-30/60/90/120 s breadcrumbs in the log are the proof it really went dark rather
-than merely stopped reporting.
-
-The sibling busy-livelock branch, two branches down, had already documented the
-correct policy and already obeyed it: *"Keeping the watchdog armed means a false
-positive here cannot disable hang detection for the remainder of boot."* The
-total-hang branch was the outlier.
-
-**Why it fired on a healthy boot.** The branch requires, for three consecutive
-5 s intervals, that `USEFUL_WORK_TICKS` not advance **and** that serial output
-not advance. `LIVENESS_LAST_OUTPUT`'s own doc comment already conceded the first
-condition holds during normal boot — a starting ring-3 process "spends nearly
-all its wall time inside the kernel on its own behalf (ELF load, demand-paging
-storm, filesystem I/O)", so ticks land in kernel mode with an empty run queue.
-The silence gate was added by `BUG-LIVENESS-DEADLINE-FALSE-FIRE` (2026-07-27) on
-the premise that "this kernel narrates its boot continuously, so a *silent*
-interval means execution really has stopped." **That premise does not survive a
-large kernel-side or ring-3 operation**, which narrates nothing for tens of
-seconds. Both conditions then coincide and the detector fires.
-
-**Three independent sightings, not one.** Lane C's merge boot of 2026-08-15
-(`useful_work=82`, fired just before a 3.5 MB fastpy ELF was demand-paged off
-ext4); `known-issues.md` (the BUG-LIVENESS-DEADLINE-FALSE-FIRE entry's later
-addendum) with `useful_work=6`, dismissed at the time as "non-fatal … and the
-boot then recovered"; and — found while fixing this — lane A's own calibration
-boot of 2026-08-16, `useful_work=349`, firing immediately after
-`[spawn] Running link()/linkat no-follow symlink test (kernel, ext4 /mnt)` with
-`preempt_disable_depth=3`. That third one is what settles the diagnosis: the
-workload in the window was an ext4 test, i.e. block I/O, and the machine was
-demonstrably deep inside the kernel doing it.
-
-**The fix.** A new `LIVENESS_LAST_KWORK` counter sums page faults resolved
-(`mm::fault::fault_stats`) plus block-I/O operations completed
-(`blkdev::io_stats`) — both plain relaxed atomic loads, because a watchdog that
-took the `SCHED` lock could deadlock against the very hang it exists to report.
-If that total advanced during the interval, the total-hang branch resets its
-counter and returns.
-
-Two design points are worth keeping:
-
-- **Only the total-hang branch consults it, and that is a definitional argument
-  rather than a tuning one.** That branch asserts "no task-level forward
-  progress, all CPUs idle-ticking"; a resolved page fault or a completed disk
-  read *contradicts* that assertion, so the gate removes a false statement. The
-  busy-livelock branch asserts something else — "a task is monopolizing a CPU" —
-  which is perfectly consistent with a fault storm, so the same gate there would
-  blind a correct detector instead of fixing an incorrect one.
-- **Bounding the report count replaces disarming as the way to stop log spam.**
-  `LIVENESS_MAX_HANG_REPORTS = 3`, with the stall counter reset after each
-  report so the next one needs another full `LIVENESS_ALERT_COUNT` of continuous
-  stall. Three rather than one because the second and third task-table dumps
-  carry information the first cannot: whether the task states are *changing*,
-  which is what separates a frozen system from a merely slow one.
-
-**Why it survived so long: the drill existed for the other branch only.**
-`test_liveness_watchdog` had a busy-livelock drill that explicitly asserted the
-watchdog stays armed, and **no drill at all** for the total-hang branch — so the
-branch kept a policy its sibling had already rejected in writing. A drill now
-covers it, and asserts both halves: that kernel-side progress suppresses the
-report, and that when the report does fire `LIVENESS_ARMED` is still true.
-
-The second half is not redundant — **it is what stops the first half passing
-vacuously.** On its own, "no report fired" is satisfied by an interval that was
-merely *not silent*, since that path returns early with the same zeroed counters
-and never reaches the kernel-progress gate at all. Asserting a report *does*
-fire under otherwise identical conditions proves the environment is silent, so
-the only remaining difference between the two halves is the one integer the
-first half rewinds. Both halves also pin the progress baseline explicitly each
-interval rather than trusting ambient quiet, so neither depends on whether a
-page fault happens to land in the window.
-
-**And the contract is machine-checked now.** `BUG-LIVENESS-DEADLINE-FALSE-FIRE`
-had *required*, since 2026-07-27, a boot log containing no `SYSTEM HANG` /
-`BOOT DEADLINE EXCEEDED` line and containing the `disarmed after …` measurement
-without the FALSE POSITIVE warning. That requirement lived only in prose:
-`boot-test.sh` grepped for `BOOT_OK` and nothing else, which is why a run
-violating both halves still exited 0. `check_liveness_failures()` now fails the
-boot on any of those lines. Because the deliberate drills would otherwise trip
-it on every healthy boot — and an assertion that always fires gets deleted,
-leaving the contract unchecked again — the drills print a `(self-test) ` infix
-and the harness matches only the real shape.
-
-**Bonus fix: the idle task was wearing a userspace test's name.** The hang dump
-showed `tid=0 state=Running cpu=0 prio=31 … name="prctl-batch269"`, reading as
-though a userspace prctl test were the task running at the moment of the "hang" —
-actively misleading in the one dump you most want to trust. `prctl(PR_SET_NAME)`
-routes to `current_task_id()`, which is 0 in kernel context, and the self-test's
-comment asserted that "kernel context has no PCB so the name isn't actually
-stored". That was simply false: task 0 is the BSP idle task and it very much
-exists, so the store landed on it. `sched::set_task_name` now refuses task 0
-outright — making the comment's claim true by construction rather than by luck —
-and the syscall self-test asserts the refusal, then exercises the storage
-round-trip on the lowest non-zero task id instead.
-
-## Benchmark `min_cycles` had no in-window stability check at all (lane A)
-
-**Status: FIXED 2026-08-15** (lane A). `bench::run` now splits each measurement
-window into contiguous halves and reports the disagreement between their
-minima as a new `<split>` column on the SCORE line;
-`scripts/bench-history.py` withdraws any benchmark whose split is flagged from
-the regression verdict instead of reporting it as a move.
-
-**What was wrong.** `scripts/bench-history.py` diffs `min_cycles` boot-over-boot
-and fails the build on a regression, but nothing checked whether the window that
-produced `min_cycles` was quiet. `min` is robust to *spikes*; it is not robust to
-a window that is uniformly busier than the boot it is being compared against —
-the minimum of a busy window is simply the busy floor. `ab_interleaved`'s doc
-comment already said this in as many words, and the `frame_owner` A/B that
-motivated it had reported a 10826-cycle cost that vanished when interleaved. The
-same failure mode applies to every history-tracked benchmark, and there was no
-check on it whatsoever, which is the limiting case of a check that cannot fire.
-
-Three disqualifications exist now and none substitutes for another:
-
-| Check | Question it answers | Blind to |
-|---|---|---|
-| per-benchmark band | is a movement of this size normal *for this benchmark*? | a boot where the whole host was slow |
-| canary | was the host busy? | a burst *inside* one benchmark's window — it samples between benchmarks |
-| split-sample (new) | did the floor move *during this window*? | a window that was uniformly busy start to finish |
-
-**The finding worth keeping: interleaving is the wrong tool here, and provably
-so.** The first implementation split by parity — even iterations to set A, odd to
-set B — by analogy with `ab_interleaved`, and it was caught before commit by
-deriving what it actually detects. Consider the motivating case: load arrives
-half-way through the window and stays. An even/odd split gives *both* sets
-samples from the quiet part and from the busy part. Each set's `min` is therefore
-the quiet-part floor. The two agree exactly, and the check reports a serene 0% on
-precisely the window it exists to reject.
-
-The generalisable lesson is that **the property that makes interleaving robust is
-exactly the property that makes it insensitive.** Interleaving is correct for
-`ab_interleaved`, where the question is "what does X cost *relative to* Y" and
-the whole point is that ambient load must lift both arms equally so it cancels in
-the difference. Here the question is the opposite — "did ambient conditions
-change?" — and a construction designed to cancel out ambient change cannot
-measure it. Contiguous halves work because the halves are *not* interchangeable;
-that asymmetry is the signal.
-
-Corollary for future checks: before building a self-check, write down the failure
-it is for and trace that specific failure through the proposed construction. Both
-designs here look equally reasonable in the abstract, and the difference is only
-visible once a concrete failure is pushed through them.
-
-**Known cost of the choice, accepted deliberately.** Halves reintroduce a bias
-interleaving did not have: the first half is colder. `run`'s warmup is 10% of
-iterations, enough for first-touch costs but not to saturate a slowly-filling
-cache or TCG translation cache, so a benchmark that warms across its whole window
-will show `min_first > min_second` on a quiet host every boot. That is not
-treated as a false positive — a benchmark still warming during its own
-measurement has no single noise floor, so its `min_cycles` is a function of how
-far the warmup got, and diffing it compares two arbitrary points on a curve. The
-flag says to lengthen *that benchmark's* warmup, not to loosen the gate. A
-systematic flag is also self-announcing: it fires every boot, so it appears in
-the suite-level count as a constant, where a noise flag comes and goes.
-
-**Not yet calibrated.** `SPLIT_UNSTABLE_REL_PCT = 15` and
-`SPLIT_UNSTABLE_ABS_CYCLES = 8` are guesses. The absolute floor exists because
-the fastest entries land in the low tens of cycles, where one cycle of `rdtsc`
-jitter is already several percent, and a gate that fires on those fires on
-everything. Both constants are calibratable by construction: the per-benchmark
-spread is printed *even when clean*, and the scorecard ends with a suite-level
-`N of M checked entries unstable` line, so "68/70" (too tight) and "0/70" (too
-loose) are both visible at a glance — neither is visible from a per-benchmark
-flag alone. See the open todo to set them from a real `--bench` boot.
-
-**A withdrawn measurement is not a passed one.** `bench-history.py` prints
-flagged benchmarks under a separate `MEASUREMENT VOID` heading and counts them
-apart from the ones that moved-but-within-band. Folding the two together would
-let a suite where nothing could be measured read as a suite where nothing
-changed. For the same reason `SplitCheck::NotChecked` — a hand-assembled
-`BenchResult`, a derived per-switch figure, a run below `SPLIT_MIN_ITERATIONS`
-— renders as `-` and never as a stability verdict in either direction.
 
 ## `cargo test -p indexer` tests lane B's crate, not lane C's (lane C)
 
@@ -15976,143 +15793,6 @@ on two rows.
 
 ---
 
-## B-KASAN-INSTRUMENTED-BUILD-PANICS-ON-ITS-OWN-REDZONE-CHECKS
-
-**Status:** ✅ **FIXED 2026-08-12** — the flood and the panic are both gone.
-Found 2026-08-12 by the first instrumented boot that got far enough to reach the
-self-tests.
-
-**Verification.** The instrumented boot of 2026-08-12 ran 5560 lines — well past
-the self-tests that previously flooded and panicked — with **zero `[kasan]
-CRITICAL` reports**. The 64-report cap is untouched at the point the hunt
-window opens, which was consequence (1) below and the reason this blocked the
-§107 escalation.
-
-**That boot did not reach `BOOT_OK`**, but for an unrelated reason: it later
-wedged mid-print on a page fault. That is tracked separately as
-`B-KASAN-INSTRUMENTED-BOOT-WEDGES-MID-PRINT-ON-A-PAGE-FAULT`; it is a different
-failure (a deadlock, not a report flood) at a different place, and it is still
-open. So the §107 escalation is unblocked *by this entry* but still gated on
-that wedge.
-
-**What the fix was.** Exactly the "proper fix" described below, implemented as
-`kernel/src/mm/rawmem.rs` (`read_u8`/`write_u8`/`fill_u8` in inline `asm!`) with
-every deliberate poisoned-memory touch in `heap.rs`/`poison.rs`/`quarantine.rs`
-routed through it, plus walk 3 of `scripts/kasan-check-preshadow.py` as the
-build gate, plus `rawmem::self_test()` at boot ahead of the poison/kasan/
-quarantine self-tests it underpins. The design and the reasoning behind walk 3's
-accessor-based violation rule are recorded in `design-decisions.md` §120.
-
-`kasan_rt::self_test`'s `before` snapshot also moved to *after*
-`self_test_freed_address()` returns, as described below. That was independently
-worth doing: it is what made the assertion count setup traffic as the thing
-under test, and it would have kept the measurement window fragile even with the
-flood gone.
-
----
-
-*Original report follows.*
-
-**What happens.** The compiler-instrumented kernel (`scripts/kasan-build.sh`)
-does **not** reach `BOOT_OK`. It runs almost the whole boot, then dies in the
-`mm::kasan_rt` self-test:
-
-```
-[kasan] CRITICAL: out-of-bounds (heap redzone) on read of 1 bytes @ 0xffff80007eb05268 (shadow=0xfb)
-   ... x64, then: [kasan] further reports suppressed after 64
-[kasan] Self-test PASSED
-[kasan-rt] Running self-test...
-!!! KERNEL PANIC !!!
-panicked at kernel\src\mm\kasan_rt.rs:386:13:
-assertion `left == right` failed: kasan-rt: outlined check did not report
-  left: 217
- right: 101
-```
-
-**Root cause — a third instance of the §118/§119 hazard.** The symbolized
-backtrace of the flood is unambiguous:
-
-```
-#0 kernel::mm::kasan_rt::report
-#1 __asan_load1_noabort
-#2 core::ptr::read_volatile::<u8>        <-- instrumented
-#3 kernel::mm::heap::check_redzone
-#4 <mm::heap::KernelHeap as GlobalAlloc>::dealloc
-#5 __rust_dealloc  #6 alloc::alloc::dealloc  #7 mm::kasan::self_test
-```
-
-`mm/heap.rs`, `mm/poison.rs`, `mm/quarantine.rs` and `mm/kasan.rs` **all**
-carry the module-level `#![cfg_attr(kasan_instrumented, sanitize(address =
-"off"))]`. It does not help them, for the reason already written down twice:
-a module-level `sanitize` **cannot exempt a generic `core` function**, because
-the monomorphisation is emitted into the *kernel* crate with the default
-(instrumented) attribute. Every one of these modules does its actual byte
-touching through `core::ptr::{read_volatile, write_volatile, write_bytes}` —
-so the exemption is **cosmetic on exactly the operations that matter**.
-
-These modules are the ones whose *entire job* is to read and write memory
-KASAN has deliberately poisoned:
-
-| Site | What it touches |
-|---|---|
-| `mm/heap.rs:138-141,305-308,1737-1740` | free-magic reads on a freed block |
-| `mm/heap.rs:160-170` | free-magic + `FREE_POISON` writes |
-| `mm/heap.rs:218,322` | redzone verify (`check_redzone`, the flood above) |
-| `mm/poison.rs:138,157,174` | `poison_free`/`poison_alloc`/`poison_redzone` fills |
-| `mm/quarantine.rs:145` | parking a freed slot poisoned — the hunt's core mechanism |
-
-So the instrumented build reports a violation for every byte of every redzone
-check and every poison fill. That is *correct* by ASan's rules and useless by
-ours: the access is the detector, not the bug.
-
-**Why the panic follows.** `kasan_rt::self_test` snapshots `report_count()`
-into `before`, then calls `kasan::self_test_freed_address()`, which does a real
-`alloc`/`dealloc` — and that `dealloc` runs `check_redzone`, generating ~116
-reports of its own before the assertion is reached. `before + 1` is then wrong
-by exactly that flood (217 vs 101). The snapshot is in the wrong place *and*
-the flood should not exist; fixing the flood fixes both.
-
-**Why this is worse than a failed boot.** Two consequences that would have
-silently wrecked the hunt even if the assertion were relaxed:
-
-1. **The 64-report cap is spent before the hunt window.** The self-tests run at
-   reference line ~21662; the Path-Z checkpoint the hunt watches is at ~19579
-   but the *armed* run poisons throughout. Once suppressed, a genuine
-   B-KNULLJUMP report would never print.
-2. **Armed, the flood is enormous.** This validation boot ran *without*
-   `mm.corruption_hunt`, so KASAN was disabled (`ENABLED` defaults false) and
-   only the self-test poisoned anything — stats `poisoned=112B,
-   shadow_frames=3`. The reference armed boot reports `poisoned=133859680B,
-   shadow_frames=197` with `total_parked=55372`. Armed *and* instrumented,
-   every one of those parks and every redzone check on 133 MB reports. (Noting
-   this because the tiny stats line looks alarming on its own and is not: it is
-   the unarmed default, not a shadow-coverage failure.)
-
-**Proper fix.** Add a small uninstrumented raw-access primitive — byte
-load/store/fill implemented with `core::arch::asm!` — and route every
-deliberate poisoned-memory touch in `heap.rs`/`poison.rs`/`quarantine.rs`
-through it. `asm!` is the right tool rather than another `sanitize` attribute:
-LLVM does not instrument inline-asm memory operands, so the guarantee holds
-whether or not the helper is inlined, and it cannot be re-broken by someone
-later calling a `core` generic from an "exempt" module. Then extend
-`scripts/kasan-check-preshadow.py` with a **third root set** ("functions that
-deliberately access poisoned memory must be uninstrumented"), so this class of
-regression is caught by the build gate rather than by a 2.7-hour boot — the
-existing gate walks only the pre-shadow root and the check-path root, which is
-why it passed this binary. Separately, move `kasan_rt::self_test`'s `before`
-snapshot to *after* `self_test_freed_address()` returns, so setup can never be
-counted as the thing under test.
-
-**Reproduce.** `./scripts/kasan-build.sh` then boot; ~2.7 h to reach the panic
-(see Q43 on the cost). Partial evidence kept in `build/serial-test.txt` from
-the 2026-08-12 run; symbol table for that binary in `build/kernsyms.txt`.
-
-**Related.** `design-decisions.md` §118 and §119 (the same hazard from the
-pre-shadow and check-path roots), `open-questions.md` Q43 (the profile's cost),
-and `B-KNULLJUMP-SIGNAL` (what the profile was built to hunt).
-
----
-
 ## TD-KASAN-IRQ-CONTEXT-ALLOCATIONS-LOSE-SHADOW-COVERAGE
 
 **Status:** open, deliberate. Logged 2026-08-12.
@@ -22268,9 +21948,12 @@ another process" — with nothing actually under test at the point of failure.
 
 ## B-TIMED-OUT-BOOT-TEST-STRANDS-THE-CROSS-WORKTREE-LOCK-FOR-20-MINUTES
 
-**Status: OPEN** (lane B reporting; the fix is in `scripts/boot-test.sh`,
-which is lane A's file — filed as
-`requests/b-a-boot-lock-survives-its-dead-owner.md`)
+**Status: FIXED 2026-08-16** by lane A, in `scripts/boot-test.sh`, with a
+regression test in `scripts/test-boot-lock.sh`. See "Fix as landed" at the
+end of this entry — it covers two *more* bugs the new test found in the same
+acquire loop, one of which was the opposite failure (breaking a lock that had
+just been legitimately taken). Reported by lane B as
+`requests/b-a-boot-lock-survives-its-dead-owner.md`.
 
 **In short:** every lane runs the boot test through a shared "only one QEMU
 at a time" lock. If a boot test is killed rather than allowed to finish —
@@ -22366,6 +22049,63 @@ defending against is precisely the ones where the holder does not get to run
 another line of code. Note that both halves here were individually correct:
 the Job Object kill is right, and the owner-matched release is right. The
 gap is only visible where they meet.
+
+### Fix as landed (2026-08-16, lane A)
+
+The reported bug is fixed as lane B suggested, and writing a test for it
+turned up two more in the same twenty lines. All three are in the acquire
+loop in `scripts/boot-test.sh`; the test is `scripts/test-boot-lock.sh`
+(24 assertions, ~1s, no build required).
+
+**1. The reported bug — a dead owner is now broken in ~60s, not 1200s.**
+The owner string's pid is parsed and probed with `kill -0`. Confirmed
+against the exact pid from the report above (`1050807`): dead, so the new
+code would have broken that lock on its first poll.
+
+**2. A lock with no owner file yet was broken *immediately* — the opposite
+failure, and the more dangerous one.** `mkdir` acquires, and the owner file
+is written on the next line. A waiter polling inside that window saw a lock
+directory with no `owner` in it, and the old code scored that as
+`_lock_age=999999`, which is `> 1200`, so the age breaker deleted a lock
+another lane had taken microseconds earlier — putting two QEMUs on one host.
+Fixed by falling back to the lock *directory's* mtime, which `mkdir` stamps
+at acquisition, and treating "cannot stat either" as the only unknown case.
+This had nothing to do with lane B's report; it was found by asking what the
+age rule does when the owner file is absent, which is a question the test
+had to answer to construct its cases.
+
+**3. The age rule no longer overrides proven liveness.** `_lock_age > 1200`
+used to break the lock unconditionally. That threshold was chosen when
+liveness was *unknowable*, so age was the only available proxy for death.
+Now that we can ask, a lock held by a demonstrably-live pid is never broken
+at any age: a boot that outruns the 20-minute estimate is slow (cold host,
+QEMU stalled on I/O), not dead, and breaking its lock produces exactly the
+"two mutually-slowed, possibly corrupted boots" that lane B's request warned
+against — with the added cost that both runs can then fail for reasons
+unrelated to the code under test. Waiting on a live owner stays bounded by
+`BOOT_LOCK_WAIT` (3600s default), which proceeds anyway rather than failing.
+
+**Kept, as lane B asked:** liveness is a **tri-state** — alive / dead /
+unknown — and unknown falls through to the age rule rather than breaking.
+Unknown covers an unparseable owner string, a `kill` that cannot answer
+(probed once via `kill -0 $$` on ourselves, so a broken `kill` disables the
+liveness breaker instead of making every owner look dead), and a lock
+younger than 60s, where a transient is likelier than a real death. The
+1200s age breaker is kept in full for the cases a pid check cannot see:
+a recycled pid, an owner from a previous Windows session, an owner in a
+different MSYS instance's pid namespace.
+
+**On the test.** The acquire loop runs *after* the kernel build, so reaching
+it through a normal `boot-test.sh` run costs ~7 minutes per case, and the
+interesting cases need a second lane holding the lock at a controlled age
+with a controlled pid — which is why this logic had no test and had
+accumulated three bugs. `scripts/test-boot-lock.sh` extracts the region
+between the `BOOT-LOCK-REGION` markers **verbatim** and executes it, rather
+than restating the logic (a restatement drifts from the original and then
+tests nothing), and fails loudly if the markers go missing. Each of the
+three fixes was mutation-tested — reverted in a scratch copy, confirmed the
+suite goes red, restored — because a lock test that cannot fail is worth
+less than no test at all.
 
 ---
 
@@ -23067,3 +22807,263 @@ it by hand — see
 `B-TIMED-OUT-BOOT-TEST-STRANDS-THE-CROSS-WORKTREE-LOCK-FOR-20-MINUTES` and
 `requests/b-a-boot-lock-survives-its-dead-owner.md`. The two compound: a flaky
 hang costs the 1800s timeout *plus* up to 20 minutes of the next run's time.
+
+## B-A-MERGE-RESURRECTED-THREE-ARCHIVED-ENTRIES, AND NOTHING WAS WATCHING FOR IT (lane A, 2026-08-16)
+
+**Status: FIXED 2026-08-16** (lane A). The three duplicated copies are removed
+from this file and `scripts/ki_dupes.py` now detects the class.
+
+### What happened
+
+Commit `6e76ce5df` archived 111 of lane A's resolved entries: deleted from
+`known-issues.md`, appended to `known-issues-resolved.md`, verified by line
+multiset across both files — a correct move, and the verification passed.
+
+Merge commit `72cc0f7a7` ("Merge remote-tracking branch 'origin/main' into
+lane-c") brought three of them back into `known-issues.md` without removing the
+archived copies:
+
+| Entry | live copy | archive copy |
+|---|---|---|
+| ``Liveness watchdog reported `SYSTEM HANG` on healthy boots…`` | 112 lines | 112 lines, identical |
+| ``Benchmark `min_cycles` had no in-window stability check at all`` | 79 lines | 79 lines + a 217-line `### Follow-up 2026-08-16` the live copy never had |
+| `B-KASAN-INSTRUMENTED-BUILD-PANICS-ON-ITS-OWN-REDZONE-CHECKS` | 137 lines | 137 lines, identical |
+
+They were byte-identical at the point of the duplication and were still
+identical when found, so nothing had been lost — but the `min_cycles` pair had
+*already* begun to drift: the archive's copy carries the threshold-calibration
+follow-up, the live one does not. A reader grepping this file for `min_cycles`
+would have found the stale copy and stopped.
+
+### Why the existing check could not catch it
+
+`ki_archive.py`'s multiset verification is a check on **one commit** — it
+compares the two files before and after its own edit. The failure happens
+**later, in a merge**, and git's behaviour there is correct-by-its-own-rules:
+one side deleted a region, the other side had touched it, so the touched text
+survives. No conflict is raised, both files parse, and the invariant that was
+verified three commits ago is now false with nothing to say so.
+
+This is a general property of *any* move implemented as delete-here +
+add-there across two files in a repo with concurrent branches. It is not
+specific to these files, but these files are where it bit.
+
+### The fix
+
+`scripts/ki_dupes.py` — parses both files through the fence-aware
+`ki_split.parse` and asserts the standing invariant, independent of any commit:
+
+> no entry title appears in both `known-issues.md` and `known-issues-resolved.md`
+
+It reports the line range of each copy in each file and classifies the pair as
+*identical* / *archive is a superset* / *live is a superset* / *DIVERGED*, so
+the reader knows whether deleting the live copy is lossless or whether text
+must be folded in first. Exit 1 on any duplicate. Matching is on the heading
+title, not the body, deliberately: a resurrected entry is by definition one
+whose body may have diverged, so requiring equal bodies would hide the worst
+case.
+
+The file header now instructs every lane to run it after any merge touching
+either file, and `requests/a-b-run-ki-dupes-after-merges.md` /
+`requests/a-c-run-ki-dupes-after-merges.md` relay that to lanes B and C. There
+are no lane B or lane C duplicates right now — the checker was run across all
+780 archived and 333 live entries and found exactly these three.
+
+### What was deliberately not done
+
+**No git hook, no CI gate.** There is no CI here, and a client-side hook is
+per-worktree state that would have to be installed three times and would drift.
+A one-second script named in the file it guards, invoked at the one moment it
+can fire (after a merge), is the honest mechanism. If this recurs despite the
+instruction, the next step is to call it from `scripts/boot-test.sh` — the one
+thing every lane does run — rather than to add a hook nobody installs.
+
+## B-A-A-FAILED-ROOTFS-REBUILD-LEAVES-THE-OLD-IMAGE-AND-THE-NEXT-BOOT-TEST-STILL-PASSES (lane A, 2026-08-16)
+
+**Status: FIXED** — `scripts/create-ext4-rootfs.sh` now says so on every
+failure path (EXIT trap, see below). Found while landing the pkgconf Path-Z
+rung; it cost two full boot-test cycles (~12 min) before the mechanism was
+visible.
+
+### What happens
+
+`create-ext4-rootfs.sh` copies everything into a `mktemp -d` staging tree,
+printing a `[rootfs] staged <thing>` line per artifact, and only writes
+`rootfs.ext4` at the very end. Several gates sit *between* the last `staged`
+line and the image write — the ctest mtime gate, the ctest content-stamp gate,
+the bash/pkgconf staleness gates, the libc.a staleness gate: five `exit 1`
+paths today.
+
+Abort on any of them and **the previous `rootfs.ext4` stays exactly where it
+was**. Nothing said the image was not rebuilt. So:
+
+1. `create-ext4-rootfs.sh` prints `[rootfs] staged pkgconf 2.3.0 … /bin/pkgconf`
+   and later aborts on an unrelated stale ctest fixture.
+2. Grepping the log for `pkgconf` finds that line and looks like success. It is
+   not — it describes a copy into a temp dir that has since been deleted.
+3. The next boot test attaches the **old** image, the new rung self-skips on
+   its missing prerequisite, and the run reports **PASS** — with only a
+   `PATH-Z COVERAGE INCOMPLETE` note, which is the same note it prints for
+   any legitimately-absent artifact.
+
+The failure is quiet in both directions: the rootfs script's error scrolls past
+in a long log, and the boot test that follows is *green*. Nothing anywhere says
+"you are testing a stale image".
+
+### Why this class is worth naming
+
+It is the same shape as `B-A-MERGE-RESURRECTED-THREE-ARCHIVED-ENTRIES`: a
+check that was correct about the moment it ran (the artifact really was staged)
+being read later as a claim about a *standing* property (the artifact is on the
+image). The intermediate step that invalidates it — the abort, the merge —
+leaves no trace at the place the reader looks.
+
+The generalisable rule: **a progress message about an intermediate step must
+not be greppable as evidence of the final result.** If a log line can be
+mistaken for the outcome, the failure path has to say so explicitly.
+
+### The fix
+
+An `EXIT` trap rather than a message at each `exit 1`, because there are five
+today and the sixth would not have remembered:
+
+```bash
+IMAGE_WRITTEN=0
+_on_exit() {
+    local rc=$?
+    rm -rf "$STAGE"
+    if [ "$rc" -ne 0 ] && [ "$IMAGE_WRITTEN" -eq 0 ]; then
+        echo "[rootfs] *** rootfs.ext4 was NOT written — the existing image is UNCHANGED. ***"
+        echo "[rootfs]     Any 'staged ...' line above went to a temp dir, not to the image."
+        echo "[rootfs]     '[rootfs] DONE.' is the only line that means the image was rebuilt."
+        echo "[rootfs]     A boot test run now uses the OLD image and can still report PASS."
+    fi
+    exit "$rc"
+}
+trap _on_exit EXIT
+```
+
+`IMAGE_WRITTEN=1` is set immediately after `mke2fs`/`debugfs` produce the
+image, so the trap fires for every abort before that point and for none after.
+It also subsumes the pre-existing `rm -rf "$STAGE"` cleanup trap it replaces.
+
+**The check to use is `[rootfs] DONE.`**, which is the last line and is printed
+only on success. `grep 'staged <your artifact>'` is not a check.
+
+### Two gates, not one — worth knowing before rebuilding a fixture
+
+The ctest fixtures are guarded twice, and satisfying one does not satisfy the
+other:
+
+| gate | compares | satisfied by |
+|---|---|---|
+| mtime | ELF mtime vs `build.py` and `libc.a` | any rebuild |
+| content stamp | recorded SHA of `build.py` **and** of the ELF vs on-disk | only `scripts/ctest-fixtures.py build` |
+
+Running `python services/ctest-<n>/build.py` directly clears the first and
+**fails the second**, because it does not update the stamp. The tool to use is:
+
+```bash
+PYTHONPATH="<fastpy>" python scripts/ctest-fixtures.py build
+```
+
+which rebuilds and re-stamps together. It needs fastpy on `PYTHONPATH` (the
+fixtures import `compiler.toolchain`) and fails with a bare
+`ModuleNotFoundError: No module named 'compiler'` without it — that error means
+a missing `PYTHONPATH`, not a missing fixture.
+
+Note the stamp gate's own advice, which is right: *do not re-stamp a fixture to
+silence it* — re-stamping records the drift rather than removing it.
+
+### Why the fixtures were stale at all
+
+Not a real drift: `d9a02bb62` ("services: build.py usage examples name your
+worktree, not `os`") changed comment text in all nine `build.py` files, which
+moved their mtimes and their recorded input hashes. The ELFs were semantically
+current. Both gates are nonetheless right to fire — neither can tell a comment
+change from a flag change, and a gate that guessed would be worthless.
+
+---
+
+## A-PKGCONF-A-MISSING-CAPABILITY-PRESENTED-AS-A-MISSING-FILE (lane A, 2026-08-16)
+
+**Status:** FIXED (the grant, and a `--debug` re-run so the next one is read
+rather than guessed). Recorded because the *class* will recur with every
+further C port, and nothing in the tree warns about it.
+
+### What happened
+
+The new `self_test_pkgconf_on_slateos_libc` rung failed on its first real run,
+on all five assertions, with pkgconf's own upstream diagnostic:
+
+```
+Package slateos-simple was not found in the pkg-config search path.
+Perhaps you should add the directory containing `slateos-simple.pc'
+to the PKG_CONFIG_PATH environment variable
+```
+
+Every obvious reading of that sentence is wrong. The `.pc` fixtures were staged
+correctly, at the right path, and `PKG_CONFIG_LIBDIR` was delivered to the child
+(`Stored 3 argv, 3 envp entries` in the same log).
+
+The cause is one line in `libpkgconf/path.c` (pkgconf 2.3.0), in
+`prepare_path_node` — which `pkgconf_path_add(…, filter=true)` calls for every
+directory in the search path:
+
+```c
+if (lstat(path, &st) == -1)
+        return NULL;     /* silently drop this search directory */
+```
+
+The `lstat` is not a permission check — pkgconf keys its search-path dedup cache
+on `st_ino`/`st_dev`, so it needs the `struct stat`. (The block is compiled in
+whenever `<sys/stat.h>` exists and the host is not Windows, which is our
+`--host=x86_64-linux-musl` build.) But `SYS_FS_LSTAT` (and `SYS_FS_STAT`)
+gate on `(File, METADATA)`, and the rung spawned pkgconf with
+`(File, READ | WRITE)`. So every `lstat` returned `-1`, every search directory
+was dropped, the search path came out **empty**, and pkgconf reported the only
+thing an empty search path can report.
+
+### Why this class is worth naming
+
+**A program that treats a failed metadata probe as "absent" converts a missing
+*capability* into a missing *file*.** The failure message then names the file —
+which is present and correct — and says nothing about the capability, which is
+the actual fault. Three separate wrong hypotheses (staging failed, `getenv` is
+broken, the `.pc` path is wrong) all survive the evidence, and each costs a
+boot cycle to test.
+
+This is specific to a capability system. Under ambient authority `stat` on a
+world-readable directory does not fail, so upstream's "cannot stat ⇒ not a
+usable directory" is sound there and is nonsense here. It will therefore repeat:
+any ported program that probes with `stat`/`access`/`lstat` and treats failure
+as absence behaves the same way, and every one of them will report the symptom
+in the vocabulary of files rather than rights.
+
+Not a systemic risk for *real* userspace: `init` is spawned with
+`(File, Rights::ALL)` (`kernel/src/main.rs`) and children inherit subsets, so
+this bites hand-rolled self-test fixtures with deliberately narrow capability
+lists — which is most of `spawn.rs`.
+
+### The fix, and the general guard
+
+1. The grant: `pkgconf_invoke` now passes `READ | WRITE | METADATA`, with the
+   `lstat` mechanism written out beside it, because a reader who does not know
+   it would see `METADATA` on a program that only reads files and delete it.
+2. The guard: `pkgconf_diagnose` re-runs a failed case with `--debug`, which
+   turns on pkgconf's own trace handler — it prints the search-path list it
+   built and every `.pc` path it tried, to stderr, which the rung already maps
+   to the console. It runs only after an assertion has failed, so it costs a
+   green boot nothing, and it would have answered this question from the first
+   failing log instead of the third.
+3. The precondition, recorded: the rung now logs each staged `.pc` with its byte
+   count and `lmetadata`s the search directory — the kernel side of the exact
+   call pkgconf makes — so "the directory exists and stats as a directory" is
+   evidence in the log rather than an assumption in the reader's head.
+
+### What to do when you see it again
+
+If a ported program reports something *absent* that you can see is present, the
+first thing to check is not the path — it is whether the program stats before it
+opens, and whether the child holds `(File, METADATA)`. `grep -n "Rights::READ | Rights::WRITE"`
+over `kernel/src/proc/spawn.rs` lists the fixtures that cannot stat.

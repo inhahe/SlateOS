@@ -154,9 +154,31 @@ kernel_is_dead() {
 
 # Print the death evidence from a serial log.  Shared by the in-loop early exit
 # and the post-loop check so both report the same way.
+#
+# WHY THE CONTEXT WINDOW: the FATAL line names the *subsystem*, not the test.
+# Break-testing CapEntryInfo printed only
+#     FATAL: Capability system self-test failed: internal kernel error (-1)
+# while the line that actually said what broke -- "[cap]   FAIL: CapEntryInfo is
+# 32 bytes / align 8, ABI says 24 / 8" -- sat one line above and was not shown.
+# Every self-test in the kernel has that shape: a specific FAIL: diagnostic
+# immediately followed by a generic FATAL: wrapper.  Reporting the wrapper alone
+# means the harness output can only ever tell you to go read the log yourself,
+# which is the difference between a diagnosis and a notification.
 report_kernel_death() {
     local file="$1"
     echo "KERNEL PANIC detected!"
+    local first
+    first="$(grep -anE '^(FATAL:|!!! KERNEL PANIC !!!|!!! DOUBLE PANIC)' "$file" 2>/dev/null | head -1 | cut -d: -f1)"
+    if [ -n "$first" ]; then
+        local from=$((first - 12))
+        [ "$from" -lt 1 ] && from=1
+        echo "--- serial log lines ${from}-$((first + 20)) (context around the death) ---"
+        sed -n "${from},$((first + 20))p" "$file" | sed 's/^/  /'
+        echo "--- end context ---"
+    fi
+    # Still list every death-ish line in the whole log: a second panic further
+    # down (or an EXCEPTION before the first FATAL) is worth seeing.
+    echo "All PANIC/FATAL/EXCEPTION lines:"
     grep -an "PANIC\|FATAL\|EXCEPTION" "$file" | head -40 || true
 }
 

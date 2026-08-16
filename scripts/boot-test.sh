@@ -454,6 +454,25 @@ report_bench_absence() {
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+# Announce the tree under test, first line of the log, before anything else.
+#
+# PROJECT_ROOT comes from `dirname "$0"`, so with three worktrees on this
+# machine a *relative* invocation (`./scripts/boot-test.sh`) tests whichever
+# tree the caller's cwd happened to be — which is not always the one they
+# think.  Observed 2026-08-16: a boot test launched to validate uncommitted
+# lane-a work ran against the integration tree's kernel from an hour earlier,
+# and the only evidence was qemu's `-drive file:` argument.  Fifteen minutes of
+# process forensics to learn something the harness knew at startup.
+#
+# So say it.  A wrong tree, a wrong branch or an unexpectedly clean/dirty
+# worktree is then visible in line 1 rather than inferable from a pid tree.
+_bt_branch="$(git -C "$PROJECT_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo '?')"
+_bt_head="$(git -C "$PROJECT_ROOT" rev-parse --short HEAD 2>/dev/null || echo '?')"
+_bt_dirty=""
+git -C "$PROJECT_ROOT" diff --quiet HEAD 2>/dev/null || _bt_dirty=" +uncommitted"
+echo "=== Tree under test: $PROJECT_ROOT [$_bt_branch @ $_bt_head$_bt_dirty] ==="
+unset _bt_branch _bt_head _bt_dirty
+
 # Convert to Windows paths if running under MSYS/Git Bash (QEMU needs them).
 to_win_path() {
     if command -v cygpath &>/dev/null; then

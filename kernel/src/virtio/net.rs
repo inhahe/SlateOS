@@ -351,8 +351,17 @@ impl VirtioNetDevice {
         // Identify which RX buffer slot this descriptor chain belongs to
         // by reading the header descriptor's physical address and computing
         // the offset within our RX frame.  Must be done BEFORE free_chain
-        // because freeing overwrites descriptor metadata.
-        let desc_addr = self.rx_queue.desc_phys_addr(head_idx);
+        // because freeing returns the descriptor to the free list.
+        //
+        // `poll_used` has already established that head_idx is an outstanding
+        // descriptor of this queue, so this cannot be None; if it somehow is,
+        // there is no buffer to attribute the packet to, so drop it rather
+        // than guess a slot.
+        let Some(desc_addr) = self.rx_queue.desc_phys_addr(head_idx) else {
+            self.rx_queue.free_chain(head_idx);
+            self.rx_pending = self.rx_pending.wrapping_sub(1);
+            return None;
+        };
         let rx_phys_base = self.rx_frame.addr();
         let buf_idx = if desc_addr >= rx_phys_base {
             ((desc_addr - rx_phys_base) as usize) / RX_BUF_SIZE

@@ -7476,6 +7476,35 @@ pub fn self_test_cpgroup() -> KernelResult<()> {
 /// for handler delivery and re-enter the dispatcher that just resolved the
 /// disposition to `SIG_DFL`: an infinite loop instead of a stop).
 ///
+/// The 100s, 120s and 140s repeat and extend all of that through `waitid`,
+/// which reports a state change as a `siginfo_t` rather than a packed status
+/// word — `si_code`/`si_status` where the checks above read
+/// `WIFSTOPPED`/`WSTOPSIG`.  That decoding has no other test for the same
+/// reason the rest of this fixture has none: the host suite compiles
+/// `waitpid`'s syscall arm out, so a host `waitid` returns `ENOSYS` before a
+/// status word exists to decode.  100-111 cover the stop/continue cycle
+/// (`CLD_STOPPED`/`SIGTSTP`, then a following `WNOHANG` that must report
+/// `si_pid == 0` to prove the report was consumed, then
+/// `CLD_CONTINUED`/`SIGCONT`); 120-132 cover terminations on fresh short-lived
+/// children (`CLD_EXITED` carrying the exit *code* in `si_status`, `ECHILD` on
+/// a re-wait, `CLD_KILLED`/`SIGKILL`); 140-147 cover argument validation.
+///
+/// Two consequences of that worth knowing when reading a failure:
+///
+/// * **The child stops itself twice.**  A job-control report is consumed by
+///   whichever call observes it, so a `waitid` re-reading the stop that check
+///   53 already read would be testing nothing.  Checks 53-62 own the first
+///   cycle and 100-111 the second.  The child exits **91** if its first raise
+///   fails and **92** if the second does, so a failure names which one broke.
+/// * **Exit codes 80-99 are the child's**, and are skipped by the parent's
+///   numbering on purpose: a parent code colliding with a child code would make
+///   a failing exit status ambiguous to read.
+///
+/// This function needs no change as the fixture grows — it prints the failing
+/// exit code and points at `main.c` rather than duplicating a per-code table,
+/// which is why 33 new checks cost the kernel side nothing.  (Filed by lane B
+/// as `requests/b-a-jobctl-fixture-now-covers-waitid.md`.)
+///
 /// No capabilities are granted, and none are needed even though the parent
 /// makes a *real* cross-process send: the kernel authorises a signal whose
 /// sender is the target's parent, and our libc's own `CAP_KILL` gate reads the

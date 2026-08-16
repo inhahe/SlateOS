@@ -86,6 +86,12 @@ pub mod colors {
     pub const DEL_BG: Color = Color::rgba(243, 139, 168, 30);
     pub const ADD_LINE_BG: Color = Color::rgba(166, 227, 161, 50);
     pub const DEL_LINE_BG: Color = Color::rgba(243, 139, 168, 50);
+
+    // Search highlights. The focused match is opaque and the rest are washes,
+    // so "which one is 4 of 17" is answerable at a glance rather than by
+    // counting down the panel.
+    pub const SEARCH_BG: Color = Color::rgba(249, 226, 175, 60);
+    pub const SEARCH_CURRENT_BG: Color = Color::rgba(250, 179, 135, 150);
 }
 
 // ============================================================================
@@ -136,6 +142,59 @@ fn char_width() -> f32 {
 /// How many grid cells `text` occupies. Characters, not bytes.
 fn columns(text: &str) -> f32 {
     text.chars().count() as f32
+}
+
+/// The next position after `index` in a list of `len` items, wrapping at the end.
+///
+/// `None` for an empty list, and that is the point: `checked_rem` returns `None`
+/// exactly when `len == 0`, so the emptiness test *is* the wrap rather than a
+/// separate `if !is_empty()` written above it. Three cursors in this program
+/// cycle over a `Vec` -- the search matches, the change list and the merge
+/// hunks -- and each of them used to spell the guard and the `%` out
+/// separately, which is three chances for the two halves to stop agreeing.
+fn wrap_next(index: usize, len: usize) -> Option<usize> {
+    index.saturating_add(1).checked_rem(len)
+}
+
+/// The previous position before `index` in a list of `len` items, wrapping at
+/// the start. `None` for an empty list.
+fn wrap_prev(index: usize, len: usize) -> Option<usize> {
+    // Two `checked_sub`s, each failing on exactly the case it stands for:
+    // `len - 1` fails when the list is empty, and `index - 1` fails when the
+    // cursor is already on the first item, which is precisely when it should
+    // wrap round to the last.
+    let last = len.checked_sub(1)?;
+    Some(index.checked_sub(1).unwrap_or(last))
+}
+
+/// One extra row at each end of a viewport.
+///
+/// The row the viewport's top edge cuts through and the row its bottom edge
+/// cuts through are both partly visible. A viewport that drew neither would
+/// show a blank strip along both edges whenever the scroll offset was not a
+/// whole number of rows, which is most of the time while scrolling.
+const OVERSCAN_ROWS: usize = 2;
+
+/// The rows of a list of `item_count` items that a viewport shows.
+///
+/// Four render paths ask exactly this and each wrote the answer out longhand --
+/// the same `scroll as usize`, the same `(height / LINE_HEIGHT) as usize`, the
+/// same `.saturating_add(..).min(len)`. Three of them added a bare `+ 2` with
+/// no name on it and the fourth, the directory list, added nothing, so the
+/// directory view dropped its bottom row while scrolling for no reason anybody
+/// had decided on.
+fn visible_range(scroll: f32, content_height: f32, item_count: usize) -> core::ops::Range<usize> {
+    // A float-to-integer `as` cast saturates rather than wrapping, so a
+    // negative scroll offset -- which a trackpad's overscroll can produce for a
+    // frame before the clamp catches up -- starts at the top of the list
+    // instead of at `usize::MAX`.
+    let first = scroll as usize;
+    let rows = (content_height / LINE_HEIGHT) as usize;
+    let end = first
+        .saturating_add(rows)
+        .saturating_add(OVERSCAN_ROWS)
+        .min(item_count);
+    first.min(end)..end
 }
 
 /// Maximum number of search results to track.
@@ -296,7 +355,7 @@ pub fn compare_directories(
 // ============================================================================
 
 /// A search match within the diff.
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SearchMatch {
     /// Which panel the match is in (0 = left, 1 = right).
     pub panel: u8,
@@ -399,19 +458,15 @@ impl SearchState {
 
     /// Move to the next match.
     pub fn next_match(&mut self) {
-        if !self.matches.is_empty() {
-            self.current_match = (self.current_match.saturating_add(1)) % self.matches.len();
+        if let Some(next) = wrap_next(self.current_match, self.matches.len()) {
+            self.current_match = next;
         }
     }
 
     /// Move to the previous match.
     pub fn prev_match(&mut self) {
-        if !self.matches.is_empty() {
-            if self.current_match == 0 {
-                self.current_match = self.matches.len().saturating_sub(1);
-            } else {
-                self.current_match = self.current_match.saturating_sub(1);
-            }
+        if let Some(prev) = wrap_prev(self.current_match, self.matches.len()) {
+            self.current_match = prev;
         }
     }
 
@@ -419,6 +474,35 @@ impl SearchState {
     #[must_use]
     pub fn current(&self) -> Option<&SearchMatch> {
         self.matches.get(self.current_match)
+    }
+
+    /// The matches that fall on one edit, in the order they occur in the line.
+    ///
+    /// A binary search rather than a filter, because the highlighter asks this
+    /// once per visible row per frame and `matches` runs to
+    /// [`MAX_SEARCH_RESULTS`]. It is sound because [`SearchState::search`]
+    /// walks the edits in order and pushes as it goes, so the list is
+    /// non-decreasing in `edit_index` by construction -- there is no separate
+    /// sort step that could be forgotten or reordered.
+    fn matches_on_edit(&self, edit_index: usize) -> &[SearchMatch] {
+        let start = self.matches.partition_point(|m| m.edit_index < edit_index);
+        let end = self.matches.partition_point(|m| m.edit_index <= edit_index);
+        self.matches.get(start..end).unwrap_or(&[])
+    }
+}
+
+/// Which panel's copy of a match a single-column view should draw.
+///
+/// [`SearchState::push_matches_for_edit`] records an equal line's match twice,
+/// once per side-by-side panel, because side-by-side draws that line twice. The
+/// unified and inline views draw it once and so must take one copy -- and
+/// taking it by a rule rather than by "whichever came first" means the two
+/// single-column views agree with each other, and with side-by-side, about
+/// which occurrence *is* the match.
+const fn canonical_panel(op: DiffOp) -> u8 {
+    match op {
+        DiffOp::Equal | DiffOp::Delete => 0,
+        DiffOp::Insert => 1,
     }
 }
 
@@ -457,9 +541,41 @@ struct SideBySidePair {
     left_line: Option<usize>,
     left_text: Option<String>,
     left_op: Option<DiffOp>,
+    /// The edit the left half was built from.
+    ///
+    /// A pair's two halves can come from two *different* edits -- that is
+    /// exactly what a paired delete+insert is -- so anything that wants to say
+    /// something about "the edit on this line" has to ask per side. The
+    /// alternative, recovering it from `row_of_edit`, would be searching a map
+    /// for a value the loop that built the row already had.
+    left_edit: Option<usize>,
     right_line: Option<usize>,
     right_text: Option<String>,
     right_op: Option<DiffOp>,
+    /// The edit the right half was built from.
+    right_edit: Option<usize>,
+}
+
+/// The side-by-side layout of an edit list: the rows to draw, and the row each
+/// edit landed on.
+///
+/// The two live in one value because they are one fact, produced by one loop.
+/// Side-by-side is the only view whose row count differs from the edit count --
+/// a delete immediately followed by an insert is one modified line and occupies
+/// one row, so two edits share it -- and three separate places used to assume
+/// the two numbers were the same: [`FileDiffApp::scroll_to_current_change`]
+/// scrolled to *edit* N when asked for the change on row N,
+/// [`FileDiffApp::max_scroll`] let the view scroll one row past the end per
+/// modified line, and the search highlighter (which did not exist) would have
+/// been the third. On a file with five hundred modified lines, "jump to the
+/// last change" scrolled five hundred rows past the bottom and showed a blank
+/// panel.
+#[derive(Clone, Debug, Default)]
+struct SideBySideRows {
+    /// The rows, in display order.
+    pairs: Vec<SideBySidePair>,
+    /// Which row each edit is displayed on, parallel to the edit list.
+    row_of_edit: Vec<usize>,
 }
 
 /// Build side-by-side pairs from an edit list.
@@ -467,22 +583,31 @@ struct SideBySidePair {
 /// Equal lines appear on both sides. Deletes appear on the left with a blank right.
 /// Inserts appear on the right with a blank left. Consecutive delete+insert pairs
 /// are aligned on the same row.
-fn build_side_by_side_pairs(edits: &[DiffEdit]) -> Vec<SideBySidePair> {
-    let mut pairs = Vec::new();
+fn build_side_by_side_pairs(edits: &[DiffEdit]) -> SideBySideRows {
+    let mut pairs: Vec<SideBySidePair> = Vec::new();
+    // Filled in step with `pairs` rather than derived from it afterwards: the
+    // loop below is the only place that knows an edit was folded into the row
+    // before it, and a second pass would have to reconstruct that decision from
+    // the output and could reconstruct it differently.
+    let mut row_of_edit: Vec<usize> = Vec::with_capacity(edits.len());
     let mut i = 0;
 
     while i < edits.len() {
         let Some(edit) = edits.get(i) else { break };
+        let row = pairs.len();
 
         match edit.op {
             DiffOp::Equal => {
+                row_of_edit.push(row);
                 pairs.push(SideBySidePair {
                     left_line: edit.left_line,
                     left_text: Some(edit.text.clone()),
                     left_op: Some(DiffOp::Equal),
+                    left_edit: Some(i),
                     right_line: edit.right_line,
                     right_text: Some(edit.text.clone()),
                     right_op: Some(DiffOp::Equal),
+                    right_edit: Some(i),
                 });
                 i = i.saturating_add(1);
             }
@@ -492,44 +617,56 @@ fn build_side_by_side_pairs(edits: &[DiffEdit]) -> Vec<SideBySidePair> {
                 if let Some(next_edit) = next
                     && next_edit.op == DiffOp::Insert
                 {
-                    // Paired: show delete on left, insert on right
+                    // Paired: show delete on left, insert on right. Both edits
+                    // land on this one row, which is the whole reason the map
+                    // exists.
+                    row_of_edit.push(row);
+                    row_of_edit.push(row);
                     pairs.push(SideBySidePair {
                         left_line: edit.left_line,
                         left_text: Some(edit.text.clone()),
                         left_op: Some(DiffOp::Delete),
+                        left_edit: Some(i),
                         right_line: next_edit.right_line,
                         right_text: Some(next_edit.text.clone()),
                         right_op: Some(DiffOp::Insert),
+                        right_edit: Some(i.saturating_add(1)),
                     });
                     i = i.saturating_add(2);
                     continue;
                 }
                 // Unpaired delete
+                row_of_edit.push(row);
                 pairs.push(SideBySidePair {
                     left_line: edit.left_line,
                     left_text: Some(edit.text.clone()),
                     left_op: Some(DiffOp::Delete),
+                    left_edit: Some(i),
                     right_line: None,
                     right_text: None,
                     right_op: None,
+                    right_edit: None,
                 });
                 i = i.saturating_add(1);
             }
             DiffOp::Insert => {
+                row_of_edit.push(row);
                 pairs.push(SideBySidePair {
                     left_line: None,
                     left_text: None,
                     left_op: None,
+                    left_edit: None,
                     right_line: edit.right_line,
                     right_text: Some(edit.text.clone()),
                     right_op: Some(DiffOp::Insert),
+                    right_edit: Some(i),
                 });
                 i = i.saturating_add(1);
             }
         }
     }
 
-    pairs
+    SideBySideRows { pairs, row_of_edit }
 }
 
 // ============================================================================
@@ -612,6 +749,24 @@ fn build_inline_rows(edits: &[DiffEdit]) -> Vec<InlineRow> {
 // Diff line rendering data (avoids too-many-arguments on render methods)
 // ============================================================================
 
+/// The search matches that could fall on one line, and which is focused.
+///
+/// Carried as one value rather than three loose arguments because the three are
+/// only meaningful together: a match list without the panel it is being drawn
+/// for would highlight an equal line twice, and without the focused match every
+/// hit would look like every other. Passing them separately invites a call site
+/// that has two of the three.
+#[derive(Clone, Copy)]
+struct SearchOverlay<'a> {
+    /// Every match on the edit this line came from -- both panels' worth,
+    /// because for an equal line the same occurrence is recorded twice.
+    matches: &'a [SearchMatch],
+    /// Which panel this line is, so the other panel's copies are skipped.
+    panel: u8,
+    /// The focused match, drawn differently from the rest.
+    current: Option<SearchMatch>,
+}
+
 /// Parameters for rendering a single diff line in side-by-side mode.
 struct DiffLineParams<'a> {
     x: f32,
@@ -620,6 +775,9 @@ struct DiffLineParams<'a> {
     line_num: Option<usize>,
     text: Option<&'a str>,
     op: Option<DiffOp>,
+    /// Drawn between the line background and the line text, so the boxes sit
+    /// behind the characters they mark rather than over them.
+    search: SearchOverlay<'a>,
 }
 
 // ============================================================================
@@ -648,6 +806,20 @@ pub struct FileDiffApp {
     pub stats: DiffStats,
     /// Merge state.
     pub merge: Option<MergeState>,
+
+    /// Side-by-side layout of `diff`, rebuilt whenever the diff is.
+    ///
+    /// Cached rather than rebuilt inside `render`, where it used to live, for
+    /// two reasons. It clones every line of both files, so building it once a
+    /// frame copied the whole document sixty times a second -- on a
+    /// hundred-thousand-line comparison that is megabytes of `String`
+    /// allocation per frame, against a two-millisecond budget. And it carries
+    /// `row_of_edit`, which the scroll and search code need *between* frames
+    /// and could not reach at all while it was a local variable.
+    sbs: SideBySideRows,
+    /// Inline layout of `diff`, rebuilt whenever the diff is. Cached for the
+    /// same reason as `sbs`: it clones every line too.
+    inline_rows: Vec<InlineRow>,
 
     /// Current view mode.
     pub view_mode: ViewMode,
@@ -702,6 +874,8 @@ impl FileDiffApp {
             diff: None,
             stats: DiffStats::default(),
             merge: None,
+            sbs: SideBySideRows::default(),
+            inline_rows: Vec::new(),
             view_mode: ViewMode::SideBySide,
             scroll_left: 0.0,
             scroll_right: 0.0,
@@ -750,54 +924,106 @@ impl FileDiffApp {
 
         let hunk_count = diff.hunks.len();
         self.merge = Some(MergeState::new(hunk_count));
+        // The two layouts are rebuilt here, with the diff they describe, so
+        // there is no moment at which a row list refers to edits that no longer
+        // exist.
+        self.sbs = build_side_by_side_pairs(&diff.edits);
+        self.inline_rows = build_inline_rows(&diff.edits);
         self.diff = Some(diff);
         self.current_change_index = 0;
         self.scroll_left = 0.0;
         self.scroll_right = 0.0;
         self.selected_hunk = 0;
 
-        // Re-run search if active
-        if self.search.visible
-            && !self.search.query.is_empty()
-            && let Some(ref diff) = self.diff
-        {
+        // Re-run the search against the new edit list.
+        //
+        // Not conditional on the search bar being open, which is what it used
+        // to be. Escape hides the bar, not the highlights, so a match list left
+        // over from the previous diff outlives the edits it indexes -- toggling
+        // "ignore whitespace" with a search still showing would leave boxes
+        // drawn on whatever lines those edit numbers now happen to name. That
+        // was harmless while nothing drew them; it is not any more.
+        self.refresh_search_matches();
+    }
+
+    /// Recompute the match list against the current diff, without moving the view.
+    fn refresh_search_matches(&mut self) {
+        if let Some(ref diff) = self.diff {
             self.search.search(&diff.edits);
+        } else {
+            // No diff means no edits to search, and stale matches would have
+            // the highlighter drawing on a document that is not there.
+            self.search.matches.clear();
+            self.search.current_match = 0;
         }
     }
 
     /// Navigate to the next change.
     pub fn next_change(&mut self) {
-        if !self.change_indices.is_empty() {
-            self.current_change_index =
-                (self.current_change_index.saturating_add(1)) % self.change_indices.len();
+        if let Some(next) = wrap_next(self.current_change_index, self.change_indices.len()) {
+            self.current_change_index = next;
             self.scroll_to_current_change();
         }
     }
 
     /// Navigate to the previous change.
     pub fn prev_change(&mut self) {
-        if !self.change_indices.is_empty() {
-            if self.current_change_index == 0 {
-                self.current_change_index = self.change_indices.len().saturating_sub(1);
-            } else {
-                self.current_change_index = self.current_change_index.saturating_sub(1);
-            }
+        if let Some(prev) = wrap_prev(self.current_change_index, self.change_indices.len()) {
+            self.current_change_index = prev;
             self.scroll_to_current_change();
+        }
+    }
+
+    /// How many rows the current view displays.
+    ///
+    /// Not the edit count. Unified draws the edit list directly and
+    /// [`build_inline_rows`] emits one row per edit, so for those two the row
+    /// *is* the edit -- but side-by-side folds a delete and the insert that
+    /// follows it into one row, and asking `diff.edits.len()` there overstates
+    /// the list by one row per modified line.
+    fn display_row_count(&self) -> usize {
+        match self.view_mode {
+            ViewMode::SideBySide => self.sbs.pairs.len(),
+            ViewMode::Unified => self.diff.as_ref().map_or(0, |d| d.edits.len()),
+            ViewMode::Inline => self.inline_rows.len(),
+        }
+    }
+
+    /// The row the current view shows edit `edit_index` on, if it shows it.
+    fn display_row_of_edit(&self, edit_index: usize) -> Option<usize> {
+        match self.view_mode {
+            ViewMode::SideBySide => self.sbs.row_of_edit.get(edit_index).copied(),
+            ViewMode::Unified => self
+                .diff
+                .as_ref()
+                .filter(|d| edit_index < d.edits.len())
+                .map(|_| edit_index),
+            ViewMode::Inline => (edit_index < self.inline_rows.len()).then_some(edit_index),
+        }
+    }
+
+    /// Put display row `row` in the middle of the viewport.
+    fn scroll_to_row(&mut self, row: usize) {
+        let half_visible = self.visible_line_count() / 2.0;
+        let target_scroll = (row as f32 - half_visible).max(0.0).min(self.max_scroll());
+        self.scroll_left = target_scroll;
+        if self.sync_scroll {
+            self.scroll_right = target_scroll;
         }
     }
 
     /// Scroll to make the current change visible.
     fn scroll_to_current_change(&mut self) {
-        if let Some(&edit_idx) = self.change_indices.get(self.current_change_index) {
-            let target_line = edit_idx as f32;
-            let visible_lines = self.visible_line_count();
-            let half_visible = visible_lines / 2.0;
-            let target_scroll = (target_line - half_visible).max(0.0);
-            self.scroll_left = target_scroll;
-            if self.sync_scroll {
-                self.scroll_right = target_scroll;
-            }
-        }
+        // Two lookups, both of which can miss, and neither of which is the
+        // other's business: the change list holds an *edit* index, and the row
+        // that edit is drawn on is the view's to say.
+        let Some(&edit_idx) = self.change_indices.get(self.current_change_index) else {
+            return;
+        };
+        let Some(row) = self.display_row_of_edit(edit_idx) else {
+            return;
+        };
+        self.scroll_to_row(row);
     }
 
     /// Number of lines visible in the content area.
@@ -808,12 +1034,7 @@ impl FileDiffApp {
 
     /// Maximum scroll value.
     fn max_scroll(&self) -> f32 {
-        if let Some(ref diff) = self.diff {
-            let total_lines = diff.edits.len() as f32;
-            (total_lines - self.visible_line_count()).max(0.0)
-        } else {
-            0.0
-        }
+        (self.display_row_count() as f32 - self.visible_line_count()).max(0.0)
     }
 
     /// Toggle an ignore option and recompute.
@@ -991,11 +1212,10 @@ impl FileDiffApp {
 
             // Hunk navigation for merge
             Key::Tab => {
-                if let Some(ref diff) = self.diff {
-                    let hunk_count = diff.hunks.len();
-                    if hunk_count > 0 {
-                        self.selected_hunk = (self.selected_hunk.saturating_add(1)) % hunk_count;
-                    }
+                if let Some(ref diff) = self.diff
+                    && let Some(next) = wrap_next(self.selected_hunk, diff.hunks.len())
+                {
+                    self.selected_hunk = next;
                 }
                 EventResult::Consumed
             }
@@ -1014,6 +1234,30 @@ impl FileDiffApp {
         }
     }
 
+    /// Re-run the search against the current diff and show the first hit.
+    ///
+    /// The three places that edit the query used to run the search and stop
+    /// there, which left the view wherever it happened to be. Typing a word
+    /// that occurs once, four thousand lines down, changed the counter from
+    /// "No matches" to "1/1" and nothing else.
+    fn rerun_search(&mut self) {
+        self.refresh_search_matches();
+        self.scroll_to_current_match();
+    }
+
+    /// Scroll so the focused search match is on screen.
+    fn scroll_to_current_match(&mut self) {
+        // The edit index is copied out before anything mutable happens: the
+        // match lives inside `self.search`, and `scroll_to_row` needs `self`.
+        let Some(edit_index) = self.search.current().map(|m| m.edit_index) else {
+            return;
+        };
+        let Some(row) = self.display_row_of_edit(edit_index) else {
+            return;
+        };
+        self.scroll_to_row(row);
+    }
+
     /// Handle keyboard input when search bar is active.
     fn handle_search_key(&mut self, key: &KeyEvent) -> EventResult {
         match key.key {
@@ -1023,13 +1267,12 @@ impl FileDiffApp {
             }
             Key::Enter => {
                 self.search.next_match();
+                self.scroll_to_current_match();
                 EventResult::Consumed
             }
             Key::Backspace => {
                 self.search.query.pop();
-                if let Some(ref diff) = self.diff {
-                    self.search.search(&diff.edits);
-                }
+                self.rerun_search();
                 EventResult::Consumed
             }
             Key::F3 => {
@@ -1038,14 +1281,13 @@ impl FileDiffApp {
                 } else {
                     self.search.next_match();
                 }
+                self.scroll_to_current_match();
                 EventResult::Consumed
             }
             _ => {
                 if let Some(ch) = key.text {
                     self.search.query.push(ch);
-                    if let Some(ref diff) = self.diff {
-                        self.search.search(&diff.edits);
-                    }
+                    self.rerun_search();
                     EventResult::Consumed
                 } else {
                     EventResult::Ignored
@@ -1109,13 +1351,13 @@ impl FileDiffApp {
 
             match self.view_mode {
                 ViewMode::SideBySide => {
-                    self.render_side_by_side(&mut tree, diff, content_y, content_height);
+                    self.render_side_by_side(&mut tree, content_y, content_height);
                 }
                 ViewMode::Unified => {
                     self.render_unified(&mut tree, diff, content_y, content_height);
                 }
                 ViewMode::Inline => {
-                    self.render_inline(&mut tree, diff, content_y, content_height);
+                    self.render_inline(&mut tree, content_y, content_height);
                 }
             }
 
@@ -1372,16 +1614,8 @@ impl FileDiffApp {
     }
 
     /// Render side-by-side diff view.
-    fn render_side_by_side(
-        &self,
-        tree: &mut RenderTree,
-        diff: &DiffResult,
-        content_y: f32,
-        content_height: f32,
-    ) {
+    fn render_side_by_side(&self, tree: &mut RenderTree, content_y: f32, content_height: f32) {
         let panel_width = (self.width - SEPARATOR_WIDTH) / 2.0;
-        let first_visible = self.scroll_left as usize;
-        let visible_count = (content_height / LINE_HEIGHT) as usize + 2;
 
         // Left panel header
         render_panel_header(tree, 0.0, content_y, panel_width, &self.left_path);
@@ -1408,7 +1642,7 @@ impl FileDiffApp {
         });
 
         // Render visible lines
-        let pairs = build_side_by_side_pairs(&diff.edits);
+        let pairs = &self.sbs.pairs;
 
         // File content only. The panel headers above and the scrollbars below
         // are proportional chrome; the lines between them are a grid stepped
@@ -1417,35 +1651,56 @@ impl FileDiffApp {
             family: FontFamily::Mono,
         });
 
-        let end = (first_visible.saturating_add(visible_count)).min(pairs.len());
-        for (vi, pair_idx) in (first_visible..end).enumerate() {
+        let current = self.search.current().copied();
+        for (vi, pair_idx) in
+            visible_range(self.scroll_left, content_height, pairs.len()).enumerate()
+        {
             let y = lines_y + vi as f32 * LINE_HEIGHT;
-            if let Some(pair) = pairs.get(pair_idx) {
-                // Left side
-                render_diff_line(
-                    tree,
-                    &DiffLineParams {
-                        x: 0.0,
-                        y,
-                        width: panel_width,
-                        line_num: pair.left_line,
-                        text: pair.left_text.as_deref(),
-                        op: pair.left_op,
+            let Some(pair) = pairs.get(pair_idx) else {
+                continue;
+            };
+            // A pair's two halves can come from two different edits -- that is
+            // what a paired delete+insert is -- so each side looks up its own.
+            let left_matches = pair
+                .left_edit
+                .map_or(&[][..], |e| self.search.matches_on_edit(e));
+            let right_matches = pair
+                .right_edit
+                .map_or(&[][..], |e| self.search.matches_on_edit(e));
+            // Left side
+            render_diff_line(
+                tree,
+                &DiffLineParams {
+                    x: 0.0,
+                    y,
+                    width: panel_width,
+                    line_num: pair.left_line,
+                    text: pair.left_text.as_deref(),
+                    op: pair.left_op,
+                    search: SearchOverlay {
+                        matches: left_matches,
+                        panel: 0,
+                        current,
                     },
-                );
-                // Right side
-                render_diff_line(
-                    tree,
-                    &DiffLineParams {
-                        x: panel_width + SEPARATOR_WIDTH,
-                        y,
-                        width: panel_width,
-                        line_num: pair.right_line,
-                        text: pair.right_text.as_deref(),
-                        op: pair.right_op,
+                },
+            );
+            // Right side
+            render_diff_line(
+                tree,
+                &DiffLineParams {
+                    x: panel_width + SEPARATOR_WIDTH,
+                    y,
+                    width: panel_width,
+                    line_num: pair.right_line,
+                    text: pair.right_text.as_deref(),
+                    op: pair.right_op,
+                    search: SearchOverlay {
+                        matches: right_matches,
+                        panel: 1,
+                        current,
                     },
-                );
-            }
+                },
+            );
         }
 
         tree.push(RenderCommand::PopFont);
@@ -1477,20 +1732,24 @@ impl FileDiffApp {
         content_y: f32,
         content_height: f32,
     ) {
-        let first_visible = self.scroll_left as usize;
-        let visible_count = (content_height / LINE_HEIGHT) as usize + 2;
-
         // File content is a grid stepped by `char_width()`; the scrollbar below
         // is not, so the scope closes before it.
         tree.push(RenderCommand::PushFont {
             family: FontFamily::Mono,
         });
 
-        let end = (first_visible.saturating_add(visible_count)).min(diff.edits.len());
-        for (vi, edit_idx) in (first_visible..end).enumerate() {
+        let current = self.search.current().copied();
+        for (vi, edit_idx) in
+            visible_range(self.scroll_left, content_height, diff.edits.len()).enumerate()
+        {
             let y = content_y + vi as f32 * LINE_HEIGHT;
             if let Some(edit) = diff.edits.get(edit_idx) {
-                self.render_unified_line(tree, y, edit);
+                let overlay = SearchOverlay {
+                    matches: self.search.matches_on_edit(edit_idx),
+                    panel: canonical_panel(edit.op),
+                    current,
+                };
+                self.render_unified_line(tree, y, edit, overlay);
             }
         }
 
@@ -1508,7 +1767,13 @@ impl FileDiffApp {
     }
 
     /// Render a single unified diff line.
-    fn render_unified_line(&self, tree: &mut RenderTree, y: f32, edit: &DiffEdit) {
+    fn render_unified_line(
+        &self,
+        tree: &mut RenderTree,
+        y: f32,
+        edit: &DiffEdit,
+        search: SearchOverlay<'_>,
+    ) {
         let (bg_color, prefix, text_color) = match edit.op {
             DiffOp::Equal => (colors::BASE, " ", colors::TEXT),
             DiffOp::Insert => (colors::ADD_BG, "+", colors::GREEN),
@@ -1570,6 +1835,7 @@ impl FileDiffApp {
 
         // Text content
         let text_x = prefix_x + char_width() * 2.0;
+        render_search_highlights(tree, text_x, y, &edit.text, search);
         tree.push(RenderCommand::Text {
             x: text_x,
             y: y + 3.0,
@@ -1583,17 +1849,11 @@ impl FileDiffApp {
     }
 
     /// Render inline diff view with character-level highlighting.
-    fn render_inline(
-        &self,
-        tree: &mut RenderTree,
-        diff: &DiffResult,
-        content_y: f32,
-        content_height: f32,
-    ) {
-        let first_visible = self.scroll_left as usize;
-        let visible_count = (content_height / LINE_HEIGHT) as usize + 2;
-
-        let inline_rows = build_inline_rows(&diff.edits);
+    fn render_inline(&self, tree: &mut RenderTree, content_y: f32, content_height: f32) {
+        // `build_inline_rows` emits exactly one row per edit, which is why the
+        // row index below doubles as the edit index the search matches are
+        // filed under. Side-by-side is the view where that stops being true.
+        let inline_rows = &self.inline_rows;
 
         // The character-level highlight rectangles are placed at
         // `columns(span) * char_width()`, so the run they sit behind has to be
@@ -1603,11 +1863,18 @@ impl FileDiffApp {
             family: FontFamily::Mono,
         });
 
-        let end = (first_visible.saturating_add(visible_count)).min(inline_rows.len());
-        for (vi, row_idx) in (first_visible..end).enumerate() {
+        let current = self.search.current().copied();
+        for (vi, row_idx) in
+            visible_range(self.scroll_left, content_height, inline_rows.len()).enumerate()
+        {
             let y = content_y + vi as f32 * LINE_HEIGHT;
             if let Some(row) = inline_rows.get(row_idx) {
-                self.render_inline_row(tree, y, row);
+                let overlay = SearchOverlay {
+                    matches: self.search.matches_on_edit(row_idx),
+                    panel: canonical_panel(row.op),
+                    current,
+                };
+                self.render_inline_row(tree, y, row, overlay);
             }
         }
 
@@ -1625,7 +1892,13 @@ impl FileDiffApp {
     }
 
     /// Render a single inline row with character-level highlights.
-    fn render_inline_row(&self, tree: &mut RenderTree, y: f32, row: &InlineRow) {
+    fn render_inline_row(
+        &self,
+        tree: &mut RenderTree,
+        y: f32,
+        row: &InlineRow,
+        search: SearchOverlay<'_>,
+    ) {
         let bg_color = match row.op {
             DiffOp::Equal => colors::BASE,
             DiffOp::Insert => colors::ADD_BG,
@@ -1674,8 +1947,14 @@ impl FileDiffApp {
             overflow: TextOverflow::Clip,
         });
 
-        // Render text with inline highlights
+        // Render text with inline highlights.
+        //
+        // The search boxes go down first, under both the character-level change
+        // spans and the text: a search hit inside a changed run has to leave
+        // the run's own colour visible, or finding a word would erase the
+        // reason it was interesting.
         let text_x = GUTTER_WIDTH + PANEL_PADDING + char_width() * 2.0;
+        render_search_highlights(tree, text_x, y, &row.text, search);
         if row.spans.is_empty() {
             tree.push(RenderCommand::Text {
                 x: text_x,
@@ -1812,11 +2091,9 @@ impl FileDiffApp {
 
         // Entries
         let list_y = y + LINE_HEIGHT;
-        let first_visible = self.dir_scroll as usize;
-        let visible_count = (height / LINE_HEIGHT) as usize;
-        let end = (first_visible.saturating_add(visible_count)).min(result.entries.len());
-
-        for (vi, entry_idx) in (first_visible..end).enumerate() {
+        for (vi, entry_idx) in
+            visible_range(self.dir_scroll, height, result.entries.len()).enumerate()
+        {
             let ey = list_y + vi as f32 * LINE_HEIGHT;
             if let Some(entry) = result.entries.get(entry_idx) {
                 render_dir_entry(tree, ey, entry);
@@ -2106,6 +2383,65 @@ fn render_panel_header(tree: &mut RenderTree, x: f32, y: f32, width: f32, path: 
     });
 }
 
+/// Draw the search-match rectangles that fall on one line.
+///
+/// This is the half of find-in-diff that was missing. `SearchState` computed
+/// matches, the status bar counted them ("4/17"), Enter and F3 advanced the
+/// counter -- and nothing was ever drawn and the view never moved, so on any
+/// file longer than one screen the whole feature was a number that changed. The
+/// byte offsets had even been carefully corrected (see the comment in
+/// [`SearchState::search`]) for the benefit of a highlighter that did not
+/// exist.
+///
+/// `text_x` is where the line's first character is drawn and `text` is the
+/// exact string drawn there, because a match's offsets are byte offsets into
+/// *that* string and nothing else.
+fn render_search_highlights(
+    tree: &mut RenderTree,
+    text_x: f32,
+    y: f32,
+    text: &str,
+    overlay: SearchOverlay<'_>,
+) {
+    let cell = char_width();
+    for m in overlay.matches {
+        if m.panel != overlay.panel {
+            continue;
+        }
+        // `get` rather than `&text[..n]`: an offset that is not on a character
+        // boundary panics, and a stale match -- one computed against a diff
+        // that has since been recomputed -- should draw nothing rather than
+        // take the window down. `textfind` returns boundaries, but the
+        // highlighter does not have to depend on knowing that.
+        let Some(before) = text.get(..m.byte_offset) else {
+            continue;
+        };
+        let Some(match_end) = m.byte_offset.checked_add(m.match_len) else {
+            continue;
+        };
+        let Some(matched) = text.get(m.byte_offset..match_end) else {
+            continue;
+        };
+        // Columns, not bytes: the content is a monospace grid, so a run's width
+        // is how many characters it holds. Measuring `before.len()` would put
+        // the box in the wrong place on every line holding a character that is
+        // not one byte -- the confusion that has now been this sweep's single
+        // most common defect.
+        tree.push(RenderCommand::FillRect {
+            x: text_x + columns(before) * cell,
+            y,
+            width: columns(matched) * cell,
+            height: LINE_HEIGHT,
+            color: if overlay.current == Some(*m) {
+                colors::SEARCH_CURRENT_BG
+            } else {
+                colors::SEARCH_BG
+            },
+            corner_radii: CornerRadii::ZERO,
+        });
+    }
+}
+
 /// Render a single diff line (used in side-by-side mode).
 fn render_diff_line(tree: &mut RenderTree, params: &DiffLineParams<'_>) {
     let bg_color = match params.op {
@@ -2161,6 +2497,15 @@ fn render_diff_line(tree: &mut RenderTree, params: &DiffLineParams<'_>) {
             Some(DiffOp::Delete) => colors::RED,
             _ => colors::TEXT,
         };
+
+        // Before the text, so the boxes are behind it.
+        render_search_highlights(
+            tree,
+            params.x + GUTTER_WIDTH + PANEL_PADDING,
+            params.y,
+            text,
+            params.search,
+        );
 
         tree.push(RenderCommand::Text {
             x: params.x + GUTTER_WIDTH + PANEL_PADDING,
@@ -2241,6 +2586,21 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    // A test that indexes out of range should fail loudly and point at the line
+    // that did it -- that is the diagnosis. The defensive lints exist to keep
+    // panics out of code that runs on a user's data, which this is not. Nor is
+    // exact float comparison a hazard in a test that asserts a *computed*
+    // layout offset equals the constant it was built from: an epsilon there
+    // would weaken the assertion rather than strengthen it.
+    #![allow(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::arithmetic_side_effects,
+        clippy::float_cmp
+    )]
+
     use super::*;
     use diffcore::myers_diff;
 
@@ -2946,7 +3306,7 @@ mod tests {
             right_line: Some(0),
             text: "hello".to_string(),
         }];
-        let pairs = build_side_by_side_pairs(&edits);
+        let pairs = build_side_by_side_pairs(&edits).pairs;
         assert_eq!(pairs.len(), 1);
         assert!(pairs[0].left_text.is_some());
         assert!(pairs[0].right_text.is_some());
@@ -2968,7 +3328,7 @@ mod tests {
                 text: "new".to_string(),
             },
         ];
-        let pairs = build_side_by_side_pairs(&edits);
+        let pairs = build_side_by_side_pairs(&edits).pairs;
         assert_eq!(pairs.len(), 1);
         assert_eq!(pairs[0].left_text.as_deref(), Some("old"));
         assert_eq!(pairs[0].right_text.as_deref(), Some("new"));
@@ -2982,7 +3342,7 @@ mod tests {
             right_line: None,
             text: "removed".to_string(),
         }];
-        let pairs = build_side_by_side_pairs(&edits);
+        let pairs = build_side_by_side_pairs(&edits).pairs;
         assert_eq!(pairs.len(), 1);
         assert!(pairs[0].left_text.is_some());
         assert!(pairs[0].right_text.is_none());
@@ -3149,7 +3509,10 @@ mod tests {
                 _ => {}
             }
         }
-        assert!(checked > 3, "expected several toolbar labels, saw {checked}");
+        assert!(
+            checked > 3,
+            "expected several toolbar labels, saw {checked}"
+        );
     }
 
     /// The content panels are a grid, so a span's highlight rectangle covers a
@@ -3164,7 +3527,10 @@ mod tests {
             (ascii - accented).abs() < f32::EPSILON,
             "three characters are three cells wide however many bytes they take"
         );
-        assert!(char_width() > 0.0, "a zero cell would collapse every column");
+        assert!(
+            char_width() > 0.0,
+            "a zero cell would collapse every column"
+        );
     }
 
     /// A cell counted in characters is only right if a character actually fits
@@ -3197,7 +3563,10 @@ mod tests {
                 FontWeightHint::Bold,
                 FontFamily::Mono,
             );
-            assert!(w <= cell + 0.01, "bold {ch:?} measures {w} in a {cell} cell");
+            assert!(
+                w <= cell + 0.01,
+                "bold {ch:?} measures {w} in a {cell} cell"
+            );
         }
     }
 
@@ -3236,7 +3605,10 @@ mod tests {
             }
             assert_eq!(depth, 0, "{mode:?}: the font scopes do not balance");
             assert_eq!(deepest, 1, "{mode:?}: the content scope was never opened");
-            assert!(inside > 0, "{mode:?}: no content drawn inside the mono scope");
+            assert!(
+                inside > 0,
+                "{mode:?}: no content drawn inside the mono scope"
+            );
         }
     }
 
@@ -3247,9 +3619,538 @@ mod tests {
         for n in ["1", "42", "9999"] {
             let right = GUTTER_WIDTH - 4.0;
             let x = text::right_x(n, right, CONTENT_FONT_SIZE, FontWeightHint::Regular);
-            assert!(x >= 0.0, "line number {n} starts at {x}, left of the gutter");
+            assert!(
+                x >= 0.0,
+                "line number {n} starts at {x}, left of the gutter"
+            );
             let end = x + text::measure(n, CONTENT_FONT_SIZE, FontWeightHint::Regular);
-            assert!((end - right).abs() < 0.01, "{n} ends at {end}, not at {right}");
+            assert!(
+                (end - right).abs() < 0.01,
+                "{n} ends at {end}, not at {right}"
+            );
+        }
+    }
+
+    // --- Cursor wrapping ---
+
+    #[test]
+    fn a_cursor_over_an_empty_list_has_nowhere_to_go() {
+        assert_eq!(wrap_next(0, 0), None);
+        assert_eq!(wrap_prev(0, 0), None);
+        // The guard and the arithmetic being one statement is the point: there
+        // is no `%` or `- 1` left that a missing `is_empty()` could reach.
+        assert_eq!(wrap_next(usize::MAX, 0), None);
+        assert_eq!(wrap_prev(usize::MAX, 0), None);
+    }
+
+    #[test]
+    fn a_cursor_wraps_at_both_ends() {
+        assert_eq!(wrap_next(0, 3), Some(1));
+        assert_eq!(wrap_next(2, 3), Some(0));
+        assert_eq!(wrap_prev(0, 3), Some(2));
+        assert_eq!(wrap_prev(1, 3), Some(0));
+        assert_eq!(wrap_next(0, 1), Some(0));
+        assert_eq!(wrap_prev(0, 1), Some(0));
+    }
+
+    // --- Viewport ---
+
+    #[test]
+    fn a_viewport_overscans_by_one_row_at_each_end() {
+        // Ten rows fit exactly, so twelve are drawn: the partial row at the top
+        // and the partial row at the bottom.
+        let r = visible_range(0.0, LINE_HEIGHT * 10.0, 1000);
+        assert_eq!(r, 0..12);
+        let r = visible_range(5.0, LINE_HEIGHT * 10.0, 1000);
+        assert_eq!(r, 5..17);
+    }
+
+    #[test]
+    fn a_viewport_stops_at_the_end_of_the_list() {
+        assert_eq!(visible_range(0.0, LINE_HEIGHT * 10.0, 3), 0..3);
+        // Scrolled past the end -- which `max_scroll` prevents, but a viewport
+        // that panicked or wrapped if it ever happened would be the wrong shape.
+        assert!(visible_range(500.0, LINE_HEIGHT * 10.0, 3).is_empty());
+        assert!(visible_range(0.0, LINE_HEIGHT * 10.0, 0).is_empty());
+    }
+
+    #[test]
+    fn a_negative_scroll_starts_at_the_top_not_at_the_end_of_the_list() {
+        // A float-to-integer cast saturates. If it wrapped, an overscroll of
+        // one frame would jump to `usize::MAX` and blank the panel.
+        assert_eq!(visible_range(-3.0, LINE_HEIGHT * 10.0, 1000), 0..12);
+    }
+
+    // --- The row a view draws an edit on ---
+
+    /// Side-by-side folds a delete and the insert after it into one row, so its
+    /// row count is smaller than the edit count. Three separate places used to
+    /// assume the two numbers were the same.
+    #[test]
+    fn a_paired_modification_puts_both_its_edits_on_one_row() {
+        let edits = vec![
+            DiffEdit {
+                op: DiffOp::Equal,
+                left_line: Some(0),
+                right_line: Some(0),
+                text: "same".to_string(),
+            },
+            DiffEdit {
+                op: DiffOp::Delete,
+                left_line: Some(1),
+                right_line: None,
+                text: "old".to_string(),
+            },
+            DiffEdit {
+                op: DiffOp::Insert,
+                left_line: None,
+                right_line: Some(1),
+                text: "new".to_string(),
+            },
+            DiffEdit {
+                op: DiffOp::Equal,
+                left_line: Some(2),
+                right_line: Some(2),
+                text: "tail".to_string(),
+            },
+        ];
+        let rows = build_side_by_side_pairs(&edits);
+        assert_eq!(rows.pairs.len(), 3, "four edits, one of them paired");
+        assert_eq!(rows.row_of_edit, vec![0, 1, 1, 2]);
+        assert_eq!(rows.pairs[1].left_edit, Some(1));
+        assert_eq!(rows.pairs[1].right_edit, Some(2));
+    }
+
+    /// Every edit has a row, and no row is claimed out of order. Written as a
+    /// property over a real diff rather than a hand-built edit list, because
+    /// the map is only useful if it stays parallel to whatever `compute_diff`
+    /// actually emits.
+    #[test]
+    fn every_edit_has_a_row_and_the_rows_only_move_forward() {
+        let left = "a\nb\nc\nd\ne\nf\n";
+        let right = "a\nB\nc\nD\nE\nf\nG\n";
+        let diff = compute_diff(left, right, &IgnoreOptions::default());
+        let rows = build_side_by_side_pairs(&diff.edits);
+
+        assert_eq!(rows.row_of_edit.len(), diff.edits.len());
+        let mut previous = 0;
+        for (edit, &row) in rows.row_of_edit.iter().enumerate() {
+            assert!(row < rows.pairs.len(), "edit {edit} claims row {row}");
+            assert!(row >= previous, "edit {edit} goes backwards to row {row}");
+            previous = row;
+        }
+        assert_eq!(rows.row_of_edit.first(), Some(&0));
+        assert_eq!(rows.row_of_edit.last(), Some(&(rows.pairs.len() - 1)));
+    }
+
+    /// `count` numbered lines of `prefix`, each preceded by a shared line.
+    ///
+    /// The shared lines are the point. Two files with *nothing* in common diff
+    /// as one delete block followed by one insert block, and the side-by-side
+    /// pairing rule -- a delete folds in the insert immediately after it --
+    /// then fires exactly once, at the seam between the blocks. Twenty changed
+    /// lines with no context are 39 rows, not 20. Interleaving an unchanged
+    /// line forces each change to be its own adjacent delete-then-insert, which
+    /// is the shape where rows and edits actually diverge:
+    /// `count` equal rows plus `count` paired rows against `3 * count` edits.
+    fn interleaved(prefix: &str, count: usize) -> String {
+        let mut out = String::new();
+        for i in 0..count {
+            out.push_str("same");
+            out.push_str(&i.to_string());
+            out.push('\n');
+            out.push_str(prefix);
+            out.push_str(&i.to_string());
+            out.push('\n');
+        }
+        out
+    }
+
+    /// Jumping to a change scrolled to *edit* N when the change was drawn on
+    /// row N-k, k being the number of paired modifications before it. With
+    /// enough of them the target was off the bottom of the list entirely and
+    /// "next change" showed a blank panel.
+    #[test]
+    fn jumping_to_a_change_scrolls_to_the_row_it_is_drawn_on() {
+        let mut app = FileDiffApp::new();
+        // Twenty modified lines with an unchanged line between each: sixty
+        // edits, forty rows.
+        app.load_files("a", &interleaved("old", 20), "b", &interleaved("new", 20));
+        app.view_mode = ViewMode::SideBySide;
+        app.height = TOOLBAR_HEIGHT + STATUS_BAR_HEIGHT + LINE_HEIGHT * 4.0;
+
+        let rows = app.sbs.pairs.len();
+        assert_eq!(rows, 40, "twenty equal rows and twenty modified ones");
+        assert_eq!(
+            app.diff.as_ref().unwrap().edits.len(),
+            60,
+            "but sixty edits, which is what made the two indices differ"
+        );
+
+        // Jump to the last change and require the row it is drawn on to be on
+        // screen. Scrolling to the *edit* index put the view twenty rows past
+        // the end of a forty-row list, which is a blank panel.
+        app.current_change_index = app.change_indices.len() - 1;
+        app.scroll_to_current_change();
+        let last_edit = *app.change_indices.last().unwrap();
+        let row = app.display_row_of_edit(last_edit).unwrap() as f32;
+        let visible = app.visible_line_count();
+        assert!(
+            app.scroll_left <= row && row < app.scroll_left + visible,
+            "row {row} is not on screen: scrolled to {} showing {visible} rows",
+            app.scroll_left
+        );
+    }
+
+    /// The scroll limit is a row count too. Using the edit count let the view
+    /// scroll past the bottom by one row per unchanged line and two per
+    /// modified one -- twenty blank rows on the file above.
+    #[test]
+    fn the_scroll_limit_counts_rows_not_edits() {
+        let mut app = FileDiffApp::new();
+        app.load_files("a", &interleaved("old", 20), "b", &interleaved("new", 20));
+        app.height = TOOLBAR_HEIGHT + STATUS_BAR_HEIGHT + LINE_HEIGHT * 4.0;
+
+        app.view_mode = ViewMode::SideBySide;
+        let sbs_max = app.max_scroll();
+        app.view_mode = ViewMode::Unified;
+        let unified_max = app.max_scroll();
+
+        assert_eq!(app.diff.as_ref().unwrap().edits.len(), 60);
+        assert_eq!(app.sbs.pairs.len(), 40);
+        assert!(
+            sbs_max < unified_max,
+            "side-by-side folds two edits into one row, so it scrolls less: \
+             {sbs_max} vs {unified_max}"
+        );
+        assert_eq!(sbs_max, 40.0 - app.visible_line_count());
+    }
+
+    // --- Search highlighting ---
+
+    /// Count the highlight rectangles a render produced, by colour.
+    fn highlight_counts(tree: &RenderTree) -> (usize, usize) {
+        let mut plain = 0;
+        let mut current = 0;
+        for cmd in &tree.commands {
+            if let RenderCommand::FillRect { color, .. } = cmd {
+                if *color == colors::SEARCH_BG {
+                    plain += 1;
+                } else if *color == colors::SEARCH_CURRENT_BG {
+                    current += 1;
+                }
+            }
+        }
+        (plain, current)
+    }
+
+    fn searching_app_on(mode: ViewMode, left: &str, right: &str, query: &str) -> FileDiffApp {
+        let mut app = FileDiffApp::new();
+        app.view_mode = mode;
+        app.load_files("a", left, "b", right);
+        app.search.visible = true;
+        app.search.query = query.to_string();
+        app.refresh_search_matches();
+        app
+    }
+
+    /// Two unchanged lines around one modified line -- the smallest file that
+    /// has an equal row, a delete and an insert all at once.
+    fn searching_app(mode: ViewMode, query: &str) -> FileDiffApp {
+        searching_app_on(
+            mode,
+            "alpha\nbravo\ncharlie\n",
+            "alpha\nzulu\ncharlie\n",
+            query,
+        )
+    }
+
+    /// The feature this whole section is about: matches were computed, counted
+    /// in the status bar and cycled through with Enter, and never drawn. On any
+    /// file longer than a screen, find-in-diff was a number that changed.
+    #[test]
+    fn a_search_match_is_drawn_as_a_highlight() {
+        for mode in [ViewMode::SideBySide, ViewMode::Unified, ViewMode::Inline] {
+            let app = searching_app(mode, "alpha");
+            assert!(!app.search.matches.is_empty(), "{mode:?}: nothing matched");
+            let (plain, current) = highlight_counts(&app.render());
+            assert!(
+                plain + current > 0,
+                "{mode:?}: {} matches and no highlight drawn",
+                app.search.matches.len()
+            );
+            assert_eq!(current, 1, "{mode:?}: exactly one match is the focused one");
+        }
+    }
+
+    /// An equal line is recorded twice, once per side-by-side panel. The
+    /// single-column views draw that line once, so they must take one copy --
+    /// otherwise every hit on an unchanged line is painted twice over.
+    #[test]
+    fn an_equal_line_is_highlighted_once_in_a_single_column_view() {
+        let app = searching_app(ViewMode::Unified, "alpha");
+        assert_eq!(
+            app.search.matches.len(),
+            2,
+            "an equal line records one match per panel"
+        );
+        let (plain, current) = highlight_counts(&app.render());
+        assert_eq!(plain + current, 1, "but the unified view draws one line");
+
+        // Side-by-side draws the line twice, so it draws both.
+        let app = searching_app(ViewMode::SideBySide, "alpha");
+        let (plain, current) = highlight_counts(&app.render());
+        assert_eq!(plain + current, 2, "one per panel");
+    }
+
+    /// A delete and the insert replacing it are two different edits on one
+    /// side-by-side row, and each panel must show only its own hit.
+    ///
+    /// `zulu` is on the new side only -- and searching is case-insensitive by
+    /// default, so a word that differs from its counterpart merely in case
+    /// would be found on *both* sides and prove nothing.
+    #[test]
+    fn each_panel_shows_only_its_own_side_of_a_modified_line() {
+        let app = searching_app(ViewMode::SideBySide, "zulu");
+        assert_eq!(app.search.matches.len(), 1, "only the right side has it");
+        assert_eq!(app.search.matches[0].panel, 1);
+        let (plain, current) = highlight_counts(&app.render());
+        assert_eq!(plain + current, 1, "drawn once, on the right");
+    }
+
+    /// The offsets in a match are byte offsets; the grid is measured in cells.
+    /// Confusing the two has been this sweep's most common defect, and here it
+    /// would put the box several columns right of the word it marks.
+    #[test]
+    fn a_highlight_is_placed_in_cells_not_bytes() {
+        let mut app = FileDiffApp::new();
+        app.view_mode = ViewMode::Unified;
+        // "ééé" is three characters and six bytes; the hit starts after them.
+        app.load_files("a", "éééNEEDLE\n", "b", "éééNEEDLE\n");
+        app.search.visible = true;
+        app.search.query = "NEEDLE".to_string();
+        app.refresh_search_matches();
+
+        let m = app.search.matches.first().copied().expect("a match");
+        assert_eq!(m.byte_offset, 6, "six bytes in, three cells in");
+
+        let tree = app.render();
+        // Where `render_unified_line` puts the line's first character: two
+        // gutters, the panel padding, then the two-cell `+ ` / `- ` marker.
+        let text_x = GUTTER_WIDTH * 2.0 + PANEL_PADDING + char_width() * 2.0;
+        let rect = tree
+            .commands
+            .iter()
+            .find_map(|c| match c {
+                RenderCommand::FillRect {
+                    x, width, color, ..
+                } if *color == colors::SEARCH_CURRENT_BG => Some((*x, *width)),
+                _ => None,
+            })
+            .expect("the focused match is drawn");
+        assert!(
+            (rect.0 - (text_x + 3.0 * char_width())).abs() < 0.01,
+            "highlight starts at {} but the fourth cell is at {}",
+            rect.0,
+            text_x + 3.0 * char_width()
+        );
+        assert!(
+            (rect.1 - 6.0 * char_width()).abs() < 0.01,
+            "NEEDLE is six cells wide, not {}",
+            rect.1 / char_width()
+        );
+    }
+
+    /// The common case: most lines hold no match, so the highlighter is called
+    /// with an empty list far more often than not and must cost nothing there.
+    #[test]
+    fn an_overlay_with_nothing_in_it_draws_nothing() {
+        let mut tree = RenderTree::new();
+        let empty = SearchOverlay {
+            matches: &[],
+            panel: 0,
+            current: None,
+        };
+        render_search_highlights(&mut tree, 0.0, 0.0, "anything", empty);
+        assert!(tree.commands.is_empty());
+    }
+
+    /// A match whose offsets do not fit the line -- which a stale match list
+    /// can produce -- draws nothing rather than panicking on a slice.
+    #[test]
+    fn a_match_that_does_not_fit_the_line_draws_nothing() {
+        let bad = [
+            SearchMatch {
+                panel: 0,
+                edit_index: 0,
+                byte_offset: 500,
+                match_len: 3,
+            },
+            SearchMatch {
+                panel: 0,
+                edit_index: 0,
+                byte_offset: 0,
+                match_len: 500,
+            },
+            SearchMatch {
+                panel: 0,
+                edit_index: 0,
+                byte_offset: usize::MAX,
+                match_len: 2,
+            },
+            // Mid-character: `String::get` refuses it, which is the whole
+            // reason this uses `get` and not a slice.
+            SearchMatch {
+                panel: 0,
+                edit_index: 0,
+                byte_offset: 1,
+                match_len: 1,
+            },
+        ];
+        let mut tree = RenderTree::new();
+        render_search_highlights(
+            &mut tree,
+            0.0,
+            0.0,
+            "é",
+            SearchOverlay {
+                matches: &bad,
+                panel: 0,
+                current: None,
+            },
+        );
+        assert!(
+            tree.commands.is_empty(),
+            "{} boxes drawn",
+            tree.commands.len()
+        );
+    }
+
+    // --- Search navigation ---
+
+    /// Advancing the match counter used to leave the view where it was, so on
+    /// a file longer than a screen "2/17" and "3/17" looked identical.
+    #[test]
+    fn advancing_to_the_next_match_scrolls_to_it() {
+        let mut app = FileDiffApp::new();
+        let mut left = String::new();
+        for i in 0..200 {
+            left.push_str(if i == 5 || i == 150 {
+                "needle\n"
+            } else {
+                "x\n"
+            });
+        }
+        app.load_files("a", &left, "b", &left);
+        app.height = TOOLBAR_HEIGHT + STATUS_BAR_HEIGHT + LINE_HEIGHT * 10.0;
+        app.search.visible = true;
+        app.search.query = "needle".to_string();
+        app.rerun_search();
+
+        let first = app.scroll_left;
+        assert!(
+            first < 20.0,
+            "the first hit is near the top, not at {first}"
+        );
+
+        // Two presses: the first hit is recorded once per panel, so the second
+        // entry is the same line seen from the other side.
+        app.handle_search_key(&key(Key::Enter));
+        app.handle_search_key(&key(Key::Enter));
+        assert!(
+            app.scroll_left > 100.0,
+            "the second hit is at line 150 but the view sits at {}",
+            app.scroll_left
+        );
+    }
+
+    #[test]
+    fn typing_a_query_scrolls_to_the_first_hit() {
+        let mut app = FileDiffApp::new();
+        let mut left = String::new();
+        for i in 0..200 {
+            left.push_str(if i == 150 { "needle\n" } else { "x\n" });
+        }
+        app.load_files("a", &left, "b", &left);
+        app.height = TOOLBAR_HEIGHT + STATUS_BAR_HEIGHT + LINE_HEIGHT * 10.0;
+        app.search.visible = true;
+        for ch in "needle".chars() {
+            app.handle_search_key(&KeyEvent {
+                key: Key::A,
+                pressed: true,
+                modifiers: Modifiers::NONE,
+                text: Some(ch),
+            });
+        }
+        assert!(
+            app.scroll_left > 100.0,
+            "typed a query whose only hit is at line 150, view sits at {}",
+            app.scroll_left
+        );
+    }
+
+    /// Escape hides the search bar but not the highlights, so the match list
+    /// outlives the bar -- and must therefore be rebuilt when the diff is,
+    /// or it names edits that no longer exist.
+    #[test]
+    fn recomputing_the_diff_does_not_leave_stale_matches() {
+        let mut app = FileDiffApp::new();
+        // Ten lines that differ only in leading space, then the hit. With
+        // whitespace significant those ten lines are twenty edits and the
+        // needle is edit twenty; ignoring whitespace collapses them to ten
+        // equal edits and the needle moves to edit ten. A match list that
+        // survives the recompute therefore names an edit that no longer
+        // exists -- so the shrink has to be large enough to run off the end,
+        // which a one-line file is not.
+        let mut left = String::new();
+        let mut right = String::new();
+        for i in 0..10 {
+            let n = i.to_string();
+            left.push_str("  a");
+            left.push_str(&n);
+            left.push('\n');
+            right.push('a');
+            right.push_str(&n);
+            right.push('\n');
+        }
+        left.push_str("needle\n");
+        right.push_str("needle\n");
+        app.load_files("a", &left, "b", &right);
+        app.search.visible = true;
+        app.search.query = "needle".to_string();
+        app.refresh_search_matches();
+        assert!(
+            app.search.matches.iter().any(|m| m.edit_index >= 11),
+            "the hit must start out past where the shrunk list ends"
+        );
+
+        // Escape hides the bar but not the highlights, so this is the state a
+        // user is actually in when they toggle the option.
+        app.search.visible = false;
+        app.toggle_ignore_whitespace();
+
+        let edits = app.diff.as_ref().unwrap().edits.len();
+        for m in &app.search.matches {
+            assert!(
+                m.edit_index < edits,
+                "match names edit {} of {edits}",
+                m.edit_index
+            );
+        }
+        // And the highlighter agrees with the new layout.
+        let (plain, current) = highlight_counts(&app.render());
+        assert!(
+            plain + current > 0,
+            "the hit is still there, and still drawn"
+        );
+    }
+
+    fn key(k: Key) -> KeyEvent {
+        KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: None,
         }
     }
 }

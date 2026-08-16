@@ -225,7 +225,9 @@ character — a panic. Call `textfind`; do not write the loop.
 
 This was a targeted pass at one defect family, not a full sweep of those five
 crates; their remaining `indexing_slicing` counts are `rssreader` 93,
-`spreadsheet` 42, `filediff` 17, `ebook` 16, `pdfviewer` 13.
+`spreadsheet` 42, `filediff` 17, `ebook` 16, `pdfviewer` 13. (`rssreader`,
+`spreadsheet` and `filediff` have since been swept to zero; `ebook` and
+`pdfviewer` remain.)
 
 ### Sweep progress: `explorer` 264 → 55, `indexing_slicing` 0 (2026-08-16)
 
@@ -519,6 +521,125 @@ Other findings worth keeping:
   the path of addresses being visited, so a depth failure is never one; the
   depth backstop used to report `#CIRC!`, which pointed at a cycle that was not
   there.
+
+### Sweep progress: `filediff` 23 → 0, all lint classes (2026-08-16)
+
+Ninth crate, fourth to reach **zero warnings of every class** across
+`--all-targets`. Tests 79 → 97. The lint work itself was small; what the crate
+actually had was **a feature that was fully computed and never drawn**, which
+no lint could have named — the warnings were the reason to read the file, not
+the finding.
+
+Three structural changes carried the warnings, and each of the three is a
+repeat of a shape already recorded in this sweep:
+
+| Was | Is | Shape |
+|---|---|---|
+| the wrapping-cursor rule (`if !v.is_empty() { i = (i + 1) % v.len() }`) written out for the search matches, the change list and the merge hunks | `wrap_next` / `wrap_prev`, where `checked_rem(len) == None` **is** the emptiness test | *the same bound written out N times* |
+| the viewport rule (`scroll as usize`, `(height / LINE_HEIGHT) as usize`, `.min(len)`) written out in four render paths, three of them with a bare `+ 2` | one `visible_range` and a named `OVERSCAN_ROWS` | *the same bound written out N times* |
+| `Vec<SideBySidePair>` returned alone, with "row N is edit N" as an unwritten convention that is **false** for this view | `SideBySideRows { pairs, row_of_edit }`, both filled by the one loop that knows | *a `Vec` plus an index is an invariant expressed as a convention* |
+
+The third of those is the interesting one, and it is recorded as a defect
+below: side-by-side is the only view whose row count differs from its edit
+count, and two separate places had assumed otherwise.
+
+Also worth keeping: the directory list was the *fourth* copy of the viewport
+rule and the only one that added no overscan, so it dropped its bottom row
+while scrolling — a real if minor rendering bug that existed purely because
+the rule was written four times instead of once. Unifying the four fixed it
+without anyone diagnosing it.
+
+## Find-in-diff in `apps/filediff` was computed but never drawn (lane C)
+
+**Status: FIXED 2026-08-16** (lane C). Verified by disabling the highlighter
+and watching five tests fail, then restoring.
+
+`SearchState` scanned every edit, recorded byte offsets and match lengths,
+recorded an equal line's hit once per side-by-side panel, and the status bar
+counted them — "4/17". Enter and F3 advanced the counter. **Nothing was ever
+rendered, and the view never moved.** On any file longer than one screen the
+entire find feature was a number that changed while the display stayed still.
+
+The giveaway that this had been true for a while: an earlier pass had
+carefully corrected the offsets to be offsets into `edit.text` rather than
+into a `to_lowercase()` copy — the `İ` (U+0130) two-bytes-folds-to-three case —
+*for the benefit of a highlighter that did not exist*. Correctness work had
+been done on the output of a function whose only consumer was a counter.
+
+What was added: `render_search_highlights`, a `SearchOverlay` carrying the
+three things a line needs (its matches, which panel it is, which match is
+focused) as one value, `SearchState::matches_on_edit` (a binary search — the
+list is non-decreasing in `edit_index` by construction, because `search` walks
+the edits in order — since the highlighter asks once per visible row per
+frame), `canonical_panel` so the single-column views draw an equal line's
+doubly-recorded hit once rather than twice, and `scroll_to_current_match`
+wired into Enter, F3, Shift-F3 and every edit of the query.
+
+Two details in the highlighter are the recurring hazards of this sweep:
+
+- **The box is measured in cells, not bytes.** `columns(before)`, not
+  `before.len()`. Byte-vs-character confusion is now this sweep's single most
+  common defect — this is the fifth — and here it would have put the box some
+  columns right of the word on any line holding a non-ASCII character. Pinned
+  by `a_highlight_is_placed_in_cells_not_bytes`, which searches `éééNEEDLE`.
+- **`text.get(..)`, not `&text[..]`.** A match list that has outlived the diff
+  it was computed against should draw nothing, not take the window down.
+
+## An edit index used as a display row in `apps/filediff` (lane C)
+
+**Status: FIXED 2026-08-16** (lane C). Verified by reverting; the test then
+reports `row 39 is not on screen: scrolled to 56 showing 4 rows`.
+
+Side-by-side folds a delete and the insert immediately after it into **one**
+row — that is what a modified line is — so its row count is smaller than its
+edit count, by one per modified line. Unified and inline draw one row per
+edit, so for those two the row *is* the edit. Two places used the edit index
+as a row anyway:
+
+- `scroll_to_current_change` scrolled to edit N when the change was drawn on
+  row N−k. On a file with twenty modified lines the last change scrolled to
+  row 56 of a 40-row list: **"jump to last change" showed a blank panel.**
+- `max_scroll` returned `diff.edits.len() − visible`, letting the view scroll
+  past the bottom by one row per modified line.
+
+Fixed structurally rather than by correcting the two arithmetic sites:
+`build_side_by_side_pairs` now returns `SideBySideRows { pairs, row_of_edit }`
+with the map filled *by the loop that builds the rows* — the only code that
+knows an edit was folded into the row before it — and the app asks
+`display_row_count()` / `display_row_of_edit()`, which answer per view mode.
+A second pass over the output would have had to reconstruct that decision, and
+could have reconstructed it differently. Pinned by
+`jumping_to_a_change_scrolls_to_the_row_it_is_drawn_on`,
+`the_scroll_limit_counts_rows_not_edits` and
+`a_paired_modification_puts_both_its_edits_on_one_row`.
+
+**Note on the test's file shape**, because the first attempt at it was wrong
+in an instructive way: two files with *no* lines in common diff as one delete
+block followed by one insert block, so the pairing rule fires exactly once, at
+the seam. Twenty changed lines with no context are 39 rows, not 20. The
+divergence only appears when the changes are separated by unchanged lines,
+which is what real files look like and what the test now builds.
+
+## Two smaller `apps/filediff` findings from the same read (lane C)
+
+**Status: both FIXED 2026-08-16** (lane C).
+
+- **The whole document was cloned every frame.** `build_side_by_side_pairs`
+  and `build_inline_rows` ran inside `render()`, and both clone every line of
+  both files. At 60 fps on a hundred-thousand-line comparison that is
+  megabytes of `String` allocation per frame against a two-millisecond frame
+  budget. Both are now cached on the app and rebuilt in `recompute_diff`,
+  which is also what made `row_of_edit` reachable between frames at all — it
+  had been a local variable inside `render`.
+- **Stale matches survived a diff recompute.** `recompute_diff` re-ran the
+  search only `if self.search.visible`, but Escape hides the search *bar*, not
+  the highlights. Toggling "ignore whitespace" with hidden-but-live matches
+  left them naming edits that no longer existed. Harmless while nothing drew
+  them; not harmless once something did. Now unconditional, and it clears the
+  list outright when there is no diff. Pinned by
+  `recomputing_the_diff_does_not_leave_stale_matches` — which had to be
+  rewritten once, because the first version's file shrank by too few edits for
+  the stale index to fall off the end, so it passed against the bug.
 
 ## Two reachable crashes in `apps/spreadsheet`, found by the lint sweep (lane C)
 

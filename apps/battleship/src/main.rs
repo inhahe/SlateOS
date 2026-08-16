@@ -72,29 +72,17 @@ const SHIP_DEFS: [(ShipKind, usize); 5] = [
     (ShipKind::Destroyer, 2),
 ];
 
-// ── Seeded LCG RNG ─────────────────────────────────────────────────
-
-struct Rng {
-    state: u64,
-}
-
-impl Rng {
-    fn new(seed: u64) -> Self {
-        Self { state: seed }
-    }
-
-    fn next(&mut self) -> u64 {
-        self.state = self
-            .state
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1_442_695_040_888_963_407);
-        self.state
-    }
-
-    fn next_range(&mut self, max: u64) -> u64 {
-        self.next() % max
-    }
-}
+// ── Randomness ──────────────────────────────────────────────────────
+//
+// From `randrange`, not a local LCG. The local one reduced with `state % max`,
+// which on a modulus-2^64 generator returns the low bits — and the low bits of
+// such a generator are a counter, not noise: bit 0 alternates 0,1,0,1 for ever.
+// Every AI ship consumed three draws (orientation, row, column) from
+// consecutive states, so `row` and `col` came from states of opposite parity
+// and `row + col` was *always odd*. The AI's entire fleet was anchored to one
+// colour of the checkerboard, at every seed, and half the board could not hold
+// the bow of a ship. See `known-issues.md` and `design-decisions.md` §447.
+use randrange::Rng;
 
 // ── Ship types ──────────────────────────────────────────────────────
 
@@ -262,11 +250,12 @@ impl AiState {
                 }
             }
         }
-        if unfired.is_empty() {
-            return (0, 0); // Should not happen in a valid game.
-        }
-        let idx = rng.next_range(unfired.len() as u64) as usize;
-        unfired[idx]
+        // One lookup rather than a length test, a draw and an index: "is there
+        // a cell to fire at" and "which one" are the same question, and asking
+        // it twice leaves two places free to disagree. `below` is total, so an
+        // empty list draws 0 and `get` declines it, which is the old
+        // "should not happen in a valid game" fallback of (0, 0).
+        rng.choose(&unfired).copied().unwrap_or((0, 0))
     }
 
     /// Record a shot result and update the mode.
@@ -535,13 +524,13 @@ impl BattleshipApp {
             let mut attempts = 0;
             while !placed && attempts < 1000 {
                 attempts += 1;
-                let orientation = if self.rng.next_range(2) == 0 {
+                let orientation = if self.rng.flip() {
                     Orientation::Horizontal
                 } else {
                     Orientation::Vertical
                 };
-                let row = self.rng.next_range(GRID_SIZE as u64) as usize;
-                let col = self.rng.next_range(GRID_SIZE as u64) as usize;
+                let row = self.rng.below(GRID_SIZE);
+                let col = self.rng.below(GRID_SIZE);
                 let ship = Ship {
                     kind,
                     row,
@@ -1268,32 +1257,58 @@ fn main() {
 mod tests {
     use super::*;
 
-    // ── RNG tests ───────────────────────────────────────────────────
+    // ── AI fleet placement is not confined to one colour of the board ──
+    //
+    // The generator's own properties — bounded, deterministic, varied — are
+    // tested in `randrange`, which owns it now. What is tested here is the
+    // property of *this crate* that the old generator destroyed.
 
+    /// The AI's ships must not all start on squares of one checkerboard
+    /// colour.
+    ///
+    /// They used to. The old generator reduced with `state % max`, which on a
+    /// modulus-2^64 LCG hands back the low bits, and bit 0 of such a generator
+    /// alternates 0,1,0,1 with no exceptions. Placing a ship drew orientation,
+    /// then row, then column from three consecutive states, so `row` and `col`
+    /// always came from states of opposite parity, and `% 10` (an even
+    /// modulus) preserves parity — so `row + col` was **always odd**. Verified
+    /// over 1999 seeds before the fix: five ships each, and not one had an
+    /// even `row + col`. Half the board could not hold the bow of a ship, and
+    /// a player who spotted it could halve their search.
+    ///
+    /// Note what this test is *not*: a check that the placements are uniform,
+    /// or that each cell is reachable. The old placement passed both — every
+    /// row appeared, every column appeared, and the marginal distributions
+    /// were fine. Only the *joint* distribution of row against column was
+    /// degenerate, which is the shape this whole class of defect takes.
     #[test]
-    fn test_rng_produces_different_values() {
-        let mut rng = Rng::new(42);
-        let a = rng.next();
-        let b = rng.next();
-        assert_ne!(a, b);
-    }
-
-    #[test]
-    fn test_rng_deterministic() {
-        let mut rng1 = Rng::new(42);
-        let mut rng2 = Rng::new(42);
-        for _ in 0..100 {
-            assert_eq!(rng1.next(), rng2.next());
+    fn ai_ships_do_not_all_start_on_one_checkerboard_colour() {
+        let mut even = 0_u32;
+        let mut odd = 0_u32;
+        for seed in 1..200_u64 {
+            let mut app = BattleshipApp::new();
+            app.rng = Rng::new(seed);
+            app.place_ai_ships();
+            for ship in &app.opponent_fleet.ships {
+                if (ship.row + ship.col) % 2 == 0 {
+                    even += 1;
+                } else {
+                    odd += 1;
+                }
+            }
         }
-    }
-
-    #[test]
-    fn test_rng_range_bounded() {
-        let mut rng = Rng::new(123);
-        for _ in 0..200 {
-            let val = rng.next_range(10);
-            assert!(val < 10);
-        }
+        assert!(
+            even > 0 && odd > 0,
+            "ship origins are all on one colour: {even} even, {odd} odd"
+        );
+        // Neither colour may take more than three quarters of the placements.
+        // Loose on purpose — the rejection loop skews it slightly and that is
+        // legitimate; what is not legitimate is a fixed parity.
+        let total = even + odd;
+        assert!(
+            even * 4 > total && odd * 4 > total,
+            "ship origins are lopsided by colour: {even} even, {odd} odd"
+        );
     }
 
     // ── Ship kind tests ─────────────────────────────────────────────

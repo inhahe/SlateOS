@@ -46,6 +46,28 @@ That separation is the whole point. A flip in a function the commit did not
 touch is evidence of an artifact; a flip in a function it recompiled is not
 evidence of anything.
 
+Two mechanisms, not one
+-----------------------
+A TCG translation block is cut by a page boundary *wherever* it falls, not only
+at a backward branch. So layout has a second, weaker channel: a function whose
+straight-line body spans a boundary pays a dispatcher round-trip once per
+**call**, where a straddling loop pays one per **iteration**. Compare mode
+reports both, and reports the crossing counts unconditionally.
+
+That is not symmetry for its own sake. The first real investigation this script
+was used for -- `http_build_response_1KiB`, a benchmark that doubled -- has a
+hot path containing no straddling loop at all: its dominant memcpy is `rep
+movsb`, which has no backward branch, and `__rust_alloc` has none either. A
+loop-only tool answers "no flips here", which reads as "layout is innocent"
+when in fact the tool never looked at the only mechanism still standing. The
+crossing count had to be computed by hand that day; a check that must be
+re-derived by hand each time is a check that will eventually be skipped.
+
+Comparability for crossings is decided by **byte length**, not loop signature:
+a function that grew across a boundary changed its code, and calling that a
+layout flip would be the same wrong-direction error the recompiled quarantine
+exists to prevent.
+
 Limits worth stating, because a silent limit is a wrong answer later
 --------------------------------------------------------------------
 * Static analysis cannot know which loop is *hot*. A flip in a cold loop costs
@@ -86,6 +108,13 @@ _BRANCH = re.compile(
     r"(j[a-z]+)\s+0x([0-9a-f]+)"
 )
 _SYMLINE = re.compile(r"^([0-9a-f]{8,16})\s+<(.+)>:$")
+#: Any disassembled instruction, branch or not. Needed for the *straight-line*
+#: half of the story: a TCG translation block is cut by a page boundary
+#: wherever it falls, not only at a backward branch, so a call-heavy function
+#: with no loop at all still pays one dispatcher round-trip per boundary it
+#: spans. Tracking the last instruction in each function is what makes that
+#: measurable instead of assumed.
+_INSN = re.compile(r"^\s*([0-9a-f]{8,16}):\s+[0-9a-f]{2} ")
 
 
 class Loop(NamedTuple):
@@ -109,6 +138,41 @@ class Loop(NamedTuple):
         says nothing about layout and it can never flip between builds.
         """
         return self.span >= PAGE
+
+
+class Extent(NamedTuple):
+    """Where a function's code begins and ends in this build.
+
+    `end` is the address of its *last instruction*, not of the next symbol:
+    the gap between two functions is alignment padding, which is never
+    executed, and counting it would invent page crossings that cost nothing.
+    """
+
+    start: int
+    end: int
+
+    @property
+    def crossings(self) -> int:
+        """How many 4 KiB boundaries the function's body spans.
+
+        This is the straight-line analogue of `Loop.straddles`. It is paid once
+        per *call* rather than once per iteration, so it is a far weaker effect
+        than a straddling loop -- but it is the only other way layout can
+        change a benchmark, so leaving it unmeasured means "no straddle flip"
+        gets read as "layout is innocent" when the tool never looked.
+        """
+        return self.end // PAGE - self.start // PAGE
+
+    @property
+    def length(self) -> int:
+        return self.end - self.start
+
+
+class Func(NamedTuple):
+    """Everything one disassembled function contributes to a comparison."""
+
+    extent: Extent
+    loops: list
 
 
 def _toolchain_bin(name: str) -> str:
@@ -140,8 +204,14 @@ def demangle(sym: str) -> str:
     return re.sub(r"17h[0-9a-f]{16}E$", "", sym)
 
 
-def loops_by_function(binary: str) -> dict[str, list[Loop]]:
-    """Disassemble `binary` and collect every backward branch, per function."""
+def disassemble(binary: str) -> dict[str, Func]:
+    """Disassemble `binary` into per-function loops and code extents.
+
+    One objdump pass serves both analyses. That is not just for speed: running
+    it twice would let the loop view and the crossing view disagree about
+    which functions exist, and a disagreement between two halves of the same
+    answer is worse than either half alone.
+    """
     objdump = _toolchain_bin("llvm-objdump")
     proc = subprocess.run(
         [objdump, "-d", binary],
@@ -151,7 +221,9 @@ def loops_by_function(binary: str) -> dict[str, list[Loop]]:
             f"straddle-check: {objdump} failed ({proc.returncode}):\n"
             f"{proc.stderr[:2000]}")
 
-    out: dict[str, list[Loop]] = {}
+    loops: dict[str, list[Loop]] = {}
+    ends: dict[str, int] = {}
+    starts: dict[str, int] = {}
     current = None
     start = 0
     for line in proc.stdout.splitlines():
@@ -159,10 +231,21 @@ def loops_by_function(binary: str) -> dict[str, list[Loop]]:
         if sym:
             start = int(sym.group(1), 16)
             current = demangle(sym.group(2))
-            out.setdefault(current, [])
+            loops.setdefault(current, [])
+            # A name can repeat (identical generic instantiations, or the same
+            # symbol emitted in two sections).  Keep the *widest* span seen, so
+            # the crossing count is never understated by a later, shorter copy
+            # silently replacing an earlier one.
+            starts[current] = min(starts.get(current, start), start)
+            ends[current] = max(ends.get(current, start), start)
             continue
+        if current is None:
+            continue
+        insn = _INSN.match(line)
+        if insn:
+            ends[current] = max(ends[current], int(insn.group(1), 16))
         match = _BRANCH.match(line)
-        if not match or current is None:
+        if not match:
             continue
         addr = int(match.group(1), 16)
         target = int(match.group(3), 16)
@@ -171,13 +254,19 @@ def loops_by_function(binary: str) -> dict[str, list[Loop]]:
         # loop in it.
         if not (start <= target < addr):
             continue
-        out[current].append(Loop(
+        loops[current].append(Loop(
             offset=target - start,
             span=addr - target,
             target=target,
             straddles=(target // PAGE) != (addr // PAGE),
         ))
-    return out
+    return {name: Func(Extent(starts[name], ends[name]), loops[name])
+            for name in loops}
+
+
+def loops_by_function(binary: str) -> dict[str, list[Loop]]:
+    """Disassemble `binary` and collect every backward branch, per function."""
+    return {name: func.loops for name, func in disassemble(binary).items()}
 
 
 def signature(loops: list[Loop]) -> tuple[tuple[int, int], ...]:
@@ -291,11 +380,55 @@ def classify_flips(old: dict[str, list[Loop]], new: dict[str, list[Loop]],
     return Flips(gained, lost, recompiled, only_new, only_old)
 
 
+class CrossFlips(NamedTuple):
+    """The straight-line counterpart of `Flips`. See `classify_crossings`."""
+
+    more: list    #: (func, old_count, new_count) -- spans more boundaries now
+    fewer: list   #: (func, old_count, new_count) -- spans fewer
+    resized: int  #: byte length changed, so the counts are not comparable
+
+
+def classify_crossings(old: dict[str, Func], new: dict[str, Func],
+                       wanted: list[str]) -> CrossFlips:
+    """Find functions whose body spans a different number of page boundaries.
+
+    Comparability is decided by **byte length**, not by loop signature. Two
+    functions with the same loops can still differ in length (a changed call,
+    a different constant), and a length change means the crossing count could
+    have moved because the code grew rather than because it moved -- which is
+    the same "the code changed, so this is not a layout finding" quarantine
+    that `classify_flips` applies, expressed in the unit that matters here.
+
+    A function can gain a crossing purely by moving: a 3 KiB function is
+    entirely within one page at some addresses and spans two at others.
+    """
+    more, fewer, resized = [], [], 0
+    for func, new_func in new.items():
+        if not _matches(func, wanted):
+            continue
+        old_func = old.get(func)
+        if old_func is None:
+            continue
+        if old_func.extent.length != new_func.extent.length:
+            resized += 1
+            continue
+        old_n = old_func.extent.crossings
+        new_n = new_func.extent.crossings
+        if new_n > old_n:
+            more.append((func, old_n, new_n))
+        elif new_n < old_n:
+            fewer.append((func, old_n, new_n))
+    return CrossFlips(more, fewer, resized)
+
+
 def report_compare(old_bin: str, new_bin: str, wanted: list[str],
                    min_span: int) -> int:
-    old = loops_by_function(old_bin)
-    new = loops_by_function(new_bin)
+    old_funcs = disassemble(old_bin)
+    new_funcs = disassemble(new_bin)
+    old = {n: f.loops for n, f in old_funcs.items()}
+    new = {n: f.loops for n, f in new_funcs.items()}
     flips = classify_flips(old, new, wanted, min_span)
+    crossed = classify_crossings(old_funcs, new_funcs, wanted)
     gained, lost = flips.gained, flips.lost
     recompiled, only_new, only_old = (
         flips.recompiled, flips.only_new, flips.only_old)
@@ -333,10 +466,29 @@ def report_compare(old_bin: str, new_bin: str, wanted: list[str],
         print(f"  ... and {len(recompiled) - 40} more")
     print(f"only in new: {only_new}    only in old: {only_old}")
 
+    # The straight-line half. Reported unconditionally, and *before* the
+    # verdict below, because the whole hazard here is concluding "layout is
+    # innocent" from a loop analysis that never looked at the other mechanism.
+    print(f"\nPAGE CROSSINGS (straight-line; paid once per CALL, not per "
+          f"iteration): {len(crossed.more)} span more, {len(crossed.fewer)} "
+          f"span fewer, {crossed.resized} not comparable (byte length changed)")
+    if crossed.more or crossed.fewer:
+        rows = ([(f, o, n, "+") for f, o, n in crossed.more]
+                + [(f, o, n, "-") for f, o, n in crossed.fewer])
+        rows.sort(key=lambda r: (-abs(r[2] - r[1]), r[0]))
+        width = min(max(len(r[0]) for r in rows), 72)
+        for func, old_n, new_n, mark in rows[:20]:
+            print(f"  {mark} {_shorten(func, width):<{width}}  "
+                  f"{old_n} -> {new_n} boundaries")
+        if len(rows) > 20:
+            print(f"  ... and {len(rows) - 20} more")
+
     if not gained and not lost:
         print("\nNo untouched function changed straddle status. If benchmarks "
               "moved between these two builds, page-straddle layout is NOT "
-              "the explanation -- look for a real code cause.")
+              "the explanation -- but check the crossing rows above against "
+              "the benchmark's call path before ruling layout out entirely, "
+              "then look for a real code cause.")
     else:
         print(f"\n{len(gained)} functions got slower and {len(lost)} got "
               f"faster purely from where they landed. Cross-reference these "

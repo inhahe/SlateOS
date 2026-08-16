@@ -213,6 +213,105 @@ def test_demangle_strips_only_the_build_hash(sc):
           sc.demangle("_ZN1b17h0000000000000000E"), False)
 
 
+def func(sc, start: int, length: int, loops=()):
+    """Build a Func as if a function of `length` bytes started at `start`.
+
+    `end` is the last instruction's address, which is what the real parser
+    records -- so, as with `place`, a test cannot assert a crossing count the
+    tool would not itself derive.
+    """
+    return sc.Func(sc.Extent(start=start, end=start + length), list(loops))
+
+
+def test_a_function_can_gain_a_crossing_by_moving_alone(sc):
+    """The positive control for the straight-line mechanism.
+
+    This is the half `straddle-check` was blind to until a real investigation
+    needed it: `http_build_response_1KiB`'s hot path contains no straddling
+    loop at all -- `memcpy` is `rep movsb` and has no backward branch -- so a
+    loop-only tool reports "layout is innocent" without having looked at the
+    only mechanism left. The count has to be computed by hand or not at all,
+    and "by hand" is how a check quietly stops being run.
+
+    A 3000-byte function fits inside one page at 0x1000 and spans a boundary
+    at 0x1c00. Same code, same length, different answer.
+
+    Note the second address is deliberately *not* page-aligned: the first
+    draft used 0x3000, where a 3000-byte function still fits entirely inside
+    its page, so the "moved" case crossed nothing and the test failed against
+    correct code. The guard assertion below is what caught it -- which is the
+    argument for having it, since without it this test would have been
+    "fixed" by weakening the tool.
+    """
+    inside = {"f": func(sc, 0x1000, 3000)}
+    astride = {"f": func(sc, 0x1c00, 3000)}
+    check("the modelled move really does change the crossing count",
+          (inside["f"].extent.crossings, astride["f"].extent.crossings),
+          (0, 1))
+    check("a function that moved across a boundary is 'more'",
+          [r[0] for r in sc.classify_crossings(inside, astride, []).more],
+          ["f"])
+    check("...and is not also reported as 'fewer'",
+          sc.classify_crossings(inside, astride, []).fewer, [])
+    # Both directions, for the same reason the loop tests check both: a build
+    # that removes a crossing produces a benchmark that got faster, and
+    # reading only one half turns a bidirectional re-roll into a one-sided
+    # regression.
+    check("the reverse pair is 'fewer', not 'more'",
+          [r[0] for r in sc.classify_crossings(astride, inside, []).fewer],
+          ["f"])
+    check("the counts are reported, not just the direction",
+          sc.classify_crossings(inside, astride, []).more, [("f", 0, 1)])
+
+
+def test_a_resized_function_is_quarantined_not_attributed(sc):
+    """A length change means the code changed; the count is not comparable.
+
+    Exactly the `classify_flips` recompiled quarantine, in the unit that
+    matters for crossings. Without it, a function that grew past a page
+    boundary -- a real code change -- would be reported as having *moved*,
+    which is the wrong answer in the wrong direction.
+    """
+    old = {"f": func(sc, 0x1000, 3000)}
+    new = {"f": func(sc, 0x1000, 5000)}   # grew across a boundary
+    check("the grown function really does cross more",
+          (old["f"].extent.crossings, new["f"].extent.crossings), (0, 1))
+    flips = sc.classify_crossings(old, new, [])
+    check("a resized function is not reported as 'more'", flips.more, [])
+    check("a resized function is not reported as 'fewer'", flips.fewer, [])
+    check("a resized function IS counted, separately", flips.resized, 1)
+
+
+def test_crossings_ignore_padding_between_functions(sc):
+    """`end` is the last instruction, not the next symbol.
+
+    The gap between two functions is alignment padding and is never executed.
+    Measuring to the next symbol would invent crossings that cost nothing --
+    and would make the count depend on the *next* function's alignment, so an
+    unrelated edit could appear to move this one.
+    """
+    # Last instruction at 0xffc, well inside the page; padding would run to
+    # 0x1000 and manufacture a crossing.
+    check("a function ending just short of a boundary crosses nothing",
+          func(sc, 0x800, 0x7fc).extent.crossings, 0)
+    check("a function whose last instruction is past the boundary crosses it",
+          func(sc, 0x800, 0x800).extent.crossings, 1)
+
+
+def test_crossing_symbol_filter_actually_filters(sc):
+    """Tested against the positive control, so a no-op filter fails loudly."""
+    inside = {"hot_fn": func(sc, 0x1000, 3000),
+              "cold_fn": func(sc, 0x1000, 3000)}
+    astride = {"hot_fn": func(sc, 0x1c00, 3000),
+               "cold_fn": func(sc, 0x1c00, 3000)}
+    check("with no filter, both functions are reported",
+          sorted(r[0] for r in sc.classify_crossings(inside, astride, []).more),
+          ["cold_fn", "hot_fn"])
+    check("a symbol substring narrows it to one",
+          [r[0] for r in sc.classify_crossings(inside, astride, ["hot"]).more],
+          ["hot_fn"])
+
+
 def main():
     """Auto-discover `test_*` in this module, same contract as bench-history.
 
@@ -223,9 +322,9 @@ def main():
     sc = load_module()
     tests = [(name, fn) for name, fn in list(globals().items())
              if name.startswith("test_") and callable(fn)]
-    if len(tests) < 7:
+    if len(tests) < 11:
         print(f"FATAL: test discovery found only {len(tests)} tests; the "
-              f"suite has at least 7. Discovery is broken, not the code.")
+              f"suite has at least 11. Discovery is broken, not the code.")
         return 1
     for _, fn in tests:
         params = inspect.signature(fn).parameters

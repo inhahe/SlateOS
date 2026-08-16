@@ -29,6 +29,7 @@
 //! Backend (compositor syscalls, framebuffer, etc.)
 //! ```
 
+pub mod canvas;
 pub mod color;
 pub mod colorpicker;
 pub mod context_ext;

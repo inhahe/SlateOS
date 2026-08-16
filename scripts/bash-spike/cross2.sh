@@ -5,8 +5,10 @@
 # no spaces (configure word-splits $CC, and the repo lives under "visual studio
 # projects"), and the whole build happens on the Linux filesystem — /mnt/d is
 # both space-laden and slow.
+. "$(dirname "${BASH_SOURCE[0]}")/../lib/worktree.sh" || exit 1
+
 set -x
-SPIKE="/mnt/d/visual studio projects/os/build/spike"
+SPIKE="$SLATE_SPIKE"
 BUILD="/tmp/bash-cross"
 
 command -v "$SPIKE/zig/zig" >/dev/null || { echo "NO_ZIG"; exit 1; }

@@ -1,0 +1,11 @@
+# Intermediate objects emitted by each ctest fixture's build.py. Only the
+# linked ELF fixture is tracked, because the boot test needs the ELF on a
+# machine that may have no zig/WSL toolchain to rebuild it with.
+#
+# This rule lives here, matched by pattern, rather than as a copy of the same
+# two lines in every services/ctest-*/ directory. Eight of the nine fixtures
+# carried that per-directory copy and ctest-ctty did not — so its main.o was
+# committed and stayed committed, contradicting the very comment its siblings
+# were repeating. A rule replicated per directory is a rule a new directory
+# opts out of by simply not having it.
+ctest-*/main.o

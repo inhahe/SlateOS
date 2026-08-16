@@ -1,7 +1,9 @@
 #!/bin/bash
 # Extract tcc + crt + libtcc1.a from rootfs.ext4 and strace a hosted compile.
+. "$(dirname "${BASH_SOURCE[0]}")/lib/worktree.sh" || exit 1
+
 set -u
-R="/mnt/d/visual studio projects/os/rootfs.ext4"
+R="$SLATE_ROOTFS"
 STRACE=/tmp/straceroot/usr/bin/strace
 WORK=/tmp/tccx
 rm -rf "$WORK"

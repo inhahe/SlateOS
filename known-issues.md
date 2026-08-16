@@ -398,7 +398,7 @@ fresh measurement disagree, the measurement wins.
 
 ## Active Bugs
 
-### B-BASH-SLATEOS-ELF-WAS-EXEMPT-FROM-THE-STALENESS-GATE. The one artifact that exercises our libc hardest was the one artifact allowed to be out of date — 2026-08-16 — ✅ GATE FIXED 2026-08-16 by lane B (`scripts/create-ext4-rootfs.sh`); the stale binary itself still needs a relink
+### B-BASH-SLATEOS-ELF-WAS-EXEMPT-FROM-THE-STALENESS-GATE. The one artifact that exercises our libc hardest was the one artifact allowed to be out of date — 2026-08-16 — ✅ RESOLVED 2026-08-16 by lane B (gate in `scripts/create-ext4-rootfs.sh`; stale binary relinked; boot-verified green on `main`)
 
 **In short:** The image build refuses to ship a ring-3 test program that is
 older than the C library it was compiled against, because such a program tests
@@ -439,13 +439,23 @@ consumer is `kernel/src/proc/spawn.rs::self_test_bash_on_slateos_libc`.
 | absent | warning, boot green | warning, boot green | A skip reports nothing **and says so**; the harness already prints `PATH-Z COVERAGE INCOMPLETE`. Unlike a fixture it cannot be rebuilt from a one-line command, so failing a fresh checkout would be punitive. |
 | present, older than `libc.a` | staged silently | **exit 1** | A stale binary reports OK and is wrong. This is the `ctest-*` rule verbatim; `ALLOW_STALE_FIXTURES=1` downgrades it, since a host that cannot rebuild the fixtures certainly cannot relink bash. |
 
-**Still open.** `os/build/spike/bash-slateos.elf` is dated 2026-08-12 and must be
-relinked against the current sysroot
-(`wsl -d Ubuntu -- bash scripts/bash-spike/slatelink.sh`) before the next image
-built from `os` will pass. That is now *enforced* rather than hoped for, which
-is the point of the change — but it does mean the next `main` rootfs build will
-fail loudly until someone relinks it. That is the intended behaviour and is
-strictly better than the silent pass it replaces.
+**~~Still open~~ — CLOSED 2026-08-16, same day, and the relink proved the point.**
+`os/build/spike/bash-slateos.elf` was dated 2026-08-12 and had to be relinked
+against the current sysroot before any image built from `os` would pass the new
+gate. Done: `wsl -d Ubuntu -- bash scripts/bash-spike/slatelink.sh` exited 0 with
+**zero undefined symbols**, and the artifact went from 5,349,720 to 5,398,808
+bytes — **+49,088 bytes of libc that the shipped binary did not previously
+contain.** That size delta is the evidence the entry was arguing for in the
+abstract: the library really had moved underneath it, so every boot from `main`
+between 08-12 and today reported "bash on our libc: OK" about a libc four days
+old. `os`'s nine `ctest-*` fixtures were rebuilt alongside it (they were 08-14,
+and its `ctest-jobctl.elf` predated the 33 new `waitid` checks), and the rootfs
+rebuilt clean — zero staleness warnings, bash staged, 9 fixtures staged.
+
+Boot-verified on `main` the same day: BOOT_OK in 291 s, with
+`GNU bash 5.2 on our own libc.a (ring 3 …): OK` — this time about the *current*
+libc — and no `PATH-Z COVERAGE INCOMPLETE` line, which is what the previous
+run's log had flagged and what led here in the first place.
 
 **Worth generalising, again.** This is the third instance of the pattern
 `B-PATHZ-PREREQUISITE-SKIPS-ARE-SILENT` names: the check was not wrong, it just
@@ -21393,6 +21403,8 @@ A check that says something false is worse than no check, because it is
 believed — and the cost lands on the *next* real regression, which gets
 waved through as "probably noise again".
 
+---
+
 ## TD-FONT-DOES-NOT-READ-VARIATION-STORES
 
 **What.** `gui/font/src/device.rs` reads `GPOS` device tables — the per-pixel
@@ -21667,3 +21679,310 @@ isolation, and believed the note.
 --workspace` invocations against one `target/`. The first attempt died with
 `os error 32` — "could not execute process colorpicker-….exe … being used by
 another process" — with nothing actually under test at the point of failure.
+---
+
+## B-TIMED-OUT-BOOT-TEST-STRANDS-THE-CROSS-WORKTREE-LOCK-FOR-20-MINUTES
+
+**Status: OPEN** (lane B reporting; the fix is in `scripts/boot-test.sh`,
+which is lane A's file — filed as
+`requests/b-a-boot-lock-survives-its-dead-owner.md`)
+
+**In short:** every lane runs the boot test through a shared "only one QEMU
+at a time" lock. If a boot test is killed rather than allowed to finish —
+which is exactly what our own timeout runner does when a run overruns — the
+lock is left behind with nobody holding it, and the *next* boot test on any
+lane sits and waits for it. It eventually gives up and continues after 20
+minutes, so nothing breaks permanently; the cost is that a 20-minute stall
+looks indistinguishable from a hung boot, and a lane that is trying to
+verify a fix loses that time for no reason. Observed today, twice in one
+session.
+
+**What actually happens.** `scripts/boot-test.sh` (~1295-1350) serialises
+QEMU across the three worktrees with a `mkdir`-based lock directory in the
+git *common* dir (`$(git rev-parse --git-common-dir)/slateos-boot-lock`,
+i.e. `os/.git/slateos-boot-lock` — shared by all worktrees, which is why it
+is not under any lane's `build/`). `release_boot_lock` removes it only when
+`$BOOT_LOCK_DIR/owner` still names this process, which is the right rule —
+it is what stops us deleting a lock some other lane acquired after ours was
+broken. But release is reached only if the script gets to run its exit path.
+
+`scripts/run-timeout.py`, per `CLAUDE.md`, deliberately puts the child in a
+Windows Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, so a timeout
+tears down the **entire process tree at once** — bash included. That is the
+correct behaviour for its actual job (no orphaned QEMU, ever), and it is why
+we use it. The side effect is that `boot-test.sh` never executes *any* exit
+path, so the lock directory outlives the process that made it. The only
+thing that then clears it is the age-based breaker at line 1336, which
+requires the lock to be **>1200s (20 min)** old — a threshold chosen against
+our longest healthy boot (~8 min), which is correct for its own purpose and
+far too slow here.
+
+**How it presented.** A boot test on `main` timed out at 1800s (the cold
+kernel build alone took 24m16s, leaving too little for the ~344s boot). The
+warm re-run then logged, at 60-second intervals:
+
+```
+=== Waiting for boot lock, held by lane-B/pid-1050807/1786884746 (0s) ===
+=== Waiting for boot lock, held by lane-B/pid-1050807/1786884746 (60s) ===
+...                                                              (420s) ===
+```
+
+`pid-1050807` was the *timed-out* run. Nothing was running: `tasklist` showed
+zero QEMU processes. Clearing the directory by hand let the waiter acquire
+within one 5s poll.
+
+**The diagnosis was made harder by a wrong first guess, which is worth
+recording.** On seeing the timeout I checked `os/build/` for a lock, found
+nothing, and concluded "clean teardown — no stale lock". `build/.boot-lock`
+is only the *fallback* path used when `git rev-parse --git-common-dir`
+fails; the real lock is in the git common dir precisely so that all four
+worktrees share one. Looking for a cross-worktree lock inside one
+worktree's `build/` will always find nothing and always look reassuring.
+
+**What the fix should be: make the lock defend itself against a dead
+owner, rather than only against an old one.** The owner file already records
+the pid (`lane-B/pid-$$/<epoch>`), and every lane runs the script under the
+same MSYS bash, so a waiter can ask whether that pid still exists:
+
+```sh
+# before consulting _lock_age, ask whether the holder is alive at all
+_lock_pid="$(sed -n 's#.*/pid-\([0-9]\+\)/.*#\1#p' "$BOOT_LOCK_DIR/owner" 2>/dev/null || echo "")"
+if [ -n "$_lock_pid" ] && ! kill -0 "$_lock_pid" 2>/dev/null; then
+    echo "=== Breaking boot lock: owner pid $_lock_pid is gone ==="
+    rm -rf "$BOOT_LOCK_DIR" 2>/dev/null || true
+    continue
+fi
+```
+
+Two properties matter and should be kept. It must stay **conservative in the
+unknown case** — if the owner string does not parse, or `kill -0` cannot
+answer, fall through to the existing 1200s age rule rather than breaking;
+a lock broken while QEMU is live costs a corrupted, mutually-slowed pair of
+boots, which is far worse than waiting. And it must not replace the age
+breaker, which still covers the cases a pid check cannot see (a pid recycled
+onto a new process, an owner from a previous Windows session, an owner in a
+different MSYS instance whose pid namespace is not ours).
+
+**Why not fix it in `run-timeout.py` instead.** It is tempting to have the
+timeout runner clean up, but it must not: `run-timeout.py` is generic — it
+knows nothing about boot locks and should not, and giving it lock-specific
+knowledge would mean every future resource guarded this way needs another
+special case in it. More decisively, it cannot be relied on for this even in
+principle, because the same stranding happens when the runner *itself* dies
+(power loss, harness restart, Ctrl-C at the wrong moment). The lock has to
+be robust against its holder vanishing however that happens; that logic
+belongs with the lock.
+
+**Standing lesson.** A cleanup that lives only on the success path is not
+cleanup — it is a comment about what usually happens. Anything holding a
+shared resource must be recoverable *by the next acquirer* without help
+from the process that died, because the whole class of failures worth
+defending against is precisely the ones where the holder does not get to run
+another line of code. Note that both halves here were individually correct:
+the Job Object kill is right, and the owner-matched release is right. The
+gap is only visible where they meet.
+
+---
+
+## B-THE-TRACKED-FIXTURE-BINARIES-DRIFT-FROM-THEIR-SOURCES, AND THE STALENESS GATE CANNOT SEE IT
+
+**Status: FIXED 2026-08-16** (binaries re-committed in `169d3a242`; the
+content-based gate — the part that actually matters — landed as
+`scripts/ctest-fixtures.py`, wired into `scripts/create-ext4-rootfs.sh`, and is
+verified in both directions. See "Fix as landed" at the end of this entry.)
+
+**In short:** nine test programs are checked into git twice — once as C source
+and once as the compiled binary built from it. Nothing verifies that the second
+was built from the first. Today the committed source of one of them contained
+33 checks that its committed binary did not, and every boot test passed anyway,
+because each working copy happened to hold a locally-rebuilt binary that had
+never been committed. We already have a check meant to catch stale fixtures,
+but it compares file timestamps — and a fresh `git clone` gives every file the
+same timestamp, so the check is structurally incapable of noticing.
+
+**The concrete instance.** Commit `6c89903d0` added 236 lines to
+`services/ctest-jobctl/main.c` (the 33 new `waitid` checks) and did not touch
+the tracked `services/ctest-jobctl/ctest-jobctl.elf`. Sizes at that point:
+
+| | tracked in git | correct rebuild | delta |
+|---|---|---|---|
+| `ctest-jobctl.elf` | 2,603,328 | 2,627,416 | +24,088 |
+| the other eight `ctest-*.elf` | — | — | +~19,400 each |
+
+The ~19,400 bytes common to all nine is the same `libc.a` growth that
+`B-BASH-SLATEOS-ELF-WAS-EXEMPT-FROM-THE-STALENESS-GATE` found in bash earlier
+the same day; the extra ~4,700 on `ctest-jobctl` is the new checks. So *every*
+tracked fixture was linking an old libc, and one was additionally missing its
+own source's content.
+
+**Why the existing gate does not catch it — and cannot.**
+`scripts/create-ext4-rootfs.sh` compares each `.elf`'s **mtime** against
+`toolchain/sysroot/lib/libc.a`'s. Two independent reasons that misses this:
+
+1. **The gate reads the working tree, not the index.** Rebuilding the fixture
+   locally satisfies it permanently. Nobody has to commit the rebuild, and if
+   nobody does, git stays exactly as stale as it was while every local gate
+   reports green. That is not a hypothetical: `06d6d1f69` ("relink every ctest
+   fixture against the current sysroot libc.a") and `94d036ee2` ("rebuild stale
+   ctest fixtures and make staleness fatal") are *the same relink*, committed
+   before and then allowed to drift again.
+2. **On a fresh checkout, mtime carries no information.** `git clone` /
+   `git checkout` stamps every file with the checkout time, so `main.c`,
+   `libc.a` and the `.elf` are all the same age and no ordering exists to
+   compare. A clean clone of `main` would have boot-tested the 33 new checks
+   against a binary without them and reported OK — the exact false-green the
+   gate was written to prevent, in the one environment where the gate is silent.
+
+Note the gate is not *wrong*; it answers "was this rebuilt after the library
+changed?", which is the right question for a build directory. It is being asked
+to answer a different question — "was this binary built from this source?" —
+which no timestamp can answer.
+
+**Proper fix: make the invariant a content invariant.** Have each fixture's
+`build.py` write a small tracked stamp file next to the ELF recording the
+SHA-256 of every input that determines the binary — `main.c`, the
+`toolchain/sysroot/lib/libc.a` it linked, and the compiler/link flags — and
+have `create-ext4-rootfs.sh` recompute those hashes and compare, instead of
+comparing mtimes. Properties this buys that mtime cannot:
+
+- It survives a fresh checkout, because content hashes do not depend on file
+  timestamps.
+- It fails in **CI and on the operator's machine identically**, rather than only
+  where the build outputs happen to live.
+- It distinguishes the two failure modes we have now conflated: "binary predates
+  the library" and "binary was not built from this source" are different
+  hashes, and the message can say which.
+- The stamp is diffable, so a commit that changes `main.c` without the ELF shows
+  an unchanged stamp next to a changed source in review.
+
+Keep the mtime check as a fast local pre-filter if desired, but it must not be
+the authority.
+
+**Second, smaller defect found alongside, already fixed.**
+`services/ctest-ctty/main.o` was tracked, even though the other eight fixtures
+each carried a `.gitignore` saying "only the linked ELF fixture is tracked" —
+ctest-ctty was simply the one directory that never got a copy of that file.
+Replaced the nine per-directory copies with one pattern rule in
+`services/.gitignore` (`ctest-*/main.o`), verified with `git check-ignore`
+across all nine. A rule replicated per directory is a rule a new directory opts
+out of by not having it.
+
+**Standing lesson.** Checking a build product into version control creates an
+invariant — *this artifact was built from that source* — and version control
+does not enforce it. If we are going to track binaries (and we should here: the
+boot test must run on a machine with no zig/WSL toolchain), then the invariant
+needs an explicit, content-based check, because the natural one people reach for
+is timestamps, and timestamps are precisely the thing a checkout destroys. This
+is the third artifact family in one day to be stale for a slightly different
+reason; the common thread is that each gate was verifying something adjacent to
+the property actually wanted.
+
+**Fix as landed (2026-08-16).** `scripts/ctest-fixtures.py`, with three
+subcommands (`check`, `build`, `stamp`), called from `create-ext4-rootfs.sh`
+immediately after the existing mtime gate. It hashes `build.py`, `main.c` and
+the linked `libc.a` into a tracked `<fixture>.stamp`, plus the ELF itself, and
+on mismatch names *which* input moved — the diagnosis differs by input
+(`main.c` = a source edit committed without its rebuild; `libc.a` = needs a
+relink; the ELF alone = the binary was replaced behind the build's back).
+
+Three design points worth keeping if this is ever rewritten:
+
+- **`build.py` is hashed as a stand-in for the compile and link flags.** They
+  live nowhere else, so this means a change to `-O2`, the code model or the
+  entry symbol invalidates the fixture exactly as a source edit does, with no
+  second list of flags to keep in sync with the first.
+- **The fixture list is a glob over `services/ctest-*/`, not nine names,** so a
+  tenth fixture is covered the day it lands. This is deliberate: the sibling
+  defect in this same entry (`ctest-ctty`'s missing `.gitignore`) happened
+  precisely because a rule was replicated per directory and one directory never
+  got a copy.
+- **A missing stamp is a failure, not a skip.** An unstamped fixture is one we
+  can make no statement about, and "could not verify" must never render as
+  "fine" — that is `B-PATHZ-PREREQUISITE-SKIPS-ARE-SILENT` all over again.
+
+**Verified in both directions, and the negative direction found a real bug in
+the fix itself.** Positive: all nine stamp and check clean, in Windows Python
+and again under WSL inside a full image build. Negative: editing
+`ctest-jobctl/main.c` and running the real `create-ext4-rootfs.sh` gave
+`ROOTFS_EXIT=1`, named `input main.c` specifically, produced **no** `DONE` line
+(so no image was written), and still checked the remaining eight rather than
+stopping at the first failure.
+
+The bug the negative pass caught: the gate was probing for `python`, and the
+rootfs script runs under **WSL Ubuntu, which ships `/usr/bin/python3` and no
+`python` at all** — so on its first real run the check silently skipped itself.
+The only thing that revealed it was the deliberately loud
+"skipped the content-stamp check" warning in the else-branch. That is the entire
+argument for writing that branch loudly rather than letting an absent
+interpreter fall through quietly, and it is the fourth instance today of "the
+check did not run" wearing the costume of "the check passed". Now probes
+`python3` before `python`, and the remediation hint it prints uses
+`sys.executable`, so a command printed inside WSL is a command that works
+inside WSL.
+
+## B-THE-BASH-RELINK-SCRIPT-HARD-CODED-ONE-WORKTREE-SO-ONLY-`main`-EVER-RAN-BASH
+
+**Status: FIXED 2026-08-16** (`scripts/bash-spike/slatelink.sh` now derives the
+repo root from its own location; lane B relinked and boot-verified.)
+
+**In short:** the script that builds our GNU bash binary had the path of one
+particular working copy typed into it. Whichever of the four working copies you
+ran it from, it read that one copy's library and wrote the result into that one
+copy's output directory. So two of the three development lanes never had a bash
+binary at all, their boot tests quietly skipped the bash test for four days, and
+nobody noticed because "skipped" and "passed" both end with the boot test
+passing.
+
+**What it looked like.** `slatelink.sh` opened with two absolute paths:
+
+```sh
+SPIKE="/mnt/d/visual studio projects/os/build/spike"
+SYSROOT="/mnt/d/visual studio projects/os/toolchain/sysroot/lib"
+```
+
+There are four checkouts (`os`, `os-lane-a`, `os-lane-b`, `os-lane-c`), so those
+two lines are wrong in three separate ways at once, depending on where the
+script is invoked from:
+
+1. **It links against another lane's `libc.a`.** The artifact then proves
+   nothing about the libc of the tree you ran it in — which is the entire point
+   of the exercise, since `self_test_bash_on_slateos_libc` exists to assert that
+   *our* libc satisfies bash.
+2. **It writes into another lane's `build/spike/`,** clobbering whatever that
+   lane had there without that lane's knowledge.
+3. **It leaves the invoking worktree with no `bash-slateos.elf`,** so that
+   lane's rootfs build logs `bash-slateos.elf not found — the bash self-test
+   will no-op` and the image ships without `/bin/bash`.
+
+**The observable consequence**, straight out of lane B's boot log before the
+fix:
+
+```
+=== PATH-Z COVERAGE INCOMPLETE ===
+  Path-Z prerequisites: 1 rung(s) SKIPPED — coverage is INCOMPLETE
+  [spawn]   SKIP: GNU bash 5.2 linked against OUR libc.a (ring 3) — prerequisite missing: /mnt/bin/bash
+=== Boot test PASSED ===
+```
+
+Bash ships beside osh by operator decision (design-decisions.md §305), which
+makes it a product artifact, not a spike leftover. Two of three lanes were
+merging work to `main` having never executed it once.
+
+**Fix.** `ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"`, with
+`SPIKE` and `SYSROOT` derived from it, so the script always operates on the
+worktree it physically lives in. The `/tmp` scratch directories are now keyed by
+worktree name (`/tmp/slate-sysroot-$LANE`, `/tmp/slate_missing-$LANE.txt`) so
+two lanes relinking concurrently cannot overwrite each other's copy of the
+sysroot or each other's missing-symbol report — the boot lock serialises QEMU,
+not this. The script also now fails with an explanatory message when
+`/tmp/bash-cross` is absent, instead of `cd`-ing into nothing and linking an
+empty object list.
+
+**Standing lesson, and it is the same one as three other entries today.** A
+hard-coded path is not merely unportable; in a multi-worktree repo it is a
+*silent cross-lane write*. Any script that reads or writes repo-relative files
+must locate the repo from `BASH_SOURCE`/`__file__`, never from a literal. The
+reason this survived is the familiar one: the failure mode was a SKIP, and a
+skipped rung inside a passing boot test reads as success
+(`B-PATHZ-PREREQUISITE-SKIPS-ARE-SILENT`). The Path-Z coverage banner is what
+eventually made it visible, which is an argument for that banner existing.

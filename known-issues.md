@@ -71501,6 +71501,63 @@ change, so attribution needs a bisect over the recorded commits
 better target: it more than doubled, in two clean ~45% steps, from a nine-run
 plateau.
 
+**Step 1 attribution, 2026-08-15: code layout is RULED OUT — and this is a
+positive result, not an absence of evidence.** Both commits were built from a
+scratch worktree (`build/straddle/kernel-f79aec561`, `kernel-c893184fa`) and
+compared with `scripts/straddle-check.py --compare`. The pair is adjacent — one
+commit, `mm/vfs: return Cow<'_, Path> from namespace::resolve_path` — which
+touches nothing in the HTTP path.
+
+The re-roll is enormous, exactly as the family analysis predicted:
+
+| | count |
+|---|---|
+| loops that gained a straddle | 5181 |
+| loops that lost one | 4997 |
+| functions quarantined as recompiled | 9 |
+
+The 9 recompiled functions are precisely `namespace::resolve_path`, its callers
+and their self-tests — the signature check isolated the commit's real footprint
+with no false positives, which is the first end-to-end evidence that the
+quarantine works on a real pair rather than on synthetic inputs.
+
+**And none of those 10178 flips is on this benchmark's path.** That is what
+makes this decisive: the instrument fired ~10k times on the same binary pair
+and still reported nothing here.
+
+| on the `http_build_response_1KiB` path | loops | straddle change |
+|---|---|---|
+| `bench_build_response` (has `build_response` inlined) | none | — |
+| `etag_for_body` — 103 B FNV loop over 1 KiB, **the dominant loop** | 2 | `no` → `no` |
+| `memcpy` / `memset` / `memmove` | **none** (`rep movsb`, no backward branch) | — |
+| `__rust_alloc` / `__rust_dealloc` | none | — |
+| `core::fmt::write` | none | — |
+| only httpd flip in the whole binary: `build_response_gzip` | 1 | straddle **lost** (faster, wrong direction) |
+
+**The straight-line confound was measured too, not waved away.** `straddle-check`
+models *loops*, but a TCG translation block is also cut by a page boundary in
+straight-line code, so a call-heavy path could pay per call rather than per
+iteration. Counting page-boundary crossings inside every function on the path
+gives **2 in the old build, 3 in the new** — the single change being one integer
+`Display` impl. The response formats two integers, so the worst case is two extra
+dispatcher round-trips per call against a +2656-cycle regression. It does not
+account for it.
+
+This limitation of the tool is real and remains: `straddle-check` cannot see
+straight-line page crossings, and here that had to be checked by hand. Logged so
+the next comparison does not quietly assume loops are the only mechanism.
+
+**So the regression has a non-layout cause, and the leading hypothesis is now
+that the benchmark is not isolated from heap history.** The suite runs in a fixed
+order in one address space; `build_response` allocates a `String` and grows a
+`Vec`, so which slab/free-list path those hit depends on everything allocated
+before them. A commit that removes allocations from path resolution changes the
+heap's shape by the time the HTTP benchmark runs, without touching a line of
+HTTP code. That is the same class of defect as the straddle lottery — a
+whole-binary property masquerading as a per-benchmark regression — and it is
+**not yet tested**; it is written down here as the next thing to falsify, not as
+a finding.
+
 #### Finding 2 — **FIXED 2026-08-15** (lane A): `level_shifts()` in `scripts/bench-history.py`
 
 The harness defect is closed. A new check compares each run against a baseline

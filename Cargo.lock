@@ -1840,6 +1840,9 @@ version = "0.1.0"
 [[package]]
 name = "coreutils"
 version = "0.1.0"
+dependencies = [
+ "ere",
+]
 
 [[package]]
 name = "coriolis-cli"

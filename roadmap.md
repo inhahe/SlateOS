@@ -788,8 +788,14 @@ Roadmap:
   marks either side of its consonant, in 47 characters across a dozen scripts —
   was being recomposed before the shaper could move the front half, and undoing
   that naively cost 555 faces because HarfBuzz's decomposition is font-aware and
-  ours was not (§439). Next: the ignorable fix and device tables in
-  `ValueRecord`. Vello itself waits on `[A]`'s GPU driver.
+  ours was not (§439). The ignorable fix is done as well
+  (`TD-FONT-DOES-NOT-HIDE-DEFAULT-IGNORABLES` closed, §434) — it was two bugs
+  under one name, erasing them *and* stepping over them, and the 170/40
+  `misplaced` that survive it are a deliberate divergence in where an erased
+  zero-advance glyph sits, not a residue. **Next: device tables in
+  `ValueRecord`**, then right-to-left reordering
+  (`TD-FONT-DOES-NOT-REORDER-RIGHT-TO-LEFT-TEXT`). Vello itself waits on
+  `[A]`'s GPU driver.
 - `[C]` Text overflow policy — **done** (§427, `TD-GUI-CLIPPED-TEXT-IS-NOT-MARKED`
   closed). `RenderCommand::Text` carries a **required** `overflow: TextOverflow`
   (`Clip` | `Ellipsis`) and the compositor draws the mark, reserving room for it

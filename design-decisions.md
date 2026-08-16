@@ -10960,6 +10960,70 @@ the event is the person reading the file's subject matter at that moment. If
 that proves optimistic, the escalation is a check in the task-completion
 checklist, not a bigger file.
 
+## §314 — A conservative capability projection may gate an *attempt*, never a *refusal*
+
+**Date:** 2026-08-16
+**Decided by:** Claude (autonomous) — a corollary of §312, which the operator
+decided; this resolves how §312's projection may be *consumed*, which §312
+itself did not say.
+
+**In short.** §312 made libc's capability words deliberately pessimistic: if we
+cannot prove the kernel would allow something, we report "not held". That is the
+right way to *answer a question*, but it is the wrong way to *make a decision*.
+A dozen places in our libc refuse an operation outright when the capability
+reads false — which means they will start refusing things the kernel is
+perfectly willing to do, purely because our projection is cautious. The rule
+adopted here: libc may use the projection to decide whether it is worth trying
+something, but never as its reason for saying no. Where the kernel is the one
+who actually decides, libc forwards the call and reports the kernel's answer.
+
+**The decision.**
+
+1. **A capability that reads false is not evidence of a denial.** §312's
+   projection under-approximates the kernel's authority by construction —
+   deny-by-default, unmapped `CAP_*` false, `CAP_SYS_ADMIN` a hand-written
+   union that admits five uncovered sites. An under-approximation used as a
+   denial test produces false denials at exactly the rate it is conservative,
+   which is to say: by design.
+2. **Where a kernel call stands behind the operation, libc does not pre-empt
+   it.** `kill` reaches `SYS_SIGNAL_SEND`, `chown` reaches `SYS_FS_SET_OWNER`;
+   both kernels evaluate the real predicate and return a real error. libc's job
+   there is to forward and translate, not to guess first and guess narrowly.
+3. **Where libc is the sole decider, the gate must express Linux's whole
+   predicate** — the capability *and* its alternative — or the operation is
+   reported as unimplemented. A stub that returns `EPERM` because a projected
+   capability is missing has invented an authority failure for something it was
+   never going to do; `ENOSYS` is the honest answer and the one that does not
+   mislead a port into dropping a feature it could have had.
+
+**Why not the alternative** — keep the pre-emptive gates and teach each one
+Linux's full rule. It is the obvious move and it fails on the facts: for the
+cross-process cases libc *cannot evaluate the rule*. Linux's `kill` permission
+test needs the **target's** credentials, and we have no syscall that exposes
+them; `ptrace_may_access` additionally needs the target's dumpable flag. A gate
+that cannot evaluate its own predicate is not a gate, it is a guess with an
+`EPERM` attached. Where the alternative *is* evaluable — `mlock`'s
+`CAP_IPC_LOCK` **or** `RLIMIT_MEMLOCK`, `setuid`'s `target == cur` — teaching
+the gate the full rule is exactly right, and those sites already do it. This
+decision is about the ones where it is not evaluable.
+
+**What is given up, honestly.** libc loses a defence-in-depth layer: a caller
+that would have been stopped early now issues a syscall and is stopped there.
+That costs a syscall on a path that was going to fail anyway, and it means a
+buggy caller discovers its mistake one layer deeper. Both are acceptable
+because the layer being removed was never load-bearing — the kernel re-checks
+every privileged operation regardless, which is the same property that makes
+§312's optimistic-answer period safe. What is *not* acceptable is the
+alternative's cost: a wrong denial is indistinguishable, at the call site, from
+a real one.
+
+**Where it bites.** The full site-by-site survey is `known-issues.md` →
+`TD-POSIX-CAP-GATES-OMIT-LINUX-S-NON-CAPABILITY-ALTERNATIVE`. This decision
+governs its Class A (7 sites, actionable) and the reporting half of Class B
+(7 sites blocked on a model concept we lack). It is a **prerequisite for §312
+step 3** — flipping the gates truthful before applying it would turn every one
+of these into a live regression on the same day.
+
 ## §400 — Every GUI process finds its own UI font, lazily, from a compiled-in fallback list
 
 **Date:** 2026-08-14

@@ -879,6 +879,49 @@ else
     echo "[rootfs]          (build it with scripts/bash-spike/, see its README)"
 fi
 
+# --- pkgconf 2.3.0, likewise linked against OUR OWN libc ----------------------
+# Upstream pkgconf, cross-compiled and statically linked against
+# toolchain/sysroot/lib/libc.a — the same treatment as bash above, and the
+# result of applying roadmap-detailed.md's "Porting vs. Reimplementing" policy
+# (try the port before writing a line) to the package-config tool.  It links
+# with *zero* undefined symbols against our libc alone; libstubs.a is not
+# needed and cannot be linked anyway (both archives are Rust-built and collide
+# on `__rustc::rust_begin_unwind`).
+#
+# Why this block exists at all: the port has linked cleanly since 2026-08-14,
+# and until 2026-08-16 the only copy of the binary was left in /tmp.  A /tmp
+# artifact cannot be staged, cannot be staleness-checked, and does not survive a
+# reboot of the host — so a port described as "proven to work" had never once
+# been in an image.  `scripts/pkgconf-spike/run.sh` now copies it into
+# build/spike/ and this block puts it on the image, which is what "proven"
+# should have meant in the first place.
+#
+# Staged under both names because pkgconf *is* the pkg-config implementation —
+# a build that shells out to `pkg-config` must find it.  A copy rather than a
+# symlink, for the same reason dash is copied to /bin/sh above: the image
+# builder should not have to depend on symlink support.
+#
+# Staleness: identical rule to bash — absent is honest (best-effort, warn),
+# present-but-older-than-libc.a is a lie (fatal), because a stale binary links a
+# libc that is no longer in the build.  See the long comment above bash.
+PKGCONF_SLATE="$ROOT_DIR/build/spike/pkgconf-slateos.elf"
+PKGCONF_STALE=0
+if [ -e "$PKGCONF_SLATE" ]; then
+    cp -L "$PKGCONF_SLATE" "$STAGE/bin/pkgconf"
+    cp -L "$PKGCONF_SLATE" "$STAGE/bin/pkg-config"
+    echo "[rootfs] staged pkgconf 2.3.0 (linked against our libc.a): /bin/pkgconf, /bin/pkg-config"
+    if [ -e "$ROOT_DIR/toolchain/sysroot/lib/libc.a" ] \
+       && [ "$ROOT_DIR/toolchain/sysroot/lib/libc.a" -nt "$PKGCONF_SLATE" ]; then
+        echo "[rootfs] WARNING: pkgconf-slateos.elf is OLDER than the sysroot libc.a — it links a"
+        echo "[rootfs]          stale libc and proves nothing about the current one. Rebuild it:"
+        echo "[rootfs]            wsl -d Ubuntu -- bash scripts/pkgconf-spike/run.sh"
+        PKGCONF_STALE=1
+    fi
+else
+    echo "[rootfs] NOTE: $PKGCONF_SLATE not found — /bin/pkgconf will be absent"
+    echo "[rootfs]       (build it with: wsl -d Ubuntu -- bash scripts/pkgconf-spike/run.sh)"
+fi
+
 # --- native C ring-3 fixtures (services/ctest-*) ------------------------------
 # A few self-tests need constructs only a C compiler emits — e.g. a `__thread`
 # access plus a `%fs:0x28` stack-protector canary load in a *child* thread (see
@@ -953,6 +996,24 @@ if [ "$BASH_STALE" -gt 0 ]; then
         echo "[rootfs]        consumer of our libc on the image, so that is the widest"
         echo "[rootfs]        false-green available. Relink it:"
         echo "[rootfs]          wsl -d Ubuntu -- bash scripts/bash-spike/slatelink.sh"
+        echo "[rootfs]        or set ALLOW_STALE_FIXTURES=1 to build the image anyway."
+        exit 1
+    fi
+fi
+
+# And the same rule again for pkgconf, for the same reason: it statically links
+# the same libc.a, so an ELF older than the library is a binary on the image
+# built against a libc that is no longer in the build.
+if [ "$PKGCONF_STALE" -gt 0 ]; then
+    if [ "${ALLOW_STALE_FIXTURES:-0}" = "1" ]; then
+        echo "[rootfs] WARNING: pkgconf-slateos.elf is stale (see above);" \
+             "continuing because ALLOW_STALE_FIXTURES=1"
+    else
+        echo "[rootfs] ERROR: build/spike/pkgconf-slateos.elf is STALE."
+        echo "[rootfs]        It links an older libc.a than the one in the sysroot, so"
+        echo "[rootfs]        /bin/pkgconf on the image would be built against a libc"
+        echo "[rootfs]        that is no longer in the build. Rebuild it:"
+        echo "[rootfs]          wsl -d Ubuntu -- bash scripts/pkgconf-spike/run.sh"
         echo "[rootfs]        or set ALLOW_STALE_FIXTURES=1 to build the image anyway."
         exit 1
     fi

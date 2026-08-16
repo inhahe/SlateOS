@@ -364,6 +364,114 @@ no value bits, and shifting a `u8` by 8 is not a shift), and the slideshow's
 `elapsed_ms += elapsed_ms` — the crate's only unbounded accumulator, fed by a
 caller-supplied duration — is now `saturating_add`.
 
+### Sweep progress: `connect4` 174 → 0, all lint classes (2026-08-16)
+
+Sixth crate, and the first to reach **zero warnings of every class** —
+101 `indexing_slicing`, 69 `arithmetic_side_effects`, 3 `unwrap_used` and 1
+`slicing` all gone. Tests 100 → 108. Non-test code shrank 941 → 901 lines
+*while gaining* the doc comments that explain the new invariants.
+
+No **reachable** panic fell out of this one, and that is worth stating plainly
+rather than dressing two latent defects up as live bugs. Both defects below are
+real and both are now proven by tests that fail against the old code — but each
+was reachable only from a caller that does not exist, so neither shipped:
+
+- **`undo_drop` indexed `heights` with an unchecked column.** `can_drop(col)`
+  tested `col < COLS`; `undo_drop(col)` opened with `self.heights[col] == 0`
+  and tested nothing. Every caller passes a column from `valid_moves()`, so it
+  was never reached. Reverting the fix makes
+  `an_off_board_column_is_declined_rather_than_indexed` panic with `index out
+  of bounds: the len is 7 but the index is 7`.
+- **The AI dropped and undid as two unpaired statements**, discarding both
+  `Option`s. Had `drop_piece` ever been refused, the following `undo_drop`
+  would still have run and removed a piece a *different* move had put there.
+  `valid_moves()` filters full columns, so it was never refused. Reverting the
+  fix makes `with_move_on_a_full_column_runs_nothing_and_undoes_nothing` fail
+  with the board's top-of-column-0 piece missing.
+
+The structural work was pattern 1 in a form not seen in the earlier crates:
+**the same bound written out eight times, four of those with the offsets
+spelled into the indices.** `has_won` and `evaluate_board` each contained four
+hand-written nested scans — horizontal, vertical, and both diagonals — with
+bodies like `grid[row][col] == p && grid[row+1][col-1] == p && grid[row+2]
+[col-2] == p && grid[row+3][col-3] == p`, guarded from a distance by
+`for col in 3..COLS`. `find_winner` had a fifth copy of the guards, and
+`check_line` a sixth of the stepping. One `DIRECTIONS` table plus a
+`line_cells(row, col, dr, dc) -> Option<[(usize, usize); RUN]>` replaced all of
+them; `all_lines()` yields the 69 runs that fit on a 7x6 board and every scan
+now reads from it.
+
+Two consequences beyond the lint count:
+
+- **`has_won` and `find_winner` can no longer disagree.** They were independent
+  hand-written scans answering the same question — one drives the AI's search,
+  the other decides the game the player sees — and nothing checked that they
+  agreed. They now share `all_lines`, and
+  `has_won_and_find_winner_agree_across_a_played_out_game` walks a full game
+  asserting it at every position.
+- **`with_move(col, piece, f)` replaced the drop/undo pair** at all four AI call
+  sites, so "these two calls must be paired" stopped being a convention the
+  caller had to keep and became something the caller cannot get wrong. It also
+  collapsed `ai_best_move`'s two identical win/block loops into one, and
+  `minimax`'s duplicated maximizing/minimizing bodies into one.
+
+The `arithmetic_side_effects` count reached zero here without contortion, which
+is a useful data point for the open question of whether that lint earns its keep
+tree-wide: the game-logic arithmetic was all genuinely `saturating_*` or
+`checked_*` in meaning, and the float layout arithmetic the lint does not flag.
+
+### Sweep progress: `rssreader` 112 → 0, all lint classes (2026-08-16)
+
+Seventh crate, and the second to reach **zero warnings of every class**. Tests
+152 → 162. Four defects fell out, all recorded below, and this is the crate
+that named a **new failure class for the sweep: unbounded work driven by remote
+data.**
+
+The six patterns the sweep had been finding until now are all about a bound
+that is *stated* somewhere and then not honoured at the point of use. This
+crate has those too — but three of its four defects are the opposite shape:
+**no bound was ever stated at all**, because the quantity being bounded is not
+an index. A recursion depth, a loop trip count and a stack frame are not things
+`indexing_slicing` looks at, and none of the three failures is a `Result` the
+caller could have handled:
+
+| What was unbounded | Set by | Failure |
+|---|---|---|
+| XML nesting depth | the feed's bytes | stack overflow → process abort |
+| calendar year loop | a `<pubDate>` field | hang |
+| `wrap_text` break loop | a word's length in an article body | quadratic time |
+
+An RSS reader is the first crate in this sweep whose *entire input* is remote
+and unauthenticated — the user subscribes to a URL, and everything after that
+is the publisher's choice. That makes "how big can this get?" a security
+question rather than a robustness one, and the answer was "as big as the
+publisher likes" in three places.
+
+Structurally, the parser rewrite is the same move that `byteread` was for
+`imageviewer`: **six cursor primitives** (`rest`, `peek_at`, `looking_at`,
+`skip`, `eat`, `take_past`) now carry every read of the input, each stating its
+bound at the point of the read. The methods above them used to restate it —
+`if self.pos + 3 < self.input.len() && self.input[self.pos] == b'<' && …`,
+which is one bound written twice, several statements apart, and in two cases a
+nine-byte slice guarded by `pos + 8 < len`. That is correct (it implies
+`pos + 9 <= len`) but not in a form a reader can check against the slice beside
+it. Five methods collapsed to one line each on top of the primitives.
+
+The calendar is now two closed forms (Howard Hinnant's civil-from-days and
+days-from-civil) instead of two year-by-year loops, pinned by
+`the_two_calendar_directions_are_inverses_over_the_whole_year_range`, which
+round-trips all 385,536 dates from 1970-01-01 to 9999-12-31 in 0.08 s and also
+asserts monotonicity and the rejection of each month's `last + 1`. Removing the
+loops fixed correctness as well as termination: `2023-02-29`, month 13, day 0,
+hour 25 and minute 60 used to roll silently into the next real date, and now
+each is refused.
+
+Two `#[expect(clippy::arithmetic_side_effects, reason = "…")]` remain, both on
+the Hinnant forms, and both reasons carry the proof: the operands are bounded
+three lines above by the era decomposition and by `YEAR_RANGE`. Saturating
+arithmetic there would return an `Option` no input can make `None`, which is a
+worse thing to hand a reader than a stated bound.
+
 ## A BMP declaring a height of `i32::MIN` panics the file explorer (lane C)
 
 **Status: FIXED 2026-08-16** (lane C). Verified by reverting the fix and
@@ -521,6 +629,116 @@ short) and cut at an arbitrary byte, which the subsequent `&text[head..tail]`
 slice panicked on whenever the cut landed inside a character. Rewritten to
 walk `char_indices` outwards from the match, so the window is in the unit it
 claims. Pinned by `a_snippet_window_lands_on_character_boundaries`.
+
+## Four bugs in `apps/rssreader` reachable from a subscribed feed's bytes (lane C)
+
+**Status: FIXED 2026-08-16** (lane C), commits `9a5b33aa9`, `bfeab0bfe` and the
+`wrap_text` commit below. Each was verified by reverting the fix and watching
+the named test fail with the message quoted here — none is argued from reading
+the diff.
+
+All four are reachable from **remote data**: an RSS reader's input is a URL the
+user subscribed to and everything the publisher serves from it. There is no
+crafted-file step, no privilege boundary to cross and nothing for the user to
+click. Three of the four are denial of service against the reader process
+rather than memory unsafety, but the first one is an abort with no unwinding,
+so nothing at any call site can turn it into an error message.
+
+### 1. Unbounded XML recursion — a feed can abort the process
+
+`XmlParser::parse_element` recursed once per level of element nesting with no
+cap. Measured in a debug build on a 2 MiB thread, nesting overflowed the stack
+somewhere between 512 and 1024 levels, so roughly **seven kilobytes** of
+`<a><a><a>…` is enough. A stack overflow is not a `Result` and not a panic: on
+Windows the test binary died with `STATUS_STACK_OVERFLOW` (exit `0xc00000fd`),
+no unwinding, nothing to catch.
+
+Fixed with `MAX_XML_DEPTH = 100` and a `parse_child` wrapper that owns both the
+increment and the decrement — kept in its own three-line function specifically
+so the two cannot drift apart behind one of `parse_element`'s six early
+returns. 100 is far below the cliff and unreachable by accident: RSS and Atom
+nest four or five deep, and the deepest thing this program parses is an OPML
+folder tree.
+
+Pinned by `deeply_nested_elements_are_refused_rather_than_overflowing_the_stack`
+(depth 2000), plus `nesting_within_the_limit_still_parses` and
+`many_siblings_do_not_count_as_depth` (5000 siblings under one `<channel>`) so
+the cap cannot be satisfied by a parser that simply refuses more than 100 of
+anything. Reverting the guard takes the whole test binary down rather than
+reporting a failure — which is as visible as a failure gets.
+
+### 2. Two unbounded calendar loops — a `<pubDate>` can hang the reader
+
+Date parsing ran `for y in 1970..year` to convert a year to days, and
+`format_timestamp` ran the mirror loop back down. `year` was parsed straight out
+of `<pubDate>` into a `u64` with no range check. Measured:
+`"4000000-01-01"` took 107 ms for a single date; `"18446744073709551615-01-01"`
+never returned. Both directions are reachable — a merely large year parses
+slowly into a huge timestamp, which the formatter then walks back down on every
+frame that draws the article.
+
+Replaced with the two Hinnant closed forms, a `YEAR_RANGE` of `1970..=9999`,
+and an `Option` return so an out-of-range date is refused rather than
+approximated. Pinned by `an_absurd_year_is_refused_instead_of_hanging_the_parser`;
+reverting the bound makes that test time out at 60 s.
+
+Fixed as a side effect: impossible dates and clock readings
+(`2023-02-29`, month 13, day 0, hour 25, minute 60) used to roll forward
+silently, and pre-1970 dates answered as though the year were 1970. Leap
+second 60 is still accepted, deliberately — it is a real reading, and folding
+it into the following minute is closer than discarding the article's date.
+
+### 3. `wrap_text` split a `&str` at a byte offset — a long word aborts the view
+
+```rust
+let max_chars = (max_width / char_width) as usize;
+…
+while remaining.len() > max_chars {
+    let (chunk, rest) = remaining.split_at(max_chars);
+```
+
+`max_chars` is a count of characters, derived from a pixel width; `str::len`
+and `str::split_at` are both in bytes. `split_at` does not truncate or round to
+a boundary — it panics:
+
+```
+end byte index 77 is not a char boundary; it is inside '本' (bytes 75..78)
+```
+
+The caller is the article content view, drawing the article body, so any feed
+containing one long non-ASCII word aborted the render on every frame that
+reached it. Fixed by measuring in characters throughout, with a `split_at_chars`
+helper that converts a character count to a byte offset via `char_indices`.
+
+The same confusion was a **display** bug independent of the panic: the fit test
+`current_line.len() + 1 + word.len() <= max_chars` compared bytes to a
+character budget, so text wrapped at a fraction of its intended width whenever
+it was not ASCII. `wrapping_counts_characters_not_bytes` wraps the same shape
+of text in Latin and Greek and demands identical line widths; against the old
+code it reports Latin `[23, 7]` against Greek `[11, 11, 7]` — under half.
+
+A third defect was found while fixing these and is guarded by the same rewrite:
+the break loop re-measured the untaken remainder on every pass, which is
+quadratic in a word whose length the feed chooses. The loop now ends on the
+emptiness of the tail, which is linear.
+Pinned by `a_long_non_ascii_word_is_wrapped_rather_than_panicking`,
+`wrapping_counts_characters_not_bytes` and
+`a_very_long_word_wraps_without_dropping_text`.
+
+### 4. `OfflineCache::cache_article` emptied the cache and then stored nothing
+
+Not a panic — a plain logic defect, and the sweep's "the guard is downstream of
+what it guards" pattern with a user-visible cost. The check rejecting an
+article larger than the entire cache ran *after* the eviction loop, so an
+oversized article drove that loop until the cache was empty and was then
+declined. One oversized article in a feed therefore wiped the user's whole
+offline cache on **every refresh** and cached nothing in its place.
+
+Underneath it, a second one: the previous copy of an article was not removed
+before making room, so re-caching an article — which a refresh does for every
+article it re-reads — evicted as though the old and new copies had to coexist.
+Both fixed by moving the size check to the first line and removing the old
+entry before the loop.
 
 ## Six reachable bugs in `apps/explorer`, found by the lint sweep (lane C)
 
@@ -23592,6 +23810,181 @@ exclude. That predicate is also the one that genuinely gates —
 (`kernel/src/syscall/handlers.rs`: "the cap/identity permission check is
 performed by the userspace posix wrappers") — which is why it carries a test
 asserting no other Process right, `METADATA` above all, can reach it.
+## B-A-A-MERGE-OF-TWO-CORRECT-COMMITS-LEFT-NINE-FIXTURES-LINKING-A-LIBC-`main`-NO-LONGER-BUILDS (lane B's tree; filed by lane A, 2026-08-16)
+
+**Status: OPEN 2026-08-16.** Blocks `rootfs.ext4` rebuilds in every worktree.
+Requests filed: `requests/a-b-nine-ctest-fixtures-on-main-link-a-libc-main-no-longer-builds.md`
+(the repair, lane B's) and `requests/a-c-fixture-rebuild-was-correct-on-lane-c-and-wrong-on-main.md`
+(the habit, lane C's). Recorded here as well as there because a request is read
+once by one lane, and this is a live defect on `main` that must not depend on
+that happening.
+
+**In short:** nine compiled test programs in `services/ctest-*/` are checked into
+git alongside a small file recording which library they were linked against.
+That record is honest and still wrong: the library it names is not the one
+`main`'s source code produces any more. Two commits caused it, and *each one was
+correct in the tree it was made in* — one added thirteen functions to the
+library, the other rebuilt the nine programs, and they were made on different
+branches within two hours of each other. Only their merge is broken, so neither
+author's checkout could have shown it, and no check we have looks at a merge.
+
+**Reproduce from a clean `main` checkout, two commands:**
+
+```
+$ powershell -File toolchain/build-sysroot.ps1
+$ python scripts/ctest-fixtures.py check
+[ctest] ERROR ctest-ctty: STALE - the ELF does not match its inputs.
+[ctest]          input toolchain/sysroot/lib/libc.a: recorded 4b14549d0295552e... but on disk f7f9356c0bad29c2...
+   … identically for all nine …
+```
+
+`llvm-nm --defined-only`, diffed across the two archives, says exactly what
+moved. **Seventeen public, unmangled symbols** are in the archive `main` builds
+and absent from the one all nine stamps name:
+
+```
+__sched_cpucount   forkpty   login_tty   openpty   ttyname_r
+posix_spawnattr_getschedparam   posix_spawnattr_setschedparam
+posix_spawnattr_getschedpolicy  posix_spawnattr_setschedpolicy
+posix_spawnattr_getsigdefault   posix_spawnattr_setsigdefault
+posix_spawnattr_getsigmask      posix_spawnattr_setsigmask
+pthread_getcpuclockid   pthread_kill   sigwaitinfo   syscall
+```
+
+Nothing public went the other way — the reverse direction of the diff is
+entirely mangled `_ZN5posix…llvm.<cgu-hash>` internals whose codegen-unit hashes
+moved, which is what makes the delta unambiguous rather than noise. Defined
+symbol counts 4379 → 4397; archive size 12,344,478 → 12,322,086 bytes.
+
+**The history, which is the entry's actual content:**
+
+```
+                 c23cc33c0  merge origin/main into lane-b   11:11
+                    /   \
+   lane-b 12:22  5531f816c   2069cbd8e  lane-c: rebuild + re-stamp   13:09
+   +13 libc symbols     \   /           (built against 11:11's libc.a)
+                      b807390ff  main   ← both, and they disagree
+```
+
+`git merge-base 5531f816c 2069cbd8e` is `c23cc33c0`, and
+`git merge-base --is-ancestor 5531f816c 2069cbd8e` answers **no**. So:
+
+- **On `lane-c` at 13:09 the rebuild was correct.** The `libc.a` lane C linked
+  against *was* what lane C's `posix/src` produced. Every gate passed honestly.
+- **On `lane-b` at 12:22 the posix change was correct.** Lane B had no rebuilt
+  `services/ctest-*` ELFs to invalidate, because on `lane-b` they had not been
+  rebuilt.
+- **On `main` the pair is wrong**, and no author's tree could show it.
+
+**Why every existing gate is structurally the wrong instrument.**
+`create-ext4-rootfs.sh` has three, and this passes cleanly through the reasoning
+of all three:
+
+| gate | what it asks | why it misses this |
+|---|---|---|
+| mtime (lines ~1213–1246) | was the ELF rebuilt after `libc.a` changed? | The script says so itself at line 1213: *"a fresh checkout stamps every file with one time, leaving no ordering to compare."* And here nobody rebuilt against a known-stale libc — the libc went stale *underneath* a correct rebuild, in a different worktree, afterwards. |
+| content stamp (`ctest-fixtures.py`) | does the ELF match the `libc.a` it was built against? | Yes, it does. The stamp is **self-consistent and still wrong**: nothing verifies that *that* `libc.a` matches the `posix/src` in the tree. |
+| `SYSROOT_STALE` | is `libc.a` older than `posix/src`? | Fires only at image-build time, in whichever lane happens to build an image, on a gitignored file that may not exist. |
+
+The reason lane A saw it at all is that `posix/src/crt.rs` happened to receive a
+merge-fresh mtime while the gitignored `libc.a` kept its older build time. That
+is luck, not detection — and the initial hypothesis it produced ("the mtime gate
+is a merge false positive") was *wrong*, which is only known because it was
+tested by actually rebuilding rather than reasoned about.
+
+**This is a defect class, not an incident.** Prior art in this file —
+`B-THE-TRACKED-FIXTURE-BINARIES-DRIFT-FROM-THEIR-SOURCES` — established that a
+tracked build product carries an invariant version control does not enforce, and
+fixed it with content stamps. The stamp closed *within-tree* drift completely.
+What remains open is one level up: **a merge can invalidate an artifact without
+any commit in either parent being wrong.** Any tracked binary with recorded
+inputs owned by one lane and derived from another lane's source has this shape.
+Today that is `services/ctest-*` (lane B's, derived from `posix/src`); lane C's
+`gui/**` binaries with recorded inputs are the next candidates.
+
+**Detection half: FIXED 2026-08-16 — `scripts/stamp-ancestry.py`.** A pure-git
+check, no toolchain, ~40 ms, same answer in a fresh clone as on the machine that
+merged. **Run it after every merge, beside `python scripts/ki_dupes.py`;** the
+two are the same kind of check — both catch things that are wrong only in a
+merge — and belong in the same habit.
+
+> Let `S` = the commit that last touched any of a family's stamps
+> (`git log --format=%H -1 -- ':(glob)services/ctest-*/*.stamp'`). Any commit
+> reachable from HEAD but not from `S` that touches the family's sources
+> (`git log S..HEAD -- posix tzrules toolchain/build-sysroot.ps1`) is a commit
+> whose effect on the artifact was never recorded.
+
+It is *exactly* sensitive to the merge-induced case, because it asks a question
+about **history** rather than about the working tree, which is the property both
+mtime and the content stamp lack. It belongs at **merge time**, not image-build
+time: merge is when the defect is created, and an image build is a lane-local
+event that may not happen for hours.
+
+Four design points worth keeping if it is ever rewritten, each because the
+one-line rule as first stated was wrong in a way that mattered:
+
+- **The source set is `posix/` + `tzrules/` + `toolchain/build-sysroot.ps1`, not
+  `posix/src/**`.** `libc.a` is the `posix` staticlib; `posix` path-depends on
+  `tzrules`; and the `RUSTFLAGS` that pick the float ABI — the ones
+  `BUG-SYSROOT-SOFT-FLOAT-ABI` is about — live in the build script and nowhere
+  else. A `tzrules` change would have walked straight through the rule as
+  originally written.
+- **Named commits are confirmed against trees.** A source touched and then
+  reverted produces commits in `S..HEAD` but no change to the artifact's inputs.
+  Listing commits gives a useful message; comparing `S:posix` against
+  `HEAD:posix` gives the correct verdict; neither alone does both.
+- **The root `Cargo.toml` warns rather than fails.** Its `[profile.release]`
+  genuinely can change `libc.a`, but it far more often just gains a workspace
+  member from an unrelated lane (`byteread` did, the same day). A check that
+  cries wolf gets `ALLOW_`-flagged into silence, so this is a deliberate,
+  documented hole — an opt-level change passes as a warning — and not an
+  oversight. The alternative was parsing the manifest to see which table moved,
+  which is fragile in a way that fails silently.
+- **A family whose stamps match nothing, and a typo in a declared source path,
+  both exit 2 rather than reporting clean.** A path that does not exist reads as
+  a path that never changed, cheerfully and in green — so a typo in the config
+  would have *widened* the silence the script exists to end. That is the fifth
+  instance in this file of "the check did not run" wearing the costume of "the
+  check passed", and it was written in from the start for that reason.
+
+**Verified in both directions.** Positive: on the merged tree it names
+`5531f816c` and nothing else. Negative: `--rev 2069cbd8e` — lane C's tree, where
+the rebuild *was* correct — reports `OK`, so it is not a check that simply always
+fires. The stale-config and missing-family branches were exercised directly and
+both exit 2. The `:(glob)` pathspec magic is deliberate and load-bearing: plain
+git globbing lets `*` cross `/`, which would silently widen the stamp pathspec.
+
+**Still open: the repair** (lane B rebuilds and re-commits the nine ELFs), and
+one judgement call the detector does not settle — whether to also record the
+libc's **source** identity in the stamp (the tree hash of `posix/`, alongside
+the existing `libc.a` content hash). That would make the stamp answer the right
+question directly rather than have a second script answer it alongside, at the
+cost of coupling a file under `services/` to a path outside it. The detector
+makes that optional rather than urgent; lane A has a stake only in the class
+being detectable, which it now is.
+
+**What it blocks right now.** `create-ext4-rootfs.sh` exits 1 on the stamp
+mismatch, correctly, so no worktree can rebuild `rootfs.ext4`. That leaves the
+boot test running an image with no `/bin/bash`, so
+`self_test_bash_on_slateos_libc` self-skips and every run ends:
+
+```
+=== PATH-Z COVERAGE INCOMPLETE ===
+  [spawn]   SKIP: GNU bash 5.2 linked against OUR libc.a (ring 3) — prerequisite missing: /mnt/bin/bash
+=== Boot test PASSED ===
+```
+
+**`ALLOW_STALE_FIXTURES=1` is deliberately not being used**, and that decision
+should survive whoever reads this next. It builds the image immediately, but the
+nine fixtures then run against a libc missing `pthread_kill` and the entire
+`posix_spawnattr_*` family — and `ctest-jobctl` is precisely the fixture that
+exited 101 the last time a fixture ran against a libc that predated a fix it
+needed (the anecdote in `create-ext4-rootfs.sh`'s own comment at 1247–1256). A
+green boot test asserting that is worse than no boot test.
+
+Lane A's own artifacts are already relinked against the fresh `libc.a`
+(`bash-slateos.elf`, `pkgconf-slateos.elf`), so once the nine ELFs land the
+image builds with no further action from anyone.
 
 ## B-A-THE-BOOT-LOCK-HAS-NO-QUEUE-SO-A-POLITE-WAITER-CAN-BE-OVERTAKEN-FOREVER (lane B, 2026-08-16)
 

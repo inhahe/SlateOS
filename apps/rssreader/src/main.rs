@@ -149,10 +149,29 @@ impl XmlElement {
     }
 }
 
+/// How deeply elements may nest before the document is rejected.
+///
+/// `parse_element` recurses once per level, so without a cap the feed decides
+/// how much of our stack to use. That is not a theoretical concern: measured in
+/// a debug build on a 2 MiB thread, nesting overflowed the stack somewhere
+/// between 512 and 1024 levels — and a stack overflow is not a `Result`. It
+/// aborts the process with no unwinding and nothing to catch, so no amount of
+/// error handling at the call site helps. A feed is remote data, so roughly
+/// seven kilobytes of `<a><a><a>…` served from any URL the user has subscribed
+/// to was enough to kill the reader outright.
+///
+/// 100 is chosen to be unreachable by accident and far below the cliff: RSS and
+/// Atom nest four or five deep, and the deepest structure this program parses
+/// is an OPML folder tree, which is a hand-made hierarchy nobody builds a
+/// hundred levels of.
+const MAX_XML_DEPTH: usize = 100;
+
 /// XML parser state.
 struct XmlParser<'a> {
     input: &'a [u8],
     pos: usize,
+    /// Elements currently open above the cursor. See [`MAX_XML_DEPTH`].
+    depth: usize,
 }
 
 /// Errors that can occur during XML parsing.
@@ -163,6 +182,8 @@ pub enum XmlError {
     MismatchedClose { expected: String, found: String },
     InvalidEntity(String),
     InvalidAttribute(String),
+    /// Elements nested deeper than [`MAX_XML_DEPTH`].
+    TooDeep { limit: usize },
 }
 
 impl core::fmt::Display for XmlError {
@@ -178,6 +199,9 @@ impl core::fmt::Display for XmlError {
             }
             Self::InvalidEntity(s) => write!(f, "invalid entity: {s}"),
             Self::InvalidAttribute(s) => write!(f, "invalid attribute: {s}"),
+            Self::TooDeep { limit } => {
+                write!(f, "elements nested more than {limit} deep")
+            }
         }
     }
 }
@@ -187,28 +211,117 @@ impl<'a> XmlParser<'a> {
         Self {
             input: input.as_bytes(),
             pos: 0,
+            depth: 0,
         }
+    }
+
+    // -- Cursor primitives ---------------------------------------------------
+    //
+    // Every read of `input` in this parser goes through one of the six methods
+    // below, and each states its bound at the point of the read. The methods
+    // that follow used to restate it themselves — `if self.pos + 3 <
+    // self.input.len() && self.input[self.pos] == b'<' && …` — which is the
+    // same bound written out twice, once as a guard and once as an index,
+    // several statements apart. Two of those pairs guarded a nine-byte slice
+    // with `self.pos + 8 < len`: correct, since it implies `pos + 9 <= len`,
+    // but not in a form a reader can check against the slice beside it.
+
+    /// The remaining input, from the cursor to the end. Empty past the end.
+    fn rest(&self) -> &'a [u8] {
+        self.input.get(self.pos..).unwrap_or_default()
     }
 
     /// Peek at the current byte without consuming it.
     fn peek(&self) -> Option<u8> {
-        self.input.get(self.pos).copied()
+        self.peek_at(0)
+    }
+
+    /// Peek at the byte `offset` positions ahead of the cursor.
+    fn peek_at(&self, offset: usize) -> Option<u8> {
+        self.rest().get(offset).copied()
+    }
+
+    /// Does the input at the cursor begin with `needle`?
+    fn looking_at(&self, needle: &[u8]) -> bool {
+        self.rest().starts_with(needle)
+    }
+
+    /// [`Self::looking_at`], ignoring ASCII case — for the constructs XML
+    /// spells in capitals but real documents spell however they like.
+    fn looking_at_ignore_case(&self, needle: &[u8]) -> bool {
+        self.rest()
+            .get(..needle.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(needle))
+    }
+
+    /// Advance the cursor by `n` bytes, stopping at the end of the input.
+    fn skip(&mut self, n: usize) {
+        self.pos = self.pos.saturating_add(n).min(self.input.len());
+    }
+
+    /// If the input at the cursor begins with `needle`, consume it.
+    fn eat(&mut self, needle: &[u8]) -> bool {
+        let found = self.looking_at(needle);
+        if found {
+            self.skip(needle.len());
+        }
+        found
     }
 
     /// Advance position by one byte and return it.
     fn advance(&mut self) -> Option<u8> {
-        let b = self.input.get(self.pos).copied();
+        let b = self.peek();
         if b.is_some() {
-            self.pos += 1;
+            self.skip(1);
         }
         b
+    }
+
+    /// Advance the cursor to just past the next occurrence of `needle`,
+    /// returning the bytes skipped over, `needle` itself excluded.
+    ///
+    /// If `needle` never occurs the cursor lands on the end of the input and
+    /// the rest is returned — an unterminated comment or CDATA section is the
+    /// normal way a truncated download presents itself, and consuming it is
+    /// what keeps the caller's loop moving.
+    fn take_past(&mut self, needle: &[u8]) -> String {
+        let start = self.pos;
+        // `windows` panics on a zero width, and "the next occurrence of
+        // nothing" has no useful answer anyway.
+        debug_assert!(!needle.is_empty(), "take_past needs a non-empty needle");
+        let found = if needle.is_empty() {
+            None
+        } else {
+            self.rest().windows(needle.len()).position(|w| w == needle)
+        };
+        match found {
+            Some(offset) => {
+                self.skip(offset);
+                let text = self.text_since(start);
+                self.skip(needle.len());
+                text
+            }
+            None => {
+                self.pos = self.input.len();
+                self.text_since(start)
+            }
+        }
+    }
+
+    /// The input between `start` and the cursor, decoded as text.
+    ///
+    /// The lossy decode is exact rather than lossy in practice: `input` came
+    /// from a `&str`, and every position this parser stops at is either a byte
+    /// it matched (all ASCII) or the end, so no slice can split a character.
+    fn text_since(&self, start: usize) -> String {
+        String::from_utf8_lossy(self.input.get(start..self.pos).unwrap_or_default()).into_owned()
     }
 
     /// Skip whitespace characters.
     fn skip_whitespace(&mut self) {
         while let Some(b) = self.peek() {
             if b == b' ' || b == b'\t' || b == b'\n' || b == b'\r' {
-                self.pos += 1;
+                self.skip(1);
             } else {
                 break;
             }
@@ -220,29 +333,26 @@ impl<'a> XmlParser<'a> {
         self.pos >= self.input.len()
     }
 
+    /// Read bytes while `keep` accepts them, stopping before the first that it
+    /// does not. Returns the bytes read.
+    fn read_while(&mut self, keep: impl Fn(u8) -> bool) -> String {
+        let start = self.pos;
+        while self.peek().is_some_and(&keep) {
+            self.skip(1);
+        }
+        self.text_since(start)
+    }
+
     /// Read bytes until a specific byte is encountered (not consumed).
     fn read_until(&mut self, stop: u8) -> String {
-        let start = self.pos;
-        while let Some(b) = self.peek() {
-            if b == stop {
-                break;
-            }
-            self.pos += 1;
-        }
-        String::from_utf8_lossy(&self.input[start..self.pos]).to_string()
+        self.read_while(|b| b != stop)
     }
 
     /// Read a name (tag name or attribute name): [a-zA-Z0-9_:.-]+
     fn read_name(&mut self) -> String {
-        let start = self.pos;
-        while let Some(b) = self.peek() {
-            if b.is_ascii_alphanumeric() || b == b'_' || b == b':' || b == b'.' || b == b'-' {
-                self.pos += 1;
-            } else {
-                break;
-            }
-        }
-        String::from_utf8_lossy(&self.input[start..self.pos]).to_string()
+        self.read_while(|b| {
+            b.is_ascii_alphanumeric() || b == b'_' || b == b':' || b == b'.' || b == b'-'
+        })
     }
 
     /// Decode an XML entity reference.
@@ -282,8 +392,12 @@ impl<'a> XmlParser<'a> {
             "auml" => Ok('ä'),
             "szlig" => Ok('ß'),
             "ntilde" => Ok('ñ'),
-            s if s.starts_with('#') => {
-                let numeric = &s[1..];
+            _ => {
+                // A numeric character reference, `&#233;` or `&#xE9;`. Anything
+                // that is not one is an entity this parser does not know.
+                let Some(numeric) = entity.strip_prefix('#') else {
+                    return Err(XmlError::InvalidEntity(entity.to_string()));
+                };
                 let codepoint = if let Some(hex) = numeric.strip_prefix('x') {
                     u32::from_str_radix(hex, 16)
                         .map_err(|_| XmlError::InvalidEntity(entity.to_string()))?
@@ -294,7 +408,6 @@ impl<'a> XmlParser<'a> {
                 };
                 char::from_u32(codepoint).ok_or_else(|| XmlError::InvalidEntity(entity.to_string()))
             }
-            _ => Err(XmlError::InvalidEntity(entity.to_string())),
         }
     }
 
@@ -349,110 +462,76 @@ impl<'a> XmlParser<'a> {
                 "expected quote for attribute value".to_string(),
             ));
         }
-        let start = self.pos;
-        while let Some(b) = self.peek() {
-            if b == quote {
-                // Both delimiters are ASCII, so `start` and `self.pos` are
-                // character boundaries; and the input came from a `&str`, so
-                // the lossy decode is exact.
-                let raw =
-                    String::from_utf8_lossy(self.input.get(start..self.pos).unwrap_or_default())
-                        .into_owned();
-                self.pos = self.pos.saturating_add(1);
-                return Ok(Self::decode_entities(&raw));
-            }
-            self.pos = self.pos.saturating_add(1);
+        let raw = self.read_until(quote);
+        if self.advance() != Some(quote) {
+            return Err(XmlError::UnexpectedEof);
         }
-        Err(XmlError::UnexpectedEof)
+        Ok(Self::decode_entities(&raw))
     }
 
     /// Skip the XML declaration (<?xml ... ?>).
     fn skip_xml_declaration(&mut self) {
-        if self.pos + 1 < self.input.len()
-            && self.input[self.pos] == b'<'
-            && self.input[self.pos + 1] == b'?'
-        {
-            while self.pos + 1 < self.input.len() {
-                if self.input[self.pos] == b'?' && self.input[self.pos + 1] == b'>' {
-                    self.pos += 2;
-                    return;
-                }
-                self.pos += 1;
-            }
+        if self.eat(b"<?") {
+            self.take_past(b"?>");
         }
     }
 
     /// Skip a comment (<!-- ... -->).
     fn skip_comment(&mut self) -> bool {
-        if self.pos + 3 < self.input.len()
-            && self.input[self.pos] == b'<'
-            && self.input[self.pos + 1] == b'!'
-            && self.input[self.pos + 2] == b'-'
-            && self.input[self.pos + 3] == b'-'
-        {
-            self.pos += 4;
-            while self.pos + 2 < self.input.len() {
-                if self.input[self.pos] == b'-'
-                    && self.input[self.pos + 1] == b'-'
-                    && self.input[self.pos + 2] == b'>'
-                {
-                    self.pos += 3;
-                    return true;
-                }
-                self.pos += 1;
-            }
-            // Unterminated comment: skip to end
-            self.pos = self.input.len();
-            return true;
+        if !self.eat(b"<!--") {
+            return false;
         }
-        false
+        // An unterminated comment consumes the rest, which `take_past` already
+        // does — a truncated feed must not leave the caller's loop looking at
+        // the same `<` forever.
+        self.take_past(b"-->");
+        true
     }
 
     /// Skip a CDATA section and return its content.
     fn try_read_cdata(&mut self) -> Option<String> {
-        if self.pos + 8 < self.input.len() && &self.input[self.pos..self.pos + 9] == b"<![CDATA[" {
-            self.pos += 9;
-            let start = self.pos;
-            while self.pos + 2 < self.input.len() {
-                if self.input[self.pos] == b']'
-                    && self.input[self.pos + 1] == b']'
-                    && self.input[self.pos + 2] == b'>'
-                {
-                    let content = String::from_utf8_lossy(&self.input[start..self.pos]).to_string();
-                    self.pos += 3;
-                    return Some(content);
-                }
-                self.pos += 1;
-            }
-            let content = String::from_utf8_lossy(&self.input[start..self.input.len()]).to_string();
-            self.pos = self.input.len();
-            return Some(content);
-        }
-        None
+        self.eat(b"<![CDATA[").then(|| self.take_past(b"]]>"))
     }
 
     /// Skip a DOCTYPE declaration.
     fn skip_doctype(&mut self) -> bool {
-        if self.pos + 8 < self.input.len() {
-            let slice = &self.input[self.pos..self.pos + 9];
-            if slice.eq_ignore_ascii_case(b"<!DOCTYPE") || slice.eq_ignore_ascii_case(b"<!doctype")
-            {
-                let mut depth: u32 = 1;
-                self.pos += 9;
-                while let Some(b) = self.advance() {
-                    if b == b'<' {
-                        depth = depth.saturating_add(1);
-                    } else if b == b'>' {
-                        depth = depth.saturating_sub(1);
-                        if depth == 0 {
-                            return true;
-                        }
-                    }
+        if !self.looking_at_ignore_case(b"<!DOCTYPE") {
+            return false;
+        }
+        self.skip(b"<!DOCTYPE".len());
+        // A DOCTYPE may carry an internal subset in brackets whose entity
+        // declarations contain further `<`, so the `>` that ends it is the one
+        // that balances, not the first one seen.
+        let mut depth: u32 = 1;
+        while let Some(b) = self.advance() {
+            if b == b'<' {
+                depth = depth.saturating_add(1);
+            } else if b == b'>' {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    break;
                 }
-                return true;
             }
         }
-        false
+        true
+    }
+
+    /// Parse a nested element, refusing to recurse past [`MAX_XML_DEPTH`].
+    ///
+    /// The counter is kept here rather than inside `parse_element` so that the
+    /// increment and the decrement are the first and last statements of one
+    /// short function and cannot drift apart behind an early return —
+    /// `parse_element` has six of those.
+    fn parse_child(&mut self) -> Result<XmlElement, XmlError> {
+        if self.depth >= MAX_XML_DEPTH {
+            return Err(XmlError::TooDeep {
+                limit: MAX_XML_DEPTH,
+            });
+        }
+        self.depth = self.depth.saturating_add(1);
+        let parsed = self.parse_element();
+        self.depth = self.depth.saturating_sub(1);
+        parsed
     }
 
     /// Parse a single element (and its children recursively).
@@ -477,11 +556,11 @@ impl<'a> XmlParser<'a> {
             self.skip_whitespace();
             match self.peek() {
                 Some(b'>') => {
-                    self.pos += 1;
+                    self.skip(1);
                     break;
                 }
                 Some(b'/') => {
-                    self.pos += 1;
+                    self.skip(1);
                     if self.advance() != Some(b'>') {
                         return Err(XmlError::MalformedTag("expected '>' after '/'".to_string()));
                     }
@@ -492,12 +571,12 @@ impl<'a> XmlParser<'a> {
                     let attr_name = self.read_name();
                     if attr_name.is_empty() {
                         // Skip unknown byte
-                        self.pos += 1;
+                        self.skip(1);
                         continue;
                     }
                     self.skip_whitespace();
                     if self.peek() == Some(b'=') {
-                        self.pos += 1; // skip '='
+                        self.skip(1); // skip '='
                         let value = self.read_attribute_value()?;
                         elem.attributes.insert(attr_name, value);
                     } else {
@@ -525,11 +604,7 @@ impl<'a> XmlParser<'a> {
             }
 
             // Check for closing tag
-            if self.pos + 1 < self.input.len()
-                && self.input[self.pos] == b'<'
-                && self.input[self.pos + 1] == b'/'
-            {
-                self.pos += 2;
+            if self.eat(b"</") {
                 let close_tag = self.read_name();
                 // Skip to '>'
                 while let Some(b) = self.advance() {
@@ -549,11 +624,11 @@ impl<'a> XmlParser<'a> {
             // Check for child element
             if self.peek() == Some(b'<') {
                 // Could be a child element, a processing instruction, or a comment
-                if self.pos + 1 < self.input.len() && self.input[self.pos + 1] == b'?' {
+                if self.looking_at(b"<?") {
                     self.skip_xml_declaration();
                     continue;
                 }
-                if self.pos + 1 < self.input.len() && self.input[self.pos + 1] == b'!' {
+                if self.looking_at(b"<!") {
                     if self.skip_comment() {
                         continue;
                     }
@@ -567,10 +642,10 @@ impl<'a> XmlParser<'a> {
                         continue;
                     }
                     // Unknown <! construct, skip it
-                    self.pos += 1;
+                    self.skip(1);
                     continue;
                 }
-                let child = self.parse_element()?;
+                let child = self.parse_child()?;
                 elem.children.push(XmlNode::Element(child));
                 continue;
             }
@@ -581,14 +656,7 @@ impl<'a> XmlParser<'a> {
             }
 
             // Text content
-            let text_start = self.pos;
-            while let Some(b) = self.peek() {
-                if b == b'<' {
-                    break;
-                }
-                self.pos += 1;
-            }
-            let raw = String::from_utf8_lossy(&self.input[text_start..self.pos]).to_string();
+            let raw = self.read_until(b'<');
             let decoded = Self::decode_entities(&raw);
             if !decoded.trim().is_empty() {
                 elem.children.push(XmlNode::Text(decoded));
@@ -840,41 +908,99 @@ pub fn format_timestamp(ts: u64) -> String {
     format!("{year:04}-{month:02}-{day:02} {hours:02}:{minutes:02}")
 }
 
-/// Convert days since Unix epoch to (year, month, day).
-fn days_to_ymd(mut days: u64) -> (u64, u64, u64) {
-    // Adjusted algorithm based on civil calendar
-    let mut year: u64 = 1970;
+/// The instant the bundled sample articles are dated from, so that the sample
+/// data reads as a week of activity rather than a column of epoch seconds.
+const SAMPLE_BASE_TS: u64 = 1_700_000_000;
 
-    loop {
-        let days_in_year = if is_leap_year(year) { 366 } else { 365 };
-        if days < days_in_year {
-            break;
-        }
-        days -= days_in_year;
-        year += 1;
-    }
-
-    let month_days: [u64; 12] = if is_leap_year(year) {
-        [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-    } else {
-        [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-    };
-
-    let mut month: u64 = 1;
-    for &md in &month_days {
-        if days < md {
-            break;
-        }
-        days -= md;
-        month += 1;
-    }
-
-    (year, month, days + 1)
+/// A sample article's timestamp: `days` days and `secs` seconds after
+/// [`SAMPLE_BASE_TS`].
+///
+/// The sample data spelled each of these out as `base_ts + 86400 * 7 + 3600`,
+/// which is the same seconds-per-day conversion written by hand sixteen
+/// times -- sixteen chances to type 8640.
+const fn sample_ts(days: u64, secs: u64) -> u64 {
+    SAMPLE_BASE_TS
+        .saturating_add(days.saturating_mul(86_400))
+        .saturating_add(secs)
 }
+
+/// Convert days since the Unix epoch to (year, month, day).
+///
+/// Closed form, after Howard Hinnant's `civil_from_days`
+/// (<https://howardhinnant.github.io/date_algorithms.html>), which reckons
+/// from 0000-03-01 so that the leap day falls at the end of the year and the
+/// month lengths become a repeating pattern with no table and no branch.
+///
+/// It replaced a `loop` that subtracted one year's worth of days at a time
+/// starting from 1970. `days` is `ts / 86400` where `ts` is an article's
+/// `published`, which is parsed out of a feed's `<pubDate>` — so the number of
+/// iterations was chosen by whoever wrote the feed. See [`days_from_civil`]
+/// for the same defect in the other direction, and the measurement.
+#[expect(
+    clippy::arithmetic_side_effects,
+    reason = "Every operand here is bounded by the shape of the algorithm, not \
+              by an invariant elsewhere: `era` is at most days/146097, and \
+              `era * 146097` is therefore at most `days`, which came from \
+              `ts / 86400` and so is at most u64::MAX/86400. `day_of_era` is \
+              in 0..=146096 by construction, `year_of_era` in 0..=399, and \
+              `day_of_year` in 0..=365, so `365 * year_of_era`, `5 * \
+              day_of_year` and `153 * month_index` are all under 150_000. \
+              Writing these as checked operations would return an `Option` \
+              that no input can make `None`."
+)]
+fn days_to_ymd(days: u64) -> (u64, u64, u64) {
+    // Shift the epoch from 1970-01-01 to 0000-03-01.
+    let shifted = days.saturating_add(DAYS_FROM_0000_03_01_TO_EPOCH);
+
+    let era = shifted / DAYS_PER_ERA;
+    let day_of_era = shifted - era * DAYS_PER_ERA; // 0..=146096
+    // Count the whole years inside the era, correcting for the 4/100/400 rule.
+    let year_of_era = (day_of_era - day_of_era / 1460 + day_of_era / 36524
+        - day_of_era / 146_096)
+        / 365; // 0..=399
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    // March is month 0 in this reckoning; 153/5 is the mean length of a month
+    // in the repeating five-month 31-30-31-30-31 pattern the shift produces.
+    let month_index = (5 * day_of_year + 2) / 153; // 0..=11
+    let day = day_of_year - (153 * month_index + 2) / 5 + 1; // 1..=31
+    let month = if month_index < 10 {
+        month_index + 3
+    } else {
+        month_index - 9
+    };
+    let year = year_of_era + era * 400 + u64::from(month <= 2);
+
+    (year, month, day)
+}
+
+/// Days from 0000-03-01 (the epoch of the shifted civil calendar) to
+/// 1970-01-01.
+const DAYS_FROM_0000_03_01_TO_EPOCH: u64 = 719_468;
+/// Days in a 400-year Gregorian era, which is a whole number of weeks.
+const DAYS_PER_ERA: u64 = 146_097;
+
+/// The range of years this program will accept in a date.
+///
+/// A `<pubDate>` outside it is not a date that has been mangled, it is not a
+/// date at all, and treating it as one is how the parser used to be talked
+/// into arithmetic on numbers no calendar has. Rejecting it gives
+/// `parse_date_string` a `None`, which every caller already handles.
+const YEAR_RANGE: core::ops::RangeInclusive<u64> = 1970..=9999;
 
 /// Check if a year is a leap year.
 fn is_leap_year(year: u64) -> bool {
     (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400)
+}
+
+/// Length of `month` (1-based) in a leap or common year, or `None` if `month`
+/// is not a month.
+fn days_in_month(month: u64, leap: bool) -> Option<u64> {
+    let lengths: [u64; 12] = if leap {
+        [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    } else {
+        [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    };
+    lengths.get(month.checked_sub(1)? as usize).copied()
 }
 
 /// Parse a simple date string into a Unix timestamp.
@@ -915,10 +1041,9 @@ fn try_parse_iso8601(s: &str) -> Option<u64> {
     let month: u64 = base.get(1)?.parse().ok()?;
 
     let day_part = *base.get(2)?;
-    let (day_str, time_str) = if let Some(t_pos) = day_part.find('T') {
-        (&day_part[..t_pos], Some(&day_part[t_pos + 1..]))
-    } else {
-        (day_part, None)
+    let (day_str, time_str) = match day_part.split_once('T') {
+        Some((day, time)) => (day, Some(time)),
+        None => (day_part, None),
     };
 
     let day: u64 = day_str.parse().ok()?;
@@ -928,7 +1053,7 @@ fn try_parse_iso8601(s: &str) -> Option<u64> {
         (0, 0, 0)
     };
 
-    Some(ymd_hms_to_epoch(year, month, day, hours, minutes, seconds))
+    ymd_hms_to_epoch(year, month, day, hours, minutes, seconds)
 }
 
 /// Parse time components from "HH:MM:SS" or "HH:MM" string.
@@ -954,20 +1079,27 @@ fn try_parse_rfc822(s: &str) -> Option<u64> {
         return None;
     }
 
-    // Skip day name if present (e.g. "Mon,")
-    let offset = if parts.first()?.ends_with(',') { 1 } else { 0 };
+    // Drop the day name if present (e.g. "Mon,") so that the fields below are
+    // counted from the date rather than from the start of the string. Taking
+    // the tail once is what lets them be read as first/second/third instead of
+    // as `offset + 1`, `offset + 2`, `offset + 3` against the original.
+    let fields = if parts.first()?.ends_with(',') {
+        parts.get(1..)?
+    } else {
+        parts.as_slice()
+    };
 
-    let day: u64 = parts.get(offset)?.parse().ok()?;
-    let month = month_name_to_number(parts.get(offset + 1)?)?;
-    let year: u64 = parts.get(offset + 2)?.parse().ok()?;
+    let day: u64 = fields.first()?.parse().ok()?;
+    let month = month_name_to_number(fields.get(1)?)?;
+    let year: u64 = fields.get(2)?.parse().ok()?;
 
-    let (hours, minutes, seconds) = if let Some(time_str) = parts.get(offset + 3) {
+    let (hours, minutes, seconds) = if let Some(time_str) = fields.get(3) {
         parse_time_components(time_str)
     } else {
         (0, 0, 0)
     };
 
-    Some(ymd_hms_to_epoch(year, month, day, hours, minutes, seconds))
+    ymd_hms_to_epoch(year, month, day, hours, minutes, seconds)
 }
 
 /// Convert month name abbreviation to number (1-12).
@@ -998,34 +1130,71 @@ fn try_parse_simple_date(s: &str) -> Option<u64> {
     let year: u64 = parts.first()?.parse().ok()?;
     let month: u64 = parts.get(1)?.parse().ok()?;
     let day: u64 = parts.get(2)?.parse().ok()?;
-    Some(ymd_hms_to_epoch(year, month, day, 0, 0, 0))
+    ymd_hms_to_epoch(year, month, day, 0, 0, 0)
+}
+
+/// Days from 1970-01-01 to `year-month-day`, or `None` if that is not a date.
+///
+/// Closed form, after Howard Hinnant's `days_from_civil` — the exact inverse
+/// of [`days_to_ymd`], and it replaced the same defect. The old version was
+/// `for y in 1970..year { total_days += … }`, and `year` is parsed straight
+/// out of a feed's `<pubDate>` with `parse().ok()?` into a `u64`. So a feed
+/// served from any URL the user had subscribed to could set the trip count of
+/// a loop on the parsing thread. Measured: `"4000000-01-01"` took 107 ms for
+/// one date — a hundred such items in a feed is eleven seconds of freeze —
+/// and `"18446744073709551615-01-01"` did not finish, and cannot, because
+/// 1.8e19 iterations is not a wait, it is a hang.
+///
+/// The bound is [`YEAR_RANGE`] rather than merely "small enough not to hang":
+/// the two are the same fix, but a year outside it is not a date and saying
+/// so is more useful than computing a timestamp from it.
+#[expect(
+    clippy::arithmetic_side_effects,
+    reason = "The guard on the first line bounds `year` to 9999 and `month` to \
+              12, and `days_in_month` bounds `day` to 31, so `shifted_year` is \
+              under 10_000, `year_of_era` is in 0..=399, `month_index` in \
+              0..=11 and `day_of_year` in 0..=365. Every product below is \
+              therefore under 1.5 million, against a u64. The subtraction of \
+              DAYS_FROM_0000_03_01_TO_EPOCH is the one operation that can \
+              genuinely go negative -- for a year before 1970 -- and it is \
+              written as `checked_sub`."
+)]
+fn days_from_civil(year: u64, month: u64, day: u64) -> Option<u64> {
+    if !YEAR_RANGE.contains(&year) || !(1..=12).contains(&month) {
+        return None;
+    }
+    if day < 1 || day > days_in_month(month, is_leap_year(year))? {
+        return None;
+    }
+
+    // March is month 0, so the leap day is the last day of the year rather
+    // than one buried in the middle that every later month has to know about.
+    let shifted_year = if month <= 2 { year - 1 } else { year };
+    let era = shifted_year / 400;
+    let year_of_era = shifted_year - era * 400; // 0..=399
+    let month_index = if month > 2 { month - 3 } else { month + 9 }; // 0..=11
+    let day_of_year = (153 * month_index + 2) / 5 + day - 1; // 0..=365
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+
+    (era * DAYS_PER_ERA + day_of_era).checked_sub(DAYS_FROM_0000_03_01_TO_EPOCH)
 }
 
 /// Convert year/month/day/hour/minute/second to Unix epoch seconds.
-fn ymd_hms_to_epoch(year: u64, month: u64, day: u64, h: u64, m: u64, s: u64) -> u64 {
-    let mut total_days: u64 = 0;
-
-    // Days from years
-    for y in 1970..year {
-        total_days += if is_leap_year(y) { 366 } else { 365 };
+///
+/// `None` for a date [`days_from_civil`] refuses, or a clock reading that is
+/// not one — 25:00 and 00:99 turn up in feeds written by hand, and a parser
+/// that accepts them silently reports an article as posted the following day.
+fn ymd_hms_to_epoch(year: u64, month: u64, day: u64, h: u64, m: u64, s: u64) -> Option<u64> {
+    if h > 23 || m > 59 || s > 60 {
+        // 60 is allowed: a leap second is a real reading, and folding it into
+        // the following minute is closer than rejecting the whole article.
+        return None;
     }
-
-    // Days from months in the current year
-    let month_days: [u64; 12] = if is_leap_year(year) {
-        [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-    } else {
-        [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-    };
-
-    for i in 0..(month.saturating_sub(1) as usize) {
-        if let Some(&md) = month_days.get(i) {
-            total_days += md;
-        }
-    }
-
-    total_days += day.saturating_sub(1);
-
-    total_days * 86400 + h * 3600 + m * 60 + s
+    let days = days_from_civil(year, month, day)?;
+    days.checked_mul(86_400)?
+        .checked_add(h.checked_mul(3600)?)?
+        .checked_add(m.checked_mul(60)?)?
+        .checked_add(s)
 }
 
 // ============================================================================
@@ -1720,19 +1889,25 @@ impl OfflineCache {
     pub fn cache_article(&mut self, article_id: ArticleId, content: &str, timestamp: u64) {
         let size = content.len();
 
-        // Evict old entries if we'd exceed the limit
-        while self.current_size + size > self.max_size && !self.entries.is_empty() {
-            self.evict_oldest();
-        }
-
+        // First, before anything is thrown away. This check used to sit *after*
+        // the eviction loop, so an article too large ever to be stored still
+        // drove that loop until the cache was empty — and was then skipped.
+        // One oversized article in a feed emptied the user's entire offline
+        // cache on every refresh and cached nothing in its place.
         if size > self.max_size {
-            // Single article exceeds cache — skip it
             return;
         }
 
-        // Remove existing entry if present
+        // Drop any previous copy of this article before making room, so its
+        // bytes are not counted against the space the new copy needs. Re-caching
+        // an article — which a refresh does for every article it re-reads —
+        // used to evict as though the old and new copies had to coexist.
         if let Some(old) = self.entries.remove(&article_id) {
             self.current_size = self.current_size.saturating_sub(old.size_bytes);
+        }
+
+        while self.current_size.saturating_add(size) > self.max_size && !self.entries.is_empty() {
+            self.evict_oldest();
         }
 
         let entry = CacheEntry {
@@ -1742,7 +1917,7 @@ impl OfflineCache {
             size_bytes: size,
         };
 
-        self.current_size += size;
+        self.current_size = self.current_size.saturating_add(size);
         self.entries.insert(article_id, entry);
     }
 
@@ -1981,7 +2156,7 @@ impl RssReaderApp {
     /// Add a new folder and return its ID.
     pub fn add_folder(&mut self, name: &str) -> FolderId {
         let id = self.next_folder_id;
-        self.next_folder_id += 1;
+        self.next_folder_id = self.next_folder_id.saturating_add(1);
         self.folders.push(Folder::new(id, name));
         id
     }
@@ -1989,7 +2164,7 @@ impl RssReaderApp {
     /// Add a new feed and return its ID.
     pub fn add_feed(&mut self, title: &str, url: &str, folder_id: Option<FolderId>) -> FeedId {
         let id = self.next_feed_id;
-        self.next_feed_id += 1;
+        self.next_feed_id = self.next_feed_id.saturating_add(1);
         let mut feed = Feed::new(id, title, url);
         feed.folder_id = folder_id;
         self.feeds.push(feed);
@@ -2042,7 +2217,7 @@ impl RssReaderApp {
     /// Add an article to the store and cache it.
     pub fn add_article(&mut self, feed_id: FeedId, title: &str, content: &str) -> ArticleId {
         let id = self.next_article_id;
-        self.next_article_id += 1;
+        self.next_article_id = self.next_article_id.saturating_add(1);
         let mut article = Article::new(id, feed_id, title);
         article.content = content.to_string();
         article.cached_text = html_to_text(content);
@@ -2115,8 +2290,16 @@ impl RssReaderApp {
     }
 
     /// Get the indices of articles matching current filter, sort, and sidebar selection.
+    ///
+    /// The articles are carried alongside their indices through the sort
+    /// rather than being looked up again from the index while comparing. The
+    /// index and the article it names are the same fact, and holding them
+    /// together means the comparator cannot be handed one that no longer
+    /// resolves — `self.articles[a_idx]` inside a `sort_by` was safe only
+    /// because the indices had just come from `enumerate()` twenty lines
+    /// above, which is an invariant no reader of the comparator can see.
     pub fn filtered_article_indices(&self) -> Vec<usize> {
-        let mut indices: Vec<usize> = self
+        let mut matching: Vec<(usize, &Article)> = self
             .articles
             .iter()
             .enumerate()
@@ -2154,48 +2337,38 @@ impl RssReaderApp {
                     || textfind::contains(&a.author, &self.search_query, case)
                     || textfind::contains(a.display_content(), &self.search_query, case)
             })
-            .map(|(i, _)| i)
             .collect();
 
-        // Sort
-        indices.sort_by(|&a_idx, &b_idx| {
-            let a = &self.articles[a_idx];
-            let b = &self.articles[b_idx];
-            match self.sort_order {
-                SortOrder::DateDesc => b.published.cmp(&a.published),
-                SortOrder::DateAsc => a.published.cmp(&b.published),
-                SortOrder::TitleAsc => a.title.cmp(&b.title),
-                SortOrder::TitleDesc => b.title.cmp(&a.title),
-                SortOrder::FeedNameAsc => {
-                    let fa = self.feed_name(a.feed_id);
-                    let fb = self.feed_name(b.feed_id);
-                    fa.cmp(&fb)
-                }
-                SortOrder::FeedNameDesc => {
-                    let fa = self.feed_name(a.feed_id);
-                    let fb = self.feed_name(b.feed_id);
-                    fb.cmp(&fa)
-                }
-            }
+        matching.sort_by(|(_, a), (_, b)| match self.sort_order {
+            SortOrder::DateDesc => b.published.cmp(&a.published),
+            SortOrder::DateAsc => a.published.cmp(&b.published),
+            SortOrder::TitleAsc => a.title.cmp(&b.title),
+            SortOrder::TitleDesc => b.title.cmp(&a.title),
+            SortOrder::FeedNameAsc => self.feed_name(a.feed_id).cmp(self.feed_name(b.feed_id)),
+            SortOrder::FeedNameDesc => self.feed_name(b.feed_id).cmp(self.feed_name(a.feed_id)),
         });
 
-        indices
+        matching.into_iter().map(|(i, _)| i).collect()
     }
 
     /// Get the display name of a feed by ID.
-    pub fn feed_name(&self, feed_id: FeedId) -> String {
+    ///
+    /// Borrowed, not cloned: the feed-name sort orders call this twice per
+    /// comparison, so returning a `String` allocated and freed two feed titles
+    /// for every step of an O(n log n) sort that runs on every frame.
+    pub fn feed_name(&self, feed_id: FeedId) -> &str {
         self.feeds
             .iter()
             .find(|f| f.id == feed_id)
-            .map(|f| f.title.clone())
-            .unwrap_or_else(|| "Unknown Feed".to_string())
+            .map_or("Unknown Feed", |f| f.title.as_str())
     }
 
     /// Navigate to the next article.
     pub fn next_article(&mut self) {
         let count = self.filtered_article_indices().len();
-        if count > 0 && self.selected_article_index + 1 < count {
-            self.selected_article_index += 1;
+        let next = self.selected_article_index.saturating_add(1);
+        if next < count {
+            self.selected_article_index = next;
             self.content_scroll_offset = 0.0;
         }
     }
@@ -2203,7 +2376,7 @@ impl RssReaderApp {
     /// Navigate to the previous article.
     pub fn prev_article(&mut self) {
         if self.selected_article_index > 0 {
-            self.selected_article_index -= 1;
+            self.selected_article_index = self.selected_article_index.saturating_sub(1);
             self.content_scroll_offset = 0.0;
         }
     }
@@ -2220,9 +2393,9 @@ impl RssReaderApp {
     /// Import feeds from OPML data.
     pub fn import_opml(&mut self, opml_xml: &str) -> Result<usize, String> {
         let outlines = parse_opml(opml_xml)?;
-        let mut count = 0;
+        let mut count: usize = 0;
         for outline in &outlines {
-            count += self.import_opml_outline(outline, None);
+            count = count.saturating_add(self.import_opml_outline(outline, None));
         }
         Ok(count)
     }
@@ -2233,7 +2406,7 @@ impl RssReaderApp {
         outline: &OpmlOutline,
         parent_folder: Option<FolderId>,
     ) -> usize {
-        let mut count = 0;
+        let mut count: usize = 0;
 
         if let Some(ref url) = outline.xml_url {
             // This is a feed
@@ -2243,12 +2416,12 @@ impl RssReaderApp {
             {
                 feed.link = html_url.clone();
             }
-            count += 1;
+            count = count.saturating_add(1);
         } else if !outline.children.is_empty() {
             // This is a folder
             let folder_id = self.add_folder(&outline.text);
             for child in &outline.children {
-                count += self.import_opml_outline(child, Some(folder_id));
+                count = count.saturating_add(self.import_opml_outline(child, Some(folder_id)));
             }
         }
 
@@ -2281,7 +2454,7 @@ impl RssReaderApp {
                 .any(|a| a.feed_id == feed_id && a.title == pa.title && a.link == pa.link);
             if !already_exists {
                 let id = self.next_article_id;
-                self.next_article_id += 1;
+                self.next_article_id = self.next_article_id.saturating_add(1);
                 let mut article = Article::new(id, feed_id, &pa.title);
                 article.link = pa.link.clone();
                 article.author = pa.author.clone();
@@ -2357,13 +2530,12 @@ impl RssReaderApp {
         }
 
         // Create sample articles
-        let base_ts: u64 = 1_700_000_000;
 
         self.create_sample_article(
             rust_feed,
             "This Week in Rust 520",
             "TWiR Team",
-            base_ts + 86400 * 7,
+            sample_ts(7, 0),
             "This week's crate is ratatui, a library for building terminal UIs. \
              Rust 1.74 was released with return-position impl Trait in traits, \
              better async diagnostics, and improved const generics.",
@@ -2374,7 +2546,7 @@ impl RssReaderApp {
             rust_feed,
             "This Week in Rust 519",
             "TWiR Team",
-            base_ts + 86400 * 6,
+            sample_ts(6, 0),
             "Highlights include the new async working group roadmap, \
              improvements to cargo's dependency resolution, and a new RFC \
              for pattern types. Community spotlight on axum web framework.",
@@ -2385,7 +2557,7 @@ impl RssReaderApp {
             rust_feed,
             "This Week in Rust 518",
             "TWiR Team",
-            base_ts + 86400 * 5,
+            sample_ts(5, 0),
             "Feature spotlight: edition 2024 planning, proc-macro improvements, \
              and the Rust Foundation's engineering update. Notable crate: \
              polars for high-performance DataFrames.",
@@ -2397,7 +2569,7 @@ impl RssReaderApp {
             hn_feed,
             "Show HN: A Microkernel OS Written Entirely by AI",
             "rustdev42",
-            base_ts + 86400 * 7 + 3600,
+            sample_ts(7, 3600),
             "An ambitious project to build a complete desktop OS using AI pair programming. \
              Features include a custom GUI toolkit, package manager, and full POSIX compatibility. \
              The kernel uses 16KiB pages and a capability-based security model.",
@@ -2408,7 +2580,7 @@ impl RssReaderApp {
             hn_feed,
             "SQLite Considers Adding a Native Vector Search Extension",
             "databasenews",
-            base_ts + 86400 * 6 + 7200,
+            sample_ts(6, 7200),
             "The SQLite team is exploring built-in vector similarity search, \
              potentially making it the simplest path to vector database functionality. \
              Discussion around performance characteristics and API design.",
@@ -2419,7 +2591,7 @@ impl RssReaderApp {
             hn_feed,
             "Why WebAssembly Is the Future of Server-Side Rendering",
             "webdevtimes",
-            base_ts + 86400 * 5 + 1800,
+            sample_ts(5, 1800),
             "A deep dive into using WebAssembly for server-side rendering, \
              with benchmarks showing 3x improvement over V8 for certain workloads. \
              Covers WASI, component model, and toolchain maturity.",
@@ -2430,7 +2602,7 @@ impl RssReaderApp {
             hn_feed,
             "The Hidden Costs of Microservices Nobody Talks About",
             "archdigest",
-            base_ts + 86400 * 4 + 5400,
+            sample_ts(4, 5400),
             "An honest retrospective on microservices at scale: observability overhead, \
              distributed transaction complexity, cold start latency, and the cognitive \
              load on developers. Includes cost analysis from a Fortune 500 migration.",
@@ -2442,7 +2614,7 @@ impl RssReaderApp {
             bbc_feed,
             "Major Climate Agreement Reached at Summit",
             "BBC Correspondents",
-            base_ts + 86400 * 7 + 7200,
+            sample_ts(7, 7200),
             "World leaders have agreed on a landmark climate package that includes \
              binding emissions targets for developing nations. The agreement covers \
              carbon markets, deforestation limits, and a $100 billion adaptation fund.",
@@ -2453,7 +2625,7 @@ impl RssReaderApp {
             bbc_feed,
             "Space Agency Announces New Mars Mission Timeline",
             "Science Desk",
-            base_ts + 86400 * 6 + 3600,
+            sample_ts(6, 3600),
             "The European Space Agency has revealed an accelerated timeline for its \
              Mars sample return mission, with launch now planned for 2028. The mission \
              will work in conjunction with NASA's Perseverance rover samples.",
@@ -2464,7 +2636,7 @@ impl RssReaderApp {
             bbc_feed,
             "Global Chip Shortage Shows Signs of Easing",
             "Tech Editor",
-            base_ts + 86400 * 3 + 9000,
+            sample_ts(3, 9000),
             "Semiconductor supply chains are stabilizing as new fabrication plants \
              come online in Arizona and Dresden. Lead times have dropped significantly \
              for automotive and consumer electronics chipsets.",
@@ -2476,7 +2648,7 @@ impl RssReaderApp {
             arxiv_feed,
             "Scaling Laws for Neural Architecture Search",
             "Chen, Li, et al.",
-            base_ts + 86400 * 7 + 1200,
+            sample_ts(7, 1200),
             "We present empirical scaling laws for neural architecture search (NAS) \
              that predict search cost and final model performance as functions of \
              search space size and compute budget. Our findings suggest that current \
@@ -2488,7 +2660,7 @@ impl RssReaderApp {
             arxiv_feed,
             "Efficient Attention Mechanisms for Long Sequences",
             "Wang, Johnson, et al.",
-            base_ts + 86400 * 5 + 4800,
+            sample_ts(5, 4800),
             "We propose a novel attention mechanism that achieves O(n log n) complexity \
              while maintaining comparable performance to standard O(n^2) attention. \
              Evaluations on document understanding and genomics tasks show strong results.",
@@ -2500,7 +2672,7 @@ impl RssReaderApp {
             lobsters_feed,
             "Writing a Tree-Walking Interpreter in Rust",
             "compiler_nerd",
-            base_ts + 86400 * 6 + 5400,
+            sample_ts(6, 5400),
             "A tutorial series on building a complete interpreter for a small language, \
              covering lexing, parsing, type checking, and evaluation. Uses Rust's enums \
              and pattern matching for clean AST representation.",
@@ -2511,7 +2683,7 @@ impl RssReaderApp {
             lobsters_feed,
             "The State of Linux Desktop in 2024",
             "pinguin",
-            base_ts + 86400 * 4 + 2700,
+            sample_ts(4, 2700),
             "A comprehensive review of the Linux desktop ecosystem: Wayland adoption, \
              Flatpak maturity, gaming via Proton, and the ongoing fragmentation debate. \
              Includes user satisfaction survey results from 50,000 respondents.",
@@ -2523,7 +2695,7 @@ impl RssReaderApp {
             planet_feed,
             "Async Rust: A Practical Guide to Pitfalls",
             "Alice Ryhl",
-            base_ts + 86400 * 7 + 2400,
+            sample_ts(7, 2400),
             "Common mistakes in async Rust code and how to avoid them: accidental blocking, \
              cancellation safety, select! gotchas, and async drop. Includes real-world \
              examples from the Tokio maintainer team.",
@@ -2534,7 +2706,7 @@ impl RssReaderApp {
             planet_feed,
             "Introducing Bevy 0.14: A Game Engine Update",
             "Bevy Contributors",
-            base_ts + 86400 * 5 + 6000,
+            sample_ts(5, 6000),
             "Bevy 0.14 brings deferred rendering, screen-space ambient occlusion, \
              a revamped asset system, and significantly improved compile times. \
              The ECS system now supports component hooks and observers.",
@@ -2555,7 +2727,7 @@ impl RssReaderApp {
         is_starred: bool,
     ) {
         let id = self.next_article_id;
-        self.next_article_id += 1;
+        self.next_article_id = self.next_article_id.saturating_add(1);
         let mut article = Article::new(id, feed_id, title);
         article.author = author.to_string();
         article.published = published;
@@ -3304,7 +3476,13 @@ impl RssReaderApp {
                 break; // Below visible area
             }
 
-            let article = &self.articles[article_idx];
+            let Some(article) = self.articles.get(article_idx) else {
+                // Keep the row's slot. A bare `continue` here would skip the
+                // `cy += item_height` at the foot of the loop and slide every
+                // article below this one up by a row.
+                cy += item_height;
+                continue;
+            };
             let is_selected = list_idx == self.selected_article_index;
             let is_active = is_selected && self.active_pane == ActivePane::ArticleList;
 
@@ -4179,9 +4357,34 @@ impl RssReaderApp {
 // Text wrapping utility
 // ============================================================================
 
+/// Split `s` after at most `max_chars` characters, never inside one.
+///
+/// `str::split_at` takes a *byte* offset and panics if that offset lands in the
+/// middle of a multi-byte character, so it cannot be handed a character count
+/// directly. `char_indices().nth(n)` converts the one into the other, and
+/// returning `None` when the string is shorter than `n` is exactly the
+/// "nothing left to split off" case.
+fn split_at_chars(s: &str, max_chars: usize) -> (&str, &str) {
+    match s.char_indices().nth(max_chars) {
+        Some((byte, _)) => s.split_at(byte),
+        None => (s, ""),
+    }
+}
+
 /// Simple word-wrap that breaks text into lines fitting within `max_width`.
 ///
 /// Assumes an approximate character width based on font size.
+///
+/// Every length here is measured in **characters**, not bytes. It used to be
+/// bytes, compared against a character budget derived from the pixel width,
+/// which was wrong in two ways at once. The visible one: a line of Japanese or
+/// Greek or accented Latin wrapped at a third to a half of its intended width,
+/// because `str::len` counts the UTF-8 encoding rather than what is drawn. The
+/// fatal one: the over-long-word branch called `split_at(max_chars)` with that
+/// byte offset, and `split_at` panics when the offset is inside a character —
+/// so a single long non-ASCII word in an article body aborted the content view
+/// on every frame that tried to draw it. Article bodies come from whatever feed
+/// the user subscribed to, so that panic was reachable from remote data.
 pub fn wrap_text(text: &str, max_width: f32, font_size: f32) -> Vec<String> {
     let char_width = font_size * 0.55; // Approximate average character width
     let max_chars = (max_width / char_width) as usize;
@@ -4192,27 +4395,46 @@ pub fn wrap_text(text: &str, max_width: f32, font_size: f32) -> Vec<String> {
 
     let mut lines = Vec::new();
     let mut current_line = String::new();
+    // Kept alongside `current_line` rather than recomputed, so that the fit
+    // test below is a comparison of two counts and not a scan of the line.
+    let mut current_chars: usize = 0;
 
     for word in text.split_whitespace() {
+        let word_chars = word.chars().count();
         if current_line.is_empty() {
-            if word.len() > max_chars {
-                // Word is longer than the line — break it
+            if word_chars > max_chars {
+                // Word is longer than the line — break it. The loop condition
+                // is the emptiness of the tail rather than a fresh count of
+                // it: re-measuring the remainder on every pass would walk the
+                // whole word once per line, which is quadratic in a word the
+                // feed chose the length of.
                 let mut remaining = word;
-                while remaining.len() > max_chars {
-                    let (chunk, rest) = remaining.split_at(max_chars);
+                loop {
+                    let (chunk, rest) = split_at_chars(remaining, max_chars);
+                    if rest.is_empty() {
+                        break;
+                    }
                     lines.push(chunk.to_string());
                     remaining = rest;
                 }
                 current_line = remaining.to_string();
+                current_chars = remaining.chars().count();
             } else {
                 current_line = word.to_string();
+                current_chars = word_chars;
             }
-        } else if current_line.len() + 1 + word.len() <= max_chars {
+        // The `+ 1` is the space that joining would insert. Saturating
+        // addition rather than a bare `+` because these are two lengths of
+        // caller-supplied text: neither can realistically overflow, but the
+        // check that says so belongs in the code and not in a reader's head.
+        } else if current_chars.saturating_add(1).saturating_add(word_chars) <= max_chars {
             current_line.push(' ');
             current_line.push_str(word);
+            current_chars = current_chars.saturating_add(1).saturating_add(word_chars);
         } else {
             lines.push(current_line);
             current_line = word.to_string();
+            current_chars = word_chars;
         }
     }
 
@@ -4246,7 +4468,188 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    // A test that indexes out of range should fail loudly and point at the
+    // line that did it — that is the diagnosis. The defensive lints exist to
+    // keep panics out of code that runs on a user's data, which this is not.
+    #![allow(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
+
     use super::*;
+
+    /// A feed is remote data, and `parse_element` recurses once per nesting
+    /// level. Before [`MAX_XML_DEPTH`] existed, roughly seven kilobytes of
+    /// `<a><a><a>…` aborted the process with `STATUS_STACK_OVERFLOW` — not a
+    /// panic, not a `Result`, nothing an error path could catch. Measured
+    /// overflow was between 512 and 1024 levels in a debug build, so 2000 here
+    /// is comfortably over the cliff: if the limit is ever removed, this test
+    /// takes the whole test binary down rather than reporting a failure, which
+    /// is exactly as visible.
+    #[test]
+    fn deeply_nested_elements_are_refused_rather_than_overflowing_the_stack() {
+        let depth = 2000usize;
+        let mut xml = String::new();
+        for _ in 0..depth {
+            xml.push_str("<a>");
+        }
+        xml.push('x');
+        for _ in 0..depth {
+            xml.push_str("</a>");
+        }
+        assert_eq!(
+            parse_xml(&xml),
+            Err(XmlError::TooDeep {
+                limit: MAX_XML_DEPTH
+            }),
+        );
+    }
+
+    /// The limit must not be so tight that it rejects documents this program
+    /// actually reads. Real RSS and Atom nest four or five deep; an OPML
+    /// folder tree is the deepest thing here and is hand-made.
+    #[test]
+    fn nesting_within_the_limit_still_parses() {
+        for depth in [1usize, 5, 20, MAX_XML_DEPTH] {
+            let mut xml = String::new();
+            for _ in 0..depth {
+                xml.push_str("<a>");
+            }
+            xml.push('x');
+            for _ in 0..depth {
+                xml.push_str("</a>");
+            }
+            let parsed = parse_xml(&xml)
+                .unwrap_or_else(|e| panic!("depth {depth} is within the limit but failed: {e}"));
+            assert_eq!(parsed.tag, "a");
+        }
+    }
+
+    /// `<pubDate>` is remote data and the year was parsed from it into a `u64`
+    /// with no range check, then used as the trip count of `for y in
+    /// 1970..year`. Measured against the old code: `"4000000-01-01"` took
+    /// 107 ms to parse one date, and `"18446744073709551615-01-01"` never
+    /// returned — 1.8e19 iterations is not a slow parse, it is a hang, on
+    /// whichever thread was fetching the feed.
+    #[test]
+    fn an_absurd_year_is_refused_instead_of_hanging_the_parser() {
+        let started = std::time::Instant::now();
+        for date in [
+            "18446744073709551615-01-01",
+            "4000000-01-01",
+            "999999999-12-31T23:59:59Z",
+            "1 Jan 18446744073709551615 00:00:00 GMT",
+        ] {
+            assert_eq!(parse_date_string(date), None, "{date} is not a date");
+        }
+        // Not a timing assertion so much as a liveness one: the old code did
+        // not finish the first of these at all, so any bound at all is the
+        // difference being tested. A second is orders of magnitude of slack
+        // over the closed form.
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "parsing four impossible dates should be instant, took {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// `days_from_civil` and `days_to_ymd` are inverses, and this is the
+    /// property that says so — the two closed forms replaced two loops that
+    /// were each other's inverse by construction, so nothing weaker than a
+    /// round trip over the whole accepted range would catch a transcription
+    /// slip in one of them.
+    #[test]
+    fn the_two_calendar_directions_are_inverses_over_the_whole_year_range() {
+        let mut checked = 0u32;
+        let mut previous_days = None;
+        for year in YEAR_RANGE {
+            let leap = is_leap_year(year);
+            for month in 1..=12u64 {
+                let last = days_in_month(month, leap).expect("1..=12 are months");
+                for day in [1, 2, 15, last] {
+                    let days = days_from_civil(year, month, day)
+                        .unwrap_or_else(|| panic!("{year:04}-{month:02}-{day:02} is a real date"));
+                    assert_eq!(
+                        days_to_ymd(days),
+                        (year, month, day),
+                        "round trip failed for {year:04}-{month:02}-{day:02}"
+                    );
+                    // Monotonic: a later date is a larger day number. A sign
+                    // error inside one era could round-trip and still be wrong.
+                    if let Some(prev) = previous_days {
+                        assert!(
+                            days > prev,
+                            "{year:04}-{month:02}-{day:02} did not advance the day count"
+                        );
+                    }
+                    previous_days = Some(days);
+                    checked += 1;
+                }
+                // Never accept a day past the end of the month.
+                assert_eq!(
+                    days_from_civil(year, month, last + 1),
+                    None,
+                    "{year:04}-{month:02} has only {last} days"
+                );
+            }
+        }
+        assert!(checked > 380_000, "expected the whole range, got {checked}");
+    }
+
+    /// Leap-year handling is the part of a calendar that goes wrong quietly.
+    #[test]
+    fn february_29_exists_exactly_in_leap_years() {
+        for (year, leap) in [
+            (2000u64, true), // divisible by 400, so a leap year
+            (2024, true),
+            (2023, false),
+            (2100, false), // divisible by 100 but not 400, so it is not
+            (2400, true),
+        ] {
+            assert_eq!(
+                days_from_civil(year, 2, 29).is_some(),
+                leap,
+                "February 29 in {year}"
+            );
+        }
+    }
+
+    /// A clock reading that is not one used to be folded into the following
+    /// day rather than rejected, so an article stamped 25:00 was reported as
+    /// posted tomorrow.
+    #[test]
+    fn an_impossible_clock_reading_is_refused() {
+        assert!(ymd_hms_to_epoch(2024, 1, 1, 23, 59, 59).is_some());
+        assert_eq!(ymd_hms_to_epoch(2024, 1, 1, 24, 0, 0), None);
+        assert_eq!(ymd_hms_to_epoch(2024, 1, 1, 0, 60, 0), None);
+        assert_eq!(ymd_hms_to_epoch(2024, 1, 1, 0, 0, 61), None);
+        // A leap second is a real reading and is kept.
+        assert!(ymd_hms_to_epoch(2016, 12, 31, 23, 59, 60).is_some());
+        // As are the dates that are not dates.
+        assert_eq!(ymd_hms_to_epoch(2023, 2, 29, 0, 0, 0), None);
+        assert_eq!(ymd_hms_to_epoch(2024, 13, 1, 0, 0, 0), None);
+        assert_eq!(ymd_hms_to_epoch(2024, 1, 0, 0, 0, 0), None);
+        // Before the epoch there is no u64 timestamp to return, and the old
+        // code silently answered as though the year were 1970.
+        assert_eq!(ymd_hms_to_epoch(1969, 12, 31, 0, 0, 0), None);
+    }
+
+    /// Sibling elements are not nesting. The counter is decremented when a
+    /// child closes, so a feed with thousands of `<item>`s under one
+    /// `<channel>` — which is completely ordinary — must not trip the limit.
+    #[test]
+    fn many_siblings_do_not_count_as_depth() {
+        let mut xml = String::from("<channel>");
+        for i in 0..5000 {
+            xml.push_str(&format!("<item><title>{i}</title></item>"));
+        }
+        xml.push_str("</channel>");
+        let parsed = parse_xml(&xml).expect("siblings are not depth");
+        assert_eq!(parsed.find_all("item").len(), 5000);
+    }
 
     // -----------------------------------------------------------------------
     // XML Parser tests
@@ -4651,7 +5054,7 @@ mod tests {
     #[test]
     fn test_format_timestamp_known_date() {
         // 2024-01-01 00:00:00 UTC
-        let ts = ymd_hms_to_epoch(2024, 1, 1, 0, 0, 0);
+        let ts = ymd_hms_to_epoch(2024, 1, 1, 0, 0, 0).expect("2024-01-01 is a date");
         let formatted = format_timestamp(ts);
         assert!(formatted.starts_with("2024-01-01"));
     }
@@ -4673,7 +5076,7 @@ mod tests {
     #[test]
     fn test_days_to_ymd_known_date() {
         // 2024-01-01 is day 19723 since epoch
-        let ts = ymd_hms_to_epoch(2024, 1, 1, 0, 0, 0);
+        let ts = ymd_hms_to_epoch(2024, 1, 1, 0, 0, 0).expect("2024-01-01 is a date");
         let days = ts / 86400;
         let (y, m, d) = days_to_ymd(days);
         assert_eq!((y, m, d), (2024, 1, 1));
@@ -5704,6 +6107,65 @@ mod tests {
         let word = "a".repeat(200);
         let lines = wrap_text(&word, 50.0, 14.0);
         assert!(lines.len() > 1);
+    }
+
+    #[test]
+    fn a_long_non_ascii_word_is_wrapped_rather_than_panicking() {
+        // 120 characters, 360 bytes. Splitting this at a *byte* offset of 77
+        // lands in the middle of the encoding of a character, and `split_at`
+        // panics when it does -- it does not truncate or round. The text
+        // reaching here is an article body, i.e. whatever the subscribed feed
+        // served, so before the fix a feed could decide whether the content
+        // view rendered at all.
+        let word = "\u{65e5}\u{672c}\u{8a9e}".repeat(40);
+        let lines = wrap_text(&word, 600.0, 14.0);
+        assert!(lines.len() > 1, "120 characters must not fit one line here");
+        assert_eq!(lines.concat(), word, "wrapping must not lose or add text");
+        // The first line is a full one, so it is the budget; nothing may exceed it.
+        let budget = lines.first().map_or(0, |line| line.chars().count());
+        assert!(budget > 0);
+        for line in &lines {
+            assert!(
+                line.chars().count() <= budget,
+                "line of {} characters exceeds the {budget}-character budget",
+                line.chars().count()
+            );
+        }
+    }
+
+    #[test]
+    fn wrapping_counts_characters_not_bytes() {
+        // The same shape of text in two alphabets, one of which encodes to two
+        // bytes per character. Wrapping answers a question about what is
+        // drawn, so the two must wrap identically. Measured against
+        // `str::len` the Greek wrapped at half the width of the Latin -- a
+        // silent display bug, separate from the panic above, that affected
+        // every feed not written in ASCII.
+        let latin = "abc def ghi jkl mno pqr stu vwx";
+        let greek = "\u{3b1}\u{3b2}\u{3b3} \u{3b4}\u{3b5}\u{3b6} \u{3b7}\u{3b8}\u{3b9} \
+                     \u{3ba}\u{3bb}\u{3bc} \u{3bd}\u{3be}\u{3bf} \u{3c0}\u{3c1}\u{3c3} \
+                     \u{3c4}\u{3c5}\u{3c6} \u{3c7}\u{3c8}\u{3c9}";
+        let latin_lines = wrap_text(latin, 200.0, 14.0);
+        let greek_lines = wrap_text(greek, 200.0, 14.0);
+        assert!(
+            latin_lines.len() > 1,
+            "the sample must actually wrap or this test asserts nothing"
+        );
+        let widths = |lines: &[String]| -> Vec<usize> {
+            lines.iter().map(|line| line.chars().count()).collect()
+        };
+        assert_eq!(widths(&latin_lines), widths(&greek_lines));
+    }
+
+    #[test]
+    fn a_very_long_word_wraps_without_dropping_text() {
+        // A word the feed chose the length of. The break loop must be linear
+        // in that length -- re-measuring the untaken remainder on every pass
+        // would walk the whole word once per line produced.
+        let word = "\u{3bb}".repeat(50_000);
+        let lines = wrap_text(&word, 200.0, 14.0);
+        assert!(lines.len() > 100);
+        assert_eq!(lines.concat(), word);
     }
 
     // -----------------------------------------------------------------------

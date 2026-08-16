@@ -19,10 +19,10 @@
 //! Enter/Space to drop a piece, N for new game, Escape to quit.
 
 use guitk::color::Color;
-use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
-use guitk::style::CornerRadii;
 #[allow(unused_imports)]
 use guitk::event::{Event, Key, KeyEvent, Modifiers};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
+use guitk::style::CornerRadii;
 
 // ── Catppuccin Mocha palette ────────────────────────────────────────
 const BASE: Color = Color::from_hex(0x1E1E2E);
@@ -44,6 +44,14 @@ const MAUVE: Color = Color::from_hex(0xCBA6F7);
 // ── Layout constants ────────────────────────────────────────────────
 const COLS: usize = 7;
 const ROWS: usize = 6;
+/// Total cells on the board. A `const` rather than `COLS * ROWS` written at
+/// each use: a multiplication in a const initialiser is checked by the
+/// compiler, so it cannot be the arithmetic that overflows at runtime.
+const CELL_COUNT: usize = COLS * ROWS;
+/// The column the AI prefers and the cursor starts on.
+const CENTER_COL: usize = COLS / 2;
+/// How many pieces in a row win the game.
+const RUN: usize = 4;
 const CELL_SIZE: f32 = 72.0;
 const CELL_GAP: f32 = 4.0;
 const BOARD_PADDING: f32 = 16.0;
@@ -56,6 +64,8 @@ const INDICATOR_SIZE: f32 = 20.0;
 const CORNER_RADIUS: f32 = 8.0;
 const CELL_CORNER_RADIUS: f32 = 4.0;
 const WIN_LINE_WIDTH: f32 = 4.0;
+/// How many of the most recent moves the history panel lists.
+const MAX_HISTORY_SHOWN: usize = 20;
 
 // ── AI constants ────────────────────────────────────────────────────
 const AI_DEPTH: i32 = 6;
@@ -114,7 +124,62 @@ enum GameStatus {
 /// Coordinates of the four cells forming a winning line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct WinLine {
-    cells: [(usize, usize); 4],
+    cells: [(usize, usize); RUN],
+}
+
+// ── Run geometry ────────────────────────────────────────────────────
+
+/// The directions a run of four can take, as `(row_step, col_step)`.
+///
+/// Four, not eight: a run and the same run walked backwards are the same
+/// four cells, so including the reverses would find every win twice and
+/// double every window's contribution to the AI's evaluation.
+const DIRECTIONS: [(isize, isize); 4] = [(0, 1), (1, 0), (1, 1), (1, -1)];
+
+/// The coordinates of the `RUN` cells beginning at `(row, col)` and stepping
+/// by `(dr, dc)`, or `None` if the run would leave the board.
+///
+/// This is the *only* place a run's bounds are checked. Win detection, the
+/// AI's board evaluation and the win-line highlight all scan the same runs,
+/// and each used to carry its own hand-written copy of the `col + 3 < COLS`
+/// arithmetic — eight copies in all, four of them written out a second time
+/// with the offsets spelled into the indices (`grid[row + 2][col - 2]`).
+/// Eight copies of a bound are eight chances to get one of them wrong.
+fn line_cells(row: usize, col: usize, dr: isize, dc: isize) -> Option<[(usize, usize); RUN]> {
+    let mut cells = [(0usize, 0usize); RUN];
+    for (i, cell) in cells.iter_mut().enumerate() {
+        let step = isize::try_from(i).ok()?;
+        let r = isize::try_from(row)
+            .ok()?
+            .checked_add(dr.checked_mul(step)?)?;
+        let c = isize::try_from(col)
+            .ok()?
+            .checked_add(dc.checked_mul(step)?)?;
+        // `try_from` is the negative-side bound: a run heading down or left
+        // off the board produces a negative coordinate, which has no `usize`.
+        let (r, c) = (usize::try_from(r).ok()?, usize::try_from(c).ok()?);
+        if r >= ROWS || c >= COLS {
+            return None;
+        }
+        *cell = (r, c);
+    }
+    Some(cells)
+}
+
+/// Every run of four that fits on the board: row-major, and within a cell in
+/// `DIRECTIONS` order.
+///
+/// The order is observable — `find_winner` reports the first winning run it
+/// yields — and reproduces what the hand-written nested scans it replaced
+/// produced.
+fn all_lines() -> impl Iterator<Item = [(usize, usize); RUN]> {
+    (0..ROWS).flat_map(|row| {
+        (0..COLS).flat_map(move |col| {
+            DIRECTIONS
+                .iter()
+                .filter_map(move |&(dr, dc)| line_cells(row, col, dr, dc))
+        })
+    })
 }
 
 // ── Board ───────────────────────────────────────────────────────────
@@ -140,116 +205,114 @@ impl Board {
         }
     }
 
+    /// The number of pieces in `col`, which is also the row the next piece
+    /// dropped there would land in. `None` for a column not on the board.
+    fn height(&self, col: usize) -> Option<usize> {
+        self.heights.get(col).copied()
+    }
+
     /// Returns `true` if the given column can accept another piece.
     fn can_drop(&self, col: usize) -> bool {
-        col < COLS && self.heights[col] < ROWS
+        self.height(col).is_some_and(|filled| filled < ROWS)
+    }
+
+    /// Returns the cell at the given (row, col). Cells off the board read as
+    /// `Empty` — there is nothing there to be anyone's piece.
+    fn get(&self, row: usize, col: usize) -> Cell {
+        self.grid
+            .get(row)
+            .and_then(|cells| cells.get(col))
+            .copied()
+            .unwrap_or(Cell::Empty)
+    }
+
+    /// Writes `piece` at `(row, col)`, returning `false` if that is not a
+    /// cell on the board.
+    fn set(&mut self, row: usize, col: usize, piece: Cell) -> bool {
+        let Some(cell) = self.grid.get_mut(row).and_then(|cells| cells.get_mut(col)) else {
+            return false;
+        };
+        *cell = piece;
+        true
     }
 
     /// Drops a piece into the given column. Returns the row it landed in,
-    /// or `None` if the column is full.
+    /// or `None` if the column is full or not on the board.
     fn drop_piece(&mut self, col: usize, piece: Cell) -> Option<usize> {
-        if !self.can_drop(col) {
+        let row = self.height(col)?;
+        if row >= ROWS || !self.set(row, col, piece) {
             return None;
         }
-        let row = self.heights[col];
-        self.grid[row][col] = piece;
-        self.heights[col] = row + 1;
-        self.piece_count += 1;
+        *self.heights.get_mut(col)? = row.saturating_add(1);
+        self.piece_count = self.piece_count.saturating_add(1);
         Some(row)
     }
 
     /// Removes the top piece from the given column (for AI undo). Returns
-    /// the cell that was removed, or `None` if the column is empty.
+    /// the cell that was removed, or `None` if the column is empty or not on
+    /// the board.
     fn undo_drop(&mut self, col: usize) -> Option<Cell> {
-        if self.heights[col] == 0 {
+        // Via `height`, not `self.heights[col]`. This was the one place in
+        // the drop/undo pair where the column index went unchecked: an
+        // off-board column that `can_drop` merely declined would panic here.
+        let row = self.height(col)?.checked_sub(1)?;
+        let cell = self.get(row, col);
+        if !self.set(row, col, Cell::Empty) {
             return None;
         }
-        self.heights[col] -= 1;
-        let row = self.heights[col];
-        let cell = self.grid[row][col];
-        self.grid[row][col] = Cell::Empty;
-        self.piece_count -= 1;
+        *self.heights.get_mut(col)? = row;
+        self.piece_count = self.piece_count.saturating_sub(1);
         Some(cell)
     }
 
-    /// Returns the cell at the given (row, col).
-    fn get(&self, row: usize, col: usize) -> Cell {
-        if row < ROWS && col < COLS {
-            self.grid[row][col]
-        } else {
-            Cell::Empty
-        }
+    /// Plays `piece` in `col`, evaluates `f` on the resulting position, then
+    /// takes the piece back.
+    ///
+    /// Returns `None` — *without* calling `f` — if the drop was refused. The
+    /// AI used to drop and undo as two separate statements and discard both
+    /// results, so a refused drop would still have run the undo, taking back
+    /// a piece some earlier move had put there.
+    fn with_move<T>(
+        &mut self,
+        col: usize,
+        piece: Cell,
+        f: impl FnOnce(&mut Self) -> T,
+    ) -> Option<T> {
+        self.drop_piece(col, piece)?;
+        let out = f(self);
+        let undone = self.undo_drop(col);
+        debug_assert!(undone.is_some(), "a drop that succeeded must be undoable");
+        Some(out)
     }
 
     /// Returns `true` if every column is full.
     fn is_full(&self) -> bool {
-        self.piece_count >= COLS * ROWS
+        self.piece_count >= CELL_COUNT
+    }
+
+    /// The player whose pieces occupy all of `cells`, or `None` if the run
+    /// is not one player's alone.
+    fn line_owner(&self, cells: [(usize, usize); RUN]) -> Option<Cell> {
+        let mut occupants = cells.into_iter().map(|(row, col)| self.get(row, col));
+        let first = occupants.next()?;
+        if first == Cell::Empty {
+            return None;
+        }
+        occupants.all(|cell| cell == first).then_some(first)
     }
 
     /// Checks for a four-in-a-row starting at (row, col) in a given
     /// direction (dr, dc). Returns the winning line if found.
-    fn check_line(
-        &self,
-        row: usize,
-        col: usize,
-        dr: isize,
-        dc: isize,
-    ) -> Option<WinLine> {
-        let piece = self.grid[row][col];
-        if piece == Cell::Empty {
-            return None;
-        }
-        let mut cells = [(row, col); 4];
-        // i is used both as a multiplier on (dr, dc) and as the write index
-        // into `cells`; iter_mut would force a parallel counter.
-        #[allow(clippy::needless_range_loop)]
-        for i in 1..4 {
-            let nr = row as isize + dr * i as isize;
-            let nc = col as isize + dc * i as isize;
-            if nr < 0 || nr >= ROWS as isize || nc < 0 || nc >= COLS as isize {
-                return None;
-            }
-            let nr = nr as usize;
-            let nc = nc as usize;
-            if self.grid[nr][nc] != piece {
-                return None;
-            }
-            cells[i] = (nr, nc);
-        }
+    fn check_line(&self, row: usize, col: usize, dr: isize, dc: isize) -> Option<WinLine> {
+        let cells = line_cells(row, col, dr, dc)?;
+        self.line_owner(cells)?;
         Some(WinLine { cells })
     }
 
     /// Scans the entire board for a four-in-a-row. Returns the winner
     /// and the winning line if found.
     fn find_winner(&self) -> Option<(Cell, WinLine)> {
-        for row in 0..ROWS {
-            for col in 0..COLS {
-                if self.grid[row][col] == Cell::Empty {
-                    continue;
-                }
-                // Right
-                if col + 3 < COLS
-                    && let Some(line) = self.check_line(row, col, 0, 1) {
-                        return Some((self.grid[row][col], line));
-                    }
-                // Up
-                if row + 3 < ROWS
-                    && let Some(line) = self.check_line(row, col, 1, 0) {
-                        return Some((self.grid[row][col], line));
-                    }
-                // Up-right diagonal
-                if row + 3 < ROWS && col + 3 < COLS
-                    && let Some(line) = self.check_line(row, col, 1, 1) {
-                        return Some((self.grid[row][col], line));
-                    }
-                // Up-left diagonal
-                if row + 3 < ROWS && col >= 3
-                    && let Some(line) = self.check_line(row, col, 1, -1) {
-                        return Some((self.grid[row][col], line));
-                    }
-            }
-        }
-        None
+        all_lines().find_map(|cells| Some((self.line_owner(cells)?, WinLine { cells })))
     }
 
     /// Returns the current game status by checking for winners and draws.
@@ -263,58 +326,19 @@ impl Board {
         }
     }
 
-    /// Quick check: does the given player have four in a row?
-    /// More efficient than `find_winner` when we only need a boolean.
+    /// Does the given player have four in a row?
+    ///
+    /// `find_winner` answers the same question and also says *which* four;
+    /// this is the form the AI's inner loop wants. They scan `all_lines` in
+    /// the same order, so they cannot disagree — which they could when each
+    /// carried its own hand-written scan, and a disagreement would have had
+    /// the AI searching positions the game already considered won.
     fn has_won(&self, player: Cell) -> bool {
-        // Horizontal
-        for row in 0..ROWS {
-            for col in 0..COLS.saturating_sub(3) {
-                if self.grid[row][col] == player
-                    && self.grid[row][col + 1] == player
-                    && self.grid[row][col + 2] == player
-                    && self.grid[row][col + 3] == player
-                {
-                    return true;
-                }
-            }
-        }
-        // Vertical
-        for col in 0..COLS {
-            for row in 0..ROWS.saturating_sub(3) {
-                if self.grid[row][col] == player
-                    && self.grid[row + 1][col] == player
-                    && self.grid[row + 2][col] == player
-                    && self.grid[row + 3][col] == player
-                {
-                    return true;
-                }
-            }
-        }
-        // Diagonal up-right
-        for row in 0..ROWS.saturating_sub(3) {
-            for col in 0..COLS.saturating_sub(3) {
-                if self.grid[row][col] == player
-                    && self.grid[row + 1][col + 1] == player
-                    && self.grid[row + 2][col + 2] == player
-                    && self.grid[row + 3][col + 3] == player
-                {
-                    return true;
-                }
-            }
-        }
-        // Diagonal up-left
-        for row in 0..ROWS.saturating_sub(3) {
-            for col in 3..COLS {
-                if self.grid[row][col] == player
-                    && self.grid[row + 1][col - 1] == player
-                    && self.grid[row + 2][col - 2] == player
-                    && self.grid[row + 3][col - 3] == player
-                {
-                    return true;
-                }
-            }
-        }
-        false
+        all_lines().any(|cells| {
+            cells
+                .into_iter()
+                .all(|(row, col)| self.get(row, col) == player)
+        })
     }
 
     /// Returns a list of columns that can accept pieces, ordered from the
@@ -322,14 +346,18 @@ impl Board {
     fn valid_moves(&self) -> Vec<usize> {
         // Center-first ordering: 3, 2, 4, 1, 5, 0, 6
         const ORDER: [usize; COLS] = [3, 2, 4, 1, 5, 0, 6];
-        ORDER.iter().copied().filter(|&c| self.can_drop(c)).collect()
+        ORDER
+            .iter()
+            .copied()
+            .filter(|&c| self.can_drop(c))
+            .collect()
     }
 }
 
 // ── AI: Minimax with alpha-beta pruning ─────────────────────────────
 
 /// Evaluates a window of 4 cells for scoring.
-fn evaluate_window(window: &[Cell; 4], player: Cell) -> i32 {
+fn evaluate_window(window: &[Cell; RUN], player: Cell) -> i32 {
     let opp = player.opponent();
     let player_count = window.iter().filter(|&&c| c == player).count();
     let opp_count = window.iter().filter(|&&c| c == opp).count();
@@ -350,66 +378,20 @@ fn evaluate_window(window: &[Cell; 4], player: Cell) -> i32 {
 
 /// Evaluates the entire board position from the perspective of `player`.
 fn evaluate_board(board: &Board, player: Cell) -> i32 {
-    let mut score: i32 = 0;
+    // Center column preference.
+    let center_pieces = (0..ROWS)
+        .filter(|&row| board.get(row, CENTER_COL) == player)
+        .count();
+    let mut score = i32::try_from(center_pieces)
+        .unwrap_or(i32::MAX)
+        .saturating_mul(SCORE_CENTER);
 
-    // Center column preference
-    let center_col = COLS / 2;
-    for row in 0..ROWS {
-        if board.grid[row][center_col] == player {
-            score += SCORE_CENTER;
-        }
-    }
-
-    // Horizontal windows
-    for row in 0..ROWS {
-        for col in 0..COLS.saturating_sub(3) {
-            let window = [
-                board.grid[row][col],
-                board.grid[row][col + 1],
-                board.grid[row][col + 2],
-                board.grid[row][col + 3],
-            ];
-            score += evaluate_window(&window, player);
-        }
-    }
-
-    // Vertical windows
-    for col in 0..COLS {
-        for row in 0..ROWS.saturating_sub(3) {
-            let window = [
-                board.grid[row][col],
-                board.grid[row + 1][col],
-                board.grid[row + 2][col],
-                board.grid[row + 3][col],
-            ];
-            score += evaluate_window(&window, player);
-        }
-    }
-
-    // Diagonal up-right
-    for row in 0..ROWS.saturating_sub(3) {
-        for col in 0..COLS.saturating_sub(3) {
-            let window = [
-                board.grid[row][col],
-                board.grid[row + 1][col + 1],
-                board.grid[row + 2][col + 2],
-                board.grid[row + 3][col + 3],
-            ];
-            score += evaluate_window(&window, player);
-        }
-    }
-
-    // Diagonal up-left
-    for row in 0..ROWS.saturating_sub(3) {
-        for col in 3..COLS {
-            let window = [
-                board.grid[row][col],
-                board.grid[row + 1][col - 1],
-                board.grid[row + 2][col - 2],
-                board.grid[row + 3][col - 3],
-            ];
-            score += evaluate_window(&window, player);
-        }
+    // Every window on the board, in all four directions. The sum does not
+    // depend on the order, so this is the same score the four hand-written
+    // direction loops produced — from one scan instead of four.
+    for cells in all_lines() {
+        let window = cells.map(|(row, col)| board.get(row, col));
+        score = score.saturating_add(evaluate_window(&window, player));
     }
 
     score
@@ -431,11 +413,13 @@ fn minimax(
     ai_player: Cell,
 ) -> (i32, Option<usize>) {
     if depth == 0 || is_terminal(board) {
+        // A win found sooner is worth more than the same win found later, so
+        // the remaining depth is added to the magnitude.
         if board.has_won(ai_player) {
-            return (SCORE_WIN + depth, None);
+            return (SCORE_WIN.saturating_add(depth), None);
         }
         if board.has_won(ai_player.opponent()) {
-            return (-SCORE_WIN - depth, None);
+            return (SCORE_WIN.saturating_add(depth).saturating_neg(), None);
         }
         if board.is_full() {
             return (0, None);
@@ -444,69 +428,60 @@ fn minimax(
     }
 
     let moves = board.valid_moves();
-    if moves.is_empty() {
+    // The first legal move is the fallback answer: alpha-beta can cut the
+    // loop off before any move has beaten `best_score`, and no legal move at
+    // all means there is nothing to report.
+    let Some(&fallback) = moves.first() else {
         return (0, None);
-    }
+    };
+    let deeper = depth.saturating_sub(1);
+    let mover = if maximizing {
+        ai_player
+    } else {
+        ai_player.opponent()
+    };
 
-    if maximizing {
-        let mut best_score = i32::MIN;
-        let mut best_col = moves[0];
-        for &col in &moves {
-            let current = ai_player;
-            board.drop_piece(col, current);
-            let (score, _) = minimax(board, depth - 1, alpha, beta, false, ai_player);
-            board.undo_drop(col);
+    let mut best_col = fallback;
+    let mut best_score = if maximizing { i32::MIN } else { i32::MAX };
+    for &col in &moves {
+        let Some((score, _)) = board.with_move(col, mover, |after| {
+            minimax(after, deeper, alpha, beta, !maximizing, ai_player)
+        }) else {
+            // `valid_moves` said this column had room, so a refusal here
+            // means the board changed under us; skip rather than undo a
+            // move that was never made.
+            continue;
+        };
+        if maximizing {
             if score > best_score {
                 best_score = score;
                 best_col = col;
             }
             alpha = alpha.max(score);
-            if alpha >= beta {
-                break;
-            }
-        }
-        (best_score, Some(best_col))
-    } else {
-        let mut best_score = i32::MAX;
-        let mut best_col = moves[0];
-        for &col in &moves {
-            let current = ai_player.opponent();
-            board.drop_piece(col, current);
-            let (score, _) = minimax(board, depth - 1, alpha, beta, true, ai_player);
-            board.undo_drop(col);
+        } else {
             if score < best_score {
                 best_score = score;
                 best_col = col;
             }
             beta = beta.min(score);
-            if alpha >= beta {
-                break;
-            }
         }
-        (best_score, Some(best_col))
+        if alpha >= beta {
+            break;
+        }
     }
+    (best_score, Some(best_col))
 }
 
 /// Finds the best move for the AI player using minimax.
 fn ai_best_move(board: &mut Board, ai_player: Cell, depth: i32) -> Option<usize> {
-    // Check for immediate winning move first
-    for &col in &board.valid_moves() {
-        board.drop_piece(col, ai_player);
-        let wins = board.has_won(ai_player);
-        board.undo_drop(col);
-        if wins {
-            return Some(col);
-        }
-    }
-
-    // Check for immediate block needed
-    let opp = ai_player.opponent();
-    for &col in &board.valid_moves() {
-        board.drop_piece(col, opp);
-        let wins = board.has_won(opp);
-        board.undo_drop(col);
-        if wins {
-            return Some(col);
+    // A move that wins immediately, and then one that stops the opponent
+    // winning immediately, both beat whatever the search would return — and
+    // the two searches are the same search with a different piece in hand.
+    for player in [ai_player, ai_player.opponent()] {
+        for col in board.valid_moves() {
+            if board.with_move(col, player, |after| after.has_won(player)) == Some(true) {
+                return Some(col);
+            }
         }
     }
 
@@ -548,7 +523,7 @@ impl Connect4App {
     fn new() -> Self {
         Self {
             board: Board::new(),
-            cursor_col: COLS / 2,
+            cursor_col: CENTER_COL,
             current_player: Cell::Red,
             status: GameStatus::Playing,
             win_line: None,
@@ -565,7 +540,7 @@ impl Connect4App {
     /// Resets the board for a new game.
     fn new_game(&mut self) {
         self.board = Board::new();
-        self.cursor_col = COLS / 2;
+        self.cursor_col = CENTER_COL;
         self.current_player = Cell::Red;
         self.status = GameStatus::Playing;
         self.win_line = None;
@@ -574,16 +549,15 @@ impl Connect4App {
 
     /// Moves the cursor left.
     fn move_cursor_left(&mut self) {
-        if self.cursor_col > 0 {
-            self.cursor_col -= 1;
-        }
+        self.cursor_col = self.cursor_col.saturating_sub(1);
     }
 
     /// Moves the cursor right.
     fn move_cursor_right(&mut self) {
-        if self.cursor_col + 1 < COLS {
-            self.cursor_col += 1;
-        }
+        self.cursor_col = self
+            .cursor_col
+            .saturating_add(1)
+            .min(COLS.saturating_sub(1));
     }
 
     /// Attempts to drop a piece in the current cursor column.
@@ -604,33 +578,25 @@ impl Connect4App {
         if self.status != GameStatus::Playing {
             return false;
         }
-        if !self.board.can_drop(col) {
+        let player = self.current_player;
+        // `drop_piece` states the "is there room in this column" bound itself
+        // and reports it; a `can_drop` guard here would be the same bound
+        // written a second time, one statement away from the read it guards.
+        if self.board.drop_piece(col, player).is_none() {
             return false;
         }
-        let player = self.current_player;
-        self.board.drop_piece(col, player);
         self.move_history.push((col, player));
 
         // Check for win
         if let Some((_, line)) = self.board.find_winner() {
             self.status = GameStatus::Won(player);
             self.win_line = Some(line);
-            match player {
-                Cell::Red => {
-                    if player == self.human_player {
-                        self.human_wins += 1;
-                    } else {
-                        self.ai_wins += 1;
-                    }
-                }
-                Cell::Yellow => {
-                    if player == self.human_player {
-                        self.human_wins += 1;
-                    } else {
-                        self.ai_wins += 1;
-                    }
-                }
-                Cell::Empty => {}
+            // Both arms of the `match player` this replaces did the same
+            // thing: who scores turns only on whether the mover is the human.
+            if player == self.human_player {
+                self.human_wins = self.human_wins.saturating_add(1);
+            } else {
+                self.ai_wins = self.ai_wins.saturating_add(1);
             }
             return true;
         }
@@ -638,7 +604,7 @@ impl Connect4App {
         // Check for draw
         if self.board.is_full() {
             self.status = GameStatus::Draw;
-            self.draws += 1;
+            self.draws = self.draws.saturating_add(1);
             return true;
         }
 
@@ -676,9 +642,7 @@ impl Connect4App {
             Key::Enter | Key::Space => {
                 if self.drop_current() {
                     // After human move, run AI if game is still going
-                    if self.status == GameStatus::Playing
-                        && self.current_player == self.ai_player
-                    {
+                    if self.status == GameStatus::Playing && self.current_player == self.ai_player {
                         self.ai_turn();
                     }
                 }
@@ -695,12 +659,10 @@ impl Connect4App {
     /// Returns the pixel center of a board cell (col, row) for rendering.
     /// Row 0 is the bottom row, but we render it at the bottom of the screen.
     fn cell_center(col: usize, row: usize) -> (f32, f32) {
-        let x = BOARD_OFFSET_X
-            + BOARD_PADDING
-            + col as f32 * (CELL_SIZE + CELL_GAP)
-            + CELL_SIZE / 2.0;
+        let x =
+            BOARD_OFFSET_X + BOARD_PADDING + col as f32 * (CELL_SIZE + CELL_GAP) + CELL_SIZE / 2.0;
         // Row 0 is bottom, so we flip: row 0 maps to the last visual row
-        let visual_row = ROWS - 1 - row;
+        let visual_row = ROWS.saturating_sub(1).saturating_sub(row);
         let y = BOARD_OFFSET_Y
             + BOARD_PADDING
             + visual_row as f32 * (CELL_SIZE + CELL_GAP)
@@ -847,9 +809,11 @@ impl Connect4App {
                     corner_radii: CornerRadii::all(PIECE_RADIUS + 2.0),
                 });
             }
-            // Draw lines connecting winning cells
-            let (r0, c0) = line.cells[0];
-            let (r3, c3) = line.cells[3];
+            // Draw a line connecting the ends of the run. Destructuring the
+            // fixed-size array rather than indexing it: `[first, .., last]`
+            // is irrefutable for `[_; RUN]`, so the compiler — not a comment
+            // about `RUN` being 4 — is what says the ends exist.
+            let [(r0, c0), .., (r3, c3)] = line.cells;
             let (x1, y1) = Self::cell_center(c0, r0);
             let (x2, y2) = Self::cell_center(c3, r3);
             cmds.push(RenderCommand::Line {
@@ -869,7 +833,7 @@ impl Connect4App {
             cmds.push(RenderCommand::Text {
                 x: cx - 4.0,
                 y: col_y,
-                text: format!("{}", col + 1),
+                text: format!("{}", col.saturating_add(1)),
                 color: OVERLAY0,
                 font_size: INFO_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
@@ -905,16 +869,12 @@ impl Connect4App {
             overflow: TextOverflow::Clip,
         });
 
-        let max_display = 20;
-        let start = if self.move_history.len() > max_display {
-            self.move_history.len() - max_display
-        } else {
-            0
-        };
-        for (i, &(col, player)) in self.move_history[start..].iter().enumerate() {
-            let move_num = start + i + 1;
+        let start = self.move_history.len().saturating_sub(MAX_HISTORY_SHOWN);
+        let shown = self.move_history.get(start..).unwrap_or_default();
+        for (i, &(col, player)) in shown.iter().enumerate() {
+            let move_num = start.saturating_add(i).saturating_add(1);
             let player_name = if player == Cell::Red { "R" } else { "Y" };
-            let line = format!("{move_num}. {player_name} -> col {}", col + 1);
+            let line = format!("{move_num}. {player_name} -> col {}", col.saturating_add(1));
             let color = if player == Cell::Red { RED } else { YELLOW };
             cmds.push(RenderCommand::Text {
                 x: panel_x,
@@ -940,6 +900,17 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    // A test that indexes out of range should fail loudly and point at the
+    // line that did it — that is the diagnosis. The defensive lints exist to
+    // keep panics out of code that runs on a user's data, which this is not.
+    #![allow(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
+
     use super::*;
 
     // ── Board basic tests ───────────────────────────────────────────
@@ -1257,12 +1228,60 @@ mod tests {
         // Columns filled alternating in groups of 3 to prevent horizontal wins
         let pattern = [
             // col 0       col 1       col 2       col 3       col 4       col 5       col 6
-            [Cell::Red,    Cell::Red,    Cell::Red,    Cell::Yellow, Cell::Yellow, Cell::Yellow, Cell::Red],
-            [Cell::Yellow, Cell::Yellow, Cell::Yellow, Cell::Red,    Cell::Red,    Cell::Red,    Cell::Yellow],
-            [Cell::Red,    Cell::Red,    Cell::Red,    Cell::Yellow, Cell::Yellow, Cell::Yellow, Cell::Red],
-            [Cell::Red,    Cell::Red,    Cell::Red,    Cell::Yellow, Cell::Yellow, Cell::Yellow, Cell::Red],
-            [Cell::Yellow, Cell::Yellow, Cell::Yellow, Cell::Red,    Cell::Red,    Cell::Red,    Cell::Yellow],
-            [Cell::Red,    Cell::Red,    Cell::Red,    Cell::Yellow, Cell::Yellow, Cell::Yellow, Cell::Red],
+            [
+                Cell::Red,
+                Cell::Red,
+                Cell::Red,
+                Cell::Yellow,
+                Cell::Yellow,
+                Cell::Yellow,
+                Cell::Red,
+            ],
+            [
+                Cell::Yellow,
+                Cell::Yellow,
+                Cell::Yellow,
+                Cell::Red,
+                Cell::Red,
+                Cell::Red,
+                Cell::Yellow,
+            ],
+            [
+                Cell::Red,
+                Cell::Red,
+                Cell::Red,
+                Cell::Yellow,
+                Cell::Yellow,
+                Cell::Yellow,
+                Cell::Red,
+            ],
+            [
+                Cell::Red,
+                Cell::Red,
+                Cell::Red,
+                Cell::Yellow,
+                Cell::Yellow,
+                Cell::Yellow,
+                Cell::Red,
+            ],
+            [
+                Cell::Yellow,
+                Cell::Yellow,
+                Cell::Yellow,
+                Cell::Red,
+                Cell::Red,
+                Cell::Red,
+                Cell::Yellow,
+            ],
+            [
+                Cell::Red,
+                Cell::Red,
+                Cell::Red,
+                Cell::Yellow,
+                Cell::Yellow,
+                Cell::Yellow,
+                Cell::Red,
+            ],
         ];
         board.grid = pattern;
         board.heights = [ROWS; COLS];
@@ -1442,12 +1461,60 @@ mod tests {
     fn test_is_terminal_draw() {
         let mut board = Board::new();
         let pattern = [
-            [Cell::Red,    Cell::Red,    Cell::Red,    Cell::Yellow, Cell::Yellow, Cell::Yellow, Cell::Red],
-            [Cell::Yellow, Cell::Yellow, Cell::Yellow, Cell::Red,    Cell::Red,    Cell::Red,    Cell::Yellow],
-            [Cell::Red,    Cell::Red,    Cell::Red,    Cell::Yellow, Cell::Yellow, Cell::Yellow, Cell::Red],
-            [Cell::Red,    Cell::Red,    Cell::Red,    Cell::Yellow, Cell::Yellow, Cell::Yellow, Cell::Red],
-            [Cell::Yellow, Cell::Yellow, Cell::Yellow, Cell::Red,    Cell::Red,    Cell::Red,    Cell::Yellow],
-            [Cell::Red,    Cell::Red,    Cell::Red,    Cell::Yellow, Cell::Yellow, Cell::Yellow, Cell::Red],
+            [
+                Cell::Red,
+                Cell::Red,
+                Cell::Red,
+                Cell::Yellow,
+                Cell::Yellow,
+                Cell::Yellow,
+                Cell::Red,
+            ],
+            [
+                Cell::Yellow,
+                Cell::Yellow,
+                Cell::Yellow,
+                Cell::Red,
+                Cell::Red,
+                Cell::Red,
+                Cell::Yellow,
+            ],
+            [
+                Cell::Red,
+                Cell::Red,
+                Cell::Red,
+                Cell::Yellow,
+                Cell::Yellow,
+                Cell::Yellow,
+                Cell::Red,
+            ],
+            [
+                Cell::Red,
+                Cell::Red,
+                Cell::Red,
+                Cell::Yellow,
+                Cell::Yellow,
+                Cell::Yellow,
+                Cell::Red,
+            ],
+            [
+                Cell::Yellow,
+                Cell::Yellow,
+                Cell::Yellow,
+                Cell::Red,
+                Cell::Red,
+                Cell::Red,
+                Cell::Yellow,
+            ],
+            [
+                Cell::Red,
+                Cell::Red,
+                Cell::Red,
+                Cell::Yellow,
+                Cell::Yellow,
+                Cell::Yellow,
+                Cell::Red,
+            ],
         ];
         board.grid = pattern;
         board.heights = [ROWS; COLS];
@@ -1694,9 +1761,9 @@ mod tests {
     fn test_render_has_title() {
         let app = Connect4App::new();
         let cmds = app.render();
-        let has_title = cmds.iter().any(|cmd| {
-            matches!(cmd, RenderCommand::Text { text, .. } if text == "Connect Four")
-        });
+        let has_title = cmds
+            .iter()
+            .any(|cmd| matches!(cmd, RenderCommand::Text { text, .. } if text == "Connect Four"));
         assert!(has_title);
     }
 
@@ -1704,9 +1771,9 @@ mod tests {
     fn test_render_has_board_background() {
         let app = Connect4App::new();
         let cmds = app.render();
-        let has_blue_board = cmds.iter().any(|cmd| {
-            matches!(cmd, RenderCommand::FillRect { color, .. } if *color == BLUE)
-        });
+        let has_blue_board = cmds
+            .iter()
+            .any(|cmd| matches!(cmd, RenderCommand::FillRect { color, .. } if *color == BLUE));
         assert!(has_blue_board);
     }
 
@@ -1715,9 +1782,9 @@ mod tests {
         let app = Connect4App::new();
         let cmds = app.render();
         // Should have a red indicator (cursor)
-        let has_indicator = cmds.iter().any(|cmd| {
-            matches!(cmd, RenderCommand::FillRect { color, .. } if *color == RED)
-        });
+        let has_indicator = cmds
+            .iter()
+            .any(|cmd| matches!(cmd, RenderCommand::FillRect { color, .. } if *color == RED));
         assert!(has_indicator);
     }
 
@@ -1730,10 +1797,13 @@ mod tests {
         // Count RED fill rects - should only be from pieces, not cursor
         // (There may still be red pieces, so this is a weak test,
         // but the indicator specifically has INDICATOR_SIZE dimensions)
-        let indicator_count = cmds.iter().filter(|cmd| {
-            matches!(cmd, RenderCommand::FillRect { width, color, .. }
+        let indicator_count = cmds
+            .iter()
+            .filter(|cmd| {
+                matches!(cmd, RenderCommand::FillRect { width, color, .. }
                 if *color == RED && (*width - INDICATOR_SIZE).abs() < 0.01)
-        }).count();
+            })
+            .count();
         assert_eq!(indicator_count, 0);
     }
 
@@ -1748,9 +1818,10 @@ mod tests {
             cells: [(0, 0), (0, 1), (0, 2), (0, 3)],
         });
         let cmds = app.render();
-        let stroke_count = cmds.iter().filter(|cmd| {
-            matches!(cmd, RenderCommand::StrokeRect { color, .. } if *color == GREEN)
-        }).count();
+        let stroke_count = cmds
+            .iter()
+            .filter(|cmd| matches!(cmd, RenderCommand::StrokeRect { color, .. } if *color == GREEN))
+            .count();
         assert_eq!(stroke_count, 4);
     }
 
@@ -1760,9 +1831,10 @@ mod tests {
         app.move_history.push((3, Cell::Red));
         app.move_history.push((2, Cell::Yellow));
         let cmds = app.render();
-        let history_entries = cmds.iter().filter(|cmd| {
-            matches!(cmd, RenderCommand::Text { text, .. } if text.contains("->"))
-        }).count();
+        let history_entries = cmds
+            .iter()
+            .filter(|cmd| matches!(cmd, RenderCommand::Text { text, .. } if text.contains("->")))
+            .count();
         assert_eq!(history_entries, 2);
     }
 
@@ -1850,7 +1922,14 @@ mod tests {
     #[test]
     fn test_multiple_drops_same_column() {
         let mut board = Board::new();
-        let pieces = [Cell::Red, Cell::Yellow, Cell::Red, Cell::Yellow, Cell::Red, Cell::Yellow];
+        let pieces = [
+            Cell::Red,
+            Cell::Yellow,
+            Cell::Red,
+            Cell::Yellow,
+            Cell::Red,
+            Cell::Yellow,
+        ];
         for (i, &piece) in pieces.iter().enumerate() {
             let row = board.drop_piece(4, piece);
             assert_eq!(row, Some(i));
@@ -1927,12 +2006,60 @@ mod tests {
     fn test_app_draw_increments_draws() {
         let mut app = Connect4App::new();
         let pattern = [
-            [Cell::Red,    Cell::Red,    Cell::Red,    Cell::Yellow, Cell::Yellow, Cell::Yellow, Cell::Red],
-            [Cell::Yellow, Cell::Yellow, Cell::Yellow, Cell::Red,    Cell::Red,    Cell::Red,    Cell::Yellow],
-            [Cell::Red,    Cell::Red,    Cell::Red,    Cell::Yellow, Cell::Yellow, Cell::Yellow, Cell::Red],
-            [Cell::Red,    Cell::Red,    Cell::Red,    Cell::Yellow, Cell::Yellow, Cell::Yellow, Cell::Red],
-            [Cell::Yellow, Cell::Yellow, Cell::Yellow, Cell::Red,    Cell::Red,    Cell::Red,    Cell::Yellow],
-            [Cell::Red,    Cell::Red,    Cell::Red,    Cell::Yellow, Cell::Yellow, Cell::Yellow, Cell::Yellow],
+            [
+                Cell::Red,
+                Cell::Red,
+                Cell::Red,
+                Cell::Yellow,
+                Cell::Yellow,
+                Cell::Yellow,
+                Cell::Red,
+            ],
+            [
+                Cell::Yellow,
+                Cell::Yellow,
+                Cell::Yellow,
+                Cell::Red,
+                Cell::Red,
+                Cell::Red,
+                Cell::Yellow,
+            ],
+            [
+                Cell::Red,
+                Cell::Red,
+                Cell::Red,
+                Cell::Yellow,
+                Cell::Yellow,
+                Cell::Yellow,
+                Cell::Red,
+            ],
+            [
+                Cell::Red,
+                Cell::Red,
+                Cell::Red,
+                Cell::Yellow,
+                Cell::Yellow,
+                Cell::Yellow,
+                Cell::Red,
+            ],
+            [
+                Cell::Yellow,
+                Cell::Yellow,
+                Cell::Yellow,
+                Cell::Red,
+                Cell::Red,
+                Cell::Red,
+                Cell::Yellow,
+            ],
+            [
+                Cell::Red,
+                Cell::Red,
+                Cell::Red,
+                Cell::Yellow,
+                Cell::Yellow,
+                Cell::Yellow,
+                Cell::Yellow,
+            ],
         ];
         // Fill all but one cell
         app.board.grid = pattern;
@@ -2044,9 +2171,9 @@ mod tests {
         // Should have column number labels 1..7
         for num in 1..=7 {
             let num_str = format!("{num}");
-            let has_col = cmds.iter().any(|cmd| {
-                matches!(cmd, RenderCommand::Text { text, .. } if text == &num_str)
-            });
+            let has_col = cmds
+                .iter()
+                .any(|cmd| matches!(cmd, RenderCommand::Text { text, .. } if text == &num_str));
             assert!(has_col, "Missing column number {num}");
         }
     }
@@ -2055,9 +2182,160 @@ mod tests {
     fn test_render_help_text() {
         let app = Connect4App::new();
         let cmds = app.render();
-        let has_help = cmds.iter().any(|cmd| {
-            matches!(cmd, RenderCommand::Text { text, .. } if text.contains("Left/Right"))
-        });
+        let has_help = cmds.iter().any(
+            |cmd| matches!(cmd, RenderCommand::Text { text, .. } if text.contains("Left/Right")),
+        );
         assert!(has_help);
+    }
+
+    // ── Run geometry ────────────────────────────────────────────────
+    //
+    // `all_lines` replaced eight hand-written nested scans. These tests pin
+    // the set it yields, because every other scan on the board now trusts it.
+
+    #[test]
+    fn all_lines_yields_every_run_of_four_exactly_once() {
+        let lines: Vec<_> = all_lines().collect();
+        // 24 horizontal (6 rows x 4 starts) + 21 vertical (7 cols x 3) +
+        // 12 up-right + 12 up-left. This is the standard count of
+        // four-in-a-row windows on a 7x6 board.
+        assert_eq!(lines.len(), 69, "wrong number of runs on the board");
+
+        let mut seen: Vec<[(usize, usize); RUN]> = Vec::new();
+        for line in &lines {
+            assert!(
+                !seen.contains(line),
+                "run {line:?} was yielded twice -- it would be scored twice"
+            );
+            seen.push(*line);
+        }
+    }
+
+    #[test]
+    fn every_run_all_lines_yields_is_on_the_board() {
+        for line in all_lines() {
+            for (row, col) in line {
+                assert!(
+                    row < ROWS && col < COLS,
+                    "run left the board at ({row}, {col})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_run_that_would_leave_the_board_has_no_cells() {
+        // Off the right edge, off the top, off the left edge going up-left,
+        // and starting outside the board entirely.
+        assert_eq!(line_cells(0, 4, 0, 1), None);
+        assert_eq!(line_cells(3, 0, 1, 0), None);
+        assert_eq!(line_cells(0, 2, 1, -1), None);
+        assert_eq!(line_cells(ROWS, 0, 0, 1), None);
+    }
+
+    // ── Bounds made total, not merely unreached ─────────────────────
+
+    #[test]
+    fn an_off_board_column_is_declined_rather_than_indexed() {
+        let mut board = Board::new();
+        // `can_drop` always declined an off-board column; `undo_drop` used to
+        // index `heights` with it and panic. Both now answer the same way.
+        assert!(!board.can_drop(COLS));
+        assert_eq!(board.drop_piece(COLS, Cell::Red), None);
+        assert_eq!(board.undo_drop(COLS), None);
+        assert_eq!(board.height(COLS), None);
+        assert_eq!(board.piece_count, 0, "a declined drop changes nothing");
+    }
+
+    #[test]
+    fn cells_off_the_board_are_empty_and_cannot_be_written() {
+        let mut board = Board::new();
+        assert_eq!(board.get(ROWS, 0), Cell::Empty);
+        assert_eq!(board.get(0, COLS), Cell::Empty);
+        assert!(!board.set(ROWS, 0, Cell::Red));
+        assert!(!board.set(0, COLS, Cell::Red));
+        assert!(board.set(0, 0, Cell::Red));
+        assert_eq!(board.get(0, 0), Cell::Red);
+    }
+
+    #[test]
+    fn with_move_leaves_the_board_exactly_as_it_found_it() {
+        let mut board = Board::new();
+        board.drop_piece(3, Cell::Red);
+        board.drop_piece(3, Cell::Yellow);
+        board.drop_piece(4, Cell::Red);
+        let before = board.clone();
+
+        let saw = board.with_move(3, Cell::Yellow, |after| after.get(2, 3));
+        assert_eq!(saw, Some(Cell::Yellow), "the closure sees the played move");
+        assert_eq!(board.grid, before.grid);
+        assert_eq!(board.heights, before.heights);
+        assert_eq!(board.piece_count, before.piece_count);
+    }
+
+    #[test]
+    fn with_move_on_a_full_column_runs_nothing_and_undoes_nothing() {
+        let mut board = Board::new();
+        for _ in 0..ROWS {
+            board.drop_piece(0, Cell::Red);
+        }
+        board.drop_piece(1, Cell::Yellow);
+        let before = board.clone();
+
+        // The old code dropped and undid as two statements: a refused drop
+        // still ran the undo, which would have taken back the piece in
+        // column 0 that a different move had put there.
+        let mut ran = false;
+        let out = board.with_move(0, Cell::Yellow, |_| {
+            ran = true;
+        });
+        // The board first: an undo without a matching drop is what actually
+        // damages the position, and it is what this test exists to catch.
+        assert_eq!(board.grid, before.grid, "a refused drop moved a piece");
+        assert_eq!(board.heights, before.heights);
+        assert_eq!(board.piece_count, before.piece_count);
+        assert_eq!(out, None, "a full column is refused");
+        assert!(!ran, "the closure must not run on a refused drop");
+    }
+
+    // ── The two win detectors agree ─────────────────────────────────
+
+    #[test]
+    fn has_won_and_find_winner_agree_across_a_played_out_game() {
+        // `has_won` drives the AI's search and `find_winner` decides the
+        // game the player sees. They were two independent hand-written
+        // scans; a disagreement would have had the AI searching on inside a
+        // position the board already called won. Now both read `all_lines`,
+        // and this walks a full game to say so.
+        let mut board = Board::new();
+        let mut player = Cell::Red;
+        // A fixed, non-repeating column order so the playout fills the board
+        // unevenly and passes through many near-win positions.
+        let script = [3, 3, 4, 2, 4, 5, 2, 1, 5, 6, 1, 0, 6, 0];
+        for round in 0..COLS {
+            for &col in &script {
+                let col = (col + round) % COLS;
+                if board.drop_piece(col, player).is_none() {
+                    continue;
+                }
+                player = player.opponent();
+
+                let found = board.find_winner();
+                let red = board.has_won(Cell::Red);
+                let yellow = board.has_won(Cell::Yellow);
+                assert_eq!(
+                    found.is_some(),
+                    red || yellow,
+                    "detectors disagree on\n{board:?}"
+                );
+                if let Some((winner, line)) = found {
+                    assert_eq!(
+                        board.line_owner(line.cells),
+                        Some(winner),
+                        "the reported line is not the reported winner's"
+                    );
+                }
+            }
+        }
     }
 }

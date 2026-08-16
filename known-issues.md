@@ -71422,7 +71422,7 @@ Better still, for anything that builds or boots: assert the working directory
 first, so a mislanded command fails loudly instead of quietly compiling in
 someone else's tree.
 
-### [A] B-BENCH-A-PERSISTENT-REGRESSION-IS-REPORTED-ONCE-THEN-ABSORBED-INTO-ITS-OWN-RANGE — 2026-08-15 — ⚠️ OPEN (harness defect + two real regressions found)
+### [A] B-BENCH-A-PERSISTENT-REGRESSION-IS-REPORTED-ONCE-THEN-ABSORBED-INTO-ITS-OWN-RANGE — 2026-08-15 — ⚠️ PARTLY FIXED (harness defect FIXED; the two real regressions it exposed are still unattributed)
 
 **Two findings: two genuine regressions, and the reason the harness stopped
 reporting them on the very next run.**
@@ -71500,3 +71500,100 @@ change, so attribution needs a bisect over the recorded commits
 (`f79aec5 → c893184 → e384f46`), not a guess. `http_build_response_1KiB` is the
 better target: it more than doubled, in two clean ~45% steps, from a nine-run
 plateau.
+
+#### Finding 2 — **FIXED 2026-08-15** (lane A): `level_shifts()` in `scripts/bench-history.py`
+
+The harness defect is closed. A new check compares each run against a baseline
+drawn from runs that **predate the shift** — `LEVEL_SHIFT_SKIP = 3` most-recent
+runs are excluded from the reference window, so a regression introduced in the
+last one-to-three runs cannot have entered its own baseline. This is the
+"proper fix" option above (median of runs 5-12 back), not the cheap interim one.
+
+On the recorded history it now prints, on the very run quoted above as reporting
+the suite clean:
+
+```
+SUSTAINED SHIFT (>25% off a baseline from before the last 3 runs, and outside
+that baseline's own spread -- these do NOT show up run-over-run once they persist):
+  http_build_response_1KiB: was ~5991ns -> now 12407ns (+106% vs suite);
+  pre-window baseline 5759-6277ns over 8 runs
+```
+
+**Two things had to be got right, and both were found by measurement, not
+reasoning — recorded because the first version of each looked obviously
+correct:**
+
+1. **Persistence is the entire discriminator.** The first version compared only
+   the newest run to the clean baseline. Replayed causally over all 26 recorded
+   runs it fired on **11 (42%)**, including `net_ipv6_parse +110%` and
+   `page_fault +103%` — the exact single-run excursions this same entry
+   identifies above as noise. Drift correction does not save it: contamination
+   is a **heavy tail, not a uniform slowdown**, so `speed_factor` (a median)
+   removes the central shift and leaves the tail looking like several
+   simultaneous regressions. Requiring the benchmark to be off-baseline in the
+   newest run *and* the `LEVEL_SHIFT_PERSIST = 2` before it took this to 2/26,
+   because host disturbance is random per run while a code regression is in
+   every run after the commit.
+2. **A flat percentage threshold is not scale-aware.** The one survivor was
+   `ipc_channel_sync` (646 → 967 → 684 → **578** — i.e. noise), whose own 1.5-IQR
+   fence is ~20% wide, so a 25% threshold sits *inside* its noise. Judging the
+   level shift against Tukey's **extreme**-outlier fence (`k=3`) instead of the
+   1.5 used elsewhere declines it while `http_build_response_1KiB` remains
+   outside by a factor of two. Final rate: **1 firing in 26 runs**, the true
+   positive.
+
+**Known limitation, deliberate:** this inherits the flat 25% threshold, so the
+concurrent `vfs_stat_root` shift (~3600 → ~4450, **+23%**) is below it and is
+*not* reported by this check. That is the pre-existing blind spot, not a new
+one; the `vfs_stat_root` regression above is still tracked by hand.
+
+Regression tests: `scripts/test-bench-history.py`, three new cases. They were
+**mutation-tested**, not merely observed to pass — deleting the persistence
+check makes both the synthetic one-run-excursion case and the real-history
+"stays quiet" control fail. Note for whoever tunes the constants: patching
+`bh.LEVEL_SHIFT_PCT` at runtime does **nothing**, because `threshold_pct`
+defaults to it and default arguments bind at definition time. A mutation test
+that patches the module attribute silently tests nothing and reports success —
+pass `threshold_pct=` explicitly, as the test does.
+
+**Still open in this entry:** the *cause* of the two real regressions
+(the bisect described just above). Only the harness defect is fixed.
+
+### [A] TOOLING-A-BARE-`bench-history.py`-RECORDS-A-RUN-AND-MISLABELS-ITS-PROVENANCE — 2026-08-15 — ⚠️ OPEN (low severity, easy to trip)
+
+**Status:** open. Hit while validating `level_shifts()`; the bad record was
+caught within the minute and reverted with `git checkout -- bench/history.jsonl`,
+so no bad data reached a commit. Recorded because the failure is silent and the
+file it damages is the baseline every performance verdict is measured against.
+
+**What happens.** `python scripts/bench-history.py` with no arguments is a
+natural thing to type when you want to *read* the analysis — and it **writes**.
+It parses whatever is in `build/serial-test.txt` and appends a record, because
+recording is the intended behaviour when `boot-test.sh` invokes it after a
+`--bench` boot. There is a `--no-record` flag; the default is the destructive
+one.
+
+**Why the record is worse than a mere duplicate.** Two fields are taken from
+the *invocation*, not from the log being parsed:
+
+- `profile` defaults to `LEGACY_PROFILE` (`debug`), and
+- `commit` comes from the current git HEAD.
+
+So the accidental run took release-profile numbers from an older boot and stored
+them tagged `profile=debug`, `commit=<today's HEAD>`. Nothing validates that
+pairing, and nothing could: the serial log does not record which profile or
+commit produced it. Since `comparable_records()` partitions strictly by profile,
+a mislabelled record does not merely add noise — it lands in the *wrong
+partition*, where it is a baseline for numbers it has no relationship to.
+
+**Reproduce:** with any `build/serial-test.txt` containing a scorecard, run
+`python scripts/bench-history.py` and diff `bench/history.jsonl`.
+
+**Proper fix** (not "add a warning"): make the provenance travel with the data
+rather than with the command line. Have the kernel print the build profile and
+the commit hash into the scorecard header at boot, and have `parse_serial()`
+read them; then `--profile` becomes an override that must *agree* with the log,
+and a disagreement is an error rather than a silent relabel. Until then the
+lesser mitigation is to make recording explicit (`--record`) so the read-only
+use is the default, which is the safe direction for a tool whose output is
+advisory but whose side effect is permanent.

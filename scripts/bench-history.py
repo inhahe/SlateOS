@@ -1313,6 +1313,226 @@ def per_benchmark_bands(records, k=TUKEY_K):
     return bands
 
 
+#: How many of the most recent runs the level-shift reference window skips.
+#:
+#: This is the whole mechanism, so it is worth stating plainly: the reference
+#: must not contain the regression it is meant to detect. Three is chosen
+#: because it is one more than the number of runs it took to expose the problem
+#: below (a regression that appeared in run N was already invisible in N+1), and
+#: because a shift that has persisted for more than three runs on this project
+#: is old enough that its own commits have been merged and the bisect range is
+#: no longer small. Raising it makes the reference cleaner and the report later;
+#: lowering it risks the reference absorbing the very shift being looked for.
+LEVEL_SHIFT_SKIP = 3
+
+#: How many *recorded* runs, in addition to the one being judged, must also be
+#: off baseline before a shift is called sustained.
+#:
+#: Must be strictly less than `LEVEL_SHIFT_SKIP`, and is: the reference window
+#: is `window[:-LEVEL_SHIFT_SKIP]` while the persistence window is
+#: `window[-LEVEL_SHIFT_PERSIST:]`, so 2 < 3 guarantees the two never overlap
+#: -- a run can never be evidence for a shift *and* part of the baseline that
+#: shift is measured against. (It also leaves `window[-3]` in neither, a
+#: one-run buffer against an off-by-one turning the baseline dirty.)
+#:
+#: Two is the smallest value that does any work at all: with the current run
+#: that is three consecutive runs above the fence. Measured on the 26 recorded
+#: runs, requiring only the current run fired on 11 (42%), almost all of them
+#: known single-run host excursions; requiring three consecutive fires only on
+#: the genuinely persistent ones. Raising it further would delay the report by
+#: a full run each time for no measured gain -- and every run costs a boot.
+LEVEL_SHIFT_PERSIST = 2
+
+#: A benchmark this far off its pre-window baseline, after removing whole-suite
+#: drift, is reported as a sustained shift. Same figure as the run-over-run
+#: threshold so the two reports mean the same thing by "moved".
+LEVEL_SHIFT_PCT = 25.0
+
+#: Tukey's *extreme*-outlier multiplier (the textbook companion to the 1.5 used
+#: for `TUKEY_K`), used for the level-shift fence only.
+#:
+#: A flat 25% threshold is not scale-aware, and for a benchmark whose own fence
+#: is already ~20% wide it sits inside the noise. Measured: `ipc_channel_sync`
+#: read 646 -> 967 -> 684 -> 578 against a baseline median of 530 and a 1.5-IQR
+#: fence of 438-640. Three consecutive runs cleared both 25% and that fence --
+#: and then it went back to 578, so it was noise. Its 3-IQR fence is 363-716,
+#: which declines the run that fired. Over the same window
+#: `http_build_response_1KiB` (a real 2x regression) is outside its own 3-IQR
+#: fence of 5494-6649 in all three runs, by a factor of two.
+#:
+#: Using the wider fence here rather than everywhere is deliberate: elsewhere
+#: the band vetoes a single-run movement that other checks still watch, whereas
+#: this report claims a *durable* shift worth bisecting for, is deliberately
+#: delayed by `LEVEL_SHIFT_PERSIST` runs before it speaks, and is wired into
+#: `--fail-on-regression`. It should be correspondingly harder to trip. Like
+#: 1.5, this constant is Tukey's, not one fitted to this project's data.
+LEVEL_SHIFT_TUKEY_K = 3.0
+
+
+def level_shifts(records, host, profile, current, threshold_pct=LEVEL_SHIFT_PCT):
+    """Benchmarks sitting far off a baseline that PREDATES the recent runs.
+
+    Returns `[(name, reference_median, value, adjusted_pct, band, n)]`, worst
+    first, or `[]` when there is not enough clean history to judge.
+
+    Why this exists (a real miss, not a hypothetical)
+    -------------------------------------------------
+    Everything else in `diff()` is anchored to the **immediately preceding
+    run**, and the per-benchmark band is explicitly only a *veto* -- it "can
+    demote a report, never create one". Both properties are right for what they
+    do, and together they leave one specific hole:
+
+    A regression that appears and then **persists** is reported exactly once.
+    On the very next run, (1) run-over-run sees no movement, so the benchmark is
+    never a candidate and the band is never consulted; and (2) the trailing
+    window has meanwhile absorbed the elevated sample, so even if it were
+    consulted it would answer "within range".
+
+    Measured on this repo, 2026-08-15. `http_build_response_1KiB` sat at
+    ~6000 ns for nine runs, then read 8546 -> 12431 -> 12407. The run that
+    *confirmed* the regression (12431 -> 12407, agreeing to 0.2%) printed:
+
+        No benchmark moved outside its own recent range
+
+    which is true, and reads as "no regressions", and means "nothing changed
+    since the regression". The window poisons itself, fastest for exactly the
+    regressions that matter most -- a persistent one appears in every
+    subsequent run by definition.
+
+    How the reference is kept clean
+    -------------------------------
+    The reference window skips the most recent `LEVEL_SHIFT_SKIP` runs and takes
+    the `SPEED_WINDOW` runs before those. A shift introduced in the last one to
+    three runs therefore cannot have entered its own baseline.
+
+    Whole-suite drift is removed the same way `report_run_position` does it, via
+    `speed_factor` against the reference medians. Without that, a run on a
+    busier host would light up every benchmark at once; with it, only a
+    benchmark that moved *relative to its peers* is reported. That matters more
+    here than for run-over-run comparisons, because the reference is deliberately
+    older and so more likely to differ in machine conditions.
+
+    The Tukey band from the same reference window is attached and used as a
+    veto, exactly as `per_benchmark_bands` is used elsewhere: a benchmark whose
+    own pre-window spread already covered the new value is not a finding --
+    though at `LEVEL_SHIFT_TUKEY_K`, a wider fence than the rest of the file
+    uses, for the reasons recorded on that constant.
+
+    What it actually fires on (replayed causally over all 26 recorded runs,
+    each judged against only the runs before it)
+    -----------------------------------------------------------------------
+    ==============================  ========  ==================================
+    version                         fires on  notes
+    ==============================  ========  ==================================
+    newest run vs clean baseline    11 (42%)  `net_ipv6_parse +110%`,
+                                              `page_fault +103%`, ... all known
+                                              single-run host excursions
+    + persistence                    2 (7.7%) target kept; one survivor
+    + symmetric test                 2 (7.7%) no change -- see `_shift_pct`
+    + extreme fence                  1 (3.8%) survivor dropped; target kept
+    ==============================  ========  ==================================
+
+    The one surviving firing is the true positive: `http_build_response_1KiB`
+    at run 25 -- the run whose report had read "No benchmark moved outside its
+    own recent range".
+
+    Known limitation, stated rather than hidden: this inherits the flat 25%
+    threshold, so the concurrent `vfs_stat_root` shift (~3600 -> ~4450, +23%)
+    is below it and is NOT reported here. That is the same blind spot the
+    run-over-run path has, not a new one.
+    """
+    if records is None or host is None:
+        return []
+    window = comparable_records(records, host, profile)
+    # Causal and clean: drop the run being judged and the ones that could
+    # already contain the shift, then take the window before them.
+    reference = window[:-LEVEL_SHIFT_SKIP][-SPEED_WINDOW:] if len(
+        window) > LEVEL_SHIFT_SKIP else []
+    if len(reference) < MIN_WINDOW_FOR_BAND:
+        return []
+
+    medians = per_benchmark_median(reference)
+    bands = per_benchmark_bands(reference, k=LEVEL_SHIFT_TUKEY_K)
+
+    # PERSISTENCE IS THE WHOLE DISCRIMINATOR -- measured, not assumed.
+    #
+    # A first version of this compared only the newest run against the clean
+    # baseline. Replayed over the 26 recorded runs it fired on 11 of them (42%),
+    # and the firings included `net_ipv6_parse +110%` and `page_fault +103%` on
+    # a run where both returned to baseline immediately afterwards. Those are
+    # precisely the single-run excursions the existing machinery already grades.
+    #
+    # The reason drift correction does not save it: contamination is not a
+    # uniform slowdown but a heavy tail. `speed_factor` removes the *median*
+    # shift, so a run where a few benchmarks stalled badly and the rest did not
+    # comes out with its tail intact and looking like several simultaneous
+    # regressions.
+    #
+    # Persistence separates the two cleanly, because it keys on the one property
+    # that actually differs: host disturbance is random per run, while a code
+    # regression is in every run after the commit. So a benchmark must sit above
+    # the fence in the newest run AND in the ones just before it.
+    recent = window[-LEVEL_SHIFT_PERSIST:]
+    if len(recent) < LEVEL_SHIFT_PERSIST:
+        return []
+
+    def _corrected(entries):
+        """Entries divided by that run's own whole-suite factor."""
+        factor = speed_factor(entries, medians) or 1.0
+        return {n: v / factor for n, v in entries.items() if v and v > 0}
+
+    corrected_recent = [_corrected(r.get("entries", {})) for r in recent]
+    corrected_current = _corrected(current)
+
+    def _shift_pct(entries_map, name):
+        """How far `name` is above baseline in one run, or None if not shifted.
+
+        Deliberately the *same* test for a past run as for the run being
+        judged. An earlier version applied only the band veto to the past runs
+        and the full threshold to the current one, on the reasoning that the
+        past runs merely had to corroborate.
+
+        Making it symmetric is a correctness fix, not a measured improvement,
+        and the distinction is worth keeping straight: replayed over the 26
+        recorded runs it changed the firing rate not at all (2/26 before and
+        after). The false positive it was aimed at -- `ipc_channel_sync`,
+        646 -> 967 -> 684 -> 578 -- survived it, because after drift correction
+        its 646 reads +25.1%, over the line by a tenth of a point. What
+        actually removed that one was `LEVEL_SHIFT_TUKEY_K`.
+
+        It stays because the weaker version let the report *mean* something it
+        did not say: "sustained shift of >25%" could be printed for a series
+        that was never 25% off in any run but the last.
+        """
+        value = entries_map.get(name)
+        if value is None:
+            return None
+        median = medians.get(name)
+        if not median or median <= 0:
+            return None
+        band = bands.get(name)
+        # Unjudgeable benchmarks are dropped rather than reported: unlike the
+        # run-over-run path, this check is not the only thing watching them, and
+        # a noisy unbanded benchmark would fire here every single run.
+        if not band or band_position(value, band, True) != BAND_OUTSIDE:
+            return None
+        pct = (value / median - 1.0) * 100.0
+        return pct if pct >= threshold_pct else None
+
+    rows = []
+    for name in corrected_current:
+        adjusted = _shift_pct(corrected_current, name)
+        if adjusted is None:
+            continue
+        # ...and the identical finding must hold in each of the preceding runs.
+        if any(_shift_pct(run, name) is None for run in corrected_recent):
+            continue
+        rows.append((name, medians[name], current[name], adjusted,
+                     bands[name], len(reference)))
+    rows.sort(key=lambda r: -r[3])
+    return rows
+
+
 def band_position(value, band, worse):
     """Is `value` outside `band` in the direction that matters?
 
@@ -1589,6 +1809,27 @@ def report(previous, current_entries, threshold_pct,
             f"but landed inside this benchmark's own recent spread -- this is "
             f"NOT a finding in either direction):",
             reg_within + imp_within, worst_first)
+    # Independent of everything above: a sustained shift is invisible to the
+    # run-over-run comparison by construction (see level_shifts.__doc__), so it
+    # is computed from its own pre-window reference and printed unconditionally
+    # -- including on runs where the run-over-run lists are empty, which is
+    # exactly when it is most needed.
+    shifts = level_shifts(records, host, profile, current) if records else []
+    if shifts:
+        print(
+            f"  SUSTAINED SHIFT (>{LEVEL_SHIFT_PCT:g}% off a baseline from "
+            f"before the last {LEVEL_SHIFT_SKIP} runs, and outside that "
+            f"baseline's own spread -- these do NOT show up run-over-run once "
+            f"they persist):"
+        )
+        for name, median, value, adjusted, band, n in shifts:
+            lo, hi, _med, _n = band
+            print(
+                f"    {name}: was ~{median:.0f}ns -> now {value}ns "
+                f"({adjusted:+.0f}% vs suite); pre-window baseline "
+                f"{lo:.0f}-{hi:.0f}ns over {n} runs"
+            )
+
     if added:
         print("  NEW:")
         for name, measured in added:
@@ -1597,7 +1838,11 @@ def report(previous, current_entries, threshold_pct,
         print("  GONE (present last run, absent now):")
         for name in removed:
             print(f"    {name}")
-    if not (regressed or improved or added or removed):
+    # Every "nothing found" line below is qualified by `not shifts`. An
+    # unqualified all-clear printed alongside a SUSTAINED SHIFT block would be
+    # the original bug wearing a new hat: the reader takes the summary line as
+    # the verdict, and the summary line was only ever about run-over-run.
+    if not (regressed or improved or added or removed or shifts):
         if drift:
             print(
                 f"  No benchmark moved by more than {threshold_pct:g}% "
@@ -1606,7 +1851,7 @@ def report(previous, current_entries, threshold_pct,
         else:
             print(f"  No benchmark moved by more than {threshold_pct:g}%.")
     elif not (reg_out or reg_unjudged or imp_out or imp_unjudged
-              or added or removed):
+              or added or removed or shifts):
         # Everything that crossed the threshold was demoted. Say so, rather
         # than printing only the demoted list and leaving the reader to work
         # out that nothing was found -- the whole point of the band is that
@@ -1621,7 +1866,13 @@ def report(previous, current_entries, threshold_pct,
     # is still being *claimed* as a regression: confirmed ones and the ones
     # with too little history to judge. A movement inside the benchmark's own
     # spread failing the build is exactly the false positive this fixes.
-    return bool(reg_out or reg_unjudged)
+    #
+    # Sustained shifts count too. They are held to a strictly higher bar than
+    # the run-over-run claims (off a clean pre-window baseline AND outside that
+    # baseline's Tukey fence), so anything reaching this point is better
+    # evidenced than the reports that already fail the build -- and a
+    # regression that persists is the one most worth failing on, not least.
+    return bool(reg_out or reg_unjudged or shifts)
 
 
 def cmd_list(history_path):

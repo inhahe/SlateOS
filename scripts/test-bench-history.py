@@ -1271,6 +1271,148 @@ def test_band_declines_the_written_up_false_positive_on_the_real_history(bh):
           bh.band_position(953, band, True), bh.BAND_OUTSIDE)
 
 
+def _shift_history(bh, values, host="H", profile="release"):
+    """One record per value for benchmark `v`, alongside stable companions.
+
+    The companions are not padding. `level_shifts` divides every run by that
+    run's own `speed_factor`, which is the *median* ratio across benchmarks --
+    so in a history containing only the benchmark under test, the factor is
+    that benchmark's own ratio and the correction cancels the shift exactly,
+    and nothing can ever fire. Any synthetic history for this function needs a
+    stable majority for the drift correction to be measured against.
+    """
+    records = []
+    for value in values:
+        entries = {f"stable{i}": 1000 for i in range(6)}
+        entries["v"] = value
+        records.append({"host": host, "profile": profile, "entries": entries})
+    return records
+
+
+def test_level_shift_catches_a_regression_the_other_checks_cannot_see(bh):
+    """B-BENCH-A-PERSISTENT-REGRESSION-IS-REPORTED-ONCE-THEN-ABSORBED-INTO-ITS-OWN-RANGE.
+
+    The hole, restated: every other check in `diff()` is anchored to the
+    immediately preceding run, and the per-benchmark band is only ever a veto.
+    So a regression that appears and *stays* is reported exactly once -- on the
+    next run there is no run-over-run movement to report, and the trailing
+    window has meanwhile swallowed the elevated samples.
+
+    The two halves of this test are the point. A step that persists must be
+    found; the same magnitude of step appearing for one run only must not be,
+    because that is the single-run host excursion the existing machinery
+    already grades. Persistence is the only thing separating them, so a version
+    of `level_shifts` that dropped the persistence requirement would pass the
+    first half and fail the second.
+    """
+    stable = [1000] * 6
+    # Eleven prior runs: eight flat (the reference), then three elevated.
+    persisted = _shift_history(bh, stable + [1000, 1000] + [3000, 3000])
+    rows = bh.level_shifts(persisted, "H", "release",
+                           dict(persisted[-1]["entries"], v=3000))
+    names = [r[0] for r in rows]
+    check("a step that persisted is reported", names, ["v"])
+
+    # Same current value, but the run before it was back at baseline.
+    blipped = _shift_history(bh, stable + [1000, 1000] + [1000, 1000])
+    rows = bh.level_shifts(blipped, "H", "release",
+                           dict(blipped[-1]["entries"], v=3000))
+    check("a one-run excursion of the same size is not",
+          [r[0] for r in rows], [])
+
+    # And a flat history reports nothing at all.
+    flat = _shift_history(bh, stable + [1000] * 4)
+    check("a flat history is silent",
+          bh.level_shifts(flat, "H", "release",
+                          dict(flat[-1]["entries"], v=1000)), [])
+
+    # Too little history is silence, not a finding: same rule as the bands.
+    thin = _shift_history(bh, [1000, 1000, 1000])
+    check("too little history cannot manufacture a shift",
+          bh.level_shifts(thin, "H", "release",
+                          dict(thin[-1]["entries"], v=9999)), [])
+
+    # The percent threshold, pinned deliberately, because on the recorded
+    # history it is nearly redundant -- the fence and the persistence rule do
+    # almost all the work, and lowering the threshold from 25% to 1% moves the
+    # real-data firing rate only from 1/26 to 3/26. So the replay control below
+    # cannot notice if this knob stops being applied, and without this case
+    # nothing would. A flat reference gives a zero-IQR fence, so +10% is
+    # outside the fence yet under the threshold: exactly one condition
+    # separates it from the firing case above.
+    small = _shift_history(bh, stable + [1000, 1000] + [1100, 1100])
+    current = dict(small[-1]["entries"], v=1100)
+    check("a persistent move below the threshold is not reported",
+          bh.level_shifts(small, "H", "release", current), [])
+    check("...and the same move is reported once the threshold allows it",
+          [r[0] for r in bh.level_shifts(small, "H", "release", current,
+                                         threshold_pct=5.0)], ["v"])
+
+
+def test_level_shift_reference_window_cannot_contain_the_shift(bh):
+    """The invariant the whole mechanism rests on, asserted rather than assumed.
+
+    The reference is `window[:-LEVEL_SHIFT_SKIP]`; the persistence evidence is
+    `window[-LEVEL_SHIFT_PERSIST:]`. If those ever overlap, a run could be
+    simultaneously evidence *for* a shift and part of the baseline the shift is
+    measured against -- which is the self-poisoning bug this function exists to
+    fix, reintroduced inside the fix. It is one comparison, and it is the kind
+    of constant someone tunes later without re-deriving the consequence.
+    """
+    check("the persistence window is strictly inside the skipped runs",
+          bh.LEVEL_SHIFT_PERSIST < bh.LEVEL_SHIFT_SKIP, True)
+    check("the level-shift fence is wider than the general-purpose one",
+          bh.LEVEL_SHIFT_TUKEY_K > bh.TUKEY_K, True)
+
+
+def test_level_shift_replays_the_real_history_without_crying_wolf(bh):
+    """Positive control *and* false-positive control, on the recorded runs.
+
+    A detector wired into `--fail-on-regression` is only as good as its firing
+    rate on real data, so this replays all recorded runs causally -- each judged
+    against only the runs before it -- and pins both ends:
+
+    * it must find `http_build_response_1KiB`, which stepped ~6000 -> 8546 ->
+      12431 -> 12407 and whose confirming run printed "No benchmark moved
+      outside its own recent range";
+    * it must stay quiet on the great majority of runs. Measured when written:
+      1 firing in 26. Earlier versions scored 11 in 26 -- a rate at which the
+      report is noise and gets ignored, which is worse than not having it.
+
+    The bound is deliberately loose (a quarter of runs) rather than pinned at
+    exactly 1: this replays a *growing* real history, so a future contaminated
+    run may legitimately add a firing, and a test that fails whenever a new
+    benchmark run is recorded would simply be deleted. It fails on the
+    regime change -- a detector that has started firing constantly.
+    """
+    import json
+    if not os.path.exists(HISTORY):
+        check("history.jsonl exists for the level-shift control", False, True)
+        return
+    records = [json.loads(line) for line in
+               open(HISTORY, encoding="utf-8").read().splitlines()
+               if line.strip()]
+
+    fired = []
+    for i, record in enumerate(records):
+        rows = bh.level_shifts(records[:i], record.get("host"),
+                               bh.record_profile(record),
+                               record.get("entries", {}))
+        if rows:
+            fired.append((i, [r[0] for r in rows]))
+
+    check("the detector stays quiet on most real runs",
+          len(fired) <= max(1, len(records) // 4), True)
+
+    names = {name for _i, found in fired for name in found}
+    if any(r["entries"].get("http_build_response_1KiB") == 12407
+           for r in records if "entries" in r):
+        check("...and still catches the written-up 2x regression",
+              "http_build_response_1KiB" in names, True)
+    else:
+        print("SKIP  http_build_response_1KiB control (run no longer in history)")
+
+
 def test_main_records_wall_time_and_host_load(bh, tmpdir):
     """The new fields must survive the full `main()` path onto disk.
 

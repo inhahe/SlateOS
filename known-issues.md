@@ -590,10 +590,10 @@ on an invariant maintained by four other methods. All three are now a single
 
 ## The same broken reduction is copy-pasted into 27 crates, and `randrange` now exists to replace it (lane C)
 
-**Status: OPEN 2026-08-16 — twelve of 27 crates fixed** (`simon`, `battleship`,
-`sliding`, `asteroids`, `yahtzee`, `hearts`, `solitaire`, `freecell`,
-`minesweeper`, `flood`, `snake`, `wordsearch`); the shared crate that the rest
-should move to is written and green.
+**Status: OPEN 2026-08-16 — thirteen of 27 crates fixed** (`simon`,
+`battleship`, `sliding`, `asteroids`, `yahtzee`, `hearts`, `solitaire`,
+`freecell`, `minesweeper`, `flood`, `snake`, `wordsearch`, `pacman`); the
+shared crate that the rest should move to is written and green.
 
 The defect above is not `simon`'s. A scan of the tree
 (`build/scratch/lcg_scan.py`) finds the same LCG constants in **~36 places** and
@@ -625,6 +625,7 @@ measured:
 | `apps/flood` | 6 | no two cells in a row ever shared a colour — zero matches in 61 200 pairs; each column used half the palette | fixed `15d7265d6` |
 | `apps/snake` | 20, 20 | the food could reach 50 of the 400 cells, in a fixed diagonal lattice | fixed `4d448a617` |
 | `apps/wordsearch` | 26, 2..30 | every second filler letter came from {A,C,…,Y} and the ones between from {B,D,…,Z} — 0 repeats in 2000 draws, 76 expected; and BISON was picked for 14% of puzzles against ZEBRA's 41% | fixed `4cce605f8` |
+| `apps/pacman` | 31, 28 | each frightened ghost could flee to 7 of the 28 columns and 217 of the 868 cells; all four together to 14 columns, the seed choosing only *which* 14 | fixed `481f36e8d` |
 
 **The three card games are one shape and worth reading together.** All three
 shuffle 52 cards with a correct downward Fisher–Yates and draw the partner with
@@ -651,8 +652,18 @@ and the ones that do not still pass every distribution test written against
 them.
 
 Still degenerate, not yet migrated: `breakout`, `dots`, `hangman`, `life`,
-`lightsout`, `match3`, `maze`, `memory`, `pacman`, `pinball`, `sudoku`,
-`tetris`, `wordle`.
+`lightsout`, `match3`, `maze`, `memory`, `pinball`, `sudoku`, `tetris`,
+`wordle`.
+
+**`pacman` is the cleanest case of the two-draws-per-consumer stride**, and it
+is the one to remember when a crate draws for several actors in a round-robin.
+Its two bounds sit side by side in one expression — 31 for the row, 28 for the
+column — and the odd one behaved perfectly while the even one lost most of the
+board. Because four ghosts draw a pair each per tick, every ghost saw a draw
+counter of the *same* parity for ever, so the parity coupling never averaged
+out the way it does for a single consumer. Counting the reach of all four
+ghosts together hides this: 14 columns of 28 looks merely halved, when each
+individual ghost is confined to 7.
 
 **`wordsearch` is the first crate whose two call sites broke in two different
 ways, and it is the argument for checking every bound rather than the worst

@@ -590,10 +590,10 @@ on an invariant maintained by four other methods. All three are now a single
 
 ## The same broken reduction is copy-pasted into 27 crates, and `randrange` now exists to replace it (lane C)
 
-**Status: OPEN 2026-08-16 — eleven of 27 crates fixed** (`simon`, `battleship`,
+**Status: OPEN 2026-08-16 — twelve of 27 crates fixed** (`simon`, `battleship`,
 `sliding`, `asteroids`, `yahtzee`, `hearts`, `solitaire`, `freecell`,
-`minesweeper`, `flood`, `snake`); the shared crate that the rest should move to
-is written and green.
+`minesweeper`, `flood`, `snake`, `wordsearch`); the shared crate that the rest
+should move to is written and green.
 
 The defect above is not `simon`'s. A scan of the tree
 (`build/scratch/lcg_scan.py`) finds the same LCG constants in **~36 places** and
@@ -624,6 +624,7 @@ measured:
 | `apps/minesweeper` | 256 | an Intermediate board was a window into one 256-cell cycle: 5000 seeds gave 252 layouts, and the 257th new game replayed the first | fixed `3f28501a6` |
 | `apps/flood` | 6 | no two cells in a row ever shared a colour — zero matches in 61 200 pairs; each column used half the palette | fixed `15d7265d6` |
 | `apps/snake` | 20, 20 | the food could reach 50 of the 400 cells, in a fixed diagonal lattice | fixed `4d448a617` |
+| `apps/wordsearch` | 26, 2..30 | every second filler letter came from {A,C,…,Y} and the ones between from {B,D,…,Z} — 0 repeats in 2000 draws, 76 expected; and BISON was picked for 14% of puzzles against ZEBRA's 41% | fixed `4cce605f8` |
 
 **The three card games are one shape and worth reading together.** All three
 shuffle 52 cards with a correct downward Fisher–Yates and draw the partner with
@@ -651,7 +652,15 @@ them.
 
 Still degenerate, not yet migrated: `breakout`, `dots`, `hangman`, `life`,
 `lightsout`, `match3`, `maze`, `memory`, `pacman`, `pinball`, `sudoku`,
-`tetris`, `wordle`, `wordsearch`.
+`tetris`, `wordle`.
+
+**`wordsearch` is the first crate whose two call sites broke in two different
+ways, and it is the argument for checking every bound rather than the worst
+one.** Its filler alphabet (`% 26`) failed loudly — a visible comb across the
+grid. Its Fisher–Yates over the 30-word category list failed quietly: the word
+list still looked random, and only counting over 5000 games showed one animal
+in 14% of puzzles and another in 41%. A crate can be cleared on the symptom you
+went looking for and still be wrong in the way you did not.
 
 **Three bound shapes account for every symptom found so far**, and it is worth
 checking a call site against all three rather than only the first:

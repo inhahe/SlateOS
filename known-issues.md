@@ -590,8 +590,9 @@ on an invariant maintained by four other methods. All three are now a single
 
 ## The same broken reduction is copy-pasted into 27 crates, and `randrange` now exists to replace it (lane C)
 
-**Status: OPEN 2026-08-16 — one of 27 crates fixed** (`apps/simon`, above); the
-shared crate that the rest should move to is written and green.
+**Status: OPEN 2026-08-16 — five of 27 crates fixed** (`simon`, `battleship`,
+`sliding`, `asteroids`, `yahtzee`); the shared crate that the rest should move
+to is written and green.
 
 The defect above is not `simon`'s. A scan of the tree
 (`build/scratch/lcg_scan.py`) finds the same LCG constants in **~36 places** and
@@ -613,15 +614,30 @@ measured:
 |---|---:|---|---|
 | `apps/simon` | 4 | dealt Green, Red, Yellow, Blue for ever, at every seed | fixed `8d135ad07` |
 | `apps/battleship` | 2, 10 | every AI ship's bow on an odd `row + col` — one colour of the checkerboard, over all 1999 seeds tried | fixed `7544fdb3c` |
-| `apps/sliding` | 4 | 499 seeds produced **two** distinct 4×4 boards between them | fixed |
-| `apps/asteroids` | 4 | not yet measured | open |
-| `apps/pipes` | 4 | not yet measured | open |
+| `apps/sliding` | 4 | 499 seeds produced **two** distinct 4×4 boards between them | fixed `de4280a98` |
+| `apps/asteroids` | 4 | every asteroid of every wave entered from **one** edge; the seed only chose which | fixed `762afae1f` |
+| `apps/yahtzee` | 6 | adjacent dice locked to opposite parity, so a Yahtzee was impossible — zero in 15 000 rolls, ~12 expected | fixed `81b88fc5e` |
+
+`apps/pipes` was in this table and should not have been: its `next_bounded`
+shifts (`>> 33`) before the `%`, so it never touches the low-bit counter. The
+same correction applies to `apps/game2048`, `apps/mahjong`, `apps/spades`
+(`>> 32`), `apps/videoplayer`, `apps/speedtest` (`>> 33`) and
+`apps/credmanager` (an xorshift finaliser) — **all seven are safe**, and the
+scan that flagged them matched the LCG constants rather than the reduction.
+Confirm the reduction, not the constants, before adding a crate here.
 
 `apps/life`'s `next_bool` uses `% 100`; 100 = 4 × 25, and the odd factor 25
 restores a long period, so it is mild. That is exactly why the defect survived
 so long: most call sites use an odd or non-power-of-two bound and look fine,
 and the ones that do not still pass every distribution test written against
 them.
+
+Still degenerate, not yet migrated: `breakout`, `dots`, `flood`, `freecell`,
+`hangman`, `hearts`, `life`, `lightsout`, `match3`, `maze`, `memory`,
+`minesweeper`, `pacman`, `pinball`, `snake`, `solitaire`, `sudoku`, `tetris`,
+`wordle`, `wordsearch`. `hearts` is the most interesting of them — it reduces
+with `self.next() % max` against a *decreasing* deck size, which is the card
+shuffle itself.
 
 The replacement is **`randrange/`**, a new top-level `no_std`,
 dependency-free crate on the same pattern as `textfind`, `byteread` and
@@ -651,9 +667,8 @@ layout is asserting a photograph, and the question it should have been asking
 (is the board solvable, are the ships non-overlapping, does the sequence vary)
 is usually one line away and would have survived the fix.
 
-**Three ways a test can look like it covers this and not.** All three were
-found in the first two migrations, and all three are worth checking for in the
-remaining twenty-four:
+**Four ways a test can look like it covers this and not.** All four were found
+while migrating, and all four are worth checking for in the remaining twenty:
 
 - **A distribution check cannot see it.** `simon`'s broken draw used all four
   colours exactly equally; only the order was fixed. A histogram is the right
@@ -666,6 +681,13 @@ remaining twenty-four:
   were only ever two boards in the whole seed space, and the test happened to
   draw one of each. "Are these two different?" cannot distinguish two outcomes
   from a thousand; count distinct results over a hundred seeds instead.
+- **Pooling across seeds cannot see it.** The first draft of `asteroids`'
+  spawn-edge test gathered edges from twenty seeds into *one* set and asserted
+  all four appeared. It passed against the broken generator, because the defect
+  was per-game: each seed picked one edge and used it for every asteroid, and
+  twenty seeds between them covered all four. The defect is only visible inside
+  a single game, so build the set per seed and assert inside the loop. This one
+  produced a false green that was caught only by running the revert.
 
 ### Sweep progress: `contacts` 83 → 0, all lint classes (2026-08-16)
 

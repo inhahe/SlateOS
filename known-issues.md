@@ -24454,8 +24454,8 @@ they were failing on was this.
 | caller | wants | has |
 |---|---|---|
 | `osh`'s `[[ =~ ]]` | ERE | a real ERE engine (now the `ere` crate) |
-| `grep` | BRE, and ERE under `-E` | `hay.contains(pattern)` — `line_selected`, `grep.rs` |
-| `sed` | BRE | `str::contains`, plus a hand-rolled `.`/`*` matcher (`regex_match_at`, `sed.rs:395`) |
+| `grep` | BRE, and ERE under `-E` | ✅ `ere` (`bb12be713`) |
+| `sed` | BRE | ✅ `ere` (rewritten whole; see below) |
 | `awk`'s `/re/` and `~` | ERE | `simple_contains`, `awk.rs:250` |
 | `expr`'s `:` | BRE anchored at the start | `str::contains` |
 
@@ -24482,11 +24482,16 @@ about what `[a-z]` means. Two things worth knowing before using it:
 Rewrite the four callers on it. Each is its own task and each is more than a
 one-line substitution, because the missing regex is not the only thing missing:
 
-* **`grep`** — BRE by default, ERE under `-E`, literal under `-F`. Its argument
+* ~~**`grep`** — BRE by default, ERE under `-E`, literal under `-F`. Its argument
   parser also errors on `-q`, on `--`, and on every option it does not know
   (`-w -x -l -L -h -H -o -e -f -s -m`), which is why lane C saw `rc=2` from
-  invocations that should have worked.
-* **`sed`** — BRE in both addresses and `s///`. `regex_match_at` goes.
+  invocations that should have worked.~~ **Done, `bb12be713`.**
+* ~~**`sed`** — BRE in both addresses and `s///`. `regex_match_at` goes.~~
+  **Done.** It was not a rewiring in the end but a rewrite: the old `sed` also
+  had no ranges (`1,5d` deleted lines 1 and 5), no hold space worth the name,
+  and `String`-typed lines. Verified differentially against the host's GNU
+  `sed` — `scripts/sed-diff.sh`, **88 of 89 cases byte-identical** on stdout and
+  exit status. The one difference is the backreference gap below.
 * **`awk`** — ERE for `/re/`, `~`, `!~`, and for `split`/`sub`/`gsub`/`match`.
 * **`expr`** — BRE anchored at the start, with the POSIX `:` return rule (the
   first group if there is one, else the match length).
@@ -24507,3 +24512,57 @@ so it is as much untrusted input as the subject is.
 `posix/src/regex.rs` stays a separate implementation on purpose — it is
 `no_std`, fixed-buffer, C-ABI, and answers to POSIX's error codes byte for byte.
 For the Rust programs, see `design-decisions.md` §322.
+
+## B-BACKREFERENCES-ARE-REFUSED-SO-SOME-CLASSIC-ONE-LINERS-FAIL (lane B, 2026-08-16) — **open**
+
+**In short:** a backreference is the part of a pattern that says "and here the
+*same text* again" — `\(.*\)\n\1` means "some text, a newline, then that exact
+text once more". Our regex engine cannot express one, so it refuses the pattern
+with an error instead of matching. GNU accepts it. The visible effect is that a
+few well-known `sed`/`grep` one-liners — most famously the `sed` spelling of
+`uniq` — print an error and exit non-zero where on Linux they would work.
+
+```
+$ printf 'x\nx\ny\n' | sed '$!N;/^\(.*\)\n\1$/!P;D'
+sed: -e expression #1, char 18: backreference \1 is not supported     # ours, rc=1
+x                                                                     # GNU,  rc=0
+y
+```
+
+This is the one case out of 89 in `scripts/sed-diff.sh` that does not match GNU,
+and `grep '\(a\)\1'` fails the same way.
+
+### Why it is refused rather than wrong
+
+`userspace/ere` is a Pike VM (a Thompson NFA simulation): it advances *all*
+alternatives of the pattern through the subject in one left-to-right pass, so it
+costs `O(len(input) × len(pattern))` and cannot be made to backtrack into
+catastrophic time — that immunity is why it was chosen (`design-decisions.md`
+§322). But the same property is why a backreference is impossible: matching one
+requires re-comparing against text an *earlier* alternative captured, and in a
+simulation where every alternative advances together there is no single "the"
+capture to compare against. So this is not an unfinished feature; it is the
+shape of the engine.
+
+Refusing by name is deliberate. Silently treating `\1` as a literal `1` would
+turn a pattern that cannot be answered into one that is answered *wrongly*, and
+a wrong match in `sed` edits the user's file.
+
+### The proper fix
+
+What glibc does: keep the Pike VM for everything, and add a **backtracking
+matcher used only for patterns that contain `\1`–`\9`**. The compiler already
+knows at parse time whether a pattern has one, so the choice is made once, per
+pattern, not per input line — and every pattern that does not use a
+backreference keeps today's linear guarantee untouched.
+
+It is a real tradeoff and wants its own `design-decisions.md` entry before it is
+built, because it reintroduces exponential blowup for exactly the patterns that
+take the fallback, and `grep -f` / `sed -f` read patterns from files. The
+mitigations are the usual ones — a step budget that aborts the match with an
+error rather than hanging, and the existing `MAX_PROG` bound on program size.
+
+**Until then** the behaviour is safe: it is loud, it is specific about which
+construct it cannot do, and it exits non-zero. Nothing silently produces a wrong
+answer. What it costs is GNU compatibility for a small, well-known family of
+scripts.

@@ -23523,3 +23523,64 @@ exclude. That predicate is also the one that genuinely gates —
 (`kernel/src/syscall/handlers.rs`: "the cap/identity permission check is
 performed by the userspace posix wrappers") — which is why it carries a test
 asserting no other Process right, `METADATA` above all, can reach it.
+
+## B-A-THE-BOOT-LOCK-HAS-NO-QUEUE-SO-A-POLITE-WAITER-CAN-BE-OVERTAKEN-FOREVER (lane B, 2026-08-16)
+
+**Status: open.** `scripts/boot-test.sh` is lane A's file; asked as
+`requests/b-a-the-boot-lock-has-no-queue-so-a-waiting-lane-can-starve.md`.
+
+### What is wrong
+
+The cross-worktree QEMU lock is acquired with `mkdir` in a `sleep 5` retry
+loop. There is no queue and no ticket, so acquisition is a race between
+whoever calls `mkdir` first. A lane that finishes a boot and immediately
+starts another beats a waiter every time: it is already at the `mkdir` while
+the waiter is inside its sleep. The waiter is not deadlocked and nothing is
+corrupt — it just never gets a turn, and to its own operator that is
+indistinguishable from a hung boot.
+
+### Observed, not theorised
+
+One lane B run waiting, 2026-08-16:
+
+```
+=== Waiting for boot lock, held by lane-A/pid-1097553/1786905372 (240s) ===
+=== Waiting for boot lock, held by lane-A/pid-1099717/1786905732 (300s) ===
+```
+
+Both the pid *and* the epoch in the owner string change between those two
+lines — `pid-1097553`@14:36:12 became `pid-1099717`@14:42:12. That is lane A
+releasing and a new lane A run re-taking the lock, with lane B's waiter never
+once winning the `mkdir`. The wait counter keeps climbing straight across the
+handover, so in a log the only tell is the owner string.
+
+### Why the existing backstops miss it
+
+Both are liveness rules, and the owner here is genuinely alive. The pid check
+correctly says "alive"; the age rule is deliberately guarded by
+`_lock_alive != "yes"` and so correctly declines to break a live lock. That
+leaves only `BOOT_LOCK_WAIT` (default 3600s), **whose expiry action is to boot
+anyway** — starting a second concurrent QEMU under TCG, which is precisely what
+the lock exists to prevent. So starvation does not merely delay a run: left for
+an hour it escalates into the two-QEMU slowdown the lock's own header paragraph
+describes, and that slowdown then gets attributed to the code under test.
+
+### Proper fix
+
+A ticket lock keeping `mkdir` as the primitive: a waiter registers
+`$BOOT_LOCK_DIR.waiters/<epoch>-<pid>` and only attempts `mkdir` when its
+ticket is the oldest, removing it on every exit path. Tickets need the same
+liveness/age sweep the lock already has, since a waiter torn down by
+`run-timeout.py`'s Job Object leaves a dead ticket that would block the queue
+head. Smaller alternatives (an anti-barge delay after release; failing rather
+than booting anyway when `BOOT_LOCK_WAIT` expires against a provably live
+owner) are in the request. The last of those is worth doing regardless: it does
+not fix starvation, but it stops starvation from silently becoming an invalid
+result.
+
+### Workaround in use
+
+Lane B raised its own `run-timeout.py` budget from 1200s to 3600s. The smaller
+budget was killing the run *during the lock wait*, which made the starvation
+present as a self-inflicted timeout — worth knowing, but it is a symptom
+workaround and not the fix.

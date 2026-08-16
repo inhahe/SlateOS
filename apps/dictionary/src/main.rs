@@ -14,7 +14,7 @@
 //! - Built-in dictionary with 200+ common words
 
 use guitk::color::Color;
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
 // ── Catppuccin Mocha palette ───────────────────────────────────────────────
@@ -721,6 +721,7 @@ impl DictionaryApp {
                 color: if active { TEXT_COLOR } else { OVERLAY0 },
                 font_weight: if active { FontWeightHint::Bold } else { FontWeightHint::Regular },
                 max_width: Some(tab_w - 16.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }
@@ -742,6 +743,7 @@ impl DictionaryApp {
             color: if self.search_query.is_empty() { OVERLAY0 } else { TEXT_COLOR },
             font_weight: FontWeightHint::Regular,
             max_width: Some(self.width - 72.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Results
@@ -755,6 +757,7 @@ impl DictionaryApp {
                 text: "No words found".into(), font_size: 12.0,
                 color: OVERLAY0, font_weight: FontWeightHint::Regular,
                 max_width: Some(self.width - 48.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -776,6 +779,7 @@ impl DictionaryApp {
                     color: if is_sel { BLUE } else { TEXT_COLOR },
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(200.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
 
                 // Part of speech
@@ -786,6 +790,7 @@ impl DictionaryApp {
                         color: def.part_of_speech.color(),
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(80.0),
+                        overflow: TextOverflow::Ellipsis,
                     });
                 }
 
@@ -797,6 +802,7 @@ impl DictionaryApp {
                         text: preview, font_size: 10.0,
                         color: SUBTEXT0, font_weight: FontWeightHint::Regular,
                         max_width: Some(self.width - 48.0),
+                        overflow: TextOverflow::Ellipsis,
                     });
                 }
             }
@@ -813,6 +819,7 @@ impl DictionaryApp {
                     font_size: 12.0, color: OVERLAY0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(self.width - 40.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
                 return;
             }
@@ -826,6 +833,7 @@ impl DictionaryApp {
             text: entry.word.clone(), font_size: 28.0,
             color: TEXT_COLOR, font_weight: FontWeightHint::Bold,
             max_width: Some(self.width - 40.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Favorite star
@@ -837,6 +845,7 @@ impl DictionaryApp {
             color: if is_fav { YELLOW } else { OVERLAY0 },
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         dy += 34.0;
@@ -847,6 +856,7 @@ impl DictionaryApp {
             text: entry.pronunciation.clone(), font_size: 14.0,
             color: MAUVE, font_weight: FontWeightHint::Regular,
             max_width: Some(self.width - 40.0),
+            overflow: TextOverflow::Ellipsis,
         });
         dy += 22.0;
 
@@ -863,6 +873,7 @@ impl DictionaryApp {
                 color: def.part_of_speech.color(),
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(100.0),
+                overflow: TextOverflow::Ellipsis,
             });
             dy += 16.0;
 
@@ -871,6 +882,7 @@ impl DictionaryApp {
                 text: def.text.clone(), font_size: 12.0,
                 color: TEXT_COLOR, font_weight: FontWeightHint::Regular,
                 max_width: Some(self.width - 56.0),
+                overflow: TextOverflow::Ellipsis,
             });
             dy += 20.0;
 
@@ -880,6 +892,7 @@ impl DictionaryApp {
                     text: format!("\"{ex}\""), font_size: 11.0,
                     color: SUBTEXT0, font_weight: FontWeightHint::Light,
                     max_width: Some(self.width - 64.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
                 dy += 18.0;
             }
@@ -894,6 +907,7 @@ impl DictionaryApp {
                 text: "Synonyms".into(), font_size: 12.0,
                 color: GREEN, font_weight: FontWeightHint::Bold,
                 max_width: Some(100.0),
+                overflow: TextOverflow::Ellipsis,
             });
             dy += 16.0;
             cmds.push(RenderCommand::Text {
@@ -901,6 +915,7 @@ impl DictionaryApp {
                 text: entry.synonyms.join(", "), font_size: 11.0,
                 color: SUBTEXT1, font_weight: FontWeightHint::Regular,
                 max_width: Some(self.width - 56.0),
+                overflow: TextOverflow::Ellipsis,
             });
             dy += 18.0;
         }
@@ -912,6 +927,7 @@ impl DictionaryApp {
                 text: "Antonyms".into(), font_size: 12.0,
                 color: RED, font_weight: FontWeightHint::Bold,
                 max_width: Some(100.0),
+                overflow: TextOverflow::Ellipsis,
             });
             dy += 16.0;
             cmds.push(RenderCommand::Text {
@@ -919,6 +935,7 @@ impl DictionaryApp {
                 text: entry.antonyms.join(", "), font_size: 11.0,
                 color: SUBTEXT1, font_weight: FontWeightHint::Regular,
                 max_width: Some(self.width - 56.0),
+                overflow: TextOverflow::Ellipsis,
             });
             dy += 18.0;
         }
@@ -931,6 +948,7 @@ impl DictionaryApp {
                 text: "Etymology".into(), font_size: 12.0,
                 color: PEACH, font_weight: FontWeightHint::Bold,
                 max_width: Some(100.0),
+                overflow: TextOverflow::Ellipsis,
             });
             dy += 16.0;
             cmds.push(RenderCommand::Text {
@@ -938,6 +956,7 @@ impl DictionaryApp {
                 text: entry.etymology.clone(), font_size: 11.0,
                 color: SUBTEXT0, font_weight: FontWeightHint::Regular,
                 max_width: Some(self.width - 56.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }
@@ -949,6 +968,7 @@ impl DictionaryApp {
             font_size: 16.0, color: BLUE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(self.width - 40.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         let row_h: f32 = 28.0;
@@ -961,6 +981,7 @@ impl DictionaryApp {
                 text: "No entries yet".into(), font_size: 11.0,
                 color: OVERLAY0, font_weight: FontWeightHint::Regular,
                 max_width: Some(self.width - 40.0),
+                overflow: TextOverflow::Ellipsis,
             });
             return;
         }
@@ -982,6 +1003,7 @@ impl DictionaryApp {
                 color: if is_sel { BLUE } else { TEXT_COLOR },
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(self.width - 48.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }
@@ -992,6 +1014,7 @@ impl DictionaryApp {
             text: "Word of the Day".into(), font_size: 18.0,
             color: YELLOW, font_weight: FontWeightHint::Bold,
             max_width: Some(self.width - 40.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         if let Some(entry) = self.word_of_day() {
@@ -1005,6 +1028,7 @@ impl DictionaryApp {
                 text: entry.word.clone(), font_size: 24.0,
                 color: TEXT_COLOR, font_weight: FontWeightHint::Bold,
                 max_width: Some(self.width - 56.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             cmds.push(RenderCommand::Text {
@@ -1012,6 +1036,7 @@ impl DictionaryApp {
                 text: entry.pronunciation.clone(), font_size: 12.0,
                 color: MAUVE, font_weight: FontWeightHint::Regular,
                 max_width: Some(self.width - 56.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             if let Some(def) = entry.definitions.first() {
@@ -1020,6 +1045,7 @@ impl DictionaryApp {
                     text: def.text.clone(), font_size: 11.0,
                     color: SUBTEXT1, font_weight: FontWeightHint::Regular,
                     max_width: Some(self.width - 56.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
 
@@ -1028,6 +1054,7 @@ impl DictionaryApp {
                 text: "[Enter] View full entry".into(), font_size: 10.0,
                 color: OVERLAY0, font_weight: FontWeightHint::Regular,
                 max_width: Some(200.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }
@@ -1043,6 +1070,7 @@ impl DictionaryApp {
             text: self.status_message.clone(), font_size: 10.0,
             color: SUBTEXT1, font_weight: FontWeightHint::Regular,
             max_width: Some(self.width * 0.5),
+            overflow: TextOverflow::Ellipsis,
         });
         cmds.push(RenderCommand::Text {
             x: self.width - 250.0, y: y + 8.0,
@@ -1050,6 +1078,7 @@ impl DictionaryApp {
             font_size: 10.0, color: OVERLAY0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(240.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 }

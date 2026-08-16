@@ -13,7 +13,7 @@
 //! - Custom gesture → action bindings
 
 use guitk::color::Color;
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
 // ============================================================================
@@ -696,6 +696,7 @@ impl TouchpadSettingsUI {
             color: MOCHA_TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Device name.
@@ -708,6 +709,7 @@ impl TouchpadSettingsUI {
                 color: MOCHA_SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 
@@ -744,6 +746,7 @@ impl TouchpadSettingsUI {
                     FontWeightHint::Regular
                 },
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             tx += tw + 6.0;
         }
@@ -825,6 +828,7 @@ impl TouchpadSettingsUI {
             color: MOCHA_TEXT,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -924,6 +928,7 @@ impl TouchpadSettingsUI {
             color: MOCHA_TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         cy += 24.0;
 
@@ -936,6 +941,7 @@ impl TouchpadSettingsUI {
             color: MOCHA_SUBTEXT0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         cmds.push(RenderCommand::Text {
             x: x + 70.0,
@@ -945,6 +951,7 @@ impl TouchpadSettingsUI {
             color: MOCHA_SUBTEXT0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         cmds.push(RenderCommand::Text {
             x: x + 160.0,
@@ -954,6 +961,7 @@ impl TouchpadSettingsUI {
             color: MOCHA_SUBTEXT0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         cy += 20.0;
 
@@ -988,6 +996,7 @@ impl TouchpadSettingsUI {
                 color: MOCHA_LAVENDER,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             let dir_str = match g.direction {
@@ -1004,6 +1013,7 @@ impl TouchpadSettingsUI {
                 color: MOCHA_TEXT,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             cmds.push(RenderCommand::Text {
@@ -1014,6 +1024,7 @@ impl TouchpadSettingsUI {
                 color: MOCHA_BLUE,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             cy += 26.0;
@@ -1066,6 +1077,7 @@ impl TouchpadSettingsUI {
             color: MOCHA_TEXT,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         cy += 32.0;
 
@@ -1106,6 +1118,7 @@ impl TouchpadSettingsUI {
             color: MOCHA_BASE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -1127,6 +1140,7 @@ impl TouchpadSettingsUI {
             color: MOCHA_TEXT,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         // Toggle track.
         let track_x = x + 250.0;
@@ -1168,6 +1182,7 @@ impl TouchpadSettingsUI {
             color: MOCHA_TEXT,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         // Slider track.
         let track_x = x + 250.0;
@@ -1209,6 +1224,7 @@ impl TouchpadSettingsUI {
             color: MOCHA_SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -1228,6 +1244,7 @@ impl TouchpadSettingsUI {
             color: MOCHA_TEXT,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         cmds.push(RenderCommand::FillRect {
             x: x + 250.0,
@@ -1245,6 +1262,7 @@ impl TouchpadSettingsUI {
             color: MOCHA_BLUE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 }

@@ -34,7 +34,7 @@
 #![allow(clippy::unreadable_literal)]
 
 use guitk::Color;
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
 // ============================================================================
@@ -1584,6 +1584,7 @@ impl MediaConvertApp {
             font_size: 15.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(160.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Profile selector
@@ -1607,6 +1608,7 @@ impl MediaConvertApp {
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(190.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Quality preset
@@ -1627,6 +1629,7 @@ impl MediaConvertApp {
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(110.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Convert button
@@ -1647,6 +1650,7 @@ impl MediaConvertApp {
             font_size: 12.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(80.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         cmds.push(RenderCommand::Line {
@@ -1687,6 +1691,7 @@ impl MediaConvertApp {
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - 24.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -1718,6 +1723,7 @@ impl MediaConvertApp {
             font_size: 10.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(SIDEBAR_WIDTH - 24.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         let mut cy = y + 32.0;
@@ -1767,6 +1773,7 @@ impl MediaConvertApp {
                     FontWeightHint::Regular
                 },
                 max_width: Some(SIDEBAR_WIDTH - 60.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Size + duration
@@ -1783,6 +1790,7 @@ impl MediaConvertApp {
                 font_size: 9.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(SIDEBAR_WIDTH - 60.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             cy += ITEM_HEIGHT;
@@ -1797,6 +1805,7 @@ impl MediaConvertApp {
                 font_size: 13.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
     }
@@ -1840,6 +1849,7 @@ impl MediaConvertApp {
             font_size: 10.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(max_w),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 18.0;
 
@@ -1863,6 +1873,7 @@ impl MediaConvertApp {
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(max_w - 16.0),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 36.0;
 
@@ -1882,6 +1893,7 @@ impl MediaConvertApp {
                     font_size: 10.0,
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(max_w),
+                    overflow: TextOverflow::Ellipsis,
                 });
                 cy += 18.0;
 
@@ -1901,6 +1913,7 @@ impl MediaConvertApp {
                         font_size: 11.0,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(max_w - 8.0),
+                        overflow: TextOverflow::Ellipsis,
                     });
                     cy += 16.0;
                 }
@@ -1914,6 +1927,7 @@ impl MediaConvertApp {
                     font_size: 10.0,
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(max_w),
+                    overflow: TextOverflow::Ellipsis,
                 });
                 cy += 18.0;
 
@@ -1953,6 +1967,7 @@ impl MediaConvertApp {
                         font_size: 11.0,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(max_w - 8.0),
+                        overflow: TextOverflow::Ellipsis,
                     });
                     cy += 16.0;
                 }
@@ -1966,6 +1981,7 @@ impl MediaConvertApp {
                     font_size: 10.0,
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(max_w),
+                    overflow: TextOverflow::Ellipsis,
                 });
                 cy += 18.0;
 
@@ -2000,6 +2016,7 @@ impl MediaConvertApp {
                         font_size: 11.0,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(max_w - 8.0),
+                        overflow: TextOverflow::Ellipsis,
                     });
                     cy += 16.0;
                 }
@@ -2013,6 +2030,7 @@ impl MediaConvertApp {
                     font_size: 12.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(max_w),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
         }
@@ -2027,6 +2045,7 @@ impl MediaConvertApp {
             font_size: 10.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(max_w),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 18.0;
         cmds.push(RenderCommand::Text {
@@ -2037,6 +2056,7 @@ impl MediaConvertApp {
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(max_w - 8.0),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 16.0;
         cmds.push(RenderCommand::Text {
@@ -2047,6 +2067,7 @@ impl MediaConvertApp {
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(max_w - 8.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -2076,6 +2097,7 @@ impl MediaConvertApp {
             font_size: 10.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width - 24.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         let mut cy = y + 32.0;
@@ -2113,6 +2135,7 @@ impl MediaConvertApp {
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 100.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Conversion type
@@ -2124,6 +2147,7 @@ impl MediaConvertApp {
                 font_size: 9.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 100.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Status label
@@ -2135,6 +2159,7 @@ impl MediaConvertApp {
                 font_size: 10.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(70.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Progress bar (if running)
@@ -2173,6 +2198,7 @@ impl MediaConvertApp {
                 font_size: 13.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
     }

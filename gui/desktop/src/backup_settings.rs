@@ -5,7 +5,7 @@
 //! policies, and backup history with restore capabilities.
 
 use guitk::color::Color;
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
 
@@ -685,6 +685,7 @@ impl BackupSettingsUI {
             color: TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Tab bar
@@ -718,6 +719,7 @@ impl BackupSettingsUI {
                     FontWeightHint::Regular
                 },
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             tab_x += tw + 4.0;
@@ -791,6 +793,7 @@ impl BackupSettingsUI {
             color: TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         cmds.push(RenderCommand::Text {
@@ -801,6 +804,7 @@ impl BackupSettingsUI {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - 52.0),
+            overflow: TextOverflow::Ellipsis,
         });
         row_y += 96.0;
 
@@ -849,6 +853,7 @@ impl BackupSettingsUI {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             cmds.push(RenderCommand::Text {
@@ -859,6 +864,7 @@ impl BackupSettingsUI {
                 color: *color,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
         row_y += 76.0;
@@ -904,6 +910,7 @@ impl BackupSettingsUI {
             color: SUBTEXT1,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         row_y += 22.0;
 
@@ -916,6 +923,7 @@ impl BackupSettingsUI {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             cmds.push(RenderCommand::Text {
@@ -926,6 +934,7 @@ impl BackupSettingsUI {
                 color: TEXT,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 140.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             row_y += 20.0;
@@ -949,6 +958,7 @@ impl BackupSettingsUI {
             color: CRUST,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -974,6 +984,7 @@ impl BackupSettingsUI {
             color: TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         let toggle_bg = if self.settings.enabled {
@@ -1000,6 +1011,7 @@ impl BackupSettingsUI {
             color: SUBTEXT1,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         row_y += 22.0;
 
@@ -1057,6 +1069,7 @@ impl BackupSettingsUI {
                     FontWeightHint::Regular
                 },
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             row_y += 38.0;
@@ -1072,6 +1085,7 @@ impl BackupSettingsUI {
             color: SUBTEXT1,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         row_y += 22.0;
 
@@ -1106,6 +1120,7 @@ impl BackupSettingsUI {
                     FontWeightHint::Regular
                 },
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             cmds.push(RenderCommand::Text {
@@ -1116,6 +1131,7 @@ impl BackupSettingsUI {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 32.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             row_y += 50.0;
@@ -1139,6 +1155,7 @@ impl BackupSettingsUI {
             color: SUBTEXT1,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         row_y += 22.0;
 
@@ -1160,6 +1177,7 @@ impl BackupSettingsUI {
                 color: TEXT,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             let toggle_color = if *enabled { BLUE } else { SURFACE2 };
@@ -1192,6 +1210,7 @@ impl BackupSettingsUI {
             color: TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Add source button
@@ -1211,6 +1230,7 @@ impl BackupSettingsUI {
             color: CRUST,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         row_y += 28.0;
 
@@ -1232,6 +1252,7 @@ impl BackupSettingsUI {
             color: SUBTEXT1,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         cmds.push(RenderCommand::Text {
@@ -1242,6 +1263,7 @@ impl BackupSettingsUI {
             color: BLUE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - 32.0),
+            overflow: TextOverflow::Ellipsis,
         });
         row_y += 60.0;
 
@@ -1282,6 +1304,7 @@ impl BackupSettingsUI {
                     color: BLUE,
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
             }
 
@@ -1293,6 +1316,7 @@ impl BackupSettingsUI {
                 color: if source.enabled { TEXT } else { OVERLAY0 },
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 120.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             if source.include_subdirs {
@@ -1304,6 +1328,7 @@ impl BackupSettingsUI {
                     color: OVERLAY0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
             }
 
@@ -1316,6 +1341,7 @@ impl BackupSettingsUI {
                 color: RED,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             row_y += 46.0;
@@ -1337,6 +1363,7 @@ impl BackupSettingsUI {
             color: TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         cmds.push(RenderCommand::FillRect {
@@ -1355,6 +1382,7 @@ impl BackupSettingsUI {
             color: CRUST,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         row_y += 28.0;
 
@@ -1402,6 +1430,7 @@ impl BackupSettingsUI {
                 color: LAVENDER,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             // Description
@@ -1413,6 +1442,7 @@ impl BackupSettingsUI {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 100.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Remove
@@ -1424,6 +1454,7 @@ impl BackupSettingsUI {
                 color: RED,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             row_y += 50.0;
@@ -1442,6 +1473,7 @@ impl BackupSettingsUI {
             color: TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         row_y += 28.0;
 
@@ -1455,6 +1487,7 @@ impl BackupSettingsUI {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 32.0),
+                overflow: TextOverflow::Ellipsis,
             });
         } else {
             for entry in self.settings.history.iter().rev() {
@@ -1485,6 +1518,7 @@ impl BackupSettingsUI {
                     color: TEXT,
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
 
                 cmds.push(RenderCommand::Text {
@@ -1501,6 +1535,7 @@ impl BackupSettingsUI {
                     color: SUBTEXT0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(width - 40.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
 
                 if let Some(ref err) = entry.error_message {
@@ -1512,6 +1547,7 @@ impl BackupSettingsUI {
                         color: RED,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(width - 40.0),
+                        overflow: TextOverflow::Ellipsis,
                     });
                 }
 

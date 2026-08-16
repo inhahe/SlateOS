@@ -10,7 +10,7 @@
 
 use crate::color::Color;
 use crate::event::{EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
-use crate::render::{FontWeightHint, RenderCommand};
+use crate::render::{FontWeightHint, RenderCommand, TextOverflow};
 use crate::style::CornerRadii;
 
 // ─── Re-export the shared item-id type from the context-menu module ────────
@@ -669,6 +669,7 @@ impl MenuBar {
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             // Mnemonic underline.
@@ -1249,6 +1250,7 @@ fn render_entries(
                     font_size: FONT_SIZE,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
 
                 if let Some(sc) = shortcut {
@@ -1260,6 +1262,7 @@ fn render_entries(
                         font_size: FONT_SIZE,
                         font_weight: FontWeightHint::Regular,
                         max_width: None,
+                        overflow: TextOverflow::Clip,
                     });
                 }
 
@@ -1289,6 +1292,7 @@ fn render_entries(
                         font_size: FONT_SIZE,
                         font_weight: FontWeightHint::Bold,
                         max_width: None,
+                        overflow: TextOverflow::Clip,
                     });
                 }
 
@@ -1300,6 +1304,7 @@ fn render_entries(
                     font_size: FONT_SIZE,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
 
                 cur_y += ITEM_HEIGHT;
@@ -1327,6 +1332,7 @@ fn render_entries(
                     font_size: FONT_SIZE,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
 
                 // Arrow indicator.
@@ -1338,6 +1344,7 @@ fn render_entries(
                     font_size: FONT_SIZE,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
 
                 cur_y += ITEM_HEIGHT;

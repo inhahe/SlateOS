@@ -7,7 +7,7 @@
 //! on-screen keyboard toggle.
 
 use guitk::color::Color;
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
 // ============================================================================
@@ -502,6 +502,7 @@ impl LoginScreen {
             color: TEXT,
             font_weight: FontWeightHint::Light,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         if self.config.show_date {
             commands.push(RenderCommand::Text {
@@ -512,6 +513,7 @@ impl LoginScreen {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
     }
@@ -549,6 +551,7 @@ impl LoginScreen {
                 color: if selected { BLUE } else { SUBTEXT0 },
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             // Name.
@@ -560,6 +563,7 @@ impl LoginScreen {
                 color: TEXT,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             // Account type.
@@ -571,6 +575,7 @@ impl LoginScreen {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
     }
@@ -589,6 +594,7 @@ impl LoginScreen {
                 color: BLUE,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             // Name.
@@ -600,6 +606,7 @@ impl LoginScreen {
                 color: TEXT,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             // Password field.
@@ -649,6 +656,7 @@ impl LoginScreen {
                 },
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(field_w - 24.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Show/hide toggle.
@@ -665,6 +673,7 @@ impl LoginScreen {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             // Submit button.
@@ -685,6 +694,7 @@ impl LoginScreen {
                 color: CRUST,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             // Error message.
@@ -697,6 +707,7 @@ impl LoginScreen {
                     color: RED,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(200.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
 
@@ -713,6 +724,7 @@ impl LoginScreen {
                     color: YELLOW,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(240.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
 
@@ -726,6 +738,7 @@ impl LoginScreen {
                     color: SUBTEXT0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
             }
         }
@@ -743,6 +756,7 @@ impl LoginScreen {
             color: TEXT,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -759,6 +773,7 @@ impl LoginScreen {
                 color: TEXT,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
     }
@@ -787,6 +802,7 @@ impl LoginScreen {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 
@@ -800,6 +816,7 @@ impl LoginScreen {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 
@@ -813,6 +830,7 @@ impl LoginScreen {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 
@@ -826,6 +844,7 @@ impl LoginScreen {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
     }
@@ -871,6 +890,7 @@ impl LoginScreen {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             commands.push(RenderCommand::Text {
                 x: mx + 36.0,
@@ -880,6 +900,7 @@ impl LoginScreen {
                 color: TEXT,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
     }

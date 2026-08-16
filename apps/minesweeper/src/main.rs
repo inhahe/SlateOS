@@ -13,7 +13,7 @@
 //! Uses an LCG pseudo-random number generator (no external rand crate).
 
 use guitk::color::Color;
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
 // ── Catppuccin Mocha palette ────────────────────────────────────────
@@ -633,6 +633,7 @@ impl MinesweeperApp {
             color: RED,
             font_weight: FontWeightHint::Bold,
             max_width: Some(80.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Mine label
@@ -644,6 +645,7 @@ impl MinesweeperApp {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(60.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Status indicator (center)
@@ -668,6 +670,7 @@ impl MinesweeperApp {
             color: status_color,
             font_weight: FontWeightHint::Bold,
             max_width: Some(30.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Difficulty label (just below center icon)
@@ -679,6 +682,7 @@ impl MinesweeperApp {
             color: OVERLAY0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(80.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Timer (right side)
@@ -692,6 +696,7 @@ impl MinesweeperApp {
             color: BLUE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(80.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Timer label
@@ -703,6 +708,7 @@ impl MinesweeperApp {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(60.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -767,6 +773,7 @@ impl MinesweeperApp {
                     color: RED,
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(CELL_SIZE),
+                    overflow: TextOverflow::Ellipsis,
                 });
                 // If game is lost and this flag was wrong, show X overlay
                 if self.status == GameStatus::Lost && !cell.is_mine {
@@ -804,6 +811,7 @@ impl MinesweeperApp {
                         color: mine_color,
                         font_weight: FontWeightHint::Bold,
                         max_width: Some(CELL_SIZE),
+                        overflow: TextOverflow::Ellipsis,
                     });
                 } else {
                     // Revealed safe cell
@@ -824,6 +832,7 @@ impl MinesweeperApp {
                             color: num_color,
                             font_weight: FontWeightHint::Bold,
                             max_width: Some(CELL_SIZE),
+                            overflow: TextOverflow::Ellipsis,
                         });
                     }
                 }

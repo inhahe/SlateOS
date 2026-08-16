@@ -19,7 +19,7 @@
 
 use guitk::color::Color;
 use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
 const BASE: Color = Color::from_hex(0x1E1E2E);
@@ -337,6 +337,7 @@ impl Nim {
             font_size: 24.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Preset name
@@ -348,6 +349,7 @@ impl Nim {
             font_size: 13.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Turn / status
@@ -372,6 +374,7 @@ impl Nim {
             font_size: 14.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Scores
@@ -383,6 +386,7 @@ impl Nim {
             font_size: 13.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Heaps
@@ -409,6 +413,7 @@ impl Nim {
                     FontWeightHint::Regular
                 },
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             // Tokens
@@ -434,6 +439,7 @@ impl Nim {
                         font_size: 14.0,
                         font_weight: FontWeightHint::Bold,
                         max_width: None,
+                        overflow: TextOverflow::Clip,
                     });
                 }
             }
@@ -466,6 +472,7 @@ impl Nim {
                 font_size: 14.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             cmds.push(RenderCommand::Text {
                 x: 60.0,
@@ -475,6 +482,7 @@ impl Nim {
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 
@@ -498,6 +506,7 @@ impl Nim {
                 font_size: 14.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             let lines = [
                 ("Left/Right", "Select heap"),
@@ -518,6 +527,7 @@ impl Nim {
                     font_size: 11.0,
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
                 cmds.push(RenderCommand::Text {
                     x: hx + 95.0,
@@ -527,6 +537,7 @@ impl Nim {
                     font_size: 11.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
             }
         }

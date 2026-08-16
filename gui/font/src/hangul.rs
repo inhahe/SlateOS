@@ -59,12 +59,14 @@
 //! against, on the same reasoning as
 //! [`indic_shape`](crate::indic_shape)'s.
 //!
-//! # Not yet wired in
+//! # Where this runs
 //!
-//! This module is written and tested but is **not declared in `lib.rs`**, so it
-//! compiles nowhere and changes no output. It was parked mid-task; see
-//! `known-issues.md`, `TD-FONT-HAS-A-HANGUL-SHAPER-NOTHING-CALLS`, for the four
-//! edits that connect it and the reason the connection is all-or-nothing.
+//! [`preprocess`] is called from [`ScaledFont::shape_lang`](crate::scaled)
+//! after normalization, on the pieces, before the run is split by script. It
+//! runs *after* the sort and the composition because everything it moves is a
+//! jamo or a tone mark, neither of which normalization touches — unlike the
+//! Thai pass in [`thai`](crate::thai), which has to run before the sort
+//! because the mark it produces would be sorted to the wrong side.
 
 use alloc::vec::Vec;
 

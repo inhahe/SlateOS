@@ -32,7 +32,7 @@
 //! ```
 
 use guitk::color::Color;
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
 // The same zone engine the libc's `localtime` and osh's `printf '%(…)T'` use.
@@ -990,6 +990,7 @@ impl ClockDisplay {
             font_size: 13.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Date below the time.
@@ -1002,6 +1003,7 @@ impl ClockDisplay {
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Extra timezones.
@@ -1017,6 +1019,7 @@ impl ClockDisplay {
                 font_size: 10.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             tz_y += 14.0;
         }
@@ -1340,6 +1343,7 @@ impl CalendarView {
                     font_size: 10.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(WEEK_NUM_WIDTH),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
 
@@ -1378,6 +1382,7 @@ impl CalendarView {
             font_size: 18.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Right arrow.
@@ -1389,6 +1394,7 @@ impl CalendarView {
             font_size: 18.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Centered month/year label. Month names are localised, so an
@@ -1403,6 +1409,7 @@ impl CalendarView {
             font_size: 15.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(grid_width - 40.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // "Today" button below the label.
@@ -1423,6 +1430,7 @@ impl CalendarView {
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
     }
@@ -1439,6 +1447,7 @@ impl CalendarView {
                 font_size: 11.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(CELL_SIZE),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }
@@ -1505,6 +1514,7 @@ impl CalendarView {
                 FontWeightHint::Regular
             },
             max_width: Some(CELL_SIZE),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Event dot indicator.
@@ -1565,6 +1575,7 @@ impl CalendarView {
             font_size: 13.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width - PADDING * 2.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Event rows.
@@ -1596,6 +1607,7 @@ impl CalendarView {
                 font_size: 10.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(50.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Title.
@@ -1607,6 +1619,7 @@ impl CalendarView {
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - PADDING * 2.0 - 75.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -1622,6 +1635,7 @@ impl CalendarView {
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
     }
@@ -1680,6 +1694,7 @@ impl CalendarView {
             font_size: 18.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         cmds.push(RenderCommand::Text {
             x: x + total_width - PADDING - 16.0,
@@ -1689,6 +1704,7 @@ impl CalendarView {
             font_size: 18.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         cmds.push(RenderCommand::Text {
             x: center_x,
@@ -1698,6 +1714,7 @@ impl CalendarView {
             font_size: 16.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         cy += NAV_HEIGHT;
 
@@ -1734,6 +1751,7 @@ impl CalendarView {
             font_size: 11.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(7.0 * MINI_CELL),
+            overflow: TextOverflow::Ellipsis,
         });
 
         let grid_y = y + MINI_MONTH_LABEL_HEIGHT;
@@ -1783,6 +1801,7 @@ impl CalendarView {
                 font_size: 8.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(MINI_CELL),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }

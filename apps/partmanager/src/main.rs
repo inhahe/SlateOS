@@ -21,7 +21,7 @@ use guitk::color::Color;
 #[allow(unused_imports)]
 use guitk::event::{Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEventKind};
 #[allow(unused_imports)]
-use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
 use guitk::table::{Column, Fit, Table};
@@ -1207,6 +1207,7 @@ fn render_title_bar(tree: &mut RenderTree, width: f32) {
         font_size: 14.0,
         font_weight: FontWeightHint::Bold,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
 
     // Divider line at bottom of title bar
@@ -1268,6 +1269,7 @@ fn render_toolbar(tree: &mut RenderTree, app: &PartitionManagerApp) {
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(TOOLBAR_BTN_WIDTH - 16.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         bx += TOOLBAR_BTN_WIDTH + 4.0;
@@ -1312,6 +1314,7 @@ fn render_sidebar(tree: &mut RenderTree, app: &PartitionManagerApp) {
         font_size: 11.0,
         font_weight: FontWeightHint::Bold,
         max_width: Some(SIDEBAR_WIDTH - 24.0),
+        overflow: TextOverflow::Ellipsis,
     });
 
     let list_top = top + 28.0;
@@ -1355,6 +1358,7 @@ fn render_sidebar(tree: &mut RenderTree, app: &PartitionManagerApp) {
             font_size: 12.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(SIDEBAR_WIDTH - 24.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Disk model + size
@@ -1367,6 +1371,7 @@ fn render_sidebar(tree: &mut RenderTree, app: &PartitionManagerApp) {
             font_size: 10.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(SIDEBAR_WIDTH - 24.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Health indicator dot
@@ -1423,6 +1428,7 @@ fn render_disk_map(tree: &mut RenderTree, app: &PartitionManagerApp) {
         font_size: 12.0,
         font_weight: FontWeightHint::Bold,
         max_width: Some(available_width),
+        overflow: TextOverflow::Ellipsis,
     });
 
     // Bar background
@@ -1515,6 +1521,7 @@ fn render_disk_map(tree: &mut RenderTree, app: &PartitionManagerApp) {
                 font_size: 10.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(clamped_width - 8.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             let size_text = format_size(region.size_bytes());
@@ -1526,6 +1533,7 @@ fn render_disk_map(tree: &mut RenderTree, app: &PartitionManagerApp) {
                 font_size: 9.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(clamped_width - 8.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -1560,6 +1568,7 @@ fn render_disk_map(tree: &mut RenderTree, app: &PartitionManagerApp) {
             font_size: 10.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         lx += 70.0;
     }
@@ -1581,6 +1590,7 @@ fn render_disk_map(tree: &mut RenderTree, app: &PartitionManagerApp) {
         font_size: 10.0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
 }
 
@@ -1614,6 +1624,7 @@ fn render_partition_list(tree: &mut RenderTree, app: &PartitionManagerApp) {
         font_size: 12.0,
         font_weight: FontWeightHint::Bold,
         max_width: Some(list_width),
+        overflow: TextOverflow::Ellipsis,
     });
 
     let header_y = top + 18.0;
@@ -1801,6 +1812,7 @@ fn render_detail_panel(tree: &mut RenderTree, app: &PartitionManagerApp) {
         font_size: 12.0,
         font_weight: FontWeightHint::Bold,
         max_width: Some(text_w),
+        overflow: TextOverflow::Ellipsis,
     });
     py += SECTION_HEADER_HEIGHT;
 
@@ -1828,6 +1840,7 @@ fn render_detail_panel(tree: &mut RenderTree, app: &PartitionManagerApp) {
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(100.0),
+            overflow: TextOverflow::Ellipsis,
         });
         let val_color = if *label == "SMART" {
             disk.smart_health.color()
@@ -1842,6 +1855,7 @@ fn render_detail_panel(tree: &mut RenderTree, app: &PartitionManagerApp) {
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(DETAIL_PANEL_WIDTH - 132.0),
+            overflow: TextOverflow::Ellipsis,
         });
         py += PROPERTY_ROW_HEIGHT;
     }
@@ -1868,6 +1882,7 @@ fn render_detail_panel(tree: &mut RenderTree, app: &PartitionManagerApp) {
             font_size: 12.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(text_w),
+            overflow: TextOverflow::Ellipsis,
         });
         py += SECTION_HEADER_HEIGHT;
 
@@ -1889,6 +1904,7 @@ fn render_detail_panel(tree: &mut RenderTree, app: &PartitionManagerApp) {
                 font_size: 10.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(text_w),
+                overflow: TextOverflow::Ellipsis,
             });
             py += 28.0;
         }
@@ -1928,6 +1944,7 @@ fn render_detail_panel(tree: &mut RenderTree, app: &PartitionManagerApp) {
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(100.0),
+                overflow: TextOverflow::Ellipsis,
             });
             tree.push(RenderCommand::Text {
                 x: val_x,
@@ -1937,6 +1954,7 @@ fn render_detail_panel(tree: &mut RenderTree, app: &PartitionManagerApp) {
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(DETAIL_PANEL_WIDTH - 132.0),
+                overflow: TextOverflow::Ellipsis,
             });
             py += PROPERTY_ROW_HEIGHT;
         }
@@ -2027,6 +2045,7 @@ fn render_queue_panel(tree: &mut RenderTree, app: &PartitionManagerApp) {
         font_size: 11.0,
         font_weight: FontWeightHint::Bold,
         max_width: Some(panel_width - 24.0),
+        overflow: TextOverflow::Ellipsis,
     });
 
     if !app.queue_expanded {
@@ -2070,6 +2089,7 @@ fn render_queue_panel(tree: &mut RenderTree, app: &PartitionManagerApp) {
             font_size: 10.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Destructive indicator
@@ -2087,6 +2107,7 @@ fn render_queue_panel(tree: &mut RenderTree, app: &PartitionManagerApp) {
             font_size: 10.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(panel_width - 48.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -2128,6 +2149,7 @@ fn render_status_bar(tree: &mut RenderTree, app: &PartitionManagerApp) {
         font_size: 11.0,
         font_weight: FontWeightHint::Regular,
         max_width: Some(app.width * 0.6),
+        overflow: TextOverflow::Ellipsis,
     });
 
     // Pending ops count on right
@@ -2141,6 +2163,7 @@ fn render_status_bar(tree: &mut RenderTree, app: &PartitionManagerApp) {
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(190.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 }
@@ -2216,6 +2239,7 @@ fn render_confirm_dialog(tree: &mut RenderTree, app: &PartitionManagerApp) {
         font_size: 14.0,
         font_weight: FontWeightHint::Bold,
         max_width: Some(DIALOG_WIDTH - 40.0),
+        overflow: TextOverflow::Ellipsis,
     });
 
     // Message. `RenderCommand::Text` clips at `max_width` rather than
@@ -2257,6 +2281,7 @@ fn render_confirm_dialog(tree: &mut RenderTree, app: &PartitionManagerApp) {
             font_size: 11.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(DIALOG_WIDTH - 64.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -2295,6 +2320,7 @@ fn render_confirm_dialog(tree: &mut RenderTree, app: &PartitionManagerApp) {
         font_size: 12.0,
         font_weight: FontWeightHint::Bold,
         max_width: Some(DIALOG_BTN_WIDTH - 20.0),
+        overflow: TextOverflow::Ellipsis,
     });
 
     // Cancel button
@@ -2321,6 +2347,7 @@ fn render_confirm_dialog(tree: &mut RenderTree, app: &PartitionManagerApp) {
         font_size: 12.0,
         font_weight: FontWeightHint::Regular,
         max_width: Some(DIALOG_BTN_WIDTH - 20.0),
+        overflow: TextOverflow::Ellipsis,
     });
 }
 
@@ -2392,6 +2419,7 @@ fn render_create_partition_dialog(tree: &mut RenderTree, app: &PartitionManagerA
         font_size: 14.0,
         font_weight: FontWeightHint::Bold,
         max_width: Some(dw - 40.0),
+        overflow: TextOverflow::Ellipsis,
     });
 
     // Available space info
@@ -2403,6 +2431,7 @@ fn render_create_partition_dialog(tree: &mut RenderTree, app: &PartitionManagerA
         font_size: 11.0,
         font_weight: FontWeightHint::Regular,
         max_width: Some(dw - 40.0),
+        overflow: TextOverflow::Ellipsis,
     });
 
     // Filesystem selector
@@ -2415,6 +2444,7 @@ fn render_create_partition_dialog(tree: &mut RenderTree, app: &PartitionManagerA
         font_size: 11.0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
     fy += 18.0;
 
@@ -2446,6 +2476,7 @@ fn render_create_partition_dialog(tree: &mut RenderTree, app: &PartitionManagerA
                 FontWeightHint::Regular
             },
             max_width: Some(btn_w - 16.0),
+            overflow: TextOverflow::Ellipsis,
         });
         fx += btn_w + 4.0;
     }
@@ -2460,6 +2491,7 @@ fn render_create_partition_dialog(tree: &mut RenderTree, app: &PartitionManagerA
         font_size: 11.0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
     fy += 18.0;
 
@@ -2498,6 +2530,7 @@ fn render_create_partition_dialog(tree: &mut RenderTree, app: &PartitionManagerA
         font_size: 11.0,
         font_weight: FontWeightHint::Regular,
         max_width: Some(dw - 56.0),
+        overflow: TextOverflow::Ellipsis,
     });
 
     // Size slider representation
@@ -2514,6 +2547,7 @@ fn render_create_partition_dialog(tree: &mut RenderTree, app: &PartitionManagerA
         font_size: 11.0,
         font_weight: FontWeightHint::Regular,
         max_width: Some(dw - 40.0),
+        overflow: TextOverflow::Ellipsis,
     });
     fy += 18.0;
 
@@ -2565,6 +2599,7 @@ fn render_create_partition_dialog(tree: &mut RenderTree, app: &PartitionManagerA
         font_size: 12.0,
         font_weight: FontWeightHint::Bold,
         max_width: Some(DIALOG_BTN_WIDTH - 20.0),
+        overflow: TextOverflow::Ellipsis,
     });
 
     let cancel_hovered = dialog.hovered_button == Some(1);
@@ -2590,6 +2625,7 @@ fn render_create_partition_dialog(tree: &mut RenderTree, app: &PartitionManagerA
         font_size: 12.0,
         font_weight: FontWeightHint::Regular,
         max_width: Some(DIALOG_BTN_WIDTH - 20.0),
+        overflow: TextOverflow::Ellipsis,
     });
 }
 
@@ -2662,6 +2698,7 @@ fn render_format_dialog(tree: &mut RenderTree, app: &PartitionManagerApp) {
         font_size: 14.0,
         font_weight: FontWeightHint::Bold,
         max_width: Some(DIALOG_WIDTH - 40.0),
+        overflow: TextOverflow::Ellipsis,
     });
 
     // Warning
@@ -2681,6 +2718,7 @@ fn render_format_dialog(tree: &mut RenderTree, app: &PartitionManagerApp) {
         font_size: 11.0,
         font_weight: FontWeightHint::Bold,
         max_width: Some(DIALOG_WIDTH - 64.0),
+        overflow: TextOverflow::Ellipsis,
     });
 
     // Filesystem selector
@@ -2692,6 +2730,7 @@ fn render_format_dialog(tree: &mut RenderTree, app: &PartitionManagerApp) {
         font_size: 11.0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
 
     let formattable = FilesystemType::formattable();
@@ -2723,6 +2762,7 @@ fn render_format_dialog(tree: &mut RenderTree, app: &PartitionManagerApp) {
                 FontWeightHint::Regular
             },
             max_width: Some(btn_w - 16.0),
+            overflow: TextOverflow::Ellipsis,
         });
         fx += btn_w + 4.0;
     }
@@ -2755,6 +2795,7 @@ fn render_format_dialog(tree: &mut RenderTree, app: &PartitionManagerApp) {
         font_size: 12.0,
         font_weight: FontWeightHint::Bold,
         max_width: Some(DIALOG_BTN_WIDTH - 20.0),
+        overflow: TextOverflow::Ellipsis,
     });
 
     let cancel_hovered = dialog.hovered_button == Some(1);
@@ -2780,6 +2821,7 @@ fn render_format_dialog(tree: &mut RenderTree, app: &PartitionManagerApp) {
         font_size: 12.0,
         font_weight: FontWeightHint::Regular,
         max_width: Some(DIALOG_BTN_WIDTH - 20.0),
+        overflow: TextOverflow::Ellipsis,
     });
 }
 

@@ -29,7 +29,7 @@ use guitk::event::{
 #[allow(unused_imports)]
 use guitk::layout::{FlexAlign, FlexDirection, FlexItem, FlexJustify, SizeConstraint};
 #[allow(unused_imports)]
-use guitk::render::{FontFamily, FontWeightHint, RenderCommand, RenderTree};
+use guitk::render::{FontFamily, FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 #[allow(unused_imports)]
 use guitk::style::{Borders, CornerRadii, Edges, FontWeight, Style, TextAlign};
 use guitk::text;
@@ -2240,6 +2240,7 @@ impl HexEditor {
                 font_size: UI_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(38.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -2312,6 +2313,7 @@ impl HexEditor {
                 font_size: UI_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(tab_width),
+                overflow: TextOverflow::Ellipsis,
             });
 
             tab_x += tab_width + 2.0;
@@ -2379,6 +2381,7 @@ impl HexEditor {
                 font_size: HEX_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(char_w * 11.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Hex bytes column.
@@ -2438,6 +2441,7 @@ impl HexEditor {
                         FontWeightHint::Regular
                     },
                     max_width: Some(char_w * 3.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
 
                 hex_x += char_w * 3.0;
@@ -2514,6 +2518,7 @@ impl HexEditor {
                         font_size: HEX_FONT_SIZE,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(char_w),
+                        overflow: TextOverflow::Ellipsis,
                     });
                 }
             }
@@ -2559,6 +2564,7 @@ impl HexEditor {
             font_size: UI_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(INSPECTOR_WIDTH - 16.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Data type values.
@@ -2579,6 +2585,7 @@ impl HexEditor {
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(90.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             let value_str = doc
@@ -2592,6 +2599,7 @@ impl HexEditor {
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(INSPECTOR_WIDTH - 108.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             y += 16.0;
@@ -2637,6 +2645,7 @@ impl HexEditor {
             font_size: UI_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(300.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Selection size.
@@ -2651,6 +2660,7 @@ impl HexEditor {
                 font_size: UI_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(120.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -2664,6 +2674,7 @@ impl HexEditor {
             font_size: UI_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(140.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Edit mode.
@@ -2685,6 +2696,7 @@ impl HexEditor {
             font_size: UI_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(40.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Column indicator (hex/ASCII).
@@ -2697,6 +2709,7 @@ impl HexEditor {
             font_size: UI_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(50.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Modified indicator.
@@ -2709,6 +2722,7 @@ impl HexEditor {
                 font_size: UI_FONT_SIZE,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(70.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -2721,6 +2735,7 @@ impl HexEditor {
             font_size: UI_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(40.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -2774,6 +2789,7 @@ impl HexEditor {
             font_size: UI_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(40.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Search input text.
@@ -2795,6 +2811,7 @@ impl HexEditor {
             font_size: UI_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(bar_width - 120.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Match count.
@@ -2807,6 +2824,7 @@ impl HexEditor {
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(65.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }
@@ -2861,6 +2879,7 @@ impl HexEditor {
             font_size: UI_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(dialog_width - 24.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Input field background.
@@ -2902,6 +2921,7 @@ impl HexEditor {
             font_size: UI_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(dialog_width - 40.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 }

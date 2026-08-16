@@ -30,7 +30,7 @@
 #![allow(dead_code)]
 
 use guitk::color::Color;
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
 
@@ -1121,6 +1121,7 @@ pub fn render_column_header(manager: &ColumnManager, total_width: f32) -> Vec<Re
             font_size: HEADER_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(w - 8.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Sort arrow (if sorted by this column).
@@ -1139,6 +1140,7 @@ pub fn render_column_header(manager: &ColumnManager, total_width: f32) -> Vec<Re
                     font_size: 9.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
             }
         }
@@ -1221,6 +1223,7 @@ pub fn render_column_values(
                 font_size: CELL_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(w - 8.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -1322,6 +1325,7 @@ pub fn render_column_chooser(manager: &ColumnManager, x: f32, y: f32) -> Vec<Ren
             font_size: CHOOSER_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(menu_w - 40.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Category badge (dim, right-aligned).
@@ -1334,6 +1338,7 @@ pub fn render_column_chooser(manager: &ColumnManager, x: f32, y: f32) -> Vec<Ren
             font_size: 9.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         row_y += CHOOSER_ROW_HEIGHT;

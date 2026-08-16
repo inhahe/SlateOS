@@ -5,7 +5,7 @@
 //! reclamation policies.
 
 use guitk::color::Color;
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
 // ============================================================================
@@ -517,6 +517,7 @@ impl StorageSettingsUI {
             color: TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: Some(inner),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 32.0;
 
@@ -538,6 +539,7 @@ impl StorageSettingsUI {
                 color: RED,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(inner - 20.0),
+                overflow: TextOverflow::Ellipsis,
             });
             cy += 34.0;
         }
@@ -567,6 +569,7 @@ impl StorageSettingsUI {
                     FontWeightHint::Regular
                 },
                 max_width: Some(tab_w - 16.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
         cy += 38.0;
@@ -604,6 +607,7 @@ impl StorageSettingsUI {
                 color: TEXT,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(width * 0.55),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Used / total
@@ -620,6 +624,7 @@ impl StorageSettingsUI {
                 color: if drive.is_low_space() { RED } else { SUBTEXT0 },
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width * 0.38),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Usage bar
@@ -665,6 +670,7 @@ impl StorageSettingsUI {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 24.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             y += 62.0;
@@ -681,6 +687,7 @@ impl StorageSettingsUI {
                 color: LAVENDER,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(width),
+                overflow: TextOverflow::Ellipsis,
             });
             y += 24.0;
 
@@ -702,6 +709,7 @@ impl StorageSettingsUI {
                     color: TEXT,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(width * 0.4),
+                    overflow: TextOverflow::Ellipsis,
                 });
                 cmds.push(RenderCommand::Text {
                     x: x + width * 0.45,
@@ -711,6 +719,7 @@ impl StorageSettingsUI {
                     color: SUBTEXT0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(width * 0.5),
+                    overflow: TextOverflow::Ellipsis,
                 });
                 y += 20.0;
             }
@@ -727,6 +736,7 @@ impl StorageSettingsUI {
                     color: GREEN,
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(width),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
         }
@@ -762,6 +772,7 @@ impl StorageSettingsUI {
             color: LAVENDER,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
+            overflow: TextOverflow::Ellipsis,
         });
         y += 24.0;
 
@@ -833,6 +844,7 @@ impl StorageSettingsUI {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width * 0.3),
+                overflow: TextOverflow::Ellipsis,
             });
             cmds.push(RenderCommand::Text {
                 x: x + width * 0.35,
@@ -842,6 +854,7 @@ impl StorageSettingsUI {
                 color: TEXT,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width * 0.6),
+                overflow: TextOverflow::Ellipsis,
             });
             // Change button placeholder
             cmds.push(RenderCommand::FillRect {
@@ -860,6 +873,7 @@ impl StorageSettingsUI {
                 color: BLUE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(48.0),
+                overflow: TextOverflow::Ellipsis,
             });
             y += 42.0;
         }
@@ -874,6 +888,7 @@ impl StorageSettingsUI {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width * 0.55),
+            overflow: TextOverflow::Ellipsis,
         });
         cmds.push(RenderCommand::Text {
             x: x + width * 0.58,
@@ -883,6 +898,7 @@ impl StorageSettingsUI {
             color: TEXT,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width * 0.4),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -902,6 +918,7 @@ impl StorageSettingsUI {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width * 0.65),
+            overflow: TextOverflow::Ellipsis,
         });
         let tx = x + width - 48.0;
         let bg = if on { GREEN } else { SURFACE1 };

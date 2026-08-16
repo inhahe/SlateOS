@@ -18,7 +18,7 @@
 #![allow(dead_code)]
 
 use guitk::color::Color;
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
 use std::collections::{HashMap, VecDeque};
@@ -1450,6 +1450,7 @@ pub fn render_placeholder(
         font_size,
         font_weight: FontWeightHint::Bold,
         max_width: Some(display_size),
+        overflow: TextOverflow::Ellipsis,
     });
 
     cmds

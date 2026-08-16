@@ -26,7 +26,7 @@ use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEventKind};
 use guitk::fold;
 #[allow(unused_imports)]
-use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
 
@@ -1533,6 +1533,7 @@ fn render_title_bar(state: &DeviceManagerState, cmds: &mut Vec<RenderCommand>) {
         color: COLOR_TEXT,
         font_weight: FontWeightHint::Bold,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
 
     // Problem count badge
@@ -1556,6 +1557,7 @@ fn render_title_bar(state: &DeviceManagerState, cmds: &mut Vec<RenderCommand>) {
             color: COLOR_BASE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(84.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -1612,6 +1614,7 @@ fn render_toolbar(state: &DeviceManagerState, cmds: &mut Vec<RenderCommand>) {
             color: COLOR_TEXT,
             font_weight: FontWeightHint::Regular,
             max_width: Some(TOOLBAR_BTN_WIDTH - 16.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -1688,6 +1691,7 @@ fn render_search_bar(state: &DeviceManagerState, cmds: &mut Vec<RenderCommand>) 
         color: text_color,
         font_weight: FontWeightHint::Regular,
         max_width: Some(input_w - 16.0),
+        overflow: TextOverflow::Ellipsis,
     });
 }
 
@@ -1782,6 +1786,7 @@ fn render_sidebar(state: &DeviceManagerState, cmds: &mut Vec<RenderCommand>) {
                     color: COLOR_OVERLAY,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
 
                 cmds.push(RenderCommand::Text {
@@ -1792,6 +1797,7 @@ fn render_sidebar(state: &DeviceManagerState, cmds: &mut Vec<RenderCommand>) {
                     color: cat.color(),
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
 
                 cmds.push(RenderCommand::Text {
@@ -1802,6 +1808,7 @@ fn render_sidebar(state: &DeviceManagerState, cmds: &mut Vec<RenderCommand>) {
                     color: COLOR_TEXT,
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(SIDEBAR_WIDTH - indent - 48.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
             } else if let Some(dev_id) = node.device_id {
                 // Device node: show status icon and name
@@ -1816,6 +1823,7 @@ fn render_sidebar(state: &DeviceManagerState, cmds: &mut Vec<RenderCommand>) {
                         color: dev.status.color(),
                         font_weight: FontWeightHint::Bold,
                         max_width: None,
+                        overflow: TextOverflow::Clip,
                     });
 
                     // Device name
@@ -1835,6 +1843,7 @@ fn render_sidebar(state: &DeviceManagerState, cmds: &mut Vec<RenderCommand>) {
                         color: name_color,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(SIDEBAR_WIDTH - indent - 26.0),
+                        overflow: TextOverflow::Ellipsis,
                     });
 
                     // Driver update indicator
@@ -1903,6 +1912,7 @@ fn render_properties_panel(state: &DeviceManagerState, cmds: &mut Vec<RenderComm
                 color: COLOR_OVERLAY,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(panel_width - 40.0),
+                overflow: TextOverflow::Ellipsis,
             });
             return;
         }
@@ -1999,6 +2009,7 @@ fn render_tab_bar(
                 FontWeightHint::Regular
             },
             max_width: Some(tab_width - 8.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 }
@@ -2026,6 +2037,7 @@ fn render_general_tab(
         color: COLOR_TEXT,
         font_weight: FontWeightHint::Bold,
         max_width: Some(width - 32.0),
+        overflow: TextOverflow::Ellipsis,
     });
     row_y += 24.0;
 
@@ -2047,6 +2059,7 @@ fn render_general_tab(
         color: status_color,
         font_weight: FontWeightHint::Bold,
         max_width: Some(width - 48.0),
+        overflow: TextOverflow::Ellipsis,
     });
     row_y += 20.0;
 
@@ -2059,6 +2072,7 @@ fn render_general_tab(
             color: COLOR_SUBTEXT,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - 48.0),
+            overflow: TextOverflow::Ellipsis,
         });
         row_y += 18.0;
     }
@@ -2109,6 +2123,7 @@ fn render_general_tab(
             color: COLOR_OVERLAY,
             font_weight: FontWeightHint::Regular,
             max_width: Some(120.0),
+            overflow: TextOverflow::Ellipsis,
         });
         cmds.push(RenderCommand::Text {
             x: value_x,
@@ -2118,6 +2133,7 @@ fn render_general_tab(
             color: COLOR_TEXT,
             font_weight: FontWeightHint::Regular,
             max_width: Some(max_val_w),
+            overflow: TextOverflow::Ellipsis,
         });
         row_y += PROPERTY_ROW_HEIGHT;
     }
@@ -2146,6 +2162,7 @@ fn render_driver_tab(
         color: COLOR_LAVENDER,
         font_weight: FontWeightHint::Bold,
         max_width: Some(width - 32.0),
+        overflow: TextOverflow::Ellipsis,
     });
     row_y += SECTION_HEADER_HEIGHT;
 
@@ -2167,6 +2184,7 @@ fn render_driver_tab(
                     color: COLOR_OVERLAY,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(120.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
                 cmds.push(RenderCommand::Text {
                     x: value_x,
@@ -2176,6 +2194,7 @@ fn render_driver_tab(
                     color: COLOR_TEXT,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(max_val_w),
+                    overflow: TextOverflow::Ellipsis,
                 });
                 row_y += PROPERTY_ROW_HEIGHT;
             }
@@ -2200,6 +2219,7 @@ fn render_driver_tab(
                 color: COLOR_LAVENDER,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(width - 32.0),
+                overflow: TextOverflow::Ellipsis,
             });
             row_y += SECTION_HEADER_HEIGHT;
 
@@ -2212,6 +2232,7 @@ fn render_driver_tab(
                     color: COLOR_OVERLAY,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(120.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
                 cmds.push(RenderCommand::Text {
                     x: value_x,
@@ -2221,6 +2242,7 @@ fn render_driver_tab(
                     color: check.status.color(),
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(max_val_w),
+                    overflow: TextOverflow::Ellipsis,
                 });
                 row_y += PROPERTY_ROW_HEIGHT;
 
@@ -2233,6 +2255,7 @@ fn render_driver_tab(
                         color: COLOR_OVERLAY,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(120.0),
+                        overflow: TextOverflow::Ellipsis,
                     });
                     cmds.push(RenderCommand::Text {
                         x: value_x,
@@ -2242,6 +2265,7 @@ fn render_driver_tab(
                         color: COLOR_YELLOW,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(max_val_w),
+                        overflow: TextOverflow::Ellipsis,
                     });
                     row_y += PROPERTY_ROW_HEIGHT;
                 }
@@ -2255,6 +2279,7 @@ fn render_driver_tab(
                         color: COLOR_OVERLAY,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(120.0),
+                        overflow: TextOverflow::Ellipsis,
                     });
                     cmds.push(RenderCommand::Text {
                         x: value_x,
@@ -2264,6 +2289,7 @@ fn render_driver_tab(
                         color: COLOR_TEXT,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(max_val_w),
+                        overflow: TextOverflow::Ellipsis,
                     });
                 }
             }
@@ -2286,6 +2312,7 @@ fn render_driver_tab(
                     color: COLOR_BASE,
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(120.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
         }
@@ -2298,6 +2325,7 @@ fn render_driver_tab(
                 color: COLOR_OVERLAY,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 32.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }
@@ -2325,6 +2353,7 @@ fn render_resources_tab(
         color: COLOR_LAVENDER,
         font_weight: FontWeightHint::Bold,
         max_width: Some(width - 32.0),
+        overflow: TextOverflow::Ellipsis,
     });
     row_y += SECTION_HEADER_HEIGHT;
 
@@ -2336,6 +2365,7 @@ fn render_resources_tab(
         color: COLOR_OVERLAY,
         font_weight: FontWeightHint::Regular,
         max_width: Some(120.0),
+        overflow: TextOverflow::Ellipsis,
     });
     cmds.push(RenderCommand::Text {
         x: value_x,
@@ -2345,6 +2375,7 @@ fn render_resources_tab(
         color: COLOR_TEXT,
         font_weight: FontWeightHint::Regular,
         max_width: Some(max_val_w),
+        overflow: TextOverflow::Ellipsis,
     });
     row_y += PROPERTY_ROW_HEIGHT + 8.0;
 
@@ -2367,6 +2398,7 @@ fn render_resources_tab(
         color: COLOR_LAVENDER,
         font_weight: FontWeightHint::Bold,
         max_width: Some(width - 32.0),
+        overflow: TextOverflow::Ellipsis,
     });
     row_y += SECTION_HEADER_HEIGHT;
 
@@ -2378,6 +2410,7 @@ fn render_resources_tab(
         color: COLOR_OVERLAY,
         font_weight: FontWeightHint::Regular,
         max_width: Some(120.0),
+        overflow: TextOverflow::Ellipsis,
     });
     cmds.push(RenderCommand::Text {
         x: value_x,
@@ -2387,6 +2420,7 @@ fn render_resources_tab(
         color: COLOR_TEXT,
         font_weight: FontWeightHint::Regular,
         max_width: Some(max_val_w),
+        overflow: TextOverflow::Ellipsis,
     });
     row_y += PROPERTY_ROW_HEIGHT;
 
@@ -2407,6 +2441,7 @@ fn render_resources_tab(
             color: COLOR_OVERLAY,
             font_weight: FontWeightHint::Regular,
             max_width: Some(120.0),
+            overflow: TextOverflow::Ellipsis,
         });
         cmds.push(RenderCommand::Text {
             x: value_x,
@@ -2416,6 +2451,7 @@ fn render_resources_tab(
             color: COLOR_TEXT,
             font_weight: FontWeightHint::Regular,
             max_width: Some(max_val_w),
+            overflow: TextOverflow::Ellipsis,
         });
         row_y += PROPERTY_ROW_HEIGHT;
     }
@@ -2441,6 +2477,7 @@ fn render_resources_tab(
         color: COLOR_LAVENDER,
         font_weight: FontWeightHint::Bold,
         max_width: Some(width - 32.0),
+        overflow: TextOverflow::Ellipsis,
     });
     row_y += SECTION_HEADER_HEIGHT;
 
@@ -2452,6 +2489,7 @@ fn render_resources_tab(
         color: COLOR_OVERLAY,
         font_weight: FontWeightHint::Regular,
         max_width: Some(120.0),
+        overflow: TextOverflow::Ellipsis,
     });
     cmds.push(RenderCommand::Text {
         x: value_x,
@@ -2463,6 +2501,7 @@ fn render_resources_tab(
         color: COLOR_TEXT,
         font_weight: FontWeightHint::Regular,
         max_width: Some(max_val_w),
+        overflow: TextOverflow::Ellipsis,
     });
 }
 
@@ -2486,6 +2525,7 @@ fn render_events_tab(
         color: COLOR_LAVENDER,
         font_weight: FontWeightHint::Bold,
         max_width: Some(width - 32.0),
+        overflow: TextOverflow::Ellipsis,
     });
     row_y += SECTION_HEADER_HEIGHT;
 
@@ -2499,6 +2539,7 @@ fn render_events_tab(
             color: COLOR_OVERLAY,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - 32.0),
+            overflow: TextOverflow::Ellipsis,
         });
         return;
     }
@@ -2520,6 +2561,7 @@ fn render_events_tab(
         color: COLOR_OVERLAY,
         font_weight: FontWeightHint::Bold,
         max_width: Some(140.0),
+        overflow: TextOverflow::Ellipsis,
     });
     cmds.push(RenderCommand::Text {
         x: x + 170.0,
@@ -2529,6 +2571,7 @@ fn render_events_tab(
         color: COLOR_OVERLAY,
         font_weight: FontWeightHint::Bold,
         max_width: Some(100.0),
+        overflow: TextOverflow::Ellipsis,
     });
     cmds.push(RenderCommand::Text {
         x: x + 280.0,
@@ -2538,6 +2581,7 @@ fn render_events_tab(
         color: COLOR_OVERLAY,
         font_weight: FontWeightHint::Bold,
         max_width: Some(width - 296.0),
+        overflow: TextOverflow::Ellipsis,
     });
     row_y += EVENT_ROW_HEIGHT;
 
@@ -2567,6 +2611,7 @@ fn render_events_tab(
             color: COLOR_SUBTEXT,
             font_weight: FontWeightHint::Regular,
             max_width: Some(140.0),
+            overflow: TextOverflow::Ellipsis,
         });
         cmds.push(RenderCommand::Text {
             x: x + 170.0,
@@ -2576,6 +2621,7 @@ fn render_events_tab(
             color: event.kind.color(),
             font_weight: FontWeightHint::Regular,
             max_width: Some(100.0),
+            overflow: TextOverflow::Ellipsis,
         });
         cmds.push(RenderCommand::Text {
             x: x + 280.0,
@@ -2585,6 +2631,7 @@ fn render_events_tab(
             color: COLOR_TEXT,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - 296.0),
+            overflow: TextOverflow::Ellipsis,
         });
         row_y += EVENT_ROW_HEIGHT;
     }
@@ -2611,6 +2658,7 @@ fn render_resource_view(
         color: COLOR_TEXT,
         font_weight: FontWeightHint::Bold,
         max_width: Some(width - 32.0),
+        overflow: TextOverflow::Ellipsis,
     });
     row_y += 28.0;
 
@@ -2623,6 +2671,7 @@ fn render_resource_view(
         color: COLOR_LAVENDER,
         font_weight: FontWeightHint::Bold,
         max_width: Some(width - 32.0),
+        overflow: TextOverflow::Ellipsis,
     });
     row_y += SECTION_HEADER_HEIGHT;
 
@@ -2636,6 +2685,7 @@ fn render_resource_view(
             color: COLOR_TEAL,
             font_weight: FontWeightHint::Regular,
             max_width: Some(80.0),
+            overflow: TextOverflow::Ellipsis,
         });
         cmds.push(RenderCommand::Text {
             x: x + 110.0,
@@ -2645,6 +2695,7 @@ fn render_resource_view(
             color: COLOR_TEXT,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - 126.0),
+            overflow: TextOverflow::Ellipsis,
         });
         row_y += PROPERTY_ROW_HEIGHT;
     }
@@ -2669,6 +2720,7 @@ fn render_resource_view(
         color: COLOR_LAVENDER,
         font_weight: FontWeightHint::Bold,
         max_width: Some(width - 32.0),
+        overflow: TextOverflow::Ellipsis,
     });
     row_y += SECTION_HEADER_HEIGHT;
 
@@ -2681,6 +2733,7 @@ fn render_resource_view(
             color: COLOR_PEACH,
             font_weight: FontWeightHint::Regular,
             max_width: Some(220.0),
+            overflow: TextOverflow::Ellipsis,
         });
         cmds.push(RenderCommand::Text {
             x: x + 250.0,
@@ -2690,6 +2743,7 @@ fn render_resource_view(
             color: COLOR_TEXT,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - 266.0),
+            overflow: TextOverflow::Ellipsis,
         });
         row_y += PROPERTY_ROW_HEIGHT;
     }
@@ -2714,6 +2768,7 @@ fn render_resource_view(
         color: COLOR_LAVENDER,
         font_weight: FontWeightHint::Bold,
         max_width: Some(width - 32.0),
+        overflow: TextOverflow::Ellipsis,
     });
     row_y += SECTION_HEADER_HEIGHT;
 
@@ -2726,6 +2781,7 @@ fn render_resource_view(
             color: COLOR_SAPPHIRE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(60.0),
+            overflow: TextOverflow::Ellipsis,
         });
         cmds.push(RenderCommand::Text {
             x: x + 90.0,
@@ -2735,6 +2791,7 @@ fn render_resource_view(
             color: COLOR_TEXT,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - 106.0),
+            overflow: TextOverflow::Ellipsis,
         });
         row_y += PROPERTY_ROW_HEIGHT;
     }
@@ -2781,6 +2838,7 @@ fn render_status_bar(state: &DeviceManagerState, cmds: &mut Vec<RenderCommand>) 
         color: COLOR_SUBTEXT,
         font_weight: FontWeightHint::Regular,
         max_width: Some(state.width - 24.0),
+        overflow: TextOverflow::Ellipsis,
     });
 }
 

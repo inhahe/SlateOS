@@ -5,7 +5,7 @@
 //! auto-mount preferences, and power management per device.
 
 use guitk::color::Color;
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
 
@@ -581,6 +581,7 @@ impl DeviceSettingsUI {
             color: TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Tab bar
@@ -614,6 +615,7 @@ impl DeviceSettingsUI {
                     FontWeightHint::Regular
                 },
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             tab_x += tw + 4.0;
@@ -695,6 +697,7 @@ impl DeviceSettingsUI {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             cmds.push(RenderCommand::Text {
@@ -705,6 +708,7 @@ impl DeviceSettingsUI {
                 color: *color,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
         row_y += 72.0;
@@ -718,6 +722,7 @@ impl DeviceSettingsUI {
             color: SUBTEXT1,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         row_y += 24.0;
 
@@ -739,6 +744,7 @@ impl DeviceSettingsUI {
                 color: TEXT,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             cmds.push(RenderCommand::Text {
@@ -749,6 +755,7 @@ impl DeviceSettingsUI {
                 color: TEXT,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             cmds.push(RenderCommand::Text {
@@ -759,6 +766,7 @@ impl DeviceSettingsUI {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             row_y += 42.0;
@@ -774,6 +782,7 @@ impl DeviceSettingsUI {
             color: SUBTEXT1,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         row_y += 24.0;
 
@@ -805,6 +814,7 @@ impl DeviceSettingsUI {
                 color: TEXT,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             let toggle_bg = if *enabled { BLUE } else { SURFACE2 };
@@ -853,6 +863,7 @@ impl DeviceSettingsUI {
             },
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - 24.0),
+            overflow: TextOverflow::Ellipsis,
         });
         row_y += 44.0;
 
@@ -903,6 +914,7 @@ impl DeviceSettingsUI {
                 color: SUBTEXT1,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             row_y += 34.0;
 
@@ -938,6 +950,7 @@ impl DeviceSettingsUI {
                         color: TEXT,
                         font_weight: FontWeightHint::Bold,
                         max_width: Some(width - 140.0),
+                        overflow: TextOverflow::Ellipsis,
                     });
 
                     // Manufacturer and status
@@ -954,6 +967,7 @@ impl DeviceSettingsUI {
                         color: SUBTEXT0,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(width - 80.0),
+                        overflow: TextOverflow::Ellipsis,
                     });
 
                     // Driver badge
@@ -973,6 +987,7 @@ impl DeviceSettingsUI {
                         color: CRUST,
                         font_weight: FontWeightHint::Bold,
                         max_width: None,
+                        overflow: TextOverflow::Clip,
                     });
 
                     row_y += 54.0;
@@ -993,6 +1008,7 @@ impl DeviceSettingsUI {
             color: TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         row_y += 28.0;
 
@@ -1021,6 +1037,7 @@ impl DeviceSettingsUI {
                 color: RED,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             row_y += 40.0;
         }
@@ -1044,6 +1061,7 @@ impl DeviceSettingsUI {
                 color: TEXT,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(width - 100.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             let driver_info = match (&device.driver_name, &device.driver_version) {
@@ -1060,6 +1078,7 @@ impl DeviceSettingsUI {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             // Status badge
@@ -1079,6 +1098,7 @@ impl DeviceSettingsUI {
                 color: CRUST,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             row_y += 58.0;
@@ -1097,6 +1117,7 @@ impl DeviceSettingsUI {
             color: TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         row_y += 28.0;
 
@@ -1111,6 +1132,7 @@ impl DeviceSettingsUI {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         } else {
             for device in &removable {
@@ -1131,6 +1153,7 @@ impl DeviceSettingsUI {
                     color: TEXT,
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
 
                 cmds.push(RenderCommand::Text {
@@ -1141,6 +1164,7 @@ impl DeviceSettingsUI {
                     color: SUBTEXT0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(width - 120.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
 
                 // Eject button
@@ -1160,6 +1184,7 @@ impl DeviceSettingsUI {
                     color: CRUST,
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
 
                 row_y += 62.0;

@@ -25,7 +25,7 @@
 //! - 5 sample habits pre-loaded
 
 use guitk::color::Color;
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::table::{Column, Fit, Table};
 
@@ -1140,6 +1140,7 @@ impl HabitTrackerApp {
             color: TEXT_COLOR,
             font_weight: FontWeightHint::Bold,
             max_width: Some(200.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Date display
@@ -1156,6 +1157,7 @@ impl HabitTrackerApp {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(280.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Today's progress
@@ -1169,6 +1171,7 @@ impl HabitTrackerApp {
             color: GREEN,
             font_weight: FontWeightHint::Bold,
             max_width: Some(180.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Progress bar
@@ -1216,6 +1219,7 @@ impl HabitTrackerApp {
             color: CRUST,
             font_weight: FontWeightHint::Bold,
             max_width: Some(80.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -1262,6 +1266,7 @@ impl HabitTrackerApp {
                     FontWeightHint::Regular
                 },
                 max_width: Some(w - 16.0),
+                overflow: TextOverflow::Ellipsis,
             });
             tx += w + 6.0;
         }
@@ -1284,6 +1289,7 @@ impl HabitTrackerApp {
                 color: CRUST,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(100.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }
@@ -1299,6 +1305,7 @@ impl HabitTrackerApp {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(300.0),
+                overflow: TextOverflow::Ellipsis,
             });
             return;
         }
@@ -1327,6 +1334,7 @@ impl HabitTrackerApp {
                 color: label_color,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(Self::DAY_COL_W),
+                overflow: TextOverflow::Ellipsis,
             });
             cmds.push(RenderCommand::Text {
                 x: cx + 6.0,
@@ -1336,6 +1344,7 @@ impl HabitTrackerApp {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(Self::DAY_COL_W),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -1349,6 +1358,7 @@ impl HabitTrackerApp {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(50.0),
+            overflow: TextOverflow::Ellipsis,
         });
         cmds.push(RenderCommand::Text {
             x: stats_x + 56.0,
@@ -1358,6 +1368,7 @@ impl HabitTrackerApp {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(30.0),
+            overflow: TextOverflow::Ellipsis,
         });
         cmds.push(RenderCommand::Text {
             x: stats_x + 90.0,
@@ -1367,6 +1378,7 @@ impl HabitTrackerApp {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(30.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         let row_start_y = start_y + 32.0 - self.scroll_offset;
@@ -1418,6 +1430,7 @@ impl HabitTrackerApp {
                 color: TEXT_COLOR,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(160.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Frequency label
@@ -1429,6 +1442,7 @@ impl HabitTrackerApp {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(100.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Check-in dots for last 7 days
@@ -1461,6 +1475,7 @@ impl HabitTrackerApp {
                         color: CRUST,
                         font_weight: FontWeightHint::Bold,
                         max_width: Some(dot_size),
+                        overflow: TextOverflow::Ellipsis,
                     });
                 }
 
@@ -1488,6 +1503,7 @@ impl HabitTrackerApp {
                 color: streak_color,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(40.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // 7-day rate
@@ -1501,6 +1517,7 @@ impl HabitTrackerApp {
                 color: rate_7_color,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(40.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // 30-day rate
@@ -1514,6 +1531,7 @@ impl HabitTrackerApp {
                 color: rate_30_color,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(40.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }
@@ -1589,6 +1607,7 @@ impl HabitTrackerApp {
             color: TEXT_COLOR,
             font_weight: FontWeightHint::Bold,
             max_width: Some(300.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         let table = Table::with_gap(STATS_COLUMNS, pad, STATS_GAP);
@@ -1701,6 +1720,7 @@ impl HabitTrackerApp {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(w - 32.0),
+            overflow: TextOverflow::Ellipsis,
         });
         cmds.push(RenderCommand::Text {
             x: x + 16.0,
@@ -1710,6 +1730,7 @@ impl HabitTrackerApp {
             color: TEXT_COLOR,
             font_weight: FontWeightHint::Bold,
             max_width: Some(w - 32.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -1725,6 +1746,7 @@ impl HabitTrackerApp {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(300.0),
+                overflow: TextOverflow::Ellipsis,
             });
             return;
         }
@@ -1737,6 +1759,7 @@ impl HabitTrackerApp {
             color: TEXT_COLOR,
             font_weight: FontWeightHint::Bold,
             max_width: Some(300.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         for (vi, &idx) in archived.iter().enumerate() {
@@ -1778,6 +1801,7 @@ impl HabitTrackerApp {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(200.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             cmds.push(RenderCommand::Text {
@@ -1792,6 +1816,7 @@ impl HabitTrackerApp {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(300.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Restore hint
@@ -1804,6 +1829,7 @@ impl HabitTrackerApp {
                     color: BLUE,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(140.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
         }
@@ -1820,6 +1846,7 @@ impl HabitTrackerApp {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(300.0),
+                overflow: TextOverflow::Ellipsis,
             });
             return;
         }
@@ -1841,6 +1868,7 @@ impl HabitTrackerApp {
             color: TEXT_COLOR,
             font_weight: FontWeightHint::Bold,
             max_width: Some(400.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Navigation hint
@@ -1852,6 +1880,7 @@ impl HabitTrackerApp {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(300.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Heatmap: 52 weeks x 7 days
@@ -1873,6 +1902,7 @@ impl HabitTrackerApp {
                     color: SUBTEXT0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(40.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
         }
@@ -1916,6 +1946,7 @@ impl HabitTrackerApp {
                         color: SUBTEXT0,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(30.0),
+                        overflow: TextOverflow::Ellipsis,
                     });
                 }
             }
@@ -1931,6 +1962,7 @@ impl HabitTrackerApp {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(40.0),
+            overflow: TextOverflow::Ellipsis,
         });
         let legend_colors = [
             SURFACE0,
@@ -1956,6 +1988,7 @@ impl HabitTrackerApp {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(40.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Stats summary below heatmap
@@ -1995,6 +2028,7 @@ impl HabitTrackerApp {
                 color: *color,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(190.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }
@@ -2041,6 +2075,7 @@ impl HabitTrackerApp {
             color: TEXT_COLOR,
             font_weight: FontWeightHint::Bold,
             max_width: Some(200.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Name field
@@ -2052,6 +2087,7 @@ impl HabitTrackerApp {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(60.0),
+            overflow: TextOverflow::Ellipsis,
         });
         cmds.push(RenderCommand::FillRect {
             x: fx + 80.0,
@@ -2079,6 +2115,7 @@ impl HabitTrackerApp {
             color: name_color,
             font_weight: FontWeightHint::Regular,
             max_width: Some(270.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Category
@@ -2094,6 +2131,7 @@ impl HabitTrackerApp {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(80.0),
+            overflow: TextOverflow::Ellipsis,
         });
         cmds.push(RenderCommand::FillRect {
             x: fx + 110.0,
@@ -2111,6 +2149,7 @@ impl HabitTrackerApp {
             color: CRUST,
             font_weight: FontWeightHint::Bold,
             max_width: Some(120.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Frequency
@@ -2122,6 +2161,7 @@ impl HabitTrackerApp {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(80.0),
+            overflow: TextOverflow::Ellipsis,
         });
         let freq_text = if self.create_frequency_daily {
             String::from("Daily (F1 to toggle)")
@@ -2136,6 +2176,7 @@ impl HabitTrackerApp {
             color: TEXT_COLOR,
             font_weight: FontWeightHint::Regular,
             max_width: Some(250.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Buttons
@@ -2155,6 +2196,7 @@ impl HabitTrackerApp {
             color: CRUST,
             font_weight: FontWeightHint::Bold,
             max_width: Some(70.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         cmds.push(RenderCommand::FillRect {
@@ -2173,6 +2215,7 @@ impl HabitTrackerApp {
             color: TEXT_COLOR,
             font_weight: FontWeightHint::Regular,
             max_width: Some(70.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -2194,6 +2237,7 @@ impl HabitTrackerApp {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(self.width * 0.5),
+            overflow: TextOverflow::Ellipsis,
         });
         cmds.push(RenderCommand::Text {
             x: self.width - 320.0,
@@ -2203,6 +2247,7 @@ impl HabitTrackerApp {
             color: OVERLAY0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(310.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 }
@@ -3528,6 +3573,7 @@ mod tests {
                 font_size,
                 font_weight,
                 max_width: Some(_),
+                overflow: TextOverflow::Ellipsis,
                 ..
             } = cmd
             else {
@@ -3564,6 +3610,7 @@ mod tests {
                     text,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(_),
+                    overflow: TextOverflow::Ellipsis,
                     ..
                 } if (x - left).abs() < 0.01 => Some(text.clone()),
                 _ => None,

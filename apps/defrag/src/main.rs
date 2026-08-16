@@ -28,7 +28,7 @@
 #[allow(unused_imports)]
 use guitk::color::Color;
 #[allow(unused_imports)]
-use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
 use guitk::table::{Column, Fit, Table};
@@ -1554,6 +1554,7 @@ impl DefragUI {
             font_size: FONT_SIZE_TITLE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(200.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Action buttons on the right side
@@ -1590,6 +1591,7 @@ impl DefragUI {
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(btn_w - 16.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -1638,6 +1640,7 @@ impl DefragUI {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(action_w - 20.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -1666,6 +1669,7 @@ impl DefragUI {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(SIDEBAR_WIDTH - 2.0 * PADDING),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Drive list
@@ -1702,6 +1706,7 @@ impl DefragUI {
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(SIDEBAR_WIDTH - 2.0 * PADDING - 8.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Drive info line (fs type + device type)
@@ -1718,6 +1723,7 @@ impl DefragUI {
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(SIDEBAR_WIDTH - 2.0 * PADDING - 8.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Usage bar
@@ -1766,6 +1772,7 @@ impl DefragUI {
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(bar_w),
+                overflow: TextOverflow::Ellipsis,
             });
 
             dy += row_h + 4.0;
@@ -1792,6 +1799,7 @@ impl DefragUI {
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(SIDEBAR_WIDTH - 2.0 * PADDING - 8.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }
@@ -1856,6 +1864,7 @@ impl DefragUI {
                     FontWeightHint::Regular
                 },
                 max_width: Some(tab_w - 24.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             tx += tab_w + 2.0;
@@ -1961,6 +1970,7 @@ impl DefragUI {
                     font_size: FONT_SIZE_SMALL,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
                 // 16 px from the swatch to the label, then 14 px of gap to
                 // the next swatch. The label's own width is measured, not
@@ -1982,6 +1992,7 @@ impl DefragUI {
                 font_size: FONT_SIZE_HEADING,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 
@@ -2043,6 +2054,7 @@ impl DefragUI {
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(120.0),
+                overflow: TextOverflow::Ellipsis,
             });
             tree.push(RenderCommand::Text {
                 x: x + 140.0,
@@ -2052,6 +2064,7 @@ impl DefragUI {
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(130.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }
@@ -2106,6 +2119,7 @@ impl DefragUI {
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Status line below progress bar
@@ -2135,6 +2149,7 @@ impl DefragUI {
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(w),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }
@@ -2159,6 +2174,7 @@ impl DefragUI {
                 font_size: FONT_SIZE_HEADING,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             return;
         };
@@ -2309,6 +2325,7 @@ impl DefragUI {
                 font_size: FONT_SIZE_HEADING,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             let live_lines: &[(&str, String)] = &[
@@ -2338,6 +2355,7 @@ impl DefragUI {
                     font_size: FONT_SIZE,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(200.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
                 tree.push(RenderCommand::Text {
                     x: card_x + 220.0,
@@ -2347,6 +2365,7 @@ impl DefragUI {
                     font_size: FONT_SIZE,
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(card_w - 240.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
             return;
@@ -2365,6 +2384,7 @@ impl DefragUI {
                 font_size: FONT_SIZE_HEADING,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             return;
         };
@@ -2392,6 +2412,7 @@ impl DefragUI {
             font_size: FONT_SIZE_HEADING,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Before/After bars
@@ -2408,6 +2429,7 @@ impl DefragUI {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(150.0),
+            overflow: TextOverflow::Ellipsis,
         });
         tree.push(RenderCommand::FillRect {
             x: bar_x,
@@ -2436,6 +2458,7 @@ impl DefragUI {
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // After
@@ -2448,6 +2471,7 @@ impl DefragUI {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(150.0),
+            overflow: TextOverflow::Ellipsis,
         });
         tree.push(RenderCommand::FillRect {
             x: bar_x,
@@ -2476,6 +2500,7 @@ impl DefragUI {
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Detail lines
@@ -2503,6 +2528,7 @@ impl DefragUI {
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(160.0),
+                overflow: TextOverflow::Ellipsis,
             });
             tree.push(RenderCommand::Text {
                 x: card_x + 180.0,
@@ -2512,6 +2538,7 @@ impl DefragUI {
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(card_w - 200.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }
@@ -2541,6 +2568,7 @@ impl DefragUI {
             font_size: FONT_SIZE_HEADING,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Enabled toggle
@@ -2585,6 +2613,7 @@ impl DefragUI {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Schedule details
@@ -2610,6 +2639,7 @@ impl DefragUI {
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(100.0),
+                overflow: TextOverflow::Ellipsis,
             });
             tree.push(RenderCommand::Text {
                 x: card_x + 120.0,
@@ -2619,6 +2649,7 @@ impl DefragUI {
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(card_w - 140.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -2641,6 +2672,7 @@ impl DefragUI {
             font_size: FONT_SIZE_HEADING,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         for (i, excl) in self.excludes.iter().enumerate() {
@@ -2672,6 +2704,7 @@ impl DefragUI {
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(card_w - PADDING * 2.0 - 40.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }
@@ -2725,6 +2758,7 @@ impl DefragUI {
             font_size: FONT_SIZE_HEADING,
             font_weight: FontWeightHint::Bold,
             max_width: Some(dw - 2.0 * PADDING),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Warning text
@@ -2736,6 +2770,7 @@ impl DefragUI {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(dw - 2.0 * PADDING),
+            overflow: TextOverflow::Ellipsis,
         });
         tree.push(RenderCommand::Text {
             x: dx + PADDING,
@@ -2745,6 +2780,7 @@ impl DefragUI {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(dw - 2.0 * PADDING),
+            overflow: TextOverflow::Ellipsis,
         });
         tree.push(RenderCommand::Text {
             x: dx + PADDING,
@@ -2754,6 +2790,7 @@ impl DefragUI {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(dw - 2.0 * PADDING),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Buttons
@@ -2777,6 +2814,7 @@ impl DefragUI {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(BUTTON_WIDTH - 10.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Proceed anyway button
@@ -2796,6 +2834,7 @@ impl DefragUI {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(BUTTON_WIDTH - 10.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -2832,6 +2871,7 @@ impl DefragUI {
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Regular,
             max_width: Some(WINDOW_WIDTH / 2.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Right side: defrag state
@@ -2861,6 +2901,7 @@ impl DefragUI {
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Regular,
             max_width: Some(240.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 }

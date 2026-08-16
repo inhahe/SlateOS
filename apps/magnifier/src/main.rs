@@ -15,7 +15,7 @@
 //! - Screenshot of magnified view
 
 use guitk::color::Color;
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
 // ── Catppuccin Mocha palette ───────────────────────────────────────────────
@@ -648,6 +648,7 @@ impl MagnifierApp {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(160.0),
+                overflow: TextOverflow::Ellipsis,
             });
             cmds.push(RenderCommand::Text {
                 x: self.width / 2.0 - 80.0,
@@ -657,6 +658,7 @@ impl MagnifierApp {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(160.0),
+                overflow: TextOverflow::Ellipsis,
             });
             return cmds;
         }
@@ -742,6 +744,7 @@ impl MagnifierApp {
             color: Color::rgba(255, 255, 255, 180),
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -824,6 +827,7 @@ impl MagnifierApp {
             color: Color::rgba(255, 255, 255, 160),
             font_weight: FontWeightHint::Regular,
             max_width: Some(self.lens_width - 16.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -850,6 +854,7 @@ impl MagnifierApp {
             color: OVERLAY0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(120.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Magnified docked view
@@ -909,6 +914,7 @@ impl MagnifierApp {
             color: Color::rgba(255, 255, 255, 180),
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -964,6 +970,7 @@ impl MagnifierApp {
                 color: YELLOW,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
     }
@@ -1001,6 +1008,7 @@ impl MagnifierApp {
                 color: TEXT_COLOR,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(110.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // RGB values
@@ -1012,6 +1020,7 @@ impl MagnifierApp {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(110.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Close hint
@@ -1023,6 +1032,7 @@ impl MagnifierApp {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(150.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }
@@ -1047,6 +1057,7 @@ impl MagnifierApp {
             color: SUBTEXT1,
             font_weight: FontWeightHint::Regular,
             max_width: Some(self.width * 0.45),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Mode / tracking / filter
@@ -1064,6 +1075,7 @@ impl MagnifierApp {
             color: OVERLAY0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(self.width * 0.5 - 8.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -1100,6 +1112,7 @@ impl MagnifierApp {
             color: BLUE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(hw - 32.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         let shortcuts = [
@@ -1131,6 +1144,7 @@ impl MagnifierApp {
                 color: PEACH,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(120.0),
+                overflow: TextOverflow::Ellipsis,
             });
             cmds.push(RenderCommand::Text {
                 x: hx + 150.0,
@@ -1140,6 +1154,7 @@ impl MagnifierApp {
                 color: TEXT_COLOR,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(230.0),
+                overflow: TextOverflow::Ellipsis,
             });
             sy += 18.0;
         }
@@ -1152,6 +1167,7 @@ impl MagnifierApp {
             color: OVERLAY0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(hw - 32.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 }

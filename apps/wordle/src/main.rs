@@ -13,7 +13,7 @@
 
 use guitk::color::Color;
 use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
 // ── Catppuccin Mocha palette ──
@@ -801,6 +801,7 @@ impl Wordle {
             font_size: 28.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Difficulty indicator
@@ -813,6 +814,7 @@ impl Wordle {
             font_size: 14.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Hard mode indicator
@@ -825,6 +827,7 @@ impl Wordle {
                 font_size: 14.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 
@@ -841,6 +844,7 @@ impl Wordle {
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Grid
@@ -943,6 +947,7 @@ impl Wordle {
                         font_size: 24.0,
                         font_weight: FontWeightHint::Bold,
                         max_width: None,
+                        overflow: TextOverflow::Clip,
                     });
                 }
             }
@@ -959,6 +964,7 @@ impl Wordle {
                 font_size: 16.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 
@@ -1019,6 +1025,7 @@ impl Wordle {
                     font_size: 16.0,
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
             }
         }
@@ -1043,6 +1050,7 @@ impl Wordle {
             font_size: 12.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Backspace
@@ -1063,6 +1071,7 @@ impl Wordle {
             font_size: 12.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Footer
@@ -1074,6 +1083,7 @@ impl Wordle {
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Game over overlay
@@ -1102,6 +1112,7 @@ impl Wordle {
                 font_size: 24.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             if self.phase == GamePhase::Won {
@@ -1118,6 +1129,7 @@ impl Wordle {
                     font_size: 16.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
             } else {
                 let answer = format!("Word: {}", self.target_word().to_uppercase());
@@ -1129,6 +1141,7 @@ impl Wordle {
                     font_size: 16.0,
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
             }
 
@@ -1140,6 +1153,7 @@ impl Wordle {
                 font_size: 13.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 

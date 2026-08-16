@@ -29,7 +29,7 @@
 //! Uses the guitk library for UI rendering.
 
 use guitk::color::Color;
-use guitk::render::{FontFamily, FontWeightHint, RenderCommand};
+use guitk::render::{FontFamily, FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
 
@@ -2851,6 +2851,7 @@ pub fn render_editor(
             color: num_color,
             font_weight: FontWeightHint::Regular,
             max_width: Some(GUTTER_WIDTH - EDITOR_PADDING),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Syntax-highlighted line content.
@@ -2882,6 +2883,7 @@ pub fn render_editor(
                     color: span.color,
                     font_weight: span.weight,
                     max_width: Some(text_width),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
         }
@@ -3052,6 +3054,7 @@ fn render_block_preview(block: &MdBlock, ctx: &mut PreviewContext) {
                     color: BLUE,
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(ctx.width),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
             ctx.y += font_size + 4.0;
@@ -3102,6 +3105,7 @@ fn render_block_preview(block: &MdBlock, ctx: &mut PreviewContext) {
                         color: SUBTEXT0,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(ctx.width - 16.0),
+                        overflow: TextOverflow::Ellipsis,
                     });
                 }
 
@@ -3117,6 +3121,7 @@ fn render_block_preview(block: &MdBlock, ctx: &mut PreviewContext) {
                         color: GREEN,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(ctx.width - 24.0),
+                        overflow: TextOverflow::Ellipsis,
                     });
                 }
             }
@@ -3167,6 +3172,7 @@ fn render_block_preview(block: &MdBlock, ctx: &mut PreviewContext) {
                             color: cb_color,
                             font_weight: FontWeightHint::Regular,
                             max_width: None,
+                            overflow: TextOverflow::Clip,
                         });
                     } else {
                         ctx.cmds.push(RenderCommand::FillRect {
@@ -3207,6 +3213,7 @@ fn render_block_preview(block: &MdBlock, ctx: &mut PreviewContext) {
                         color: TEXT,
                         font_weight: FontWeightHint::Regular,
                         max_width: None,
+                        overflow: TextOverflow::Clip,
                     });
                 }
                 let saved_x = ctx.x;
@@ -3272,6 +3279,7 @@ fn render_block_preview(block: &MdBlock, ctx: &mut PreviewContext) {
                         color: TEXT,
                         font_weight: FontWeightHint::Bold,
                         max_width: Some(col_width - 16.0),
+                        overflow: TextOverflow::Ellipsis,
                     });
                 }
             }
@@ -3316,6 +3324,7 @@ fn render_block_preview(block: &MdBlock, ctx: &mut PreviewContext) {
                             color: TEXT,
                             font_weight: FontWeightHint::Regular,
                             max_width: Some(col_width - 16.0),
+                            overflow: TextOverflow::Ellipsis,
                         });
                     }
                 }
@@ -3391,6 +3400,7 @@ fn render_inlines_preview(
                 color: segment.color.unwrap_or(color),
                 font_weight: seg_weight,
                 max_width: Some(ctx.width - offset_x),
+                overflow: TextOverflow::Ellipsis,
             });
         }
         offset_x += seg_width;
@@ -3750,6 +3760,7 @@ pub fn render_toolbar(buttons: &[ToolbarButton], x: f32, y: f32, width: f32) -> 
             color: TEXT,
             font_weight: FontWeightHint::Regular,
             max_width: Some(btn_width - 16.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         btn_x += btn_width + 4.0;
@@ -3843,6 +3854,7 @@ pub fn render_tab_bar(
             color: text_color,
             font_weight: label_weight,
             max_width: Some(tab_width - 16.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Close button (X).
@@ -3854,6 +3866,7 @@ pub fn render_tab_bar(
             color: OVERLAY0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         tab_x += tab_width + 2.0;
@@ -3914,6 +3927,7 @@ pub fn render_status_bar(
         color: SUBTEXT0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
 
     // Center: statistics.
@@ -3938,6 +3952,7 @@ pub fn render_status_bar(
         color: SUBTEXT0,
         font_weight: FontWeightHint::Regular,
         max_width: Some(width * 0.6),
+        overflow: TextOverflow::Ellipsis,
     });
 
     // Right side: view mode and auto-save status.
@@ -3964,6 +3979,7 @@ pub fn render_status_bar(
         color: SUBTEXT0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
 
     cmds
@@ -4006,6 +4022,7 @@ pub fn render_toc_sidebar(entries: &[TocEntry], x: f32, y: f32, height: f32) -> 
         color: BLUE,
         font_weight: FontWeightHint::Bold,
         max_width: Some(TOC_SIDEBAR_WIDTH - 24.0),
+        overflow: TextOverflow::Ellipsis,
     });
 
     // Entries.
@@ -4041,6 +4058,7 @@ pub fn render_toc_sidebar(entries: &[TocEntry], x: f32, y: f32, height: f32) -> 
             color: entry_color,
             font_weight,
             max_width: Some(TOC_SIDEBAR_WIDTH - 24.0 - indent),
+            overflow: TextOverflow::Ellipsis,
         });
 
         entry_y += 20.0;
@@ -4095,6 +4113,7 @@ pub fn render_find_replace(
         color: SUBTEXT0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
 
     // Find input box.
@@ -4115,6 +4134,7 @@ pub fn render_find_replace(
         color: TEXT,
         font_weight: FontWeightHint::Regular,
         max_width: Some(width * 0.4 - 8.0),
+        overflow: TextOverflow::Ellipsis,
     });
 
     // Match count.
@@ -4135,6 +4155,7 @@ pub fn render_find_replace(
         color: SUBTEXT0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
 
     // Replace row.
@@ -4146,6 +4167,7 @@ pub fn render_find_replace(
         color: SUBTEXT0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
 
     // Replace input box.
@@ -4166,6 +4188,7 @@ pub fn render_find_replace(
         color: TEXT,
         font_weight: FontWeightHint::Regular,
         max_width: Some(width * 0.4 - 8.0),
+        overflow: TextOverflow::Ellipsis,
     });
 
     // Action buttons.
@@ -4190,6 +4213,7 @@ pub fn render_find_replace(
             color: TEXT,
             font_weight: FontWeightHint::Regular,
             max_width: Some(bw - 16.0),
+            overflow: TextOverflow::Ellipsis,
         });
         bx += bw + 4.0;
     }
@@ -4264,6 +4288,7 @@ pub fn render_template_chooser(x: f32, y: f32, width: f32, height: f32) -> Vec<R
         color: BLUE,
         font_weight: FontWeightHint::Bold,
         max_width: Some(dialog_width - 40.0),
+        overflow: TextOverflow::Ellipsis,
     });
 
     // Template buttons.
@@ -4290,6 +4315,7 @@ pub fn render_template_chooser(x: f32, y: f32, width: f32, height: f32) -> Vec<R
             color: TEXT,
             font_weight: FontWeightHint::Regular,
             max_width: Some(btn_width - 24.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         btn_y += btn_height + 8.0;
@@ -4917,6 +4943,7 @@ impl App {
             color: YELLOW,
             font_weight: FontWeightHint::Bold,
             max_width: Some(dw - 24.0),
+            overflow: TextOverflow::Ellipsis,
         });
         cmds.push(RenderCommand::Text {
             x: dx + 12.0,
@@ -4926,6 +4953,7 @@ impl App {
             color: TEXT,
             font_weight: FontWeightHint::Regular,
             max_width: Some(dw - 24.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         let deleted = matches!(prompt.change, DiskChange::Deleted);
@@ -4956,6 +4984,7 @@ impl App {
                 color: TEXT,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(140.0),
+                overflow: TextOverflow::Ellipsis,
             });
             cmds.push(RenderCommand::Text {
                 x: dx + 160.0,
@@ -4965,6 +4994,7 @@ impl App {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(dw - 176.0),
+                overflow: TextOverflow::Ellipsis,
             });
             by += 34.0;
         }
@@ -5019,6 +5049,7 @@ impl App {
             color: YELLOW,
             font_weight: FontWeightHint::Bold,
             max_width: Some(dw - 24.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         let col_w = (dw - 24.0) / 2.0;
@@ -5032,6 +5063,7 @@ impl App {
             color: GREEN,
             font_weight: FontWeightHint::Bold,
             max_width: Some(col_w),
+            overflow: TextOverflow::Ellipsis,
         });
         cmds.push(RenderCommand::Text {
             x: theirs_x,
@@ -5041,6 +5073,7 @@ impl App {
             color: RED,
             font_weight: FontWeightHint::Bold,
             max_width: Some(col_w),
+            overflow: TextOverflow::Ellipsis,
         });
 
         let mut y = dy + 60.0;
@@ -5080,6 +5113,7 @@ impl App {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(10.0),
+                overflow: TextOverflow::Ellipsis,
             });
             for (li, line) in ours.iter().enumerate() {
                 cmds.push(RenderCommand::Text {
@@ -5090,6 +5124,7 @@ impl App {
                     color: TEXT,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(col_w),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
             for (li, line) in theirs.iter().enumerate() {
@@ -5101,6 +5136,7 @@ impl App {
                     color: TEXT,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(col_w),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
             y += block_h + 6.0;
@@ -5115,6 +5151,7 @@ impl App {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(dw - 24.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 }

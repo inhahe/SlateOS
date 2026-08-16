@@ -106,9 +106,10 @@ def main():
         w("/// always try both without asking how many there are.\n")
         w(f"pub(crate) static SCRIPT_TAGS: [([u8; 4], [u8; 4]); {len(tags)}] = [\n")
         for script, (_, first, second) in sorted(tags.items(), key=lambda kv: kv[1][0]):
-            a = ", ".join(f"b'{c}'" for c in first)
-            b = ", ".join(f"b'{c}'" for c in second)
-            w(f"    ([{a}], [{b}]), // {script}\n")
+            # `*b"latn"` rather than `[b'l', b'a', b't', b'n']`: the same array,
+            # but the byte-string spelling is the one clippy's `byte_char_slices`
+            # asks for, and this crate denies `clippy::all`.
+            w(f'    (*b"{first}", *b"{second}"), // {script}\n')
         w("];\n")
 
     print(f"wrote {out}")

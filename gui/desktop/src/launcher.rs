@@ -30,7 +30,7 @@
 
 use guitk::color::Color;
 use guitk::event::{Key, KeyEvent};
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
 
@@ -661,6 +661,7 @@ impl LauncherState {
                 font_size: INPUT_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         } else {
             cmds.push(RenderCommand::Text {
@@ -671,6 +672,7 @@ impl LauncherState {
                 font_size: INPUT_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(input_width - 24.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -747,6 +749,7 @@ impl LauncherState {
                     FontWeightHint::Regular
                 },
                 max_width: Some(input_width - text_x - 80.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Description
@@ -758,6 +761,7 @@ impl LauncherState {
                 font_size: DESC_FONT_SIZE,
                 font_weight: FontWeightHint::Light,
                 max_width: Some(input_width - text_x - 80.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Category badge
@@ -789,6 +793,7 @@ impl LauncherState {
                 font_size: DESC_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 
@@ -802,6 +807,7 @@ impl LauncherState {
                 font_size: NAME_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 

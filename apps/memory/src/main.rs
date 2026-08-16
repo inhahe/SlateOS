@@ -18,7 +18,7 @@
 
 use guitk::color::Color;
 use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
 const BASE: Color = Color::from_hex(0x1E1E2E);
@@ -347,6 +347,7 @@ impl MemoryGame {
             font_size: 24.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         let size_label = format!(
@@ -361,6 +362,7 @@ impl MemoryGame {
             font_size: 14.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Grid
@@ -395,6 +397,7 @@ impl MemoryGame {
                             font_size: 20.0,
                             font_weight: FontWeightHint::Bold,
                             max_width: None,
+                            overflow: TextOverflow::Clip,
                         });
                     }
                     CardState::FaceUp => {
@@ -417,6 +420,7 @@ impl MemoryGame {
                             font_size: 28.0,
                             font_weight: FontWeightHint::Bold,
                             max_width: None,
+                            overflow: TextOverflow::Clip,
                         });
                     }
                     CardState::Matched => {
@@ -438,6 +442,7 @@ impl MemoryGame {
                             font_size: 28.0,
                             font_weight: FontWeightHint::Regular,
                             max_width: None,
+                            overflow: TextOverflow::Clip,
                         });
                     }
                 }
@@ -474,6 +479,7 @@ impl MemoryGame {
                 font_size: 18.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 
@@ -497,6 +503,7 @@ impl MemoryGame {
             font_size: 14.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         let labels = ["4x4", "4x6", "6x6"];
         for (i, label) in labels.iter().enumerate() {
@@ -513,6 +520,7 @@ impl MemoryGame {
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 
@@ -526,6 +534,7 @@ impl MemoryGame {
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 

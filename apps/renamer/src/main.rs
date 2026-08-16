@@ -35,7 +35,7 @@
 #![allow(dead_code)]
 
 use guitk::Color;
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::table::{Column, Fit, Table};
 use guitk::text;
@@ -1048,6 +1048,7 @@ impl RenamerApp {
             color: TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: Some(200.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Toolbar buttons. Pair label with color so we never index out of bounds.
@@ -1077,6 +1078,7 @@ impl RenamerApp {
                 color,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(bw - 16.0),
+                overflow: TextOverflow::Ellipsis,
             });
             bx += bw + 6.0;
         }
@@ -1096,6 +1098,7 @@ impl RenamerApp {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(290.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -1154,6 +1157,7 @@ impl RenamerApp {
                     FontWeightHint::Regular
                 },
                 max_width: Some(tab_w - 12.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -1182,6 +1186,7 @@ impl RenamerApp {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(SIDEBAR_WIDTH - PADDING * 2.0),
+                overflow: TextOverflow::Ellipsis,
             });
             cmds.push(RenderCommand::Text {
                 x: x + PADDING,
@@ -1191,6 +1196,7 @@ impl RenamerApp {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(SIDEBAR_WIDTH - PADDING * 2.0),
+                overflow: TextOverflow::Ellipsis,
             });
             cmds.push(RenderCommand::Text {
                 x: x + PADDING,
@@ -1200,6 +1206,7 @@ impl RenamerApp {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(SIDEBAR_WIDTH - PADDING * 2.0),
+                overflow: TextOverflow::Ellipsis,
             });
             return;
         }
@@ -1237,6 +1244,7 @@ impl RenamerApp {
                 color: if is_selected { TEXT } else { SUBTEXT0 },
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(SIDEBAR_WIDTH - 40.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Operation details
@@ -1280,6 +1288,7 @@ impl RenamerApp {
                     color: OVERLAY0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(OP_DETAIL_WIDTH),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
 
@@ -1299,6 +1308,7 @@ impl RenamerApp {
                 color: TEXT,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(SIDEBAR_WIDTH - PADDING * 2.0),
+                overflow: TextOverflow::Ellipsis,
             });
             py += 22.0;
 
@@ -1311,6 +1321,7 @@ impl RenamerApp {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(80.0),
+                overflow: TextOverflow::Ellipsis,
             });
             py += 16.0;
             cmds.push(RenderCommand::Text {
@@ -1321,6 +1332,7 @@ impl RenamerApp {
                 color: TEXT,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(SIDEBAR_WIDTH - PADDING * 3.0),
+                overflow: TextOverflow::Ellipsis,
             });
             py += 22.0;
 
@@ -1333,6 +1345,7 @@ impl RenamerApp {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(80.0),
+                overflow: TextOverflow::Ellipsis,
             });
             py += 16.0;
             let name_color = if file.conflict {
@@ -1350,6 +1363,7 @@ impl RenamerApp {
                 color: name_color,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(SIDEBAR_WIDTH - PADDING * 3.0),
+                overflow: TextOverflow::Ellipsis,
             });
             py += 22.0;
 
@@ -1362,6 +1376,7 @@ impl RenamerApp {
                     color: RED,
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(SIDEBAR_WIDTH - PADDING * 2.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
                 py += 18.0;
             }
@@ -1387,6 +1402,7 @@ impl RenamerApp {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(SIDEBAR_WIDTH - PADDING * 2.0),
+                overflow: TextOverflow::Ellipsis,
             });
             py += 16.0;
 
@@ -1405,6 +1421,7 @@ impl RenamerApp {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(SIDEBAR_WIDTH - PADDING * 2.0),
+                overflow: TextOverflow::Ellipsis,
             });
         } else {
             cmds.push(RenderCommand::Text {
@@ -1415,6 +1432,7 @@ impl RenamerApp {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(SIDEBAR_WIDTH - PADDING * 2.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }
@@ -1429,6 +1447,7 @@ impl RenamerApp {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(SIDEBAR_WIDTH - PADDING * 2.0),
+                overflow: TextOverflow::Ellipsis,
             });
             return;
         }
@@ -1457,6 +1476,7 @@ impl RenamerApp {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(SIDEBAR_WIDTH - 20.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             hy += 30.0;
@@ -1531,6 +1551,7 @@ impl RenamerApp {
                     color: CRUST,
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(12.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
 
@@ -1651,6 +1672,7 @@ impl RenamerApp {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(WINDOW_WIDTH - PADDING * 2.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 }
@@ -2394,6 +2416,7 @@ mod tests {
                 font_size,
                 font_weight,
                 max_width: Some(_),
+                overflow: TextOverflow::Ellipsis,
                 ..
             } = cmd
             else {
@@ -2425,6 +2448,7 @@ mod tests {
                     x: tx,
                     text,
                     max_width: Some(_),
+                    overflow: TextOverflow::Ellipsis,
                     ..
                 } if (tx - left).abs() < 0.01 => Some(text.clone()),
                 _ => None,

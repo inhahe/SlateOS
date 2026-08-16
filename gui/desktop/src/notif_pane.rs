@@ -32,7 +32,7 @@
 
 use guitk::color::Color;
 use guitk::event::{EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
 
@@ -766,6 +766,7 @@ impl NotificationPane {
             font_size: 16.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(200.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Unread badge.
@@ -792,6 +793,7 @@ impl NotificationPane {
                 font_size: 11.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(20.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -806,6 +808,7 @@ impl NotificationPane {
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(60.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Settings gear link.
@@ -818,6 +821,7 @@ impl NotificationPane {
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(60.0),
+                overflow: TextOverflow::Ellipsis,
             });
         } else {
             // "Back" link.
@@ -830,6 +834,7 @@ impl NotificationPane {
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(40.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -848,6 +853,7 @@ impl NotificationPane {
             font_size: 11.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(120.0),
+            overflow: TextOverflow::Ellipsis,
         });
         y += 20.0;
 
@@ -893,6 +899,7 @@ impl NotificationPane {
             font_size: 13.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(180.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Toggle pill.
@@ -945,6 +952,7 @@ impl NotificationPane {
             font_size: 13.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(180.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Slider track.
@@ -1005,6 +1013,7 @@ impl NotificationPane {
                 font_size: 14.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(160.0),
+                overflow: TextOverflow::Ellipsis,
             });
             cmds.push(RenderCommand::PopClip);
             return;
@@ -1028,6 +1037,7 @@ impl NotificationPane {
                         font_size: 11.0,
                         font_weight: FontWeightHint::Bold,
                         max_width: Some(100.0),
+                        overflow: TextOverflow::Ellipsis,
                     });
                 }
                 y += GROUP_HEADER_HEIGHT;
@@ -1097,6 +1107,7 @@ impl NotificationPane {
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(card_width - 50.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Timestamp (relative).
@@ -1109,6 +1120,7 @@ impl NotificationPane {
             font_size: 10.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(55.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Title.
@@ -1120,6 +1132,7 @@ impl NotificationPane {
             font_size: 13.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(card_width - 40.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Body — a one-line preview, elided against the width it is drawn in
@@ -1138,6 +1151,7 @@ impl NotificationPane {
             font_size: BODY_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(card_width - BODY_INSET),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Dismiss button (X) — shown on hover.
@@ -1161,6 +1175,7 @@ impl NotificationPane {
                 font_size: 12.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
     }
@@ -1189,6 +1204,7 @@ impl NotificationPane {
             font_size: 11.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(150.0),
+            overflow: TextOverflow::Ellipsis,
         });
         y += 24.0;
 
@@ -1217,6 +1233,7 @@ impl NotificationPane {
                 font_size: 13.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(200.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Priority badge.
@@ -1237,6 +1254,7 @@ impl NotificationPane {
                 font_size: 10.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(45.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Enabled toggle.
@@ -1274,6 +1292,7 @@ impl NotificationPane {
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(card_width - 30.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             y += 108.0;
@@ -1290,6 +1309,7 @@ impl NotificationPane {
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(250.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -1963,6 +1983,7 @@ mod tests {
                     text,
                     font_size,
                     max_width: Some(w),
+                    overflow: TextOverflow::Ellipsis,
                     color,
                     ..
                 } if (*font_size - BODY_FONT_SIZE).abs() < f32::EPSILON

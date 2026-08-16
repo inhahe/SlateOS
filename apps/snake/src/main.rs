@@ -21,7 +21,7 @@ use guitk::color::Color;
 use guitk::event::{Event, Key};
 #[cfg(test)]
 use guitk::event::{KeyEvent, Modifiers};
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
 // ── Catppuccin Mocha palette ────────────────────────────────────────
@@ -738,6 +738,7 @@ impl SnakeApp {
             font_size: HEADER_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Score display.
@@ -750,6 +751,7 @@ impl SnakeApp {
             font_size: HEADER_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // High score.
@@ -762,6 +764,7 @@ impl SnakeApp {
             font_size: HEADER_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Difficulty / mode indicators.
@@ -778,6 +781,7 @@ impl SnakeApp {
             font_size: STATS_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -1018,6 +1022,7 @@ impl SnakeApp {
             font_size: STATS_FONT_SIZE + 2.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         y_offset += line_height + 4.0;
 
@@ -1061,6 +1066,7 @@ impl SnakeApp {
                 font_size: STATS_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             cmds.push(RenderCommand::Text {
                 x: sx + STATS_PANEL_WIDTH - 60.0,
@@ -1070,6 +1076,7 @@ impl SnakeApp {
                 font_size: STATS_FONT_SIZE,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             y_offset += line_height;
         }
@@ -1094,6 +1101,7 @@ impl SnakeApp {
             font_size: STATS_FONT_SIZE + 2.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         y_offset += line_height;
 
@@ -1114,6 +1122,7 @@ impl SnakeApp {
                 font_size: STATS_FONT_SIZE - 1.0,
                 font_weight: FontWeightHint::Light,
                 max_width: Some(STATS_PANEL_WIDTH - 20.0),
+                overflow: TextOverflow::Ellipsis,
             });
             y_offset += line_height - 4.0;
         }
@@ -1152,6 +1161,7 @@ impl SnakeApp {
             font_size: TITLE_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         cmds.push(RenderCommand::Text {
@@ -1162,6 +1172,7 @@ impl SnakeApp {
             font_size: OVERLAY_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Wrap mode toggle hint.
@@ -1177,6 +1188,7 @@ impl SnakeApp {
             font_size: OVERLAY_FONT_SIZE - 2.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -1230,6 +1242,7 @@ impl SnakeApp {
             font_size: TITLE_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Score.
@@ -1242,6 +1255,7 @@ impl SnakeApp {
             font_size: OVERLAY_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // High score.
@@ -1254,6 +1268,7 @@ impl SnakeApp {
             font_size: OVERLAY_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Length.
@@ -1266,6 +1281,7 @@ impl SnakeApp {
             font_size: OVERLAY_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Restart hint.
@@ -1277,6 +1293,7 @@ impl SnakeApp {
             font_size: OVERLAY_FONT_SIZE - 2.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         cmds.push(RenderCommand::Text {
@@ -1287,6 +1304,7 @@ impl SnakeApp {
             font_size: OVERLAY_FONT_SIZE - 2.0,
             font_weight: FontWeightHint::Light,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 

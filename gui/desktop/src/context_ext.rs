@@ -13,7 +13,7 @@
 //! - Rate limit: if a handler takes >200ms, skip it with "loading..." entry.
 
 use guitk::color::Color;
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
 // ============================================================================
@@ -772,6 +772,7 @@ pub fn render_context_menu(
                     color: if hovered { TEXT } else { SUBTEXT1 },
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
 
                 // Label.
@@ -783,6 +784,7 @@ pub fn render_context_menu(
                     color: if hovered { TEXT } else { SUBTEXT1 },
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
 
                 // Shortcut hint.
@@ -795,6 +797,7 @@ pub fn render_context_menu(
                         color: OVERLAY0,
                         font_weight: FontWeightHint::Light,
                         max_width: None,
+                        overflow: TextOverflow::Clip,
                     });
                 }
 
@@ -830,6 +833,7 @@ pub fn render_context_menu(
                     color: if hovered { BLUE } else { SUBTEXT0 },
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
 
                 // Label (with "loading..." indicator if slow).
@@ -852,6 +856,7 @@ pub fn render_context_menu(
                     },
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
 
                 // Shortcut hint.
@@ -864,6 +869,7 @@ pub fn render_context_menu(
                         color: OVERLAY0,
                         font_weight: FontWeightHint::Light,
                         max_width: None,
+                        overflow: TextOverflow::Clip,
                     });
                 }
 
@@ -877,6 +883,7 @@ pub fn render_context_menu(
                         color: SUBTEXT0,
                         font_weight: FontWeightHint::Regular,
                         max_width: None,
+                        overflow: TextOverflow::Clip,
                     });
                 }
 
@@ -960,6 +967,7 @@ impl ExtensionSettingsUI {
             color: TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         cy += 32.0;
 
@@ -989,6 +997,7 @@ impl ExtensionSettingsUI {
             },
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         cy += 40.0;
 
@@ -1003,6 +1012,7 @@ impl ExtensionSettingsUI {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         } else {
             for ext in &filtered {
@@ -1040,6 +1050,7 @@ impl ExtensionSettingsUI {
                     color: if ext.enabled { TEXT } else { SUBTEXT0 },
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
 
                 // App name.
@@ -1051,6 +1062,7 @@ impl ExtensionSettingsUI {
                     color: OVERLAY0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
 
                 // Slow indicator.
@@ -1063,6 +1075,7 @@ impl ExtensionSettingsUI {
                         color: YELLOW,
                         font_weight: FontWeightHint::Bold,
                         max_width: None,
+                        overflow: TextOverflow::Clip,
                     });
                 }
 
@@ -1076,6 +1089,7 @@ impl ExtensionSettingsUI {
                         color: OVERLAY0,
                         font_weight: FontWeightHint::Light,
                         max_width: None,
+                        overflow: TextOverflow::Clip,
                     });
                 }
 

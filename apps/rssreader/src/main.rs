@@ -26,7 +26,7 @@
 use std::collections::HashMap;
 
 use guitk::color::Color;
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
 
@@ -2687,6 +2687,7 @@ impl RssReaderApp {
             color: PEACH,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // App title
@@ -2698,6 +2699,7 @@ impl RssReaderApp {
             color: TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Feed count badge
@@ -2713,6 +2715,7 @@ impl RssReaderApp {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Right side: refresh all button area
@@ -2733,6 +2736,7 @@ impl RssReaderApp {
             color: BLUE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Bottom border
@@ -2781,6 +2785,7 @@ impl RssReaderApp {
             color: filter_color,
             font_weight: FontWeightHint::Regular,
             max_width: Some(94.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Sort button
@@ -2801,6 +2806,7 @@ impl RssReaderApp {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(144.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Search box
@@ -2843,6 +2849,7 @@ impl RssReaderApp {
             color: search_text_color,
             font_weight: FontWeightHint::Regular,
             max_width: Some(224.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Bottom border
@@ -2907,6 +2914,7 @@ impl RssReaderApp {
             color: if is_selected { TEXT } else { SUBTEXT0 },
             font_weight: FontWeightHint::Bold,
             max_width: Some(panel_width - 60.0),
+            overflow: TextOverflow::Ellipsis,
         });
         // Unread count badge
         let total_unread = self.total_unread();
@@ -2928,6 +2936,7 @@ impl RssReaderApp {
                 color: CRUST,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(24.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
         cy += item_height + 2.0;
@@ -2961,6 +2970,7 @@ impl RssReaderApp {
             },
             font_weight: FontWeightHint::Regular,
             max_width: Some(panel_width - 60.0),
+            overflow: TextOverflow::Ellipsis,
         });
         let starred_count = self.total_starred();
         if starred_count > 0 {
@@ -2980,6 +2990,7 @@ impl RssReaderApp {
                 color: CRUST,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(24.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
         cy += item_height + 8.0;
@@ -3021,6 +3032,7 @@ impl RssReaderApp {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             cmds.push(RenderCommand::Text {
@@ -3031,6 +3043,7 @@ impl RssReaderApp {
                 color: if is_folder_selected { TEXT } else { SUBTEXT0 },
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(panel_width - 72.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Folder unread count
@@ -3044,6 +3057,7 @@ impl RssReaderApp {
                     color: OVERLAY0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
             }
             cy += item_height;
@@ -3088,6 +3102,7 @@ impl RssReaderApp {
                         color: if is_feed_selected { TEXT } else { SUBTEXT0 },
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(panel_width - 88.0),
+                        overflow: TextOverflow::Ellipsis,
                     });
 
                     // Feed unread count
@@ -3101,6 +3116,7 @@ impl RssReaderApp {
                             color: BLUE,
                             font_weight: FontWeightHint::Bold,
                             max_width: None,
+                            overflow: TextOverflow::Clip,
                         });
                     }
                     cy += item_height;
@@ -3160,6 +3176,7 @@ impl RssReaderApp {
                     color: if is_feed_selected { TEXT } else { SUBTEXT0 },
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(panel_width - 72.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
 
                 let feed_unread = self.unread_count_for_feed(feed.id);
@@ -3172,6 +3189,7 @@ impl RssReaderApp {
                         color: BLUE,
                         font_weight: FontWeightHint::Bold,
                         max_width: None,
+                        overflow: TextOverflow::Clip,
                     });
                 }
                 cy += item_height;
@@ -3221,6 +3239,7 @@ impl RssReaderApp {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(panel_width - 32.0),
+                overflow: TextOverflow::Ellipsis,
             });
             cmds.push(RenderCommand::Text {
                 x: x + 16.0,
@@ -3230,6 +3249,7 @@ impl RssReaderApp {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Light,
                 max_width: Some(panel_width - 32.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -3280,6 +3300,7 @@ impl RssReaderApp {
                     color: YELLOW,
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
             }
 
@@ -3298,6 +3319,7 @@ impl RssReaderApp {
                 color: title_color,
                 font_weight: title_weight,
                 max_width: Some(panel_width - 56.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Feed name and date
@@ -3312,6 +3334,7 @@ impl RssReaderApp {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(panel_width - 40.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Summary preview. Elided by *measured width*, not by byte count.
@@ -3347,6 +3370,7 @@ impl RssReaderApp {
                 color: SURFACE2,
                 font_weight: FontWeightHint::Light,
                 max_width: Some(preview_width),
+                overflow: TextOverflow::Ellipsis,
             });
 
             cy += item_height;
@@ -3397,6 +3421,7 @@ impl RssReaderApp {
                 color: TEXT,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(content_width),
+                overflow: TextOverflow::Ellipsis,
             });
             cy += 32.0;
 
@@ -3417,6 +3442,7 @@ impl RssReaderApp {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(content_width),
+                overflow: TextOverflow::Ellipsis,
             });
             cy += 24.0;
 
@@ -3439,6 +3465,7 @@ impl RssReaderApp {
                 color: status_color,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             if article.is_starred {
@@ -3458,6 +3485,7 @@ impl RssReaderApp {
                     color: YELLOW,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
             }
 
@@ -3484,6 +3512,7 @@ impl RssReaderApp {
                     color: GREEN,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
             }
 
@@ -3510,6 +3539,7 @@ impl RssReaderApp {
                     color: BLUE,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(content_width),
+                    overflow: TextOverflow::Ellipsis,
                 });
                 cy += 20.0;
             }
@@ -3535,6 +3565,7 @@ impl RssReaderApp {
                     color: SUBTEXT1,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(content_width),
+                    overflow: TextOverflow::Ellipsis,
                 });
                 cy += line_height;
             }
@@ -3548,6 +3579,7 @@ impl RssReaderApp {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(panel_width - 40.0),
+                overflow: TextOverflow::Ellipsis,
             });
             cmds.push(RenderCommand::Text {
                 x: x + panel_width / 2.0 - 110.0,
@@ -3557,6 +3589,7 @@ impl RssReaderApp {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Light,
                 max_width: Some(panel_width - 40.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -3598,6 +3631,7 @@ impl RssReaderApp {
             color: BLUE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Filter and sort status
@@ -3609,6 +3643,7 @@ impl RssReaderApp {
             color: OVERLAY0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(300.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Status message
@@ -3621,6 +3656,7 @@ impl RssReaderApp {
                 color: PEACH,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(self.width / 2.0 - 120.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -3638,6 +3674,7 @@ impl RssReaderApp {
             color: OVERLAY0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(190.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Help hint
@@ -3649,6 +3686,7 @@ impl RssReaderApp {
             color: SURFACE2,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -3699,6 +3737,7 @@ impl RssReaderApp {
             color: TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Close hint
@@ -3710,6 +3749,7 @@ impl RssReaderApp {
             color: OVERLAY0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Separator
@@ -3748,6 +3788,7 @@ impl RssReaderApp {
                 color: PEACH,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(110.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Description
@@ -3759,6 +3800,7 @@ impl RssReaderApp {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(dialog_width - 180.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             row_y += row_height;
@@ -3810,6 +3852,7 @@ impl RssReaderApp {
             color: TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // URL input label
@@ -3821,6 +3864,7 @@ impl RssReaderApp {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // URL input field
@@ -3849,6 +3893,7 @@ impl RssReaderApp {
             color: OVERLAY0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(dialog_width - 56.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Folder selection label
@@ -3860,6 +3905,7 @@ impl RssReaderApp {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Folder dropdown
@@ -3879,6 +3925,7 @@ impl RssReaderApp {
             color: OVERLAY0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(dialog_width - 56.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Buttons
@@ -3901,6 +3948,7 @@ impl RssReaderApp {
             color: TEXT,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Add button
@@ -3920,6 +3968,7 @@ impl RssReaderApp {
             color: CRUST,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -3970,6 +4019,7 @@ impl RssReaderApp {
             color: TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Column headers
@@ -3981,6 +4031,7 @@ impl RssReaderApp {
             color: OVERLAY0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         cmds.push(RenderCommand::Text {
             x: dx + 200.0,
@@ -3990,6 +4041,7 @@ impl RssReaderApp {
             color: OVERLAY0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         cmds.push(RenderCommand::Text {
             x: dx + 280.0,
@@ -3999,6 +4051,7 @@ impl RssReaderApp {
             color: OVERLAY0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Separator
@@ -4034,6 +4087,7 @@ impl RssReaderApp {
                 color: TEXT,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(156.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Format
@@ -4045,6 +4099,7 @@ impl RssReaderApp {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             // Status text
@@ -4058,6 +4113,7 @@ impl RssReaderApp {
                 color: status_color,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(dialog_width - 300.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // URL underneath
@@ -4069,6 +4125,7 @@ impl RssReaderApp {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Light,
                 max_width: Some(dialog_width - 60.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             row_y += row_height;

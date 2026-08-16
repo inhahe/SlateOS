@@ -6,7 +6,7 @@
 //! (H.264, H.265, VP9, AV1, AAC, Opus, FLAC).
 
 use guitk::color::Color;
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
 // ============================================================================
@@ -2388,6 +2388,7 @@ impl VideoPlayerApp {
                     FontWeightHint::Regular
                 },
                 max_width: Some(tab_width - 12.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             if active {
@@ -2440,6 +2441,7 @@ impl VideoPlayerApp {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(300.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             cmds.push(RenderCommand::Text {
@@ -2450,6 +2452,7 @@ impl VideoPlayerApp {
                 color: SURFACE2,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(200.0),
+                overflow: TextOverflow::Ellipsis,
             });
         } else {
             // Video frame placeholder
@@ -2465,6 +2468,7 @@ impl VideoPlayerApp {
                     color: SURFACE2,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(300.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
 
@@ -2490,6 +2494,7 @@ impl VideoPlayerApp {
                     color: Color::rgb(255, 255, 255),
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(380.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
 
@@ -2511,6 +2516,7 @@ impl VideoPlayerApp {
                     color: Color::rgb(255, 255, 255),
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(180.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
 
@@ -2534,6 +2540,7 @@ impl VideoPlayerApp {
                     color: Color::rgb(255, 255, 255),
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
             }
         }
@@ -2629,6 +2636,7 @@ impl VideoPlayerApp {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(200.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Remaining time
@@ -2640,6 +2648,7 @@ impl VideoPlayerApp {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(100.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Playback buttons row
@@ -2714,6 +2723,7 @@ impl VideoPlayerApp {
             color: if self.volume.is_muted() { RED } else { TEXT },
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Volume bar
@@ -2754,6 +2764,7 @@ impl VideoPlayerApp {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(50.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Right controls: speed, repeat, shuffle, aspect
@@ -2771,6 +2782,7 @@ impl VideoPlayerApp {
             },
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         cmds.push(RenderCommand::Text {
@@ -2785,6 +2797,7 @@ impl VideoPlayerApp {
             },
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         cmds.push(RenderCommand::Text {
@@ -2804,6 +2817,7 @@ impl VideoPlayerApp {
             },
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         cmds.push(RenderCommand::Text {
@@ -2814,6 +2828,7 @@ impl VideoPlayerApp {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(60.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Subtitle indicator
@@ -2826,6 +2841,7 @@ impl VideoPlayerApp {
                 color: YELLOW,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 
@@ -2838,6 +2854,7 @@ impl VideoPlayerApp {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -2875,6 +2892,7 @@ impl VideoPlayerApp {
             color: fg,
             font_weight: FontWeightHint::Bold,
             max_width: Some(w - 4.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -2905,6 +2923,7 @@ impl VideoPlayerApp {
             color: TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: Some(panel_w - 32.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Shuffle / repeat status
@@ -2924,6 +2943,7 @@ impl VideoPlayerApp {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(panel_w - 32.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Separator
@@ -2980,6 +3000,7 @@ impl VideoPlayerApp {
                 color: if is_current { BLUE } else { OVERLAY0 },
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(24.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Playing indicator
@@ -2992,6 +3013,7 @@ impl VideoPlayerApp {
                     color: GREEN,
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
             }
 
@@ -3008,6 +3030,7 @@ impl VideoPlayerApp {
                     FontWeightHint::Regular
                 },
                 max_width: Some(panel_w - 160.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Duration
@@ -3020,6 +3043,7 @@ impl VideoPlayerApp {
                     color: OVERLAY0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(60.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
 
@@ -3032,6 +3056,7 @@ impl VideoPlayerApp {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(panel_w - 100.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -3066,6 +3091,7 @@ impl VideoPlayerApp {
                     color: BLUE,
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(300.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
                 *y += line_h + 4.0;
             };
@@ -3080,6 +3106,7 @@ impl VideoPlayerApp {
                         color: SUBTEXT0,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(120.0),
+                        overflow: TextOverflow::Ellipsis,
                     });
                     cmds.push(RenderCommand::Text {
                         x: value_x,
@@ -3089,6 +3116,7 @@ impl VideoPlayerApp {
                         color: TEXT,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(400.0),
+                        overflow: TextOverflow::Ellipsis,
                     });
                     *y += line_h;
                 };
@@ -3235,6 +3263,7 @@ impl VideoPlayerApp {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(200.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }
@@ -3260,6 +3289,7 @@ impl VideoPlayerApp {
             color: TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: Some(300.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Enabled indicator
@@ -3280,6 +3310,7 @@ impl VideoPlayerApp {
             color: CRUST,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Preamp
@@ -3291,6 +3322,7 @@ impl VideoPlayerApp {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(150.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Preset buttons
@@ -3321,6 +3353,7 @@ impl VideoPlayerApp {
                     FontWeightHint::Regular
                 },
                 max_width: Some(56.0),
+                overflow: TextOverflow::Ellipsis,
             });
             px += 64.0;
         }
@@ -3352,6 +3385,7 @@ impl VideoPlayerApp {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             cmds.push(RenderCommand::Text {
                 x: 4.0,
@@ -3361,6 +3395,7 @@ impl VideoPlayerApp {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             cmds.push(RenderCommand::Text {
                 x: 4.0,
@@ -3370,6 +3405,7 @@ impl VideoPlayerApp {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             for (i, band) in self.equalizer.bands.iter().enumerate() {
@@ -3427,6 +3463,7 @@ impl VideoPlayerApp {
                     color: SUBTEXT0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(band_w),
+                    overflow: TextOverflow::Ellipsis,
                 });
 
                 // Gain value
@@ -3438,6 +3475,7 @@ impl VideoPlayerApp {
                     color: SUBTEXT0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(band_w * 0.7),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
         }
@@ -3463,6 +3501,7 @@ impl VideoPlayerApp {
             color: TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: Some(300.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         let adj = &self.video_adjustments;
@@ -3490,6 +3529,7 @@ impl VideoPlayerApp {
                 color: TEXT,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(110.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Slider track
@@ -3538,6 +3578,7 @@ impl VideoPlayerApp {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(50.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -3563,6 +3604,7 @@ impl VideoPlayerApp {
             color: reset_fg,
             font_weight: FontWeightHint::Bold,
             max_width: Some(80.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Deinterlace mode
@@ -3574,6 +3616,7 @@ impl VideoPlayerApp {
             color: TEXT,
             font_weight: FontWeightHint::Regular,
             max_width: Some(300.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -3597,6 +3640,7 @@ impl VideoPlayerApp {
             color: TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: Some(300.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         let prefs = &self.preferences;
@@ -3648,6 +3692,7 @@ impl VideoPlayerApp {
                 color: TEXT,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(180.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             let value_color = if *value == "On" {
@@ -3665,6 +3710,7 @@ impl VideoPlayerApp {
                 color: value_color,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(200.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -3679,6 +3725,7 @@ impl VideoPlayerApp {
             color: BLUE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(200.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         cmds.push(RenderCommand::Text {
@@ -3693,6 +3740,7 @@ impl VideoPlayerApp {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(300.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         cmds.push(RenderCommand::Text {
@@ -3703,6 +3751,7 @@ impl VideoPlayerApp {
             color: BLUE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(200.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         cmds.push(RenderCommand::Text {
@@ -3717,6 +3766,7 @@ impl VideoPlayerApp {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(400.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         cmds.push(RenderCommand::Text {
@@ -3727,6 +3777,7 @@ impl VideoPlayerApp {
             color: BLUE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(200.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         cmds.push(RenderCommand::Text {
@@ -3746,6 +3797,7 @@ impl VideoPlayerApp {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(500.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -3769,6 +3821,7 @@ impl VideoPlayerApp {
             color: TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: Some(300.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         let shortcuts = Shortcuts::list();
@@ -3805,6 +3858,7 @@ impl VideoPlayerApp {
                 color: MAUVE,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(74.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Action
@@ -3816,6 +3870,7 @@ impl VideoPlayerApp {
                 color: SUBTEXT1,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(180.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }

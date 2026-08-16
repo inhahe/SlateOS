@@ -13320,3 +13320,598 @@ table, so adding `-9` cannot break their build; it falls through to `EIO` until
 they map it. Until they do, an overflow reports as a generic I/O error rather
 than the retryable `ERANGE` — annoying, not wrong. Filed in the reply to
 `requests/b-a-cap-enumerating-query-syscall.md`.
+## §427 — Text that does not fit carries an overflow policy on the draw command, and the compositor draws the ellipsis
+
+**Date:** 2026-08-15
+**Decided by:** Operator (answering `open-questions.md` Q45 — "q45: a."; Claude
+raised the question and recommended A)
+**Zone:** gui-core, gui-toolkit, apps
+
+**In short.** When a piece of text is too wide for the space it was given, we
+currently just stop drawing it — no "…", no mark of any kind. So a label reading
+`Gateway 192.168.1.1 res` looks like a complete sentence rather than a truncated
+one, and a reader has no way to tell that anything was cut. The fix is to make
+every text-drawing instruction say up front what should happen when the text
+does not fit — either cut it silently or end it with "…" — so that the question
+can no longer be left unanswered by accident. The cost is that every place in
+the codebase that draws text has to be edited to say which it wants.
+
+**Context.** `RenderCommand::Text` carries an optional `max_width`. The
+compositor honours it in `draw_text` by walking glyphs and breaking before the
+first one that would cross the limit. Nothing is drawn to mark the break. A
+caller who wants the cut marked has to call `text::elide` beforehand — which
+measures the string to find the cut point, and then the compositor measures it
+again while drawing it, answering the same question twice with two
+implementations that can disagree.
+
+The result is the failure mode in `known-issues.md` →
+`TD-GUI-CLIPPED-TEXT-IS-NOT-MARKED`: well over a hundred single-line labels
+across `gui/**` and `apps/**` pass `max_width` without eliding. Most are safe
+only because their values are short and app-authored. The ones that bite carry
+user or network data — file names, SSIDs, error strings, host names — where a
+plausible-looking truncation is indistinguishable from the real value.
+
+**Options.**
+
+1. **`overflow: TextOverflow` (`Clip` | `Ellipsis`) as a field on
+   `RenderCommand::Text`; the compositor draws the ellipsis.** *What changes:*
+   text cut by `max_width` ends in "…" wherever a caller asks for it, and the
+   ellipsis is placed by the party that knows exactly where the glyphs ran out.
+   *Cost:* Rust has no per-field default in a struct variant, so this edits
+   **every** construction of `Text` in the tree.
+2. **A second variant, `RenderCommand::ElidedText`.** *What changes:* the same
+   visible outcome, with no edit to existing call sites. *Cost:* every renderer,
+   every test and every match on `RenderCommand` splits an arm forever to encode
+   one boolean.
+3. **A builder — `Text::new(..).ellipsis()`.** *What changes:* the same outcome,
+   opt-in. *Cost:* the struct-literal form stays available and stays wrong, so
+   the next label someone writes still has the bug.
+4. **Sweep `text::elide` across the call sites that need it.** *What changes:*
+   today's hundred-odd bad labels get fixed. *Cost:* nothing prevents the
+   hundred-and-first, and the double-measurement stays.
+
+**The decision: option 1.** It is the only option that makes the mistake
+*unrepresentable* — after it, a `Text` command cannot exist without having
+answered "and what if it doesn't fit?". The operator was told the churn was
+several hundred sites and chose A anyway, on exactly that ground. (Measured
+afterwards: **4517 `RenderCommand::Text {` sites across 208 files**, well above
+the estimate. That does not reopen the decision — the decision was about
+representability, not diff size — but it does mean the edit is *scripted*, not
+made by hand.)
+
+**Execution constraint, and it is load-bearing.** This lands as **its own commit
+with nothing else in flight.** A four-thousand-site mechanical diff entangled
+with real work cannot be separated afterwards; that is precisely the trap §310
+(the repo-wide rustfmt) exists to document, and it cost a revert-and-redo cycle
+in `posix` when it happened there.
+
+**A sub-decision left to Claude, recorded here so it can be overruled.** For the
+sites that pass `max_width: None`, the choice is vacuous and they get `Clip`.
+For the sites that *do* set a `max_width`, the mechanical translation would be
+`Clip` — that preserves today's behaviour exactly. It is nonetheless the wrong
+default: today's behaviour *is* the reported bug, and a scripted sweep that
+faithfully preserves a bug at four thousand sites has done nothing. Those sites
+default to **`Ellipsis`**. The consequence is that some labels which currently
+fill their box to the last pixel will end in "…" one glyph earlier; that is the
+intended change, not a regression. Sites where clipping is genuinely correct —
+a progress bar's fill, a decorative rule — are those that should be
+individually set back to `Clip` afterwards, because they are the rare case and
+can be argued for one at a time.
+
+**Where it lands.** `gui/toolkit/src/render.rs` (`RenderCommand::Text`, the
+`RenderTree::text()` helper), `gui/compositor/src/main.rs` (`draw_text` — the
+`break` at the limit becomes the place the ellipsis is drawn),
+`gui/toolkit/src/text.rs` (`elide` / `elide_start`, which now overlap the
+compositor's job and need reconciling rather than deleting — they still serve
+callers who need the *string*, not the pixels), and every `max_width: Some(..)`
+in `gui/**` and `apps/**`. Closes `known-issues.md` →
+`TD-GUI-CLIPPED-TEXT-IS-NOT-MARKED`.
+
+## §428 — Normalization stays font-blind; the font-fitting stage decomposes what the face cannot draw
+
+**Date:** 2026-08-15
+**Decided by:** Operator (answering `open-questions.md` C-Q1 — "c-q1: c.";
+Claude raised the question and recommended C)
+**Zone:** gui-core
+
+**In short.** Some accented letters can be written two ways: as one character
+(`ḉ`) or as a plain `c` with two accent marks stacked on it. A font may contain
+the pieces but not the single combined character. Today, when that happens, we
+draw an empty box — the "missing character" rectangle — where other systems draw
+the letter correctly by falling back to the pieces. The question was *which part
+of our code should notice*. We chose: the part that already knows what the font
+contains, rather than the part that converts text into its canonical spelling.
+The visible result is that those letters render correctly; the text-conversion
+step keeps knowing nothing about fonts, which is what lets it be tested and
+cached on its own.
+
+**Context.** `gui/font/src/norm.rs` is layered on a principle written into its
+module doc: **`nfc` answers a question about *text*** — NFC is the Unicode rule
+that spells `e` + `´` as the single character `é` — **and never looks at a font;
+`fit_to_face` answers a question about the *font*** and does not renormalize.
+Composition is a property of the string, so it is decided before any face
+(a font file as loaded for rendering) is consulted.
+
+HarfBuzz — the reference text shaper (the library that turns characters into
+positioned glyphs), which we run a differential sweep against — does the
+opposite. It decomposes to NFD (the fully-separated spelling) and then
+*recomposes only where the face has a glyph*, so the same string normalizes
+differently in two different fonts.
+
+The question surfaced as the entire residue of that sweep. Fixing
+`TD-FONT-HAS-A-HANGUL-SHAPER-NOTHING-CALLS` took the disagreement count from 892
+to 339, and the remaining 339 are **one question asked 339 times**, not a
+scatter: `\u1e09` (ḉ, c with cedilla and acute) 255 cases, `\u212b` (Å, the
+angstrom sign) 57, `été` 10, and a short tail. Concretely, for `\u1e09` in a
+face holding `c`, the cedilla and the acute but no precomposed `ḉ`: we emit one
+missing-glyph box, HarfBuzz emits three glyphs that stack into the right-looking
+character.
+
+**Options.**
+
+- **A — keep the current layering unchanged.** *What changes:* nothing; we keep
+  drawing a box where HarfBuzz draws correct text. *Pro:* each stage has one job
+  and one input. *Con:* the user does not care which stage was principled.
+- **B — adopt HarfBuzz's font-aware recomposition wholesale.** *What changes:*
+  the sweep residue goes to near zero and partial-coverage faces render
+  correctly. *Con:* normalization becomes a function of `(text, face)` — no
+  longer hoistable out of a loop, no longer cacheable per string, not reasonable
+  about without a font in hand; `norm.rs`'s layering claim becomes false.
+- **C — a narrow fallback: `nfc` stays pure, but `fit_to_face` decomposes a
+  composed character it cannot draw when the pieces *are* drawable.** *What
+  changes:* the same visible outcome as B for exactly the failing case, with A's
+  layering intact. *Con:* two mechanisms where HarfBuzz has one — we agree with
+  it on output while diverging on structure.
+
+**The decision: option C.** The decomposition happens in the stage that already
+owns "what can this face draw", and `split_undrawable` already exists with
+exactly that shape — which is why C was the recommendation rather than a
+compromise between the other two. Expected result: the 339 disagreements move to
+`agree` without `nfc` ever taking a face as input.
+
+**The cost accepted, and what to actually test.** Running two mechanisms where
+HarfBuzz runs one means we can match its output while diverging on how we got
+there, and divergence in structure eventually shows up as divergence in output.
+The concrete risk named in the question is **mark reordering after a late
+decomposition** — when several accents attach to one letter, their order matters,
+and HarfBuzz gets it right by construction because it decomposes before
+reordering, whereas we would decompose after. Treat that as the thing to verify
+rather than assume: the sweep is the instrument, and any ordering case it
+surfaces is this decision's bill coming due, not a surprise.
+
+**Why B is worth keeping written down.** If a future case cannot be fixed inside
+`fit_to_face`, B is the argument that has to be beaten, and it should not be
+re-litigated from scratch. It was refused for one reason: it makes normalization
+depend on the font, and everything we do with normalized text — caching it,
+hoisting it out of a render loop, testing it without a font — depends on it not
+doing that.
+
+**Where it lands.** `gui/font/src/norm.rs` (`fit_to_face`, `split_undrawable`,
+and the module doc's layering paragraph, which now needs a sentence saying the
+fallback exists and why it does not violate the principle),
+`gui/font/src/scaled.rs::shape` (call order), and
+`gui/font/tools/harfbuzz_sweep.py` (the 339 should move to `agree`). Reference:
+HarfBuzz `src/hb-ot-shape-normalize.cc`,
+`HB_OT_SHAPE_NORMALIZATION_MODE_COMPOSED_DIACRITICS_NO_SHORT_CIRCUIT`.
+
+## §429 — A required field on a shared type is added and filled in one commit, across lane boundaries
+
+**Date:** 2026-08-15
+**Decided by:** Claude (autonomous) — lane C
+
+**In short:** The project is worked by three agents who each own a slice of the
+tree and are forbidden from editing each other's files. When one of them needs a
+change in another's slice, they leave a note in a `requests/` folder and the
+other picks it up later. That works when the two halves of the change are
+independently valid. It does not work when a shared data structure gains a
+field that every user of it *must* fill in: the half that adds the field and the
+half that fills it in are each, alone, a codebase that does not compile. There
+is no order to do them in. This entry decides that in that specific case the
+adding lane fills in the other lanes' sites too, in the same commit, and tells
+them afterwards.
+
+### The situation that forced it
+
+§427 added a required `overflow` field to `guitk::render::RenderCommand::Text`.
+That type lives in lane C's tree but is *constructed* wherever anything draws
+text: 4,517 occurrences across 208 files in lane C's own tree, and 31 more in
+`init/login/src/main.rs`, which belongs to lane B. `net/`, `netscan/` and `pkg/`
+have none, so that one file is the whole out-of-lane reach. That number had to
+be measured before the options below could be weighed at all — the shape of the
+fallout is what decides whether this is a request or something else — and it is
+what makes option D tractable. Had the reach been thirty files across two lanes,
+the answer would be C.
+
+Rust has no per-field default in an enum struct variant. That is not incidental
+to §427; it is the whole mechanism the operator chose it for. So:
+
+- Lane C adds the field. `init/login` no longer compiles. Because the boot test
+  builds the whole workspace, **`main` is red for every lane** until lane B
+  happens to read its dropbox — which, as `roadmap.md` notes from experience,
+  can be a day, because `requests/` is a set of files on a branch rather than a
+  mailbox, and a request is invisible until the recipient merges.
+- Lane B fills the field in first. It cannot: the field does not exist.
+
+Both orderings are red. The two halves are not independently valid, and the
+request mechanism can only express changes that are.
+
+### The options
+
+**A. File a request and let the tree stay red in between.** Honest about the
+ownership rule and costs nothing to implement. It also means deliberately
+pushing a `main` that does not build, for an unbounded period, in a project
+whose stated rule is "never merge a red tree to `main` to unblock myself" —
+and it blocks the *other* lane too, which had no part in the change.
+
+**B. Add the field with a `Default` so unfilled sites still compile.** Keeps
+every commit green and every lane inside its own tree. It also destroys the
+point: a defaulted `overflow` means all 4,548 sites silently keep today's
+behaviour,
+and today's behaviour is the reported bug. The operator considered and rejected
+exactly this under §427. Reintroducing it here as a *process* convenience would
+be overturning a decision that was not mine to overturn.
+
+**C. Add a second variant / a parallel type, migrate lane by lane, delete the
+old one at the end.** Every commit is green and no lane touches another's files.
+It is the textbook answer and it is a real option. Against it: it is three
+round-trips through the dropbox for a mechanical change, the intermediate state
+has two ways to spell the same command (which is its own bug surface), and the
+"delete the old one at the end" step is the one that never happens — it depends
+on every lane having finished, with nothing failing if it is skipped.
+
+**D. (chosen) The commit that adds a required field to a shared type also fills
+in every construction of it, wherever it lives, and notifies the other lane
+afterwards via `requests/`.** One green commit, no intermediate dialect, no
+dangling cleanup step. The cost is real and is the reason this entry exists:
+lane C wrote to lane B's tree, which the ownership rule forbids outright, and
+the ownership rule exists to prevent the single most expensive failure in this
+arrangement — two agents editing one file and one silently clobbering the other.
+
+### Why D, and what makes it safe
+
+The clobber risk is not a constant; it is a function of whether the other lane
+has work in flight in that file. That is measurable, so it was measured before
+the decision rather than assumed: `origin/lane-b` was **0 commits ahead of
+`origin/main`** — nothing in flight anywhere in lane B — and
+`init/login/src/main.rs` had last been touched only by a repo-wide rename. The
+risk the rule guards against was, at that moment, nil.
+
+So D is conditional, and the conditions are the decision:
+
+1. **The change must be mechanical.** A rule stated in one line, applied
+   uniformly, with no judgement about the other lane's screens. Here:
+   `max_width: Some(..)` → `Ellipsis`, `max_width: None` → `Clip`.
+2. **The other lane's branch must be at or behind `main` in the affected
+   files** — checked with `git log origin/lane-<x> --not origin/main -- <path>`,
+   not assumed. If they have work in flight, this is off the table and the
+   answer reverts to C.
+3. **It must be scripted, and the script committed**, so the other lane can read
+   precisely what was done to their file and re-run it to confirm it is a fixed
+   point. (`scripts/q45_apply.py`.)
+4. **A `requests/<mine>-<theirs>-*.md` must be filed in the same commit**,
+   stating what was changed, by what rule, and that they may freely correct any
+   site without asking — it is their file and they know what those screens are
+   for.
+
+If any of the four fails, C is the fallback, and the extra round-trips are the
+price of not writing to someone else's tree.
+
+### What this does not license
+
+It is not a general exemption from the ownership rule. It covers exactly the
+case where a change is **atomic by the type system** — the compiler will not
+accept either half alone. Anything a lane could plausibly do in two green
+commits still goes through `requests/` and waits. In particular, "it would be
+faster if I just did it" is not this rule; the trigger is "there is no ordering
+of commits that compiles", which is a fact about the change and not a judgement
+about the schedule.
+
+### Where it bites
+
+`scripts/q45_apply.py` (the `ROOTS` list includes `init`, with a comment
+pointing here), `requests/c-b-render-text-gained-a-required-field.md`, and
+`roadmap.md` → "Three-Agent Parallel Execution", whose `requests/` protocol this
+entry qualifies. The next required field on a shared type will hit the same wall;
+this is the answer for it.
+
+## §430 — A language is a *list* of OpenType tags generated from HarfBuzz, and the first one the font registers wins
+
+**Date:** 2026-08-15
+**Decided by:** Claude (autonomous)
+
+**In short:** A font can hold rules that apply to one language and not another
+written in the same alphabet — Turkish spells the lowercase of `I` as a dotless
+`ı`, Romanian wants a comma under `ș` rather than a cedilla. To reach those
+rules the shaper has to turn what the caller knows ("this text is Turkish",
+written `tr`) into the four-letter code the font filed them under (`TRK `).
+There is no rule that derives one from the other: it is a lookup table of about
+eleven hundred entries that Microsoft maintains. Three things were decided
+here — where that table comes from, what to do when one language maps to
+several codes, and what to store per font.
+
+### The decisions
+
+**1. The table is generated from HarfBuzz's source, not written by hand.**
+`gui/font/tools/gen_lang_tables.py` parses HarfBuzz's `hb-ot-tag-table.hh` and
+`hb-ot-tag.cc` and emits `gui/font/src/lang_tables.rs` (148 complex rules, 188
+two-letter keys, 916 three-letter keys, 162 blocked codes). A registry update
+is a regeneration, not an edit.
+
+*Alternative:* transcribe the Microsoft registry by hand, or write the mapping
+as code. Both were rejected for the same reason: the crate measures itself
+against HarfBuzz with `tools/harfbuzz_sweep.py`, and a table that disagrees
+with HarfBuzz's turns every sweep difference into an argument about whose
+registry is right instead of a bug report. Taking the data from the shaper we
+compare against makes any remaining difference *ours*.
+
+*Cost:* the generator is coupled to the layout of two HarfBuzz source files and
+will break when they are restructured. It is written to fail loudly rather than
+silently emit a short table — it checks HarfBuzz's own stated run lengths, and
+refuses on a key collision between two of the tables — so a break is a stopped
+run and not a wrong answer.
+
+**2. One BCP 47 tag maps to up to three OpenType tags, tried in order, and the
+first the *font registers* wins.** `ro-MD` is `MOL ` then `ROM `; `ml` is
+Malayalam Traditional then Reformed; `ga` is `IRI ` then `IRT `. The cap of
+three is HarfBuzz's `HB_OT_MAX_TAGS_PER_LANGUAGE`.
+
+*Alternative — and this is what the first version of the fix did:* keep only
+the first tag of each list, on the reasoning that a language has one code and
+the rest are historical spellings. That is wrong, and the HarfBuzz sweep proved
+it within one run: 66 of this host's 556 faces (`Candara.ttf` among them)
+register `('latn', 'ROM ')` and no `MOL ` at all, so Romanian's comma-below
+reached Moldavian in HarfBuzz and not in us. The `ro-MD` disagreement bucket
+was 345 against plain `ro`'s 279; after the rework it is 279, exactly. The
+candidates are not synonyms — they are an ordered search, and a font gets to
+answer at whichever spelling it chose.
+
+*Why cap at three rather than keep every candidate:* HarfBuzz truncates there,
+and a fourth candidate we honoured and HarfBuzz did not would be a divergence
+in the one place the two engines are meant to agree exactly. The cap is also
+the widest run the registry actually contains, so today it truncates nothing.
+
+**3. `ByScript` stores a language's lookup selection only when it differs from
+its script's default — but stores the language's *tag* either way.** Two thirds
+of the 3031 LangSysRecords on this host select exactly what their script's
+default does; storing those would be storing a second copy of an answer already
+present.
+
+The second half of that sentence is the subtle part, and it is forced by
+decision 2. "Which candidate wins" must be decided by what the font
+**registers**, never by what happened to be worth storing — otherwise a face
+that registers `MOL ` and gives it no rules of its own would fall through to
+`ROM ` and apply Romanian's overrides to Moldavian, on the strength of an
+optimisation. So `ByScript` carries a second sorted list of every (script,
+language) pair the face names, at 8 bytes each (~5 per face here), and consults
+that to choose the candidate before looking up what it selects.
+`gsub::tests::the_first_candidate_a_face_registers_wins_even_when_it_selects_nothing`
+is the regression guard; mutating `selection` to search the stored selections
+directly fails exactly that test and nothing else.
+
+### If this is ever revisited
+
+The thing to preserve is the invariant that the mapping is *HarfBuzz's*, not a
+reasonable approximation of it. Every one of the three decisions above bends
+toward that, and the one time it was bent away from — keeping the head of each
+candidate list — cost a wrong answer on 12% of the host's fonts that 521 green
+unit tests could not see.
+
+**Where:** `gui/font/src/lang.rs`, `gui/font/src/lang_tables.rs` (generated),
+`gui/font/tools/gen_lang_tables.py`, `gui/font/src/otl.rs`
+(`select`, `ByScript::parse`, `ByScript::selection`),
+`known-issues.md` → `TD-FONT-IGNORES-LANGSYS-OVERRIDES`.
+
+## §431 — When the host cannot falsify a shaping pass, synthesize a font that can
+
+**Date:** 2026-08-15
+**Decided by:** Claude (autonomous)
+
+**In short:** Everything the font crate does is checked by shaping the same
+string with our code and with HarfBuzz (the reference text-shaping library
+every browser uses) over all 556 fonts installed on this machine, and
+comparing. That works only while some installed font actually exercises the
+code being checked. For the Thai fallback below, *none* does — so the sweep
+would have printed "agree" for a pass that never ran, which is worse than no
+test at all. The decision: when no installed font can disprove a pass, build
+one that can, with fontTools, and check it in.
+
+### The problem, concretely
+
+A Thai font that predates OpenType ships the shifted forms of its tone marks
+(a tone mark moves down and left when it has to clear a tall consonant) as
+extra glyphs in the *private use area* — the block of codepoints Unicode
+reserves for "whatever the font vendor wants" — at U+F700 for Windows and
+U+F880 for the Mac. Picking those glyphs is the shaping engine's job, and the
+engine only does it when the font contains no Thai layout rules of its own.
+
+Every Thai font Windows ships today *does* contain its own layout rules, which
+turns the fallback off. A direct probe confirmed it: of the 556 faces
+installed here, **zero** carry a single one of those private-use glyphs. So
+the fallback was unfalsifiable against the host collection — the sweep asks
+each face for glyphs, both engines answer with the same missing-glyph boxes,
+and the report says the two agree.
+
+### The decision
+
+`gui/font/tools/gen_thai_legacy.py` builds three faces with fontTools that do
+not exist on this machine and could not: the Thai block, the private-use
+block, and deliberately **no `GSUB`/`GPOS`/`GDEF` at all**. That absence is
+the whole point — it is what makes both engines take their fallback path over
+the same face, so the two answers become comparable.
+
+Three faces, and the third is as load-bearing as the first two:
+
+| face | holds | what it proves |
+|---|---|---|
+| `ThaiLegacyWin` | Windows private-use forms only | the fallback fires and picks the right form |
+| `ThaiLegacyMac` | Mac forms only | the vendor preference is *tested*, not assumed |
+| `ThaiNoPua` | Thai glyphs, no private-use forms | the pass runs, finds nothing, and damages nothing |
+
+`ThaiNoPua` is the case every real modern face without Thai layout rules is
+in. A fallback that mangled *that* would mangle a lot of real fonts, and no
+amount of agreement on the first two faces would have caught it.
+
+Result: 78 of 78 strings agree with HarfBuzz across the three faces. The
+corpus (`gui/font/tools/thai-pua-corpus.txt`) names one string per edge of the
+two state machines rather than sampling real text, since a synthetic font's
+only purpose is to reach edges real text reaches rarely.
+
+*What it cost:* two generated files and a fontTools dependency for the test
+tooling (not for the crate). *Alternative rejected:* hand-write unit tests
+asserting specific glyph ids. Those assert what I believe HarfBuzz does; the
+synthetic face asks HarfBuzz. When the two disagree, only the second one
+tells me which of us is wrong — and it did, immediately, by catching that the
+pass was gated on the wrong predicate and never fired at all.
+
+**Generalization.** This is now the rule for the three shapers still to come
+(Khmer, Myanmar, USE) and for anything else the host cannot exercise: if the
+sweep cannot disagree with a pass, the pass is untested, and the fix is a
+font that can disagree — not a weaker claim in the commit message.
+`harfbuzz_sweep.py` grew a `--corpus FILE` flag so each such oracle brings its
+own strings instead of bloating the built-in corpus.
+
+**Where:** `gui/font/tools/gen_thai_legacy.py`,
+`gui/font/tools/thai-pua-corpus.txt`, `gui/font/tools/harfbuzz_sweep.py`
+(`--fonts`, `--corpus`), `gui/font/src/thai.rs` (`pua_shape`),
+`known-issues.md` → `TD-FONT-HAS-NO-UNIVERSAL-SHAPING-ENGINE`.
+
+## §432 — The Thai SARA AM pass runs between decomposition and the mark sort, not after normalization
+
+**Date:** 2026-08-15
+**Decided by:** Claude (autonomous)
+
+**In short:** Thai has one letter, SARA AM, that is drawn as two separate
+marks in two different places — a small circle above the consonant and a
+stroke after it. Unicode never says so, so we were asking fonts for a single
+glyph almost none of them have. Splitting it is straightforward; *when* to
+split it is the decision, because the shaper also sorts marks into a standard
+order, and doing these two things in the wrong order draws the circle on the
+wrong side of a tone mark.
+
+### The two candidate placements
+
+The crate already has a precedent for a script-specific rewrite of the
+character sequence: the Korean pass, which runs *after* normalization is
+completely finished. Copying that shape would have been the tidy choice.
+
+It is wrong here, and the proof is a trace rather than an argument. Take
+`<0E14, 0E4B, 0E38, 0E33>` — a consonant, a tone mark, a below-base vowel, and
+SARA AM:
+
+| order | result |
+|---|---|
+| split first, then sort (HarfBuzz) | `<0E14, 0E38, 0E4B, 0E4D, 0E32>` |
+| sort first, then split | `<0E14, 0E38, 0E4D, 0E4B, 0E32>` |
+
+Same five characters, and the circle (`0E4D`) lands on the opposite side of
+the tone mark (`0E4B`). Only the first matches HarfBuzz, and the sweep sees
+the difference as a different glyph order.
+
+So the pass is a parameter of the normalizer (`SaraAm::Decompose` /
+`LeaveAlone`), invoked between decomposition and the sort. It is safe there
+because no character decomposes to or from a Thai or Lao one, so the pass
+cannot see a half-decomposed sequence and cannot create work for the
+decomposer. `norm::nfc` passes `LeaveAlone`, so plain NFC stays exactly NFC —
+the pass is shaping, not normalization, and only the shaping entry point asks
+for it.
+
+### Why it cannot be a combining-class table instead
+
+The obvious-looking simplification — express the reordering as combining
+classes and let the existing sort do it — does not work, and the reason is
+worth recording so nobody tries it later. The circle this pass produces has to
+move back over above-base marks. A circle the *user typed* (U+0E4D directly)
+must not move at all. They are the same character; only their provenance
+differs, and a combining class is a property of a character. HarfBuzz has the
+same constraint and solves it the same way, by doing the move at the moment
+of splitting, while the provenance is still known.
+
+*Cost of the choice:* `norm::normalize` gained a third parameter and a
+script-specific call, which is a small dent in its generality. *Measured
+benefit:* host sweep agreement 18806 → 21015 and differences 3382 → 1176,
+with every Thai and Lao string agreeing on all 556 faces.
+
+**Where:** `gui/font/src/thai.rs` (`preprocess`), `gui/font/src/norm.rs`
+(`normalize`, `SaraAm`, `pieces`), `gui/font/src/hangul.rs` (the contrasting
+precedent), `known-issues.md` →
+`TD-FONT-HAS-NO-UNIVERSAL-SHAPING-ENGINE`.
+
+## §433 — A feature belongs to exactly one stage, enforced where the stages are built rather than where they are applied
+
+**Date:** 2026-08-15
+**Decided by:** Claude (autonomous)
+
+**In short:** A font's shaping rules are grouped into named "features"
+(`ccmp` composes characters, `blwf` picks the below-the-line form of a letter,
+and so on), and the shaper runs them in a fixed sequence of stages. Both the
+Indic and the Khmer shaper were listing some features in an early stage and
+then *again* in a final catch-all stage, so those features ran twice. Usually
+that changes nothing — running a rule on its own output is normally a no-op —
+but it is not what HarfBuzz does, and the second application can rewrite a
+glyph the first one already produced. The decision is where to fix it: in the
+code that applies stages, or in the code that builds them.
+
+### How it was found, and why that matters
+
+Not by reading. The duplication had been in `indic_shape.rs` since that shaper
+was written, and every one of the 556 faces installed on this host agreed with
+HarfBuzz anyway, because a real font's lookups are overwhelmingly idempotent:
+substituting a below-base form for a glyph that is already a below-base form
+matches nothing the second time. It took the Khmer probe font of §431 — where
+every feature's lookup appends a marker glyph, and so is *deliberately* not
+idempotent — to make the second application visible, as a doubled marker.
+
+That is the §431 argument arriving a second time from a different direction:
+the host had been reporting agreement about a code path it could not exercise,
+and the bug it hid was not in the shaper being written but in one that had
+been shipping for weeks.
+
+### The two places it could be fixed
+
+**In `gsub::apply_stages`** — track which feature bits have already run and
+mask them out of later stages. This is closest to what HarfBuzz literally
+does: `hb_ot_map_builder_t::compile` sorts the collected features by tag,
+merges duplicates, and keeps `hb_min` of the two stage numbers.
+
+**In each shaper's stage list** — build the stages so they are disjoint by
+construction, by masking the earlier stages out of the final catch-all.
+
+The second was chosen, for two reasons that pull the same way:
+
+* **`apply_stages` has a legitimate reason to run the same lookup twice.**
+  Deduplication belongs to *features*, not lookups. Two different features
+  routinely point at one lookup, and when they are in different stages that
+  lookup genuinely must run twice, with different masks — that is how a
+  feature that is on for one syllable and off for the next is expressed at
+  all. A dedup living in `apply_stages` would be one refactor away from being
+  written against lookups instead of features, and that version would be
+  silently wrong in a way no host face would reveal either.
+* **A shaper that names a feature twice has a bug in its stage list**, and the
+  stage list is where a reader looks to answer "when does `blwf` run?". Fixing
+  it downstream leaves the wrong answer written in the place people read.
+
+So `khmer.rs` and `indic_shape.rs` each grew a `stages()` function returning
+the stage masks, with the final stage computed as
+`ALL_FEATURES & !already_staged & !liga`. Extracting it from `shape` was the
+point of the exercise rather than tidiness: a `stages()` that returns a value
+can be asserted about, and four tests now pin the invariant — the stages are
+pairwise disjoint, their union is every feature except `liga`, the first stage
+is exactly the basic set, and the global features fall in the last stage only.
+A comment saying the same thing is deletable by anyone who thinks it is
+redundant.
+
+*Cost of the choice:* the invariant is restated once per shaper rather than
+enforced once centrally, so a fourth shaper can reintroduce it. That is what
+the tests are for, and a shaper without the corresponding test is a shaper
+whose stage list nobody checked. *Benefit:* `apply_stages` keeps the ability
+to run one lookup under two features, which the alternative would have put at
+risk, and the Khmer probe went from **1 agreement of 45 to 43** — measured by
+putting the duplication back and re-running, not estimated. That figure is the
+other half of the point: against a face that can object, a feature applied
+twice is not a subtle difference, it is almost every string. Against the 556
+faces installed here it was none of them.
+
+**Where:** `gui/font/src/khmer.rs` (`stages`, `shape`, and the two stage
+tests), `gui/font/src/indic_shape.rs` (the same four), `gui/font/src/gsub.rs`
+(`apply_stages`, deliberately unchanged), `gui/font/tools/gen_khmer_probe.py`
+(the oracle that exposed it), `design-decisions.md` §431.

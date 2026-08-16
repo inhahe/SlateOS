@@ -10,7 +10,7 @@
 #[allow(unused_imports)]
 use guitk::color::Color;
 #[allow(unused_imports)]
-use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
 
@@ -755,6 +755,7 @@ impl RecordingTimer {
                 font_size: 28.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             },
             // Remaining label
             RenderCommand::Text {
@@ -765,6 +766,7 @@ impl RecordingTimer {
                 font_size: 16.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             },
         ]
     }
@@ -893,6 +895,7 @@ impl MarkerList {
                     font_size: 10.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(80.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
         }
@@ -1133,6 +1136,7 @@ impl NoiseGate {
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Threshold slider track
@@ -1350,6 +1354,7 @@ impl PlaybackController {
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         commands.push(RenderCommand::Text {
             x: x + width - 40.0,
@@ -1359,6 +1364,7 @@ impl PlaybackController {
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         commands
@@ -1578,6 +1584,7 @@ impl RecordingHistory {
             font_size: 14.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         if self.entries.is_empty() {
@@ -1589,6 +1596,7 @@ impl RecordingHistory {
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             return commands;
         }
@@ -1622,6 +1630,7 @@ impl RecordingHistory {
                 font_size: 13.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width * 0.5),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Duration and size
@@ -1634,6 +1643,7 @@ impl RecordingHistory {
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 
@@ -1887,6 +1897,7 @@ impl SoundRecorderApp {
             font_size: 16.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // State indicator
@@ -1906,6 +1917,7 @@ impl SoundRecorderApp {
             font_size: 14.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Device selector area
@@ -1918,6 +1930,7 @@ impl SoundRecorderApp {
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(300.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -1930,6 +1943,7 @@ impl SoundRecorderApp {
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(240.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Timer display
@@ -2041,6 +2055,7 @@ impl SoundRecorderApp {
             font_size: 13.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 }

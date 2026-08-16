@@ -6,7 +6,7 @@
 //! captions). Extends the core a11y module with a full settings UI.
 
 use guitk::color::Color;
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
 
@@ -486,6 +486,7 @@ impl AccessibilitySettingsUI {
             color: TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width - 48.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Active features count
@@ -499,6 +500,7 @@ impl AccessibilitySettingsUI {
                 color: GREEN,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 48.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -535,6 +537,7 @@ impl AccessibilitySettingsUI {
                     FontWeightHint::Regular
                 },
                 max_width: Some(tw - 18.0),
+                overflow: TextOverflow::Ellipsis,
             });
             tx += tw + 6.0;
         }
@@ -635,6 +638,7 @@ impl AccessibilitySettingsUI {
             color: LAVENDER,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 24.0;
         self.render_toggle_row(
@@ -674,6 +678,7 @@ impl AccessibilitySettingsUI {
             color: LAVENDER,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 24.0;
         self.render_toggle_row(
@@ -713,6 +718,7 @@ impl AccessibilitySettingsUI {
             color: LAVENDER,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 24.0;
         self.render_toggle_row(
@@ -774,6 +780,7 @@ impl AccessibilitySettingsUI {
             color: LAVENDER,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 24.0;
         self.render_toggle_row(cmds, x, cy, width, "Show Captions", a.show_captions);
@@ -889,6 +896,7 @@ impl AccessibilitySettingsUI {
             color: TEXT,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - 80.0),
+            overflow: TextOverflow::Ellipsis,
         });
         let sw_x = x + width - 44.0;
         cmds.push(RenderCommand::FillRect {
@@ -927,6 +935,7 @@ impl AccessibilitySettingsUI {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width * 0.5),
+            overflow: TextOverflow::Ellipsis,
         });
         cmds.push(RenderCommand::Text {
             x: x + width * 0.55,
@@ -936,6 +945,7 @@ impl AccessibilitySettingsUI {
             color: TEXT,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width * 0.45),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 }

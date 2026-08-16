@@ -36,7 +36,7 @@
 #![allow(dead_code)]
 
 use guitk::Color;
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
 
@@ -1723,6 +1723,7 @@ impl App {
             color: TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: Some(150.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Tabs
@@ -1759,6 +1760,7 @@ impl App {
                 color: if active { BLUE } else { SUBTEXT0 },
                 font_weight: tab_weight,
                 max_width: Some(w),
+                overflow: TextOverflow::Ellipsis,
             });
 
             tab_x += w + 6.0;
@@ -1790,6 +1792,7 @@ impl App {
                 color: if *active { CRUST } else { SUBTEXT0 },
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(30.0),
+                overflow: TextOverflow::Ellipsis,
             });
             let _ = tooltip; // used for hover tooltip
         }
@@ -1809,6 +1812,7 @@ impl App {
                 color: SUBTEXT1,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(90.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }
@@ -1841,6 +1845,7 @@ impl App {
                 color: RED,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(WINDOW_WIDTH - 100.0),
+                overflow: TextOverflow::Ellipsis,
             });
         } else if !self.pattern.is_empty() {
             cmds.push(RenderCommand::Text {
@@ -1851,6 +1856,7 @@ impl App {
                 color: GREEN,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(WINDOW_WIDTH - 100.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -1915,6 +1921,7 @@ impl App {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(70.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Input background
@@ -1966,6 +1973,7 @@ impl App {
             color: text_color,
             font_weight: FontWeightHint::Regular,
             max_width: Some(input_width - 16.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Cursor
@@ -2028,6 +2036,7 @@ impl App {
             color: SUBTEXT1,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width - 16.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Body
@@ -2078,6 +2087,7 @@ impl App {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(30.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Render text with highlights
@@ -2124,6 +2134,7 @@ impl App {
                 color: TEXT,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 50.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             char_offset = line_end.saturating_add(1); // +1 for the newline
@@ -2138,6 +2149,7 @@ impl App {
             color: OVERLAY0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(70.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -2185,6 +2197,7 @@ impl App {
                 color: if selected { BLUE } else { SUBTEXT0 },
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(tw),
+                overflow: TextOverflow::Ellipsis,
             });
             tx += tw + 4.0;
         }
@@ -2203,6 +2216,7 @@ impl App {
                     color: OVERLAY0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(width - 24.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
             } else if self.compile_error.is_none() {
                 cmds.push(RenderCommand::Text {
@@ -2213,6 +2227,7 @@ impl App {
                     color: YELLOW,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(width - 24.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
         } else {
@@ -2241,6 +2256,7 @@ impl App {
                 color: SUBTEXT1,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(width - 16.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             for (ei, explanation) in self.explanations.iter().take(6).enumerate() {
@@ -2252,6 +2268,7 @@ impl App {
                     color: SUBTEXT0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(width - 24.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
         }
@@ -2300,6 +2317,7 @@ impl App {
                 color: if is_current { BLUE } else { OVERLAY0 },
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(width - 16.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Matched text
@@ -2321,6 +2339,7 @@ impl App {
                 color: GREEN,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 16.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Show groups if enabled
@@ -2351,6 +2370,7 @@ impl App {
                         color: MAUVE,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(width - 130.0),
+                        overflow: TextOverflow::Ellipsis,
                     });
                 }
             }
@@ -2401,6 +2421,7 @@ impl App {
                     FontWeightHint::Regular
                 },
                 max_width: Some(w),
+                overflow: TextOverflow::Ellipsis,
             });
             cat_x += w + 6.0;
         }
@@ -2451,6 +2472,7 @@ impl App {
                 color: CRUST,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(badge_w),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Name
@@ -2462,6 +2484,7 @@ impl App {
                 color: TEXT,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(300.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Pattern
@@ -2479,6 +2502,7 @@ impl App {
                 color: SKY,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(WINDOW_WIDTH - 40.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Description on right
@@ -2490,6 +2514,7 @@ impl App {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(230.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -2502,6 +2527,7 @@ impl App {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(300.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }
@@ -2528,6 +2554,7 @@ impl App {
             color: BLUE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(col_width - 24.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         let syntax_items = [
@@ -2572,6 +2599,7 @@ impl App {
                 color: GREEN,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(80.0),
+                overflow: TextOverflow::Ellipsis,
             });
             cmds.push(RenderCommand::Text {
                 x: PADDING + 100.0,
@@ -2581,6 +2609,7 @@ impl App {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(col_width - 112.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -2603,6 +2632,7 @@ impl App {
             color: PEACH,
             font_weight: FontWeightHint::Bold,
             max_width: Some(col_width - 24.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         let replace_items = [
@@ -2624,6 +2654,7 @@ impl App {
                 color: PEACH,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(80.0),
+                overflow: TextOverflow::Ellipsis,
             });
             cmds.push(RenderCommand::Text {
                 x: right_x + 100.0,
@@ -2633,6 +2664,7 @@ impl App {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(col_width - 112.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -2646,6 +2678,7 @@ impl App {
             color: TEAL,
             font_weight: FontWeightHint::Bold,
             max_width: Some(col_width - 24.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         let tips = [
@@ -2672,6 +2705,7 @@ impl App {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(col_width - 28.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }

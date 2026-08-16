@@ -21,7 +21,7 @@
 // centralised rather than diverging per-crate.
 
 use guitk::Color;
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
 
@@ -127,6 +127,7 @@ fn render_pattern_list(
             font_size: 10.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(max_width),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += PATTERN_ROW_HEIGHT;
     }
@@ -139,6 +140,7 @@ fn render_pattern_list(
             font_size: 10.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(max_width),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += PATTERN_ROW_HEIGHT;
     }
@@ -1235,6 +1237,7 @@ impl PasswordApp {
             font_size: 15.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(200.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Tab buttons
@@ -1267,6 +1270,7 @@ impl PasswordApp {
                     FontWeightHint::Regular
                 },
                 max_width: Some(btn_w - 16.0),
+                overflow: TextOverflow::Ellipsis,
             });
             tx += btn_w + 4.0;
         }
@@ -1309,6 +1313,7 @@ impl PasswordApp {
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - 24.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -1344,6 +1349,7 @@ impl PasswordApp {
             font_size: 10.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(max_w),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 18.0;
 
@@ -1373,6 +1379,7 @@ impl PasswordApp {
             font_size: 13.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(max_w - 16.0),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 44.0;
 
@@ -1402,6 +1409,7 @@ impl PasswordApp {
                 font_size: 11.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(btn_w - 20.0),
+                overflow: TextOverflow::Ellipsis,
             });
             cy += 32.0;
         }
@@ -1417,6 +1425,7 @@ impl PasswordApp {
             font_size: 10.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(max_w),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 18.0;
 
@@ -1489,6 +1498,7 @@ impl PasswordApp {
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(max_w - 16.0),
+                overflow: TextOverflow::Ellipsis,
             });
             cy += 18.0;
         }
@@ -1517,6 +1527,7 @@ impl PasswordApp {
                     font_size: 10.0,
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(max_w),
+                    overflow: TextOverflow::Ellipsis,
                 });
                 cy += 22.0;
 
@@ -1544,6 +1555,7 @@ impl PasswordApp {
                         font_size: 13.0,
                         font_weight: FontWeightHint::Bold,
                         max_width: Some(badge_w - 16.0),
+                        overflow: TextOverflow::Ellipsis,
                     });
 
                     // Score
@@ -1555,6 +1567,7 @@ impl PasswordApp {
                         font_size: 13.0,
                         font_weight: FontWeightHint::Regular,
                         max_width: None,
+                        overflow: TextOverflow::Clip,
                     });
                     cy += 40.0;
 
@@ -1573,6 +1586,7 @@ impl PasswordApp {
                             font_size: 12.0,
                             font_weight: FontWeightHint::Regular,
                             max_width: Some(max_w),
+                            overflow: TextOverflow::Ellipsis,
                         });
                         cy += 18.0;
                     }
@@ -1587,6 +1601,7 @@ impl PasswordApp {
                         font_size: 10.0,
                         font_weight: FontWeightHint::Bold,
                         max_width: Some(max_w),
+                        overflow: TextOverflow::Ellipsis,
                     });
                     cy += 18.0;
 
@@ -1605,6 +1620,7 @@ impl PasswordApp {
                             font_size: 11.0,
                             font_weight: FontWeightHint::Regular,
                             max_width: Some(150.0),
+                            overflow: TextOverflow::Ellipsis,
                         });
                         cmds.push(RenderCommand::Text {
                             x: lx + 160.0,
@@ -1614,6 +1630,7 @@ impl PasswordApp {
                             font_size: 11.0,
                             font_weight: FontWeightHint::Regular,
                             max_width: Some(max_w - 170.0),
+                            overflow: TextOverflow::Ellipsis,
                         });
                         cy += 16.0;
                     }
@@ -1629,6 +1646,7 @@ impl PasswordApp {
                             font_size: 10.0,
                             font_weight: FontWeightHint::Bold,
                             max_width: Some(max_w),
+                            overflow: TextOverflow::Ellipsis,
                         });
                         cy += 18.0;
 
@@ -1655,6 +1673,7 @@ impl PasswordApp {
                         font_size: 13.0,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(max_w),
+                        overflow: TextOverflow::Ellipsis,
                     });
                 }
             }
@@ -1667,6 +1686,7 @@ impl PasswordApp {
                     font_size: 10.0,
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(max_w),
+                    overflow: TextOverflow::Ellipsis,
                 });
                 cy += 22.0;
 
@@ -1721,6 +1741,7 @@ impl PasswordApp {
                         font_size: 11.0,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(max_w - 140.0),
+                        overflow: TextOverflow::Ellipsis,
                     });
 
                     cmds.push(RenderCommand::Text {
@@ -1731,6 +1752,7 @@ impl PasswordApp {
                         font_size: 10.0,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(100.0),
+                        overflow: TextOverflow::Ellipsis,
                     });
 
                     cy += HISTORY_ROW_PITCH;
@@ -1744,6 +1766,7 @@ impl PasswordApp {
                         font_size: 10.0,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(max_w - 8.0),
+                        overflow: TextOverflow::Ellipsis,
                     });
                 }
             }

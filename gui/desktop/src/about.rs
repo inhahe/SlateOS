@@ -11,7 +11,7 @@
 //! serialized/deserialized in a simple key=value text format for persistence.
 
 use guitk::color::Color;
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
 
@@ -336,6 +336,7 @@ impl AboutDialog {
             color: COL_TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width - 40.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Tab bar.
@@ -367,6 +368,7 @@ impl AboutDialog {
                     FontWeightHint::Regular
                 },
                 max_width: Some(90.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -429,6 +431,7 @@ impl AboutDialog {
             color: COL_MANTLE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(logo_w - 20.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Version and build date below the logo.
@@ -442,6 +445,7 @@ impl AboutDialog {
             color: COL_TEXT,
             font_weight: FontWeightHint::Regular,
             max_width: Some(logo_w),
+            overflow: TextOverflow::Ellipsis,
         });
         row_y += 24.0;
 
@@ -453,6 +457,7 @@ impl AboutDialog {
             color: COL_SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(logo_w),
+            overflow: TextOverflow::Ellipsis,
         });
         row_y += 30.0;
 
@@ -465,6 +470,7 @@ impl AboutDialog {
             color: COL_OVERLAY0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(logo_w),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -486,6 +492,7 @@ impl AboutDialog {
             color: COL_TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
+            overflow: TextOverflow::Ellipsis,
         });
 
         let mut row_y = y + 30.0;
@@ -537,6 +544,7 @@ impl AboutDialog {
             color: COL_TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
+            overflow: TextOverflow::Ellipsis,
         });
 
         let mut row_y = y + 30.0;
@@ -576,6 +584,7 @@ impl AboutDialog {
             color: COL_TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
+            overflow: TextOverflow::Ellipsis,
         });
 
         if self.licenses.is_empty() {
@@ -587,6 +596,7 @@ impl AboutDialog {
                 color: COL_SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width),
+                overflow: TextOverflow::Ellipsis,
             });
             return;
         }
@@ -645,6 +655,7 @@ impl AboutDialog {
                     color: COL_LAVENDER,
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(width - 16.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
 
                 // License body text, one command per wrapped line.
@@ -657,6 +668,7 @@ impl AboutDialog {
                         color: COL_SUBTEXT0,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(width - 16.0),
+                        overflow: TextOverflow::Ellipsis,
                     });
                 }
             }
@@ -727,6 +739,7 @@ fn render_property_row(
         color: COL_SUBTEXT0,
         font_weight: FontWeightHint::Regular,
         max_width: Some(width * 0.4),
+        overflow: TextOverflow::Ellipsis,
     });
     cmds.push(RenderCommand::Text {
         x: x + width * 0.45,
@@ -736,6 +749,7 @@ fn render_property_row(
         color: COL_TEXT,
         font_weight: FontWeightHint::Regular,
         max_width: Some(width * 0.55),
+        overflow: TextOverflow::Ellipsis,
     });
 }
 

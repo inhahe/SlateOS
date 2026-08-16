@@ -798,176 +798,176 @@ pub(crate) static SCRIPT_RANGES: [(u32, u32, u16); 778] = [
 /// spelling. Scripts with a single tag repeat it, so a caller can
 /// always try both without asking how many there are.
 pub(crate) static SCRIPT_TAGS: [([u8; 4], [u8; 4]); 172] = [
-    ([b'l', b'a', b't', b'n'], [b'l', b'a', b't', b'n']), // Latn
-    ([b'b', b'o', b'p', b'o'], [b'b', b'o', b'p', b'o']), // Bopo
-    ([b'g', b'r', b'e', b'k'], [b'g', b'r', b'e', b'k']), // Grek
-    ([b'c', b'o', b'p', b't'], [b'c', b'o', b'p', b't']), // Copt
-    ([b'c', b'y', b'r', b'l'], [b'c', b'y', b'r', b'l']), // Cyrl
-    ([b'a', b'r', b'm', b'n'], [b'a', b'r', b'm', b'n']), // Armn
-    ([b'h', b'e', b'b', b'r'], [b'h', b'e', b'b', b'r']), // Hebr
-    ([b'a', b'r', b'a', b'b'], [b'a', b'r', b'a', b'b']), // Arab
-    ([b's', b'y', b'r', b'c'], [b's', b'y', b'r', b'c']), // Syrc
-    ([b't', b'h', b'a', b'a'], [b't', b'h', b'a', b'a']), // Thaa
-    ([b'n', b'k', b'o', b' '], [b'n', b'k', b'o', b' ']), // Nkoo
-    ([b's', b'a', b'm', b'r'], [b's', b'a', b'm', b'r']), // Samr
-    ([b'm', b'a', b'n', b'd'], [b'm', b'a', b'n', b'd']), // Mand
-    ([b'd', b'e', b'v', b'2'], [b'd', b'e', b'v', b'a']), // Deva
-    ([b'b', b'n', b'g', b'2'], [b'b', b'e', b'n', b'g']), // Beng
-    ([b'g', b'u', b'r', b'2'], [b'g', b'u', b'r', b'u']), // Guru
-    ([b'g', b'j', b'r', b'2'], [b'g', b'u', b'j', b'r']), // Gujr
-    ([b'o', b'r', b'y', b'2'], [b'o', b'r', b'y', b'a']), // Orya
-    ([b't', b'm', b'l', b'2'], [b't', b'a', b'm', b'l']), // Taml
-    ([b't', b'e', b'l', b'2'], [b't', b'e', b'l', b'u']), // Telu
-    ([b'k', b'n', b'd', b'2'], [b'k', b'n', b'd', b'a']), // Knda
-    ([b'm', b'l', b'm', b'2'], [b'm', b'l', b'y', b'm']), // Mlym
-    ([b's', b'i', b'n', b'h'], [b's', b'i', b'n', b'h']), // Sinh
-    ([b't', b'h', b'a', b'i'], [b't', b'h', b'a', b'i']), // Thai
-    ([b'l', b'a', b'o', b' '], [b'l', b'a', b'o', b' ']), // Laoo
-    ([b't', b'i', b'b', b't'], [b't', b'i', b'b', b't']), // Tibt
-    ([b'm', b'y', b'm', b'2'], [b'm', b'y', b'm', b'r']), // Mymr
-    ([b'g', b'e', b'o', b'r'], [b'g', b'e', b'o', b'r']), // Geor
-    ([b'h', b'a', b'n', b'g'], [b'h', b'a', b'n', b'g']), // Hang
-    ([b'e', b't', b'h', b'i'], [b'e', b't', b'h', b'i']), // Ethi
-    ([b'c', b'h', b'e', b'r'], [b'c', b'h', b'e', b'r']), // Cher
-    ([b'c', b'a', b'n', b's'], [b'c', b'a', b'n', b's']), // Cans
-    ([b'o', b'g', b'a', b'm'], [b'o', b'g', b'a', b'm']), // Ogam
-    ([b'r', b'u', b'n', b'r'], [b'r', b'u', b'n', b'r']), // Runr
-    ([b't', b'g', b'l', b'g'], [b't', b'g', b'l', b'g']), // Tglg
-    ([b'h', b'a', b'n', b'o'], [b'h', b'a', b'n', b'o']), // Hano
-    ([b'b', b'u', b'h', b'd'], [b'b', b'u', b'h', b'd']), // Buhd
-    ([b't', b'a', b'g', b'b'], [b't', b'a', b'g', b'b']), // Tagb
-    ([b'k', b'h', b'm', b'r'], [b'k', b'h', b'm', b'r']), // Khmr
-    ([b'm', b'o', b'n', b'g'], [b'm', b'o', b'n', b'g']), // Mong
-    ([b'l', b'i', b'm', b'b'], [b'l', b'i', b'm', b'b']), // Limb
-    ([b't', b'a', b'l', b'e'], [b't', b'a', b'l', b'e']), // Tale
-    ([b't', b'a', b'l', b'u'], [b't', b'a', b'l', b'u']), // Talu
-    ([b'b', b'u', b'g', b'i'], [b'b', b'u', b'g', b'i']), // Bugi
-    ([b'l', b'a', b'n', b'a'], [b'l', b'a', b'n', b'a']), // Lana
-    ([b'b', b'a', b'l', b'i'], [b'b', b'a', b'l', b'i']), // Bali
-    ([b's', b'u', b'n', b'd'], [b's', b'u', b'n', b'd']), // Sund
-    ([b'b', b'a', b't', b'k'], [b'b', b'a', b't', b'k']), // Batk
-    ([b'l', b'e', b'p', b'c'], [b'l', b'e', b'p', b'c']), // Lepc
-    ([b'o', b'l', b'c', b'k'], [b'o', b'l', b'c', b'k']), // Olck
-    ([b'b', b'r', b'a', b'i'], [b'b', b'r', b'a', b'i']), // Brai
-    ([b'g', b'l', b'a', b'g'], [b'g', b'l', b'a', b'g']), // Glag
-    ([b't', b'f', b'n', b'g'], [b't', b'f', b'n', b'g']), // Tfng
-    ([b'h', b'a', b'n', b'i'], [b'h', b'a', b'n', b'i']), // Hani
-    ([b'k', b'a', b'n', b'a'], [b'k', b'a', b'n', b'a']), // Hira
-    ([b'k', b'a', b'n', b'a'], [b'k', b'a', b'n', b'a']), // Kana
-    ([b'y', b'i', b' ', b' '], [b'y', b'i', b' ', b' ']), // Yiii
-    ([b'l', b'i', b's', b'u'], [b'l', b'i', b's', b'u']), // Lisu
-    ([b'v', b'a', b'i', b' '], [b'v', b'a', b'i', b' ']), // Vaii
-    ([b'b', b'a', b'm', b'u'], [b'b', b'a', b'm', b'u']), // Bamu
-    ([b's', b'y', b'l', b'o'], [b's', b'y', b'l', b'o']), // Sylo
-    ([b'p', b'h', b'a', b'g'], [b'p', b'h', b'a', b'g']), // Phag
-    ([b's', b'a', b'u', b'r'], [b's', b'a', b'u', b'r']), // Saur
-    ([b'k', b'a', b'l', b'i'], [b'k', b'a', b'l', b'i']), // Kali
-    ([b'r', b'j', b'n', b'g'], [b'r', b'j', b'n', b'g']), // Rjng
-    ([b'j', b'a', b'v', b'a'], [b'j', b'a', b'v', b'a']), // Java
-    ([b'c', b'h', b'a', b'm'], [b'c', b'h', b'a', b'm']), // Cham
-    ([b't', b'a', b'v', b't'], [b't', b'a', b'v', b't']), // Tavt
-    ([b'm', b't', b'e', b'i'], [b'm', b't', b'e', b'i']), // Mtei
-    ([b'l', b'i', b'n', b'b'], [b'l', b'i', b'n', b'b']), // Linb
-    ([b'l', b'y', b'c', b'i'], [b'l', b'y', b'c', b'i']), // Lyci
-    ([b'c', b'a', b'r', b'i'], [b'c', b'a', b'r', b'i']), // Cari
-    ([b'i', b't', b'a', b'l'], [b'i', b't', b'a', b'l']), // Ital
-    ([b'g', b'o', b't', b'h'], [b'g', b'o', b't', b'h']), // Goth
-    ([b'p', b'e', b'r', b'm'], [b'p', b'e', b'r', b'm']), // Perm
-    ([b'u', b'g', b'a', b'r'], [b'u', b'g', b'a', b'r']), // Ugar
-    ([b'x', b'p', b'e', b'o'], [b'x', b'p', b'e', b'o']), // Xpeo
-    ([b'd', b's', b'r', b't'], [b'd', b's', b'r', b't']), // Dsrt
-    ([b's', b'h', b'a', b'w'], [b's', b'h', b'a', b'w']), // Shaw
-    ([b'o', b's', b'm', b'a'], [b'o', b's', b'm', b'a']), // Osma
-    ([b'o', b's', b'g', b'e'], [b'o', b's', b'g', b'e']), // Osge
-    ([b'e', b'l', b'b', b'a'], [b'e', b'l', b'b', b'a']), // Elba
-    ([b'a', b'g', b'h', b'b'], [b'a', b'g', b'h', b'b']), // Aghb
-    ([b'v', b'i', b't', b'h'], [b'v', b'i', b't', b'h']), // Vith
-    ([b't', b'o', b'd', b'r'], [b't', b'o', b'd', b'r']), // Todr
-    ([b'l', b'i', b'n', b'a'], [b'l', b'i', b'n', b'a']), // Lina
-    ([b'c', b'p', b'r', b't'], [b'c', b'p', b'r', b't']), // Cprt
-    ([b'a', b'r', b'm', b'i'], [b'a', b'r', b'm', b'i']), // Armi
-    ([b'p', b'a', b'l', b'm'], [b'p', b'a', b'l', b'm']), // Palm
-    ([b'n', b'b', b'a', b't'], [b'n', b'b', b'a', b't']), // Nbat
-    ([b'h', b'a', b't', b'r'], [b'h', b'a', b't', b'r']), // Hatr
-    ([b'p', b'h', b'n', b'x'], [b'p', b'h', b'n', b'x']), // Phnx
-    ([b'l', b'y', b'd', b'i'], [b'l', b'y', b'd', b'i']), // Lydi
-    ([b's', b'i', b'd', b't'], [b's', b'i', b'd', b't']), // Sidt
-    ([b'm', b'e', b'r', b'o'], [b'm', b'e', b'r', b'o']), // Mero
-    ([b'm', b'e', b'r', b'c'], [b'm', b'e', b'r', b'c']), // Merc
-    ([b'k', b'h', b'a', b'r'], [b'k', b'h', b'a', b'r']), // Khar
-    ([b's', b'a', b'r', b'b'], [b's', b'a', b'r', b'b']), // Sarb
-    ([b'n', b'a', b'r', b'b'], [b'n', b'a', b'r', b'b']), // Narb
-    ([b'm', b'a', b'n', b'i'], [b'm', b'a', b'n', b'i']), // Mani
-    ([b'a', b'v', b's', b't'], [b'a', b'v', b's', b't']), // Avst
-    ([b'p', b'r', b't', b'i'], [b'p', b'r', b't', b'i']), // Prti
-    ([b'p', b'h', b'l', b'i'], [b'p', b'h', b'l', b'i']), // Phli
-    ([b'p', b'h', b'l', b'p'], [b'p', b'h', b'l', b'p']), // Phlp
-    ([b'o', b'r', b'k', b'h'], [b'o', b'r', b'k', b'h']), // Orkh
-    ([b'h', b'u', b'n', b'g'], [b'h', b'u', b'n', b'g']), // Hung
-    ([b'r', b'o', b'h', b'g'], [b'r', b'o', b'h', b'g']), // Rohg
-    ([b'g', b'a', b'r', b'a'], [b'g', b'a', b'r', b'a']), // Gara
-    ([b'y', b'e', b'z', b'i'], [b'y', b'e', b'z', b'i']), // Yezi
-    ([b's', b'o', b'g', b'o'], [b's', b'o', b'g', b'o']), // Sogo
-    ([b's', b'o', b'g', b'd'], [b's', b'o', b'g', b'd']), // Sogd
-    ([b'o', b'u', b'g', b'r'], [b'o', b'u', b'g', b'r']), // Ougr
-    ([b'c', b'h', b'r', b's'], [b'c', b'h', b'r', b's']), // Chrs
-    ([b'e', b'l', b'y', b'm'], [b'e', b'l', b'y', b'm']), // Elym
-    ([b'b', b'r', b'a', b'h'], [b'b', b'r', b'a', b'h']), // Brah
-    ([b'k', b't', b'h', b'i'], [b'k', b't', b'h', b'i']), // Kthi
-    ([b's', b'o', b'r', b'a'], [b's', b'o', b'r', b'a']), // Sora
-    ([b'c', b'a', b'k', b'm'], [b'c', b'a', b'k', b'm']), // Cakm
-    ([b'm', b'a', b'h', b'j'], [b'm', b'a', b'h', b'j']), // Mahj
-    ([b's', b'h', b'r', b'd'], [b's', b'h', b'r', b'd']), // Shrd
-    ([b'k', b'h', b'o', b'j'], [b'k', b'h', b'o', b'j']), // Khoj
-    ([b'm', b'u', b'l', b't'], [b'm', b'u', b'l', b't']), // Mult
-    ([b's', b'i', b'n', b'd'], [b's', b'i', b'n', b'd']), // Sind
-    ([b'g', b'r', b'a', b'n'], [b'g', b'r', b'a', b'n']), // Gran
-    ([b't', b'u', b't', b'g'], [b't', b'u', b't', b'g']), // Tutg
-    ([b'n', b'e', b'w', b'a'], [b'n', b'e', b'w', b'a']), // Newa
-    ([b't', b'i', b'r', b'h'], [b't', b'i', b'r', b'h']), // Tirh
-    ([b's', b'i', b'd', b'd'], [b's', b'i', b'd', b'd']), // Sidd
-    ([b'm', b'o', b'd', b'i'], [b'm', b'o', b'd', b'i']), // Modi
-    ([b't', b'a', b'k', b'r'], [b't', b'a', b'k', b'r']), // Takr
-    ([b'a', b'h', b'o', b'm'], [b'a', b'h', b'o', b'm']), // Ahom
-    ([b'd', b'o', b'g', b'r'], [b'd', b'o', b'g', b'r']), // Dogr
-    ([b'w', b'a', b'r', b'a'], [b'w', b'a', b'r', b'a']), // Wara
-    ([b'd', b'i', b'a', b'k'], [b'd', b'i', b'a', b'k']), // Diak
-    ([b'n', b'a', b'n', b'd'], [b'n', b'a', b'n', b'd']), // Nand
-    ([b'z', b'a', b'n', b'b'], [b'z', b'a', b'n', b'b']), // Zanb
-    ([b's', b'o', b'y', b'o'], [b's', b'o', b'y', b'o']), // Soyo
-    ([b'p', b'a', b'u', b'c'], [b'p', b'a', b'u', b'c']), // Pauc
-    ([b's', b'u', b'n', b'u'], [b's', b'u', b'n', b'u']), // Sunu
-    ([b'b', b'h', b'k', b's'], [b'b', b'h', b'k', b's']), // Bhks
-    ([b'm', b'a', b'r', b'c'], [b'm', b'a', b'r', b'c']), // Marc
-    ([b'g', b'o', b'n', b'm'], [b'g', b'o', b'n', b'm']), // Gonm
-    ([b'g', b'o', b'n', b'g'], [b'g', b'o', b'n', b'g']), // Gong
-    ([b't', b'o', b'l', b's'], [b't', b'o', b'l', b's']), // Tols
-    ([b'm', b'a', b'k', b'a'], [b'm', b'a', b'k', b'a']), // Maka
-    ([b'k', b'a', b'w', b'i'], [b'k', b'a', b'w', b'i']), // Kawi
-    ([b'x', b's', b'u', b'x'], [b'x', b's', b'u', b'x']), // Xsux
-    ([b'c', b'p', b'm', b'n'], [b'c', b'p', b'm', b'n']), // Cpmn
-    ([b'e', b'g', b'y', b'p'], [b'e', b'g', b'y', b'p']), // Egyp
-    ([b'h', b'l', b'u', b'w'], [b'h', b'l', b'u', b'w']), // Hluw
-    ([b'g', b'u', b'k', b'h'], [b'g', b'u', b'k', b'h']), // Gukh
-    ([b'm', b'r', b'o', b'o'], [b'm', b'r', b'o', b'o']), // Mroo
-    ([b't', b'n', b's', b'a'], [b't', b'n', b's', b'a']), // Tnsa
-    ([b'b', b'a', b's', b's'], [b'b', b'a', b's', b's']), // Bass
-    ([b'h', b'm', b'n', b'g'], [b'h', b'm', b'n', b'g']), // Hmng
-    ([b'k', b'r', b'a', b'i'], [b'k', b'r', b'a', b'i']), // Krai
-    ([b'm', b'e', b'd', b'f'], [b'm', b'e', b'd', b'f']), // Medf
-    ([b'b', b'e', b'r', b'f'], [b'b', b'e', b'r', b'f']), // Berf
-    ([b'p', b'l', b'r', b'd'], [b'p', b'l', b'r', b'd']), // Plrd
-    ([b't', b'a', b'n', b'g'], [b't', b'a', b'n', b'g']), // Tang
-    ([b'n', b's', b'h', b'u'], [b'n', b's', b'h', b'u']), // Nshu
-    ([b'k', b'i', b't', b's'], [b'k', b'i', b't', b's']), // Kits
-    ([b'd', b'u', b'p', b'l'], [b'd', b'u', b'p', b'l']), // Dupl
-    ([b's', b'g', b'n', b'w'], [b's', b'g', b'n', b'w']), // Sgnw
-    ([b'h', b'm', b'n', b'p'], [b'h', b'm', b'n', b'p']), // Hmnp
-    ([b't', b'o', b't', b'o'], [b't', b'o', b't', b'o']), // Toto
-    ([b'w', b'c', b'h', b'o'], [b'w', b'c', b'h', b'o']), // Wcho
-    ([b'n', b'a', b'g', b'm'], [b'n', b'a', b'g', b'm']), // Nagm
-    ([b'o', b'n', b'a', b'o'], [b'o', b'n', b'a', b'o']), // Onao
-    ([b't', b'a', b'y', b'o'], [b't', b'a', b'y', b'o']), // Tayo
-    ([b'm', b'e', b'n', b'd'], [b'm', b'e', b'n', b'd']), // Mend
-    ([b'a', b'd', b'l', b'm'], [b'a', b'd', b'l', b'm']), // Adlm
+    (*b"latn", *b"latn"), // Latn
+    (*b"bopo", *b"bopo"), // Bopo
+    (*b"grek", *b"grek"), // Grek
+    (*b"copt", *b"copt"), // Copt
+    (*b"cyrl", *b"cyrl"), // Cyrl
+    (*b"armn", *b"armn"), // Armn
+    (*b"hebr", *b"hebr"), // Hebr
+    (*b"arab", *b"arab"), // Arab
+    (*b"syrc", *b"syrc"), // Syrc
+    (*b"thaa", *b"thaa"), // Thaa
+    (*b"nko ", *b"nko "), // Nkoo
+    (*b"samr", *b"samr"), // Samr
+    (*b"mand", *b"mand"), // Mand
+    (*b"dev2", *b"deva"), // Deva
+    (*b"bng2", *b"beng"), // Beng
+    (*b"gur2", *b"guru"), // Guru
+    (*b"gjr2", *b"gujr"), // Gujr
+    (*b"ory2", *b"orya"), // Orya
+    (*b"tml2", *b"taml"), // Taml
+    (*b"tel2", *b"telu"), // Telu
+    (*b"knd2", *b"knda"), // Knda
+    (*b"mlm2", *b"mlym"), // Mlym
+    (*b"sinh", *b"sinh"), // Sinh
+    (*b"thai", *b"thai"), // Thai
+    (*b"lao ", *b"lao "), // Laoo
+    (*b"tibt", *b"tibt"), // Tibt
+    (*b"mym2", *b"mymr"), // Mymr
+    (*b"geor", *b"geor"), // Geor
+    (*b"hang", *b"hang"), // Hang
+    (*b"ethi", *b"ethi"), // Ethi
+    (*b"cher", *b"cher"), // Cher
+    (*b"cans", *b"cans"), // Cans
+    (*b"ogam", *b"ogam"), // Ogam
+    (*b"runr", *b"runr"), // Runr
+    (*b"tglg", *b"tglg"), // Tglg
+    (*b"hano", *b"hano"), // Hano
+    (*b"buhd", *b"buhd"), // Buhd
+    (*b"tagb", *b"tagb"), // Tagb
+    (*b"khmr", *b"khmr"), // Khmr
+    (*b"mong", *b"mong"), // Mong
+    (*b"limb", *b"limb"), // Limb
+    (*b"tale", *b"tale"), // Tale
+    (*b"talu", *b"talu"), // Talu
+    (*b"bugi", *b"bugi"), // Bugi
+    (*b"lana", *b"lana"), // Lana
+    (*b"bali", *b"bali"), // Bali
+    (*b"sund", *b"sund"), // Sund
+    (*b"batk", *b"batk"), // Batk
+    (*b"lepc", *b"lepc"), // Lepc
+    (*b"olck", *b"olck"), // Olck
+    (*b"brai", *b"brai"), // Brai
+    (*b"glag", *b"glag"), // Glag
+    (*b"tfng", *b"tfng"), // Tfng
+    (*b"hani", *b"hani"), // Hani
+    (*b"kana", *b"kana"), // Hira
+    (*b"kana", *b"kana"), // Kana
+    (*b"yi  ", *b"yi  "), // Yiii
+    (*b"lisu", *b"lisu"), // Lisu
+    (*b"vai ", *b"vai "), // Vaii
+    (*b"bamu", *b"bamu"), // Bamu
+    (*b"sylo", *b"sylo"), // Sylo
+    (*b"phag", *b"phag"), // Phag
+    (*b"saur", *b"saur"), // Saur
+    (*b"kali", *b"kali"), // Kali
+    (*b"rjng", *b"rjng"), // Rjng
+    (*b"java", *b"java"), // Java
+    (*b"cham", *b"cham"), // Cham
+    (*b"tavt", *b"tavt"), // Tavt
+    (*b"mtei", *b"mtei"), // Mtei
+    (*b"linb", *b"linb"), // Linb
+    (*b"lyci", *b"lyci"), // Lyci
+    (*b"cari", *b"cari"), // Cari
+    (*b"ital", *b"ital"), // Ital
+    (*b"goth", *b"goth"), // Goth
+    (*b"perm", *b"perm"), // Perm
+    (*b"ugar", *b"ugar"), // Ugar
+    (*b"xpeo", *b"xpeo"), // Xpeo
+    (*b"dsrt", *b"dsrt"), // Dsrt
+    (*b"shaw", *b"shaw"), // Shaw
+    (*b"osma", *b"osma"), // Osma
+    (*b"osge", *b"osge"), // Osge
+    (*b"elba", *b"elba"), // Elba
+    (*b"aghb", *b"aghb"), // Aghb
+    (*b"vith", *b"vith"), // Vith
+    (*b"todr", *b"todr"), // Todr
+    (*b"lina", *b"lina"), // Lina
+    (*b"cprt", *b"cprt"), // Cprt
+    (*b"armi", *b"armi"), // Armi
+    (*b"palm", *b"palm"), // Palm
+    (*b"nbat", *b"nbat"), // Nbat
+    (*b"hatr", *b"hatr"), // Hatr
+    (*b"phnx", *b"phnx"), // Phnx
+    (*b"lydi", *b"lydi"), // Lydi
+    (*b"sidt", *b"sidt"), // Sidt
+    (*b"mero", *b"mero"), // Mero
+    (*b"merc", *b"merc"), // Merc
+    (*b"khar", *b"khar"), // Khar
+    (*b"sarb", *b"sarb"), // Sarb
+    (*b"narb", *b"narb"), // Narb
+    (*b"mani", *b"mani"), // Mani
+    (*b"avst", *b"avst"), // Avst
+    (*b"prti", *b"prti"), // Prti
+    (*b"phli", *b"phli"), // Phli
+    (*b"phlp", *b"phlp"), // Phlp
+    (*b"orkh", *b"orkh"), // Orkh
+    (*b"hung", *b"hung"), // Hung
+    (*b"rohg", *b"rohg"), // Rohg
+    (*b"gara", *b"gara"), // Gara
+    (*b"yezi", *b"yezi"), // Yezi
+    (*b"sogo", *b"sogo"), // Sogo
+    (*b"sogd", *b"sogd"), // Sogd
+    (*b"ougr", *b"ougr"), // Ougr
+    (*b"chrs", *b"chrs"), // Chrs
+    (*b"elym", *b"elym"), // Elym
+    (*b"brah", *b"brah"), // Brah
+    (*b"kthi", *b"kthi"), // Kthi
+    (*b"sora", *b"sora"), // Sora
+    (*b"cakm", *b"cakm"), // Cakm
+    (*b"mahj", *b"mahj"), // Mahj
+    (*b"shrd", *b"shrd"), // Shrd
+    (*b"khoj", *b"khoj"), // Khoj
+    (*b"mult", *b"mult"), // Mult
+    (*b"sind", *b"sind"), // Sind
+    (*b"gran", *b"gran"), // Gran
+    (*b"tutg", *b"tutg"), // Tutg
+    (*b"newa", *b"newa"), // Newa
+    (*b"tirh", *b"tirh"), // Tirh
+    (*b"sidd", *b"sidd"), // Sidd
+    (*b"modi", *b"modi"), // Modi
+    (*b"takr", *b"takr"), // Takr
+    (*b"ahom", *b"ahom"), // Ahom
+    (*b"dogr", *b"dogr"), // Dogr
+    (*b"wara", *b"wara"), // Wara
+    (*b"diak", *b"diak"), // Diak
+    (*b"nand", *b"nand"), // Nand
+    (*b"zanb", *b"zanb"), // Zanb
+    (*b"soyo", *b"soyo"), // Soyo
+    (*b"pauc", *b"pauc"), // Pauc
+    (*b"sunu", *b"sunu"), // Sunu
+    (*b"bhks", *b"bhks"), // Bhks
+    (*b"marc", *b"marc"), // Marc
+    (*b"gonm", *b"gonm"), // Gonm
+    (*b"gong", *b"gong"), // Gong
+    (*b"tols", *b"tols"), // Tols
+    (*b"maka", *b"maka"), // Maka
+    (*b"kawi", *b"kawi"), // Kawi
+    (*b"xsux", *b"xsux"), // Xsux
+    (*b"cpmn", *b"cpmn"), // Cpmn
+    (*b"egyp", *b"egyp"), // Egyp
+    (*b"hluw", *b"hluw"), // Hluw
+    (*b"gukh", *b"gukh"), // Gukh
+    (*b"mroo", *b"mroo"), // Mroo
+    (*b"tnsa", *b"tnsa"), // Tnsa
+    (*b"bass", *b"bass"), // Bass
+    (*b"hmng", *b"hmng"), // Hmng
+    (*b"krai", *b"krai"), // Krai
+    (*b"medf", *b"medf"), // Medf
+    (*b"berf", *b"berf"), // Berf
+    (*b"plrd", *b"plrd"), // Plrd
+    (*b"tang", *b"tang"), // Tang
+    (*b"nshu", *b"nshu"), // Nshu
+    (*b"kits", *b"kits"), // Kits
+    (*b"dupl", *b"dupl"), // Dupl
+    (*b"sgnw", *b"sgnw"), // Sgnw
+    (*b"hmnp", *b"hmnp"), // Hmnp
+    (*b"toto", *b"toto"), // Toto
+    (*b"wcho", *b"wcho"), // Wcho
+    (*b"nagm", *b"nagm"), // Nagm
+    (*b"onao", *b"onao"), // Onao
+    (*b"tayo", *b"tayo"), // Tayo
+    (*b"mend", *b"mend"), // Mend
+    (*b"adlm", *b"adlm"), // Adlm
 ];

@@ -41,13 +41,28 @@
 //! diverged from it would be a place our text differs from every other
 //! renderer's for reasons no one could reconstruct.
 //!
+//! # Khmer shares [`Category`] and [`Char::of`]
+//!
+//! HarfBuzz derives Indic and Khmer from one table and then shapes them with
+//! two *different* shapers, because Khmer's reordering rules are not the Indic
+//! ones — and it stores both scripts' categories in the same buffer slot, one
+//! enum laid over another. This module does the same: [`Category`] carries the
+//! seven variants only [`khmer`](crate::khmer) reads
+//! ([`VowelAbove`](Category::VowelAbove), [`VowelBelow`](Category::VowelBelow),
+//! [`VowelPre`](Category::VowelPre), [`VowelPost`](Category::VowelPost),
+//! [`Robatic`](Category::Robatic), [`XGroup`](Category::XGroup),
+//! [`YGroup`](Category::YGroup)), and no Khmer character can reach the Indic
+//! machine anyway because the two are dispatched on script.
+//!
+//! What is *not* shared is the grammar: [`syllables`] scans the Indic machine
+//! and [`khmer::syllables`](crate::khmer::syllables) the Khmer one.
+//!
 //! # What is deliberately not here
 //!
-//! * **Khmer and Myanmar.** HarfBuzz derives their tables with the same
-//!   script and then shapes them with two *different* shapers, because their
-//!   reordering rules are not the Indic ones. Including their characters in
-//!   this table would mean carrying categories (`VAbv`, `VPre`, `Coeng`, …)
-//!   that nothing here reads.
+//! * **Myanmar.** Its block brings a dozen more categories — `IV`, `As`,
+//!   `DB`, `GB`, `MH`, `MW`, `MY`, `PT`, `VS` — that only the Myanmar machine
+//!   reads. There is no Myanmar shaper yet, so neither the block nor the
+//!   categories are here.
 //! * **The Universal Shaping Engine.** Sinhala, Tibetan, Javanese, Balinese
 //!   and two dozen others are shaped by USE, a single table-driven engine that
 //!   replaced writing a shaper per script. It is a larger piece of work and
@@ -123,6 +138,23 @@ pub(crate) enum Category {
     ConsonantWithStacker,
     /// A syllable modifier that is always drawn after the base.
     SyllableModifierPost,
+    /// Khmer: a dependent vowel drawn above its base.
+    VowelAbove,
+    /// Khmer: a dependent vowel drawn below its base.
+    VowelBelow,
+    /// Khmer: a dependent vowel drawn to the left of its base — the one the
+    /// Khmer reordering moves to the front of the syllable.
+    VowelPre,
+    /// Khmer: a dependent vowel drawn to the right of its base.
+    VowelPost,
+    /// Khmer: the robat and the two register shifters, which the grammar
+    /// admits in one distinguished slot directly after the consonant.
+    Robatic,
+    /// Khmer: a sign the grammar admits repeatedly between the matras, and
+    /// which may be preceded by a joiner.
+    XGroup,
+    /// Khmer: a sign the grammar admits only at the tail of a syllable.
+    YGroup,
 }
 
 /// Where in the reordered syllable a character belongs.
@@ -472,7 +504,7 @@ mod tests {
     }
 
     /// Every variant of [`Category`], in declaration order.
-    const ALL_CATEGORIES: [Category; 19] = [
+    const ALL_CATEGORIES: [Category; 26] = [
         Category::Other,
         Category::Consonant,
         Category::Vowel,
@@ -492,6 +524,13 @@ mod tests {
         Category::Symbol,
         Category::ConsonantWithStacker,
         Category::SyllableModifierPost,
+        Category::VowelAbove,
+        Category::VowelBelow,
+        Category::VowelPre,
+        Category::VowelPost,
+        Category::Robatic,
+        Category::XGroup,
+        Category::YGroup,
     ];
 
     /// The scanner indexes a transition row by the category's discriminant,

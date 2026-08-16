@@ -25,7 +25,7 @@
 #[allow(unused_imports)]
 use guitk::color::Color;
 #[allow(unused_imports)]
-use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
 use guitk::text;
@@ -2058,6 +2058,7 @@ impl SystemRestoreUI {
             font_size: FONT_SIZE_TITLE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(300.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Snapshot count badge.
@@ -2078,6 +2079,7 @@ impl SystemRestoreUI {
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Regular,
             max_width: Some(80.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Search box.
@@ -2108,6 +2110,7 @@ impl SystemRestoreUI {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(220.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Header bottom border.
@@ -2180,6 +2183,7 @@ impl SystemRestoreUI {
                     FontWeightHint::Regular
                 },
                 max_width: Some(tab_width),
+                overflow: TextOverflow::Ellipsis,
             });
             tab_x += tab_width + 4.0;
         }
@@ -2214,6 +2218,7 @@ impl SystemRestoreUI {
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(BUTTON_WIDTH - 8.0),
+                overflow: TextOverflow::Ellipsis,
             });
             btn_x += BUTTON_WIDTH + 8.0;
         }
@@ -2343,6 +2348,7 @@ impl SystemRestoreUI {
                         FontWeightHint::Regular
                     },
                     max_width: Some(300.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
 
                 // Metadata line: type, size, age.
@@ -2360,6 +2366,7 @@ impl SystemRestoreUI {
                     font_size: FONT_SIZE_SMALL,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(400.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
 
                 // Lock indicator.
@@ -2373,6 +2380,7 @@ impl SystemRestoreUI {
                         font_size: FONT_SIZE_SMALL,
                         font_weight: FontWeightHint::Bold,
                         max_width: Some(50.0),
+                        overflow: TextOverflow::Ellipsis,
                     });
                 }
 
@@ -2388,6 +2396,7 @@ impl SystemRestoreUI {
                         font_size: FONT_SIZE_SMALL,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(80.0),
+                        overflow: TextOverflow::Ellipsis,
                     });
                 }
 
@@ -2459,6 +2468,7 @@ impl SystemRestoreUI {
                         FontWeightHint::Regular
                     },
                     max_width: Some(400.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
 
                 // Metadata.
@@ -2476,6 +2486,7 @@ impl SystemRestoreUI {
                     font_size: FONT_SIZE_SMALL,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(500.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
 
                 // Timestamp on the left side.
@@ -2488,6 +2499,7 @@ impl SystemRestoreUI {
                     font_size: FONT_SIZE_SMALL,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(50.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
 
                 entry_y += TIMELINE_ENTRY_HEIGHT;
@@ -2508,6 +2520,7 @@ impl SystemRestoreUI {
             font_size: FONT_SIZE_HEADING,
             font_weight: FontWeightHint::Bold,
             max_width: Some(panel_width),
+            overflow: TextOverflow::Ellipsis,
         });
 
         if let (Some(sid), Some(cid)) = (self.selected_id, self.compare_id) {
@@ -2527,6 +2540,7 @@ impl SystemRestoreUI {
                     font_size: FONT_SIZE,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(panel_width),
+                    overflow: TextOverflow::Ellipsis,
                 });
 
                 // List entries.
@@ -2551,6 +2565,7 @@ impl SystemRestoreUI {
                         font_size: FONT_SIZE_SMALL,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(panel_width - 16.0),
+                        overflow: TextOverflow::Ellipsis,
                     });
                     entry_y += 18.0;
                 }
@@ -2564,6 +2579,7 @@ impl SystemRestoreUI {
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(panel_width),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }
@@ -2582,6 +2598,7 @@ impl SystemRestoreUI {
             font_size: FONT_SIZE_HEADING,
             font_weight: FontWeightHint::Bold,
             max_width: Some(panel_width),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Status.
@@ -2611,6 +2628,7 @@ impl SystemRestoreUI {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(60.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Frequency.
@@ -2633,6 +2651,7 @@ impl SystemRestoreUI {
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(160.0),
+                overflow: TextOverflow::Ellipsis,
             });
             rt.push(RenderCommand::Text {
                 x: value_x,
@@ -2642,6 +2661,7 @@ impl SystemRestoreUI {
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(panel_width - 200.0),
+                overflow: TextOverflow::Ellipsis,
             });
             info_y += 24.0;
         }
@@ -2667,6 +2687,7 @@ impl SystemRestoreUI {
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(160.0),
+                overflow: TextOverflow::Ellipsis,
             });
             rt.push(RenderCommand::Text {
                 x: value_x,
@@ -2676,6 +2697,7 @@ impl SystemRestoreUI {
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(200.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }
@@ -2694,6 +2716,7 @@ impl SystemRestoreUI {
             font_size: FONT_SIZE_HEADING,
             font_weight: FontWeightHint::Bold,
             max_width: Some(panel_width),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Storage bar visualization.
@@ -2753,6 +2776,7 @@ impl SystemRestoreUI {
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Regular,
             max_width: Some(200.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         rt.push(RenderCommand::FillRect {
@@ -2771,6 +2795,7 @@ impl SystemRestoreUI {
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Regular,
             max_width: Some(200.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Statistics table.
@@ -2795,6 +2820,7 @@ impl SystemRestoreUI {
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(200.0),
+                overflow: TextOverflow::Ellipsis,
             });
             rt.push(RenderCommand::Text {
                 x: value_x,
@@ -2804,6 +2830,7 @@ impl SystemRestoreUI {
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(200.0),
+                overflow: TextOverflow::Ellipsis,
             });
             info_y += 22.0;
         }
@@ -2820,6 +2847,7 @@ impl SystemRestoreUI {
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(panel_width),
+                overflow: TextOverflow::Ellipsis,
             });
             info_y += 20.0;
             for suggestion in &suggestions {
@@ -2831,6 +2859,7 @@ impl SystemRestoreUI {
                     font_size: FONT_SIZE_SMALL,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(panel_width - 24.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
                 info_y += 18.0;
             }
@@ -2887,6 +2916,7 @@ impl SystemRestoreUI {
             font_size: FONT_SIZE_HEADING,
             font_weight: FontWeightHint::Bold,
             max_width: Some(WINDOW_WIDTH / 2.0 - PADDING),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Type badge.
@@ -2906,6 +2936,7 @@ impl SystemRestoreUI {
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Bold,
             max_width: Some(70.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         y += 24.0;
@@ -2947,6 +2978,7 @@ impl SystemRestoreUI {
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(60.0),
+                overflow: TextOverflow::Ellipsis,
             });
             rt.push(RenderCommand::Text {
                 x: label_x + 65.0,
@@ -2956,6 +2988,7 @@ impl SystemRestoreUI {
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(120.0),
+                overflow: TextOverflow::Ellipsis,
             });
             label_x += 190.0;
         }
@@ -2971,6 +3004,7 @@ impl SystemRestoreUI {
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Bold,
             max_width: Some(80.0),
+            overflow: TextOverflow::Ellipsis,
         });
         let comp_names: Vec<&str> = snap.components.iter().map(|c| c.label()).collect();
         rt.push(RenderCommand::Text {
@@ -2981,6 +3015,7 @@ impl SystemRestoreUI {
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Regular,
             max_width: Some(WINDOW_WIDTH - col1_x - 90.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         y += 20.0;
@@ -3007,6 +3042,7 @@ impl SystemRestoreUI {
                     font_size: FONT_SIZE_SMALL,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(tag_width - 16.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
                 tag_x += tag_width + 6.0;
             }
@@ -3025,6 +3061,7 @@ impl SystemRestoreUI {
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(40.0),
+                overflow: TextOverflow::Ellipsis,
             });
             cx += 40.0;
 
@@ -3068,6 +3105,7 @@ impl SystemRestoreUI {
                     font_size: FONT_SIZE_SMALL,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(marker_w),
+                    overflow: TextOverflow::Ellipsis,
                 });
                 cx += marker_w + CHAIN_LINK_GAP;
                 rt.push(RenderCommand::Text {
@@ -3078,6 +3116,7 @@ impl SystemRestoreUI {
                     font_size: FONT_SIZE_SMALL,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(CHAIN_SEPARATOR_WIDTH),
+                    overflow: TextOverflow::Ellipsis,
                 });
                 cx += CHAIN_SEPARATOR_WIDTH;
             }
@@ -3092,6 +3131,7 @@ impl SystemRestoreUI {
                         font_size: FONT_SIZE_SMALL,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(CHAIN_SEPARATOR_WIDTH),
+                        overflow: TextOverflow::Ellipsis,
                     });
                     cx += CHAIN_SEPARATOR_WIDTH;
                 }
@@ -3108,6 +3148,7 @@ impl SystemRestoreUI {
                     font_size: FONT_SIZE_SMALL,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(CHAIN_LINK_WIDTH),
+                    overflow: TextOverflow::Ellipsis,
                 });
                 cx += shown_w + CHAIN_LINK_GAP;
             }
@@ -3129,6 +3170,7 @@ impl SystemRestoreUI {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(250.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -3159,6 +3201,7 @@ impl SystemRestoreUI {
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Regular,
             max_width: Some(300.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Center: storage summary.
@@ -3181,6 +3224,7 @@ impl SystemRestoreUI {
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Regular,
             max_width: Some(200.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Right: schedule status.
@@ -3204,6 +3248,7 @@ impl SystemRestoreUI {
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Regular,
             max_width: Some(180.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -3280,6 +3325,7 @@ impl SystemRestoreUI {
             font_size: FONT_SIZE_HEADING,
             font_weight: FontWeightHint::Bold,
             max_width: Some(dialog_w - 2.0 * PADDING),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Name field.
@@ -3292,6 +3338,7 @@ impl SystemRestoreUI {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(60.0),
+            overflow: TextOverflow::Ellipsis,
         });
         rt.push(RenderCommand::FillRect {
             x: dx + PADDING,
@@ -3319,6 +3366,7 @@ impl SystemRestoreUI {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(dialog_w - 2.0 * PADDING - 16.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Description field.
@@ -3331,6 +3379,7 @@ impl SystemRestoreUI {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(100.0),
+            overflow: TextOverflow::Ellipsis,
         });
         rt.push(RenderCommand::FillRect {
             x: dx + PADDING,
@@ -3351,6 +3400,7 @@ impl SystemRestoreUI {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(100.0),
+            overflow: TextOverflow::Ellipsis,
         });
         field_y += 20.0;
 
@@ -3382,6 +3432,7 @@ impl SystemRestoreUI {
                     font_size: FONT_SIZE_SMALL,
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(CHECKBOX_SIZE),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
             rt.push(RenderCommand::Text {
@@ -3392,6 +3443,7 @@ impl SystemRestoreUI {
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(col_width - CHECKBOX_SIZE - 8.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -3406,6 +3458,7 @@ impl SystemRestoreUI {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(dialog_w - 2.0 * PADDING),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Buttons.
@@ -3427,6 +3480,7 @@ impl SystemRestoreUI {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(BUTTON_WIDTH - 16.0),
+            overflow: TextOverflow::Ellipsis,
         });
         // Create.
         rt.push(RenderCommand::FillRect {
@@ -3445,6 +3499,7 @@ impl SystemRestoreUI {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(BUTTON_WIDTH - 16.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -3483,6 +3538,7 @@ impl SystemRestoreUI {
             font_size: FONT_SIZE_HEADING,
             font_weight: FontWeightHint::Bold,
             max_width: Some(dialog_w - 2.0 * PADDING),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Warning.
@@ -3495,6 +3551,7 @@ impl SystemRestoreUI {
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(dialog_w - 2.0 * PADDING),
+                overflow: TextOverflow::Ellipsis,
             });
 
             rt.push(RenderCommand::Text {
@@ -3505,6 +3562,7 @@ impl SystemRestoreUI {
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(dialog_w - 2.0 * PADDING),
+                overflow: TextOverflow::Ellipsis,
             });
 
             rt.push(RenderCommand::Text {
@@ -3515,6 +3573,7 @@ impl SystemRestoreUI {
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(dialog_w - 2.0 * PADDING),
+                overflow: TextOverflow::Ellipsis,
             });
 
             rt.push(RenderCommand::Text {
@@ -3525,6 +3584,7 @@ impl SystemRestoreUI {
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(dialog_w - 2.0 * PADDING),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Tip: create a snapshot before restoring.
@@ -3544,6 +3604,7 @@ impl SystemRestoreUI {
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(dialog_w - 2.0 * PADDING - 16.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -3565,6 +3626,7 @@ impl SystemRestoreUI {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(BUTTON_WIDTH - 16.0),
+            overflow: TextOverflow::Ellipsis,
         });
         rt.push(RenderCommand::FillRect {
             x: dx + dialog_w - 112.0,
@@ -3582,6 +3644,7 @@ impl SystemRestoreUI {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(BUTTON_WIDTH - 16.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -3618,6 +3681,7 @@ impl SystemRestoreUI {
             font_size: FONT_SIZE_HEADING,
             font_weight: FontWeightHint::Bold,
             max_width: Some(dialog_w - 2.0 * PADDING),
+            overflow: TextOverflow::Ellipsis,
         });
 
         if let Some(snap) = self.manager.tree.get_snapshot(id) {
@@ -3629,6 +3693,7 @@ impl SystemRestoreUI {
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(dialog_w - 2.0 * PADDING),
+                overflow: TextOverflow::Ellipsis,
             });
             rt.push(RenderCommand::Text {
                 x: dx + PADDING,
@@ -3638,6 +3703,7 @@ impl SystemRestoreUI {
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(dialog_w - 2.0 * PADDING),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -3658,6 +3724,7 @@ impl SystemRestoreUI {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(BUTTON_WIDTH - 16.0),
+            overflow: TextOverflow::Ellipsis,
         });
         rt.push(RenderCommand::FillRect {
             x: dx + dialog_w - 112.0,
@@ -3675,6 +3742,7 @@ impl SystemRestoreUI {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(BUTTON_WIDTH - 16.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -3711,6 +3779,7 @@ impl SystemRestoreUI {
             font_size: FONT_SIZE_HEADING,
             font_weight: FontWeightHint::Bold,
             max_width: Some(dialog_w - 2.0 * PADDING),
+            overflow: TextOverflow::Ellipsis,
         });
         rt.push(RenderCommand::Text {
             x: dx + PADDING,
@@ -3720,6 +3789,7 @@ impl SystemRestoreUI {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(dialog_w - 2.0 * PADDING),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Path field.
@@ -3739,6 +3809,7 @@ impl SystemRestoreUI {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(dialog_w - 2.0 * PADDING - 16.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         let btn_y = dy + dialog_h - 40.0;
@@ -3758,6 +3829,7 @@ impl SystemRestoreUI {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(BUTTON_WIDTH - 16.0),
+            overflow: TextOverflow::Ellipsis,
         });
         rt.push(RenderCommand::FillRect {
             x: dx + dialog_w - 112.0,
@@ -3775,6 +3847,7 @@ impl SystemRestoreUI {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(BUTTON_WIDTH - 16.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -3811,6 +3884,7 @@ impl SystemRestoreUI {
             font_size: FONT_SIZE_HEADING,
             font_weight: FontWeightHint::Bold,
             max_width: Some(dialog_w - 2.0 * PADDING),
+            overflow: TextOverflow::Ellipsis,
         });
         rt.push(RenderCommand::Text {
             x: dx + PADDING,
@@ -3820,6 +3894,7 @@ impl SystemRestoreUI {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(dialog_w - 2.0 * PADDING),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Path field.
@@ -3839,6 +3914,7 @@ impl SystemRestoreUI {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(dialog_w - 2.0 * PADDING - 16.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         let btn_y = dy + dialog_h - 40.0;
@@ -3858,6 +3934,7 @@ impl SystemRestoreUI {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(BUTTON_WIDTH - 16.0),
+            overflow: TextOverflow::Ellipsis,
         });
         rt.push(RenderCommand::FillRect {
             x: dx + dialog_w - 112.0,
@@ -3875,6 +3952,7 @@ impl SystemRestoreUI {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(BUTTON_WIDTH - 16.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -3924,6 +4002,7 @@ impl SystemRestoreUI {
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(overlay_w - 2.0 * PADDING),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Progress bar background.
@@ -3970,6 +4049,7 @@ impl SystemRestoreUI {
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(40.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Step counter.
@@ -3986,6 +4066,7 @@ impl SystemRestoreUI {
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(overlay_w - 2.0 * PADDING),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Error message if any.
@@ -3998,6 +4079,7 @@ impl SystemRestoreUI {
                     font_size: FONT_SIZE_SMALL,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(overlay_w - 2.0 * PADDING),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
         }

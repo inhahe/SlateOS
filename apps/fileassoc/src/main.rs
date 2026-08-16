@@ -11,7 +11,7 @@
 #[allow(unused_imports)]
 use guitk::color::Color;
 #[allow(unused_imports)]
-use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
 
@@ -1163,6 +1163,7 @@ impl FileAssocUI {
             font_size: FONT_SIZE_HEADING,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Search bar background
@@ -1195,6 +1196,7 @@ impl FileAssocUI {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(SEARCH_WIDTH - 16.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // "Reset Defaults" button
@@ -1215,6 +1217,7 @@ impl FileAssocUI {
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Regular,
             max_width: Some(BUTTON_WIDTH - 20.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // "Export" button
@@ -1235,6 +1238,7 @@ impl FileAssocUI {
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -1280,6 +1284,7 @@ impl FileAssocUI {
                 FontWeightHint::Regular
             },
             max_width: Some(SIDEBAR_WIDTH - 34.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Category items
@@ -1294,6 +1299,7 @@ impl FileAssocUI {
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         y += 20.0;
 
@@ -1331,6 +1337,7 @@ impl FileAssocUI {
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             // Category label
@@ -1347,6 +1354,7 @@ impl FileAssocUI {
                     FontWeightHint::Regular
                 },
                 max_width: Some(SIDEBAR_WIDTH - 48.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Count badge
@@ -1360,6 +1368,7 @@ impl FileAssocUI {
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             y += SIDEBAR_ITEM_HEIGHT;
@@ -1407,6 +1416,7 @@ impl FileAssocUI {
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         rt.push(RenderCommand::Text {
             x: col_desc_x,
@@ -1416,6 +1426,7 @@ impl FileAssocUI {
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         rt.push(RenderCommand::Text {
             x: col_mime_x,
@@ -1425,6 +1436,7 @@ impl FileAssocUI {
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         rt.push(RenderCommand::Text {
             x: col_app_x,
@@ -1434,6 +1446,7 @@ impl FileAssocUI {
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Separator line
@@ -1508,6 +1521,7 @@ impl FileAssocUI {
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             // Description
@@ -1519,6 +1533,7 @@ impl FileAssocUI {
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(150.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // MIME type
@@ -1530,6 +1545,7 @@ impl FileAssocUI {
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(150.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Default app name
@@ -1552,6 +1568,7 @@ impl FileAssocUI {
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(table_w - (col_app_x - table_x) - PADDING),
+                overflow: TextOverflow::Ellipsis,
             });
 
             y += ROW_HEIGHT;
@@ -1569,6 +1586,7 @@ impl FileAssocUI {
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
     }
@@ -1611,6 +1629,7 @@ impl FileAssocUI {
             font_size: FONT_SIZE_HEADING,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         y += 28.0;
 
@@ -1627,6 +1646,7 @@ impl FileAssocUI {
                     font_size: FONT_SIZE,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(DETAILS_PANEL_WIDTH - 2.0 * PADDING),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
             Some(ft) => {
@@ -1650,6 +1670,7 @@ impl FileAssocUI {
                     font_size: FONT_SIZE,
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
                 y += 40.0;
 
@@ -1692,6 +1713,7 @@ impl FileAssocUI {
                     font_size: FONT_SIZE,
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
                 y += BUTTON_HEIGHT + 8.0;
 
@@ -1712,6 +1734,7 @@ impl FileAssocUI {
                     font_size: FONT_SIZE,
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
                 y += BUTTON_HEIGHT + 16.0;
 
@@ -1724,6 +1747,7 @@ impl FileAssocUI {
                     font_size: FONT_SIZE_SMALL,
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
                 y += 20.0;
 
@@ -1737,6 +1761,7 @@ impl FileAssocUI {
                         font_size: FONT_SIZE_SMALL,
                         font_weight: FontWeightHint::Regular,
                         max_width: None,
+                        overflow: TextOverflow::Clip,
                     });
                 } else {
                     for app in &compatible {
@@ -1763,6 +1788,7 @@ impl FileAssocUI {
                             font_size: FONT_SIZE_SMALL,
                             font_weight: FontWeightHint::Regular,
                             max_width: Some(DETAILS_PANEL_WIDTH - 2.0 * PADDING - 16.0),
+                            overflow: TextOverflow::Ellipsis,
                         });
 
                         y += 26.0;
@@ -1782,6 +1808,7 @@ impl FileAssocUI {
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         rt.push(RenderCommand::Text {
             x: x + 90.0,
@@ -1791,6 +1818,7 @@ impl FileAssocUI {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(DETAILS_PANEL_WIDTH - 90.0 - 2.0 * PADDING),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -1857,6 +1885,7 @@ impl FileAssocUI {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // App list
@@ -1896,6 +1925,7 @@ impl FileAssocUI {
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             rt.push(RenderCommand::Text {
                 x: dx + 16.0,
@@ -1909,6 +1939,7 @@ impl FileAssocUI {
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(DIALOG_WIDTH - 32.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             ay += DIALOG_APP_ROW_HEIGHT;
@@ -1946,6 +1977,7 @@ impl FileAssocUI {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Bottom button bar
@@ -1968,6 +2000,7 @@ impl FileAssocUI {
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // OK button
@@ -1987,6 +2020,7 @@ impl FileAssocUI {
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 }

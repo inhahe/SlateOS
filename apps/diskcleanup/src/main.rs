@@ -28,7 +28,7 @@
 #[allow(unused_imports)]
 use guitk::color::Color;
 #[allow(unused_imports)]
-use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
 use guitk::text;
@@ -955,6 +955,7 @@ impl CleanupUI {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width * 0.5),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Description (smaller, dimmer).
@@ -966,6 +967,7 @@ impl CleanupUI {
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width * 0.5),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Size estimate (right-aligned).
@@ -979,6 +981,7 @@ impl CleanupUI {
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(110.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -992,6 +995,7 @@ impl CleanupUI {
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
     }
@@ -1024,6 +1028,7 @@ impl CleanupUI {
             font_size: FONT_SIZE_HEADING,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width - PADDING * 2.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -1061,6 +1066,7 @@ impl CleanupUI {
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width * 0.4),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -1112,6 +1118,7 @@ impl CleanupUI {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(w),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -1150,6 +1157,7 @@ impl CleanupUI {
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - PADDING * 2.0),
+                overflow: TextOverflow::Ellipsis,
             });
         } else {
             for (i, item) in items.iter().enumerate() {
@@ -1167,6 +1175,7 @@ impl CleanupUI {
                     font_size: FONT_SIZE,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(width * 0.6),
+                    overflow: TextOverflow::Ellipsis,
                 });
 
                 // Size.
@@ -1178,6 +1187,7 @@ impl CleanupUI {
                     font_size: FONT_SIZE_SMALL,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
 
                 // Safety indicator.
@@ -1191,6 +1201,7 @@ impl CleanupUI {
                     font_size: FONT_SIZE_SMALL,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
             }
         }
@@ -1242,6 +1253,7 @@ impl CleanupUI {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - PADDING * 2.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Progress bar track.
@@ -1294,6 +1306,7 @@ impl CleanupUI {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - PADDING * 2.0),
+            overflow: TextOverflow::Ellipsis,
         });
         y += 24.0;
 
@@ -1306,6 +1319,7 @@ impl CleanupUI {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width - PADDING * 2.0),
+            overflow: TextOverflow::Ellipsis,
         });
         y += 24.0;
 
@@ -1319,6 +1333,7 @@ impl CleanupUI {
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - PADDING * 2.0),
+                overflow: TextOverflow::Ellipsis,
             });
             y += 20.0;
 
@@ -1331,6 +1346,7 @@ impl CleanupUI {
                     font_size: FONT_SIZE_SMALL,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(width - PADDING * 3.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
                 y += 18.0;
             }
@@ -1351,6 +1367,7 @@ impl CleanupUI {
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - PADDING * 2.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Done button.
@@ -1429,6 +1446,7 @@ impl CleanupUI {
             font_size: FONT_SIZE_HEADING,
             font_weight: FontWeightHint::Bold,
             max_width: Some(dialog_w - PADDING * 2.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Summary.
@@ -1447,6 +1465,7 @@ impl CleanupUI {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(dialog_w - PADDING * 2.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Buttons.

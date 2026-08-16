@@ -16,7 +16,7 @@
 
 use crate::Rect;
 use guitk::color::Color;
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::{Border, CornerRadii};
 use guitk::text;
 
@@ -1009,6 +1009,7 @@ impl ScreenSaver {
             font_size: 72.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         cmds
@@ -1112,6 +1113,7 @@ impl ScreenSaver {
                     font_size: 14.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(14.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
         }
@@ -1172,6 +1174,7 @@ impl ScreenSaver {
             font_size: 28.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(logo_w - 30.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         cmds
@@ -1224,6 +1227,7 @@ pub fn render_battery_icon(
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(24.0),
+            overflow: TextOverflow::Ellipsis,
         });
         return cmds;
     }
@@ -1293,6 +1297,7 @@ pub fn render_battery_icon(
             font_size: 10.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(batt_w),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -1306,6 +1311,7 @@ pub fn render_battery_icon(
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(36.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -1341,6 +1347,7 @@ pub fn render_power_profile_badge(profile: PowerProfile, x: f32, y: f32) -> Vec<
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(badge_w - 16.0),
+            overflow: TextOverflow::Ellipsis,
         },
     ]
 }
@@ -1427,6 +1434,7 @@ pub fn render_power_menu(
             font_size: style.font_size,
             font_weight: FontWeightHint::Regular,
             max_width: Some((row.rect.w - style.text_inset * 2.0).max(0.0)),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 

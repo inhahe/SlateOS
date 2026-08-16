@@ -21,7 +21,7 @@ use guitk::color::Color;
 #[allow(unused_imports)]
 use guitk::event::{Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEventKind};
 #[allow(unused_imports)]
-use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
 use guitk::text;
@@ -812,6 +812,7 @@ fn render_title_bar(tree: &mut RenderTree) {
         font_size: 14.0,
         font_weight: FontWeightHint::Bold,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
 }
 
@@ -850,6 +851,7 @@ fn render_toolbar(tree: &mut RenderTree, app: &NetManagerApp) {
             font_size: TOOLBAR_TEXT,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         bx += bw + 8.0;
     }
@@ -878,6 +880,7 @@ fn render_toolbar(tree: &mut RenderTree, app: &NetManagerApp) {
         font_size: TOOLBAR_TEXT,
         font_weight: FontWeightHint::Regular,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
 }
 
@@ -906,6 +909,7 @@ fn render_sidebar(tree: &mut RenderTree, app: &NetManagerApp) {
         font_size: 11.0,
         font_weight: FontWeightHint::Bold,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
 
     // Separator
@@ -957,6 +961,7 @@ fn render_sidebar(tree: &mut RenderTree, app: &NetManagerApp) {
             font_size: 13.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(SIDEBAR_WIDTH - 50.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Status line
@@ -969,6 +974,7 @@ fn render_sidebar(tree: &mut RenderTree, app: &NetManagerApp) {
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(SIDEBAR_WIDTH - 50.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Status dot (right side)
@@ -1075,6 +1081,7 @@ fn render_tab_bar(tree: &mut RenderTree, app: &NetManagerApp, px: f32, py: f32, 
                 FontWeightHint::Regular
             },
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         tx += tw + 4.0;
@@ -1242,6 +1249,7 @@ fn render_tab_dns(tree: &mut RenderTree, app: &NetManagerApp, px: f32, py: f32, 
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         y += DNS_ROW_HEIGHT;
     } else {
@@ -1266,6 +1274,7 @@ fn render_tab_dns(tree: &mut RenderTree, app: &NetManagerApp, px: f32, py: f32, 
                 font_size: 12.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             // Server address
@@ -1277,6 +1286,7 @@ fn render_tab_dns(tree: &mut RenderTree, app: &NetManagerApp, px: f32, py: f32, 
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             // Up/Down/Remove buttons (small)
@@ -1335,6 +1345,7 @@ fn render_tab_dns(tree: &mut RenderTree, app: &NetManagerApp, px: f32, py: f32, 
         font_size: 12.0,
         font_weight: FontWeightHint::Regular,
         max_width: Some(184.0),
+        overflow: TextOverflow::Ellipsis,
     });
 
     // Add button
@@ -1357,6 +1368,7 @@ fn render_tab_wifi(tree: &mut RenderTree, app: &NetManagerApp, px: f32, py: f32,
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         return;
     }
@@ -1389,6 +1401,7 @@ fn render_tab_wifi(tree: &mut RenderTree, app: &NetManagerApp, px: f32, py: f32,
             font_size: 13.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(200.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Details line
@@ -1407,6 +1420,7 @@ fn render_tab_wifi(tree: &mut RenderTree, app: &NetManagerApp, px: f32, py: f32,
             font_size: 10.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(300.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Connect button
@@ -1459,6 +1473,7 @@ fn render_tab_vpn(tree: &mut RenderTree, app: &NetManagerApp, px: f32, py: f32, 
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         return;
     }
@@ -1500,6 +1515,7 @@ fn render_tab_vpn(tree: &mut RenderTree, app: &NetManagerApp, px: f32, py: f32, 
             font_size: 13.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(250.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Details
@@ -1517,6 +1533,7 @@ fn render_tab_vpn(tree: &mut RenderTree, app: &NetManagerApp, px: f32, py: f32, 
             font_size: 10.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(350.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Connect/Disconnect button
@@ -1556,6 +1573,7 @@ fn render_tab_profiles(tree: &mut RenderTree, app: &NetManagerApp, px: f32, py: 
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         return;
     }
@@ -1595,6 +1613,7 @@ fn render_tab_profiles(tree: &mut RenderTree, app: &NetManagerApp, px: f32, py: 
             font_size: 13.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(200.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Details
@@ -1615,6 +1634,7 @@ fn render_tab_profiles(tree: &mut RenderTree, app: &NetManagerApp, px: f32, py: 
             font_size: 10.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Remove button
@@ -1758,6 +1778,7 @@ fn render_tab_traffic(tree: &mut RenderTree, app: &NetManagerApp, px: f32, py: f
         font_size: 11.0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
     tree.push(RenderCommand::FillRect {
         x: lx + 50.0,
@@ -1775,6 +1796,7 @@ fn render_tab_traffic(tree: &mut RenderTree, app: &NetManagerApp, px: f32, py: f
         font_size: 11.0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
 }
 
@@ -1794,6 +1816,7 @@ fn render_tab_diagnostics(tree: &mut RenderTree, app: &NetManagerApp, px: f32, p
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         y += 24.0;
         render_button(tree, "Run", lx, y, 80.0, BUTTON_HEIGHT, BLUE);
@@ -1832,6 +1855,7 @@ fn render_tab_diagnostics(tree: &mut RenderTree, app: &NetManagerApp, px: f32, p
             font_size: 12.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(200.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Details. A row is a fixed two-line cell in a list meant to be
@@ -1853,6 +1877,7 @@ fn render_tab_diagnostics(tree: &mut RenderTree, app: &NetManagerApp, px: f32, p
             font_size: DIAG_DETAIL_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(detail_width),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Status label on right
@@ -1864,6 +1889,7 @@ fn render_tab_diagnostics(tree: &mut RenderTree, app: &NetManagerApp, px: f32, p
             font_size: 11.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         y += row_h + 4.0;
@@ -1903,6 +1929,7 @@ fn render_status_bar(tree: &mut RenderTree, app: &NetManagerApp) {
         font_size: 11.0,
         font_weight: FontWeightHint::Regular,
         max_width: Some(WINDOW_WIDTH - 200.0),
+        overflow: TextOverflow::Ellipsis,
     });
 
     // Interface count on right
@@ -1915,6 +1942,7 @@ fn render_status_bar(tree: &mut RenderTree, app: &NetManagerApp) {
         font_size: 11.0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
 }
 
@@ -1932,6 +1960,7 @@ fn render_section_title(tree: &mut RenderTree, title: &str, x: f32, y: f32) -> f
         font_size: SECTION_TEXT,
         font_weight: FontWeightHint::Bold,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
     tree.push(RenderCommand::Line {
         x1: x,
@@ -1957,6 +1986,7 @@ fn render_field_row(tree: &mut RenderTree, label: &str, value: &str, lx: f32, vx
         font_size: 12.0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
     tree.push(RenderCommand::Text {
         x: vx,
@@ -1966,6 +1996,7 @@ fn render_field_row(tree: &mut RenderTree, label: &str, value: &str, lx: f32, vx
         font_size: 12.0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
 }
 
@@ -1991,6 +2022,7 @@ fn render_editable_field(
         font_size: 12.0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
 
     if editing {
@@ -2023,6 +2055,7 @@ fn render_editable_field(
         font_size: 12.0,
         font_weight: FontWeightHint::Regular,
         max_width: Some(190.0),
+        overflow: TextOverflow::Ellipsis,
     });
 }
 
@@ -2066,6 +2099,7 @@ fn render_toggle_row(tree: &mut RenderTree, label: &str, enabled: bool, x: f32, 
         font_size: 12.0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
 }
 
@@ -2109,6 +2143,7 @@ fn render_button(
         font_size: TOOLBAR_TEXT,
         font_weight: FontWeightHint::Bold,
         max_width: Some(w - 8.0),
+        overflow: TextOverflow::Ellipsis,
     });
 }
 
@@ -2131,6 +2166,7 @@ fn render_mini_button(tree: &mut RenderTree, label: &str, x: f32, y: f32, color:
         font_size: 11.0,
         font_weight: FontWeightHint::Bold,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
 }
 
@@ -2145,6 +2181,7 @@ fn render_no_selection(tree: &mut RenderTree, px: f32, py: f32, pw: f32) {
         font_size: 14.0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
 }
 

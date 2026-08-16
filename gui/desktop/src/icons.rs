@@ -21,7 +21,7 @@
 //! ```
 
 use guitk::color::Color;
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
 // ============================================================================
@@ -866,6 +866,7 @@ impl DesktopIconLayer {
                         font_size: ICON_GLYPH_SIZE,
                         font_weight: FontWeightHint::Regular,
                         max_width: None,
+                        overflow: TextOverflow::Clip,
                     });
                 }
             }
@@ -963,6 +964,7 @@ impl DesktopIconLayer {
             font_size: ICON_GLYPH_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Label text below icon (centered, 2-line max with ellipsis).
@@ -981,6 +983,7 @@ impl DesktopIconLayer {
                 font_size: LABEL_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(LABEL_MAX_WIDTH),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Actual label text.
@@ -1000,6 +1003,7 @@ impl DesktopIconLayer {
                     FontWeightHint::Regular
                 },
                 max_width: Some(LABEL_MAX_WIDTH),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }

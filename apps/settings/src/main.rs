@@ -20,7 +20,7 @@ use guitk::event::{
 #[allow(unused_imports)]
 use guitk::layout::{FlexAlign, FlexDirection, FlexWrap, Size};
 #[allow(unused_imports)]
-use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 #[allow(unused_imports)]
 use guitk::style::{CornerRadii, Edges};
 use guitk::text;
@@ -1046,6 +1046,7 @@ fn text_bold(tree: &mut RenderTree, x: f32, y: f32, content: &str, color: Color,
         font_size: size,
         font_weight: FontWeightHint::Bold,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
 }
 
@@ -1067,6 +1068,7 @@ fn text_clipped(
         font_size: size,
         font_weight: FontWeightHint::Regular,
         max_width: Some(max_width),
+        overflow: TextOverflow::Ellipsis,
     });
 }
 

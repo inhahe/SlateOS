@@ -20,7 +20,7 @@
 
 use guitk::color::Color;
 use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
 // ── Catppuccin Mocha palette ────────────────────────────────────────
@@ -1257,6 +1257,7 @@ impl SpadesGame {
             font_size: TITLE_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Round number
@@ -1268,6 +1269,7 @@ impl SpadesGame {
             font_size: INFO_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Team scores
@@ -1292,6 +1294,7 @@ impl SpadesGame {
             font_size: INFO_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         commands.push(RenderCommand::FillRect {
@@ -1310,6 +1313,7 @@ impl SpadesGame {
             font_size: INFO_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Trick count vs bid for this round (below scores)
@@ -1327,6 +1331,7 @@ impl SpadesGame {
                 font_size: SMALL_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             commands.push(RenderCommand::Text {
                 x: 480.0,
@@ -1336,6 +1341,7 @@ impl SpadesGame {
                 font_size: SMALL_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
     }
@@ -1367,6 +1373,7 @@ impl SpadesGame {
                 font_size: SMALL_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 
@@ -1392,6 +1399,7 @@ impl SpadesGame {
                 font_size: SMALL_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
     }
@@ -1464,6 +1472,7 @@ impl SpadesGame {
             font_size: CARD_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Suit symbol center
@@ -1475,6 +1484,7 @@ impl SpadesGame {
             font_size: CARD_SUIT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Rank in bottom-right
@@ -1486,6 +1496,7 @@ impl SpadesGame {
             font_size: CARD_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -1513,6 +1524,7 @@ impl SpadesGame {
             font_size: LABEL_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         for (i, &card) in hand.iter().enumerate() {
@@ -1549,6 +1561,7 @@ impl SpadesGame {
             font_size: INFO_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Separator
@@ -1586,6 +1599,7 @@ impl SpadesGame {
                 font_size: LABEL_FONT_SIZE,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             // Bid
@@ -1606,6 +1620,7 @@ impl SpadesGame {
                 font_size: SMALL_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             // Tricks won
@@ -1617,6 +1632,7 @@ impl SpadesGame {
                 font_size: SMALL_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             // Cards remaining
@@ -1629,6 +1645,7 @@ impl SpadesGame {
                 font_size: SMALL_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
     }
@@ -1649,6 +1666,7 @@ impl SpadesGame {
             font_size: INFO_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Controls help
@@ -1667,6 +1685,7 @@ impl SpadesGame {
             font_size: SMALL_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -1714,6 +1733,7 @@ impl SpadesGame {
             font_size: INFO_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Current selection
@@ -1730,6 +1750,7 @@ impl SpadesGame {
             font_size: BID_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Bid button grid (0-13)
@@ -1778,6 +1799,7 @@ impl SpadesGame {
                 font_size: LABEL_FONT_SIZE,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 
@@ -1790,6 +1812,7 @@ impl SpadesGame {
             font_size: SMALL_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Show other players' bids if they've already bid
@@ -1814,6 +1837,7 @@ impl SpadesGame {
                 font_size: SMALL_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
     }
@@ -1851,6 +1875,7 @@ impl SpadesGame {
             font_size: TITLE_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Winner
@@ -1862,6 +1887,7 @@ impl SpadesGame {
             font_size: INFO_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Instructions
@@ -1873,6 +1899,7 @@ impl SpadesGame {
             font_size: INFO_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 }

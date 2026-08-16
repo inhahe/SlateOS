@@ -28,7 +28,7 @@ use guitk::color::Color;
 #[cfg(test)]
 use guitk::event::Modifiers;
 use guitk::event::{Event, Key, KeyEvent};
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
 // ── Catppuccin Mocha palette ────────────────────────────────────────
@@ -1192,6 +1192,7 @@ impl Pinball {
             font_size: TITLE_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Score.
@@ -1203,6 +1204,7 @@ impl Pinball {
             font_size: LABEL_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         cmds.push(RenderCommand::Text {
             x: sx + 10.0,
@@ -1212,6 +1214,7 @@ impl Pinball {
             font_size: SCORE_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Combo.
@@ -1224,6 +1227,7 @@ impl Pinball {
                 font_size: LABEL_FONT_SIZE,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 
@@ -1236,6 +1240,7 @@ impl Pinball {
             font_size: LABEL_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         // Draw ball indicators.
         for i in 0..self.balls_remaining {
@@ -1262,6 +1267,7 @@ impl Pinball {
                 font_size: LABEL_FONT_SIZE,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 
@@ -1275,6 +1281,7 @@ impl Pinball {
                 font_size: SCORE_FONT_SIZE,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 
@@ -1288,6 +1295,7 @@ impl Pinball {
             font_size: LABEL_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         let stat_items = [
             format!("Bumpers: {}", self.total_bumper_hits),
@@ -1303,6 +1311,7 @@ impl Pinball {
                 font_size: LABEL_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 
@@ -1321,6 +1330,7 @@ impl Pinball {
             font_size: LABEL_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // High scores.
@@ -1333,6 +1343,7 @@ impl Pinball {
             font_size: LABEL_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         cmds.push(RenderCommand::Line {
             x1: sx + 10.0,
@@ -1357,6 +1368,7 @@ impl Pinball {
                 font_size: LABEL_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 
@@ -1371,6 +1383,7 @@ impl Pinball {
                 font_size: LABEL_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             // Bar background.
             let bar_w = sw - 20.0;
@@ -1520,6 +1533,7 @@ impl Pinball {
             font_size: 9.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -1574,6 +1588,7 @@ impl Pinball {
                 font_size: 10.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
     }
@@ -1606,6 +1621,7 @@ impl Pinball {
             font_size: 9.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -1805,6 +1821,7 @@ impl Pinball {
             font_size: FOOTER_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -1840,6 +1857,7 @@ impl Pinball {
             font_size: OVERLAY_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         cmds.push(RenderCommand::Text {
@@ -1850,6 +1868,7 @@ impl Pinball {
             font_size: LABEL_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -1875,6 +1894,7 @@ impl Pinball {
             font_size: OVERLAY_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         cmds.push(RenderCommand::Text {
@@ -1885,6 +1905,7 @@ impl Pinball {
             font_size: SCORE_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         cmds.push(RenderCommand::Text {
@@ -1895,6 +1916,7 @@ impl Pinball {
             font_size: LABEL_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -1919,6 +1941,7 @@ impl Pinball {
             font_size: LABEL_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 

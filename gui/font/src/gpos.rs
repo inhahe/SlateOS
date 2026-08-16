@@ -55,6 +55,7 @@ use crate::context::{
     MAX_NESTING, Matched, chain_match, context_match, read_records,
 };
 use crate::gsub::SubGlyph;
+use crate::lang::Lang;
 use crate::mark::{attachment, lig_attachment};
 use crate::otl::{
     ByScript, Lookup, MAX_SUBTABLES, binary_search, coverage_index, glyph_class, lookup_at,
@@ -123,7 +124,10 @@ const KINDS: [u16; 8] = [
 /// positional features must reach only the glyphs the shaper marked eligible,
 /// a positioning feature is gated by its own glyph coverage — a face's `abvm`
 /// simply does not cover glyphs that have nothing above them.
-const FEATURES: [&[u8; 4]; 14] = [
+///
+/// Visible to the crate so that `the_two_tables_ask_for_the_same_features` in
+/// [`otl`](crate::otl) can pin the "one feature map" claim above.
+pub(crate) const FEATURES: [&[u8; 4]; 14] = [
     b"abvm", b"blwm", b"calt", b"ccmp", b"clig", b"curs", b"dist", b"kern", b"liga", b"locl",
     b"mark", b"mkmk", b"rclt", b"rlig",
 ];
@@ -266,6 +270,10 @@ pub(crate) struct Run<'a> {
     pub(crate) rtl: bool,
     /// The run's script, which selects the lookups.
     pub(crate) script: Option<ScriptTags>,
+    /// The run's language, which selects among the lookups that script offers.
+    /// `None` — and any language the script does not register — takes the
+    /// script's default language system. See [`lang`](crate::lang).
+    pub(crate) lang: Option<Lang>,
 }
 
 /// A face's `GPOS`, resolved once per script.
@@ -294,7 +302,7 @@ impl Positioning {
         })
     }
 
-    /// Whether a run of `script` reaches a `kern` feature here.
+    /// Whether a run of `script` in `lang` reaches a `kern` feature here.
     ///
     /// A face files its `GPOS` features under particular scripts, so this is a
     /// question about the run and not about the face: Leelawadee registers only
@@ -307,9 +315,9 @@ impl Positioning {
     /// The script fallback chain is [`ByScript::for_script`]'s, so a face that
     /// registers `DFLT` answers for every run, as it should.
     #[must_use]
-    pub(crate) fn kerns(&self, script: Option<ScriptTags>) -> bool {
+    pub(crate) fn kerns(&self, script: Option<ScriptTags>, lang: Option<Lang>) -> bool {
         self.lookups
-            .for_script(script)
+            .for_script(script, lang)
             .any(|(_, mask)| mask & KERN_MASK != 0)
     }
 
@@ -318,7 +326,7 @@ impl Positioning {
         let mut out: Vec<Adjust> = (0..run.glyphs.len())
             .map(|i| Adjust::plain(run.advances.get(i).copied().unwrap_or(0)))
             .collect();
-        for (lookup, _) in self.lookups.for_script(run.script) {
+        for (lookup, _) in self.lookups.for_script(run.script, run.lang) {
             self.run_lookup(data, lookup, run, &mut out);
         }
         // Marks lose their width here, between the lookups and the chains, for
@@ -1432,13 +1440,13 @@ mod tests {
         let data = gpos_table_with_empty_script(b"latn", &[(SINGLE_POS, sub)]);
         let pos = Positioning::parse(&data, span(0, data.len()), None).expect("GPOS parses");
         // A script the table does not register reaches `DFLT`, as ever.
-        assert!(pos.kerns(Some(ScriptTags::exactly(*b"thai"))));
-        assert!(pos.kerns(None));
+        assert!(pos.kerns(Some(ScriptTags::exactly(*b"thai")), None));
+        assert!(pos.kerns(None, None));
         // `latn` is registered, so the chain stops there — and finds nothing.
-        assert!(!pos.kerns(Some(ScriptTags::exactly(*b"latn"))));
+        assert!(!pos.kerns(Some(ScriptTags::exactly(*b"latn")), None));
         assert_eq!(
             pos.lookups
-                .for_script(Some(ScriptTags::exactly(*b"latn")))
+                .for_script(Some(ScriptTags::exactly(*b"latn")), None)
                 .count(),
             0
         );
@@ -1518,9 +1526,9 @@ mod tests {
         let asks = |script: &[u8; 4], feature: &[u8; 4]| {
             let data = gpos_table_for(script, feature, &[(SINGLE_POS, sub())]);
             let pos = Positioning::parse(&data, span(0, data.len()), None).expect("GPOS parses");
-            let latin = pos.kerns(Some(ScriptTags::exactly(*b"latn")));
-            let thai = pos.kerns(Some(ScriptTags::exactly(*b"thai")));
-            let none = pos.kerns(None);
+            let latin = pos.kerns(Some(ScriptTags::exactly(*b"latn")), None);
+            let thai = pos.kerns(Some(ScriptTags::exactly(*b"thai")), None);
+            let none = pos.kerns(None, None);
             (latin, thai, none)
         };
         // Filed under `thai` alone: only a Thai run reaches it. A run with no
@@ -1547,6 +1555,7 @@ mod tests {
                 marks: &marks,
                 rtl: false,
                 script: None,
+                lang: None,
             },
         )
         .iter()

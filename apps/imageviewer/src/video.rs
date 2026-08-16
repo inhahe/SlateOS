@@ -9,7 +9,7 @@
 #![allow(dead_code)]
 
 use guitk::color::Color;
-use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
 
@@ -1426,6 +1426,7 @@ pub fn render_controls(
         font_size: 11.0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
 
     // -- Playback buttons (centered) --
@@ -1451,6 +1452,7 @@ pub fn render_controls(
         font_size: 11.0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
 
     // -- Status indicators (left, below time) --
@@ -1493,6 +1495,7 @@ pub fn render_controls(
                 font_size: 14.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
         PlayerState::Error(msg) => {
@@ -1510,6 +1513,7 @@ pub fn render_controls(
                 font_size: 13.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(area_w - 40.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
         _ => {}
@@ -1635,6 +1639,7 @@ fn render_playback_buttons(player: &VideoPlayer, tree: &mut RenderTree, center_x
             font_size: 14.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(CONTROL_BUTTON_SIZE - 8.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 }
@@ -1658,6 +1663,7 @@ fn render_volume(player: &VideoPlayer, tree: &mut RenderTree, x: f32, y: f32, wi
         font_size: 12.0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
 
     // Slider track
@@ -1698,6 +1704,7 @@ fn render_volume(player: &VideoPlayer, tree: &mut RenderTree, x: f32, y: f32, wi
         font_size: 10.0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
 }
 
@@ -1720,6 +1727,7 @@ fn render_badge(tree: &mut RenderTree, x: f32, y: f32, label: &str, color: Color
         font_size: 10.0,
         font_weight: FontWeightHint::Bold,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
     w
 }

@@ -112,3 +112,11 @@ __pycache__/
 # rule stops it being staged by accident, the hook stops any push that carries
 # it regardless of how it got committed. See scripts/hooks/pre-push.
 /todo2.txt
+
+# Synthetic oracle faces for the HarfBuzz sweep. Each is regenerated in one
+# command from the tracked generator beside it — `gen_thai_legacy.py`,
+# `gen_khmer_probe.py` — and is a build artifact of that script, not a source
+# file. Tracking them would put a few hundred KB of binary in history that no
+# reader can diff and that any change to the generator immediately stales.
+/gui/font/tools/thai-legacy/
+/gui/font/tools/khmer-probe/

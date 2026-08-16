@@ -15,7 +15,7 @@
 #![allow(dead_code)]
 
 use guitk::color::Color;
-use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
 
@@ -1230,6 +1230,7 @@ fn text_bold(tree: &mut RenderTree, x: f32, y: f32, content: &str, color: Color,
         font_size: size,
         font_weight: FontWeightHint::Bold,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
 }
 

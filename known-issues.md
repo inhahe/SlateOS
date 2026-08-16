@@ -62631,11 +62631,33 @@ that box's height, and does anything downstream of it move. Where the answer to
 the third is "yes" — a stacked list, a following field — the height and the
 drawn lines must come from one call, not two.
 
-## TD-GUI-CLIPPED-TEXT-IS-NOT-MARKED — `max_width` cuts mid-glyph and says nothing
+## TD-GUI-CLIPPED-TEXT-IS-NOT-MARKED — `max_width` cuts mid-glyph and says nothing — ✅ **RESOLVED 2026-08-15**
 
-**Status.** Open, and deliberately not fixed in the pass that closed
+**Resolution.** `RenderCommand::Text` gained a **required** `overflow:
+TextOverflow` field (`Clip` | `Ellipsis`), and the compositor draws the mark.
+The operator chose "required, no `Default`" from four options precisely so that
+every one of the 4,517 constructions in the tree had to answer the question
+`max_width` had been posing and never answering; see `design-decisions.md` §427
+for the options and §429 for why the commit also had to fill in lane B's 31
+sites. The second measurement the entry complains about below is gone from the
+policy path: the compositor decides about the mark from the run it has already
+shaped, so `text::elide` is no longer the only way to get a cut marked.
+
+Bounded sites default to `Ellipsis` rather than to the behaviour-preserving
+`Clip`, because today's behaviour *is* this entry — a sweep that faithfully
+preserved it at four thousand sites would have done nothing.
+
+Tested at all three layers: the compositor (a mark appears only when earned,
+stays inside the limit, falls back to clipping when the mark itself does not
+fit, and never blanks a field clipping would have filled), the toolkit (each
+helper emits the right policy), and `guiremote` (both policies survive the wire,
+are distinguishable on it, and an unknown byte is a `DecodeError` rather than a
+guess — `PROTOCOL_VERSION` went to 2 for it).
+
+**Status.** ~~Open, and deliberately not fixed in the pass that closed
 `TD-GUI-TEXT-COMMAND-DOES-NOT-WRAP`, because the good fix is a change to
-`RenderCommand::Text` itself and wants a decision rather than a sweep.
+`RenderCommand::Text` itself and wants a decision rather than a sweep.~~
+The decision was asked and answered.
 
 **What it is.** `max_width` clips: the compositor walks glyphs and stops when
 the next one would cross the limit. It draws no ellipsis. So a label that does
@@ -63173,7 +63195,99 @@ expected count would have had to be relaxed for a change that made the shaper
 `TD-FONT-SCRIPT-RUNS-IGNORE-SCRIPT-EXTENSIONS` and
 `TD-FONT-HAS-NO-JOINING-OR-REORDERING-SHAPER`.
 
-## TD-FONT-IGNORES-LANGSYS-OVERRIDES
+## TD-FONT-IGNORES-LANGSYS-OVERRIDES — a font's per-language rules were unreachable — ✅ **RESOLVED 2026-08-15**
+
+**Resolution.** Exactly the fix sketched below, and the required-feature gap
+beside it. `ScaledFont::shape_lang(text, Option<Lang>)` and
+`SystemFont::shape_lang` take a language; `shape(text)` is `shape_lang(text,
+None)`, so the change is purely additive and no caller that names no language
+can shape differently than it did. `otl::ByScript::parse` now precomputes a
+lookup selection per **(script, language)** rather than per script, preferring
+the named LangSysRecord over the DefaultLangSys, and `feature_indices` finally
+reads `requiredFeatureIndex` — the one feature a language system states outside
+its index list, which the walk had been dropping for the default language too.
+
+`lang.rs` does the BCP 47 → OpenType mapping, following HarfBuzz's
+`hb_ot_tags_from_language` rule for rule: complex rules first (`ro-MD` →
+`MOL `, `zh-Hant` → `ZHT `), then extended-language-subtag substitution, then
+the 2- and 3-letter registries, then the blocked list, else uppercase. It is
+allocation-free and puts no bound on the tag's length.
+`tools/gen_lang_tables.py` generates its four tables from HarfBuzz's source, so
+a registry update is a regeneration rather than an edit.
+
+Four things worth keeping in mind about the shape of the fix:
+
+- **A LangSysRecord replaces the default's feature list; it does not add to
+  it.** So naming a language can take a feature *away* — which is exactly what
+  `TRK ` does to `liga`. Callers should pass `None` rather than a guess: a
+  wrong language is worse than no language.
+- **One BCP 47 tag resolves to a *list* of up to three OpenType tags, not to
+  one.** `ro-MD` is `MOL ` and then `ROM `; `ml` is Malayalam Traditional and
+  then Reformed; `ga` is `IRI ` and then `IRT `. They are candidates and not
+  synonyms: a face is asked for each in turn and the first it **registers**
+  wins. The cap of three is HarfBuzz's `HB_OT_MAX_TAGS_PER_LANGUAGE`, and
+  truncating where HarfBuzz truncates is what keeps the two engines answering
+  alike. See "What the oracle caught" below — the first version of this fix
+  kept only the head of each list and was wrong on 66 of the host's 556 faces.
+- **Language selection deliberately does not fall back the way script
+  selection does.** A script that does not register the language takes its own
+  default, never another script's — HarfBuzz's split between
+  `hb_ot_layout_table_select_script` and
+  `hb_ot_layout_script_select_language`. `gsub::tests::language_selection_does_not_fall_back_to_another_script`
+  pins it.
+- **A script's default entry is stored even when it selects nothing**, because
+  that entry is what says the script exists and stops the fallback chain.
+  Language entries identical to their script's default are *not* stored; two
+  thirds of the host's are. This is why `ByScript` keeps a second list of every
+  (script, language) the face *registers*: "which candidate wins" is decided by
+  what the font registered, never by what happened to be worth storing, or a
+  `MOL ` that says nothing would hand Moldavian to `ROM `'s overrides on the
+  strength of an optimisation.
+
+**Scale.** `tools/langsys_survey.py` measured the host before the fix: of 581
+installed faces, 290 register at least one LangSysRecord, 3031 (script,
+language) records in all, 1203 of which differ from their default and **996 of
+which differ in a feature tag this crate asks for, across 230 faces**. Moved
+tags: `locl` 856, `ccmp` 90, `liga` 67, `calt` 28, `mark` 25. The survey's
+feature list is pinned equal to the shaper's by
+`otl::tests::the_survey_matches_the_shapers_feature_list`, so a number it
+reports cannot quietly come to mean something else.
+
+**Tested** by seven new unit tests over hand-built ScriptLists that
+`fixture::script_list` cannot express (a script with no DefaultLangSys, a
+script with named languages, a `requiredFeatureIndex`, a face registering only
+a language's second candidate, and both orders of a face registering two of
+them), by 20 tests over the BCP 47 mapping, and by `tools/harfbuzz_sweep.py`,
+which grew a language field: each new corpus entry is a string already in the
+corpus plus a tag, so a difference between the two halves is the language and
+nothing else, and both halves map the tag with the same rules. The sweep's
+buffer language is set *after* `guess_segment_properties`, and explicitly to
+`""` for the language-less entries, because the guess otherwise fills it in
+from the machine's locale and the run would pass or fail by where it was made.
+
+**What the oracle caught.** The first version of this fix passed 521 unit
+tests, was clippy-clean, and was wrong. The sweep found it in one run: `ro-MD`
+disagreed with HarfBuzz on **345** faces where plain `ro` disagreed on 279, and
+the 66-face gap was the bug. HarfBuzz's `hb_ot_tags_from_language` returns an
+ordered list of up to `HB_OT_MAX_TAGS_PER_LANGUAGE = 3` candidate tags and asks
+the face for each in turn; `gen_lang_tables.py` had deliberately kept only the
+first of each list, on the reasoning that a language has one tag. Those 66
+faces — `Candara.ttf` among them — register `('latn', 'ROM ')` and no `MOL `,
+so HarfBuzz reached Romanian's comma-below `locl` for Moldavian through the
+second candidate and we did not. After the generator was reworked to keep all
+of them, the `ro-MD` bucket is 279: exactly `ro`'s, exactly the language-less
+twin's, and entirely the pre-existing NFC divergence recorded in
+`design-decisions.md` §410. Final sweep: 556 faces × 35 strings, 18235 agree,
+reordered 0, misplaced 0.
+
+This is the third bug the HarfBuzz oracle has found that a green unit-test
+suite could not, and for the same reason every time: "this face has no glyph
+/ no language system for that" is a *legal* answer, so no self-consistency
+check can tell it apart from the truth. Only a second implementation can.
+
+The original entry follows.
+
+---
 
 **What.** `otl::select` reads each ScriptRecord's DefaultLangSys and ignores
 its LangSysRecords entirely. The per-language overrides — Turkish dotless `i`
@@ -63433,10 +63547,154 @@ order of how well the host can check the work:
 Each step needs its corpus strings added to `harfbuzz_sweep.py` first, or the
 sweep reports agreement it never tested.
 
+**Step 1 of 3 done — Thai/Lao, 2026-08-15** (`gui/font/src/thai.rs`, commits
+`48597037a` and `a7130c6b4`). Both halves the survey predicted, and both
+measured:
+
+* **SARA AM decomposition.** U+0E33 (Lao U+0EB3) is one character drawn as two
+  marks in two places, and Unicode gives it no canonical decomposition, so we
+  were asking faces for a glyph almost none have. `thai::preprocess` splits it
+  into nikhahit + sara aa and walks the nikhahit back over any above-base
+  marks, which is HarfBuzz's `preprocess_text_thai` — Uniscribe's behaviour,
+  not the MS OT Thai spec's. It runs from `norm::normalize` *between*
+  decomposition and the mark sort, and the ordering is load-bearing rather
+  than incidental: sorting first puts the nikhahit on the wrong side of a
+  tone mark. Host sweep, 556 faces: **agree 18806 → 21015, reordered 3 → 0,
+  differ 3382 → 1176**, every Thai and Lao string now agreeing on every face.
+  The residual 1176 is entirely the pre-existing NFC bucket, untouched.
+* **The private-use fallback.** `thai::pua_shape`, two state machines
+  transcribed from `hb-ot-shaper-thai.cc`, gated on HarfBuzz's
+  `!plan->map.found_script[0]` — the face's `GSUB` did not name `thai`.
+  Note that this is *not* `Face::shapes_as_default`, which answers false for a
+  face with no `GSUB` at all; a face with no `GSUB` is exactly the font the
+  pass exists for, and using the wrong predicate made the pass never fire.
+
+  This one could not be measured against the host at all: **not one of the 556
+  installed faces carries a single Thai private-use glyph** (probed directly),
+  because every Thai font Windows ships today describes its shaping in `GSUB`,
+  which turns the fallback off. A host sweep would have reported agreement it
+  never tested. So the oracle was built instead —
+  `gui/font/tools/gen_thai_legacy.py` synthesizes three faces with no
+  `GSUB`/`GPOS`/`GDEF` (Windows forms, Mac forms, and none), and
+  `thai-pua-corpus.txt` names one string per edge of the two machines plus
+  controls. **78 of 78 agree**, including the vendor preference and the
+  no-private-use face, which the pass must leave untouched.
+
+`harfbuzz_sweep.py` gained a `--corpus FILE` flag along the way, so each of
+the remaining steps can bring its own corpus without editing the built-in one.
+
+**Step 2 of 3 done — Khmer, 2026-08-15** (`gui/font/src/khmer.rs`, commits
+`1897b9b19` and `8f1247264`). The shaper, the oracle that could disagree with
+it, and the bug that oracle found in a shaper that had been shipping for weeks:
+
+* **The shaper.** Khmer is the Indic model with two moves and one structural
+  difference. The moves: a COENG+RO pair jumps to the head of its syllable and
+  takes `pref`, and everything it jumped over takes `cfar`; a pre-base vowel
+  moves to the head as well, ahead of a fronted pair. The five split vowels
+  (U+17BE–U+17C5) get no canonical decomposition from Unicode, so they are
+  split by hand into U+17C1 plus a second half before the syllables are cut.
+  The structural difference is that the reordering runs *before the first
+  lookup* rather than after `locl`/`ccmp` as Indic does. The syllable-serial
+  stamping the two shapers share came out into `gui/font/src/syllabic.rs` at
+  the same time. `cfar` was appended to `gsub::FEATURES` (and to
+  `langsys_survey.py`'s `WANTED`, which `otl.rs` pins equal to it).
+* **The host measurement.** 556 faces: **agree 27421 → 27687**, differ back
+  down to the same 1176 pre-existing NFC baseline, **reordered 0, misplaced 0**
+  — every Khmer string agreeing on every face.
+* **The oracle, per §431 of `design-decisions.md`.** That host number is worth
+  much less than it looks. Only three installed faces register `khmr` at all
+  (the Leelawadee UI family), and **not one face on this machine has a `cfar`
+  lookup**, nor `pres`, nor `psts` — probed directly. So the sweep was
+  reporting agreement about masks it never applied. `gui/font/tools/
+  gen_khmer_probe.py` builds `KhmerProbe.ttf`, where each of thirteen features
+  has one lookup rewriting every Khmer glyph as *itself followed by a marker
+  glyph unique to that feature*, so a glyph run spells out which features
+  reached it and in what order. It is a one-to-two substitution on purpose: the
+  base has to survive so the next feature still matches it, and `cfar` — which
+  is applied after `blwf`, on the very glyphs `blwf` is set on — is precisely
+  the feature a one-to-one substitution would have hidden. Markers carry zero
+  advance so a wrong mask can never smear into the positions.
+  `khmer-corpus.txt` is one string per edge of the shaper rather than sampled
+  text. **43 of 45 agree.**
+* **What it found.** `locl`, `ccmp`, `blwf`, `abvf` and `pstf` were each being
+  applied **twice** — named in an early stage and then again in the final
+  `ALL_FEATURES` stage, which `gsub::apply_stages` does not deduplicate.
+  HarfBuzz gives each feature exactly one stage (`hb_ot_map_builder_t::compile`
+  merges duplicate tags at the `hb_min` of their stages), so this was a real
+  divergence. **The Indic shaper had the same bug**, and 556 installed faces
+  had hidden it for as long as that shaper has existed: a duplicate application
+  is invisible unless a lookup is not idempotent, and real faces' lookups
+  overwhelmingly are. Fixed in both by masking the earlier stages out of the
+  last one; `stages()` was factored out of `shape` in each so the "one feature,
+  one stage" invariant is four tests rather than a comment.
+* **The two that still differ** are the joiner strings, and are not a Khmer
+  bug: HarfBuzz emits the face's space glyph for a default-ignorable character
+  (ZWJ, ZWNJ, soft hyphen …) once shaping is done, and deletes it outright if
+  the face has no space. We emit the character's own glyph. That is crate-wide
+  and script-independent — a soft hyphen would draw a visible hyphen mid-word
+  on any face that maps it — so it is tracked separately under
+  `TD-FONT-DOES-NOT-HIDE-DEFAULT-IGNORABLES` rather than here.
+
+Myanmar is next, then USE.
+
 **Where.** `gui/font/src/sfnt.rs` — `Face::substitute`, which dispatches on
 `Script::shaping` and would gain the other families; `gui/font/src/indic.rs`
 and `indic_machine.rs` — the models to copy; `gui/font/tools/harfbuzz_sweep.py`
 — `CORPUS`, which needs a string per family before any of this is measurable.
+
+## TD-FONT-DOES-NOT-HIDE-DEFAULT-IGNORABLES
+
+**What.** A handful of characters exist to instruct the shaper and are never
+meant to be drawn: the zero-width joiner and non-joiner, the soft hyphen, the
+bidi controls, the variation selectors, the byte-order mark. Once shaping is
+over, HarfBuzz erases them — `hb_ot_hide_default_ignorables`, in
+`hb_ot_substitute_post`, replaces each one's glyph with the face's `space`
+glyph, or **deletes the glyph entirely** if the face has no space — and
+`hb_ot_zero_width_default_ignorables`, during positioning, zeroes their
+advances and x-offsets first. We do neither: `ScaledFont::shape` maps the
+character through `cmap` like any other and returns whatever glyph came back.
+
+**Symptom, measured.** The two strings the Khmer probe font disagrees on
+(`gui/font/tools/khmer-corpus.txt`, the `\u17d2\u200d\u1781` and
+`\u17d2\u200c\u1781` lines) are exactly this: HarfBuzz emits the space glyph
+where we emit ZWJ's and ZWNJ's own glyphs. It is invisible in the host sweep
+only because the built-in corpus has no string containing an ignorable that
+the face also maps.
+
+**Why it matters beyond the joiners.** This is crate-wide and
+script-independent, and the joiner case is the *benign* one — a face that maps
+ZWJ usually maps it to something blank anyway. The soft hyphen U+00AD is the
+one that bites: fonts routinely map it to a real hyphen glyph, so a word
+carrying a discretionary break renders with a hyphen sitting in the middle of
+it whether or not the line broke there. The bidi controls and variation
+selectors are the same shape of bug.
+
+**One subtlety that is easy to get wrong.** HarfBuzz's predicate is
+`(unicode_props() & UPROPS_MASK_IGNORABLE) && !_hb_glyph_info_substituted()` —
+a character stops counting as ignorable the moment a GSUB lookup rewrites it,
+because at that point the glyph is whatever the font asked for and is no
+longer the control character. So the flag has to be *cleared on substitution*,
+not merely tested at the end. And the set is HarfBuzz's own hard-coded list
+(U+00AD, U+034F, U+061C, U+17B4–17B5, U+180B–180E, U+200B–200F, U+202A–202E,
+U+2060–206F, U+FE00–FE0F, U+FEFF, U+FFF0–FFF8, U+1BCA0–1BCA3, U+1D173–1D17A,
+U+E0000–E0FFF), *not* Unicode's `Default_Ignorable_Code_Point` property; using
+the Unicode set would make the sweep disagree in the other direction.
+
+**Proper fix.** A flag on `SubGlyph`, set in `scaled.rs`'s per-piece build loop
+from the character, cleared at the three sites in `gsub.rs` that assign a
+glyph id — `apply_single`, `apply_alternate`, the ligature path — and by
+`apply_multiple`'s splice. Then in the loop that builds `out: Vec<ShapedGlyph>`
+at the end of `shape`, zero the advance and offsets and substitute the space
+glyph, or drop the glyph if the face maps no space. Corpus strings containing
+a soft hyphen and the joiners go into `harfbuzz_sweep.py`'s built-in `CORPUS`
+in the same change, so the fix is measured on all 556 host faces rather than
+on the one probe font that happened to expose it.
+
+**Where.** `gui/font/src/scaled.rs` — the per-piece loop that derives
+`tab`/`klass`/`mark`/`indic` from each character, and the `out`-building loop
+after it; `gui/font/src/gsub.rs` — `apply_single`, `apply_multiple`,
+`apply_alternate` and the ligature path; `gui/font/tools/harfbuzz_sweep.py` —
+`CORPUS`.
 
 ## TD-FONT-DOES-NOT-REORDER-RIGHT-TO-LEFT-TEXT
 
@@ -72046,3 +72304,154 @@ machine warrants".
 **Generalisable:** when a consumer is removed from a shared calibration, the
 calibration's *error messages* are part of its interface and go stale with it.
 Grep the failure text, not just the call sites.
+### A trailing `| tail` swallows the exit code too — and hides the log while it runs — 2026-08-15
+
+Follow-up to "A trailing `tail` swallows the exit code the notification
+reports". That entry says to make the command under test the **last** command in
+the chain. That is not enough, because it is satisfied by:
+
+```
+python scripts/run-timeout.py 900 cargo test -p compositor ... 2>&1 | tail -50
+```
+
+`cargo` *is* the last command written, but a pipeline's exit status is the exit
+status of its **last element**, so the notification reported `tail`'s 0. This
+was reintroduced twice in one session by an agent who had written the original
+entry the session before, which is the reason for restating it.
+
+Two things are wrong with the pipe form and only one of them is the exit code:
+
+1. **The status is `tail`'s.** The rule has to be stated as *the process whose
+   status you care about must be the last element of the last pipeline* — not
+   "the last command", which reads as satisfied by the above.
+2. **The output file stays empty until the job ends.** `tail` cannot emit
+   anything until its input closes, so the incremental log — the entire reason
+   `run-timeout.py` streams and heartbeats — shows nothing while the job runs.
+   Checking on a long build mid-flight returns an empty file, which reads as a
+   hang.
+
+Both vanish if the pipe is simply dropped. `run-timeout.py` already writes to
+the harness's output file; use `Read`/`tail` on **that file** afterwards instead
+of filtering in the pipeline. Reserve pipes for foreground commands whose status
+does not matter.
+
+### BUG-LIVENESS-SYSTEM-HANG-FALSE-POSITIVE. The total-hang detector fired on a healthy boot and, by disarming, blinded the wall-clock backstop for the remaining ~600 s — 2026-08-15 — OPEN (lane A owns the fix)
+
+**In short.** The boot watchdog announced `SYSTEM HANG`. The machine had not
+hung: the boot continued for another ten minutes and reached `BOOT_OK`. The
+report is a false positive, and the kernel itself says so at disarm time. The
+damage is not the wrong line — it is that the code path printing it also turns
+the watchdog *off*, so hang detection (including the wall-clock boot deadline
+that is supposed to catch every hang mode by construction) was dead for the rest
+of that boot.
+
+**Where.** `kernel/src/sched/mod.rs` — `liveness_check()` (~2547), the total-hang
+branch at ~2585-2610. Lane C found it; lane C does not write `kernel/**`, so the
+full evidence and analysis is filed as
+`requests/c-a-liveness-system-hang-false-positive.md`. This entry exists so the
+finding is not lost if that request is closed or moved.
+
+**Reproduce.** Any full `scripts/boot-test.sh` run is a candidate; it is
+intermittent. Observed on the lane-c → main merge boot of 2026-08-15 (green,
+exit 0, 1156 s, `BOOT_OK` at line 25970 of `build/serial-test.txt`):
+
+- line 3024 — `[liveness] SYSTEM HANG: no task-level forward progress and no serial output for 15+ seconds (useful_work=82, all CPUs idle-ticking)`, immediately after the fastpy `inredirect` ring-3 self-test passed and immediately before a 3.5 MB fastpy ELF spawn (line 3112);
+- line 3025 — `local_has_real_work=false preempt_disable_depth=1`, `heartbeat=12001`, `ctx_switches=880`, and 15 of 16 recent RIP samples at the *same* kernel address `0xffffffff80646c27`, i.e. cpu0 busy in one kernel path on a task's behalf;
+- breadcrumbs stop after the 120 s one (line 2843) although the boot ran ~750 s armed — the backstop went dark at that moment;
+- line 25971 — `[liveness] disarmed after 753.531s armed … WARNING: a detector already disarmed us, yet boot reached BOOT_OK, so that report was a FALSE POSITIVE`.
+
+Earlier sighting of the same line with `useful_work=6` is recorded at
+known-issues.md:26337, where it was dismissed as non-fatal.
+
+**Root cause.** The detector requires (a) `USEFUL_WORK_TICKS` frozen and (b)
+serial silence, for three consecutive 5 s intervals. Condition (a) holds during
+*every* healthy large ring-3 spawn — `LIVENESS_LAST_OUTPUT`'s own doc comment
+(sched/mod.rs:2203-2213) says a starting ring-3 process "spends nearly all its
+wall time inside the kernel on its own behalf (ELF load, demand-paging storm,
+filesystem I/O), so ticks land in kernel mode with an empty run queue".
+`BUG-LIVENESS-DEADLINE-FALSE-FIRE` (line 25665) added condition (b) as the fix,
+on the premise that the kernel narrates continuously so silence means a real
+stop. That premise fails across a multi-megabyte demand-paged spawn under TCG,
+which is silent for well over 15 s. So the silence gate narrowed the false
+positive without eliminating it.
+
+**Why it is worse than noise.** The total-hang branch does
+`LIVENESS_ARMED.store(false)` (line 2600) before dumping, and
+`liveness_boot_deadline_check()` early-returns on `!LIVENESS_ARMED`
+(lines 2505-2509). The sibling busy-livelock branch deliberately does *not*
+disarm, and its comment (2636-2641) states the exact invariant the total-hang
+branch breaks: "Keeping the watchdog armed means a false positive here cannot
+disable hang detection for the remainder of boot."
+
+**Contract violated.** `BUG-LIVENESS-DEADLINE-FALSE-FIRE`'s Verification section
+(~25757) requires a boot log containing no `SYSTEM HANG` line and containing the
+`disarmed after …` measurement *without* the FALSE POSITIVE warning. The merge
+boot violates both halves, and nothing enforces it: `boot-test.sh` greps only for
+`BOOT_OK`, so the run exits 0 regardless. A harness assertion on `SYSTEM HANG` /
+`BOOT DEADLINE EXCEEDED` / `FALSE POSITIVE` would make the contract
+machine-checked.
+
+**Proper fix (lane A's call).** In preference order: (1) make the total-hang
+branch soft — report, but stay armed, so the backstop survives; (2) give the
+detector a progress signal a demand-paging spawn actually moves (page-fault or
+block-I/O counter, or a spawn-scoped suppression window), since the dump proves
+real progress the counter cannot see; (3) raising `LIVENESS_ALERT_COUNT` is a
+re-tune, not a fix — the silent stretch scales with ELF size and host speed;
+(4) assert the contract in `boot-test.sh` regardless of which of the above lands.
+
+**Adjacent, minor.** In the same dump, `tid=0` (BSP idle, `prio=31`) carries
+`name="prctl-batch269"`, a leftover from a `prctl(PR_SET_NAME)` self-test — the
+idle task's name is mutable, which makes the hang dump read as though a
+userspace test task were running. Either make the idle task's name immutable or
+have `PR_SET_NAME` refuse `tid=0`.
+
+### INFRA-D-DRIVE-EXHAUSTED. The build drive hit **zero** bytes free mid-session; a file write failed with `ENOSPC` — 2026-08-15 — MITIGATED (10 GB reclaimed), needs a standing policy
+
+**In short.** `D:` (1.9 TB, holds all four OS worktrees) filled completely while
+lane C was working. A plain `Write` of a 6 KB markdown file failed with
+`ENOSPC: no space left on device`, leaving a **zero-byte file** behind — the
+write is not atomic, so a half-applied edit is a real possibility for anything
+larger. Any lane can hit this at any moment, and a build or boot test that dies
+this way will not say "disk full"; it will say something misleading.
+
+**Evidence.** `df -h /d` reported `1.9T 1.9T 0 100%` at the moment of the failed
+write. Free space then oscillated 12 GB → 9.7 GB over ~10 minutes with no cargo
+or rustc process running, i.e. something outside the build was still consuming.
+
+**What was reclaimed (safe, zero rebuild cost).** Two dead target triples in the
+`os` integration tree, neither referenced by any current config
+(`grep -rl ouros .cargo/config.toml toolchain/` is empty — the project was
+renamed OurOS → SlateOS months ago):
+
+| Path | Size | Last touched |
+|---|---|---|
+| `os/target/x86_64-ouros/` | 8.56 GB (31050 files) | 2026-05-31 |
+| `os/target/x86_64-pc-windows-msvc/` | 1.60 GB (896 files) | 2026-05-27 |
+
+Free space went 9.7 GB → 18 GB. Measured project footprints for context:
+`os` **122 GB**, `os-lane-b` 41 GB, `os-lane-c` 36 GB, `os-lane-a` 4.3 GB —
+~203 GB of the drive is our four worktrees, nearly all of it `target/`.
+
+**Not investigated further, deliberately.** `D:\System Volume Information` had
+been written minutes before the exhaustion, which points at VSS shadow copies /
+System Restore — plausible, since a churning 200 GB build tree is exactly what
+makes shadow storage grow without bound. Confirming it needs
+`vssadmin list shadowstorage`, which requires elevation, and resizing or
+deleting shadow copies destroys the operator's restore points. **That is the
+operator's call, not an agent's** — flagged to them rather than acted on. The
+operator's own `LithicBackup.exe` was also running (started 03:38, ~16 h).
+
+**Standing hazards this exposes.**
+
+1. **No lane checks free space before a build or boot test.** A full workspace
+   build plus a boot test wants several GB; starting one with <5 GB free
+   produces a confusing failure rather than a clear one. A `df` guard at the top
+   of `scripts/boot-test.sh` that aborts with an explicit message below a
+   threshold would convert a mystery into a diagnosis.
+2. **Cleaning another lane's `target/` is not safe ad hoc.** A boot test
+   (`qemu-system-x86_64.exe`) was running in another lane while this was being
+   investigated. Only clearly-dead artifacts — obsolete target triples, caches
+   for toolchains no longer in use — can be removed without coordination.
+3. **`Write` is not atomic under `ENOSPC`.** The failed write left a zero-byte
+   file that had to be removed by hand before retrying. Worth remembering when a
+   tool reports a write failure: check the file, do not assume it is untouched.

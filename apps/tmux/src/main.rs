@@ -37,7 +37,7 @@
 #![allow(dead_code)]
 
 use guitk::Color;
-use guitk::render::{FontFamily, FontWeightHint, RenderCommand};
+use guitk::render::{FontFamily, FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
 
@@ -1809,6 +1809,7 @@ impl Multiplexer {
                 color: tab_color,
                 font_weight: if is_active { FontWeightHint::Bold } else { FontWeightHint::Regular },
                 max_width: Some(tab_w - 16.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             tab_x += tab_w + 2.0;
@@ -1882,6 +1883,7 @@ impl Multiplexer {
                                     color: fg,
                                     font_weight: if cell.bold { FontWeightHint::Bold } else { FontWeightHint::Regular },
                                     max_width: Some(cell_w),
+                                    overflow: TextOverflow::Ellipsis,
                                 });
                             }
                         }
@@ -1922,6 +1924,7 @@ impl Multiplexer {
                     color: CRUST,
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(85.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
 
@@ -1960,6 +1963,7 @@ impl Multiplexer {
             color: CRUST,
             font_weight: FontWeightHint::Bold,
             max_width: Some(200.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Window list (center)
@@ -1979,6 +1983,7 @@ impl Multiplexer {
                     color,
                     font_weight: weight,
                     max_width: Some(150.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
             } else {
                 cmds.push(RenderCommand::Text {
@@ -1989,6 +1994,7 @@ impl Multiplexer {
                     color,
                     font_weight: weight,
                     max_width: Some(150.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
             wx += 100.0;
@@ -2015,6 +2021,7 @@ impl Multiplexer {
             color: CRUST,
             font_weight: FontWeightHint::Regular,
             max_width: Some(190.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -2037,6 +2044,7 @@ impl Multiplexer {
             color: TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: Some(200.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         cmds.push(RenderCommand::Text {
@@ -2047,6 +2055,7 @@ impl Multiplexer {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(300.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -2086,6 +2095,7 @@ impl Multiplexer {
             color: TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: Some(w - 24.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         for (i, session) in self.sessions.iter().enumerate() {
@@ -2118,6 +2128,7 @@ impl Multiplexer {
                 color: if is_active { TEXT } else { SUBTEXT0 },
                 font_weight: if is_active { FontWeightHint::Bold } else { FontWeightHint::Regular },
                 max_width: Some(w - 24.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }
@@ -2159,6 +2170,7 @@ impl Multiplexer {
             color: TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: Some(w - 24.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         for (i, window) in session.windows.iter().enumerate() {
@@ -2186,6 +2198,7 @@ impl Multiplexer {
                 color: if is_active { TEXT } else { SUBTEXT0 },
                 font_weight: if is_active { FontWeightHint::Bold } else { FontWeightHint::Regular },
                 max_width: Some(w - 24.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }
@@ -2209,6 +2222,7 @@ impl Multiplexer {
             color: YELLOW,
             font_weight: FontWeightHint::Regular,
             max_width: Some(WINDOW_WIDTH - PADDING * 2.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -2232,6 +2246,7 @@ impl Multiplexer {
             color: CRUST,
             font_weight: FontWeightHint::Bold,
             max_width: Some(90.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 }

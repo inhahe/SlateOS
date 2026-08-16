@@ -24,7 +24,7 @@
 #[allow(unused_imports)]
 use guitk::color::Color;
 #[allow(unused_imports)]
-use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
 use guitk::table::{Column, Fit, Table};
@@ -1167,6 +1167,7 @@ impl DiskAnalyzerUI {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(INPUT_WIDTH - 16.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Scan button
@@ -1196,6 +1197,7 @@ impl DiskAnalyzerUI {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(BUTTON_WIDTH - 10.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // View mode toggle buttons
@@ -1234,6 +1236,7 @@ impl DiskAnalyzerUI {
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(btn_w - 16.0),
+                overflow: TextOverflow::Ellipsis,
             });
             btn_x += btn_w + 4.0;
         }
@@ -1263,6 +1266,7 @@ impl DiskAnalyzerUI {
                     font_size: FONT_SIZE_SMALL,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
                 bx += 20.0;
             }
@@ -1279,6 +1283,7 @@ impl DiskAnalyzerUI {
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(150.0),
+                overflow: TextOverflow::Ellipsis,
             });
             bx += (segment.len() as f32) * 7.0 + 4.0;
         }
@@ -1325,6 +1330,7 @@ impl DiskAnalyzerUI {
                     font_size: FONT_SIZE_SMALL,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(rect.width - 8.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
             // Size label if rect is tall enough
@@ -1337,6 +1343,7 @@ impl DiskAnalyzerUI {
                     font_size: FONT_SIZE_SMALL,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(rect.width - 8.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
         }
@@ -1350,6 +1357,7 @@ impl DiskAnalyzerUI {
                 font_size: FONT_SIZE_HEADING,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
     }
@@ -1482,6 +1490,7 @@ impl DiskAnalyzerUI {
             font_size: FONT_SIZE_HEADING,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         let chart_y = content_y + 28.0;
@@ -1521,6 +1530,7 @@ impl DiskAnalyzerUI {
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(80.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Bar
@@ -1548,6 +1558,7 @@ impl DiskAnalyzerUI {
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(300.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -1560,6 +1571,7 @@ impl DiskAnalyzerUI {
                 font_size: FONT_SIZE_HEADING,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
     }
@@ -1605,6 +1617,7 @@ impl DiskAnalyzerUI {
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Regular,
             max_width: Some(WINDOW_WIDTH - 2.0 * PADDING),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -1649,6 +1662,7 @@ impl DiskAnalyzerUI {
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(tw - 16.0),
+                overflow: TextOverflow::Ellipsis,
             });
             line_y += 16.0;
         }

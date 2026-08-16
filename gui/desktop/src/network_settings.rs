@@ -6,7 +6,7 @@
 //! stack via IPC for actual configuration changes.
 
 use guitk::color::Color;
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
 
@@ -1099,6 +1099,7 @@ impl NetworkSettingsUI {
             color: TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Tab bar
@@ -1132,6 +1133,7 @@ impl NetworkSettingsUI {
                     FontWeightHint::Regular
                 },
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             tab_x += tw + 4.0;
@@ -1218,6 +1220,7 @@ impl NetworkSettingsUI {
             color: TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         if let Some(iface) = self.settings.default_interface() {
@@ -1234,6 +1237,7 @@ impl NetworkSettingsUI {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 52.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -1265,6 +1269,7 @@ impl NetworkSettingsUI {
                 color: TEXT,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             // Toggle indicator
@@ -1306,6 +1311,7 @@ impl NetworkSettingsUI {
             color: SUBTEXT1,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         row_y += 24.0;
 
@@ -1327,6 +1333,7 @@ impl NetworkSettingsUI {
                 color: TEXT,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             cmds.push(RenderCommand::Text {
@@ -1342,6 +1349,7 @@ impl NetworkSettingsUI {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 80.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Status dot
@@ -1367,6 +1375,7 @@ impl NetworkSettingsUI {
             color: OVERLAY0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -1395,6 +1404,7 @@ impl NetworkSettingsUI {
             color: TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         row_y += 28.0;
 
@@ -1426,6 +1436,7 @@ impl NetworkSettingsUI {
             },
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - 24.0),
+            overflow: TextOverflow::Ellipsis,
         });
         row_y += 44.0;
 
@@ -1438,6 +1449,7 @@ impl NetworkSettingsUI {
             color: SUBTEXT1,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         row_y += 22.0;
 
@@ -1455,6 +1467,7 @@ impl NetworkSettingsUI {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         } else {
             for net in &networks {
@@ -1505,6 +1518,7 @@ impl NetworkSettingsUI {
                         FontWeightHint::Regular
                     },
                     max_width: Some(width - 140.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
 
                 // Security and band info
@@ -1521,6 +1535,7 @@ impl NetworkSettingsUI {
                     color: SUBTEXT0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
 
                 // Connected/saved badge
@@ -1533,6 +1548,7 @@ impl NetworkSettingsUI {
                         color: GREEN,
                         font_weight: FontWeightHint::Bold,
                         max_width: None,
+                        overflow: TextOverflow::Clip,
                     });
                 } else if net.is_saved {
                     cmds.push(RenderCommand::Text {
@@ -1543,6 +1559,7 @@ impl NetworkSettingsUI {
                         color: SUBTEXT0,
                         font_weight: FontWeightHint::Regular,
                         max_width: None,
+                        overflow: TextOverflow::Clip,
                     });
                 }
 
@@ -1556,6 +1573,7 @@ impl NetworkSettingsUI {
                         color: net.security.color(),
                         font_weight: FontWeightHint::Regular,
                         max_width: None,
+                        overflow: TextOverflow::Clip,
                     });
                 }
 
@@ -1573,6 +1591,7 @@ impl NetworkSettingsUI {
             color: SUBTEXT1,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         row_y += 22.0;
 
@@ -1599,6 +1618,7 @@ impl NetworkSettingsUI {
                 color: TEXT,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 80.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Forget button
@@ -1610,6 +1630,7 @@ impl NetworkSettingsUI {
                 color: RED,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             row_y += 42.0;
@@ -1636,6 +1657,7 @@ impl NetworkSettingsUI {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             return;
         }
@@ -1659,6 +1681,7 @@ impl NetworkSettingsUI {
                 color: TEXT,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             // Status
@@ -1679,6 +1702,7 @@ impl NetworkSettingsUI {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             // Properties table
@@ -1715,6 +1739,7 @@ impl NetworkSettingsUI {
                     color: OVERLAY0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
 
                 cmds.push(RenderCommand::Text {
@@ -1725,6 +1750,7 @@ impl NetworkSettingsUI {
                     color: SUBTEXT1,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(width - 160.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
 
                 prop_y += 18.0;
@@ -1740,6 +1766,7 @@ impl NetworkSettingsUI {
                 color: TEXT,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             row_y += 216.0;
@@ -1758,6 +1785,7 @@ impl NetworkSettingsUI {
             color: TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         row_y += 28.0;
 
@@ -1791,6 +1819,7 @@ impl NetworkSettingsUI {
                     FontWeightHint::Regular
                 },
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
         row_y += 44.0;
@@ -1825,6 +1854,7 @@ impl NetworkSettingsUI {
                     color: SUBTEXT1,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
                 row_y += 18.0;
 
@@ -1849,6 +1879,7 @@ impl NetworkSettingsUI {
                     color: if value.is_empty() { OVERLAY0 } else { TEXT },
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
                 row_y += 40.0;
             }
@@ -1864,6 +1895,7 @@ impl NetworkSettingsUI {
             color: TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         row_y += 24.0;
 
@@ -1894,6 +1926,7 @@ impl NetworkSettingsUI {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         row_y += 32.0;
 
@@ -1918,6 +1951,7 @@ impl NetworkSettingsUI {
                     color: TEXT,
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
 
                 cmds.push(RenderCommand::Text {
@@ -1928,6 +1962,7 @@ impl NetworkSettingsUI {
                     color: SUBTEXT0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
 
                 row_y += 42.0;
@@ -1944,6 +1979,7 @@ impl NetworkSettingsUI {
             color: SUBTEXT1,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         row_y += 20.0;
 
@@ -1956,6 +1992,7 @@ impl NetworkSettingsUI {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         } else {
             for domain in &self.settings.dns.search_domains {
@@ -1967,6 +2004,7 @@ impl NetworkSettingsUI {
                     color: TEXT,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
                 row_y += 18.0;
             }
@@ -1990,6 +2028,7 @@ impl NetworkSettingsUI {
             color: OVERLAY0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -2005,6 +2044,7 @@ impl NetworkSettingsUI {
             color: TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         row_y += 28.0;
 
@@ -2042,6 +2082,7 @@ impl NetworkSettingsUI {
                     FontWeightHint::Regular
                 },
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
         row_y += 44.0;
@@ -2057,6 +2098,7 @@ impl NetworkSettingsUI {
                     color: SUBTEXT1,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
                 row_y += 18.0;
 
@@ -2087,6 +2129,7 @@ impl NetworkSettingsUI {
                     },
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(width - 24.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
             } else {
                 // Host and port
@@ -2104,6 +2147,7 @@ impl NetworkSettingsUI {
                         color: SUBTEXT1,
                         font_weight: FontWeightHint::Regular,
                         max_width: None,
+                        overflow: TextOverflow::Clip,
                     });
                     row_y += 18.0;
 
@@ -2124,6 +2168,7 @@ impl NetworkSettingsUI {
                         color: TEXT,
                         font_weight: FontWeightHint::Regular,
                         max_width: None,
+                        overflow: TextOverflow::Clip,
                     });
                     row_y += 40.0;
                 }
@@ -2146,6 +2191,7 @@ impl NetworkSettingsUI {
                     color: TEXT,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
 
                 let auth_bg = if self.settings.proxy.requires_auth {
@@ -2173,6 +2219,7 @@ impl NetworkSettingsUI {
                 color: SUBTEXT1,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             row_y += 18.0;
 
@@ -2185,6 +2232,7 @@ impl NetworkSettingsUI {
                     color: TEXT,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
                 row_y += 16.0;
             }
@@ -2197,6 +2245,7 @@ impl NetworkSettingsUI {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 32.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }
@@ -2244,6 +2293,7 @@ impl NetworkSettingsUI {
             color: TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         cmds.push(RenderCommand::Text {
@@ -2260,6 +2310,7 @@ impl NetworkSettingsUI {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - 52.0),
+            overflow: TextOverflow::Ellipsis,
         });
         row_y += 72.0;
 
@@ -2291,6 +2342,7 @@ impl NetworkSettingsUI {
                 color: TEXT,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             let toggle_bg = if *enabled { BLUE } else { SURFACE2 };
@@ -2316,6 +2368,7 @@ impl NetworkSettingsUI {
             color: SUBTEXT1,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Add rule button
@@ -2335,6 +2388,7 @@ impl NetworkSettingsUI {
             color: CRUST,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         row_y += 28.0;
 
@@ -2347,6 +2401,7 @@ impl NetworkSettingsUI {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         } else {
             for rule in &self.settings.firewall.rules {
@@ -2382,6 +2437,7 @@ impl NetworkSettingsUI {
                     color: CRUST,
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
 
                 // Rule name and details
@@ -2393,6 +2449,7 @@ impl NetworkSettingsUI {
                     color: if rule.enabled { TEXT } else { OVERLAY0 },
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(width - 140.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
 
                 cmds.push(RenderCommand::Text {
@@ -2408,6 +2465,7 @@ impl NetworkSettingsUI {
                     color: SUBTEXT0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
 
                 // Enabled/disabled text
@@ -2420,6 +2478,7 @@ impl NetworkSettingsUI {
                         color: OVERLAY0,
                         font_weight: FontWeightHint::Regular,
                         max_width: None,
+                        overflow: TextOverflow::Clip,
                     });
                 }
 

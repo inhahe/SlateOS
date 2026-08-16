@@ -21,7 +21,7 @@
 
 use guitk::color::Color;
 use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
 // ── Catppuccin Mocha palette ────────────────────────────────────────
@@ -1070,6 +1070,7 @@ impl DotsAndBoxes {
             font_size: TITLE_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Mode label.
@@ -1082,6 +1083,7 @@ impl DotsAndBoxes {
             font_size: STATUS_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Scores.
@@ -1099,6 +1101,7 @@ impl DotsAndBoxes {
             font_size: SCORE_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         let p2_text = if self.mode == GameMode::VsAi {
@@ -1114,6 +1117,7 @@ impl DotsAndBoxes {
             font_size: SCORE_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Current turn indicator.
@@ -1143,6 +1147,7 @@ impl DotsAndBoxes {
             font_size: STATUS_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -1178,6 +1183,7 @@ impl DotsAndBoxes {
                         font_size: SCORE_FONT_SIZE,
                         font_weight: FontWeightHint::Bold,
                         max_width: None,
+                        overflow: TextOverflow::Clip,
                     });
                 }
             }
@@ -1317,6 +1323,7 @@ impl DotsAndBoxes {
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -1353,6 +1360,7 @@ impl DotsAndBoxes {
             font_size: TITLE_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         let result_text = match self.winner() {
@@ -1380,6 +1388,7 @@ impl DotsAndBoxes {
             font_size: HEADER_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         let score_text = format!("Score: {} - {}", self.score_p1, self.score_p2);
@@ -1391,6 +1400,7 @@ impl DotsAndBoxes {
             font_size: SCORE_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         cmds.push(RenderCommand::Text {
@@ -1401,6 +1411,7 @@ impl DotsAndBoxes {
             font_size: STATUS_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 }

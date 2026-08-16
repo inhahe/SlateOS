@@ -36,7 +36,7 @@ use guitk::event::{
 #[allow(unused_imports)]
 use guitk::layout::{FlexAlign, FlexDirection, FlexItem, FlexJustify, SizeConstraint};
 #[allow(unused_imports)]
-use guitk::render::{FontFamily, FontWeightHint, RenderCommand, RenderTree};
+use guitk::render::{FontFamily, FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 #[allow(unused_imports)]
 use guitk::style::{Borders, CornerRadii, Edges, FontWeight, Style, TextAlign};
 use guitk::text;
@@ -1245,6 +1245,7 @@ impl FileDiffApp {
                     FontWeightHint::Regular
                 },
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             *btn_x += btn_w + 6.0;
@@ -1278,6 +1279,7 @@ impl FileDiffApp {
                 font_size: UI_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             *btn_x += btn_w + 6.0;
@@ -1325,6 +1327,7 @@ impl FileDiffApp {
                 font_size: UI_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             *btn_x += btn_w + 6.0;
@@ -1366,6 +1369,7 @@ impl FileDiffApp {
             font_size: UI_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -1534,6 +1538,7 @@ impl FileDiffApp {
                 font_size: CONTENT_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(GUTTER_WIDTH - 4.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -1548,6 +1553,7 @@ impl FileDiffApp {
                 font_size: CONTENT_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(GUTTER_WIDTH - 4.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -1561,6 +1567,7 @@ impl FileDiffApp {
             font_size: CONTENT_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Text content
@@ -1573,6 +1580,7 @@ impl FileDiffApp {
             font_size: CONTENT_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(self.width - text_x - 12.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -1647,6 +1655,7 @@ impl FileDiffApp {
                 font_size: CONTENT_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(GUTTER_WIDTH - 4.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -1664,6 +1673,7 @@ impl FileDiffApp {
             font_size: CONTENT_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Render text with inline highlights
@@ -1677,6 +1687,7 @@ impl FileDiffApp {
                 font_size: CONTENT_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(self.width - text_x - 12.0),
+                overflow: TextOverflow::Ellipsis,
             });
         } else {
             self.render_inline_spans(tree, text_x, y, row);
@@ -1732,6 +1743,7 @@ impl FileDiffApp {
                     FontWeightHint::Regular
                 },
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             char_offset += columns(span_text) * char_width();
@@ -1751,6 +1763,7 @@ impl FileDiffApp {
             font_size: 20.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         tree.push(RenderCommand::Text {
@@ -1761,6 +1774,7 @@ impl FileDiffApp {
             font_size: 14.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -1795,6 +1809,7 @@ impl FileDiffApp {
             font_size: UI_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(self.width - 16.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Entries
@@ -1848,6 +1863,7 @@ impl FileDiffApp {
             font_size: UI_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Query text
@@ -1860,6 +1876,7 @@ impl FileDiffApp {
                 font_size: CONTENT_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(bar_w - 140.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -1881,6 +1898,7 @@ impl FileDiffApp {
             font_size: UI_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -1919,6 +1937,7 @@ impl FileDiffApp {
             font_size: UI_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         text_x += 100.0;
 
@@ -1947,6 +1966,7 @@ impl FileDiffApp {
             font_size: UI_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         *text_x += 130.0;
 
@@ -1963,6 +1983,7 @@ impl FileDiffApp {
             font_size: UI_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         *text_x += 140.0;
 
@@ -1976,6 +1997,7 @@ impl FileDiffApp {
             font_size: UI_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Merge status (right-aligned)
@@ -2001,6 +2023,7 @@ impl FileDiffApp {
                     font_size: UI_FONT_SIZE,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
             }
         }
@@ -2081,6 +2104,7 @@ fn render_panel_header(tree: &mut RenderTree, x: f32, y: f32, width: f32, path: 
         font_size: UI_FONT_SIZE,
         font_weight: FontWeightHint::Bold,
         max_width: Some(width - 12.0),
+        overflow: TextOverflow::Ellipsis,
     });
 }
 
@@ -2128,6 +2152,7 @@ fn render_diff_line(tree: &mut RenderTree, params: &DiffLineParams<'_>) {
             font_size: CONTENT_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(GUTTER_WIDTH - 4.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -2147,6 +2172,7 @@ fn render_diff_line(tree: &mut RenderTree, params: &DiffLineParams<'_>) {
             font_size: CONTENT_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(params.width - GUTTER_WIDTH - PANEL_PADDING - 12.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 }
@@ -2179,6 +2205,7 @@ fn render_dir_entry(tree: &mut RenderTree, ey: f32, entry: &DirCompareEntry) {
         font_size: CONTENT_FONT_SIZE,
         font_weight: FontWeightHint::Bold,
         max_width: Some(50.0),
+        overflow: TextOverflow::Ellipsis,
     });
 
     // File path
@@ -2190,6 +2217,7 @@ fn render_dir_entry(tree: &mut RenderTree, ey: f32, entry: &DirCompareEntry) {
         font_size: CONTENT_FONT_SIZE,
         font_weight: FontWeightHint::Regular,
         max_width: Some(1200.0),
+        overflow: TextOverflow::Ellipsis,
     });
 }
 

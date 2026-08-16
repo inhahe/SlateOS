@@ -6,7 +6,7 @@
 
 use crate::color::Color;
 use crate::event::{Key, KeyEvent};
-use crate::render::{FontWeightHint, RenderCommand};
+use crate::render::{FontWeightHint, RenderCommand, TextOverflow};
 use crate::style::CornerRadii;
 
 /// A single tab definition.
@@ -409,6 +409,7 @@ impl TabView {
                     FontWeightHint::Regular
                 },
                 max_width: Some(max_label_width.max(0.0)),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Close button
@@ -429,6 +430,7 @@ impl TabView {
                     font_size: 14.0,
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
             }
 
@@ -450,6 +452,7 @@ impl TabView {
                     font_size: 12.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
             }
             // Right arrow indicator
@@ -462,6 +465,7 @@ impl TabView {
                     font_size: 12.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
             }
         }

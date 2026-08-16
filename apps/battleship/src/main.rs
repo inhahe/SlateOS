@@ -23,7 +23,7 @@
 
 use guitk::color::Color;
 use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
 // ── Catppuccin Mocha palette ────────────────────────────────────────
@@ -811,6 +811,7 @@ impl BattleshipApp {
             font_size: TITLE_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Phase indicator
@@ -843,6 +844,7 @@ impl BattleshipApp {
             font_size: TITLE_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Message bar
@@ -862,6 +864,7 @@ impl BattleshipApp {
             font_size: INFO_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Grid titles
@@ -873,6 +876,7 @@ impl BattleshipApp {
             font_size: INFO_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         cmds.push(RenderCommand::Text {
             x: GRID_LEFT_OPPONENT + GRID_WIDTH / 2.0 - 55.0,
@@ -882,6 +886,7 @@ impl BattleshipApp {
             font_size: INFO_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Column labels (1-10) for both grids
@@ -916,6 +921,7 @@ impl BattleshipApp {
                 font_size: LABEL_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
         // Row labels: A-J
@@ -932,6 +938,7 @@ impl BattleshipApp {
                 font_size: LABEL_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
     }
@@ -1162,6 +1169,7 @@ impl BattleshipApp {
             font_size: STATS_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         let hit_rate_text = format!("Hit Rate: {:.1}%", self.player_hit_rate());
@@ -1173,6 +1181,7 @@ impl BattleshipApp {
             font_size: STATS_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Ships remaining
@@ -1188,6 +1197,7 @@ impl BattleshipApp {
             font_size: STATS_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         let enemy_ships = format!("Enemy Ships: {}/5", opponent_remaining);
@@ -1199,6 +1209,7 @@ impl BattleshipApp {
             font_size: STATS_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // AI stats
@@ -1211,6 +1222,7 @@ impl BattleshipApp {
             font_size: STATS_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         let ai_rate = if self.ai_state.shots == 0 {
@@ -1227,6 +1239,7 @@ impl BattleshipApp {
             font_size: STATS_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -1249,6 +1262,7 @@ impl BattleshipApp {
             font_size: STATS_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 }

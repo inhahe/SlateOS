@@ -43,7 +43,7 @@ use std::time::{Duration, Instant};
 #[allow(unused_imports)]
 use guitk::color::Color;
 #[allow(unused_imports)]
-use guitk::render::{FontFamily, FontWeightHint, RenderCommand, RenderTree};
+use guitk::render::{FontFamily, FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
 use osfont::raster::GlyphMask;
@@ -1454,6 +1454,60 @@ fn family_of(family: FontFamily) -> Family {
     }
 }
 
+/// Draw a shaped run from `pen`, stopping before the first glyph that would
+/// cross `limit`, and leave `pen` where it stopped.
+///
+/// Extracted so the run and its ellipsis are drawn by the same code: the mark
+/// is a shaped run like any other, and a second hand-written glyph loop for it
+/// would be a second place for the baseline, the clip and the mark offsets to
+/// drift out of agreement with the first.
+///
+/// Free rather than a method for the same borrow reason as [`blend_mask`], and
+/// takes the font by `&mut` because the glyph cache rasterises on demand.
+#[allow(clippy::too_many_arguments)]
+fn blit_run(
+    fb: &mut Framebuffer,
+    font: &mut osfont::system::SystemFont,
+    run: &osfont::shape::ShapedRun,
+    pen: &mut f32,
+    baseline: f32,
+    limit: Option<f32>,
+    color: u32,
+    opacity: f32,
+    clip: Option<&Rect>,
+) {
+    // Drawing order, not logical order: the two differ only when the run
+    // contains right-to-left text, and there the logical order would put the
+    // first letter of a Hebrew word on the left — the word backwards. The
+    // truncation below is a further reason: `limit` has to cut the glyphs that
+    // fall off the *right of the line*, which is what this walk reaches last
+    // only in this order.
+    for shaped in run.draw_order() {
+        let advance = shaped.advance;
+        // Measured before drawing, so a glyph that would cross the limit is
+        // dropped whole rather than clipped down the middle.
+        if let Some(mx) = limit
+            && *pen + advance > mx
+        {
+            break;
+        }
+        if let Some(mask) = font.glyph_mask(shaped.key) {
+            // `offset` is zero except on an attached combining mark, and its
+            // `y` points up where the screen's points down.
+            blend_mask(
+                fb,
+                mask,
+                *pen + shaped.offset.0,
+                baseline - shaped.offset.1,
+                color,
+                opacity,
+                clip,
+            );
+        }
+        *pen += advance;
+    }
+}
+
 /// Blend one glyph's coverage into the framebuffer.
 ///
 /// Free rather than a method so it can run while a `&mut SystemFont` borrowed
@@ -1644,6 +1698,7 @@ impl RenderEngine {
                 font_size,
                 font_weight,
                 max_width,
+                overflow,
             } => {
                 let px = (*x + tx) as i32;
                 let py = (*y + ty) as i32;
@@ -1658,6 +1713,7 @@ impl RenderEngine {
                     max_w,
                     *font_size,
                     *font_weight,
+                    *overflow,
                 );
             }
             RenderCommand::Line {
@@ -1822,6 +1878,7 @@ impl RenderEngine {
     /// the coverage values and does its own blending — a half-covered pixel of
     /// a half-transparent window is a quarter opaque, which is exactly what
     /// multiplying the two gives.
+    #[allow(clippy::too_many_arguments)]
     fn draw_text(
         &mut self,
         fb: &mut Framebuffer,
@@ -1833,13 +1890,13 @@ impl RenderEngine {
         max_width: Option<u32>,
         size: f32,
         weight: FontWeightHint,
+        overflow: TextOverflow,
     ) {
         let clip = self.clip_stack.current().copied();
         let family = self.font_stack.last().copied().unwrap_or_default();
         let font = self.fonts.get(size, weight_of(weight), family_of(family));
         let baseline = y as f32 + font.metrics().ascent;
         let max_x = max_width.map(|w| x.saturating_add(w as i32));
-        let mut pen = x as f32;
 
         // Shaped rather than walked character by character, so this run is
         // spaced exactly as the toolkit measured it — same kerning, same
@@ -1848,35 +1905,70 @@ impl RenderEngine {
         // ends up off by half the difference, with neither process looking
         // wrong on its own.
         let run = font.shape(text);
-        // Drawing order, not logical order: the two differ only when the run
-        // contains right-to-left text, and there the logical order would put
-        // the first letter of a Hebrew word on the left — the word backwards.
-        // The truncation below is a further reason: `max_width` has to cut the
-        // glyphs that fall off the *right of the line*, which is what this
-        // walk reaches last only in this order.
-        for shaped in run.draw_order() {
-            let advance = shaped.advance;
-            // Measured before drawing, so a glyph that would cross the limit is
-            // dropped whole rather than clipped down the middle.
-            if let Some(mx) = max_x
-                && pen + advance > mx as f32
-            {
-                break;
+
+        // Decide about the ellipsis *before* drawing anything, because it
+        // changes where the real glyphs have to stop: the mark has to fit
+        // inside `max_width` too, or it is just a differently-shaped overflow.
+        //
+        // Three conditions, and all three have to hold: the caller asked for
+        // the mark; the run actually overruns, so a string that fits is never
+        // decorated with an ellipsis it did not earn; and the mark itself fits
+        // inside `max_width`, since a mark that overruns is just a
+        // differently-shaped overflow.
+        //
+        // Note what is deliberately *not* a condition: that a real glyph still
+        // fits afterwards. In a field with room for the mark and nothing else
+        // we draw the bare `…`, which says "there is a value here you cannot
+        // read" — true — in preference to one lone letter, which says "the
+        // value is M" — false. Being honest about what was lost is the whole
+        // point of the field; showing one more character is not.
+        let mut limit = max_x.map(|mx| mx as f32);
+        let mut ellipsis = None;
+        if overflow == TextOverflow::Ellipsis
+            && let Some(mx) = max_x
+        {
+            let width: f32 = run.draw_order().map(|g| g.advance).sum();
+            if x as f32 + width > mx as f32 {
+                let mark = font.shape("…");
+                let mark_width: f32 = mark.draw_order().map(|g| g.advance).sum();
+                // Subtracted as f32, not as i32: `x` and `mx` both arrive from
+                // another process, and `mx - x` is in range only by an argument
+                // about how `saturating_add` bounds it. An argument is not a
+                // guard, and this one costs nothing to make unnecessary.
+                if mark_width <= mx as f32 - x as f32 {
+                    limit = Some(mx as f32 - mark_width);
+                    ellipsis = Some(mark);
+                }
             }
-            if let Some(mask) = font.glyph_mask(shaped.key) {
-                // `offset` is zero except on an attached combining mark, and
-                // its `y` points up where the screen's points down.
-                blend_mask(
-                    fb,
-                    mask,
-                    pen + shaped.offset.0,
-                    baseline - shaped.offset.1,
-                    color,
-                    opacity,
-                    clip.as_ref(),
-                );
-            }
-            pen += advance;
+        }
+
+        let mut pen = x as f32;
+        blit_run(
+            fb,
+            font,
+            &run,
+            &mut pen,
+            baseline,
+            limit,
+            color,
+            opacity,
+            clip.as_ref(),
+        );
+        if let Some(mark) = ellipsis {
+            // Unbounded on purpose: the room was reserved above, so bounding it
+            // again could only round it away and put us back where we started —
+            // a cut with nothing to show for it.
+            blit_run(
+                fb,
+                font,
+                &mark,
+                &mut pen,
+                baseline,
+                None,
+                color,
+                opacity,
+                clip.as_ref(),
+            );
         }
     }
 
@@ -3391,6 +3483,11 @@ impl Compositor {
             Some(max_text_width),
             DEFAULT_FONT_SIZE,
             FontWeightHint::Regular,
+            // A window title is chosen by the window, is as long as it likes,
+            // and is the one string on screen a reader uses to tell two windows
+            // apart. Cutting it without a mark is how "Save invoice-final" and
+            // "Save invoice-final-2" become the same title.
+            TextOverflow::Ellipsis,
         );
 
         // Close button (red circle/square).
@@ -4265,6 +4362,7 @@ mod tests {
                 font_size: 14.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             },
             RenderCommand::Line {
                 x1: 0.0,
@@ -4360,6 +4458,7 @@ mod tests {
             font_size: 14.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         }];
         assert!(!Compositor::first_command_covers_client(
             &text_first,
@@ -4457,6 +4556,7 @@ mod tests {
                     font_size: 18.0,
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 },
             ];
             comp.submit_render(id, commands).expect("submit_render");
@@ -5211,23 +5311,29 @@ mod tests {
 
     // ---- text rendering ----------------------------------------------------
 
-    /// Draws `text` on a black surface and returns the rows and columns that
-    /// received ink, so a test can talk about where the glyphs landed instead
-    /// of about individual pixels.
-    fn ink_of(
+    const INK_W: u32 = 200;
+    const INK_H: u32 = 120;
+    /// Where [`paint`] puts the pen. Named because the overflow tests have to
+    /// do arithmetic against it: `max_width` is measured from here, not from
+    /// the left edge of the surface.
+    const INK_X: i32 = 4;
+
+    /// Draws `text` on a black surface and hands back the whole surface, so a
+    /// test can compare two renderings pixel for pixel rather than only by
+    /// where the ink landed.
+    fn paint(
         text: &str,
         size: f32,
         weight: FontWeightHint,
         max_width: Option<u32>,
-    ) -> (Vec<u32>, Vec<u32>) {
-        const W: u32 = 200;
-        const H: u32 = 120;
-        let mut fb = Framebuffer::new(W, H).unwrap();
+        overflow: TextOverflow,
+    ) -> Framebuffer {
+        let mut fb = Framebuffer::new(INK_W, INK_H).unwrap();
         fb.clear(0xFF_00_00_00);
         let mut engine = RenderEngine::new();
         engine.draw_text(
             &mut fb,
-            4,
+            INK_X,
             4,
             text,
             0xFF_FF_FF_FF,
@@ -5235,11 +5341,33 @@ mod tests {
             max_width,
             size,
             weight,
+            overflow,
         );
+        fb
+    }
+
+    /// The rows and columns of `fb` that received ink, so a test can talk about
+    /// where the glyphs landed instead of about individual pixels.
+    fn ink_bounds(fb: &Framebuffer) -> (Vec<u32>, Vec<u32>) {
         let lit = |x: u32, y: u32| fb.get_pixel(x, y).is_some_and(|p| p & 0x00FF_FFFF != 0);
-        let rows = (0..H).filter(|&y| (0..W).any(|x| lit(x, y))).collect();
-        let cols = (0..W).filter(|&x| (0..H).any(|y| lit(x, y))).collect();
+        let rows = (0..INK_H)
+            .filter(|&y| (0..INK_W).any(|x| lit(x, y)))
+            .collect();
+        let cols = (0..INK_W)
+            .filter(|&x| (0..INK_H).any(|y| lit(x, y)))
+            .collect();
         (rows, cols)
+    }
+
+    /// `ink_bounds(paint(..))` under the policy that predates §427, which is
+    /// what every test written before it assumed.
+    fn ink_of(
+        text: &str,
+        size: f32,
+        weight: FontWeightHint,
+        max_width: Option<u32>,
+    ) -> (Vec<u32>, Vec<u32>) {
+        ink_bounds(&paint(text, size, weight, max_width, TextOverflow::Clip))
     }
 
     #[test]
@@ -5310,6 +5438,170 @@ mod tests {
         );
     }
 
+    // ---- text overflow (design-decisions.md §427) --------------------------
+    //
+    // These tests are deliberately written against *metric-independent*
+    // properties — "the two renderings differ", "the ink stays inside the
+    // limit" — rather than against pixel coordinates derived from a guess at
+    // how wide `M` or `…` is in the system face. A test that encodes guessed
+    // font metrics fails the first time the face is revised, which teaches the
+    // next reader to delete it rather than to trust it.
+
+    /// True when two renderings are identical pixel for pixel.
+    fn same_pixels(a: &Framebuffer, b: &Framebuffer) -> bool {
+        (0..INK_H).all(|y| (0..INK_W).all(|x| a.get_pixel(x, y) == b.get_pixel(x, y)))
+    }
+
+    /// A string long enough to overrun any limit these tests set.
+    const LONG: &str = "MMMMMMMMMMMMMMMM";
+
+    #[test]
+    fn test_text_ellipsis_marks_a_cut_that_clip_leaves_silent() {
+        // The whole of §427: with `Clip`, a truncated label is indistinguishable
+        // from a complete one. With `Ellipsis` it is not.
+        let clip = paint(LONG, 16.0, FontWeightHint::Regular, Some(60), TextOverflow::Clip);
+        let ell = paint(
+            LONG,
+            16.0,
+            FontWeightHint::Regular,
+            Some(60),
+            TextOverflow::Ellipsis,
+        );
+        assert!(
+            !same_pixels(&clip, &ell),
+            "an overrunning run rendered identically under both policies — \
+             the overflow field reached the compositor and was ignored"
+        );
+        let (_, cols) = ink_bounds(&ell);
+        assert!(!cols.is_empty(), "the ellipsis policy drew nothing at all");
+    }
+
+    #[test]
+    fn test_text_ellipsis_is_not_earned_by_a_string_that_fits() {
+        // A mark on a label that was never cut is a lie in the other direction:
+        // it tells the reader there is more to the value than there is.
+        for max_width in [Some(180), Some(u32::MAX)] {
+            let clip = paint("M", 16.0, FontWeightHint::Regular, max_width, TextOverflow::Clip);
+            let ell = paint(
+                "M",
+                16.0,
+                FontWeightHint::Regular,
+                max_width,
+                TextOverflow::Ellipsis,
+            );
+            assert!(
+                same_pixels(&clip, &ell),
+                "a string that fits inside {max_width:?} was decorated with a mark"
+            );
+        }
+    }
+
+    #[test]
+    fn test_text_ellipsis_without_a_bound_is_vacuous() {
+        // `max_width: None` cannot overflow, so the policy has nothing to say.
+        // Every unbounded site in the tree was swept to `Clip` on exactly this
+        // reasoning, so it had better be true.
+        let clip = paint(LONG, 16.0, FontWeightHint::Regular, None, TextOverflow::Clip);
+        let ell = paint(
+            LONG,
+            16.0,
+            FontWeightHint::Regular,
+            None,
+            TextOverflow::Ellipsis,
+        );
+        assert!(
+            same_pixels(&clip, &ell),
+            "the overflow policy changed an unbounded rendering"
+        );
+    }
+
+    #[test]
+    fn test_text_ellipsis_stays_inside_max_width() {
+        // The mark has to fit inside the bound too, or it is just a
+        // differently-shaped overflow — the failure it exists to report.
+        for w in [24u32, 40, 60, 90, 120] {
+            let (_, cols) = ink_bounds(&paint(
+                LONG,
+                16.0,
+                FontWeightHint::Regular,
+                Some(w),
+                TextOverflow::Ellipsis,
+            ));
+            if let Some(&last) = cols.iter().max() {
+                let limit = INK_X as u32 + w;
+                assert!(
+                    last < limit,
+                    "at max_width {w} the mark put ink at column {last}, \
+                     past the limit at {limit}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_text_ellipsis_falls_back_to_clipping_when_the_mark_does_not_fit() {
+        // Derived, not guessed: a glyph's ink is never wider than its advance,
+        // so a bound below the mark's *ink* width is certainly below its
+        // advance. That makes this the one width the test can be sure of
+        // without knowing the face's metrics.
+        let (_, mark_cols) = ink_bounds(&paint(
+            "…",
+            16.0,
+            FontWeightHint::Regular,
+            None,
+            TextOverflow::Clip,
+        ));
+        let mark_ink = mark_cols.iter().max().copied().unwrap() + 1 - INK_X as u32;
+        assert!(mark_ink > 2, "the ellipsis glyph rendered as {mark_ink}px of ink");
+        let w = mark_ink - 2;
+
+        let clip = paint(LONG, 16.0, FontWeightHint::Regular, Some(w), TextOverflow::Clip);
+        let ell = paint(
+            LONG,
+            16.0,
+            FontWeightHint::Regular,
+            Some(w),
+            TextOverflow::Ellipsis,
+        );
+        assert!(
+            same_pixels(&clip, &ell),
+            "at max_width {w}, too narrow for the mark itself, the ellipsis \
+             policy drew something other than a plain clip"
+        );
+    }
+
+    #[test]
+    fn test_text_ellipsis_never_blanks_a_field_that_clipping_would_fill() {
+        // Reserving room for the mark shortens the run, so the arithmetic could
+        // in principle leave nothing at all — a field that reads as empty rather
+        // than as truncated, which is worse than what §427 set out to fix.
+        for w in [16u32, 24, 40, 60, 90, 120, 199] {
+            let (_, clip) = ink_bounds(&paint(
+                LONG,
+                16.0,
+                FontWeightHint::Regular,
+                Some(w),
+                TextOverflow::Clip,
+            ));
+            if clip.is_empty() {
+                continue;
+            }
+            let (_, ell) = ink_bounds(&paint(
+                LONG,
+                16.0,
+                FontWeightHint::Regular,
+                Some(w),
+                TextOverflow::Ellipsis,
+            ));
+            assert!(
+                !ell.is_empty(),
+                "at max_width {w} clipping drew {} columns of ink and the \
+                 ellipsis policy drew none",
+                clip.len()
+            );
+        }
+    }
+
     #[test]
     fn test_text_at_absurd_coordinates_is_clipped_not_wrapped() {
         // Coordinates arrive from another process, so they may be anything.
@@ -5325,17 +5617,25 @@ mod tests {
             (8, i32::MAX),
             (-1000, -1000),
         ] {
-            engine.draw_text(
-                &mut fb,
-                x,
-                y,
-                "leak",
-                0xFF_FF_FF_FF,
-                1.0,
-                None,
-                16.0,
-                FontWeightHint::Regular,
-            );
+            // Both policies, and an extreme `max_width` with each: the ellipsis
+            // path does its own arithmetic on `x` and the limit, so an absurd
+            // coordinate reaches code the `Clip` path never runs.
+            for overflow in [TextOverflow::Clip, TextOverflow::Ellipsis] {
+                for max_width in [None, Some(0), Some(1), Some(u32::MAX)] {
+                    engine.draw_text(
+                        &mut fb,
+                        x,
+                        y,
+                        "leak",
+                        0xFF_FF_FF_FF,
+                        1.0,
+                        max_width,
+                        16.0,
+                        FontWeightHint::Regular,
+                        overflow,
+                    );
+                }
+            }
         }
         for y in 0..32 {
             for x in 0..64 {

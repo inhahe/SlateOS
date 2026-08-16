@@ -690,10 +690,67 @@ Roadmap:
   times, filed as `open-questions.md` **C-Q1**: whether normalization may
   consult font coverage, which would invert the layering §423 just
   defended. Operator's call, not a bug.
-  Next unblocked step is the rest of shaping: no Khmer/Myanmar/Thai/USE
-  shapers (`TD-FONT-HAS-NO-UNIVERSAL-SHAPING-ENGINE`), no language
-  selection (`TD-FONT-IGNORES-LANGSYS-OVERRIDES`), and no device tables in
-  `ValueRecord`. Vello itself waits on `[A]`'s GPU driver.
+  Language selection is now done too (`TD-FONT-IGNORES-LANGSYS-OVERRIDES`
+  closed, design-decisions §430). `shape_lang(text, Option<Lang>)` takes a
+  BCP 47 tag beside `shape`, which is `shape_lang(text, None)`, so the
+  change cannot regress text that names no language; `lang.rs` maps the tag
+  the way HarfBuzz does, from tables generated out of HarfBuzz's own source;
+  and `ByScript` selects per (script, language) rather than per script, and
+  finally reads `requiredFeatureIndex`. It matters on 996 (script, language)
+  records across 230 of the host's 581 faces. The oracle earned its keep
+  again: a first version that kept only the first OpenType tag per language
+  passed 521 unit tests and was wrong on the 66 faces that register `ROM `
+  and no `MOL `, because HarfBuzz tries up to three candidate tags in order
+  and takes the first the *font* registers. Sweep after the fix: 556 faces ×
+  35 strings, `agree` **18235**, `reordered` 0, `misplaced` 0, `differ` 1176
+  — every one of them the same composed-diacritics question as C-Q1.
+  Thai/Lao is now done as well — the first of the four missing shapers, and
+  two separate pieces (§431, §432). SARA AM, the Thai letter drawn as two
+  marks in two places that Unicode gives no decomposition, is split between
+  decomposition and the mark sort, an ordering that turns out to be
+  load-bearing rather than incidental: sorting first puts the nikhahit on
+  the wrong side of a tone mark. Sweep after it: 556 faces × 40 strings,
+  `agree` 18806 → **21015**, `reordered` 3 → **0**, `differ` 3382 → **1176**
+  — every Thai and Lao string agreeing on every face, and the residual the
+  same composed-diacritics bucket as before. The second piece, the
+  private-use fallback for Thai fonts predating OpenType, could not be
+  measured against the host at all: **zero** of the 556 faces carry a single
+  Thai private-use glyph, so a sweep over them would have reported agreement
+  it never tested. Three faces with no layout tables at all were synthesized
+  with fontTools to give it an oracle (Windows forms, Mac forms, and a
+  no-forms control the pass must leave untouched) — 78 of 78 agree, and the
+  oracle immediately caught that the pass was gated on the wrong predicate
+  and never fired at all. Khmer is done too (step 2 of 3) — the Indic model
+  plus two moves, a COENG+RO pair jumping to the head of its syllable and a
+  pre-base vowel jumping ahead of it, with the reordering running *before* the
+  first lookup rather than after `locl`/`ccmp`. Sweep: `agree` 27421 →
+  **27687**, `differ` back to the same **1176** baseline, `reordered` 0. And
+  §431 paid for itself twice: no installed face has a `cfar` lookup — nor
+  `pres`, nor `psts` — so the host could not falsify the masks at all, and the
+  probe font built to disagree found `locl`/`ccmp`/`blwf`/`abvf`/`pstf` being
+  applied **twice** in *both* the Khmer and the long-shipping Indic shaper.
+  1 of 45 probe strings agreed before the fix, 43 after (§433); the two
+  remaining are a crate-wide default-ignorable bug, filed as
+  `TD-FONT-DOES-NOT-HIDE-DEFAULT-IGNORABLES`. Next unblocked step is Myanmar,
+  then USE (`TD-FONT-HAS-NO-UNIVERSAL-SHAPING-ENGINE`, step 2 of 3 done), the
+  ignorable fix, and no device tables in `ValueRecord`. Vello itself waits on
+  `[A]`'s GPU driver.
+- `[C]` Text overflow policy — **done** (§427, `TD-GUI-CLIPPED-TEXT-IS-NOT-MARKED`
+  closed). `RenderCommand::Text` carries a **required** `overflow: TextOverflow`
+  (`Clip` | `Ellipsis`) and the compositor draws the mark, reserving room for it
+  before drawing so it lands inside `max_width` rather than overrunning in its
+  place. Required, with no `Default`, was the operator's call precisely so that
+  all 4,548 constructions in the workspace had to answer the question
+  `max_width` had always posed and never answered; bounded sites default to
+  `Ellipsis`, because the behaviour-preserving `Clip` *is* the reported bug.
+  `guiremote` went to `PROTOCOL_VERSION = 2` — unlike the `FontFamilyTag`
+  precedent this changes an *existing* tag's payload, so a v1 decoder would
+  desynchronise silently rather than fail. 31 of those sites are in lane B's
+  `init/login`; a required field cannot be added by one lane and filled by
+  another without a red tree in between, so they were filled in the same commit
+  and lane B notified afterwards — see **§429**, which qualifies the `requests/`
+  protocol described above for exactly this case and is attributed to Claude,
+  not the operator, so it is open to being overruled.
 - `[C]` Wayland-inspired compositor: GPU acceleration, currently a software
   rasterizer (lines ~4605, ~4619)
 - `[C]` Video-encoded capture fallback, H.264/VP9 (lines ~4623, ~5060)

@@ -35,7 +35,7 @@
 #![allow(clippy::wildcard_imports)]
 
 use guitk::color::Color;
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
 use std::collections::{HashMap, VecDeque};
@@ -1659,6 +1659,7 @@ impl MindMapApp {
             color: TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Toolbar buttons
@@ -1690,6 +1691,7 @@ impl MindMapApp {
                 color: TEXT,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(58.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -1703,6 +1705,7 @@ impl MindMapApp {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -1747,6 +1750,7 @@ impl MindMapApp {
                     FontWeightHint::Regular
                 },
                 max_width: Some(tab_w - 16.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             tx += tab_w + 4.0;
@@ -1769,6 +1773,7 @@ impl MindMapApp {
             color: TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -2009,6 +2014,7 @@ impl MindMapApp {
                 FontWeightHint::Regular
             },
             max_width: Some(sw - 16.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Collapse indicator for nodes with children
@@ -2033,6 +2039,7 @@ impl MindMapApp {
                 color: TEXT,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
     }
@@ -2083,6 +2090,7 @@ impl MindMapApp {
             color: TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         sy += 22.0;
 
@@ -2097,6 +2105,7 @@ impl MindMapApp {
                     color: SUBTEXT0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(SIDEBAR_WIDTH - 20.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
                 sy += 18.0;
 
@@ -2109,6 +2118,7 @@ impl MindMapApp {
                     color: SUBTEXT0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
                 sy += 18.0;
 
@@ -2121,6 +2131,7 @@ impl MindMapApp {
                     color: SUBTEXT0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
                 cmds.push(RenderCommand::FillRect {
                     x: x + 55.0,
@@ -2141,6 +2152,7 @@ impl MindMapApp {
                     color: SUBTEXT0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
                 sy += 18.0;
 
@@ -2154,6 +2166,7 @@ impl MindMapApp {
                     color: SUBTEXT0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
                 sy += 18.0;
 
@@ -2171,6 +2184,7 @@ impl MindMapApp {
                     color: SUBTEXT0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
                 sy += 26.0;
             }
@@ -2183,6 +2197,7 @@ impl MindMapApp {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             sy += 26.0;
         }
@@ -2206,6 +2221,7 @@ impl MindMapApp {
             color: TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         sy += 20.0;
 
@@ -2233,6 +2249,7 @@ impl MindMapApp {
                 color: BLUE,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             cmds.push(RenderCommand::Text {
                 x: x + 70.0,
@@ -2242,6 +2259,7 @@ impl MindMapApp {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(SIDEBAR_WIDTH - 80.0),
+                overflow: TextOverflow::Ellipsis,
             });
             sy += 16.0;
         }
@@ -2285,6 +2303,7 @@ impl MindMapApp {
             color: OVERLAY0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Query text
@@ -2307,6 +2326,7 @@ impl MindMapApp {
             color: query_color,
             font_weight: FontWeightHint::Regular,
             max_width: Some(bar_width - 110.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Result count
@@ -2328,6 +2348,7 @@ impl MindMapApp {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
     }
@@ -2364,6 +2385,7 @@ impl MindMapApp {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(self.win_width - 20.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Selected node info on the right
@@ -2383,6 +2405,7 @@ impl MindMapApp {
                 color: BLUE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(290.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }

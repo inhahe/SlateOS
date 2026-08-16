@@ -14,7 +14,7 @@
 //! - Filter by Unicode general category (Letter, Number, Symbol, Punctuation, etc.)
 
 use guitk::color::Color;
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
 // ── Catppuccin Mocha palette ───────────────────────────────────────────────
@@ -1139,6 +1139,7 @@ impl CharMapApp {
             color: BLUE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(w - 16.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Filter indicator
@@ -1150,6 +1151,7 @@ impl CharMapApp {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(w - 16.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         let item_h: f32 = 22.0;
@@ -1184,6 +1186,7 @@ impl CharMapApp {
                     color: text_color,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(w - 20.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
 
                 // Show range
@@ -1195,6 +1198,7 @@ impl CharMapApp {
                     color: OVERLAY0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(w - 20.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
         }
@@ -1256,6 +1260,7 @@ impl CharMapApp {
             color: TEXT_COLOR,
             font_weight: FontWeightHint::Bold,
             max_width: Some(w - 16.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Character grid
@@ -1321,6 +1326,7 @@ impl CharMapApp {
                         color: YELLOW,
                         font_weight: FontWeightHint::Bold,
                         max_width: None,
+                        overflow: TextOverflow::Clip,
                     });
                 }
 
@@ -1344,6 +1350,7 @@ impl CharMapApp {
                     color: text_color,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(cell_size - 8.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
 
                 // Codepoint label below
@@ -1355,6 +1362,7 @@ impl CharMapApp {
                     color: if is_sel { MANTLE } else { OVERLAY0 },
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(cell_size - 4.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
         }
@@ -1390,6 +1398,7 @@ impl CharMapApp {
             color: BLUE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(w - 20.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         let info = match self.selected_char_info() {
@@ -1403,6 +1412,7 @@ impl CharMapApp {
                     color: SUBTEXT0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(w - 20.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
                 return;
             }
@@ -1427,6 +1437,7 @@ impl CharMapApp {
             color: TEXT_COLOR,
             font_weight: FontWeightHint::Regular,
             max_width: Some(w - 40.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Preview size label
@@ -1438,6 +1449,7 @@ impl CharMapApp {
             color: OVERLAY0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Detail fields
@@ -1465,6 +1477,7 @@ impl CharMapApp {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(70.0),
+                overflow: TextOverflow::Ellipsis,
             });
             cmds.push(RenderCommand::Text {
                 x: x + 80.0,
@@ -1474,6 +1487,7 @@ impl CharMapApp {
                 color: TEXT_COLOR,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(w - 90.0),
+                overflow: TextOverflow::Ellipsis,
             });
             detail_y += line_h;
         }
@@ -1496,6 +1510,7 @@ impl CharMapApp {
             color: if is_fav { YELLOW } else { OVERLAY0 },
             font_weight: FontWeightHint::Regular,
             max_width: Some(w - 20.0),
+            overflow: TextOverflow::Ellipsis,
         });
         detail_y += line_h;
 
@@ -1507,6 +1522,7 @@ impl CharMapApp {
             color: OVERLAY0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(w - 20.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Recent section
@@ -1519,6 +1535,7 @@ impl CharMapApp {
             color: TEAL,
             font_weight: FontWeightHint::Bold,
             max_width: Some(w - 20.0),
+            overflow: TextOverflow::Ellipsis,
         });
         detail_y += 16.0;
 
@@ -1550,6 +1567,7 @@ impl CharMapApp {
                         color: TEXT_COLOR,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(recent_cell - 6.0),
+                        overflow: TextOverflow::Ellipsis,
                     });
                 }
             ri = ri.saturating_add(1);
@@ -1566,6 +1584,7 @@ impl CharMapApp {
                 color: YELLOW,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(w - 20.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             let mut fi: usize = 0;
@@ -1597,6 +1616,7 @@ impl CharMapApp {
                             color: TEXT_COLOR,
                             font_weight: FontWeightHint::Regular,
                             max_width: Some(recent_cell - 6.0),
+                            overflow: TextOverflow::Ellipsis,
                         });
                     }
                 fi = fi.saturating_add(1);
@@ -1630,6 +1650,7 @@ impl CharMapApp {
             color: SUBTEXT1,
             font_weight: FontWeightHint::Regular,
             max_width: Some(w * 0.6),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Active panel indicator
@@ -1649,6 +1670,7 @@ impl CharMapApp {
             color: OVERLAY0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(200.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 }

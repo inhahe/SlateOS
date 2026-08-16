@@ -17,7 +17,7 @@ use crate::layout::{
     FlexAlign, FlexDirection, FlexItem, FlexJustify, FlexLayout, LayoutBox, Size, SizeConstraint,
     flex_layout,
 };
-use crate::render::{FontWeightHint, RenderCommand, RenderTree};
+use crate::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use crate::style::{Borders, CornerRadii, Edges, FontWeight, Style};
 
 /// Unique widget identifier. Used to track persistent state across frames.
@@ -579,6 +579,7 @@ impl Widget {
                     font_size: self.style.font_size,
                     font_weight: weight_to_hint(self.style.font_weight),
                     max_width: Some(self.layout.width),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
             WidgetKind::Button { text, pressed } => {
@@ -606,6 +607,7 @@ impl Widget {
                     font_size: self.style.font_size,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(self.layout.width),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
             WidgetKind::TextInput {
@@ -629,6 +631,7 @@ impl Widget {
                     font_size: self.style.font_size,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(self.layout.width),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
             WidgetKind::Checkbox { checked, label } => {
@@ -662,6 +665,7 @@ impl Widget {
                     font_size: self.style.font_size,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
             }
             WidgetKind::ProgressBar { value, max } => {

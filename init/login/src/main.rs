@@ -23,7 +23,7 @@ use guitk::event::{
     Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 #[allow(unused_imports)]
-use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
 
@@ -1640,6 +1640,7 @@ impl LoginManager {
             font_size,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -1696,6 +1697,7 @@ impl LoginManager {
             font_size: self.scaled_font(FONT_SIZE_LARGE),
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // User list.
@@ -1755,6 +1757,7 @@ impl LoginManager {
                 font_size: self.scaled_font(12.0),
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             // Username and display name.
@@ -1767,6 +1770,7 @@ impl LoginManager {
                 font_size: self.scaled_font(FONT_SIZE_NORMAL),
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(LOGIN_BOX_WIDTH - 120.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             let subtext_color = if self.accessibility.high_contrast {
@@ -1782,6 +1786,7 @@ impl LoginManager {
                 font_size: self.scaled_font(FONT_SIZE_SMALL),
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(LOGIN_BOX_WIDTH - 120.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Admin badge.
@@ -1803,6 +1808,7 @@ impl LoginManager {
                     font_size: self.scaled_font(10.0),
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
             }
         }
@@ -1822,6 +1828,7 @@ impl LoginManager {
             font_size: self.scaled_font(FONT_SIZE_SMALL),
             font_weight: FontWeightHint::Regular,
             max_width: Some(LOGIN_BOX_WIDTH - 40.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -1897,6 +1904,7 @@ impl LoginManager {
                 font_size: self.scaled_font(22.0),
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             // Display name.
@@ -1909,6 +1917,7 @@ impl LoginManager {
                 font_size: self.scaled_font(FONT_SIZE_LARGE),
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(LOGIN_BOX_WIDTH - 40.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Username.
@@ -1924,6 +1933,7 @@ impl LoginManager {
                 font_size: self.scaled_font(FONT_SIZE_SMALL),
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 
@@ -1982,6 +1992,7 @@ impl LoginManager {
                 font_size: self.scaled_font(FONT_SIZE_NORMAL),
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(INPUT_WIDTH - 60.0),
+                overflow: TextOverflow::Ellipsis,
             });
         } else {
             tree.push(RenderCommand::Text {
@@ -1992,6 +2003,7 @@ impl LoginManager {
                 font_size: self.scaled_font(FONT_SIZE_NORMAL),
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(INPUT_WIDTH - 60.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -2010,6 +2022,7 @@ impl LoginManager {
             font_size: self.scaled_font(FONT_SIZE_SMALL),
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Error message.
@@ -2027,6 +2040,7 @@ impl LoginManager {
                 font_size: self.scaled_font(FONT_SIZE_SMALL),
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(INPUT_WIDTH),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -2049,6 +2063,7 @@ impl LoginManager {
             font_size: self.scaled_font(FONT_SIZE_NORMAL),
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // "Back" link.
@@ -2061,6 +2076,7 @@ impl LoginManager {
             font_size: self.scaled_font(FONT_SIZE_SMALL),
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -2135,6 +2151,7 @@ impl LoginManager {
             font_size: self.scaled_font(FONT_SIZE_NORMAL),
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Show locked user avatar.
@@ -2161,6 +2178,7 @@ impl LoginManager {
                     font_size: self.scaled_font(22.0),
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
 
                 // Display name.
@@ -2172,6 +2190,7 @@ impl LoginManager {
                     font_size: self.scaled_font(FONT_SIZE_LARGE),
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(LOGIN_BOX_WIDTH - 40.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
 
@@ -2221,6 +2240,7 @@ impl LoginManager {
                 font_size: self.scaled_font(FONT_SIZE_NORMAL),
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(INPUT_WIDTH - 32.0),
+                overflow: TextOverflow::Ellipsis,
             });
         } else {
             tree.push(RenderCommand::Text {
@@ -2231,6 +2251,7 @@ impl LoginManager {
                 font_size: self.scaled_font(FONT_SIZE_NORMAL),
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(INPUT_WIDTH - 32.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -2249,6 +2270,7 @@ impl LoginManager {
                 font_size: self.scaled_font(FONT_SIZE_SMALL),
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(INPUT_WIDTH),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -2271,6 +2293,7 @@ impl LoginManager {
             font_size: self.scaled_font(FONT_SIZE_NORMAL),
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -2319,6 +2342,7 @@ impl LoginManager {
             font_size: self.scaled_font(FONT_SIZE_NORMAL),
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         let items = ["Shut Down", "Restart", "Sleep"];
@@ -2348,6 +2372,7 @@ impl LoginManager {
                 font_size: self.scaled_font(20.0),
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             // Label.
@@ -2363,6 +2388,7 @@ impl LoginManager {
                     FontWeightHint::Regular
                 },
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 
@@ -2380,6 +2406,7 @@ impl LoginManager {
             font_size: self.scaled_font(FONT_SIZE_SMALL),
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -2402,6 +2429,7 @@ impl LoginManager {
             font_size: self.scaled_font(FONT_SIZE_LARGE),
             font_weight: FontWeightHint::Light,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Spinner placeholder (just a dot animation would go here).
@@ -2417,6 +2445,7 @@ impl LoginManager {
             font_size: self.scaled_font(FONT_SIZE_NORMAL),
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -2462,6 +2491,7 @@ impl LoginManager {
                 font_size: self.scaled_font(12.0),
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
     }
@@ -2494,6 +2524,7 @@ impl LoginManager {
             font_size: self.scaled_font(18.0),
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 

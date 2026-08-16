@@ -32,7 +32,7 @@
 //! ```
 
 use guitk::event::{Key, Modifiers};
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
 
@@ -996,6 +996,7 @@ pub fn render_settings_panel(
         font_size: HEADER_FONT_SIZE,
         font_weight: FontWeightHint::Bold,
         max_width: None,
+        overflow: TextOverflow::Clip,
     });
 
     // Separator line below header.
@@ -1041,6 +1042,7 @@ pub fn render_settings_panel(
             font_size: LABEL_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(content_width * 0.45),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // For LaunchApp and Custom, show the parameter after the label.
@@ -1064,6 +1066,7 @@ pub fn render_settings_panel(
                 font_size: KEY_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(content_width * 0.25),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -1109,6 +1112,7 @@ pub fn render_settings_panel(
                 font_size: KEY_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
     }

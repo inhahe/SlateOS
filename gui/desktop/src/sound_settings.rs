@@ -5,7 +5,7 @@
 //! sub-page of the desktop's Settings application.
 
 use guitk::color::Color;
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
 // ============================================================================
@@ -610,6 +610,7 @@ impl SoundSettingsUI {
             color: TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: Some(inner),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 32.0;
 
@@ -634,6 +635,7 @@ impl SoundSettingsUI {
             },
             font_weight: FontWeightHint::Regular,
             max_width: Some(inner),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 22.0;
         cy = Self::render_volume_bar(
@@ -671,6 +673,7 @@ impl SoundSettingsUI {
                     FontWeightHint::Regular
                 },
                 max_width: Some(tab_w - 16.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
         cy += 40.0;
@@ -710,6 +713,7 @@ impl SoundSettingsUI {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width),
+                overflow: TextOverflow::Ellipsis,
             });
             return y + 24.0;
         }
@@ -734,6 +738,7 @@ impl SoundSettingsUI {
                 color: TEXT,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(width - 24.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             cmds.push(RenderCommand::Text {
@@ -744,6 +749,7 @@ impl SoundSettingsUI {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 24.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Volume bar
@@ -778,6 +784,7 @@ impl SoundSettingsUI {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width),
+                overflow: TextOverflow::Ellipsis,
             });
             return y + 24.0;
         }
@@ -800,6 +807,7 @@ impl SoundSettingsUI {
                 color: TEXT,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(width - 24.0),
+                overflow: TextOverflow::Ellipsis,
             });
             cmds.push(RenderCommand::Text {
                 x: x + 12.0,
@@ -809,6 +817,7 @@ impl SoundSettingsUI {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 24.0),
+                overflow: TextOverflow::Ellipsis,
             });
             y += 56.0;
         }
@@ -823,6 +832,7 @@ impl SoundSettingsUI {
             color: LAVENDER,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
+            overflow: TextOverflow::Ellipsis,
         });
         y += 24.0;
 
@@ -876,6 +886,7 @@ impl SoundSettingsUI {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width),
+                overflow: TextOverflow::Ellipsis,
             });
             return y + 24.0;
         }
@@ -897,6 +908,7 @@ impl SoundSettingsUI {
                 color: TEXT,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(width * 0.5),
+                overflow: TextOverflow::Ellipsis,
             });
             let muted_txt = if entry.muted { " (Muted)" } else { "" };
             cmds.push(RenderCommand::Text {
@@ -907,6 +919,7 @@ impl SoundSettingsUI {
                 color: if entry.muted { RED } else { SUBTEXT0 },
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width * 0.4),
+                overflow: TextOverflow::Ellipsis,
             });
             Self::render_volume_bar(
                 cmds,
@@ -959,6 +972,7 @@ impl SoundSettingsUI {
                 color: TEXT,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width * 0.35),
+                overflow: TextOverflow::Ellipsis,
             });
             cmds.push(RenderCommand::Text {
                 x: x + width * 0.4,
@@ -968,6 +982,7 @@ impl SoundSettingsUI {
                 color: if sc.enabled { GREEN } else { OVERLAY0 },
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width * 0.15),
+                overflow: TextOverflow::Ellipsis,
             });
             cmds.push(RenderCommand::Text {
                 x: x + width * 0.6,
@@ -977,6 +992,7 @@ impl SoundSettingsUI {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width * 0.35),
+                overflow: TextOverflow::Ellipsis,
             });
             y += 32.0;
         }
@@ -998,6 +1014,7 @@ impl SoundSettingsUI {
             color: LAVENDER,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
+            overflow: TextOverflow::Ellipsis,
         });
         y += 24.0;
 
@@ -1024,6 +1041,7 @@ impl SoundSettingsUI {
                     FontWeightHint::Regular
                 },
                 max_width: Some(width - 24.0),
+                overflow: TextOverflow::Ellipsis,
             });
             y += 36.0;
         }
@@ -1080,6 +1098,7 @@ impl SoundSettingsUI {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width * 0.5),
+            overflow: TextOverflow::Ellipsis,
         });
         cmds.push(RenderCommand::Text {
             x: x + width * 0.55,
@@ -1089,6 +1108,7 @@ impl SoundSettingsUI {
             color: TEXT,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width * 0.4),
+            overflow: TextOverflow::Ellipsis,
         });
         y + 22.0
     }
@@ -1109,6 +1129,7 @@ impl SoundSettingsUI {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width * 0.6),
+            overflow: TextOverflow::Ellipsis,
         });
         let tx = x + width - 48.0;
         let bg = if on { GREEN } else { SURFACE1 };

@@ -17,7 +17,7 @@
 //! `apply_all` is set, in which case all matching rules are merged).
 
 use guitk::color::Color;
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
 
@@ -913,6 +913,7 @@ impl RulesSettingsUI {
             color: MOCHA_TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Rule count badge.
@@ -929,6 +930,7 @@ impl RulesSettingsUI {
             color: MOCHA_SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Eval mode indicator.
@@ -944,6 +946,7 @@ impl RulesSettingsUI {
             color: MOCHA_OVERLAY0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         match self.active_tab {
@@ -991,6 +994,7 @@ impl RulesSettingsUI {
                 color: MOCHA_SUBTEXT0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             hx += col_w;
         }
@@ -1042,6 +1046,7 @@ impl RulesSettingsUI {
                 color: priority_color,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             cx += COL_PRIORITY;
 
@@ -1066,6 +1071,7 @@ impl RulesSettingsUI {
                 },
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             cx += COL_NAME;
 
@@ -1084,6 +1090,7 @@ impl RulesSettingsUI {
                 color: MOCHA_BLUE,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             cx += COL_MATCH;
 
@@ -1097,6 +1104,7 @@ impl RulesSettingsUI {
                 color: if ac > 0 { MOCHA_GREEN } else { MOCHA_OVERLAY0 },
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             cx += 60.0;
 
@@ -1109,6 +1117,7 @@ impl RulesSettingsUI {
                 color: MOCHA_SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             cx += 50.0;
 
@@ -1134,6 +1143,7 @@ impl RulesSettingsUI {
                 color: status_color,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             // One-shot indicator.
@@ -1146,6 +1156,7 @@ impl RulesSettingsUI {
                     color: MOCHA_PEACH,
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
             }
 
@@ -1168,6 +1179,7 @@ impl RulesSettingsUI {
                     color: MOCHA_OVERLAY0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
             }
         }
@@ -1190,6 +1202,7 @@ impl RulesSettingsUI {
             color: MOCHA_BASE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -1212,6 +1225,7 @@ impl RulesSettingsUI {
             color: MOCHA_TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         cy += 30.0;
 
@@ -1224,6 +1238,7 @@ impl RulesSettingsUI {
             color: MOCHA_SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         cmds.push(RenderCommand::FillRect {
             x: input_x,
@@ -1249,6 +1264,7 @@ impl RulesSettingsUI {
             },
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         cy += 36.0;
 
@@ -1268,6 +1284,7 @@ impl RulesSettingsUI {
             color: MOCHA_SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         for (i, label) in criteria_labels.iter().enumerate() {
             let bx = input_x + (i as f32) * 110.0;
@@ -1292,6 +1309,7 @@ impl RulesSettingsUI {
                     FontWeightHint::Regular
                 },
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
         cy += 36.0;
@@ -1306,6 +1324,7 @@ impl RulesSettingsUI {
                 color: MOCHA_SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             cmds.push(RenderCommand::FillRect {
                 x: input_x,
@@ -1331,6 +1350,7 @@ impl RulesSettingsUI {
                 },
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             cy += 36.0;
         }
@@ -1344,6 +1364,7 @@ impl RulesSettingsUI {
             color: MOCHA_SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         cmds.push(RenderCommand::FillRect {
             x: input_x,
@@ -1361,6 +1382,7 @@ impl RulesSettingsUI {
             color: MOCHA_TEXT,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         cy += 40.0;
 
@@ -1381,6 +1403,7 @@ impl RulesSettingsUI {
             color: MOCHA_BASE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         cmds.push(RenderCommand::FillRect {
             x: input_x + 92.0,
@@ -1398,6 +1421,7 @@ impl RulesSettingsUI {
             color: MOCHA_TEXT,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 }

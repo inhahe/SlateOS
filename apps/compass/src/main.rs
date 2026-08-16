@@ -24,7 +24,7 @@
 
 use guitk::color::Color;
 use guitk::event::{Event, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
 
@@ -605,6 +605,7 @@ impl CompassApp {
             font_size: 22.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         self.render_compass_rose(cmds);
@@ -696,6 +697,7 @@ impl CompassApp {
                 font_size: 13.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(30.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -729,6 +731,7 @@ impl CompassApp {
                 font_size: size,
                 font_weight: weight,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 
@@ -824,6 +827,7 @@ impl CompassApp {
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         cmds.push(RenderCommand::Text {
@@ -834,6 +838,7 @@ impl CompassApp {
             font_size: 32.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         cmds.push(RenderCommand::Text {
@@ -844,6 +849,7 @@ impl CompassApp {
             font_size: 28.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -867,6 +873,7 @@ impl CompassApp {
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         cmds.push(RenderCommand::Text {
@@ -877,6 +884,7 @@ impl CompassApp {
             font_size: 16.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         cmds.push(RenderCommand::Text {
@@ -887,6 +895,7 @@ impl CompassApp {
             font_size: 16.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -910,6 +919,7 @@ impl CompassApp {
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         cmds.push(RenderCommand::Text {
@@ -920,6 +930,7 @@ impl CompassApp {
             font_size: 20.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -943,6 +954,7 @@ impl CompassApp {
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         if let Some(idx) = self.selected_waypoint {
@@ -955,6 +967,7 @@ impl CompassApp {
                     font_size: 16.0,
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(180.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
 
                 cmds.push(RenderCommand::Text {
@@ -965,6 +978,7 @@ impl CompassApp {
                     font_size: 12.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(180.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
 
                 if let Some((brg, dist_km)) = self.waypoint_bearing_distance() {
@@ -979,6 +993,7 @@ impl CompassApp {
                         font_size: 15.0,
                         font_weight: FontWeightHint::Regular,
                         max_width: None,
+                        overflow: TextOverflow::Clip,
                     });
 
                     cmds.push(RenderCommand::Text {
@@ -989,6 +1004,7 @@ impl CompassApp {
                         font_size: 15.0,
                         font_weight: FontWeightHint::Regular,
                         max_width: None,
+                        overflow: TextOverflow::Clip,
                     });
                 }
             }
@@ -1001,6 +1017,7 @@ impl CompassApp {
                 font_size: 14.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             cmds.push(RenderCommand::Text {
                 x: bx + 12.0,
@@ -1010,6 +1027,7 @@ impl CompassApp {
                 font_size: 14.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
     }
@@ -1048,6 +1066,7 @@ impl CompassApp {
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(185.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }
@@ -1062,6 +1081,7 @@ impl CompassApp {
             font_size: 24.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Column headers
@@ -1073,6 +1093,7 @@ impl CompassApp {
             font_size: 13.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         cmds.push(RenderCommand::Line {
@@ -1093,6 +1114,7 @@ impl CompassApp {
                 font_size: 14.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
             return;
         }
@@ -1146,6 +1168,7 @@ impl CompassApp {
                     FontWeightHint::Regular
                 },
                 max_width: Some(820.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -1159,6 +1182,7 @@ impl CompassApp {
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -1172,6 +1196,7 @@ impl CompassApp {
             font_size: 24.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         let field_w: f32 = 300.0;
@@ -1187,6 +1212,7 @@ impl CompassApp {
             font_size: 14.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         cmds.push(RenderCommand::FillRect {
             x: start_x,
@@ -1212,6 +1238,7 @@ impl CompassApp {
             font_size: 16.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(field_w - 20.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Latitude field
@@ -1224,6 +1251,7 @@ impl CompassApp {
             font_size: 14.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         cmds.push(RenderCommand::FillRect {
             x: start_x,
@@ -1260,6 +1288,7 @@ impl CompassApp {
             font_size: 16.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(field_w - 20.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Longitude field
@@ -1272,6 +1301,7 @@ impl CompassApp {
             font_size: 14.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         cmds.push(RenderCommand::FillRect {
             x: start_x,
@@ -1308,6 +1338,7 @@ impl CompassApp {
             font_size: 16.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(field_w - 20.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Submit button
@@ -1327,6 +1358,7 @@ impl CompassApp {
             font_size: 15.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Help
@@ -1338,6 +1370,7 @@ impl CompassApp {
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -1360,6 +1393,7 @@ impl CompassApp {
             font_size: 13.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(WINDOW_WIDTH - 24.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Unit indicator on right
@@ -1371,6 +1405,7 @@ impl CompassApp {
             font_size: 13.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 }

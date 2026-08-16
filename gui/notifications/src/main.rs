@@ -26,7 +26,7 @@ use guitk::{
 #[allow(unused_imports)]
 use guitk::event::{EventResult, Modifiers, MouseEventKind};
 #[allow(unused_imports)]
-use guitk::render::FontWeightHint;
+use guitk::render::{FontWeightHint, TextOverflow};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
 use guitk::text;
@@ -976,6 +976,7 @@ impl NotificationDaemon {
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(TOAST_WIDTH - TOAST_PADDING * 2.0 - CLOSE_BTN_SIZE - 16.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Title (bold).
@@ -987,6 +988,7 @@ impl NotificationDaemon {
                 font_size: 14.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(TOAST_WIDTH - TOAST_PADDING * 2.0 - CLOSE_BTN_SIZE - 16.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Body text, one command per wrapped line.
@@ -999,6 +1001,7 @@ impl NotificationDaemon {
                     font_size: TOAST_BODY_FONT_SIZE,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(TOAST_WIDTH - TOAST_PADDING * 2.0 - 16.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
 
@@ -1021,6 +1024,7 @@ impl NotificationDaemon {
                 font_size: 12.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             // Progress bar (if set).
@@ -1076,6 +1080,7 @@ impl NotificationDaemon {
                         font_size: 12.0,
                         font_weight: FontWeightHint::Regular,
                         max_width: None,
+                        overflow: TextOverflow::Clip,
                     });
                     btn_x += btn_width + 8.0;
                 }
@@ -1128,6 +1133,7 @@ impl NotificationDaemon {
             font_size: 16.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Unread count badge.
@@ -1160,6 +1166,7 @@ impl NotificationDaemon {
                 font_size: 11.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 
@@ -1181,6 +1188,7 @@ impl NotificationDaemon {
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Clip scrollable area.
@@ -1209,6 +1217,7 @@ impl NotificationDaemon {
                 font_size: 14.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 
@@ -1236,6 +1245,7 @@ impl NotificationDaemon {
                 font_size: 13.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             // Group notification count.
@@ -1248,6 +1258,7 @@ impl NotificationDaemon {
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             item_y += CENTER_GROUP_HEADER_HEIGHT;
@@ -1318,6 +1329,7 @@ impl NotificationDaemon {
             font_size: 13.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(CENTER_WIDTH - 100.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Body (truncated).
@@ -1335,6 +1347,7 @@ impl NotificationDaemon {
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(CENTER_WIDTH - 40.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Relative timestamp.
@@ -1347,6 +1360,7 @@ impl NotificationDaemon {
             font_size: 10.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Category label.
@@ -1358,6 +1372,7 @@ impl NotificationDaemon {
             font_size: 10.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Separator line.

@@ -39,7 +39,7 @@
 #![allow(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
 
 use guitk::Color;
-use guitk::render::{FontFamily, FontWeightHint, RenderCommand};
+use guitk::render::{FontFamily, FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
 
@@ -1342,6 +1342,7 @@ impl App {
             color: TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: Some(160.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Action buttons
@@ -1373,6 +1374,7 @@ impl App {
                 color: CRUST,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(bw),
+                overflow: TextOverflow::Ellipsis,
             });
             bx += bw + 6.0;
         }
@@ -1407,6 +1409,7 @@ impl App {
             color: search_color,
             font_weight: FontWeightHint::Regular,
             max_width: Some(search_w - 24.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Snippet count
@@ -1418,6 +1421,7 @@ impl App {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(50.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -1467,6 +1471,7 @@ impl App {
                 color: if selected { BLUE } else { OVERLAY0 },
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(30.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             cmds.push(RenderCommand::Text {
@@ -1481,6 +1486,7 @@ impl App {
                     FontWeightHint::Regular
                 },
                 max_width: Some(SIDEBAR_WIDTH - 56.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -1539,6 +1545,7 @@ impl App {
                         color: if selected { TEXT } else { SUBTEXT0 },
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(SIDEBAR_WIDTH - 42.0),
+                        overflow: TextOverflow::Ellipsis,
                     });
 
                     // Count
@@ -1555,6 +1562,7 @@ impl App {
                         color: OVERLAY0,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(25.0),
+                        overflow: TextOverflow::Ellipsis,
                     });
                 }
             }
@@ -1574,6 +1582,7 @@ impl App {
                         color: TEAL,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(SIDEBAR_WIDTH - 50.0),
+                        overflow: TextOverflow::Ellipsis,
                     });
                     cmds.push(RenderCommand::Text {
                         x: SIDEBAR_WIDTH - 30.0,
@@ -1583,6 +1592,7 @@ impl App {
                         color: OVERLAY0,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(25.0),
+                        overflow: TextOverflow::Ellipsis,
                     });
                 }
             }
@@ -1613,6 +1623,7 @@ impl App {
                         color: SUBTEXT0,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(SIDEBAR_WIDTH - 60.0),
+                        overflow: TextOverflow::Ellipsis,
                     });
                     cmds.push(RenderCommand::Text {
                         x: SIDEBAR_WIDTH - 30.0,
@@ -1622,6 +1633,7 @@ impl App {
                         color: OVERLAY0,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(25.0),
+                        overflow: TextOverflow::Ellipsis,
                     });
                 }
             }
@@ -1669,6 +1681,7 @@ impl App {
             color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(LIST_WIDTH - 16.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Snippet entries
@@ -1713,6 +1726,7 @@ impl App {
                 color: CRUST,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(badge_w),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Favorite star
@@ -1725,6 +1739,7 @@ impl App {
                     color: YELLOW,
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(16.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
 
@@ -1743,6 +1758,7 @@ impl App {
                 color: if selected { TEXT } else { SUBTEXT1 },
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(LIST_WIDTH - 20.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Tags
@@ -1762,6 +1778,7 @@ impl App {
                     color: OVERLAY0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(LIST_WIDTH - 20.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
         }
@@ -1775,6 +1792,7 @@ impl App {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(LIST_WIDTH - 20.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }
@@ -1822,6 +1840,7 @@ impl App {
                 color: TEXT,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(width - 120.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Template indicator
@@ -1842,6 +1861,7 @@ impl App {
                     color: CRUST,
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(60.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
 
@@ -1854,6 +1874,7 @@ impl App {
                 color: snippet.language.color(),
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(80.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Use count
@@ -1865,6 +1886,7 @@ impl App {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(120.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Description
@@ -1877,6 +1899,7 @@ impl App {
                     color: SUBTEXT0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(width - 24.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
 
@@ -1921,6 +1944,7 @@ impl App {
                     color: OVERLAY0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(28.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
 
                 // Tokens
@@ -1939,6 +1963,7 @@ impl App {
                             FontWeightHint::Regular
                         },
                         max_width: Some(width - (tx - x) - 12.0),
+                        overflow: TextOverflow::Ellipsis,
                     });
                     tx += tw;
                 }
@@ -1980,6 +2005,7 @@ impl App {
                     color: TEAL,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(tw),
+                    overflow: TextOverflow::Ellipsis,
                 });
                 tag_x += tw + 4.0;
             }
@@ -1994,6 +2020,7 @@ impl App {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(70.0),
+                overflow: TextOverflow::Ellipsis,
             });
         } else {
             // Empty state
@@ -2008,6 +2035,7 @@ impl App {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(200.0),
+                overflow: TextOverflow::Ellipsis,
             });
             cmds.push(RenderCommand::Text {
                 x: text::center_x(subline, center, NORMAL_TEXT, FontWeightHint::Regular),
@@ -2017,6 +2045,7 @@ impl App {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(200.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }
@@ -2056,6 +2085,7 @@ impl App {
             color: BLUE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(overlay_w - 32.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         let stat_items = [
@@ -2078,6 +2108,7 @@ impl App {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(150.0),
+                overflow: TextOverflow::Ellipsis,
             });
             cmds.push(RenderCommand::Text {
                 x: ox + 180.0,
@@ -2087,6 +2118,7 @@ impl App {
                 color: TEXT,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(200.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -2100,6 +2132,7 @@ impl App {
             color: SUBTEXT1,
             font_weight: FontWeightHint::Bold,
             max_width: Some(overlay_w - 32.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         for (li, (lang, count)) in stats.by_language.iter().take(5).enumerate() {
@@ -2120,6 +2153,7 @@ impl App {
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(200.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }

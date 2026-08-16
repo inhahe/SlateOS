@@ -23,7 +23,7 @@
 #[allow(unused_imports)]
 use guitk::color::Color;
 #[allow(unused_imports)]
-use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
 
@@ -564,6 +564,7 @@ impl Annotation {
                     color: self.color,
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
             }
             AnnotationTool::Highlight => {
@@ -1356,6 +1357,7 @@ impl RegionSelector {
                 color: colors::TEXT,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 
@@ -1563,6 +1565,7 @@ impl RecordingIndicator {
             color: colors::TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // File size
@@ -1574,6 +1577,7 @@ impl RecordingIndicator {
             color: colors::SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // FPS
@@ -1585,6 +1589,7 @@ impl RecordingIndicator {
             color: colors::OVERLAY0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         cmds
@@ -1948,6 +1953,7 @@ impl ScreenRecorderApp {
             color: colors::LAVENDER,
             font_weight: FontWeightHint::Bold,
             max_width: Some(SIDEBAR_WIDTH - PADDING * 2.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Separator
@@ -2013,6 +2019,7 @@ impl ScreenRecorderApp {
                     FontWeightHint::Regular
                 },
                 max_width: Some(SIDEBAR_WIDTH - PADDING * 2.0 - 8.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -2045,6 +2052,7 @@ impl ScreenRecorderApp {
             color: self.recording_state.color(),
             font_weight: FontWeightHint::Bold,
             max_width: Some(SIDEBAR_WIDTH - PADDING * 2.0 - 16.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Capture mode info
@@ -2056,6 +2064,7 @@ impl ScreenRecorderApp {
             color: colors::OVERLAY0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(SIDEBAR_WIDTH - PADDING * 2.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         cmds
@@ -2111,6 +2120,7 @@ impl ScreenRecorderApp {
             color: colors::CRUST,
             font_weight: FontWeightHint::Bold,
             max_width: Some(66.0),
+            overflow: TextOverflow::Ellipsis,
         });
         btn_x += 90.0 + BUTTON_SPACING;
 
@@ -2139,6 +2149,7 @@ impl ScreenRecorderApp {
                 color: colors::TEXT,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(52.0),
+                overflow: TextOverflow::Ellipsis,
             });
             btn_x += 80.0 + BUTTON_SPACING;
         }
@@ -2170,6 +2181,7 @@ impl ScreenRecorderApp {
                 },
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(66.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -2183,6 +2195,7 @@ impl ScreenRecorderApp {
             color: colors::SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(170.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         cmds
@@ -2233,6 +2246,7 @@ impl ScreenRecorderApp {
             color: colors::OVERLAY0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(preview_w),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Render annotations over preview
@@ -2303,6 +2317,7 @@ impl ScreenRecorderApp {
                 color: fg,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(tool_btn_w - 20.0),
+                overflow: TextOverflow::Ellipsis,
             });
             tx += tool_btn_w + BUTTON_SPACING;
         }
@@ -2323,6 +2338,7 @@ impl ScreenRecorderApp {
             color: colors::TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
+            overflow: TextOverflow::Ellipsis,
         });
 
         let row_y = y + 24.0;
@@ -2337,6 +2353,7 @@ impl ScreenRecorderApp {
             color: colors::OVERLAY0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(col_w),
+            overflow: TextOverflow::Ellipsis,
         });
         cmds.push(RenderCommand::Text {
             x,
@@ -2346,6 +2363,7 @@ impl ScreenRecorderApp {
             color: colors::TEXT,
             font_weight: FontWeightHint::Regular,
             max_width: Some(col_w),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // FPS
@@ -2357,6 +2375,7 @@ impl ScreenRecorderApp {
             color: colors::OVERLAY0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(col_w),
+            overflow: TextOverflow::Ellipsis,
         });
         cmds.push(RenderCommand::Text {
             x: x + col_w,
@@ -2366,6 +2385,7 @@ impl ScreenRecorderApp {
             color: colors::TEXT,
             font_weight: FontWeightHint::Regular,
             max_width: Some(col_w),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Audio
@@ -2390,6 +2410,7 @@ impl ScreenRecorderApp {
             color: colors::OVERLAY0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(col_w),
+            overflow: TextOverflow::Ellipsis,
         });
         cmds.push(RenderCommand::Text {
             x: x + col_w * 2.0,
@@ -2399,6 +2420,7 @@ impl ScreenRecorderApp {
             color: colors::TEXT,
             font_weight: FontWeightHint::Regular,
             max_width: Some(col_w),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Cursor options row
@@ -2411,6 +2433,7 @@ impl ScreenRecorderApp {
             color: colors::OVERLAY0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(col_w),
+            overflow: TextOverflow::Ellipsis,
         });
         let cursor_text = if self.cursor_options.capture_cursor {
             if self.cursor_options.click_highlight {
@@ -2429,6 +2452,7 @@ impl ScreenRecorderApp {
             color: colors::TEXT,
             font_weight: FontWeightHint::Regular,
             max_width: Some(col_w),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Countdown
@@ -2440,6 +2464,7 @@ impl ScreenRecorderApp {
             color: colors::OVERLAY0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(col_w),
+            overflow: TextOverflow::Ellipsis,
         });
         cmds.push(RenderCommand::Text {
             x: x + col_w,
@@ -2449,6 +2474,7 @@ impl ScreenRecorderApp {
             color: colors::TEXT,
             font_weight: FontWeightHint::Regular,
             max_width: Some(col_w),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Output directory
@@ -2460,6 +2486,7 @@ impl ScreenRecorderApp {
             color: colors::OVERLAY0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(col_w),
+            overflow: TextOverflow::Ellipsis,
         });
         let dir_display = self.output.save_directory.to_string_lossy().to_string();
         cmds.push(RenderCommand::Text {
@@ -2470,6 +2497,7 @@ impl ScreenRecorderApp {
             color: colors::TEXT,
             font_weight: FontWeightHint::Regular,
             max_width: Some(col_w),
+            overflow: TextOverflow::Ellipsis,
         });
 
         cmds
@@ -2487,6 +2515,7 @@ impl ScreenRecorderApp {
             color: colors::TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width - PADDING * 2.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Summary line
@@ -2502,6 +2531,7 @@ impl ScreenRecorderApp {
             color: colors::OVERLAY0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - PADDING * 2.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         if self.history.is_empty() {
@@ -2513,6 +2543,7 @@ impl ScreenRecorderApp {
                 color: colors::SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - PADDING * 2.0),
+                overflow: TextOverflow::Ellipsis,
             });
             return cmds;
         }
@@ -2569,6 +2600,7 @@ impl ScreenRecorderApp {
                 color: colors::TEXT,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(list_w - 96.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Details line
@@ -2586,6 +2618,7 @@ impl ScreenRecorderApp {
                 color: colors::SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(list_w - 96.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Timestamp
@@ -2597,6 +2630,7 @@ impl ScreenRecorderApp {
                 color: colors::OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(list_w - 96.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             entry_y += entry_height;
@@ -2617,6 +2651,7 @@ impl ScreenRecorderApp {
             color: colors::TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width - PADDING * 2.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         if let Some(ref trim) = self.trim {
@@ -2683,6 +2718,7 @@ impl ScreenRecorderApp {
                 color: colors::SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(track_w / 3.0),
+                overflow: TextOverflow::Ellipsis,
             });
             cmds.push(RenderCommand::Text {
                 x: track_x + track_w / 3.0,
@@ -2692,6 +2728,7 @@ impl ScreenRecorderApp {
                 color: colors::TEXT,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(track_w / 3.0),
+                overflow: TextOverflow::Ellipsis,
             });
             cmds.push(RenderCommand::Text {
                 x: track_x + track_w * 2.0 / 3.0,
@@ -2701,6 +2738,7 @@ impl ScreenRecorderApp {
                 color: colors::SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(track_w / 3.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Trim / Reset buttons
@@ -2722,6 +2760,7 @@ impl ScreenRecorderApp {
                 color: colors::CRUST,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(80.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             cmds.push(RenderCommand::FillRect {
@@ -2740,6 +2779,7 @@ impl ScreenRecorderApp {
                 color: colors::TEXT,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(60.0),
+                overflow: TextOverflow::Ellipsis,
             });
         } else {
             cmds.push(RenderCommand::Text {
@@ -2750,6 +2790,7 @@ impl ScreenRecorderApp {
                 color: colors::SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - PADDING * 2.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -2799,6 +2840,7 @@ impl ScreenRecorderApp {
                     FontWeightHint::Regular
                 },
                 max_width: Some(tab_w - 24.0),
+                overflow: TextOverflow::Ellipsis,
             });
             tx += tab_w + 4.0;
         }
@@ -2835,6 +2877,7 @@ impl ScreenRecorderApp {
             color: colors::OVERLAY0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 18.0;
         cmds.push(RenderCommand::FillRect {
@@ -2853,6 +2896,7 @@ impl ScreenRecorderApp {
             color: colors::TEXT,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - 16.0),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 40.0;
 
@@ -2865,6 +2909,7 @@ impl ScreenRecorderApp {
             color: colors::OVERLAY0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 18.0;
         cmds.push(RenderCommand::FillRect {
@@ -2883,6 +2928,7 @@ impl ScreenRecorderApp {
             color: colors::TEXT,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - 16.0),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 40.0;
 
@@ -2895,6 +2941,7 @@ impl ScreenRecorderApp {
             color: colors::SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 24.0;
 
@@ -2907,6 +2954,7 @@ impl ScreenRecorderApp {
             color: colors::SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width),
+            overflow: TextOverflow::Ellipsis,
         });
 
         cmds
@@ -2937,6 +2985,7 @@ impl ScreenRecorderApp {
                 color: colors::TEXT,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width / 2.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Keybinding display
@@ -2956,6 +3005,7 @@ impl ScreenRecorderApp {
                 color: colors::LAVENDER,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(122.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             cy += row_height;
@@ -2985,6 +3035,7 @@ impl ScreenRecorderApp {
             color: colors::TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
+            overflow: TextOverflow::Ellipsis,
         });
 
         if self.schedules.is_empty() {
@@ -2996,6 +3047,7 @@ impl ScreenRecorderApp {
                 color: colors::SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Add button
@@ -3015,6 +3067,7 @@ impl ScreenRecorderApp {
                 color: colors::CRUST,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(100.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             return cmds;
@@ -3067,6 +3120,7 @@ impl ScreenRecorderApp {
                 },
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(width - 180.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Time and duration
@@ -3082,6 +3136,7 @@ impl ScreenRecorderApp {
                 color: colors::SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 180.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Type badge
@@ -3102,6 +3157,7 @@ impl ScreenRecorderApp {
                 color: colors::SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(42.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             cy += row_h;
@@ -3124,6 +3180,7 @@ impl ScreenRecorderApp {
             color: colors::CRUST,
             font_weight: FontWeightHint::Bold,
             max_width: Some(100.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         cmds
@@ -3171,6 +3228,7 @@ impl ScreenRecorderApp {
                 color: colors::SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(self.window_width / 2.0),
+                overflow: TextOverflow::Ellipsis,
             });
         } else {
             cmds.push(RenderCommand::Text {
@@ -3181,6 +3239,7 @@ impl ScreenRecorderApp {
                 color: colors::OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(self.window_width / 2.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -3193,6 +3252,7 @@ impl ScreenRecorderApp {
             color: colors::OVERLAY0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(190.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         cmds
@@ -3243,6 +3303,7 @@ impl ScreenRecorderApp {
             color: colors::TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // "Get ready..." text below
@@ -3254,6 +3315,7 @@ impl ScreenRecorderApp {
             color: colors::SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         cmds

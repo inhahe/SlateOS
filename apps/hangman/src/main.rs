@@ -26,7 +26,7 @@
 use guitk::color::Color;
 #[allow(unused_imports)]
 use guitk::event::{Event, Key, KeyEvent, Modifiers};
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
 // -- Catppuccin Mocha palette -------------------------------------------
@@ -629,6 +629,7 @@ impl HangmanApp {
             font_size: TITLE_FONT + 8.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Subtitle.
@@ -640,6 +641,7 @@ impl HangmanApp {
             font_size: HEADER_FONT,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Category buttons.
@@ -697,6 +699,7 @@ impl HangmanApp {
                     FontWeightHint::Regular
                 },
                 max_width: Some(btn_w - 32.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -710,6 +713,7 @@ impl HangmanApp {
             font_size: STATS_FONT,
             font_weight: FontWeightHint::Regular,
             max_width: Some(btn_w),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Controls.
@@ -728,6 +732,7 @@ impl HangmanApp {
                 font_size: HINT_FONT,
                 font_weight: FontWeightHint::Light,
                 max_width: Some(btn_w),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }
@@ -753,6 +758,7 @@ impl HangmanApp {
             font_size: HEADER_FONT,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Category badge.
@@ -764,6 +770,7 @@ impl HangmanApp {
             font_size: HEADER_FONT - 2.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Difficulty.
@@ -775,6 +782,7 @@ impl HangmanApp {
             font_size: STATS_FONT,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Remaining guesses.
@@ -788,6 +796,7 @@ impl HangmanApp {
             font_size: STATS_FONT,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Hint status.
@@ -805,6 +814,7 @@ impl HangmanApp {
             font_size: STATS_FONT,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Win rate in header.
@@ -817,6 +827,7 @@ impl HangmanApp {
             font_size: STATS_FONT,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -993,6 +1004,7 @@ impl HangmanApp {
                 font_size: WORD_FONT,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             // Underline for each letter slot.
@@ -1060,6 +1072,7 @@ impl HangmanApp {
                     font_size: KEY_FONT,
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
             }
         }
@@ -1092,6 +1105,7 @@ impl HangmanApp {
             font_size: STATS_FONT + 1.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(STATS_PANEL_WIDTH - 20.0),
+            overflow: TextOverflow::Ellipsis,
         });
         y_off += line_h + 4.0;
 
@@ -1117,6 +1131,7 @@ impl HangmanApp {
                 font_size: STATS_FONT,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(STATS_PANEL_WIDTH - 20.0),
+                overflow: TextOverflow::Ellipsis,
             });
             y_off += line_h;
         }
@@ -1142,6 +1157,7 @@ impl HangmanApp {
             font_size: STATS_FONT,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         y_off += line_h;
 
@@ -1155,6 +1171,7 @@ impl HangmanApp {
                 font_size: STATS_FONT - 1.0,
                 font_weight: FontWeightHint::Light,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         } else {
             let wrong_str: String =
@@ -1167,6 +1184,7 @@ impl HangmanApp {
                 font_size: STATS_FONT,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(STATS_PANEL_WIDTH - 20.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
         y_off += line_h + 6.0;
@@ -1180,6 +1198,7 @@ impl HangmanApp {
             font_size: STATS_FONT,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         y_off += line_h;
 
@@ -1193,6 +1212,7 @@ impl HangmanApp {
                 font_size: STATS_FONT - 1.0,
                 font_weight: FontWeightHint::Light,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         } else {
             let correct_str: String =
@@ -1205,6 +1225,7 @@ impl HangmanApp {
                 font_size: STATS_FONT,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(STATS_PANEL_WIDTH - 20.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
         y_off += line_h + 12.0;
@@ -1237,6 +1258,7 @@ impl HangmanApp {
                 font_size: HINT_FONT,
                 font_weight: FontWeightHint::Light,
                 max_width: Some(STATS_PANEL_WIDTH - 20.0),
+                overflow: TextOverflow::Ellipsis,
             });
             y_off += line_h - 2.0;
         }
@@ -1302,6 +1324,7 @@ impl HangmanApp {
             font_size: TITLE_FONT,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // The word.
@@ -1313,6 +1336,7 @@ impl HangmanApp {
             font_size: OVERLAY_FONT,
             font_weight: FontWeightHint::Regular,
             max_width: Some(box_w - 40.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Streak.
@@ -1324,6 +1348,7 @@ impl HangmanApp {
             font_size: OVERLAY_FONT,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Restart hint.
@@ -1335,6 +1360,7 @@ impl HangmanApp {
             font_size: OVERLAY_FONT - 2.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         cmds.push(RenderCommand::Text {
@@ -1345,6 +1371,7 @@ impl HangmanApp {
             font_size: OVERLAY_FONT - 2.0,
             font_weight: FontWeightHint::Light,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 

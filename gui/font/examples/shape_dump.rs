@@ -15,9 +15,9 @@
 //!
 //! ```text
 //! <n>
-//! <string 1>
+//! <language 1>\t<string 1>
 //! ...
-//! <string n>
+//! <language n>\t<string n>
 //! <font path 1>
 //! <font path 2>
 //! ...
@@ -26,6 +26,14 @@
 //! Strings are one per line and so cannot contain a newline, which no shaping
 //! question needs. `\uXXXX` escapes are expanded, so the corpus file stays
 //! readable when it is full of combining marks.
+//!
+//! The language is a BCP 47 tag — `tr`, `sr`, `ro-MD` — and is empty for text
+//! that names no language. It is a field of its own rather than a second
+//! corpus because a language is not a property of the *text*: the same Turkish
+//! letters shape differently depending only on whether the caller said they
+//! were Turkish, and that difference is precisely what needs an oracle. A line
+//! with no tab is read as naming no language, so an older corpus file still
+//! means what it did.
 //!
 //! # Output
 //!
@@ -68,6 +76,7 @@ use std::fmt::Write as _;
 use std::io::{self, BufWriter, Write as _};
 use std::{env, fs, process};
 
+use osfont::lang::Lang;
 use osfont::scaled::ScaledFont;
 use osfont::shape::ShapedGlyph;
 
@@ -89,7 +98,7 @@ fn main() {
         .next()
         .and_then(|n| n.trim().parse().ok())
         .expect("first line must be the number of corpus strings");
-    let corpus: Vec<String> = lines.by_ref().take(count).map(unescape).collect();
+    let corpus: Vec<(Option<Lang>, String)> = lines.by_ref().take(count).map(entry).collect();
     assert_eq!(corpus.len(), count, "corpus is shorter than it claims");
 
     let out = io::stdout();
@@ -115,8 +124,8 @@ fn main() {
             eprintln!("{path}: will not open at {upem}px");
             continue;
         };
-        for (i, string) in corpus.iter().enumerate() {
-            let run = font.shape(string);
+        for (i, (lang, string)) in corpus.iter().enumerate() {
+            let run = font.shape_lang(string, *lang);
             let (logical, logical_pos) = dump(run.glyphs().iter());
             let (visual, visual_pos) = dump(run.draw_order());
             writeln!(
@@ -152,6 +161,18 @@ fn dump<'a>(glyphs: impl Iterator<Item = &'a ShapedGlyph>) -> (String, String) {
         write!(pos, "{:.0};{:.0};{:.0}", glyph.advance, dx, dy).unwrap();
     }
     (ids, pos)
+}
+
+/// Split one corpus line into the language it names and the text itself.
+///
+/// A tag the crate does not recognise is a corpus bug and not a shaping
+/// result, so it stops the run rather than quietly shaping as "no language" —
+/// which would look exactly like agreement.
+fn entry(line: &str) -> (Option<Lang>, String) {
+    let (tag, text) = line.split_once('\t').unwrap_or(("", line));
+    let lang = (!tag.is_empty())
+        .then(|| Lang::new(tag).unwrap_or_else(|| panic!("not a language tag: {tag:?}")));
+    (lang, unescape(text))
 }
 
 /// Expand `\uXXXX` and `\\`, so a corpus of combining marks is still legible.

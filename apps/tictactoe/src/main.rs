@@ -24,7 +24,7 @@
 
 use guitk::color::Color;
 use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
 // ── Catppuccin Mocha ────────────────────────────────────────────────
@@ -411,6 +411,7 @@ impl TicTacToeApp {
             color: COL_TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Status
@@ -440,6 +441,7 @@ impl TicTacToeApp {
             color: status_color,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Grid
@@ -487,6 +489,7 @@ impl TicTacToeApp {
                         color,
                         font_weight: FontWeightHint::Bold,
                         max_width: None,
+                        overflow: TextOverflow::Clip,
                     });
                 }
             }
@@ -517,6 +520,7 @@ impl TicTacToeApp {
             color: COL_BLUE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         cmds.push(RenderCommand::Text {
             x: grid_x + 140.0,
@@ -526,6 +530,7 @@ impl TicTacToeApp {
             color: COL_RED,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         cmds.push(RenderCommand::Text {
             x: grid_x + 260.0,
@@ -535,6 +540,7 @@ impl TicTacToeApp {
             color: COL_YELLOW,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Help
@@ -546,6 +552,7 @@ impl TicTacToeApp {
             color: COL_OVERLAY0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         cmds

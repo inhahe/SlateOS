@@ -8,7 +8,7 @@
 //! which apps were open and where they were placed.
 
 use guitk::color::Color;
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
 // ============================================================================
@@ -541,6 +541,7 @@ impl WorkspacePicker {
             },
             font_weight: FontWeightHint::Bold,
             max_width: Some(picker_w - padding * 2.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Workspace entries.
@@ -578,6 +579,7 @@ impl WorkspacePicker {
                 color: if selected { TEXT } else { SUBTEXT0 },
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             // Name.
@@ -589,6 +591,7 @@ impl WorkspacePicker {
                 color: TEXT,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(picker_w - padding * 2.0 - 100.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Window count and apps.
@@ -601,6 +604,7 @@ impl WorkspacePicker {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             // Shortcut hint.
@@ -613,6 +617,7 @@ impl WorkspacePicker {
                     color: OVERLAY0,
                     font_weight: FontWeightHint::Light,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
             }
 
@@ -632,6 +637,7 @@ impl WorkspacePicker {
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 

@@ -25,7 +25,7 @@
 
 use guitk::color::Color;
 use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
 // ── Catppuccin Mocha palette ────────────────────────────────────────
@@ -519,6 +519,7 @@ impl MazeApp {
             color: COL_TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Difficulty
@@ -529,6 +530,7 @@ impl MazeApp {
             color: COL_SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Moves
@@ -539,6 +541,7 @@ impl MazeApp {
             color: COL_SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Optimal
@@ -550,6 +553,7 @@ impl MazeApp {
                 color: COL_OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 
@@ -561,6 +565,7 @@ impl MazeApp {
             color: COL_GREEN,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Draw maze
@@ -670,6 +675,7 @@ impl MazeApp {
             color: COL_OVERLAY0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Win overlay
@@ -705,6 +711,7 @@ impl MazeApp {
             color: COL_GREEN,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         cmds.push(RenderCommand::Text {
@@ -715,6 +722,7 @@ impl MazeApp {
             color: COL_TEXT,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         if let Some(best) = self.best_moves {
@@ -725,6 +733,7 @@ impl MazeApp {
                 color: COL_YELLOW,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 
@@ -735,6 +744,7 @@ impl MazeApp {
             color: COL_OVERLAY0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 }

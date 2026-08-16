@@ -54,7 +54,7 @@
 #[allow(unused_imports)]
 use guitk::color::Color;
 #[allow(unused_imports)]
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
 use guitk::table::{Column, Fit, Table};
@@ -2115,6 +2115,7 @@ impl UndeleteApp {
             font_size: FONT_SIZE_HEADING,
             font_weight: FontWeightHint::Bold,
             max_width: Some(self.width - PADDING * 2.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         let list_y = content_y + 28.0;
@@ -2134,6 +2135,7 @@ impl UndeleteApp {
             font_size: FONT_SIZE_HEADING,
             font_weight: FontWeightHint::Bold,
             max_width: Some(self.width - PADDING * 2.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Quick scan option
@@ -2210,6 +2212,7 @@ impl UndeleteApp {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(card_w * 0.5),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Filesystem and size
@@ -2227,6 +2230,7 @@ impl UndeleteApp {
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Regular,
             max_width: Some(card_w - 24.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Usage bar
@@ -2304,6 +2308,7 @@ impl UndeleteApp {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(self.width - x - radio_size - PADDING - 8.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -2323,6 +2328,7 @@ impl UndeleteApp {
             font_size: FONT_SIZE_HEADING,
             font_weight: FontWeightHint::Bold,
             max_width: Some(self.width - PADDING * 2.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Progress bar
@@ -2361,6 +2367,7 @@ impl UndeleteApp {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(bar_w),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Bytes scanned
@@ -2376,6 +2383,7 @@ impl UndeleteApp {
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Regular,
             max_width: Some(bar_w),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // ETA
@@ -2388,6 +2396,7 @@ impl UndeleteApp {
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(bar_w),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }
@@ -2439,6 +2448,7 @@ impl UndeleteApp {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(SIDEBAR_WIDTH - PADDING * 2.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // "All Files" entry
@@ -2466,6 +2476,7 @@ impl UndeleteApp {
                 FontWeightHint::Regular
             },
             max_width: Some(SIDEBAR_WIDTH - PADDING * 2.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Category entries
@@ -2508,6 +2519,7 @@ impl UndeleteApp {
                     FontWeightHint::Regular
                 },
                 max_width: Some(SIDEBAR_WIDTH - PADDING * 2.0 - 16.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -2530,6 +2542,7 @@ impl UndeleteApp {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(SIDEBAR_WIDTH - PADDING * 2.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         let confidences = [
@@ -2559,6 +2572,7 @@ impl UndeleteApp {
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(SIDEBAR_WIDTH - PADDING * 2.0 - 14.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }
@@ -2857,6 +2871,7 @@ impl UndeleteApp {
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - PADDING * 2.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }
@@ -2890,6 +2905,7 @@ impl UndeleteApp {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(32.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Filename next to icon
@@ -2901,6 +2917,7 @@ impl UndeleteApp {
             font_size: FONT_SIZE_HEADING,
             font_weight: FontWeightHint::Bold,
             max_width: Some(inner_w - 64.0),
+            overflow: TextOverflow::Ellipsis,
         });
         cmds.push(RenderCommand::Text {
             x: inner_x + 60.0,
@@ -2910,6 +2927,7 @@ impl UndeleteApp {
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Regular,
             max_width: Some(inner_w - 64.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         cy += 64.0;
@@ -2964,6 +2982,7 @@ impl UndeleteApp {
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(inner_w - value_w),
+                overflow: TextOverflow::Ellipsis,
             });
             // These rows are a fixed 20px, so a long value is elided rather
             // than wrapped — but *which end* is cut matters. A path's tail is
@@ -2994,6 +3013,7 @@ impl UndeleteApp {
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(value_w),
+                overflow: TextOverflow::Ellipsis,
             });
             cy += 20.0;
         }
@@ -3009,6 +3029,7 @@ impl UndeleteApp {
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Bold,
             max_width: Some(inner_w),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 18.0;
 
@@ -3042,6 +3063,7 @@ impl UndeleteApp {
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Regular,
             max_width: Some(inner_w),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 24.0;
 
@@ -3064,6 +3086,7 @@ impl UndeleteApp {
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Bold,
             max_width: Some(inner_w),
+            overflow: TextOverflow::Ellipsis,
         });
         cy += 18.0;
 
@@ -3086,6 +3109,7 @@ impl UndeleteApp {
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(inner_w),
+                overflow: TextOverflow::Ellipsis,
             });
             cy += 18.0;
 
@@ -3106,6 +3130,7 @@ impl UndeleteApp {
                 font_size: 10.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(inner_w - 12.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }
@@ -3148,6 +3173,7 @@ impl UndeleteApp {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(self.width * 0.4),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Target directory
@@ -3159,6 +3185,7 @@ impl UndeleteApp {
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Regular,
             max_width: Some(self.width * 0.3),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Action buttons
@@ -3229,6 +3256,7 @@ impl UndeleteApp {
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Regular,
             max_width: Some(self.width - PADDING * 2.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -3266,6 +3294,7 @@ impl UndeleteApp {
             font_size: FONT_SIZE_HEADING,
             font_weight: FontWeightHint::Bold,
             max_width: Some(self.width - PADDING * 4.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         cmds.push(RenderCommand::Text {
@@ -3281,6 +3310,7 @@ impl UndeleteApp {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(self.width - PADDING * 4.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         cmds.push(RenderCommand::Text {
@@ -3291,6 +3321,7 @@ impl UndeleteApp {
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Regular,
             max_width: Some(self.width - PADDING * 4.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Individual results
@@ -3359,6 +3390,7 @@ impl UndeleteApp {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(row_w * 0.4),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Destination
@@ -3370,6 +3402,7 @@ impl UndeleteApp {
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Regular,
             max_width: Some(row_w * 0.4),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Size recovered
@@ -3385,6 +3418,7 @@ impl UndeleteApp {
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Regular,
             max_width: Some(row_w * 0.25),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Status text
@@ -3401,6 +3435,7 @@ impl UndeleteApp {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(row_w * 0.18),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Error message if failed
@@ -3413,6 +3448,7 @@ impl UndeleteApp {
                 font_size: 10.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(row_w * 0.18),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }
@@ -3461,6 +3497,7 @@ impl UndeleteApp {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(20.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Title
@@ -3472,6 +3509,7 @@ impl UndeleteApp {
             font_size: FONT_SIZE_TITLE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(self.width - PADDING * 2.0 - 44.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Bottom border
@@ -3515,6 +3553,7 @@ impl UndeleteApp {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width - 16.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 }
@@ -4343,6 +4382,7 @@ mod tests {
                     font_size,
                     font_weight,
                     max_width: Some(w),
+                    overflow: TextOverflow::Ellipsis,
                     ..
                 } if x >= panel_x => Some((text, font_size, font_weight, w)),
                 _ => None,

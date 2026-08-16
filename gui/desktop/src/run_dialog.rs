@@ -31,7 +31,7 @@
 //! ```
 
 use guitk::event::{EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
 
@@ -722,6 +722,7 @@ impl RunDialog {
             font_size: TITLE_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Instruction text.
@@ -735,6 +736,7 @@ impl RunDialog {
             font_size: BODY_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(DIALOG_WIDTH - PADDING * 2.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // "Open:" label.
@@ -746,6 +748,7 @@ impl RunDialog {
             font_size: BODY_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Input field background.
@@ -798,6 +801,7 @@ impl RunDialog {
             font_size: INPUT_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(input_w - 8.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         // Cursor.
@@ -822,6 +826,7 @@ impl RunDialog {
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(input_w),
+                overflow: TextOverflow::Ellipsis,
             });
         }
 
@@ -877,6 +882,7 @@ impl RunDialog {
                     font_size: INPUT_FONT_SIZE,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(input_w - 16.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
             }
         }
@@ -964,6 +970,7 @@ impl RunDialog {
                 FontWeightHint::Regular
             },
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 

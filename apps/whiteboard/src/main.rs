@@ -18,7 +18,7 @@
 #![allow(dead_code)]
 
 use guitk::color::Color;
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
 
@@ -1793,6 +1793,7 @@ impl WhiteboardApp {
             font_size: 15.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Stroke info
@@ -1805,6 +1806,7 @@ impl WhiteboardApp {
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Opacity label
@@ -1817,6 +1819,7 @@ impl WhiteboardApp {
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Stroke style indicator
@@ -1832,6 +1835,7 @@ impl WhiteboardApp {
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Grid toggle indicator
@@ -1852,6 +1856,7 @@ impl WhiteboardApp {
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Snap indicator
@@ -1872,6 +1877,7 @@ impl WhiteboardApp {
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Current color swatch
@@ -1903,6 +1909,7 @@ impl WhiteboardApp {
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Bottom border
@@ -1970,6 +1977,7 @@ impl WhiteboardApp {
                     FontWeightHint::Regular
                 },
                 max_width: Some(tab_width - 16.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             tx += tab_width + 4.0;
@@ -1992,6 +2000,7 @@ impl WhiteboardApp {
             font_size: 13.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Bottom border
@@ -2053,6 +2062,7 @@ impl WhiteboardApp {
                     FontWeightHint::Regular
                 },
                 max_width: Some(36.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             ty += 38.0;
@@ -2079,6 +2089,7 @@ impl WhiteboardApp {
             font_size: 10.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
         ty += 16.0;
 
@@ -2350,6 +2361,7 @@ impl WhiteboardApp {
                     font_size: 14.0 * self.zoom,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
+                    overflow: TextOverflow::Clip,
                 });
             }
             ShapeKind::StickyNote {
@@ -2402,6 +2414,7 @@ impl WhiteboardApp {
                         font_size: STICKY_FONT_SIZE * self.zoom,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(text_width * self.zoom),
+                        overflow: TextOverflow::Ellipsis,
                     });
                 }
             }
@@ -2537,6 +2550,7 @@ impl WhiteboardApp {
             font_size: 13.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // "+" add layer button
@@ -2556,6 +2570,7 @@ impl WhiteboardApp {
             font_size: 13.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Layer rows
@@ -2591,6 +2606,7 @@ impl WhiteboardApp {
                 font_size: 11.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             // Lock icon
@@ -2607,6 +2623,7 @@ impl WhiteboardApp {
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             // Layer name
@@ -2622,6 +2639,7 @@ impl WhiteboardApp {
                     FontWeightHint::Regular
                 },
                 max_width: Some(RIGHT_PANEL_WIDTH - 80.0),
+                overflow: TextOverflow::Ellipsis,
             });
 
             // Opacity indicator
@@ -2634,6 +2652,7 @@ impl WhiteboardApp {
                 font_size: 10.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
 
             ly += LAYER_ROW_HEIGHT + 2.0;
@@ -2683,6 +2702,7 @@ impl WhiteboardApp {
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Shape count
@@ -2695,6 +2715,7 @@ impl WhiteboardApp {
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Selection count
@@ -2708,6 +2729,7 @@ impl WhiteboardApp {
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
+                overflow: TextOverflow::Clip,
             });
         }
 
@@ -2727,6 +2749,7 @@ impl WhiteboardApp {
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Undo/redo counts
@@ -2742,6 +2765,7 @@ impl WhiteboardApp {
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
         // Page info
@@ -2757,6 +2781,7 @@ impl WhiteboardApp {
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 }

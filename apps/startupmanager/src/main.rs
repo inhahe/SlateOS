@@ -28,7 +28,7 @@
 #[allow(unused_imports)]
 use guitk::color::Color;
 #[allow(unused_imports)]
-use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
 use guitk::text;
@@ -1312,6 +1312,7 @@ impl StartupUI {
             font_size: FONT_SIZE_HEADING,
             font_weight: FontWeightHint::Bold,
             max_width: Option::None,
+            overflow: TextOverflow::Clip,
         });
         // Separator line.
         tree.push(RenderCommand::Line {
@@ -1391,6 +1392,7 @@ impl StartupUI {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(w - 8.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -1440,6 +1442,7 @@ impl StartupUI {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(field_w - 16.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -1482,6 +1485,7 @@ impl StartupUI {
                 font_size: FONT_SIZE_SMALL,
                 font_weight: weight,
                 max_width: Some(col.width() - 8.0),
+                overflow: TextOverflow::Ellipsis,
             });
             cx += col.width();
         }
@@ -1548,6 +1552,7 @@ impl StartupUI {
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(COL_NAME_WIDTH - 8.0),
+                overflow: TextOverflow::Ellipsis,
             });
             cx += COL_NAME_WIDTH;
 
@@ -1560,6 +1565,7 @@ impl StartupUI {
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(COL_PUBLISHER_WIDTH - 8.0),
+                overflow: TextOverflow::Ellipsis,
             });
             cx += COL_PUBLISHER_WIDTH;
 
@@ -1572,6 +1578,7 @@ impl StartupUI {
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(COL_STATUS_WIDTH - 8.0),
+                overflow: TextOverflow::Ellipsis,
             });
             cx += COL_STATUS_WIDTH;
 
@@ -1584,6 +1591,7 @@ impl StartupUI {
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(COL_IMPACT_WIDTH - 8.0),
+                overflow: TextOverflow::Ellipsis,
             });
             cx += COL_IMPACT_WIDTH;
 
@@ -1596,6 +1604,7 @@ impl StartupUI {
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(COL_TYPE_WIDTH - 8.0),
+                overflow: TextOverflow::Ellipsis,
             });
             cx += COL_TYPE_WIDTH;
 
@@ -1608,6 +1617,7 @@ impl StartupUI {
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(COL_PATH_WIDTH - 8.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }
@@ -1650,6 +1660,7 @@ impl StartupUI {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Option::None,
+            overflow: TextOverflow::Clip,
         });
     }
 
@@ -1669,6 +1680,7 @@ impl StartupUI {
             font_size: FONT_SIZE_HEADING,
             font_weight: FontWeightHint::Bold,
             max_width: Some(self.window_width - PADDING * 2.0),
+            overflow: TextOverflow::Ellipsis,
         });
         ly += line_spacing + 4.0;
 
@@ -1700,6 +1712,7 @@ impl StartupUI {
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Bold,
             max_width: Option::None,
+            overflow: TextOverflow::Clip,
         });
         tree.push(RenderCommand::Text {
             x: x + text::measure(label, FONT_SIZE_SMALL, FontWeightHint::Bold) + 8.0,
@@ -1709,6 +1722,7 @@ impl StartupUI {
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Regular,
             max_width: Some(self.window_width / 2.0 - 40.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -1745,6 +1759,7 @@ impl StartupUI {
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Regular,
             max_width: Some(self.window_width - PADDING * 2.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -1802,6 +1817,7 @@ impl StartupUI {
             font_size: FONT_SIZE_HEADING,
             font_weight: FontWeightHint::Bold,
             max_width: Option::None,
+            overflow: TextOverflow::Clip,
         });
 
         // Form fields.
@@ -1834,6 +1850,7 @@ impl StartupUI {
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Bold,
             max_width: Option::None,
+            overflow: TextOverflow::Clip,
         });
         tree.push(RenderCommand::Text {
             x: field_x + 80.0,
@@ -1843,6 +1860,7 @@ impl StartupUI {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Option::None,
+            overflow: TextOverflow::Clip,
         });
 
         // Impact selector.
@@ -1854,6 +1872,7 @@ impl StartupUI {
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Bold,
             max_width: Option::None,
+            overflow: TextOverflow::Clip,
         });
         tree.push(RenderCommand::Text {
             x: field_x + 280.0,
@@ -1863,6 +1882,7 @@ impl StartupUI {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Option::None,
+            overflow: TextOverflow::Clip,
         });
 
         // Dialog buttons (Cancel / Save).
@@ -1906,6 +1926,7 @@ impl StartupUI {
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Bold,
             max_width: Option::None,
+            overflow: TextOverflow::Clip,
         });
 
         let input_y = y + 14.0;
@@ -1945,6 +1966,7 @@ impl StartupUI {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(w - 12.0),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
@@ -1983,6 +2005,7 @@ impl StartupUI {
             font_size: FONT_SIZE_HEADING,
             font_weight: FontWeightHint::Bold,
             max_width: Option::None,
+            overflow: TextOverflow::Clip,
         });
 
         let name = self
@@ -1999,6 +2022,7 @@ impl StartupUI {
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(dlg_w - PADDING * 2.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
         tree.push(RenderCommand::Text {
@@ -2009,6 +2033,7 @@ impl StartupUI {
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Regular,
             max_width: Option::None,
+            overflow: TextOverflow::Clip,
         });
 
         let btn_y = dlg_y + dlg_h - BUTTON_HEIGHT - 12.0;

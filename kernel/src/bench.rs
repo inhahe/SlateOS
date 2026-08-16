@@ -3392,6 +3392,22 @@ fn bench_pick_next_scaling() {
     // Mid priority; the specific level is irrelevant to the O(1) claim.
     const PRIO: u8 = 16;
     const DEPTHS: [u32; 5] = [1, 8, 64, 256, 1024];
+    // One name per depth, and a parallel array rather than a formatted string
+    // because `run` takes `&'static str` — deliberately, so that recording a
+    // measurement never allocates inside the harness.
+    //
+    // All five used to run under the single name `sched_pick_next_isolated`,
+    // which is why they could not be recorded even in principle: five history
+    // entries under one key is not a series, it is four values overwriting each
+    // other. The shared name also made the log five identical lines apart from
+    // the numbers.
+    const DEPTH_NAMES: [&str; 5] = [
+        "sched_pick_next_d1",
+        "sched_pick_next_d8",
+        "sched_pick_next_d64",
+        "sched_pick_next_d256",
+        "sched_pick_next_d1024",
+    ];
 
     let mut shallow_ns = 0u64;
     let mut deepest = None;
@@ -3402,8 +3418,13 @@ fn bench_pick_next_scaling() {
             rq.enqueue(id, PRIO);
         }
 
+        // `get` rather than `DEPTH_NAMES[i]`: the two arrays are the same
+        // length by construction, but indexing would be a panic path in the
+        // kernel if that ever stopped being true.
+        let name = DEPTH_NAMES.get(i).copied().unwrap_or("sched_pick_next_unknown_depth");
+
         // Steady-state rotation keeps `depth` tasks queued throughout.
-        let result = run("sched_pick_next_isolated", 2000, || {
+        let result = run(name, 2000, || {
             if let Some(id) = rq.pick_next() {
                 rq.enqueue(id, PRIO);
                 core::hint::black_box(id);
@@ -3416,6 +3437,23 @@ fn bench_pick_next_scaling() {
 
         if i == 0 {
             shallow_ns = result.min_ns;
+        }
+        // Every depth but the last is tracked here; the last is scored below
+        // under the stable name `sched_pick_next`, so recording it here too
+        // would enter the same measurement twice.
+        //
+        // Tracked rather than declared diagnostics, which is the opposite call
+        // from the `_breakdown` stages, and for a reason that is about what the
+        // benchmark asserts. A decomposition's stages are meaningless apart
+        // from their siblings — there is nothing for a comparator to compare.
+        // A scaling sweep's points are each a complete measurement of the same
+        // operation at a different load, and the *claim* is the shape they
+        // trace. The in-kernel verdict below only tests the two endpoints
+        // against a 4x threshold with generous headroom, so a regression that
+        // bent the middle of the curve would pass it. Recording each point is
+        // what makes the shape diffable across boots.
+        if i + 1 < DEPTHS.len() {
+            track(name, &result);
         }
         deepest = Some(result);
     }

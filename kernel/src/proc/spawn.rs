@@ -23927,7 +23927,10 @@ pub fn self_test_pkgconf_on_slateos_libc() -> KernelResult<()> {
     // promise which nonzero code a miss produces.  Asserting `!= 0` tests what
     // is promised; asserting `== 1` would make the rung fail on an upstream
     // bump that renumbered an error.
-    let cases: [(&str, &[&[u8]], &[u8], bool); 5] = [
+    /// One pkgconf rung: (label, argv, expected stdout, expect exit code 0).
+    type PkgconfCase<'a> = (&'a str, &'a [&'a [u8]], &'a [u8], bool);
+
+    let cases: [PkgconfCase<'_>; 5] = [
         (
             "--modversion slateos-simple",
             &[b"--modversion", b"slateos-simple"],

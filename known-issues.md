@@ -13365,6 +13365,24 @@ Left at WATCHLIST rather than closed unilaterally, since retargeting a closure
 condition an earlier session set deliberately is the operator's call if they
 want it; the analysis above is the argument for doing so.
 
+**The streak is now counted by machine, 2026-08-16.** `scripts/boot-history.py`
+records every `boot-test.sh` run to `bench/boot-history.jsonl`; ask it rather
+than trusting the **7** above, which is stale by construction:
+
+```
+python scripts/boot-history.py --streaks
+```
+
+Its `W1` fingerprint deliberately encodes the *retargeted* reading of this
+entry, not the original one — no marker, serial cut **mid-line**, and **no
+exception or panic anywhere**. Per the analysis above a console-lock re-entry
+should now print rather than go silent along both remaining paths, so a match
+is not another tick toward ~90: it **falsifies** the cured-incidentally
+argument, and is the one observation this entry says is worth more than the 83
+remaining blind boots. The recorder prints that instruction next to the match.
+The counter starts at 0 today and says so — it cannot retroactively count the
+boots since 2026-06-14. See the TOOLING entry at the end of this file.
+
 ### B-FONT-CALIBRI-SHAPES-A-FRACTION-SLASH-DIFFERENTLY-FROM-HARFBUZZ. Three faces disagree by one glyph on `1/2` — 2026-08-14 — ✅ FIXED 2026-08-14 (`gui/font/src/otl.rs`, `gui/font/src/gsub.rs`)
 
 **Where:** `gui/font/src/gsub.rs`, the substitution pass; the disagreement is
@@ -24370,10 +24388,81 @@ Lane A's own artifacts are already relinked against the fresh `libc.a`
 (`bash-slateos.elf`, `pkgconf-slateos.elf`), so once the nine ELFs land the
 image builds with no further action from anyone.
 
+## TOOLING — boot outcomes are now counted, so the "clean streak" closure conditions above are queryable (2026-08-16, lane A)
+
+**Status: LANDED 2026-08-16** — `scripts/boot-history.py`,
+`scripts/test-boot-history.py`, wired into `scripts/boot-test.sh`'s EXIT trap.
+
+Several entries in this file close on a **count** — "a fresh combined
+dedicated-soak + routine-boot clean streak past ~90 with no recurrence" (W1),
+and similar bars on the other intermittent hangs. Nothing counted them. W1's
+own status line has read **clean streak 7** since 2026-06-14 while many dozens
+of boots have passed, and the entry says so itself: *"the recorded streak of 7
+is stale bookkeeping, not a real count."*
+
+That is not carelessness. Keeping the number right by hand means editing this
+file after every boot, which nobody will do and nobody did.
+
+**What now happens.** Every run of `scripts/boot-test.sh` appends one row to
+`bench/boot-history.jsonl` — verdict, commit, branch, host, wall time, label,
+and for a **failure**, the last 40 serial lines. The last part matters
+independently of the counting: `build/serial-test.txt` is gitignored scratch
+that the next run overwrites, so until now the evidence for a hang survived
+only if somebody pasted it in here before the next boot. That loss already cost
+one investigation (`B-FORKEXEC-BOOT-HANG`; `boot-test.sh`'s own comment says
+so). Failures now carry their freeze context into a committed file.
+
+**How to read it:**
+
+```
+python scripts/boot-history.py --streaks     # per-issue standing
+python scripts/boot-history.py --list        # recent runs, one line each
+```
+
+**Fingerprints currently recognised**, each validated by a serial sample
+reconstructed in `scripts/test-boot-history.py` from the evidence quoted in
+this file:
+
+| id | matched on |
+|---|---|
+| `W1` | no marker, log cut **mid-line**, no exception and no panic anywhere |
+| `B-KASAN-…-WEDGES-MID-PRINT-ON-A-PAGE-FAULT` | the cut lands inside the `EXCEPTION:` line itself |
+| `B-PTHREAD-TEARDOWN-PF` | `#PF` at a small fixed address with `cloned-thread` in the report |
+| `B-FORKEXEC-BOOT-HANG` | quiet stop **between** lines right after the last thread is reaped |
+| `W-KERNEL-COW-WRITE` | `error=0x3` write fault against a user-half address |
+
+**Two properties that are the point, not decoration.**
+
+1. **The verdict is derived from `(exit code, serial log)` at one call site**,
+   not passed in at each of `boot-test.sh`'s ~12 `exit` sites. A recorder wired
+   per-site is wrong the first time someone adds a thirteenth — and wrong in the
+   direction that matters, because the site nobody wired up is a *failure* site,
+   so the omission reads downstream as a clean streak.
+2. **A fingerprint that has never been validated against a real occurrence
+   prints a warning in place of its streak, not a number.** A matcher that
+   cannot fire produces a *perfect* clean streak, and a perfect clean streak is
+   exactly what closes an entry in this file. Same rule as
+   `scripts/stamp-ancestry.py` (design-decisions.md §208): *could not verify*
+   must never render as *fine*.
+
+**What this does not do.** It does not retroactively count the boots that
+happened before it existed, and it says so: an entry whose known occurrences
+predate the file reports "the count starts at the recorder, not at the bug."
+So the streaks above start at 0 today and are honest rather than flattering.
+Ctrl-C and build failures are deliberately **not** recorded — an interruption
+is not a boot outcome, and compile errors are common enough that recording them
+would reset every streak faster than it could grow.
+
+Rationale and the alternatives considered: design-decisions.md §209.
+
 ## B-A-THE-BOOT-LOCK-HAS-NO-QUEUE-SO-A-POLITE-WAITER-CAN-BE-OVERTAKEN-FOREVER (lane B, 2026-08-16)
 
-**Status: open.** `scripts/boot-test.sh` is lane A's file; asked as
-`requests/b-a-the-boot-lock-has-no-queue-so-a-waiting-lane-can-starve.md`.
+**Status: ✅ FIXED 2026-08-16 by lane A in `74f2bff75`** — ticket queue in
+`scripts/boot-test.sh`'s `BOOT-LOCK-REGION`, plus a new exit status 4 for
+"refused to boot beside a live lane". See "How it was fixed" at the end of this
+entry; the request file
+(`requests/b-a-the-boot-lock-has-no-queue-so-a-waiting-lane-can-starve.md`)
+carries lane A's full reply.
 
 ### What is wrong
 
@@ -24442,12 +24531,60 @@ owner) are in the request. The last of those is worth doing regardless: it does
 not fix starvation, but it stops starvation from silently becoming an invalid
 result.
 
-### Workaround in use
+### Workaround in use (no longer needed)
 
 Lane B raised its own `run-timeout.py` budget from 1200s to 3600s. The smaller
 budget was killing the run *during the lock wait*, which made the starvation
 present as a self-inflicted timeout — worth knowing, but it is a symptom
-workaround and not the fix.
+workaround and not the fix. With exit 4 a refusal now returns promptly and
+legibly, so the larger budget is no longer required for this; lane B may want to
+lower it again, since a 3600s ceiling also delays detection of a genuine hang.
+
+### How it was fixed (lane A, `74f2bff75`)
+
+The ticket queue as proposed. Every run drops `<epoch>-<pid>` in
+`$BOOT_LOCK_DIR.waiters/` before the acquire loop and attempts `mkdir` only when
+its own ticket is oldest; a lane that releases and immediately re-runs takes a
+fresh ticket at the back, which is what converts the observed starvation into a
+handover. Tickets are swept with the lock's *existing* liveness rules rather
+than a second set (proven-alive never swept, provably-dead after 60s, anything
+unjudgeable after 1200s), because a dead ticket at the head of the queue would
+block every lane — a worse failure than the starvation being fixed. The queue
+directory is a *sibling* of the lock, not a child, since the lock dir is created
+and destroyed by acquisition and the queue must outlive that.
+
+The escalation was fixed too, and it needed to be wider than the request
+proposed. `BOOT_LOCK_WAIT` expiry now refuses with **exit 4** whenever something
+live is demonstrably ahead of us. Checking only the *lock owner* is not enough
+once a queue exists: in the case where the lock is free but a live lane holds
+the head ticket, there is no owner to check, so an owner-only rule would boot
+anyway — beside the one process most likely to enter QEMU seconds later. The
+escalation would have survived the fix, merely relocated. Expiry still boots
+anyway when nothing live can be demonstrated at all, preserving the original
+conservative default for genuinely unknowable states.
+
+Exit 4 also **deletes the serial log and register dump**. `boot-test.sh`
+truncates the serial log only *after* the lock, so on the refuse path it still
+held the previous run's output, and every soak wrapper greps it the moment the
+script returns — which would re-report an old catch as new, or manufacture one
+outright. Deleting the artefacts makes "nothing was booted" self-evident to any
+caller, including ones written later that never heard of the status. The five
+loop callers were taught about it regardless: `wedge-soak.sh` no longer spends a
+sample on a refusal and now reports iterations actually *booted* rather than
+`MAX_ITERS`; `wdog-reset-experiment.sh` mattered most, since it derives its
+entire verdict from wall time and would have read a lock wait as "the watchdog
+counter fired".
+
+The anti-barge alternative was deliberately **not** taken: with a real FIFO
+queue it is redundant (a re-running lane already goes to the back), and keeping
+a heuristic alongside a queue is two rules that can disagree.
+
+Both defects that made the final version correct were found by
+`scripts/test-boot-lock.sh`, not by reading: the exit status was being swallowed
+by a command-substitution subshell in the harness itself, and the free-lock /
+live-head-waiter hole above. That harness now runs 15 cases in ~6s with no
+kernel build — cases 10-15 cover FIFO in both directions, the ticket sweep and
+its 60s floor, unparseable tickets, and that acquiring drops our own ticket.
 
 ## B-THE-FIXTURE-STAMP-HASHED-WORKTREE-BYTES-SO-IT-DID-NOT-SURVIVE-A-CHECKOUT (lane B, 2026-08-16)
 

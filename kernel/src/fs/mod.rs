@@ -272,6 +272,7 @@ pub mod notiffilter;
 pub mod notifgroup;
 pub mod notifprefs;
 pub mod notify;
+pub mod ntfs;
 pub mod numastat;
 pub mod oobe;
 pub mod oomkiller;

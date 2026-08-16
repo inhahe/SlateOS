@@ -844,10 +844,19 @@ Roadmap:
   resolved over the whole text and the direction boundaries cut in afterwards,
   which is what stops bidi rule I2 turning that digit into a one-character
   Arabic run. Sweep: `agree` 51422 → 51423, `differ` 1179 → 1178.
-  **Next: the paragraph direction and bidirectional carets the bidi work left
-  open** (`TD-FONT-CANNOT-BE-TOLD-A-PARAGRAPH-DIRECTION`,
-  `TD-FONT-CARETS-ARE-NOT-BIDIRECTIONAL`). Vello itself waits on `[A]`'s GPU
-  driver.
+  **Bidirectional carets are done as well** (§442;
+  `TD-FONT-CARETS-ARE-NOT-BIDIRECTIONAL` closed). `x_of` and `offset_at` now
+  measure across the screen rather than through the string, and both carry an
+  `Affinity`, because at a direction boundary one byte offset has two equally
+  correct screen positions and the run cannot know which the user meant. The
+  run stores its per-glyph bidi levels for this and not merely the L2
+  permutation: reversing a one-glyph right-to-left stretch is the identity, so
+  the permutation alone would face a lone Hebrew letter the wrong way. The old
+  logical prefix sum survives as `width_upto`, for truncation.
+  **Next: the paragraph direction the bidi work left open**
+  (`TD-FONT-CANNOT-BE-TOLD-A-PARAGRAPH-DIRECTION` — `shape_with(text, base)`
+  beside `shape`, which keeps calling it with `Base::Auto`). Vello itself waits
+  on `[A]`'s GPU driver.
 - `[C]` Text overflow policy — **done** (§427, `TD-GUI-CLIPPED-TEXT-IS-NOT-MARKED`
   closed). `RenderCommand::Text` carries a **required** `overflow: TextOverflow`
   (`Clip` | `Ellipsis`) and the compositor draws the mark, reserving room for it

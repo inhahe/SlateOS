@@ -1098,13 +1098,21 @@ impl ScaledFont {
         // so by now the run has no one-to-one correspondence left with the
         // string — but every glyph still knows the byte it came from, and so
         // its level.
-        let visual = if levels.is_empty() {
+        //
+        // The per-glyph levels outlive the permutation they produce: a caret
+        // needs to know which side of a glyph is its *start*, and the
+        // permutation cannot say — reversing a one-glyph right-to-left run is
+        // the identity. So they are carried into the run alongside the order.
+        let per_glyph: Vec<Level> = if levels.is_empty() {
             Vec::new()
         } else {
-            let per_glyph: Vec<Level> = out
-                .iter()
+            out.iter()
                 .map(|g| levels.get(g.cluster).copied().unwrap_or(0))
-                .collect();
+                .collect()
+        };
+        let visual = if per_glyph.is_empty() {
+            Vec::new()
+        } else {
             let order = bidi::visual_order(&per_glyph);
             if legacy_kerning {
                 recharge_kerns(&mut out, &order);
@@ -1127,7 +1135,7 @@ impl ScaledFont {
             // find.
             self.synthesize_marks(&mut out, &visual, &roles, &levels);
         }
-        ShapedRun::reordered(out, visual)
+        ShapedRun::reordered(out, visual, per_glyph)
     }
 
     /// Cut `glyphs` into the stretches that shape together — between tabs and

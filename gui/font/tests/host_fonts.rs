@@ -41,7 +41,7 @@ use osfont::gsub::SubGlyph;
 use osfont::raster::rasterize;
 use osfont::scaled::{ScaledFont, Target};
 use osfont::script::ScriptTags;
-use osfont::shape::TAB_WIDTH_IN_SPACES;
+use osfont::shape::{Affinity, TAB_WIDTH_IN_SPACES};
 use osfont::sfnt::{name_id, Face, PathCmd, SfntError};
 
 /// Every glyph these tests substitute came from Latin text, so Latin is the
@@ -1503,7 +1503,7 @@ fn shaped_runs_agree_with_their_strings_about_boundaries() {
                 for (what, at) in [
                     ("fit", run.fit(px, end)),
                     ("fit_end", run.fit_end(px, end)),
-                    ("offset_at", run.offset_at(px, end)),
+                    ("offset_at", run.offset_at(px, end).offset),
                 ] {
                     assert!(
                         allowed(at),
@@ -1520,27 +1520,47 @@ fn shaped_runs_agree_with_their_strings_about_boundaries() {
                 px += 1.0;
             }
 
-            // And the caret must never move backwards as it advances through
-            // the string, however the glyphs were rearranged underneath.
+            // The *measurement* must never go backwards as it advances through
+            // the string: it is a prefix width, and a prefix only grows.
+            //
+            // This is deliberately asserted of `width_upto` and not of `x_of`.
+            // A caret is a position on the screen, and in bidirectional text
+            // walking the string forwards walks the screen backwards for the
+            // length of every right-to-left run — so monotonicity is exactly
+            // the property a correct caret must *not* have. Asserting it here
+            // used to pass only because `x_of` was a prefix width wearing a
+            // caret's name.
             let mut last = 0.0f32;
             for at in 0..=end {
                 if !text.is_char_boundary(at) {
                     continue;
                 }
-                let x = run.x_of(at, end);
+                let w = run.width_upto(at, end);
                 assert!(
-                    x >= last - 0.01,
-                    "{}: {text:?} caret went backwards, x_of({at}) = {x} after \
-                     {last}",
+                    w >= last - 0.01,
+                    "{}: {text:?} width_upto({at}) = {w} after {last}",
                     path.display()
                 );
-                assert!(
-                    x <= run.width() + 0.01,
-                    "{}: {text:?} x_of({at}) = {x}, past the run's {} px",
-                    path.display(),
-                    run.width()
-                );
-                last = x;
+                last = w;
+            }
+
+            // The caret itself has to land somewhere on the run, from either
+            // side of every boundary. Both affinities, because at a direction
+            // change they are two different points and both are drawn.
+            for at in 0..=end {
+                if !text.is_char_boundary(at) {
+                    continue;
+                }
+                for affinity in [Affinity::Downstream, Affinity::Upstream] {
+                    let x = run.x_of(at, end, affinity);
+                    assert!(
+                        (-0.01..=run.width() + 0.01).contains(&x),
+                        "{}: {text:?} x_of({at}, {affinity:?}) = {x}, outside \
+                         the run's {} px",
+                        path.display(),
+                        run.width()
+                    );
+                }
             }
         }
     }

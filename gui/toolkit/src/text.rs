@@ -721,8 +721,12 @@ pub fn char_index_at(text: &str, offset: f32, size: f32, weight: FontWeightHint)
     // every character boundary. This converts because the callers still count
     // characters; the conversion is where a caret inside a ligature gets
     // rounded to the ligature's start rather than into the middle of it.
+    // The affinity is dropped: this returns a character index, and both sides
+    // of a direction boundary are the *same* index — the affinity says which
+    // of its two screen positions a caret should be drawn at, which is a
+    // question for whoever draws the caret, not for whoever counts characters.
     let at = with_font(size, weight, FontFamily::Ui, |font| {
-        font.shape(text).offset_at(offset, text.len())
+        font.shape(text).offset_at(offset, text.len()).offset
     });
     text.get(..at)
         .map_or_else(|| text.chars().count(), |prefix| prefix.chars().count())

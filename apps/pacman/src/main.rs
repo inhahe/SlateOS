@@ -169,10 +169,7 @@ impl Pos {
     }
 
     fn in_bounds(self) -> bool {
-        self.row >= 0
-            && self.row < MAZE_ROWS as i32
-            && self.col >= 0
-            && self.col < MAZE_COLS as i32
+        self.row >= 0 && self.row < MAZE_ROWS as i32 && self.col >= 0 && self.col < MAZE_COLS as i32
     }
 
     /// Wrap position for the tunnel (horizontal wrap-around at tunnel row).
@@ -225,7 +222,12 @@ enum GhostId {
 }
 
 impl GhostId {
-    const ALL: [GhostId; 4] = [GhostId::Blinky, GhostId::Pinky, GhostId::Inky, GhostId::Clyde];
+    const ALL: [GhostId; 4] = [
+        GhostId::Blinky,
+        GhostId::Pinky,
+        GhostId::Inky,
+        GhostId::Clyde,
+    ];
 
     fn color(self) -> Color {
         match self {
@@ -576,10 +578,7 @@ impl PacmanApp {
                 // Uses Blinky's position: target is 2 cells ahead of player,
                 // then doubled from Blinky's position.
                 let (dr, dc) = self.player_dir.delta();
-                let ahead = Pos::new(
-                    self.player_pos.row + dr * 2,
-                    self.player_pos.col + dc * 2,
-                );
+                let ahead = Pos::new(self.player_pos.row + dr * 2, self.player_pos.col + dc * 2);
                 let blinky_pos = self
                     .ghosts
                     .iter()
@@ -733,16 +732,14 @@ impl PacmanApp {
                 }
             };
 
-            let new_dir =
-                self.ghost_choose_direction(ghost_pos, current_dir, target, ghost_mode);
+            let new_dir = self.ghost_choose_direction(ghost_pos, current_dir, target, ghost_mode);
             let new_pos = ghost_pos.moved(new_dir).tunnel_wrap();
 
             // Verify the new position is passable.
             if self.is_ghost_passable(new_pos)
                 || ghost_mode == GhostMode::Eaten
                 || (new_pos.in_bounds()
-                    && self.maze[new_pos.row as usize][new_pos.col as usize]
-                        != Cell::Wall)
+                    && self.maze[new_pos.row as usize][new_pos.col as usize] != Cell::Wall)
             {
                 self.ghosts[i].pos = new_pos;
                 self.ghosts[i].direction = new_dir;
@@ -917,7 +914,11 @@ impl PacmanApp {
         }
 
         match self.state {
-            GameState::Menu => if key == Key::N { self.start_new_game() },
+            GameState::Menu => {
+                if key == Key::N {
+                    self.start_new_game()
+                }
+            }
             GameState::Playing => match key {
                 Key::Up => self.queued_dir = Some(Direction::Up),
                 Key::Down => self.queued_dir = Some(Direction::Down),
@@ -933,7 +934,11 @@ impl PacmanApp {
                 Key::N => self.start_new_game(),
                 _ => {}
             },
-            GameState::GameOver => if key == Key::N { self.start_new_game() },
+            GameState::GameOver => {
+                if key == Key::N {
+                    self.start_new_game()
+                }
+            }
         }
     }
 

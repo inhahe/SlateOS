@@ -213,9 +213,10 @@ impl Board {
                 let idx = rng.next_range(4);
                 let dir = dirs[idx];
                 if let Some(last) = last_dir
-                    && dir == last.opposite() {
-                        continue;
-                    }
+                    && dir == last.opposite()
+                {
+                    continue;
+                }
                 if self.slide(dir) {
                     last_dir = Some(dir);
                     break;
@@ -335,22 +336,21 @@ impl SlidingPuzzle {
 
     fn event(&mut self, event: &Event) {
         match event {
-            Event::Key(KeyEvent { key, modifiers, .. })
-                if *modifiers == Modifiers::NONE => {
-                    match key {
-                        Key::Up => self.handle_move(Direction::Up),
-                        Key::Down => self.handle_move(Direction::Down),
-                        Key::Left => self.handle_move(Direction::Left),
-                        Key::Right => self.handle_move(Direction::Right),
-                        Key::N => self.new_game(),
-                        Key::H => self.show_help = !self.show_help,
-                        Key::Num3 => self.set_size(3),
-                        Key::Num4 => self.set_size(4),
-                        Key::Num5 => self.set_size(5),
-                        Key::T => self.show_numbers = !self.show_numbers,
-                        _ => {}
-                    }
+            Event::Key(KeyEvent { key, modifiers, .. }) if *modifiers == Modifiers::NONE => {
+                match key {
+                    Key::Up => self.handle_move(Direction::Up),
+                    Key::Down => self.handle_move(Direction::Down),
+                    Key::Left => self.handle_move(Direction::Left),
+                    Key::Right => self.handle_move(Direction::Right),
+                    Key::N => self.new_game(),
+                    Key::H => self.show_help = !self.show_help,
+                    Key::Num3 => self.set_size(3),
+                    Key::Num4 => self.set_size(4),
+                    Key::Num5 => self.set_size(5),
+                    Key::T => self.show_numbers = !self.show_numbers,
+                    _ => {}
                 }
+            }
             Event::Mouse(MouseEvent { x, y, kind }) => {
                 if matches!(kind, MouseEventKind::Press(MouseButton::Left)) {
                     self.handle_mouse_click(*x, *y);

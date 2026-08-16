@@ -262,57 +262,25 @@ struct ImageDimensions {
     height: u32,
 }
 
-/// Read a little-endian u32 from a byte slice at `offset`.
-/// Returns `None` if out of bounds.
-fn read_le_u32(data: &[u8], offset: usize) -> Option<u32> {
-    Some(u32::from_le_bytes(read_array(data, offset)?))
-}
-
-/// Read a big-endian u32 from a byte slice at `offset`.
-fn read_be_u32(data: &[u8], offset: usize) -> Option<u32> {
-    Some(u32::from_be_bytes(read_array(data, offset)?))
-}
-
-/// Read a big-endian u16 from a byte slice at `offset`.
-fn read_be_u16(data: &[u8], offset: usize) -> Option<u16> {
-    Some(u16::from_be_bytes(read_array(data, offset)?))
-}
-
-/// Read a little-endian u16 from a byte slice at `offset`.
-fn read_le_u16(data: &[u8], offset: usize) -> Option<u16> {
-    Some(u16::from_le_bytes(read_array(data, offset)?))
-}
-
-/// Read `N` bytes at `offset`, or `None` if they are not all present.
-///
-/// `offset + N` is computed with `checked_add` because `offset` comes from an
-/// image header: a header claiming an offset near `usize::MAX` would otherwise
-/// wrap to a small number and read the wrong bytes rather than declining.
-fn read_array<const N: usize>(data: &[u8], offset: usize) -> Option<[u8; N]> {
-    let end = offset.checked_add(N)?;
-    data.get(offset..end)?.try_into().ok()
-}
-
 /// Parse BMP header to extract dimensions.
 ///
 /// BMP files start with `BM`, and the BITMAPINFOHEADER at offset 14 contains
 /// width (LE i32 at +4) and height (LE i32 at +8, may be negative for
 /// top-down bitmaps).
 fn parse_bmp_dimensions(data: &[u8]) -> Option<ImageDimensions> {
-    if data.len() < 26 {
+    if !byteread::starts_with(data, b"BM") {
         return None;
     }
-    if data.get(0..2)? != b"BM" {
-        return None;
-    }
-    let width = read_le_u32(data, 18)? as i32;
-    let height = (read_le_u32(data, 22)? as i32).abs();
+    let width = byteread::i32_le_at(data, 18)?;
+    // A negative height means a top-down bitmap; `i32::MIN` has no positive
+    // counterpart, so take the magnitude as a `u32` rather than negating.
+    let height = byteread::i32_le_at(data, 22)?.unsigned_abs();
     if width <= 0 || height == 0 {
         return None;
     }
     Some(ImageDimensions {
-        width: width as u32,
-        height: height as u32,
+        width: width.unsigned_abs(),
+        height,
     })
 }
 
@@ -328,8 +296,8 @@ fn parse_png_dimensions(data: &[u8]) -> Option<ImageDimensions> {
     if data.get(0..8)? != magic {
         return None;
     }
-    let width = read_be_u32(data, 16)?;
-    let height = read_be_u32(data, 20)?;
+    let width = byteread::u32_be_at(data, 16)?;
+    let height = byteread::u32_be_at(data, 20)?;
     if width == 0 || height == 0 {
         return None;
     }
@@ -348,8 +316,8 @@ fn parse_gif_dimensions(data: &[u8]) -> Option<ImageDimensions> {
     if sig != b"GIF87a" && sig != b"GIF89a" {
         return None;
     }
-    let width = read_le_u16(data, 6)? as u32;
-    let height = read_le_u16(data, 8)? as u32;
+    let width = byteread::u16_le_at(data, 6)? as u32;
+    let height = byteread::u16_le_at(data, 8)? as u32;
     if width == 0 || height == 0 {
         return None;
     }
@@ -390,7 +358,7 @@ fn parse_jpeg_dimensions(data: &[u8]) -> Option<ImageDimensions> {
         if pos + 2 > data.len() {
             return None;
         }
-        let seg_len = read_be_u16(data, pos)? as usize;
+        let seg_len = byteread::u16_be_at(data, pos)? as usize;
         if seg_len < 2 {
             return None;
         }
@@ -400,8 +368,8 @@ fn parse_jpeg_dimensions(data: &[u8]) -> Option<ImageDimensions> {
             if pos + 7 > data.len() {
                 return None;
             }
-            let height = read_be_u16(data, pos + 3)? as u32;
-            let width = read_be_u16(data, pos + 5)? as u32;
+            let height = byteread::u16_be_at(data, pos + 3)? as u32;
+            let width = byteread::u16_be_at(data, pos + 5)? as u32;
             if width == 0 || height == 0 {
                 return None;
             }
@@ -622,9 +590,9 @@ fn try_bmp_thumbnail(
         return None;
     }
 
-    let offset = read_le_u32(&data, 10)? as usize;
-    let bits_per_pixel = read_le_u16(&data, 28)?;
-    let compression = read_le_u32(&data, 30)?;
+    let offset = byteread::u32_le_at(&data, 10)? as usize;
+    let bits_per_pixel = byteread::u16_le_at(&data, 28)?;
+    let compression = byteread::u32_le_at(&data, 30)?;
 
     // Only handle uncompressed 24-bit or 32-bit BMPs.
     if compression != 0 || (bits_per_pixel != 24 && bits_per_pixel != 32) {
@@ -650,8 +618,7 @@ fn try_bmp_thumbnail(
 
     // BMP stores rows bottom-up by default (positive height).  Convert to
     // top-down ARGB.
-    let height_raw = read_le_u32(&data, 22)? as i32;
-    let bottom_up = height_raw > 0;
+    let bottom_up = byteread::i32_le_at(&data, 22)? > 0;
 
     let mut canvas = Canvas::transparent(dims.width, dims.height);
     for y in 0..dims.height {
@@ -1090,8 +1057,8 @@ impl DiskCache {
         // stops a file there from claiming dimensions its pixel data does not
         // match. `Canvas::from_argb` is the check, and it is the same one every
         // other route into a `Canvas` goes through.
-        let width = u32::from_le_bytes(read_array(&data, 0)?);
-        let height = u32::from_le_bytes(read_array(&data, 4)?);
+        let width = u32::from_le_bytes(byteread::array_at(&data, 0)?);
+        let height = u32::from_le_bytes(byteread::array_at(&data, 4)?);
         let pixel_data = data.get(8..)?;
         Some(into_thumbnail(
             Canvas::from_argb(width, height, pixel_data)?,

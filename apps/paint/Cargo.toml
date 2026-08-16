@@ -5,6 +5,8 @@ edition = "2024"
 description = "SlateOS Paint — drawing and image editing application"
 [dependencies]
 guitk = { path = "../../gui/toolkit" }
+# `decode_bmp` reads its header fields at offsets the file itself supplies.
+byteread = { path = "../../byteread" }
 
 [lints]
 workspace = true

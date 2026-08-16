@@ -1053,26 +1053,21 @@ pub fn encode_bmp(buf: &Canvas) -> Vec<u8> {
     out
 }
 
-/// Reads a fixed-width field out of a header at a known offset.
-///
-/// The header fields all sit within the first 54 bytes, and the old code
-/// established that with one `data.len() < 54` check and then restated it at
-/// each of the twenty-two byte indexes that followed. A `get(range)?` states
-/// the bound where the read happens, which is the only place it can be wrong.
-fn header_field<const N: usize>(data: &[u8], at: usize) -> Option<[u8; N]> {
-    data.get(at..at.checked_add(N)?)?.try_into().ok()
-}
-
 /// Decodes a 32-bit BMP file into a pixel buffer. Returns None on invalid data.
+///
+/// Every field here sits at a fixed offset in the first 54 bytes, and the old
+/// code established that with one `data.len() < 54` check and then restated it
+/// at each of the twenty-two byte indexes that followed. `byteread` states the
+/// bound where the read happens, which is the only place it can be wrong.
 pub fn decode_bmp(data: &[u8]) -> Option<Canvas> {
-    if data.get(..2)? != b"BM" {
+    if !byteread::starts_with(data, b"BM") {
         return None;
     }
 
-    let pixel_offset = u32::from_le_bytes(header_field(data, 10)?) as usize;
-    let width = i32::from_le_bytes(header_field(data, 18)?);
-    let height = i32::from_le_bytes(header_field(data, 22)?);
-    let bpp = u16::from_le_bytes(header_field(data, 28)?);
+    let pixel_offset = byteread::u32_le_at(data, 10)? as usize;
+    let width = byteread::i32_le_at(data, 18)?;
+    let height = byteread::i32_le_at(data, 22)?;
+    let bpp = byteread::u16_le_at(data, 28)?;
 
     if width <= 0 || bpp != 32 {
         return None;
@@ -1110,7 +1105,7 @@ pub fn decode_bmp(data: &[u8]) -> Option<Canvas> {
         let row_start = pixel_offset.checked_add((src_row as usize).checked_mul(row_bytes)?)?;
         for col in 0..w {
             let off = row_start.checked_add((col as usize).checked_mul(4)?)?;
-            let [b, g_val, r, a] = header_field::<4>(data, off)?;
+            let [b, g_val, r, a] = byteread::array_at::<4>(data, off)?;
             buf.set(col, row, Color::rgba(r, g_val, b, a));
         }
     }

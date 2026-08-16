@@ -2944,6 +2944,7 @@ version = "0.1.0"
 name = "explorer"
 version = "0.1.0"
 dependencies = [
+ "byteread",
  "guitk",
  "textfind",
 ]
@@ -7527,6 +7528,7 @@ version = "0.1.0"
 name = "paint"
 version = "0.1.0"
 dependencies = [
+ "byteread",
  "guitk",
 ]
 

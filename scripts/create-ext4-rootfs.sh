@@ -982,6 +982,64 @@ else
     echo "[rootfs]       (build it with: wsl -d Ubuntu -- bash scripts/pkgconf-spike/run.sh)"
 fi
 
+# --- .pc fixtures for the pkgconf self-test -----------------------------------
+# `/bin/pkgconf --version` proves the binary loads, relocates, runs main and
+# exits 0. It does not prove pkgconf *works*, because the thing pkgconf does is
+# parse .pc files, and a --version run opens none. These fixtures give it real
+# input, and are the half of that test that belongs to lane B.
+#
+# Staged in /usr/lib/pkgconfig and driven with PKG_CONFIG_LIBDIR pointing at it.
+# PKG_CONFIG_LIBDIR *replaces* the compiled-in search path rather than
+# prepending to it (that is PKG_CONFIG_PATH), so the test depends only on what
+# we staged here — not on the ./configure default, which we never pass and
+# therefore do not control. That default is now echoed by
+# scripts/pkgconf-spike/run.sh, but a self-test should not be sensitive to it.
+#
+# Staged unconditionally, even when the pkgconf binary is absent. They are four
+# small text files, and making them conditional would give the self-test two
+# independent skip conditions plus a confusing third state (binary present,
+# fixtures missing) that nothing would diagnose.
+PC_DIR="$STAGE/usr/lib/pkgconfig"
+mkdir -p "$PC_DIR"
+
+# Nested variable expansion: includedir refers to prefix. `--cflags` must emit
+# the fully-expanded -I/opt/slateos/include, which is a single token, so the
+# expected output is exact rather than order-dependent.
+cat > "$PC_DIR/slateos-simple.pc" <<'EOF'
+prefix=/opt/slateos
+includedir=${prefix}/include
+libdir=${prefix}/lib
+
+Name: slateos-simple
+Description: Fixture package for the SlateOS pkgconf self-test
+Version: 1.2.3
+Cflags: -I${includedir}
+Libs: -L${libdir} -lslatesimple
+EOF
+
+# Dependency traversal plus a version constraint that is SATISFIED.
+cat > "$PC_DIR/slateos-dep.pc" <<'EOF'
+Name: slateos-dep
+Description: Fixture that depends on slateos-simple with a satisfiable version
+Version: 0.1.0
+Requires: slateos-simple >= 1.0.0
+Cflags: -DSLATE_DEP=1
+Libs: -lslatedep
+EOF
+
+# The same, with a constraint that CANNOT be satisfied (1.2.3 is not >= 9.0.0).
+# Without this the suite would pass even if version comparison were a no-op that
+# always returned "satisfied" — the failing direction is the one that proves the
+# comparison actually runs.
+cat > "$PC_DIR/slateos-badver.pc" <<'EOF'
+Name: slateos-badver
+Description: Fixture whose version constraint is deliberately unsatisfiable
+Version: 0.0.1
+Requires: slateos-simple >= 9.0.0
+EOF
+
+echo "[rootfs] staged pkgconf .pc fixtures in /usr/lib/pkgconfig: slateos-simple, slateos-dep, slateos-badver"
+
 # --- native C ring-3 fixtures (services/ctest-*) ------------------------------
 # A few self-tests need constructs only a C compiler emits — e.g. a `__thread`
 # access plus a `%fs:0x28` stack-protector canary load in a *child* thread (see

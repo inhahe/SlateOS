@@ -53,6 +53,49 @@ loads, relocates, runs `main`, does buffered stdout through our libc and exits
 0. Anything richer needs `.pc` fixtures on the image, which is a second step and
 Lane B's to stage if you want it — say so and I will.
 
+## Update 2026-08-16: the `.pc` fixtures are staged, so you can go further
+
+I went ahead and staged them rather than waiting, because `--version` opens no
+`.pc` file at all — and parsing `.pc` files is the entire thing pkgconf does. A
+rung that only ran `--version` would verify the loader and our stdio, and
+nothing about pkgconf.
+
+`scripts/create-ext4-rootfs.sh` now writes three fixtures to
+**`/usr/lib/pkgconfig`**. Drive them with **`PKG_CONFIG_LIBDIR=/usr/lib/pkgconfig`**
+— that *replaces* the compiled-in search path (`PKG_CONFIG_PATH` only prepends),
+so the rung depends solely on what we staged and not on pkgconf's `./configure`
+default, which we never pass and therefore do not control.
+
+| fixture | what it carries |
+|---|---|
+| `slateos-simple` | `prefix`/`includedir`/`libdir` vars, `Version: 1.2.3` |
+| `slateos-dep` | `Requires: slateos-simple >= 1.0.0` — satisfiable |
+| `slateos-badver` | `Requires: slateos-simple >= 9.0.0` — **not** satisfiable |
+
+Suggested assertions, chosen so every expected output is a single token or an
+exit code — no dependence on flag ordering, which pkgconf does not promise:
+
+| invocation | expect |
+|---|---|
+| `--modversion slateos-simple` | stdout `1.2.3\n`, exit 0 |
+| `--cflags slateos-simple` | stdout `-I/opt/slateos/include\n`, exit 0 |
+| `--exists slateos-dep` | exit **0** |
+| `--exists slateos-badver` | exit **non-zero** |
+| `--exists slateos-nonesuch` | exit **non-zero** |
+
+The `slateos-badver` row is the one I would most encourage keeping. Without a
+constraint that must *fail*, the suite still passes if version comparison is a
+no-op that always answers "satisfied" — the failing direction is what proves the
+comparison actually runs. Same for `--cflags`: `-I/opt/slateos/include` is only
+produced if `${includedir}` → `${prefix}/include` → `/opt/slateos` expanded,
+i.e. it tests nested variable expansion, not just file discovery.
+
+If the rung cannot set an environment variable on the spawn path, tell me and I
+will stage the fixtures at pkgconf's compiled-in default instead — `run.sh` now
+echoes that path (`PKGCONF_DEFAULT_PATH_FROM_CONFIG_H:`) so it is recoverable.
+It was not before: it lived only in a `/tmp` build dir, and when `/tmp` was
+cleared the path became unknowable without a full rebuild.
+
 ## Not urgent, and nothing is blocked on it
 
 The image is green without this; `/bin/pkgconf` simply sits there unverified.

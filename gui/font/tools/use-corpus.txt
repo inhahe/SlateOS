@@ -32,6 +32,14 @@
 # KOMBUVA DEKA, the two-part vowel: one character, two pieces, and the pre-base
 # half must end up on the far side of the consonant from the post-base half.
 \u0d9a\u0ddc
+# The same text spelled as the two characters it decomposes to. It must draw
+# the same on a face that has both halves — and, on the 555 faces that have
+# neither, it must *not* collapse back into the one character, because those
+# are two characters the text typed and not one this crate took apart.
+\u0d9a\u0dd9\u0dcf
+# And with the al-lakuna on the end: three pieces from one character, which
+# come back together one step at a time on a face that is missing one of them.
+\u0d9a\u0ddd
 # Rakaransaya: KA, al-lakuna, ZWJ, RA. The ZWJ is hidden from the grammar and
 # joins the cluster in front of it — get the filter wrong and this is two
 # clusters, which is one dotted circle too many.

@@ -44,6 +44,16 @@
 //! font-conditional composition can leave the marks in an order NFC would
 //! never produce.
 //!
+//! There is one exception to layer 1, and it is stated as an exception rather
+//! than folded in: a **two-part vowel sign** — one character drawn as two
+//! marks on opposite sides of a consonant, of which Sinhala, Bengali, Tamil,
+//! Balinese, Chakma and nine other scripts have between them — is never
+//! recomposed on the drawing path, because a reordering shaper has to be able
+//! to move the front half on its own. [`SplitVowels`] is that switch, and
+//! [`rejoin_split_vowels`] is the font half of it: the halves go back together
+//! on a face that cannot draw them, since two missing-glyph boxes are worse
+//! than one.
+//!
 //! # Clusters
 //!
 //! A combining mark takes the cluster of the character it attaches to, not
@@ -452,11 +462,45 @@ fn hangul_decompose(cp: u32) -> Option<(char, Option<char>)> {
     Some((l, Some(v)))
 }
 
+/// Whether a two-part vowel sign, typed or decomposed into its two halves,
+/// is joined back into the single character Unicode says it is.
+///
+/// A handful of Indic and Brahmi-derived scripts write one vowel with two
+/// marks that sit on opposite sides of the consonant — Sinhala KOMBUVA HAA
+/// AELA-PILLA is U+0DD9 in front and U+0DCF behind, spelled as the one
+/// character U+0DDC. NFC joins them, because as *text* they are one vowel.
+/// A shaper must not, because as *drawing* they are two glyphs in two places
+/// and the reordering pass has to be able to move the front half on its own.
+///
+/// HarfBuzz spells this as a per-shaper composition hook — `compose_use` and
+/// `compose_indic`, both of which are the plain Unicode composition guarded by
+/// "refuse if the first character is a combining mark". Here it is one switch
+/// rather than two hooks, because the two hooks turn out to describe the same
+/// set: of the 59 canonical compositions in Unicode 16 whose first half is a
+/// mark, 12 are composition exclusions that never recompose anyway, and every
+/// one of the remaining 47 is a split vowel of a script shaped by Indic or by
+/// the Universal Shaping Engine — Bengali, Oriya, Tamil, Telugu, Kannada,
+/// Malayalam, Sinhala, Balinese, Chakma, Grantha, Tulu-Tigalari, Tirhuta,
+/// Siddham, Dives Akuru, Gurung Khema. There is no third case for a
+/// per-shaper answer to differ about, which the test below pins.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum SplitVowels {
+    /// Join the halves. What NFC means.
+    Rejoin,
+    /// Leave them apart, for the reordering pass to place separately.
+    LeaveApart,
+}
+
 /// The character `a` and `b` compose to, if they do.
 ///
 /// Under [`Hangul::LeaveAlone`] a jamo pair does not compose, so text typed as
-/// jamo stays jamo for the Hangul shaper to rule on.
-fn compose_pair(a: char, b: char, hangul: Hangul) -> Option<char> {
+/// jamo stays jamo for the Hangul shaper to rule on. Under
+/// [`SplitVowels::LeaveApart`] a pair whose first half is a combining mark does
+/// not compose, so a two-part vowel stays in two parts.
+fn compose_pair(a: char, b: char, hangul: Hangul, split: SplitVowels) -> Option<char> {
+    if split == SplitVowels::LeaveApart && is_any_mark(a) {
+        return None;
+    }
     if hangul == Hangul::Normalize
         && let Some(s) = hangul_compose(a as u32, b as u32)
     {
@@ -580,9 +624,14 @@ fn sort_marks(pieces: &mut [Piece], class: impl Fn(char) -> u8) {
 #[must_use]
 pub(crate) fn nfc(text: &str) -> Vec<Piece> {
     // NFC is NFC: a question about *text* gets the Unicode answer, Hangul
-    // included and SARA AM left whole. Only the drawing path below asks for
-    // anything else.
-    normalize(text, Hangul::Normalize, SaraAm::LeaveAlone)
+    // included, SARA AM left whole and split vowels joined. Only the drawing
+    // path below asks for anything else.
+    normalize(
+        text,
+        Hangul::Normalize,
+        SaraAm::LeaveAlone,
+        SplitVowels::Rejoin,
+    )
 }
 
 /// Whether Thai and Lao SARA AM comes apart before the marks are sorted.
@@ -607,14 +656,15 @@ enum SaraAm {
     LeaveAlone,
 }
 
-/// [`nfc`], with the Hangul and SARA AM questions left open.
+/// [`nfc`], with the Hangul, SARA AM and split-vowel questions left open.
 ///
-/// The whole of NFC except that `hangul` decides whether Hangul takes part and
-/// `sara_am` decides whether Thai's two-part vowel does. Split out so the
-/// drawing path can ask for NFC-of-everything-else without `nfc` itself
+/// The whole of NFC except that `hangul` decides whether Hangul takes part,
+/// `sara_am` decides whether Thai's two-part vowel does, and `split` decides
+/// whether the Indic and Brahmi two-part vowels are joined back up. Split out
+/// so the drawing path can ask for NFC-of-everything-else without `nfc` itself
 /// ceasing to mean NFC.
 #[must_use]
-fn normalize(text: &str, hangul: Hangul, sara_am: SaraAm) -> Vec<Piece> {
+fn normalize(text: &str, hangul: Hangul, sara_am: SaraAm, split: SplitVowels) -> Vec<Piece> {
     let mut pieces: Vec<Piece> = Vec::with_capacity(text.len());
     let mut cluster = 0usize;
     for (offset, ch) in text.char_indices() {
@@ -636,7 +686,7 @@ fn normalize(text: &str, hangul: Hangul, sara_am: SaraAm) -> Vec<Piece> {
         crate::thai::preprocess(&mut pieces);
     }
     sort_marks(&mut pieces, combining_class);
-    compose(&mut pieces, hangul);
+    compose(&mut pieces, hangul, split);
     pieces
 }
 
@@ -648,7 +698,7 @@ fn normalize(text: &str, hangul: Hangul, sara_am: SaraAm) -> Vec<Piece> {
 /// same or lower combining class from composing onto that starter, because
 /// composing past it would move a mark across another mark and change what
 /// the text says.
-fn compose(pieces: &mut Vec<Piece>, hangul: Hangul) {
+fn compose(pieces: &mut Vec<Piece>, hangul: Hangul, split: SplitVowels) {
     let mut starter: Option<usize> = None;
     let mut last_ccc: Option<u8> = None;
     let mut write = 0usize;
@@ -668,7 +718,7 @@ fn compose(pieces: &mut Vec<Piece>, hangul: Hangul) {
         if let Some(at) = starter
             && !blocked
             && let Some(&(base, base_cluster)) = pieces.get(at)
-            && let Some(joined) = compose_pair(base, ch, hangul)
+            && let Some(joined) = compose_pair(base, ch, hangul, split)
         {
             if let Some(slot) = pieces.get_mut(at) {
                 *slot = (joined, base_cluster);
@@ -724,7 +774,17 @@ pub(crate) fn pieces(text: &str, has_glyph: impl Fn(char) -> bool) -> Vec<Piece>
         // depends on what the face covers, so it is `hangul::preprocess` that
         // decides it, a stage later — and it can only decide if the spelling
         // reaching it is still the text's own.
-        normalize(text, Hangul::LeaveAlone, SaraAm::Decompose)
+        //
+        // And nothing whose first half is a mark, which is every two-part
+        // vowel: those are two glyphs on two sides of a consonant, and joining
+        // them would hand the reordering pass one character where it needs to
+        // move two things to two places. See [`SplitVowels`].
+        normalize(
+            text,
+            Hangul::LeaveAlone,
+            SaraAm::Decompose,
+            SplitVowels::LeaveApart,
+        )
     } else {
         // Already NFC by inspection, so the offsets are the string's own and
         // there is nothing to reorder or join.
@@ -736,7 +796,14 @@ pub(crate) fn pieces(text: &str, has_glyph: impl Fn(char) -> bool) -> Vec<Piece>
     // *cannot* split has to reach `fit_to_face` whole, which is what happens
     // when this declines.
     khmer::split_matras(&mut out, &has_glyph);
-    fit_to_face(&mut out, has_glyph);
+    fit_to_face(&mut out, &has_glyph);
+    // After `fit_to_face` and not before, because the two passes would
+    // otherwise fight: this one puts a two-part vowel back together when the
+    // face cannot draw the halves, and `fit_to_face` — seeing a character with
+    // no glyph and a drawable base — would immediately take it apart again.
+    // Running it second means `fit_to_face` never sees the rejoined character
+    // and has nothing to say about it.
+    rejoin_split_vowels(&mut out, &has_glyph);
     if work {
         // After `fit_to_face` and not before: splitting a character the face
         // cannot draw adds marks, and those marks have to be sorted with the
@@ -779,7 +846,7 @@ pub(crate) fn pieces(text: &str, has_glyph: impl Fn(char) -> bool) -> Vec<Piece>
 ///
 /// Recursing on the first piece is what lets a chain be walked: `ế` on a face
 /// with `e` and both marks comes apart in two steps, through `ê`.
-pub(crate) fn fit_to_face(pieces: &mut Vec<Piece>, has_glyph: impl Fn(char) -> bool) {
+pub(crate) fn fit_to_face(pieces: &mut Vec<Piece>, has_glyph: &impl Fn(char) -> bool) {
     if pieces.iter().all(|&(ch, _)| has_glyph(ch)) {
         return;
     }
@@ -790,6 +857,61 @@ pub(crate) fn fit_to_face(pieces: &mut Vec<Piece>, has_glyph: impl Fn(char) -> b
         }
     }
     *pieces = out;
+}
+
+/// Put a two-part vowel back together when the face cannot draw the halves.
+///
+/// The other half of [`SplitVowels::LeaveApart`], and the half that makes it
+/// agree with HarfBuzz rather than merely resemble it. Leaving these vowels
+/// apart is only an improvement while both halves have glyphs; on a face with
+/// no Sinhala in it at all, splitting turns one missing-glyph box into two.
+/// HarfBuzz never reaches that state because its decomposition is font-aware
+/// in the first place — `decompose` in `hb-ot-shape-normalize.cc` refuses
+/// outright when the second half has no glyph, and falls back to the whole
+/// character when the first half has none either. Measured, that is not a
+/// nicety: on the 555 installed faces with no Sinhala, a font-blind split is
+/// the entire difference on `KA + U+0DDC`.
+///
+/// Reversing the split afterwards rather than never making it keeps the
+/// font-blind pass font-blind, which is the layering the module doc is about.
+/// It reproduces HarfBuzz's recursion exactly because the recursion is
+/// bottom-up either way: HarfBuzz splits `x` into `a + b` only if `b` has a
+/// glyph and `a` either has one or splits further, and joining `a + b` back
+/// unless *both* have glyphs is the same statement read from the inside out.
+///
+/// **Only pieces that share a cluster are joined**, which is what keeps this
+/// from being a second composition pass. Two halves that share a cluster came
+/// from one character, so putting them back is undoing this crate's own work;
+/// two that do not came from two characters the text spelled apart, and
+/// HarfBuzz — whose `compose_use` and `compose_indic` refuse them — leaves
+/// those apart on any face, drawable or not.
+fn rejoin_split_vowels(pieces: &mut Vec<Piece>, has_glyph: &impl Fn(char) -> bool) {
+    // The first half of every such pair is a combining mark, so a run with no
+    // mark in it cannot contain one. That is nearly every string, and this is
+    // the check that keeps the scan below off the hot path.
+    if !pieces.iter().any(|&(ch, _)| is_any_mark(ch)) {
+        return;
+    }
+    let mut i = 0usize;
+    while let (Some(&(a, cluster)), Some(&(b, next))) =
+        (pieces.get(i), pieces.get(i.saturating_add(1)))
+    {
+        if cluster == next
+            && is_any_mark(a)
+            && !(has_glyph(a) && has_glyph(b))
+            && let Some(joined) = compose_pair(a, b, Hangul::LeaveAlone, SplitVowels::Rejoin)
+        {
+            if let Some(slot) = pieces.get_mut(i) {
+                *slot = (joined, cluster);
+            }
+            pieces.remove(i.saturating_add(1));
+            // Deliberately not advancing: the character just written may be
+            // the first half of a further pair, which is how the three-piece
+            // decomposition of U+0DDD comes back together in two steps.
+            continue;
+        }
+        i = i.saturating_add(1);
+    }
 }
 
 /// Append the drawable pieces of `ch`, or append nothing and return `false`.
@@ -1249,7 +1371,7 @@ mod tests {
     fn a_face_without_the_letter_gets_it_taken_apart() {
         let mut pieces = nfc("e\u{301}");
         assert_eq!(chars(&pieces), "\u{e9}");
-        fit_to_face(&mut pieces, |ch| ch != '\u{e9}');
+        fit_to_face(&mut pieces, &|ch| ch != '\u{e9}');
         assert_eq!(chars(&pieces), "e\u{301}");
         // Both halves are charged to the letter, so the cluster is unchanged.
         assert_eq!(clusters(&pieces), vec![0, 0]);
@@ -1265,7 +1387,7 @@ mod tests {
     fn a_face_with_none_of_the_pieces_keeps_the_character_whole() {
         for ch in ['\u{ac00}', '\u{e9}', '\u{212b}'] {
             let mut pieces = alloc::vec![(ch, 0usize)];
-            fit_to_face(&mut pieces, |_| false);
+            fit_to_face(&mut pieces, &|_| false);
             assert_eq!(pieces.len(), 1, "{ch:?} was split into unusable pieces");
             assert_eq!(chars(&pieces), String::from(ch));
         }
@@ -1276,7 +1398,7 @@ mod tests {
     #[test]
     fn a_face_missing_only_the_mark_still_shows_the_letter() {
         let mut pieces = alloc::vec![('\u{e9}', 0usize)];
-        fit_to_face(&mut pieces, |ch| ch == 'e');
+        fit_to_face(&mut pieces, &|ch| ch == 'e');
         assert_eq!(chars(&pieces), "e\u{301}");
     }
 
@@ -1298,7 +1420,7 @@ mod tests {
     #[test]
     fn a_face_with_the_letter_keeps_it_whole() {
         let mut pieces = nfc("e\u{301}");
-        fit_to_face(&mut pieces, |_| true);
+        fit_to_face(&mut pieces, &|_| true);
         assert_eq!(chars(&pieces), "\u{e9}");
     }
 
@@ -1309,7 +1431,7 @@ mod tests {
         // U+1E09 c-with-cedilla-and-acute decomposes to U+00E7 + U+0301, and
         // U+00E7 decomposes again to c + U+0327.
         let mut pieces = alloc::vec![('\u{1e09}', 0usize)];
-        fit_to_face(&mut pieces, |ch| !matches!(ch, '\u{1e09}' | '\u{e7}'));
+        fit_to_face(&mut pieces, &|ch| !matches!(ch, '\u{1e09}' | '\u{e7}'));
         assert_eq!(chars(&pieces), "c\u{327}\u{301}");
     }
 
@@ -1318,7 +1440,7 @@ mod tests {
     #[test]
     fn an_undecomposable_missing_character_is_kept() {
         let mut pieces = alloc::vec![('\u{4e2d}', 0usize)];
-        fit_to_face(&mut pieces, |_| false);
+        fit_to_face(&mut pieces, &|_| false);
         assert_eq!(chars(&pieces), "\u{4e2d}");
     }
 
@@ -1365,11 +1487,127 @@ mod tests {
             );
             let excluded = NO_COMPOSE.binary_search(&(c as u32)).is_ok();
             assert_eq!(
-                compose_pair(a, b, Hangul::Normalize) == Some(c),
+                compose_pair(a, b, Hangul::Normalize, SplitVowels::Rejoin) == Some(c),
                 !excluded,
                 "composing {a:?}+{b:?}"
             );
         }
+    }
+
+    /// A two-part vowel is one character to `nfc` and two pieces to the
+    /// drawing path, which is the whole of what [`SplitVowels`] decides.
+    ///
+    /// U+0DDC SINHALA VOWEL SIGN KOMBUVA HAA AELA-PILLA is U+0DD9 in front of
+    /// the consonant and U+0DCF behind it. Joined, the reordering pass has one
+    /// character and two places to put it.
+    #[test]
+    fn a_two_part_vowel_is_one_character_of_text_and_two_pieces_to_draw() {
+        let text = "\u{0D9A}\u{0DDC}";
+        assert_eq!(
+            nfc(text).iter().map(|&(ch, _)| ch).collect::<Vec<_>>(),
+            vec!['\u{0D9A}', '\u{0DDC}'],
+            "NFC is a question about text, and the text is one vowel"
+        );
+        assert_eq!(
+            pieces(text, |_| true)
+                .iter()
+                .map(|&(ch, _)| ch)
+                .collect::<Vec<_>>(),
+            vec!['\u{0D9A}', '\u{0DD9}', '\u{0DCF}'],
+            "drawing is a question about glyphs, and there are two of them"
+        );
+        // Both halves keep the vowel's own offset — not the consonant's, since
+        // a spacing vowel sign is a starter and opens a cluster of its own —
+        // so a caret cannot land between a vowel and the other half of itself.
+        // The consonant is three bytes, so the vowel begins at 3.
+        assert_eq!(
+            pieces(text, |_| true)
+                .iter()
+                .map(|&(_, at)| at)
+                .collect::<Vec<_>>(),
+            vec![0, 3, 3]
+        );
+        // And only while the face can draw both halves: a face with no Sinhala
+        // gets the one character back, because two missing-glyph boxes are
+        // worse than one. See [`rejoin_split_vowels`].
+        assert_eq!(
+            pieces(text, |ch| ch != '\u{0DCF}')
+                .iter()
+                .map(|&(ch, _)| ch)
+                .collect::<Vec<_>>(),
+            vec!['\u{0D9A}', '\u{0DDC}']
+        );
+        // Typed apart, it stays apart whatever the face has, because those are
+        // two characters and not one taken to pieces — which is what the
+        // shared-cluster test in `rejoin_split_vowels` is for.
+        assert_eq!(
+            pieces("\u{0D9A}\u{0DD9}\u{0DCF}", |ch| ch != '\u{0DCF}')
+                .iter()
+                .map(|&(ch, _)| ch)
+                .collect::<Vec<_>>(),
+            vec!['\u{0D9A}', '\u{0DD9}', '\u{0DCF}']
+        );
+        // Three halves from one character, which comes back in two steps.
+        assert_eq!(
+            pieces("\u{0D9A}\u{0DDD}", |_| true)
+                .iter()
+                .map(|&(ch, _)| ch)
+                .collect::<Vec<_>>(),
+            vec!['\u{0D9A}', '\u{0DD9}', '\u{0DCF}', '\u{0DCA}']
+        );
+        // And comes back only as far as the missing half forces. A face with
+        // U+0DDC but no U+0DCF stops one step in, which is what HarfBuzz's
+        // recursion does: the inner split fails on the missing second half, so
+        // the outer one falls back to the whole first half it already had.
+        assert_eq!(
+            pieces("\u{0D9A}\u{0DDD}", |ch| ch != '\u{0DCF}')
+                .iter()
+                .map(|&(ch, _)| ch)
+                .collect::<Vec<_>>(),
+            vec!['\u{0D9A}', '\u{0DDC}', '\u{0DCA}']
+        );
+        // A face with no Sinhala at all goes all the way back to one box.
+        assert_eq!(
+            pieces("\u{0D9A}\u{0DDD}", |_| false)
+                .iter()
+                .map(|&(ch, _)| ch)
+                .collect::<Vec<_>>(),
+            vec!['\u{0D9A}', '\u{0DDD}']
+        );
+    }
+
+    /// The rule [`SplitVowels::LeaveApart`] states is HarfBuzz's, and HarfBuzz
+    /// states it twice — once in `compose_use` and once in `compose_indic`.
+    /// This is the measurement that says one switch here is enough: every pair
+    /// the rule can affect belongs to a script one of those two shapers takes,
+    /// so there is no third shaper whose answer could differ and no script
+    /// that would be wrongly left split.
+    #[test]
+    fn only_indic_and_use_compose_from_a_mark() {
+        let mut affected = 0usize;
+        for &(c, a, _) in PAIRS.iter() {
+            let (Some(c), Some(a)) = (char::from_u32(c), char::from_u32(a)) else {
+                unreachable!("table row {c:#X} is not made of characters");
+            };
+            // An exclusion never recomposes anyway, so the rule cannot reach
+            // it — which is what leaves Tibetan and COMBINING GREEK DIALYTIKA
+            // TONOS out of this despite composing from a mark.
+            if !is_any_mark(a) || NO_COMPOSE.binary_search(&(c as u32)).is_ok() {
+                continue;
+            }
+            affected = affected.saturating_add(1);
+            let tags = crate::script::ScriptTags::of(c);
+            assert!(
+                crate::indic_shape::Script::shaping(tags).is_some()
+                    || crate::universal::shapes(tags),
+                "{c:?} composes from the mark {a:?} but neither engine shapes it"
+            );
+        }
+        // Not a round number for its own sake: if a Unicode update adds a
+        // split vowel to a script *neither* engine takes, the assertion above
+        // catches it — and if one is added to a script they do take, this
+        // count says so, which is the cheapest way to be told the set moved.
+        assert_eq!(affected, 47, "the set of split vowels has changed");
     }
 
     /// Normalizing anything must terminate and must not panic, whatever the

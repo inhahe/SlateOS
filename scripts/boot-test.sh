@@ -172,6 +172,90 @@ check_liveness_failures() {
     return 0
 }
 
+# Fail a boot whose benchmark suite measured something it then never judged.
+#
+# WHY THIS EXISTS: bench.rs prints one line per suite stating how many of its
+# measurement windows reached the scorecard.  Every window must land in exactly
+# one of three places — scored (graded against a target), tracked (recorded,
+# ungraded), or *declared* a diagnostic (deliberately print-only).  A window in
+# none of those is measured every boot and recorded never: it burns boot time,
+# prints a number nobody compares, and cannot regress visibly.  Seven such
+# benchmarks accumulated before the instrument existed (see known-issues.md,
+# "benchmarks measured every boot and recorded never"), and the reason they went
+# unnoticed for so long is precisely that nothing failed when they appeared.
+#
+# The design point that matters here is the ABSENT case.  Under --bench the
+# coverage line MUST be present, and its absence is a failure, not a pass.
+# run_all() prints it before main.rs prints BENCH_OK on both the deferred and
+# the inline-fallback path, so "BENCH_OK but no coverage line" means the
+# instrument itself stopped running — which is the exact condition it exists to
+# catch, and treating it as "nothing to complain about" would reproduce the
+# original bug one level up.  Outside --bench the suite may legitimately not run
+# at all, so an absent line is simply not evidence either way.
+#
+# Two failure shapes are matched:
+#   "... , N unjudged (print-only: ..."  with N > 0  -> a real coverage gap
+#   "[bench]   NOTE: ... carried a seq that names no measurement window"
+#       -> a BenchResult was hand-built without note_measurement, so the counts
+#          above it are unreliable and a clean "0 unjudged" cannot be believed
+#
+# ANY occurrence fails, not just the last: run_all() resets its state and may be
+# run more than once, and each printing is a complete verdict for its own run.
+#
+# Returns 0 if clean, 1 on a coverage gap / unreliable count / missing line.
+check_bench_coverage() {
+    local file="$1"
+    local require="${2:-0}"
+    [ -f "$file" ] || return 0
+
+    # shellcheck disable=SC2016
+    local line_pat='^\[bench\] === Scorecard coverage: '
+    if ! grep -aEq "$line_pat" "$file" 2>/dev/null; then
+        if [ "$require" = "1" ]; then
+            echo "BENCH COVERAGE LINE MISSING from serial log:"
+            echo "  --bench reached its marker but bench.rs never printed"
+            echo "  '[bench] === Scorecard coverage: ...'.  That line is printed"
+            echo "  unconditionally by print_scorecard(), before BENCH_OK, so its"
+            echo "  absence means the coverage instrument did not run.  A check that"
+            echo "  cannot fire is indistinguishable from a check that passes."
+            return 1
+        fi
+        return 0
+    fi
+
+    local rc=0
+
+    # Non-zero unjudged.  Anchored on the literal " unjudged (print-only:" suffix
+    # so it cannot match the "N are declared diagnostics" field next to it.
+    # shellcheck disable=SC2016
+    local gap_pat='^\[bench\] === Scorecard coverage: .*, [1-9][0-9]* unjudged \(print-only:'
+    if grep -aEq "$gap_pat" "$file" 2>/dev/null; then
+        echo "BENCH COVERAGE GAP detected in serial log:"
+        grep -aEn "$gap_pat" "$file" || true
+        echo "  The named windows below were measured but never recorded:"
+        grep -aEn '^\[bench\]   unjudged print-only: ' "$file" || true
+        echo "  Each must be given a destination: score() if it has a target,"
+        echo "  track() if it is comparable but untargeted, or run_diagnostic()"
+        echo "  if it is deliberately print-only.  Untargeted is not uncomparable."
+        rc=1
+    fi
+
+    # Unreliable counts.  Reported even when unjudged reads 0 — especially then,
+    # since an orphan seq marks some *other* window covered, which is the
+    # direction that hides work rather than inventing it.
+    # shellcheck disable=SC2016
+    local orphan_pat='^\[bench\]   NOTE: .*carried a seq that names no'
+    if grep -aEq "$orphan_pat" "$file" 2>/dev/null; then
+        echo "BENCH COVERAGE COUNTS ARE UNRELIABLE (orphan seq) in serial log:"
+        grep -aEn "$orphan_pat" "$file" || true
+        echo "  A BenchResult was constructed without calling note_measurement(),"
+        echo "  so its seq indexes a window belonging to some other measurement."
+        rc=1
+    fi
+
+    return "$rc"
+}
+
 # Detect a kernel that has already died, so the wait loop can stop waiting.
 #
 # WHY THIS EXISTS: the poll loop used to test only for the success marker, and
@@ -1349,6 +1433,10 @@ while kill -0 "$QEMU_PID" 2>/dev/null && [ "$ELAPSED" -lt "$TIMEOUT" ]; do
             echo "=== Boot test FAILED ($WAIT_MARKER reached but the liveness watchdog reported) ==="
             exit 1
         fi
+        if ! check_bench_coverage "$SERIAL_FILE" "$BENCH"; then
+            echo "=== Boot test FAILED ($WAIT_MARKER reached but the benchmark suite left windows unjudged) ==="
+            exit 1
+        fi
         finish_pass "$SERIAL_FILE"
     fi
 
@@ -1414,6 +1502,10 @@ if [ -f "$SERIAL_FILE" ]; then
         fi
         if ! check_liveness_failures "$SERIAL_FILE"; then
             echo "=== Boot test FAILED ($WAIT_MARKER reached but the liveness watchdog reported) ==="
+            exit 1
+        fi
+        if ! check_bench_coverage "$SERIAL_FILE" "$BENCH"; then
+            echo "=== Boot test FAILED ($WAIT_MARKER reached but the benchmark suite left windows unjudged) ==="
             exit 1
         fi
         finish_pass "$SERIAL_FILE"

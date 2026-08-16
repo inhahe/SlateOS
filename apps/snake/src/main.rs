@@ -171,10 +171,7 @@ impl Pos {
 
     /// Check if position is within grid bounds.
     fn in_bounds(self) -> bool {
-        self.row >= 0
-            && self.row < GRID_ROWS as i32
-            && self.col >= 0
-            && self.col < GRID_COLS as i32
+        self.row >= 0 && self.row < GRID_ROWS as i32 && self.col >= 0 && self.col < GRID_COLS as i32
     }
 }
 
@@ -534,10 +531,7 @@ impl SnakeApp {
 
         // Check if we ate food.
         let ate_normal = new_head == self.food.pos;
-        let ate_bonus = self
-            .bonus_food
-            .as_ref()
-            .is_some_and(|b| new_head == b.pos);
+        let ate_bonus = self.bonus_food.as_ref().is_some_and(|b| new_head == b.pos);
 
         if ate_normal {
             self.eat_normal_food();
@@ -928,8 +922,7 @@ impl SnakeApp {
         let y = oy + pos.row as f32 * (CELL_SIZE + CELL_GAP);
 
         // Faster pulsing for bonus food, also fades as it nears expiry.
-        let pulse =
-            ((self.pulse_counter % 10) as f32 / 10.0 * std::f32::consts::PI * 2.0).sin();
+        let pulse = ((self.pulse_counter % 10) as f32 / 10.0 * std::f32::consts::PI * 2.0).sin();
         let inset = 2.0 - pulse * 1.5;
 
         // Flicker when close to expiring.
@@ -1042,11 +1035,7 @@ impl SnakeApp {
             ("Score", format!("{}", self.score), TEXT_COLOR),
             ("High Score", format!("{}", self.high_score), YELLOW),
             ("Length", format!("{}", self.snake_length()), GREEN),
-            (
-                "Speed",
-                format!("Lv.{}", self.current_speed_level()),
-                PEACH,
-            ),
+            ("Speed", format!("Lv.{}", self.current_speed_level()), PEACH),
             ("Foods Eaten", format!("{}", self.foods_eaten), RED),
             ("Bonus Eaten", format!("{}", self.bonus_eaten), MAUVE),
             ("Streak", format!("x{}", self.streak), TEAL),
@@ -2098,12 +2087,7 @@ mod tests {
         let app = test_app();
         let cmds = app.render();
         match &cmds[0] {
-            RenderCommand::FillRect {
-                x,
-                y,
-                color,
-                ..
-            } => {
+            RenderCommand::FillRect { x, y, color, .. } => {
                 assert_eq!(*x, 0.0);
                 assert_eq!(*y, 0.0);
                 assert_eq!(*color, BASE);
@@ -2118,7 +2102,9 @@ mod tests {
         app.state = GameState::Paused;
         let cmds = app.render();
         // Should contain text "PAUSED".
-        let has_pause_text = cmds.iter().any(|c| matches!(c, RenderCommand::Text { text, .. } if text == "PAUSED"));
+        let has_pause_text = cmds
+            .iter()
+            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text == "PAUSED"));
         assert!(has_pause_text);
     }
 
@@ -2127,7 +2113,9 @@ mod tests {
         let mut app = test_app();
         app.state = GameState::GameOver;
         let cmds = app.render();
-        let has_game_over_text = cmds.iter().any(|c| matches!(c, RenderCommand::Text { text, .. } if text == "GAME OVER"));
+        let has_game_over_text = cmds
+            .iter()
+            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text == "GAME OVER"));
         assert!(has_game_over_text);
     }
 
@@ -2135,7 +2123,9 @@ mod tests {
     fn test_render_contains_score_text() {
         let app = test_app();
         let cmds = app.render();
-        let has_score = cmds.iter().any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("Score")));
+        let has_score = cmds
+            .iter()
+            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("Score")));
         assert!(has_score);
     }
 
@@ -2143,7 +2133,9 @@ mod tests {
     fn test_render_contains_statistics() {
         let app = test_app();
         let cmds = app.render();
-        let has_stats = cmds.iter().any(|c| matches!(c, RenderCommand::Text { text, .. } if text == "Statistics"));
+        let has_stats = cmds
+            .iter()
+            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text == "Statistics"));
         assert!(has_stats);
     }
 
@@ -2157,7 +2149,10 @@ mod tests {
             matches!(c, RenderCommand::FillRect { color, .. } if color.g > 150 && color.r < 200 && color.b < 200)
         }).count();
         // 3 snake segments + 2 eyes = at minimum some green rects.
-        assert!(green_rects >= 3, "expected at least 3 snake-colored rects, got {green_rects}");
+        assert!(
+            green_rects >= 3,
+            "expected at least 3 snake-colored rects, got {green_rects}"
+        );
     }
 
     // ── LCG RNG ─────────────────────────────────────────────────────

@@ -87,13 +87,56 @@ faults and block I/O cover both cases, whereas the spawn-scoped suppression
 window you floated as an alternative under suggestion 2 would have covered yours
 and missed mine.
 
-## Verification
+## Verification — done, and it landed on the same line you reported
 
-Full `--bench` boot in progress as of writing. The harness assertion is a real
-test of the fix rather than a formality — I confirmed it fires on the *old* log
-(it flags all three lines: the drill, the false `SYSTEM HANG`, and the
-`FALSE POSITIVE` admission), so a green boot now means the fix holds and not
-that the check is asleep.
+Full `--bench` boot **passed** (exit 0, 1173s), merged to `main` as `360cefe4e`.
+
+The harness assertion is a real test of the fix rather than a formality — I
+confirmed it fires on the *old* log (it flags all three lines: the drill, the
+false `SYSTEM HANG`, and the `FALSE POSITIVE` admission), so a green boot means
+the fix holds and not that the check is asleep.
+
+What makes this more than a green tick: the boot reproduced the **exact site**.
+The old log fired `SYSTEM HANG` at line 19050, immediately after
+`[spawn] Running link()/linkat no-follow symlink test (kernel, ext4 /mnt)...`.
+The new log reaches the same point — line 19061, same preceding line — and emits
+only:
+
+```
+[liveness] boot-window breadcrumb: 300s armed (deadline 1144s, heartbeat=29927)
+```
+
+So the kernel-progress gate vetoed it in the one case that distinguishes the two
+candidate fixes. That is the purely kernel-side case with no ring-3 process
+involved, which the spawn-scoped suppression window would not have covered.
+
+Both drills still fire and are correctly prefixed, which is the part worth
+checking rather than assuming:
+
+```
+325: [liveness] (self-test) SUSPECTED LIVELOCK: … (useful_work=4, ctx_switches=42) …
+334: [liveness] (self-test) SYSTEM HANG: … (useful_work=5, kernel_progress=1,
+     ctx_switches=42, report 1/3, watchdog stays ARMED). Dumping task table:
+346: [sched]   liveness watchdog: OK
+```
+
+and the harness pattern returns **0 matches** against that same log. So the
+`(self-test) ` infix does the discrimination it was added for: the detectors are
+demonstrably still armed and still firing on demand, while the assertion stays
+quiet. Had it tripped on the drills every healthy boot, it would have been
+deleted inside a week and the contract would be unchecked exactly as it was
+before — which is how `BUG-LIVENESS-DEADLINE-FALSE-FIRE` went unenforced since
+2026-07-27.
+
+One honest caveat on the run, since you may see it in the merged history: the
+`--bench` numbers from this boot are labelled `CONTAMINATED` (25 stalled
+benchmarks against a host band of 11; wall 395s vs a 142s median). That is host
+interference on my machine, unrelated to this fix, and the run is excluded from
+regression baselines. It does not affect any of the liveness evidence above —
+and if anything it strengthens it, since a heavily-descheduled host is precisely
+the condition that used to manufacture the false positive.
+
+— lane A, 2026-08-16 (verification appended)
 
 Written up in `known-issues.md` under "Liveness watchdog reported `SYSTEM HANG`
 on healthy boots and disarmed itself".

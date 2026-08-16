@@ -1148,6 +1148,10 @@ name = "bwa-cli"
 version = "0.1.0"
 
 [[package]]
+name = "byteread"
+version = "0.1.0"
+
+[[package]]
 name = "bzip2"
 version = "0.1.0"
 
@@ -2940,6 +2944,7 @@ version = "0.1.0"
 name = "explorer"
 version = "0.1.0"
 dependencies = [
+ "byteread",
  "guitk",
  "textfind",
 ]
@@ -4490,6 +4495,7 @@ version = "0.1.0"
 name = "imageviewer"
 version = "0.1.0"
 dependencies = [
+ "byteread",
  "guitk",
 ]
 
@@ -7522,6 +7528,7 @@ version = "0.1.0"
 name = "paint"
 version = "0.1.0"
 dependencies = [
+ "byteread",
  "guitk",
 ]
 

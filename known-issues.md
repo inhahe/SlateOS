@@ -310,6 +310,138 @@ Bresenham and midpoint-ellipse integer stepping, brush-radius squares, and
 run-length spans whose endpoints both come from the same loop. Each is guarded
 by a proof within a few lines. None is reachable.
 
+### Sweep progress: `imageviewer` 155 → 9, `indexing_slicing` 0 (2026-08-16)
+
+Fifth crate, and the one the new `byteread` crate was written for. `apps/imageviewer`
+went from 77 `indexing_slicing` + 54 `slicing` findings to **0**, and from 102
+`arithmetic_side_effects` to 9. Tests 97 → 99. One reachable panic fell out,
+recorded below.
+
+This crate is where the "bound stated twice" pattern was densest in the whole
+tree: 112 of the 131 index findings were in `src/video.rs` alone, in the MP4,
+Matroska and AVI parsers — all of them reading at offsets taken *out of the file
+being parsed*. `byteread` (see `byteread/src/lib.rs`) exists so each of those
+reads states its own bound; the conversion removed 468 lines and added 345.
+
+Three structural results worth naming, because they are the reason the count
+fell so far rather than merely moving:
+
+- **`box_payload` + `descend`.** The MP4 box tree was walked by hand at five
+  levels (moov, trak, mdia, minf, stbl), each level repeating six lines of
+  `offset.checked_add(8)` / `.checked_add(size)` / `.min(parent.len())` /
+  `if start >= end { return None }` / `&parent[start..end]`. Two helpers replaced
+  all five. `extract_stsd_codec` went from 45 lines to 5. The important part is
+  not the line count: five hand-written clamps are five chances to clamp to the
+  wrong parent, and now there is one.
+- **`EbmlScan`.** The Matroska side had five near-identical byte-scan loops
+  (`for i in 0..limit { if data[i] == ID && data[i+1] == ... }`), each re-deriving
+  the payload offset from a VINT length and each with slightly different
+  give-up behaviour — one `break`ed on the first hit even if it was garbage,
+  one `return`ed `None` from the whole function if a length was not 4 or 8.
+  One iterator replaced them, and the give-up behaviour is now uniform and
+  strictly more forgiving: a hit whose length does not decode is *skipped*
+  rather than ending the scan, because such a hit was never an element. That is
+  a real behaviour improvement — a Matroska file with a stray `0x4489` byte
+  before its real Duration used to report no duration at all.
+- **`parse_jpeg_dimensions` walks instead of indexing.** JPEG is the one format
+  here where offsets are genuinely sequential — each segment's length is read
+  from the segment before it — so it now uses `byteread::Reader` rather than a
+  hand-carried `idx`. This also fixed a latent non-panicking bug: a segment
+  length below 2 (a length field counts itself) left `idx` unadvanced, and the
+  loop only escaped by accident, because the next byte examined was the zero
+  high byte of the bogus length. It now stops.
+
+The 9 that remain are all `arithmetic_side_effects` and every one was read: two
+playlist/gallery `(i + 1) % len` pairs behind `is_empty()` guards and their
+`-= 1` mirrors behind `== 0` guards, a `/ timescale` behind `if timescale > 0`,
+a `(x / 16) + (y / 16)` checkerboard, and two `min`-clamped list ranges. Each is
+guarded by a proof within three lines. None is reachable.
+
+Two arithmetic sites were *not* left alone, because rewriting them made the
+proof shorter than the argument for it: `decode_ebml_vint`'s
+`(1u8 << (8 - len)) - 1` is now `u8::MAX.checked_shr(len)` (a width of 8 leaves
+no value bits, and shifting a `u8` by 8 is not a shift), and the slideshow's
+`elapsed_ms += elapsed_ms` — the crate's only unbounded accumulator, fed by a
+caller-supplied duration — is now `saturating_add`.
+
+## A BMP declaring a height of `i32::MIN` panics the file explorer (lane C)
+
+**Status: FIXED 2026-08-16** (lane C). Verified by reverting the fix and
+watching the test panic.
+
+`parse_bmp_dimensions` in `apps/explorer/src/thumbs.rs` read the BMP height as
+a `u32`, cast it to `i32` to interpret the sign — a negative height means a
+top-down bitmap — and then took its magnitude with `.abs()`:
+
+```rust
+let height = (read_le_u32(data, 22)? as i32).abs();
+```
+
+`i32::MIN.abs()` panics: `+2147483648` is not an `i32`. Four bytes of
+`00 00 00 80` at offset 22 of any file the explorer decides is a BMP is enough.
+
+```
+panicked at library\core\src\num\mod.rs:394:5:
+attempt to negate with overflow
+```
+
+The check that would have rejected the value — `height == 0`, and the caller's
+own size limits — runs *after* the `abs()`, so it never gets the chance. This is
+the same shape as the sweep's other findings: the guard exists, it is just
+downstream of the operation it was meant to guard.
+
+`unsigned_abs()` returns the magnitude as the `u32` it fits in, and the
+existing dimension limits then decline the thumbnail. Found while replacing
+explorer's five hand-written binary readers with `byteread` — reading the field
+as `i32_le_at` rather than `u32_le_at` + a cast is what made the `.abs()`
+visible as a decision rather than a formality.
+
+Regression test:
+`the_one_height_that_has_no_positive_counterpart_is_still_just_declined` in
+`apps/explorer/src/thumbs.rs`.
+
+## A crafted 16-byte MP4 panics the image viewer (lane C)
+
+**Status: FIXED 2026-08-16** (lane C). Verified by reverting the fix and
+watching the test panic at the exact line named.
+
+`parse_mp4_boxes` in `apps/imageviewer/src/video.rs` walks the top-level box
+list. An MP4 box header is a 4-byte size followed by a 4-byte type, and a size
+of **1** means "the real size is the 64-bit number that follows". That 64-bit
+number is read straight out of the file and is otherwise unconstrained.
+
+The walk advanced with `pos.checked_add(box_size as usize)`, accepting the
+result if it was greater than `pos`. With `box_size == u64::MAX` and `pos == 0`,
+that is `Some(usize::MAX)` — greater than `pos`, so accepted. The loop condition
+was then `while pos + 8 <= data.len()`, which is `usize::MAX + 8`:
+
+```
+thread '...' panicked at apps\imageviewer\src\video.rs:294:11:
+attempt to add with overflow
+```
+
+In a release build the add wraps to `7`, the condition passes, and the very next
+statement is `data[pos]` at `pos == usize::MAX` — so it panics either way, just
+with a less informative message.
+
+Sixteen bytes of file are enough: `00 00 00 01 "ftyp" FF*8`. Nothing about it is
+implausible for a hostile or merely corrupt file, and the viewer parses before
+it displays, so opening the file is the whole exploit path.
+
+The fix is not a bigger bound check. `checked_add` was already there and was not
+the problem — the problem was that the *next* thing to do with the accepted
+position was arithmetic on it. The walk now uses `byteread::Reader::seek`, which
+refuses a position past the end of the buffer, so an absurd size ends the walk
+instead of parking `pos` at a value that cannot be added to. The `usize::try_from`
+on `box_size` makes the 64-bit-to-pointer-width narrowing explicit rather than a
+silent `as`.
+
+Regression tests: `a_box_that_claims_the_whole_address_space_ends_the_walk` and
+`a_box_whose_size_runs_past_the_end_stops_the_walk_rather_than_reading_on` in
+`apps/imageviewer/src/video.rs`. The first fails on the old code with the panic
+above; the second passes on both and is there to pin the ordinary
+size-past-the-end case, which was already correct.
+
 ## Two reachable panics in `apps/paint`, found by the lint sweep (lane C)
 
 **Status: FIXED 2026-08-16** (lane C). Both are the same defect in two

@@ -75,28 +75,23 @@ impl ImageFormat {
         }
 
         // BMP: starts with "BM"
-        if data.first() == Some(&b'B') && data.get(1) == Some(&b'M') {
+        if byteread::starts_with(data, b"BM") {
             return Self::Bmp;
         }
 
         // PNG: 8-byte signature
-        let png_sig: [u8; 8] = [137, 80, 78, 71, 13, 10, 26, 10];
-        if data.len() >= 8 && data[..8] == png_sig {
+        if byteread::starts_with(data, &[137, 80, 78, 71, 13, 10, 26, 10]) {
             return Self::Png;
         }
 
         // JPEG: starts with FF D8
-        if data.first() == Some(&0xFF) && data.get(1) == Some(&0xD8) {
+        if byteread::starts_with(data, &[0xFF, 0xD8]) {
             return Self::Jpeg;
         }
 
         // GIF: starts with "GIF87a" or "GIF89a"
-        if data.len() >= 6 {
-            let gif87 = b"GIF87a";
-            let gif89 = b"GIF89a";
-            if &data[..6] == gif87 || &data[..6] == gif89 {
-                return Self::Gif;
-            }
+        if byteread::starts_with(data, b"GIF87a") || byteread::starts_with(data, b"GIF89a") {
+            return Self::Gif;
         }
 
         Self::Unknown
@@ -127,86 +122,54 @@ pub fn parse_dimensions(format: ImageFormat, data: &[u8]) -> Option<(u32, u32)> 
 
 fn parse_bmp_dimensions(data: &[u8]) -> Option<(u32, u32)> {
     // BMP header: width at offset 18 (4 bytes LE), height at offset 22 (4 bytes LE)
-    if data.len() < 26 {
-        return None;
-    }
-    let width = u32::from_le_bytes([
-        *data.get(18)?,
-        *data.get(19)?,
-        *data.get(20)?,
-        *data.get(21)?,
-    ]);
-    let height_raw = i32::from_le_bytes([
-        *data.get(22)?,
-        *data.get(23)?,
-        *data.get(24)?,
-        *data.get(25)?,
-    ]);
-    // Height can be negative (top-down bitmap)
-    let height = height_raw.unsigned_abs();
+    let width = byteread::u32_le_at(data, 18)?;
+    // Height can be negative (top-down bitmap).
+    let height = byteread::i32_le_at(data, 22)?.unsigned_abs();
     Some((width, height))
 }
 
 fn parse_png_dimensions(data: &[u8]) -> Option<(u32, u32)> {
     // PNG IHDR chunk: width at offset 16 (4 bytes BE), height at offset 20 (4 bytes BE)
-    if data.len() < 24 {
-        return None;
-    }
-    let width = u32::from_be_bytes([
-        *data.get(16)?,
-        *data.get(17)?,
-        *data.get(18)?,
-        *data.get(19)?,
-    ]);
-    let height = u32::from_be_bytes([
-        *data.get(20)?,
-        *data.get(21)?,
-        *data.get(22)?,
-        *data.get(23)?,
-    ]);
+    let width = byteread::u32_be_at(data, 16)?;
+    let height = byteread::u32_be_at(data, 20)?;
     Some((width, height))
 }
 
 fn parse_jpeg_dimensions(data: &[u8]) -> Option<(u32, u32)> {
-    // Scan for SOF0 marker (FF C0) to find dimensions
-    let mut idx = 2; // skip FF D8
-    while idx + 1 < data.len() {
-        if *data.get(idx)? != 0xFF {
-            idx += 1;
+    // JPEG is a stream of `FF <marker>` segments, so this walks rather than
+    // indexes: a segment's length is read from the segment before it.
+    let mut reader = byteread::Reader::at(data, 2); // skip FF D8
+    loop {
+        if reader.u8()? != 0xFF {
+            // Fill bytes and payload noise: resync on the next 0xFF.
             continue;
         }
-        let marker = *data.get(idx + 1)?;
-        idx += 2;
+        let marker = reader.u8()?;
 
-        // SOF0 (baseline), SOF1 (extended), SOF2 (progressive)
+        // SOF0 (baseline), SOF1 (extended), SOF2 (progressive) carry the
+        // dimensions: length(2) + precision(1), then height(2), width(2).
         if marker == 0xC0 || marker == 0xC1 || marker == 0xC2 {
-            // Skip length (2 bytes) and precision (1 byte)
-            if idx + 7 > data.len() {
-                return None;
-            }
-            let height = u16::from_be_bytes([*data.get(idx + 3)?, *data.get(idx + 4)?]);
-            let width = u16::from_be_bytes([*data.get(idx + 5)?, *data.get(idx + 6)?]);
-            return Some((width as u32, height as u32));
+            let height = reader.peek::<2>(3).map(u16::from_be_bytes)?;
+            let width = reader.peek::<2>(5).map(u16::from_be_bytes)?;
+            return Some((u32::from(width), u32::from(height)));
         }
 
-        // Skip this segment
-        if idx + 1 >= data.len() {
-            break;
+        // Any other segment: its length counts itself, so skipping `len` from
+        // the length field lands on the next marker. A length below 2 would
+        // not advance, which is a malformed file rather than a segment.
+        let seg_len = usize::from(reader.peek::<2>(0).map(u16::from_be_bytes)?);
+        if seg_len < 2 {
+            return None;
         }
-        let seg_len = u16::from_be_bytes([*data.get(idx)?, *data.get(idx + 1)?]) as usize;
-        idx += seg_len;
+        reader.skip(seg_len)?;
     }
-    None
 }
 
 fn parse_gif_dimensions(data: &[u8]) -> Option<(u32, u32)> {
     // GIF logical screen descriptor: width at offset 6 (2 bytes LE), height at offset 8 (2 bytes LE)
-    if data.len() < 10 {
-        return None;
-    }
-    let width = u16::from_le_bytes([*data.get(6)?, *data.get(7)?]);
-    let height = u16::from_le_bytes([*data.get(8)?, *data.get(9)?]);
-    Some((width as u32, height as u32))
+    let width = byteread::u16_le_at(data, 6)?;
+    let height = byteread::u16_le_at(data, 8)?;
+    Some((u32::from(width), u32::from(height)))
 }
 
 // ============================================================================
@@ -816,7 +779,10 @@ impl ViewerState {
         if !self.slideshow.active || self.slideshow.paused {
             return;
         }
-        self.slideshow.elapsed_ms += elapsed_ms;
+        // The only unbounded accumulator here: it is reset every interval in
+        // practice, but a caller is free to pass any elapsed time at all, and
+        // a slideshow that stops advancing beats one that aborts.
+        self.slideshow.elapsed_ms = self.slideshow.elapsed_ms.saturating_add(elapsed_ms);
         if self.slideshow.elapsed_ms >= self.slideshow.interval.millis() {
             self.slideshow.elapsed_ms = 0;
             self.next_image();
@@ -970,14 +936,13 @@ impl ViewerState {
                 self.dragging = false;
                 true
             }
-            MouseEventKind::Move
-                if self.dragging => {
-                    let dx = event.x - self.drag_start_x;
-                    let dy = event.y - self.drag_start_y;
-                    self.transform.pan_x = self.drag_start_pan_x + dx;
-                    self.transform.pan_y = self.drag_start_pan_y + dy;
-                    true
-                }
+            MouseEventKind::Move if self.dragging => {
+                let dx = event.x - self.drag_start_x;
+                let dy = event.y - self.drag_start_y;
+                self.transform.pan_x = self.drag_start_pan_x + dx;
+                self.transform.pan_y = self.drag_start_pan_y + dy;
+                true
+            }
             MouseEventKind::DoubleClick(MouseButton::Left) => {
                 // Double-click toggles between fit and actual size
                 if (self.transform.zoom - 1.0).abs() < 0.01 {
@@ -1721,6 +1686,17 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    // A test that indexes out of range should fail loudly and point at the
+    // line that did it — that is the diagnosis. The defensive lints exist to
+    // keep panics out of code that runs on a user's data, which this is not.
+    #![allow(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::float_cmp
+    )]
+
     use super::*;
 
     #[test]

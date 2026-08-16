@@ -1439,18 +1439,36 @@ artifacts, enumerate the set from the thing they have in common — here "links
 `libc.a`" — not from the directory that happened to hold them when the rule was
 written (`services/ctest-*`).
 
-### TD-POSIX-WAITID-IS-NARROWER-THAN-THE-KERNEL-COULD-MAKE-IT. `waitid` cannot express process group 1, cannot honour `WNOWAIT`, and reports `si_uid` as 0 — all three because `SYS_PROCESS_WAIT_STATUS` is `waitpid`-shaped — LOGGED 2026-08-16 by lane B — ✅ KERNEL SIDE FIXED 2026-08-16 by lane A; libc side still open
+### TD-POSIX-WAITID-IS-NARROWER-THAN-THE-KERNEL-COULD-MAKE-IT. `waitid` cannot express process group 1, cannot honour `WNOWAIT`, and reports `si_uid` as 0 — all three because `SYS_PROCESS_WAIT_STATUS` is `waitpid`-shaped — LOGGED 2026-08-16 by lane B — ✅ FIXED 2026-08-16 (kernel by lane A, libc by lane B)
 
-**Status: the kernel half is done** (2026-08-16, lane A). All three gaps — and
-the `si_utime`/`si_stime`/`rusage` fourth one below, whose premise turned out to
-be false — are now expressible through the syscall. The entry stays open because
-**libc has not been changed to use any of it yet**: `waitid` still returns
-`ENOSYS` for the group-1 case, still ignores `WNOWAIT`, and still reports
-`si_uid` as 0, because it is still passing the old three arguments. What to
-change on the libc side is spelled out in
-`requests/a-b-wait-syscall-grew-wpgid-wnowait-and-a-waitinfo-struct.md`; the
-kernel rationale is `design-decisions.md` §206. Close this entry when
-`posix/src/process.rs` consumes the new ABI.
+**Status: closed on both sides** (2026-08-16). All three gaps — and the
+`si_utime`/`si_stime`/`rusage` fourth one below, whose premise turned out to be
+false — are expressible through the syscall (lane A) *and* used by libc (lane
+B). Stays here rather than moving to `known-issues-resolved.md` until the fix
+has been on `main` through a full boot test.
+
+**What libc now does** (`posix/src/process.rs`): `waitpid`, `wait3`, `wait4` and
+`waitid` all funnel through one `wait_common`, which takes a
+`WaitTarget { Selector, Pgid }` rather than a signed integer — the same shape
+the kernel resolved to in §206, so the two cannot disagree about which child a
+selector names. `waitid(P_PGID, 1, …)` returns the kernel's `ECHILD`/success
+instead of `ENOSYS`; `WNOWAIT` maps to the kernel bit instead of being dropped;
+`si_uid`, `si_utime` and `si_stime` come from the `WaitInfo` out-parameter; and
+`wait3`/`wait4` write a genuine `rusage` from the same struct.
+
+**The `WINFO` gate is respected.** `wait_common` only sets it — and only then
+issues a five-argument syscall — when a `WaitInfo` was actually asked for. The
+three-argument path still goes through `syscall3`, which never writes `r10`/`r8`,
+so the kernel never reads registers this libc did not set. Lane A's first
+version read them unconditionally and broke `ctest-pgroup`, `ctest-jobctl` and
+`ctest-ctty` within one boot.
+
+**Units.** `WaitInfo` is microseconds and `siginfo_t.si_utime`/`si_stime` are
+USER_HZ ticks, deliberately. libc converts in exactly one place
+(`us_to_clock_t`); a second conversion site would be off by exactly 10×, which
+is the kind of error that survives review.
+
+Rationale: `design-decisions.md` §206 (kernel) and §319 (libc).
 
 **Correction to item 4 below ("there is no per-process CPU accounting").** That
 was already false when this entry was written. `pcb`'s `acct_*`/`child_*`
@@ -1517,21 +1535,125 @@ signalfd registration — so a process blocked in it could not be interrupted.
 `kernel/src/syscall/wait.rs` fixed it, and it is the clearest evidence for why
 one primitive beats three copies.
 
-Until libc catches up, the divergences remain documented on `waitid`'s doc
-comment, which is where someone debugging a `WNOWAIT` that reaped will actually
-look — and that comment now needs a line saying the kernel *can* do it.
+`waitid`'s doc comment now carries the closed list under "Three limitations that
+are gone as of 2026-08-16", which is where someone debugging a `WNOWAIT` that
+reaped will actually look, plus the two divergences from Linux that genuinely
+remain (`P_PIDFD` is `EINVAL`, and `si_utime`/`si_stime` have tick resolution
+even though the kernel knows microseconds — the field is `clock_t` and a ported
+binary expects ticks).
 
-**What *is* covered, so this entry is not mistaken for "waitid is untested."**
-Everything `waitid` can do is exercised on target by
-`services/ctest-jobctl/main.c` checks 100-111 (`CLD_STOPPED`/`CLD_CONTINUED`
-against a real kernel-encoded job-control event, plus the proof that observing
-one consumes it), 120-132 (`CLD_EXITED` with the exit *code* in `si_status`,
-`ECHILD` on re-wait, `CLD_KILLED`/`SIGKILL`), and 140-147 (argument
-validation). The fixture is the only place the `wstatus` → `siginfo_t` decoding
-is testable at all: `waitpid`'s syscall arm is compiled out for anything but
-`target_os = "none"`, so a host `waitid` returns `ENOSYS` before a status word
-exists to decode. The three gaps above are exactly the residue — the facts that
-do not survive the reap — and nothing there tests them because nothing can.
+**Coverage.** On target, `services/ctest-jobctl/main.c` checks 100-111
+(`CLD_STOPPED`/`CLD_CONTINUED` against a real kernel-encoded job-control event,
+plus the proof that observing one consumes it), 120-132 (`CLD_EXITED` with the
+exit *code* in `si_status`, `ECHILD` on re-wait, `CLD_KILLED`/`SIGKILL`),
+140-147 (argument validation) and — new with the fix — **150-187**: the
+`WaitInfo` fill including `uid` and the six counters, `WNOWAIT` peeking twice
+without reaping, and naming a process group including group 1. The fixture is
+the only place the `wstatus` → `siginfo_t` decoding is testable at all:
+`waitpid`'s syscall arm is compiled out for anything but `target_os = "none"`,
+so a host `waitid` returns `ENOSYS` before a status word exists to decode.
+
+Checks **157** and **169** are the two lane A asked lane B for by name, and they
+are the only tests in the tree that can exist anywhere else: they pass sizes
+libc by construction never passes (128 and 24 against a 72-byte struct) to prove
+the kernel zero-fills the tail and never writes past the caller's declared
+length. A kernel self-test task has no user address space, so it reaches the
+pure encoder but not `copy_to_user`, and truncation is a property of the copy.
+They reach the syscall raw rather than through a size-taking libc export,
+because such an export would be a permanent hole letting every other caller hand
+the kernel an arbitrary length for the sake of one test.
+
+### TD-POSIX-WAITID-CANNOT-SUPPRESS-EXIT-REPORTS. `waitid` without `WEXITED` still reports a child's exit, because the kernel primitive always does — LOGGED 2026-08-16 by lane B
+
+**In short:** POSIX's `waitid()` lets a caller say *which kinds* of news it
+wants about its children — "tell me if one exits", "tell me if one is
+suspended", "tell me if one resumes" — by setting flags. Ours honours the
+suspend and resume flags but cannot switch the *exit* one off: ask only about
+suspends, and an exit will still be reported. Nothing we ship asks for that
+combination, and the direction of the error is the safe one (a caller is told
+more than it asked, never less), but a ported program that relies on the
+filter will behave differently here than on Linux.
+
+**Where it lives.** `posix/src/process.rs::waitid_kernel_options` — the
+translation from `waitid`'s option word to the kernel's. `WSTOPPED`,
+`WCONTINUED` and `WNOWAIT` each have a kernel bit; `WEXITED` has none, because
+`SYS_PROCESS_WAIT_STATUS` reports a reapable exit unconditionally (that is what
+`waitpid` means) and the two job-control classes are the *additions* selected by
+`WUNTRACED`/`WCONTINUED`.
+
+**How it would show.** `waitid(P_PID, child, &info, WSTOPPED)` on a child that
+exits instead of stopping: Linux blocks (or returns `ECHILD` once the child is
+its last), ours returns the exit as `CLD_EXITED` — **and reaps it**, so the
+status is consumed by a call that did not ask for it. That last part is the
+reason this is worth an entry rather than a comment: a caller that intended to
+reap later has silently lost the exit status.
+
+Note the fixture's check 100 deliberately sets `WSTOPPED | WEXITED` together for
+exactly this reason — so a child that died instead of stopping is *reported*
+rather than leaving the parent parked. That works today by accident of this bug
+and by intent of the flags; it will keep working after a fix.
+
+**Proper fix** (kernel-side, so lane A's): a `WNOEXITED` option bit — or,
+better, invert it and make the primitive's exit reporting explicit under a bit
+that every existing caller already sets by construction, the way `WPGID` and
+`WINFO` were added without disturbing anyone. Not filed as a request yet: no
+caller in the tree needs it, and it is a strictly larger change to the wait
+primitive than the three that just landed. Promote it to `requests/` the first
+time a port actually depends on the filter — glibc's `posix_spawn` and
+`pthread_cancel` paths are the likeliest candidates.
+
+### TD-POSIX-NATIVE-GETRUSAGE-REPORTS-SYSTEM-WIDE-CPU. `getrusage()` on our own ABI returns the machine's total CPU time as if it were the caller's — LOGGED 2026-08-16 by lane B, filed to lane A
+
+**In short:** a program can ask the OS "how much CPU have I used?". On our own
+ABI it gets an answer, the answer looks entirely plausible, and it is **the
+whole machine's** CPU time rather than the asking program's. Every process gets
+the same number and that number only ever grows. There is no way for a caller
+to tell.
+
+**This is a false non-zero, and that is the point.** It is the sibling of the
+`clear_user_rusage` bug lane A just fixed, and the worse half: `wait4` reported
+zeros, which are visibly unsourced, whereas this reports a real measurement of
+something else. §314's rule — libc must not invent an answer it does not have —
+is aimed exactly here.
+
+**Where it lives.** `posix/src/resource.rs::getrusage`, the
+`target_os = "none"` arm. It fills `ru_utime` from `SYS_CPU_TIMES(0)` and
+`ru_stime` from `SYS_CPU_TIMES(1) + SYS_CPU_TIMES(2)`. `SYS_CPU_TIMES` (native
+59) takes a *field selector*, not a pid — it is the machine-wide aggregate. Note
+selector 0 is **system** time, so `ru_utime` is not even the aggregate *user*
+time; the two fields are mislabelled relative to each other as well as being
+the wrong scope. `ru_minflt`/`ru_majflt`/`ru_nvcsw`/`ru_nivcsw` and all of
+`RUSAGE_CHILDREN` are zero.
+
+**Why libc cannot fix it alone.** There is no native syscall reporting a
+process's own accounting. The counters exist (`pcb`'s `acct_*`/`child_*`,
+`thread::process_cpu_ticks`, `process_fault_counts`, `process_ctxsw_counts`) and
+the kernel already encodes the full 144-byte `struct rusage` from them in
+`kernel/src/syscall/linux.rs::sys_getrusage` (~13478) — but that encoder is
+registered only on the **Linux** ABI table, and `AbiMode` is per-process, so a
+program on our libc can never reach it. This is the same shape as
+`TD-POSIX-PROCESS-GROUPS-ARE-FAKE-FOR-NATIVE-ABI-PROGRAMS`: real kernel state,
+reachable from the ported ABI, invisible from our own, with a userspace
+approximation standing in.
+
+**Proper fix** — filed as
+`requests/b-a-native-getrusage-reports-system-wide-cpu-as-per-process.md`: a
+native `SYS_PROCESS_GET_RUSAGE` taking `who` plus the `(pointer, size)`
+extensible-struct convention `WaitInfo` established, wrapping the encoder that
+already exists. Lane B then fills the six sourceable fields exactly as
+`rusage_from_wait_info` already does for `wait4`, so the self and child paths
+agree by construction.
+
+**Not blocking.** Nothing in the tree reads `getrusage` for a decision; the
+callers are ports that are ahead of us (bash's `times` builtin, CPython's
+`resource` module). Filed now anyway because the kernel half is a registration
+around existing code, and because the failure is silent by construction — a
+wrong CPU time is never implausible.
+
+**Coverage when it lands** must be ring-3 (the host build stubs every syscall
+to `ENOSYS`), and the decisive checks are the two this bug cannot pass: two
+processes on the same machine must get **different** answers, and a process that
+has just burned CPU must get a **larger** answer than a moment before.
 
 ### TD-POSIX-TIMES-FLAKE. `posix::sys_times::tests::test_times_increments_each_call` fails intermittently under a full-workspace run — 2026-08-15 — ✅ FIXED 2026-08-15 by lane B (`posix/src/sys_times.rs`), and the triage found a second, worse bug underneath it
 
@@ -1727,7 +1849,7 @@ drawing a plausible wrong glyph:
 * **The Type 2 arithmetic operators** (`add`, `div`, `random`, the transient
   array, …). No shipping font uses them for outlines; they exist for
   procedural effects.
-### TD-PKGCONF-THE-RUST-REWRITE-IS-UNFINISHED-AND-SUPERSEDED-BY-THE-UPSTREAM-PORT. 34 of upstream's 62 options, clippy-red, never run on target — kept as reference only — 2026-08-14
+### TD-PKGCONF-THE-RUST-REWRITE-IS-UNFINISHED-AND-SUPERSEDED-BY-THE-UPSTREAM-PORT. 34 of upstream's 62 options, never run on target — kept as reference only — 2026-08-14 (clippy cleared 2026-08-16; still parked)
 
 **Where:** `userspace/pkgconf/src/` — `main.rs` (1,075 lines), `flags.rs` (454),
 `pcfile.rs` (667), `store.rs` (646), `version.rs` (301); 3,143 lines total.
@@ -1746,10 +1868,13 @@ SlateOS. It does. Upstream pkgconf 2.3.0 cross-compiles and links against
 missing symbols** on the first attempt (`scripts/pkgconf-spike/`). Per §307 and
 `roadmap-detailed.md`'s "Porting vs. Reimplementing" policy, the port wins.
 
-**What actually works** (all measured 2026-08-14, not assumed):
+**What actually works** (all measured, not assumed; 2026-08-14 unless marked):
 
-- **112/112 unit tests pass.** `cargo +nightly test -p pkgconf --target
-  x86_64-pc-windows-gnu` **from the repo root** — 112 passed, 0 failed, 0.09s.
+- **119/119 unit tests pass** (2026-08-16; was 112/112). `cargo test -p pkgconf
+  --target x86_64-pc-windows-gnu` **from the repo root** — 119 passed, 0 failed,
+  0.08s.
+- **Clippy is clean** as of 2026-08-16, `--all-targets`, and so is rustfmt. See
+  "What was cleared" below for why that was worth doing to a parked crate.
 - **It builds and links for the real target.** `cargo +nightly build-slateos -p
   pkgconf` produces a 21 MB static `ET_EXEC` for `x86_64-slateos`. An earlier
   note in the wip commit message claiming it was "never built for the
@@ -1760,7 +1885,9 @@ missing symbols** on the first attempt (`scripts/pkgconf-spike/`). Per §307 and
 
 **What does not work:**
 
-- **34 of upstream's 62 long options are implemented.** Missing: `about`,
+- **34 of upstream's 62 long options are implemented** — unchanged by the
+  2026-08-16 pass, which added behaviour behind options that already existed
+  and no new options at all. Missing: `about`,
   `define-prefix`, `digraph`, `dont-relocate-paths`, `dump-personality`, `env`,
   `env-only`, `exists-cflags`, `fragment-filter`, `ignore-conflicts`,
   `internal-cflags`, `license`, `list-package-names`, `log-file`,
@@ -1769,24 +1896,66 @@ missing symbols** on the first attempt (`scripts/pkgconf-spike/`). Per §307 and
   `relocate`, `shared`, `simulate`, `solution`, `verbose` — 28 in all.
   (`--frobnicate` and `--weird-name` appear in the source but are test
   fixtures for the unknown-option and `--` paths, not features.)
-- **Clippy is red: 9 errors, 2 warnings**, so the crate violates CLAUDE.md's
-  "clippy clean" bar. The errors are all cosmetic-grade
-  (`format!` appended to a `String` ×3, missing doc backticks ×2, collapsible
-  `if`, identical match arms, >3 bools in a struct, case-sensitive extension
-  compare).
-- **The 2 warnings are the real tell that it is unfinished**, not style noise:
-  `PcFile::path` is never read even though its doc comment says "`--validate`
-  and error messages quote this", and `Store::dirs()` is never called. Both are
-  scaffolding for features that were never wired up.
 - **It has never been executed under the SlateOS kernel.** No on-target
-  self-test exists.
+  self-test exists. This, not the option count, is the thing that would have to
+  change before anyone could claim it works.
+
+**What was cleared, 2026-08-16, and why on a parked crate.** The entry
+originally listed "clippy red: 9 errors, 2 warnings", and called the two
+warnings "the real tell that it is unfinished". Both are now gone. Doing that
+to a parked crate is worth an explanation, because "parked" and "leave it
+broken" are not the same thing: a parked crate is still *read* — by whoever
+salvages `version.rs`, and by anyone running `cargo clippy` across the
+workspace — and a reader cannot distinguish a warning that means "unfinished"
+from one that means "defect". A warning used as a status marker is a status
+marker nobody can act on.
+
+The two dead-code warnings were resolved in opposite directions, on the
+evidence rather than uniformly:
+
+- `Store::dirs()` was scaffolding for nothing, so it was **deleted**.
+- `PcFile::path` was scaffolding for a **real gap**, so it was wired up.
+  `pcfiledir` resolved inside `${...}` substitution but not for
+  `--variable=pcfiledir`, so a relocatable package's `prefix=${pcfiledir}/../..`
+  worked while the build system asking for `pcfiledir` outright got `""`.
+  It now answers both ways, and `--print-variables` lists it (pkgconf does,
+  pkg-config 0.29 does not — a name that `--variable=` answers and
+  `--print-variables` hides is worse than either behaviour on its own).
+
+That pulled in the **virtual `pkg-config` package**, which both reference
+implementations synthesise rather than read from disk, and which is what makes
+`PcFile::path` legitimately optional — a package with no file must not claim a
+`pcfiledir`. It supplies `pc_path`, `pc_system_includedirs` and
+`pc_system_libdirs` from the *compile-time* defaults and deliberately not from
+the active search path: a cross build sets `PKG_CONFIG_LIBDIR` to the target
+sysroot, and if `pc_path` followed it, every package built in that environment
+would install its own `.pc` file into the sysroot and vanish from the host's
+view of the system. Seven tests cover this, including that shape specifically.
+
+The nine clippy errors are fixed rather than allowed, with one exception:
+`struct_excessive_bools` on `Options` is allowed **with its reasoning in the
+source** — pkg-config's twenty switches are not mutually exclusive (`--cflags
+--libs --static` is the ordinary invocation), so an enum is wrong, and a
+bitfield would trade twenty self-describing field names for twenty mask
+constants. `format_push_string` is handled by a single `wr!` macro that confines
+the infallible-sink `Result` discard to one audited place instead of three
+`let _ =`.
+
+**None of this changes the decision.** §307 stands: upstream pkgconf 2.3.0 is
+what `/bin/pkgconf` and `/bin/pkg-config` are staged from
+(`scripts/create-ext4-rootfs.sh` ~line 990), this crate ships nothing, and it
+stays parked. The work above is maintenance on an archive, not progress toward
+finishing it — 28 options are still missing and it has still never run under
+the kernel.
 
 **A hazard in the working tree.** `main.rs` is *tracked and modified*, while
 `flags.rs`, `pcfile.rs`, `store.rs` and `version.rs` are *untracked*. The
 committed `main.rs` is the older ~200-line standalone version with no `mod`
 declarations. So committing `main.rs` alone would break the crate — it would
 reference four modules that do not exist in the index. Commit all five or none.
-The `wip/pkgconf-rust-parked` branch holds a consistent snapshot of all five.
+The `wip/pkgconf-rust-parked` branch holds a consistent snapshot of all five;
+it was advanced to the 2026-08-16 state in `a3c5cb306`, so that branch — not
+this working tree — is what to read if the two ever drift.
 
 **The proper fix, in the operator's preferred order:**
 
@@ -23669,9 +23838,257 @@ first thing to check is not the path — it is whether the program stats before 
 opens, and whether the child holds `(File, METADATA)`. `grep -n "Rights::READ | Rights::WRITE"`
 over `kernel/src/proc/spawn.rs` lists the fixtures that cannot stat.
 
+## B-A-BOOT-TEST-CAN-PASS-AGAINST-A-ROOTFS-IMAGE-OLDER-THAN-ITS-FIXTURES (lane B, 2026-08-16)
+
+**Status: half fixed — the checker exists and is verified; the boot test does
+not call it yet.** Filed to lane A as
+`requests/b-a-boot-test-boots-a-rootfs-image-that-may-predate-the-fixtures-in-it.md`.
+
+**Sibling, found the same day and independently:**
+`B-A-A-FAILED-ROOTFS-REBUILD-LEAVES-THE-OLD-IMAGE-AND-THE-NEXT-BOOT-TEST-STILL-PASSES`
+(lane A). The two are one false green reached by opposite routes — there the
+rebuild *ran and aborted*; here it was never run at all. Lane A's fix makes the
+abort loud at the moment it happens; this one makes the image answer for itself
+afterwards. Neither subsumes the other: a loud abort is invisible to whoever
+boots that image tomorrow, and a manifest cannot be written by a script that
+exited before writing one. They compose — after an aborted rebuild the old image
+keeps its old manifest, and `image-check` then names exactly which ELFs moved.
+
+### What happens
+
+`scripts/boot-test.sh` builds the kernel from the tree and then boots it
+against `rootfs.ext4`, an image it does not build and does not inspect. The
+ring-3 C fixtures (`services/ctest-*`) are executed from **inside that image**
+(`load_test_elf()` reads `/mnt/tests/<name>.elf`), not from the tree. So if the
+fixtures are rebuilt and the image is not repacked, the boot runs the previous
+binaries and reports `=== Boot test PASSED ===`.
+
+Observed today, on the change it would have falsified: 38 new `ctest-jobctl`
+checks (150–187, the `WaitInfo` truncation and zero-fill coverage lane A asked
+for by name), all nine ELFs rebuilt and re-stamped, a full 817 s boot test, and
+a PASS in which none of the new checks executed. The tell was a single line —
+
+```
+[spawn] Running job control (ring 3, C, native ABI) integration test (2627416 bytes ELF)
+```
+
+— where 2 627 416 is the *committed* ELF and the tree's was 2 578 120. Without
+that byte count in `spawn.rs`'s log line there would have been no signal at all,
+and the merge to `main` would have carried a rung that had never run.
+
+### Why every existing guard stayed quiet
+
+This is the part that makes it worth an entry rather than a fix-and-forget.
+Three gates already exist against fixture staleness, and all three were green:
+
+| Guard | Compares | Verdict that day |
+|---|---|---|
+| `create-ext4-rootfs.sh` mtime gate | ELF vs `libc.a`; ELF vs `main.c`/`build.py` | pass — the ELF was the newest file involved |
+| `ctest-fixtures.py check` | ELF *content* vs its inputs' content | pass — the ELF genuinely matched its source |
+| `create-ext4-rootfs.sh` sysroot gate | `libc.a` vs `posix/src` | pass |
+
+All three answer "was this ELF built from that source". None answers "is this
+ELF the one in the image we are about to boot". A fourth question, unasked —
+and note that a *stricter* version of any of the three would not have caught
+it, because none of them can see the image at all.
+
+### The fix, and the half of it that is done
+
+`scripts/ctest-fixtures.py` gained `image-stamp` and `image-check`:
+
+- `image-stamp` runs at the end of `create-ext4-rootfs.sh` (wired up, and fatal
+  if it cannot run). It writes `rootfs.ext4.manifest` — gitignored, beside the
+  image — recording the sha256 of every locally built ELF staged into it:
+  `services/ctest-*/*.elf`, `services/fastpy-*/*.elf`, `build/spike/*.elf`
+  (74 files today, so it covers the ported binaries too, which have no content
+  stamp of their own).
+- `image-check` compares that manifest against the tree and names each ELF that
+  moved.
+
+**Content hashes, not mtimes**, for a reason peculiar to this artifact: QEMU
+writes to `rootfs.ext4` on every boot, so the image's mtime records when it was
+last *run*, not when it was packed — it is reliably *newer* than the fixtures
+it is stale with respect to. (The docstring's other reason applies as well: a
+fresh clone flattens every mtime.)
+
+What is missing is the call site. `scripts/boot-test.sh` is lane A's file, so
+the `image-check` call before QEMU launches is in the request above. **Until it
+lands the checker is inert** — it exists, it passes, and nothing invokes it, so
+a stale image still buys a green boot in all three lanes.
+
+### Reproducing
+
+```
+python scripts/ctest-fixtures.py image-check          # ok
+printf 'x' >> services/ctest-pgroup/ctest-pgroup.elf
+python scripts/ctest-fixtures.py image-check          # ERROR ... exits 1
+```
+
+### The adjacent gap this exposed
+
+`scripts/bash-spike/cross2.sh` untarred `build/spike/bash-5.2.tar.gz`, a
+gitignored path that **nothing in the tree ever wrote**. Repacking the image
+requires relinking `bash-slateos.elf` (the rootfs script refuses a stale one),
+relinking requires bash's objects, and rebuilding those requires the tarball —
+which was in no script and no document, exactly the defect the zig pin fixed
+earlier the same day, one line further down. Now pinned by version and sha256
+as `slate_ensure_bash_src` in `scripts/lib/worktree.sh`, verified against
+Chet Ramey's signature via GNU's own keyring before the hash was written down.
+`run.sh` extracts on demand from the same pinned tarball rather than assuming
+`build/spike/bash-5.2/` exists.
+
+### And the third one, found by looking rather than by being bitten
+
+Having pinned zig and bash on the same day, the obvious question was which
+other third-party source this tree compiles into a shipped binary. There was
+exactly one left: `scripts/pkgconf-spike/run.sh` fetched upstream pkgconf with
+
+```sh
+[ -f "pkgconf-$VER.tar.xz" ] || curl -sSLO "https://distfiles.ariadne.space/..."
+```
+
+That is a worse failure than either of the other two were, and worth stating
+precisely rather than filing under "no hash". `curl -O` **without `--fail`
+writes the response body on an HTTP error**, and without a `.part` file it
+writes it under the final name. So a 404 page, or a connection cut halfway,
+leaves a file that satisfies `[ -f ]` from then on. The next run does not
+retry — it is *cached*. It untars whatever arrived and, if tar happens to
+succeed, compiles it into `pkgconf-slateos.elf` and stages it in the image.
+Neither the zig nor the bash gap could do that: those failed loudly by being
+absent. This one fails quietly by being present and wrong.
+
+Now `slate_ensure_pkgconf_src` in `scripts/lib/worktree.sh`, pinned at 2.3.0 /
+`3a9080ac51d03615e7c1910a0a2a8df08424892b5f13b0628a204d3fcce0ea8b`, with
+`--fail` and a `.part` file so an interrupted download is loud instead of
+sticky. The hash was cross-checked against two independent packagers rather
+than the distfiles server — asking a server to vouch for its own bytes is not
+a check — and both also agree on the 316160-byte size: OpenBSD ports' distinfo
+(base64 `OpCArFHQNhXnwZEKCiqN8IQkiStfE7BiiiBNP8zg6os=`, which decodes to that
+hex) and OpenEmbedded-core's recipe.
+
+`run.sh` also now **re-extracts unconditionally** instead of `[ -d
+"pkgconf-$VER" ] ||`. That guard would have left the pin with a hole its own
+size: a tree unpacked by an earlier run from an unverified tarball satisfies
+`[ -d ]`, so on any machine that had already run the script once, verifying the
+tarball would have changed nothing at all. It costs a second and is not even a
+rebuild, since `configure` and `make` below run unconditionally regardless.
+
+Both paths were exercised, not assumed — a pin whose *rejection* path has never
+run is one you are trusting on the strength of its happy case:
+
+| case | result |
+|---|---|
+| both copies good | resolves the scratch copy, `tar xf` from the verified path, link exit 0, 0 missing symbols |
+| scratch copy corrupted | ignored *loudly*, naming both hashes; falls through to the cache copy; builds |
+| both copies corrupted | `refusing to extract`, script exits **non-zero**, nothing is built |
+
+`pkgconf-slateos.elf` came out byte-identical (`9f0a7647f11a71c0…`) on all four
+rebuilds, including across the two different source paths, so this port is
+reproducible and a change in that hash is evidence rather than noise.
+
+One methodology note for whoever tests this next, because it cost a wrong
+conclusion here first: **`$`-expressions inside `wsl -d Ubuntu -- bash -c '…'`
+are eaten before WSL sees them**, single quotes notwithstanding. `…; echo
+"RC=$?"` reported `RC=` and a control `bash -c "exit 7"` reported `0` — which
+reads exactly like "the script refuses but exits 0", a serious bug and a
+phantom. Use `&& echo ZERO || echo NONZERO`, which contains no `$`, and it
+gives the true answer. The same artifact makes `echo "$SLATE_ROOT"` after
+sourcing `scripts/lib/worktree.sh` look like the file sets nothing.
+
+## B-POSIX-CAP-KILL-IS-PROJECTED-FROM-A-PER-CHILD-GRANT, SO EVERY PROCESS THAT HAS FORKED REPORTS IT (lane B, 2026-08-16)
+
+**Status: open, deliberately.** The fix depends on a convention only lane A can
+state; asked as
+`requests/b-a-does-resource-id-zero-mean-the-class-or-just-an-unknown-pid.md`.
+Found by lane A while landing the §312 step 3 grants and handed over as an
+observation rather than a claim ("it is your file and your call") — this entry
+is lane B agreeing with it and writing down why it is worth closing.
+
+### What is wrong
+
+`posix/src/sys_capability.rs::kernel_view::project` maps
+`(ResourceType::Process, Rights::SIGNAL)` to `CAP_KILL`. Both automatic grant
+sites — `kernel/src/proc/spawn.rs` step 5b and `kernel/src/proc/fork.rs` step 8
+— give the parent `READ|WRITE|DELETE|WAIT|SIGNAL|DUPLICATE` on **each child**.
+So the preimage is granted to every process that has ever forked or spawned,
+and `CAP_KILL` is projected for all of them.
+
+The capability actually held is "may signal pid 4271". `CAP_KILL` means "may
+signal *any* process, overriding the uid check". Projecting the second from the
+first is not a widening of degree; they are different authorities, and the
+narrow one is granted automatically to nearly everything.
+
+### Why it matters more than the blast radius suggests
+
+Nothing is *gated* on it today: §314 removed libc's pre-emptive `CAP_KILL` test
+from `kill()`/`killpg`, on the grounds that libc cannot evaluate Linux's rule
+honestly (it cannot read the target's credentials), so the check belongs in
+`SYS_SIGNAL_SEND` where the facts are. The false positive therefore reaches
+`capget`/`cap_get_proc` reporting and stops.
+
+What makes it worth closing anyway is that it contradicts the projection's
+stated contract, in the one direction that a later change cannot make safe.
+`posix/src/signal.rs` says of this very capability: "after §312 its `CAP_KILL`
+is a deliberately conservative projection that reads false for authority the
+kernel would grant." Every other rule in `project()` honours that. This one
+reads **true** for authority the kernel would refuse, and §312 step 3 — which
+points `has_capability` at the projection — is the moment an over-reporting rule
+stops being cosmetic.
+
+### The fix, and what blocks it
+
+`CapEntryInfo` already carries `resource_id`, and libc already receives it; no
+predicate reads it. The automatic grants name a real child pid, while deliberate
+class-wide grants pass `0` (lane A's own `(Process, 0, SET_CREDENTIALS)` does).
+So the rule wants to be "a Process capability naming a specific pid is not
+`CAP_KILL`; one naming no instance is."
+
+That is correct **only if `resource_id = 0` is a sentinel meaning "the class"**
+rather than a placeholder meaning "no pid was available at the call site" —
+`SpawnOptions.capabilities` is consumed before the child has a pid the caller
+knows, so both readings fit the evidence, and they are indistinguishable until a
+second predicate leans on the field. Guessing would rebuild the exact hazard
+§207 was written to avoid: a security-relevant invariant spanning two crates
+owned by two lanes, with nothing in either file stating it.
+
+### Not the same shape as the `SET_CREDENTIALS` predicate beside it
+
+`(Process, SET_CREDENTIALS)` → `CAP_SETUID`/`CAP_SETGID` is id-agnostic on
+purpose and is *not* affected: no spawn or fork path confers `SET_CREDENTIALS`,
+so holding it is always deliberate and there is no auto-grant for an id check to
+exclude. That predicate is also the one that genuinely gates —
+`SYS_PROCESS_SET_CREDENTIALS` performs no kernel-side capability check at all
+(`kernel/src/syscall/handlers.rs`: "the cap/identity permission check is
+performed by the userspace posix wrappers") — which is why it carries a test
+asserting no other Process right, `METADATA` above all, can reach it.
 ## B-A-A-MERGE-OF-TWO-CORRECT-COMMITS-LEFT-NINE-FIXTURES-LINKING-A-LIBC-`main`-NO-LONGER-BUILDS (lane B's tree; filed by lane A, 2026-08-16)
 
-**Status: OPEN 2026-08-16.** Blocks `rootfs.ext4` rebuilds in every worktree.
+**Status: ✅ FIXED 2026-08-16 — both halves.** Detection is
+`scripts/stamp-ancestry.py` (lane A, described below); the repair is lane B's
+`3ad5c98aa`, which relinks all nine ELFs and rewrites all nine `.stamp` files
+against a sysroot built from the merged `posix/src`. On lane B's tree today:
+`ctest-fixtures.py check` → `ok` ×9, `image-check` → `ok rootfs.ext4 (74 staged
+ELFs match the tree)`, `stamp-ancestry.py` → `OK … no source commit outranks
+stamp commit 3ad5c98aa` (exit 0), and the boot test passes with
+`self_test_bash_on_slateos_libc` no longer self-skipping.
+
+**Not archived yet, deliberately.** `3ad5c98aa` is on `lane-b` and reaches
+`main` only with the merge that carries this line; the archiving rule is "fixed
+*and* the fix has been on `main` for a full boot test". Move it to
+`known-issues-resolved.md` after the next green boot test on a tree that
+contains it via `main`.
+
+**The judgement call the detector left open is answered:
+`design-decisions.md` §321 — no.** The stamp will not carry a `posix/` tree
+hash. Reasons in full there; in one line, a source tree hash is wrong in both
+directions (it moves on formatting-only commits, and it misses `tzrules/`,
+`toolchain/build-sysroot.ps1` and `[profile.release]`), and a stamp mismatch is
+*fatal* to `create-ext4-rootfs.sh`, so the inaccuracy would land where the only
+escape hatch also disables the exact check beside it.
+
+Original report follows, unedited, because the history is the content.
+
+**Was: OPEN 2026-08-16.** Blocked `rootfs.ext4` rebuilds in every worktree.
 Requests filed: `requests/a-b-nine-ctest-fixtures-on-main-link-a-libc-main-no-longer-builds.md`
 (the repair, lane B's) and `requests/a-c-fixture-rebuild-was-correct-on-lane-c-and-wrong-on-main.md`
 (the habit, lane C's). Recorded here as well as there because a request is read
@@ -23813,17 +24230,19 @@ fires. The stale-config and missing-family branches were exercised directly and
 both exit 2. The `:(glob)` pathspec magic is deliberate and load-bearing: plain
 git globbing lets `*` cross `/`, which would silently widen the stamp pathspec.
 
-**Still open: the repair** (lane B rebuilds and re-commits the nine ELFs), and
-one judgement call the detector does not settle — whether to also record the
-libc's **source** identity in the stamp (the tree hash of `posix/`, alongside
-the existing `libc.a` content hash). That would make the stamp answer the right
-question directly rather than have a second script answer it alongside, at the
-cost of coupling a file under `services/` to a path outside it. The detector
-makes that optional rather than urgent; lane A has a stake only in the class
-being detectable, which it now is.
+**Repair half: FIXED 2026-08-16 — `3ad5c98aa`** (see the status block at the
+top). The judgement call the detector did not settle — whether to also record
+the libc's **source** identity in the stamp (the tree hash of `posix/`, alongside
+the existing `libc.a` content hash) — was **declined**, in `design-decisions.md`
+§321. It would have made the stamp answer the right question directly rather
+than have a second script answer it alongside; what ruled it out is that a tree
+hash cannot answer it *accurately* in either direction, while a stamp mismatch
+is fatal to the image build. The coupling cost lane A flagged (a file under
+`services/` naming a path outside it) turned out to be the smaller objection —
+the stamp already names `toolchain/sysroot/lib/libc.a`.
 
-**What it blocks right now.** `create-ext4-rootfs.sh` exits 1 on the stamp
-mismatch, correctly, so no worktree can rebuild `rootfs.ext4`. That leaves the
+**What it blocked while open.** `create-ext4-rootfs.sh` exits 1 on the stamp
+mismatch, correctly, so no worktree could rebuild `rootfs.ext4`. That left the
 boot test running an image with no `/bin/bash`, so
 `self_test_bash_on_slateos_libc` self-skips and every run ends:
 
@@ -23923,3 +24342,128 @@ Lane B raised its own `run-timeout.py` budget from 1200s to 3600s. The smaller
 budget was killing the run *during the lock wait*, which made the starvation
 present as a self-inflicted timeout — worth knowing, but it is a symptom
 workaround and not the fix.
+
+## B-THE-FIXTURE-STAMP-HASHED-WORKTREE-BYTES-SO-IT-DID-NOT-SURVIVE-A-CHECKOUT (lane B, 2026-08-16)
+
+**Status: ✅ FIXED 2026-08-16** — stamp format v2, `scripts/ctest-fixtures.py`
+(`sha256_text`, `_inputs`, `_stamp_version`) plus all nine `services/ctest-*.stamp`
+re-written. Recorded rather than fixed silently because it is the *third* time
+this file has caught a check that reports a healthy tree as broken, and the
+first time the check's own foundation was the thing at fault.
+
+**In short:** nine compiled test programs are each checked in beside a `.stamp`
+file holding a fingerprint of the source that built them. The fingerprint was
+taken of the bytes sitting in one developer's folder, and on Windows those
+bytes can differ from another folder's copy of *the identical committed file*,
+because Windows and Linux end lines differently. So all nine programs reported
+"stale, rebuild me" in a checkout where nothing whatsoever was wrong — and
+because the disk-image build treats that report as fatal, the image could not
+be built anywhere except on the one machine that wrote the stamps.
+
+### How it presented
+
+Immediately after merging `lane-b` into `main` — a **fast-forward**, so the
+tree was byte-identical to the one where all nine had just passed:
+
+```
+$ python scripts/ctest-fixtures.py check      # in the `os` integration worktree
+[ctest] ERROR ctest-ctty: STALE - the ELF does not match its inputs.
+[ctest]          input build.py: recorded 765ac1c53ad802b0... but on disk 77d760d6ca55933f...
+   … all nine, on `build.py` …
+```
+
+`main.c` did *not* drift; only `build.py` did. That asymmetry is the tell —
+a genuine source change would not confine itself to one of two tracked files
+in all nine directories at once.
+
+### Root cause
+
+`git config core.autocrlf` is **`input`**: normalise CRLF→LF on commit, do not
+convert on checkout. A clean checkout therefore yields LF. But any tool that
+rewrites a tracked text file in Python/text mode on Windows writes CRLF back,
+and `git status` still calls it clean, because `input` normalises again when
+reading the worktree. Two worktrees of one commit legitimately hold
+byte-different `build.py` files:
+
+```
+build.py  raw=77d760d6ca55933f  norm=77d760d6ca55933f  crlf=  0   os
+build.py  raw=765ac1c53ad802b0  norm=77d760d6ca55933f  crlf= 99   os-lane-b
+```
+
+`sha256()` hashed the raw bytes, so the stamp recorded a property of *the
+worktree that wrote it* rather than of the commit. This is the same class of
+error as the mtime gate the stamp was built to replace — the module docstring
+claims the stamp "survives a checkout because it does not depend on the
+filesystem's opinion of time", and it turned out to depend on the filesystem's
+opinion of line endings instead.
+
+### Why it was dangerous rather than annoying
+
+`create-ext4-rootfs.sh` **exits 1** on a stamp mismatch, deliberately. So a
+false STALE does not warn, it blocks — and its only escape hatch,
+`ALLOW_STALE_FIXTURES=1`, also disables the *real* staleness check. A check
+that cries wolf in a place with one shared off-switch trains its users to
+throw that switch, which is precisely how
+`B-CTEST-FIXTURES-LINKED-A-STALE-LIBC` happened in the first place.
+
+### The fix
+
+Text inputs (`build.py`, `main.c`) are hashed with `\r\n` folded to `\n`;
+`libc.a` and the output ELF stay byte-exact. The fold is *sound*, not just
+convenient: both text inputs are consumed by tools that treat CRLF and LF
+alike (the C preprocessor, the Python tokenizer), so two files differing only
+in line endings genuinely produce the same ELF — whereas one byte of `libc.a`
+does not.
+
+`STAMP_VERSION` went 1 → 2, and a v1 stamp is now reported as a **format**
+mismatch with its own message, explicitly *not* as drift: the two sides were
+computed under different rules and were never comparable, so "the ELF does not
+match its inputs" would have been an unfounded accusation. There is no v1
+compatibility path, on purpose — it would be code that runs once, in the hands
+of the person who wrote it.
+
+### The migration was proved content-neutral before re-stamping
+
+Re-stamping is normally the wrong repair (`check`'s own message says so: it
+records drift rather than fixing it). Here it is right, and that was
+*established* rather than assumed: the pre-edit script, recovered with
+`git show HEAD:scripts/ctest-fixtures.py`, was run against the same tree and
+reported `ok` for all nine. So under v1 rules nothing had drifted, and the only
+thing v2 changes is the rule. Afterwards, the v2 hashes were confirmed to match
+the *other* worktree's copies of `build.py` and `main.c` for all nine fixtures
+— the property that was missing all along.
+
+### Verified end to end, across the boundary that broke
+
+After the fix the `os` integration worktree still failed — on
+`toolchain/sysroot/lib/libc.a` alone (`on disk 4b14549d…`, recorded
+`e322989b…`), with the `build.py` line gone. That remainder was real and local:
+the sysroot is gitignored, so that worktree simply held an older build. Running
+`powershell -File toolchain/build-sysroot.ps1` there (100 s) and re-checking
+gave **`ok` for all nine, in the LF worktree, against stamps written in the CRLF
+one.** That crossing is the property the v1 stamp never had, and it is now the
+acceptance test for any future change to how inputs are hashed.
+
+Worth keeping: after the fix, the surviving failure was the *correct* one. A
+check that reports exactly the one thing that is genuinely wrong, and nothing
+else, is the whole point of naming drifted inputs individually.
+
+### How widespread the CRLF is, since the next reader will ask
+
+Surveyed across all 13,145 tracked text files in lane B's worktree: **70 carry
+CRLF, and every one is a `services/*/build.py`** — the nine `ctest-*` plus ~61
+`fastpy-*`. Every committed blob is LF (`git show HEAD:…` on a sample counts
+zero), so this is purely a worktree artifact of whatever generated those files
+in text mode, not anything in history.
+
+Only the nine `ctest-*` copies were ever hashed. The `fastpy-*` ones are an
+input to nothing: `STAGED_GLOBS` fingerprints their **ELFs**, which are binary
+and hashed byte-for-byte, correctly. So the exposure was exactly the nine, and
+it is closed.
+
+**No `.gitattributes` was added, deliberately.** It would not help: git already
+checks these out as LF under `autocrlf=input`; the CRLF arrives *after*
+checkout, written by a tool. A config that governs checkout cannot fix a file
+rewritten post-checkout, which is precisely why the durable fix belongs in the
+hash rule and not in git configuration — and why the fix works for any future
+tool that does the same thing without anyone having to notice.

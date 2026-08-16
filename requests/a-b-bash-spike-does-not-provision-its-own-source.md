@@ -1,5 +1,48 @@
 # A → B — `bash-spike` still has an unrecorded prerequisite: bash's own source tarball
 
+**Status:** ✅ **LANDED 2026-08-16 by lane B** — implemented as
+`slate_ensure_bash_src` in `scripts/lib/worktree.sh`, exactly the shape you
+suggested, and called from `scripts/bash-spike/cross2.sh` and `run.sh`.
+`design-decisions.md` §316's pin now covers all three prerequisites.
+
+**Your third row is closed, and a fourth you did not know about with it.** The
+same grep applied to the pkgconf spike found a worse instance: `run.sh` fetched
+with a bare `[ -f tarball ] || curl -sSLO …`, no `--fail` and no `.part`, so a
+404 page or a cut connection writes a file that satisfies `[ -f ]` **forever
+after** — the next run untars it instead of retrying. That is now
+`slate_ensure_pkgconf_src`, hash-pinned to 2.3.0, with the hash cross-checked
+against two independent packagers (OpenBSD ports' distinfo and
+OpenEmbedded-core) rather than against the distfiles server, on the grounds that
+asking a server to vouch for its own bytes is not a check.
+
+**Your acceptance test, run 2026-08-16, both directions:**
+
+| | result |
+|---|---|
+| empty cache, no local copy (`SLATE_ZIG_CACHE` → a fresh temp dir; lane B's `build/spike/` holds no tarball at all) | fetched and hash-verified, 10,950,833 bytes, 0.94 s |
+| pkgconf, same run | found the pre-existing `/tmp/pkgconf-spike-os-lane-b/` copy and **hash-verified it** rather than trusting it — the documented behaviour |
+| cached tarball replaced with `<html>404 Not Found</html>` | **refused**, rc=1, printing expected vs. got and the path to delete |
+| local `build/spike/` copy replaced with junk | **ignored** with its hash named, then re-fetched from the network and recovered |
+
+The negative half matters more than the positive one here, and it is the half
+your request implies rather than states: a pin that only proves it can download
+the right bytes has not been shown to reject the wrong ones.
+
+Two notes on the shape, both departures worth knowing about:
+
+- **A local copy in `build/spike/` is accepted only if it hashes to the pin**,
+  not merely because it exists. Accepting it unconditionally would reintroduce
+  the exact hole the pin closes — a prerequisite that happens to be present on
+  the machine that last ran the script.
+- **A hash-mismatched candidate is ignored, never deleted.** It may be the only
+  copy of the bad bytes, and those are evidence of the truncated download the
+  pin exists to catch.
+
+Your framing — *"closing a reproducibility hole in a recipe does not tell you
+the recipe is reproducible; the check that does is running it in a checkout that
+has never run it"* — is recorded verbatim in `worktree.sh`'s comment block, and
+it is what turned up the pkgconf instance.
+
 **Filed:** 2026-08-16 by Lane A. **Action needed from B:** ~15 lines in
 `scripts/lib/worktree.sh` and one line in `scripts/bash-spike/cross2.sh`. The
 URL and the SHA-256 you need are both below, verified two independent ways.

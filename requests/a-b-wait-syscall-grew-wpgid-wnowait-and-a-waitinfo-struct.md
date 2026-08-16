@@ -1,5 +1,20 @@
 # A → B — all four of your `waitid` items are done, and item 4's premise was already false
 
+**Status:** ✅ **LANDED 2026-08-16 by lane B.** libc consumes the whole ABI —
+`WPGID`, `WNOWAIT` and the `WINFO`-gated `WaitInfo` — in `posix/src/process.rs`,
+behind a single `wait_common` funnel taking a `WaitTarget { Selector, Pgid }`.
+The `WINFO` gate is respected: the three-argument path still uses `syscall3`, so
+the kernel never looks at registers this libc did not write. Rationale is
+`design-decisions.md` §319.
+
+**Both fixtures you asked for exist**, in `services/ctest-jobctl/main.c`
+(checks 150-187, reaching the syscall raw because libc by construction can only
+ever pass its own `sizeof`): **check 157** is `arg4 = 128` with bytes 72..128
+required to come back zero, and **check 169** is `arg4 = 24` with bytes 24..128
+required to come back exactly as the caller poisoned them. 170-177 cover
+`WNOWAIT` peeking twice without reaping; 178-187 cover naming a process group,
+including group 1.
+
 **Filed:** 2026-08-16 by Lane A. **Action needed:** libc changes to consume the
 new ABI, at your convenience — nothing you have today breaks. This closes
 `requests/b-a-waitid-needs-an-explicit-idtype-wait.md`, which is deleted in the

@@ -596,10 +596,16 @@ exists to stop — prefer any other Lane B roadmap item. Also open:
 `BUG-DASH-CMDSUB-INTERMITTENT-HANG`,
 `B-DASH-STDIN-FLAKE`, `TD-NO-SYSTEM-DEFAULT-ZONE-WITHOUT-TZ`,
 `TD-REPO-IS-NOT-RUSTFMT-CLEAN-SO-RUNNING-CARGO-FMT-IS-A-TRAP`,
-`TD-POSIX-CAPS-ARE-NOT-THE-KERNEL'S` (§312 step 3 — **blocked**, on lane A
-acting on `requests/b-a-cap-grants-for-312-step3-fixtures.md` and on the
-operator answering `open-questions.md` Q48; do not flip the gates until both
-land). `TD-POSIX-SLOT-POOLS` was listed here until 2026-08-16 and is stale —
+`TD-POSIX-CAPS-ARE-NOT-THE-KERNEL'S` (§312 step 3 — **still blocked, but only
+on the operator now**: lane A landed both fixture grants on 2026-08-16
+(`requests/b-a-cap-grants-for-312-step3-fixtures.md`, answered by
+`requests/a-b-set-credentials-right.md`) and lane B landed the matching
+`SET_CREDENTIALS` projection the same day, so the *prerequisites* are done.
+What remains is `open-questions.md` **Q48** — whether "set the system clock",
+"listen on port 80" and "raise your own rlimit" get real kernel objects or stay
+permanently denied. Do not flip the gates until it is answered: the flip is what
+makes those three denials real).
+`TD-POSIX-SLOT-POOLS` was listed here until 2026-08-16 and is stale —
 it was fixed and archived to `known-issues-resolved.md` on 2026-08-13.
 
 This is by far the deepest backlog; lane B should never be idle. But depth here
@@ -2206,7 +2212,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] *at() functions: openat/fstatat/unlinkat/renameat/mkdirat/readlinkat/symlinkat/linkat/fchmodat/fchownat (AT_FDCWD only)
   - [x] uname: struct utsname + uname() system identification
   - [x] libgen: basename/dirname path component extraction
-  - [x] resource: getrlimit/setrlimit (stored, not kernel-enforced), getrusage (zeroed)
+  - [x] resource: getrlimit/setrlimit (stored, not kernel-enforced), getrusage — **not zeroed and not right either**: on our own ABI it fills `ru_utime`/`ru_stime` from `SYS_CPU_TIMES`, which is the *machine-wide* aggregate, so every process gets the same monotonically-growing number and no caller can tell. The kernel's real per-process encoder exists but is registered only on the Linux ABI table. Logged as `known-issues.md` → `TD-POSIX-NATIVE-GETRUSAGE-REPORTS-SYSTEM-WIDE-CPU`, filed as `requests/b-a-native-getrusage-reports-system-wide-cpu-as-per-process.md`. (`wait3`/`wait4`'s `rusage` *is* real as of 2026-08-16 — see the `waitid` entry below.)
   - [x] process groups: getpgrp/getpgid/setpgid/setpgrp/getsid/setsid — real kernel state as of 2026-08-12 (native syscalls 533-536 onto the same `proc::pcb` helpers the Linux shim uses, so both ABIs share one source of truth; the userspace `static mut PGID` these used to answer from is gone, and `kill(-pgid)`/`killpg` now deliver). `tcgetpgrp`/`tcsetpgrp` remain userspace-only: there is no kernel controlling-terminal concept, so nothing decides *which* group is foreground and there is no place to raise SIGTTIN/SIGTTOU from — the stop itself is now implementable (see the next entry), the terminal ownership that would trigger it is not. Ring-3 coverage: `services/ctest-pgroup/`.
   - [x] job-control stop: the `Stop` default action (SIGSTOP/SIGTSTP/SIGTTIN/SIGTTOU) suspends the process for real via `SYS_SIGNAL_STOP_SELF` (1062) and returns only on SIGCONT — 2026-08-12. Deliberately *not* `SYS_SIGNAL_SEND(self, SIGTSTP)`: the kernel's send path tests `has_trampoline` before it reaches the catchable stop signals, and a native process always has one, so a self-send would loop in the dispatcher instead of stopping. The dedicated number also lets the wait status name the signal that actually stopped us (Ctrl-Z must report SIGTSTP, not SIGSTOP). Self-only by construction — no pid argument, so no new route to the `CAP_KILL`-gated cross-process stop. Coverage: `dispatch::test_dispatch_signal_stop_self_rejects_non_stop_signals` (rejection path only; the accept path parks the caller, so it cannot run from the kernel self-test task) plus posix unit tests.
   - [x] job-control wait: `waitpid`'s `WUNTRACED`/`WCONTINUED` are honoured rather than merely accepted, via `SYS_PROCESS_WAIT_STATUS` (1063) — 2026-08-12. A new number rather than extra arguments on `SYS_PROCESS_WAIT` (501): 501 returns the exit code in `rax`, where every value is a legal exit code and there is no encoding left for "stopped", and its existing 1-arg callers leave stale register contents that a new options word or status *out-pointer* would read — and write through. `sys_wait4`'s blocking loop moved down into `handlers::wait_for_child_event` and both wstatus encoders into `pcb`, so the native and Linux ABIs read the same records through the same code and cannot disagree about which child changed or how it is described. **Completed 2026-08-16:** the unification finished — `wait4`, `waitid` and 1063 now share one primitive (`kernel/src/syscall/wait.rs`), with a `WaitTarget {Any,Pid,Pgid}` enum replacing the overloaded selector. That closed lane B's `requests/b-a-waitid-needs-an-explicit-idtype-wait.md`: new `WPGID` (1<<16) makes group 1 nameable, `WNOWAIT` (1<<24) peeks without reaping, a new `WaitInfo` out-parameter (`arg3`/`arg4`, 72 bytes, `clone3`-style min-size convention) carries the child's uid and six usage counters, `wait4` writes a real `rusage` instead of zeroing it, and `waitid` fills `si_utime`/`si_stime` — and, unasked, became *interruptible* (it previously had no signal handling at all). See `design-decisions.md` §206.
@@ -2367,12 +2373,38 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] program_invocation_name/program_invocation_short_name/__progname/__progname_full: program name globals
   - [x] dirent additions: rewinddir, seekdir/telldir, dirfd (-1 stub), alphasort comparator
   - [x] waitid: extended wait (P_PID/P_ALL/P_PGID with Linux's per-idtype id
-    validation; fills the caller's `siginfo_t`; built on waitpid). Covered on
+    validation; fills the caller's `siginfo_t`). Covered on
     target by `ctest-jobctl` checks 100-111 / 120-132 / 140-147 — the only
     place the `wstatus` → `siginfo_t` decoding is testable, since `waitpid`'s
-    syscall arm is compiled out on the host. Three kernel-shaped gaps remain —
-    `WNOWAIT`, pgid 1, and `si_uid` — see `known-issues.md` →
-    `TD-POSIX-WAITID-IS-NARROWER-THAN-THE-KERNEL-COULD-MAKE-IT`
+    syscall arm is compiled out on the host.
+    - [x] **The three kernel-shaped gaps are closed (2026-08-16).** `waitid`
+      used to return `ENOSYS` for a wait on process group 1, ignore `WNOWAIT`
+      and reap anyway, and report `si_uid`/`si_utime`/`si_stime` as 0 — all
+      three because it was built on a `waitpid`-shaped syscall whose single
+      signed selector spends `-1` on "any child" and whose reap destroyed the
+      facts before it could answer. Lane A added `WPGID`, `WNOWAIT` and a
+      `WINFO`-gated 72-byte `WaitInfo` out-parameter to
+      `SYS_PROCESS_WAIT_STATUS` (§206); libc consumes all three (§319).
+      `waitpid`/`wait3`/`wait4`/`waitid` now funnel through one `wait_common`
+      taking a `WaitTarget { Selector, Pgid }` rather than a signed integer,
+      which is what stops a caller half-converting — under `WPGID`, `-g` is not
+      group `g`, it is a huge unsigned pgid matching nothing. New ring-3
+      coverage: `ctest-jobctl` checks 150-187, of which **157** (`arg4 = 128`,
+      bytes 72..128 must come back zeroed) and **169** (`arg4 = 24`, bytes
+      24..128 must be untouched) are the extensible-struct convention, which
+      nothing else in the tree can test — libc always passes its own `sizeof`,
+      and a kernel self-test task has no user address space to `copy_to_user`
+      into.
+    - [x] `wait3`/`wait4` write a **real** `struct rusage` (2026-08-16). The
+      old zero was a *false* zero: `pcb`'s counters existed the whole time and
+      the kernel's `clear_user_rusage` was discarding them. Six fields are
+      sourced (`ru_utime`, `ru_stime`, `ru_minflt`, `ru_majflt`, `ru_nvcsw`,
+      `ru_nivcsw`); the rest stay zero because nothing counts them, which is a
+      different thing from throwing away a number we have.
+    - `[ ]` Still narrower than Linux in two places, both on the doc comment
+      and in `known-issues.md`: `waitid` without `WEXITED` still reports an exit
+      (`TD-POSIX-WAITID-CANNOT-SUPPRESS-EXIT-REPORTS`), and `P_PIDFD` is
+      `EINVAL`.
   - [x] copy_file_range: cross-file copy (userspace read+write loop), offset tracking
   - [x] epoll stubs: epoll_create/create1/ctl/wait/pwait (all ENOSYS), EpollEvent struct, EPOLLIN/OUT/ERR/HUP/ET constants
   - [x] strftime/strptime expansion: 22 additional format specifiers (%C/%y/%e/%w/%u/%U/%W/%I/%k/%l/%P/%D/%F/%T/%R/%r/%x/%X/%z/%Z/%s + ISO 8601 %V/%G/%g), strptime month/weekday name parsing (%b/%B/%a/%A case-insensitive)

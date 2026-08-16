@@ -79,8 +79,13 @@ pub struct Rlimit {
 }
 
 /// Resource usage statistics.
+///
+/// `Default` is an all-zero `rusage`, which is the right starting point for a
+/// partial fill: POSIX's own "nothing to report" value for every counter here
+/// is zero, so the fields nothing in this system can source read as *none*
+/// rather than as whatever the caller's allocator left behind.
 #[repr(C)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct Rusage {
     /// User CPU time used (POSIX: struct timeval, not timespec).
     pub ru_utime: crate::time::Timeval,

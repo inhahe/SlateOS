@@ -28,6 +28,11 @@
 *.img
 *.hdd
 *.ext4
+# Written beside rootfs.ext4 by scripts/ctest-fixtures.py image-stamp: the
+# sha256 of every locally built ELF packed into it. It describes a gitignored
+# artifact, so tracking it would assert something about an image that does not
+# exist in a fresh clone.
+*.ext4.manifest
 
 # Limine binary artifacts (downloaded at build time)
 /limine/

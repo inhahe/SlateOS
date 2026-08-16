@@ -18,20 +18,30 @@ already present. See `scripts/pkgconf-spike/` (run `run.sh` to reproduce).
 Per `design-decisions.md` §307 and `roadmap-detailed.md`'s "Porting vs.
 Reimplementing" policy, the port wins.
 
-## State, as measured 2026-08-14
+## State, as measured 2026-08-16
 
 | | |
 |---|---|
-| Unit tests | **112/112 pass** (`cargo +nightly test -p pkgconf --target x86_64-pc-windows-gnu`, from the **repo root**) |
-| Builds for `x86_64-slateos` | **yes** — `cargo +nightly build-slateos -p pkgconf`, 21 MB static `ET_EXEC` |
+| Unit tests | **119/119 pass** (`cargo test -p pkgconf --target x86_64-pc-windows-gnu`, from the **repo root**) |
+| Builds for `x86_64-slateos` | **yes** — `cargo +nightly build-slateos -p pkgconf` |
 | Upstream long options implemented | **34 of 62** — 28 missing |
-| Clippy | **red — 9 errors, 2 warnings** (CLAUDE.md requires clean) |
+| Clippy | **clean** (`--all-targets`), rustfmt clean |
 | Run on target | **never** — no on-target self-test exists |
 
-The two compiler warnings are the honest signal that this is unfinished rather
-than merely unpolished: `PcFile::path` is never read despite its doc comment
-saying `--validate` quotes it, and `Store::dirs()` is never called. Both are
-scaffolding for features that were never wired up.
+**Clippy being clean does not mean this is finished.** It was red (9 errors,
+2 warnings) until 2026-08-16, and the two dead-code warnings were being used as
+a status marker for "unfinished". That is a bad marker — a reader cannot tell a
+warning that means *unfinished* from one that means *defect*, and a parked crate
+is still read. So they were resolved on the evidence, in opposite directions:
+`Store::dirs()` was scaffolding for nothing and was deleted; `PcFile::path` was
+scaffolding for a real gap (`--variable=pcfiledir` returned `""` while
+`${pcfiledir}` worked) and was wired up, along with the virtual `pkg-config`
+package that makes the field legitimately optional.
+
+**The marker that actually matters is the last row of the table:** it has never
+executed under the SlateOS kernel, and 28 upstream options are still missing.
+See `known-issues.md` for the full account of what changed and why none of it
+moves the §307 decision.
 
 ## Two traps
 
@@ -45,7 +55,9 @@ scaffolding for features that were never wired up.
    *untracked*. The committed `main.rs` is the older ~200-line standalone
    version with no `mod` declarations, so **committing `main.rs` alone would
    break the crate**. Commit all five or none. Branch
-   `wip/pkgconf-rust-parked` holds a consistent snapshot of all five.
+   `wip/pkgconf-rust-parked` holds a consistent snapshot of all five, advanced
+   to the 2026-08-16 state in `a3c5cb306` — **that branch, not this working
+   tree, is authoritative** if the two ever drift.
 
 ## If you are salvaging
 

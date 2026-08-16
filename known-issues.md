@@ -252,6 +252,11 @@ acted on; it wants a `requests/c-b-…` once there is a concrete proposal.
 
 ## Almost no `apps/` crate opts into the workspace lints (lane C)
 
+**Status: PARTIALLY FIXED 2026-08-16** (lane C) — the opt-in has landed
+tree-wide; the warning backlog it exposed is what remains open. See
+"What the measurement actually found" at the end of this entry; the original
+report follows first.
+
 **Status: OPEN 2026-08-15** (lane C). Noticed while checking whether
 `clippy::arithmetic_side_effects` applied to a fix in `apps/kanban`. It does
 not — because `apps/kanban/Cargo.toml` has no `[lints] workspace = true`.
@@ -272,6 +277,58 @@ crate by crate, fixing each crate's fallout as it goes, rather than as one
 tree-wide commit that has to be reverted the moment anything is red. Worth
 doing: a lint that is configured but not applied is worse than no lint, because
 the workspace config reads as though the guarantee is in force.
+
+### What the measurement actually found (2026-08-16)
+
+The paragraph above guessed that `clippy::all = deny` would break crates, and
+prescribed a crate-by-crate rollout on that basis. **The guess was wrong, and
+it was wrong in the direction that mattered.** Rather than assume, the opt-in
+was added to all 124 crates at once *as a measurement* and the whole tree run:
+
+```
+CARGO_TARGET_DIR=target-hl cargo clippy --keep-going --message-format=short \
+    -p <all 141 apps packages> --target x86_64-pc-windows-gnu
+```
+
+Result: **5174 findings, 0 errors, in 120 of the 141 packages.** Nothing goes
+red. Two independent reasons:
+
+- Almost every finding is one of the four `warn`-level correctness lints
+  `CLAUDE.md` asks for, not a `clippy::all` lint. The explicit
+  `arithmetic_side_effects = "warn"` / `indexing_slicing = "warn"` in the
+  workspace config *overrides* the group's `deny`, so those never error.
+- `grep -rn 'D warnings|deny(warnings)|Dwarnings' scripts/ .cargo/ Cargo.toml`
+  is empty. No build, script, or CI path in this tree turns warnings into
+  errors, so a warning backlog cannot break anyone.
+
+So the opt-in landed as **one tree-wide commit** after all. The crate-by-crate
+advice was mitigating a risk that does not exist, at the cost of 124 commits
+and of leaving the lints unenforced for however long that took.
+
+What remains open is the backlog itself:
+
+| Finding | Count |
+|---|---:|
+| `arithmetic_side_effects` ("arithmetic … unexpected side-effects") | 3161 |
+| `indexing_slicing` — "indexing may panic" | 1796 |
+| `indexing_slicing` — "slicing may panic" | 123 |
+| `expect_used` on an `Option` | 8 |
+| assorted `pedantic`/style (Debug formatting, manual `String::new`, …) | 86 |
+
+Worst crates: `editor` 500, `markdowneditor` 348, `explorer` 264, `paint` 234,
+`backup` 198, `imageviewer` 193, `indexer` 149, `connect4` 123, `rssreader`
+117, `spreadsheet` 106. Twenty-one packages are already clean, and
+`contacts`, `simon`, `diskcleanup`, `pomodoro` and `radio` have exactly one
+finding each.
+
+The 1919 `indexing_slicing` findings are the ones worth attacking first: that
+is precisely the lint class that would have caught the eighteen byte/character
+sites recorded above at the moment they were written. `arithmetic_side_effects`
+is the larger pile but the lower yield — most of its 3161 hits are loop
+counters and layout arithmetic on values that cannot overflow, and rewriting
+those to `checked_*` buys correctness theatre rather than correctness. Take
+`indexing_slicing` to zero first; then judge `arithmetic_side_effects` on
+whether a per-crate `allow` with a justification beats 3161 mechanical edits.
 
 ## `apps/editor`'s syntax highlighter is complete, tested, and not connected (lane C)
 
@@ -22288,3 +22345,57 @@ reset the device on timeout (`recover_after_timeout`) rather than reclaiming
 descriptors underneath it. Left as tech debt: changing it to leak instead
 would trade a rare wrong-packet for a permanent queue drain on a flaky device,
 and neither is right without the reset path.
+
+## TD-GUI-ARROW-KEYS-MOVE-IN-LOGICAL-ORDER
+
+**Status: OPEN 2026-08-16** (lane C). Blocked on an operator decision, filed as
+`open-questions.md` -> **C-Q2**. Do not "fix" this without an answer there: the
+two candidate behaviours are both correct, and shipping one silently makes the
+question harder to ask.
+
+**What.** Left/Right arrow keys move the caret by one position in *logical*
+order -- the order the characters are stored and read -- in every text widget in
+the tree. On a line that mixes left-to-right and right-to-left text ("I said
+<HEBREW WORD> to him"), logical order is not screen order, so pressing Right can
+move the caret visibly *leftwards*, and pressing it repeatedly makes the caret
+jump back and forth across the width of the right-to-left word rather than
+stepping across it.
+
+This is not a bug in the sense that it produces a wrong result -- the caret is
+always at a real, correct text position, and typing there inserts where the user
+would expect *in the sentence*. It is a bug in the sense that the key is named
+after a direction on the screen and does not always move in it. Windows edit
+controls move visually; macOS, GTK and Qt move logically. Both ship.
+
+**Where.** The arrow-key handlers, each of which does `cursor -= 1` /
+`cursor += 1` over a byte or character index with no reference to direction:
+
+* `gui/toolkit/src/widget.rs` -- `TextInput`
+* `gui/toolkit/src/modal.rs` -- `InputDialog`
+* `apps/editor/src/main.rs` -- `move_left` / `move_right`
+
+**Reproduce.** Type or paste a line containing a Hebrew or Arabic word between
+two English words into any of the three. Put the caret immediately before the
+right-to-left word and press Right once: the caret jumps to the *far side* of
+that word rather than moving one letter-width right, then walks back across it
+on subsequent presses.
+
+**What the proper fix looks like, if C-Q2 answers "visual".** The prerequisite
+is already built and this is the whole reason it was built:
+`TD-GUI-WIDGET-CARETS-ARE-NOT-BIDIRECTIONAL` (fixed 2026-08-16) gave
+`gui/toolkit/src/text.rs` a `TextCursor { byte, affinity }`, and
+`gui/font/src/shape.rs` a `ShapedRun` that knows each glyph's screen position
+and bidi direction. A visual step is then: ask the run for the glyph the cursor
+currently sits beside, take its neighbour in *draw* order (`draw_order()`), and
+set the cursor to that neighbour's leading or trailing edge depending on whether
+that glyph runs left-to-right or right-to-left -- which is exactly the pairing
+`offset_at` already computes (`in_left = upstream(next)` for an RTL cluster,
+the reverse for LTR). The affinity bit is what makes the two ends of a direction
+boundary distinguishable, so no extra state is needed.
+
+Two things must stay logical under either answer, and would be wrong to convert
+along with the arrows: Home/End and word-motion (Ctrl+arrow). Those name
+positions in the sentence, not directions on the screen.
+
+If C-Q2 answers "logical", this entry closes with no code change and a comment
+at each of the three sites recording that the behaviour is deliberate.

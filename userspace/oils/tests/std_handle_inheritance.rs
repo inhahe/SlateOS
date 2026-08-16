@@ -24,6 +24,11 @@ use std::process::{Command, Stdio};
 use std::sync::{Mutex, PoisonError, mpsc};
 use std::time::Duration;
 
+/// One definition, shared with the in-process tests rather than copied — see
+/// the module's own docs.
+#[path = "../src/hostpath.rs"]
+mod hostpath;
+
 /// Serialises the spawns in this file.
 ///
 /// `Stdio` hands a child its descriptors by duplicating them *inheritably* for
@@ -66,7 +71,10 @@ enum Piped {
 fn read_after_exit(which: Piped, script: &str) -> Result<String, ()> {
     let (mut reader, writer) = std::io::pipe().expect("pipe");
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_osh"));
-    cmd.args(["-c", script]).stdin(Stdio::null());
+    // The host's `sleep`, not whichever one cargo staged on the search path:
+    // these tests are timed against [`JOB_SECS`], so a `sleep` that ignored its
+    // argument would make a leak look like correct behaviour (`hostpath`).
+    hostpath::scrub(&mut cmd).args(["-c", script]).stdin(Stdio::null());
     match which {
         Piped::Stdout => {
             cmd.stdout(Stdio::from(writer)).stderr(Stdio::null());

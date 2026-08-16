@@ -36,6 +36,13 @@ pub mod bytes;
 pub use ::ere;
 pub(crate) mod escape;
 pub mod histexpand;
+/// Test scaffolding: the `$PATH` a test may search, with the two directories
+/// cargo injects struck out. Compiled only for the in-process tests; the
+/// end-to-end tests in `tests/` pull the same file in with `#[path]` rather
+/// than link it, so none of it reaches the shipped shell. See the module docs
+/// for why one definition has to serve both.
+#[cfg(test)]
+pub(crate) mod hostpath;
 pub mod interp;
 pub mod lexer;
 pub mod parser;

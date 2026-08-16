@@ -16,6 +16,11 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 
+/// One definition, shared with the in-process tests rather than copied — see
+/// the module's own docs.
+#[path = "../src/hostpath.rs"]
+mod hostpath;
+
 /// A throwaway directory used as `$HOME` (and as the cwd) for one test, removed
 /// when the test's binding is dropped.
 struct TempHome(PathBuf);
@@ -79,6 +84,11 @@ fn run_osh_in(home: &TempHome, args: &[&str], stdin_data: &str) -> (String, Stri
 
 /// The fullest form: `envs` are set *after* the isolation, so a test can put
 /// `BASH_ENV` back deliberately.
+///
+/// The isolation includes `PATH`: cargo stages ~200 SlateOS coreutils ahead of
+/// the host's for the duration of a test run, and a shell that resolved `grep`
+/// to one of those would be answering a question about our `grep` rather than
+/// about its own option parsing (`hostpath`).
 fn run_osh_env(
     home: &TempHome,
     envs: &[(&str, &str)],
@@ -86,7 +96,8 @@ fn run_osh_env(
     stdin_data: &str,
 ) -> (String, String, i32) {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_osh"));
-    cmd.args(args)
+    hostpath::scrub(&mut cmd)
+        .args(args)
         .current_dir(home.path())
         .env("HOME", home.path())
         .env_remove("BASH_ENV")

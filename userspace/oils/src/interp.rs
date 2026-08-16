@@ -66974,78 +66974,18 @@ mod tests {
         DIR.with(|d| shell_path(d.path()))
     }
 
-    /// Whether two directory names denote the same directory, for the purpose of
-    /// striking one out of `$PATH`.
-    ///
-    /// A textual comparison, not a `canonicalize`: the entries being compared
-    /// are both produced by the same process (cargo wrote one into the
-    /// environment, [`std::env::current_exe`] reported the other), so they
-    /// differ at most in separator style and — on Windows, where the filesystem
-    /// is case-insensitive — in case. Canonicalising instead would touch the
-    /// disk once per `$PATH` entry per shell, and would answer *no* for a
-    /// directory that has since been removed, which is the one case where
-    /// striking it out matters least but costs the most to get wrong.
-    fn same_dir(a: &std::path::Path, b: &std::path::Path) -> bool {
-        let norm = |p: &std::path::Path| {
-            let s = p.to_string_lossy().replace('\\', "/");
-            let s = s.strip_suffix('/').map_or(s.clone(), str::to_string);
-            if cfg!(windows) { s.to_ascii_lowercase() } else { s }
-        };
-        norm(a) == norm(b)
-    }
-
     /// The `$PATH` a test shell searches: the ambient one, minus the two
-    /// directories cargo injects into it for the duration of a test run.
+    /// directories cargo injects into it for the duration of a test run. See
+    /// [`crate::hostpath`] for why that matters and why the end-to-end tests
+    /// share this definition instead of growing one of their own.
     ///
-    /// **This is what keeps the suite's result a property of the code rather
-    /// than of what else happens to have been built.** Cargo prepends the build
-    /// directory and its `deps/` to `PATH` before running a test binary, so that
-    /// a test can find the dynamic libraries its crate links. On this workspace
-    /// that directory also holds ~200 SlateOS coreutils — `grep.exe`, `sed.exe`,
-    /// `cat.exe` among them — so a shell test that pipes through `grep` runs
-    /// *ours*, and only when `cargo test --workspace` (or any earlier `cargo
-    /// build`) has already built it. Same commit, same test binary, two
-    /// answers: `cargo test -p oils` green and `cargo test --workspace` red,
-    /// which is how lane C found this
-    /// (`requests/c-b-workspace-test-red-slateos-coreutils-shadow-host.md`).
-    ///
-    /// The tools these tests reach for are *scaffolding*, and the scaffolding
-    /// has to be the reference implementation. These are differential tests
-    /// against bash's documented behaviour: `set -o | grep '^posix'` is asking
-    /// about `set -o`, and if it fails it must be because `set -o` is wrong. A
-    /// `grep` of our own in that position turns every gap in our coreutils into
-    /// a shell-test failure filed against the shell — the defect misattributed,
-    /// and the real one hidden behind it. (Our coreutils are tested by their own
-    /// suites, and the gaps this uncovered are fixed there; see
-    /// `known-issues.md` → `B-THE-OILS-TESTS-RESOLVED-grep-sed-cat-FROM-THE-CARGO-BUILD-DIRECTORY`.)
-    ///
-    /// Removing the entries here — rather than mutating the process
-    /// environment — is what makes this safe under the harness: libtest runs
-    /// tests on threads, and `std::env::set_var` is unsound while any other
-    /// thread may be reading the environment (which is why Rust 2024 made it
-    /// `unsafe`). A shell variable is per-shell and touches nothing shared.
+    /// Binding it to a *shell variable* rather than mutating the process
+    /// environment is what makes it safe under the harness: libtest runs tests
+    /// on threads, and `std::env::set_var` is unsound while any other thread may
+    /// be reading the environment — which is why Rust 2024 made it `unsafe`. A
+    /// shell variable is per-shell and touches nothing shared.
     fn harness_path() -> Str {
-        // …/target/<triple>/<profile>/deps/<test binary>: the `deps` directory
-        // and the profile directory above it are exactly what cargo prepended.
-        let mut injected: Vec<std::path::PathBuf> = Vec::new();
-        if let Ok(exe) = std::env::current_exe() {
-            if let Some(deps) = exe.parent() {
-                injected.push(deps.to_path_buf());
-                if let Some(profile) = deps.parent() {
-                    injected.push(profile.to_path_buf());
-                }
-            }
-        }
-        let ambient = std::env::var_os("PATH").unwrap_or_default();
-        let kept: Vec<std::path::PathBuf> = std::env::split_paths(&ambient)
-            .filter(|d| !injected.iter().any(|bad| same_dir(bad, d)))
-            .collect();
-        // `join_paths` refuses a component containing the separator, which no
-        // directory that arrived *from* a split can; the fallback is unreachable
-        // and is written rather than unwrapped because this is not test-only
-        // code's excuse to panic on a `Result` it did not prove.
-        let joined = std::env::join_paths(kept).unwrap_or(ambient);
-        bytes::os_to_bytes(&joined)
+        bytes::os_to_bytes(&crate::hostpath::host_path())
     }
 
     /// A [`Shell`] rooted in this test's scratch directory — what every test

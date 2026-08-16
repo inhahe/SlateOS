@@ -21728,9 +21728,12 @@ another process" — with nothing actually under test at the point of failure.
 
 ## B-TIMED-OUT-BOOT-TEST-STRANDS-THE-CROSS-WORKTREE-LOCK-FOR-20-MINUTES
 
-**Status: OPEN** (lane B reporting; the fix is in `scripts/boot-test.sh`,
-which is lane A's file — filed as
-`requests/b-a-boot-lock-survives-its-dead-owner.md`)
+**Status: FIXED 2026-08-16** by lane A, in `scripts/boot-test.sh`, with a
+regression test in `scripts/test-boot-lock.sh`. See "Fix as landed" at the
+end of this entry — it covers two *more* bugs the new test found in the same
+acquire loop, one of which was the opposite failure (breaking a lock that had
+just been legitimately taken). Reported by lane B as
+`requests/b-a-boot-lock-survives-its-dead-owner.md`.
 
 **In short:** every lane runs the boot test through a shared "only one QEMU
 at a time" lock. If a boot test is killed rather than allowed to finish —
@@ -21826,6 +21829,63 @@ defending against is precisely the ones where the holder does not get to run
 another line of code. Note that both halves here were individually correct:
 the Job Object kill is right, and the owner-matched release is right. The
 gap is only visible where they meet.
+
+### Fix as landed (2026-08-16, lane A)
+
+The reported bug is fixed as lane B suggested, and writing a test for it
+turned up two more in the same twenty lines. All three are in the acquire
+loop in `scripts/boot-test.sh`; the test is `scripts/test-boot-lock.sh`
+(24 assertions, ~1s, no build required).
+
+**1. The reported bug — a dead owner is now broken in ~60s, not 1200s.**
+The owner string's pid is parsed and probed with `kill -0`. Confirmed
+against the exact pid from the report above (`1050807`): dead, so the new
+code would have broken that lock on its first poll.
+
+**2. A lock with no owner file yet was broken *immediately* — the opposite
+failure, and the more dangerous one.** `mkdir` acquires, and the owner file
+is written on the next line. A waiter polling inside that window saw a lock
+directory with no `owner` in it, and the old code scored that as
+`_lock_age=999999`, which is `> 1200`, so the age breaker deleted a lock
+another lane had taken microseconds earlier — putting two QEMUs on one host.
+Fixed by falling back to the lock *directory's* mtime, which `mkdir` stamps
+at acquisition, and treating "cannot stat either" as the only unknown case.
+This had nothing to do with lane B's report; it was found by asking what the
+age rule does when the owner file is absent, which is a question the test
+had to answer to construct its cases.
+
+**3. The age rule no longer overrides proven liveness.** `_lock_age > 1200`
+used to break the lock unconditionally. That threshold was chosen when
+liveness was *unknowable*, so age was the only available proxy for death.
+Now that we can ask, a lock held by a demonstrably-live pid is never broken
+at any age: a boot that outruns the 20-minute estimate is slow (cold host,
+QEMU stalled on I/O), not dead, and breaking its lock produces exactly the
+"two mutually-slowed, possibly corrupted boots" that lane B's request warned
+against — with the added cost that both runs can then fail for reasons
+unrelated to the code under test. Waiting on a live owner stays bounded by
+`BOOT_LOCK_WAIT` (3600s default), which proceeds anyway rather than failing.
+
+**Kept, as lane B asked:** liveness is a **tri-state** — alive / dead /
+unknown — and unknown falls through to the age rule rather than breaking.
+Unknown covers an unparseable owner string, a `kill` that cannot answer
+(probed once via `kill -0 $$` on ourselves, so a broken `kill` disables the
+liveness breaker instead of making every owner look dead), and a lock
+younger than 60s, where a transient is likelier than a real death. The
+1200s age breaker is kept in full for the cases a pid check cannot see:
+a recycled pid, an owner from a previous Windows session, an owner in a
+different MSYS instance's pid namespace.
+
+**On the test.** The acquire loop runs *after* the kernel build, so reaching
+it through a normal `boot-test.sh` run costs ~7 minutes per case, and the
+interesting cases need a second lane holding the lock at a controlled age
+with a controlled pid — which is why this logic had no test and had
+accumulated three bugs. `scripts/test-boot-lock.sh` extracts the region
+between the `BOOT-LOCK-REGION` markers **verbatim** and executes it, rather
+than restating the logic (a restatement drifts from the original and then
+tests nothing), and fails loudly if the markers go missing. Each of the
+three fixes was mutation-tested — reverted in a scratch copy, confirmed the
+suite goes red, restored — because a lock test that cannot fail is worth
+less than no test at all.
 
 ---
 

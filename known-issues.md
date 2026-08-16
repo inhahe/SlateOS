@@ -21377,3 +21377,97 @@ defending against is precisely the ones where the holder does not get to run
 another line of code. Note that both halves here were individually correct:
 the Job Object kill is right, and the owner-matched release is right. The
 gap is only visible where they meet.
+
+---
+
+## B-THE-TRACKED-FIXTURE-BINARIES-DRIFT-FROM-THEIR-SOURCES, AND THE STALENESS GATE CANNOT SEE IT
+
+**Status: PARTLY FIXED 2026-08-16** (the nine binaries are re-committed in
+`169d3a242`; the *gate* still cannot detect the condition, which is the part
+that matters and is still open)
+
+**In short:** nine test programs are checked into git twice — once as C source
+and once as the compiled binary built from it. Nothing verifies that the second
+was built from the first. Today the committed source of one of them contained
+33 checks that its committed binary did not, and every boot test passed anyway,
+because each working copy happened to hold a locally-rebuilt binary that had
+never been committed. We already have a check meant to catch stale fixtures,
+but it compares file timestamps — and a fresh `git clone` gives every file the
+same timestamp, so the check is structurally incapable of noticing.
+
+**The concrete instance.** Commit `6c89903d0` added 236 lines to
+`services/ctest-jobctl/main.c` (the 33 new `waitid` checks) and did not touch
+the tracked `services/ctest-jobctl/ctest-jobctl.elf`. Sizes at that point:
+
+| | tracked in git | correct rebuild | delta |
+|---|---|---|---|
+| `ctest-jobctl.elf` | 2,603,328 | 2,627,416 | +24,088 |
+| the other eight `ctest-*.elf` | — | — | +~19,400 each |
+
+The ~19,400 bytes common to all nine is the same `libc.a` growth that
+`B-BASH-SLATEOS-ELF-WAS-EXEMPT-FROM-THE-STALENESS-GATE` found in bash earlier
+the same day; the extra ~4,700 on `ctest-jobctl` is the new checks. So *every*
+tracked fixture was linking an old libc, and one was additionally missing its
+own source's content.
+
+**Why the existing gate does not catch it — and cannot.**
+`scripts/create-ext4-rootfs.sh` compares each `.elf`'s **mtime** against
+`toolchain/sysroot/lib/libc.a`'s. Two independent reasons that misses this:
+
+1. **The gate reads the working tree, not the index.** Rebuilding the fixture
+   locally satisfies it permanently. Nobody has to commit the rebuild, and if
+   nobody does, git stays exactly as stale as it was while every local gate
+   reports green. That is not a hypothetical: `06d6d1f69` ("relink every ctest
+   fixture against the current sysroot libc.a") and `94d036ee2` ("rebuild stale
+   ctest fixtures and make staleness fatal") are *the same relink*, committed
+   before and then allowed to drift again.
+2. **On a fresh checkout, mtime carries no information.** `git clone` /
+   `git checkout` stamps every file with the checkout time, so `main.c`,
+   `libc.a` and the `.elf` are all the same age and no ordering exists to
+   compare. A clean clone of `main` would have boot-tested the 33 new checks
+   against a binary without them and reported OK — the exact false-green the
+   gate was written to prevent, in the one environment where the gate is silent.
+
+Note the gate is not *wrong*; it answers "was this rebuilt after the library
+changed?", which is the right question for a build directory. It is being asked
+to answer a different question — "was this binary built from this source?" —
+which no timestamp can answer.
+
+**Proper fix: make the invariant a content invariant.** Have each fixture's
+`build.py` write a small tracked stamp file next to the ELF recording the
+SHA-256 of every input that determines the binary — `main.c`, the
+`toolchain/sysroot/lib/libc.a` it linked, and the compiler/link flags — and
+have `create-ext4-rootfs.sh` recompute those hashes and compare, instead of
+comparing mtimes. Properties this buys that mtime cannot:
+
+- It survives a fresh checkout, because content hashes do not depend on file
+  timestamps.
+- It fails in **CI and on the operator's machine identically**, rather than only
+  where the build outputs happen to live.
+- It distinguishes the two failure modes we have now conflated: "binary predates
+  the library" and "binary was not built from this source" are different
+  hashes, and the message can say which.
+- The stamp is diffable, so a commit that changes `main.c` without the ELF shows
+  an unchanged stamp next to a changed source in review.
+
+Keep the mtime check as a fast local pre-filter if desired, but it must not be
+the authority.
+
+**Second, smaller defect found alongside, already fixed.**
+`services/ctest-ctty/main.o` was tracked, even though the other eight fixtures
+each carried a `.gitignore` saying "only the linked ELF fixture is tracked" —
+ctest-ctty was simply the one directory that never got a copy of that file.
+Replaced the nine per-directory copies with one pattern rule in
+`services/.gitignore` (`ctest-*/main.o`), verified with `git check-ignore`
+across all nine. A rule replicated per directory is a rule a new directory opts
+out of by not having it.
+
+**Standing lesson.** Checking a build product into version control creates an
+invariant — *this artifact was built from that source* — and version control
+does not enforce it. If we are going to track binaries (and we should here: the
+boot test must run on a machine with no zig/WSL toolchain), then the invariant
+needs an explicit, content-based check, because the natural one people reach for
+is timestamps, and timestamps are precisely the thing a checkout destroys. This
+is the third artifact family in one day to be stale for a slightly different
+reason; the common thread is that each gate was verifying something adjacent to
+the property actually wanted.

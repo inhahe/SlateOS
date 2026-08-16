@@ -29,7 +29,7 @@
 //! | `osh`'s `[[ =~ ]]` | ERE | a real ERE engine (this one, in-tree) | yes |
 //! | `grep` | BRE, and ERE under `-E` | substring search | yes |
 //! | `sed` | BRE | substring search, plus a hand-rolled `.`/`*` matcher | yes |
-//! | `awk`'s `/re/` and `~` | ERE | substring search | not yet |
+//! | `awk`'s `/re/` and `~` | ERE | substring search | yes |
 //! | `expr`'s `:` | BRE anchored at the start | substring search | not yet |
 //!
 //! That is not four small gaps; it is one missing component, absent four times.

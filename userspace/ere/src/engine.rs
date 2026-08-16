@@ -805,6 +805,24 @@ pub struct Regex {
     ci: bool,
 }
 
+/// A compiled regex prints as its shape, not its program.
+///
+/// It exists so a caller can `#[derive(Debug)]` a structure that holds one —
+/// awk's syntax tree does, and a tree that cannot be printed cannot be debugged.
+/// The pattern text is not kept (nothing else needs it, and keeping a copy per
+/// regex to serve `{:?}` would be paying for the debugger in production), and
+/// dumping two hundred instructions where the reader expected `/^a.*b$/` would
+/// bury the rest of the tree; the counts are enough to tell two regexes apart.
+impl std::fmt::Debug for Regex {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Regex")
+            .field("insts", &self.prog.len())
+            .field("groups", &self.ngroups)
+            .field("ci", &self.ci)
+            .finish_non_exhaustive()
+    }
+}
+
 /// Per-step NFA thread frontier with a `seen` set for `O(1)` dedupe, so each
 /// program counter is added at most once per input position (keeps the run
 /// linear and terminates epsilon cycles like `()*`).

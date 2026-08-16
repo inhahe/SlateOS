@@ -24456,7 +24456,7 @@ they were failing on was this.
 | `osh`'s `[[ =~ ]]` | ERE | a real ERE engine (now the `ere` crate) |
 | `grep` | BRE, and ERE under `-E` | ✅ `ere` (`bb12be713`) |
 | `sed` | BRE | ✅ `ere` (rewritten whole; see below) |
-| `awk`'s `/re/` and `~` | ERE | `simple_contains`, `awk.rs:250` |
+| `awk`'s `/re/` and `~` | ERE | ✅ `ere` (rewritten whole; see below) |
 | `expr`'s `:` | BRE anchored at the start | `str::contains` |
 
 It is not four bugs; it is **one missing component, absent four times** — and
@@ -24492,7 +24492,24 @@ one-line substitution, because the missing regex is not the only thing missing:
   and `String`-typed lines. Verified differentially against the host's GNU
   `sed` — `scripts/sed-diff.sh`, **88 of 89 cases byte-identical** on stdout and
   exit status. The one difference is the backreference gap below.
-* **`awk`** — ERE for `/re/`, `~`, `!~`, and for `split`/`sub`/`gsub`/`match`.
+* ~~**`awk`** — ERE for `/re/`, `~`, `!~`, and for `split`/`sub`/`gsub`/`match`.~~
+  **Done.** Also a rewrite rather than a rewiring, and much the larger one: the
+  old `awk` was a line filter with an awk-shaped command line. It had no
+  variables — not even `NR` — no assignment, no `if`, no loops, no arrays, no
+  user functions, no `printf`, no `getline`, no output redirection and no range
+  patterns; and its condition evaluator's fall-through was `true`, so a pattern
+  it could not parse (which was most of them) silently matched every line. What
+  is there now is POSIX's grammar and POSIX's semantics in eight modules under
+  `userspace/coreutils/src/bin/awk/`, including the strnum rule, the lazy
+  `$0`/field duality, and a static array-versus-scalar pass (arrays pass by
+  reference, so `function fill(a){a[1]="x"}` has to be resolved before the run,
+  not during it). Verified differentially against the host's GNU `awk --posix` —
+  `scripts/awk-diff.sh`, **112 of 121 cases byte-identical** on stdout and exit
+  status, and the other nine differ deliberately: four are character-versus-byte
+  counting, two are `printf` edge cases, and three are diagnostics we raise
+  before the program runs where gawk raises them when first reached. The reasons
+  are recorded in the script and in `awk/main.rs`, and the script fails if one
+  of them ever stops being true.
 * **`expr`** — BRE anchored at the start, with the POSIX `:` return rule (the
   first group if there is one, else the match length).
 * **`cat`**, separately: `-v` and `-A` are missing, and an unknown option is

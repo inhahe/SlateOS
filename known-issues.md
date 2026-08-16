@@ -21264,3 +21264,106 @@ contamination checks all passed and its regression list was still wrong.
 A check that says something false is worse than no check, because it is
 believed — and the cost lands on the *next* real regression, which gets
 waved through as "probably noise again".
+
+---
+
+## B-TIMED-OUT-BOOT-TEST-STRANDS-THE-CROSS-WORKTREE-LOCK-FOR-20-MINUTES
+
+**Status: OPEN** (lane B reporting; the fix is in `scripts/boot-test.sh`,
+which is lane A's file — filed as
+`requests/b-a-boot-lock-survives-its-dead-owner.md`)
+
+**In short:** every lane runs the boot test through a shared "only one QEMU
+at a time" lock. If a boot test is killed rather than allowed to finish —
+which is exactly what our own timeout runner does when a run overruns — the
+lock is left behind with nobody holding it, and the *next* boot test on any
+lane sits and waits for it. It eventually gives up and continues after 20
+minutes, so nothing breaks permanently; the cost is that a 20-minute stall
+looks indistinguishable from a hung boot, and a lane that is trying to
+verify a fix loses that time for no reason. Observed today, twice in one
+session.
+
+**What actually happens.** `scripts/boot-test.sh` (~1295-1350) serialises
+QEMU across the three worktrees with a `mkdir`-based lock directory in the
+git *common* dir (`$(git rev-parse --git-common-dir)/slateos-boot-lock`,
+i.e. `os/.git/slateos-boot-lock` — shared by all worktrees, which is why it
+is not under any lane's `build/`). `release_boot_lock` removes it only when
+`$BOOT_LOCK_DIR/owner` still names this process, which is the right rule —
+it is what stops us deleting a lock some other lane acquired after ours was
+broken. But release is reached only if the script gets to run its exit path.
+
+`scripts/run-timeout.py`, per `CLAUDE.md`, deliberately puts the child in a
+Windows Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, so a timeout
+tears down the **entire process tree at once** — bash included. That is the
+correct behaviour for its actual job (no orphaned QEMU, ever), and it is why
+we use it. The side effect is that `boot-test.sh` never executes *any* exit
+path, so the lock directory outlives the process that made it. The only
+thing that then clears it is the age-based breaker at line 1336, which
+requires the lock to be **>1200s (20 min)** old — a threshold chosen against
+our longest healthy boot (~8 min), which is correct for its own purpose and
+far too slow here.
+
+**How it presented.** A boot test on `main` timed out at 1800s (the cold
+kernel build alone took 24m16s, leaving too little for the ~344s boot). The
+warm re-run then logged, at 60-second intervals:
+
+```
+=== Waiting for boot lock, held by lane-B/pid-1050807/1786884746 (0s) ===
+=== Waiting for boot lock, held by lane-B/pid-1050807/1786884746 (60s) ===
+...                                                              (420s) ===
+```
+
+`pid-1050807` was the *timed-out* run. Nothing was running: `tasklist` showed
+zero QEMU processes. Clearing the directory by hand let the waiter acquire
+within one 5s poll.
+
+**The diagnosis was made harder by a wrong first guess, which is worth
+recording.** On seeing the timeout I checked `os/build/` for a lock, found
+nothing, and concluded "clean teardown — no stale lock". `build/.boot-lock`
+is only the *fallback* path used when `git rev-parse --git-common-dir`
+fails; the real lock is in the git common dir precisely so that all four
+worktrees share one. Looking for a cross-worktree lock inside one
+worktree's `build/` will always find nothing and always look reassuring.
+
+**What the fix should be: make the lock defend itself against a dead
+owner, rather than only against an old one.** The owner file already records
+the pid (`lane-B/pid-$$/<epoch>`), and every lane runs the script under the
+same MSYS bash, so a waiter can ask whether that pid still exists:
+
+```sh
+# before consulting _lock_age, ask whether the holder is alive at all
+_lock_pid="$(sed -n 's#.*/pid-\([0-9]\+\)/.*#\1#p' "$BOOT_LOCK_DIR/owner" 2>/dev/null || echo "")"
+if [ -n "$_lock_pid" ] && ! kill -0 "$_lock_pid" 2>/dev/null; then
+    echo "=== Breaking boot lock: owner pid $_lock_pid is gone ==="
+    rm -rf "$BOOT_LOCK_DIR" 2>/dev/null || true
+    continue
+fi
+```
+
+Two properties matter and should be kept. It must stay **conservative in the
+unknown case** — if the owner string does not parse, or `kill -0` cannot
+answer, fall through to the existing 1200s age rule rather than breaking;
+a lock broken while QEMU is live costs a corrupted, mutually-slowed pair of
+boots, which is far worse than waiting. And it must not replace the age
+breaker, which still covers the cases a pid check cannot see (a pid recycled
+onto a new process, an owner from a previous Windows session, an owner in a
+different MSYS instance whose pid namespace is not ours).
+
+**Why not fix it in `run-timeout.py` instead.** It is tempting to have the
+timeout runner clean up, but it must not: `run-timeout.py` is generic — it
+knows nothing about boot locks and should not, and giving it lock-specific
+knowledge would mean every future resource guarded this way needs another
+special case in it. More decisively, it cannot be relied on for this even in
+principle, because the same stranding happens when the runner *itself* dies
+(power loss, harness restart, Ctrl-C at the wrong moment). The lock has to
+be robust against its holder vanishing however that happens; that logic
+belongs with the lock.
+
+**Standing lesson.** A cleanup that lives only on the success path is not
+cleanup — it is a comment about what usually happens. Anything holding a
+shared resource must be recoverable *by the next acquirer* without help
+from the process that died, because the whole class of failures worth
+defending against is precisely the ones where the holder does not get to run
+another line of code. Note that both halves here were individually correct:
+the Job Object kill is right, and the owner-matched release is right. The
+gap is only visible where they meet.

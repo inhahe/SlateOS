@@ -71421,3 +71421,82 @@ cd "…/os-lane-a" && { sampler… & } && ./scripts/boot-test.sh --bench …
 Better still, for anything that builds or boots: assert the working directory
 first, so a mislanded command fails loudly instead of quietly compiling in
 someone else's tree.
+
+### [A] B-BENCH-A-PERSISTENT-REGRESSION-IS-REPORTED-ONCE-THEN-ABSORBED-INTO-ITS-OWN-RANGE — 2026-08-15 — ⚠️ OPEN (harness defect + two real regressions found)
+
+**Two findings: two genuine regressions, and the reason the harness stopped
+reporting them on the very next run.**
+
+#### The series (release runs, ns, oldest → newest)
+
+```
+                          e7b912d 0bd70ab 7a96b55 c43ce8a c43ce8a 8c3f844 8135d14 24a3407 f79aec5 c893184 e384f46 c5a4013
+http_build_response_1KiB     6150    5992   10089    5964    6167    5990    5987    6018    5890  >8546  >12431  >12407
+vfs_stat_root                3473    3777    3721    3453    3591    3635    3883    3998    3136    3278   >4488   >4429
+vfs_stat_breakdown_full         -       -       -       -       -       -    3915    4015    3170    3219   >4424   >4505
+ipc_eventfd                   541     653     652     544     540     539     660     641     534     537   1021     653
+net_ipv6_parse                 81      81      80      80      81      79      80      80     113     169      80      80
+```
+
+#### Finding 1 — two regressions are real, one "regression" was noise
+
+`http_build_response_1KiB` sat at ~6000 ns for nine runs, then went 8546 →
+12431 → **12407**. `vfs_stat_root` sat in 3136-3998 for ten runs, then 4488 →
+**4429**. `vfs_stat_breakdown_full` likewise: 3170-4015, then 4424 → **4505**.
+
+The consecutive pairs agree to **0.2%** (12431 vs 12407) and **1.3%** (4488 vs
+4429). That is the decisive point, and it survives the fact that *both* runs
+were contaminated: host disturbance shows up as **stalls**, which inflate the
+*mean*, and these figures are **min-of-N**. Noise does not reproduce to two
+parts in a thousand. Two independently-disturbed runs landing on the same
+number is evidence *for* a real shift, not against it.
+
+By the same test `ipc_eventfd`'s spectacular +90% (537 → 1021) was **noise**: it
+did not reproduce (653, back inside its long-standing bimodal 534-660). So the
+earlier decision not to dismiss all three as contamination was right, and so was
+declining to accept all three — one of the three was exactly what the
+contamination story predicted, and two were not.
+
+`net_ipv6_parse` is **resolved**: 80 ns across both runs, matching the nine runs
+before the 113/169 excursion. The excursion is over and was never a code change.
+
+#### Finding 2 — the harness reported "no benchmark moved outside its own range" on the run that confirmed the regressions
+
+The re-run's verdict was:
+
+```
+No benchmark moved outside its own recent range (2 crossed 25% run-over-run).
+```
+
+Both statements are true and together they are misleading. The comparison is
+**run-over-run against the immediately preceding run**, and "its own recent
+range" is a window over the last 8 runs. So once a regression has appeared in
+one run:
+
+1. run-over-run sees 12431 → 12407 and correctly reports **no movement**; and
+2. the range has absorbed the elevated sample, so 12407 is now **inside** it.
+
+A regression is therefore visible for exactly **one run**. On the second run it
+becomes the new normal, and the harness affirmatively reports the suite as
+clean. This is worse than silence: a run that says "no benchmark moved outside
+its own recent range" is naturally read as "no regressions", when what it
+actually means is "nothing changed *since the regression*."
+
+The window poisons itself, and it does so fastest for exactly the regressions
+that matter most — a persistent one, which by definition appears in every
+subsequent run.
+
+**The proper fix** is for the range to be computed over runs that are *known
+good*, not over "the last 8 whatever they were": compare against the median of
+the last N runs **that predate the newest run's own value entering the window**,
+or keep a pinned baseline per benchmark that only moves when a change is
+explicitly accepted. A cheap interim check that would have caught this: flag any
+benchmark whose newest value is >25% off the median of runs 5-12 back, in
+addition to the existing run-over-run test.
+
+**Not yet known: what caused the two regressions.** Both jumps bracket merges of
+other lanes' work into `lane-a` as well as this lane's own `sys_cap_query`
+change, so attribution needs a bisect over the recorded commits
+(`f79aec5 → c893184 → e384f46`), not a guess. `http_build_response_1KiB` is the
+better target: it more than doubled, in two clean ~45% steps, from a nine-run
+plateau.

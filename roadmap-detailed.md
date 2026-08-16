@@ -1144,8 +1144,8 @@ _When a program hits an **unhandled language-level exception** (our SEH-style mo
   - [x] Interrupt delivery via IPC — SYS_IRQ_REGISTER/WAIT/RELEASE
   - [x] DMA mapping setup syscalls _(udriver.rs: alloc/free DMA buffers, direction control, bus addr translation, IOMMU domain integration)_
   - [x] Driver crash detection and automatic restart _(drvmon.rs: heartbeat/process-alive health modes, exponential backoff restart, configurable policies)_
-- [ ] Ada/SPARK FFI bridge for kernel-space safety-critical drivers
-- [-] virtio drivers (disk, network, GPU) for VM development/testing — virtio-blk and virtio-net done (in-kernel, legacy PCI transport); GPU pending
+- [x] Ada/SPARK FFI bridge for kernel-space safety-critical drivers _(kernel/ada/: Alire cross-GNAT to x86_64-elf, ZFP runtime, prebuilt .o + SHA-256 stamp checked by kernel/build.rs so the toolchain is not a build prerequisite; kernel/src/ada.rs safe wrapper + boot self-test; `__gnat_last_chance_handler` routed to the Rust panic path. First proved component: virtqueue descriptor index/free-list allocator, gnatprove 106/106, in production use in kernel/src/virtio/queue.rs. See design-decisions.md §205.)_
+- [-] virtio drivers (disk, network, GPU) for VM development/testing — virtio-blk, virtio-net, virtio-gpu and virtio-sound done (in-kernel; legacy PCI transport except GPU, which is modern); descriptor allocation for all four is routed through the proved Ada component
 - [x] VMware tools equivalent for VM-friendliness _(vmguest.rs: hypervisor-specific feature activation for KVM/Hyper-V/VMware/VBox/Xen/QEMU-TCG, pvclock/refTSC/pseudo-TSC clock sources, balloon memory, display resize, heartbeat, guest info reporting, shutdown signaling, VMware backdoor)_
 
 ### 2.2 Essential Drivers

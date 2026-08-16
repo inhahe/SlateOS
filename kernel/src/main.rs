@@ -63,6 +63,7 @@ extern crate alloc;
 // Module declarations.
 mod ac97;
 mod acpi;
+mod ada;
 mod ahci;
 mod alternatives;
 mod apic;
@@ -640,6 +641,38 @@ extern "C" fn kernel_main() -> ! {
     // silently reported as "<1us".
     sclatency::calibrate();
     sclatency::self_test();
+
+    // Bring up the Ada/SPARK components and check the FFI boundary.
+    //
+    // Placed here rather than next to the virtio drivers that use it because
+    // what is being checked is the *linkage*, not the driver: that the Ada
+    // objects resolved, that the calling convention agrees, and that this
+    // side's status enum still matches the Ada constants. Those are properties
+    // of the image, so a mismatch should stop the boot at a point where the
+    // serial log is short and the cause is unambiguous — not several hundred
+    // lines later as a confusing virtio failure.
+    //
+    // It needs nothing but the serial console: the Ada side allocates nothing
+    // and its state is statically allocated .bss, which is why it can run this
+    // early.
+    ada::init();
+    if let Err(e) = ada::selftest() {
+        serial_println!("FATAL: Ada/SPARK FFI self-test failed: {}", e);
+        cpu::halt_loop();
+    }
+    // Say so on success too. Every other self-test in this tree ends `: OK`, and
+    // a silent one is indistinguishable from one that was never called — an
+    // `ada::selftest()` accidentally dropped from this sequence would look
+    // exactly like a passing boot. Printing the two bounds makes the line carry
+    // information rather than just presence: they are read back out of the Ada
+    // object, so the numbers are evidence the linkage resolved.
+    serial_println!(
+        "[ada]   FFI boundary self-test (linkage, calling convention, status enum, \
+         Max_Descriptors={}, Max_Queues={}): OK",
+        ada::MAX_DESCRIPTORS,
+        ada::MAX_QUEUES
+    );
+
     cputime::init();
     timekeeping::init();
 

@@ -12,10 +12,69 @@
 //! are 4 KiB aligned), a single frame allocation satisfies the
 //! contiguity and alignment requirements.
 
-use core::sync::atomic::{Ordering, fence};
+use core::sync::atomic::{AtomicU32, Ordering, fence};
 
+use crate::ada;
 use crate::error::KernelResult;
 use crate::mm::frame::{self, PhysFrame};
+
+// ---------------------------------------------------------------------------
+// Ada descriptor-pool slots
+// ---------------------------------------------------------------------------
+//
+// The SPARK component in kernel/ada/ owns a fixed array of queue records, and
+// a live `Virtqueue` owns exactly one of them for as long as it exists.  This
+// bitmap is the allocator for that array: bit N set means slot N is spoken for.
+//
+// It is a plain atomic bitmap rather than anything cleverer because the whole
+// population is 16 and the operation happens at driver-probe time, never on an
+// I/O path.
+
+/// One bit per slot in the Ada queue pool.
+static QUEUE_SLOTS: AtomicU32 = AtomicU32::new(0);
+
+/// Mask of the bits in [`QUEUE_SLOTS`] that correspond to real pool slots.
+const SLOT_MASK: u32 = 0xFFFF;
+
+// The mask above is written as a literal so it is obvious at a glance, which
+// makes it something that could silently stop matching the Ada side.  Tie the
+// two together at compile time instead: raising Max_Queues in the Ada spec
+// without widening this mask would otherwise leave the extra slots permanently
+// unreachable, which is a bug that shows up only as an unexplained
+// ResourceExhausted at probe time.
+const _: () = assert!(
+    ada::MAX_QUEUES == 16,
+    "SLOT_MASK must cover exactly ada::MAX_QUEUES bits"
+);
+
+/// Claim a free slot in the Ada queue pool, or `None` if all are in use.
+fn acquire_queue_id() -> Option<u16> {
+    let mut cur = QUEUE_SLOTS.load(Ordering::Relaxed);
+    loop {
+        let free = !cur & SLOT_MASK;
+        if free == 0 {
+            return None;
+        }
+        let bit = free.trailing_zeros();
+        match QUEUE_SLOTS.compare_exchange_weak(
+            cur,
+            cur | (1u32 << bit),
+            Ordering::AcqRel,
+            Ordering::Relaxed,
+        ) {
+            // `bit` indexes a set bit of SLOT_MASK, so it is below 16 and the
+            // cast cannot truncate.
+            #[allow(clippy::cast_possible_truncation)]
+            Ok(_) => return Some(bit as u16),
+            Err(actual) => cur = actual,
+        }
+    }
+}
+
+/// Return a slot to the pool.  The caller must have reset it in Ada first.
+fn release_queue_id(id: u16) {
+    QUEUE_SLOTS.fetch_and(!(1u32 << id), Ordering::AcqRel);
+}
 
 // ---------------------------------------------------------------------------
 // Virtqueue descriptor
@@ -96,10 +155,16 @@ pub struct Virtqueue {
     avail_offset: usize,
     /// Byte offset of the used ring from virt_base.
     used_offset: usize,
-    /// Next free descriptor index (head of free list).
-    free_head: u16,
-    /// Number of free descriptors.
-    free_count: u16,
+    /// Slot in the Ada descriptor pool that owns this queue's free list and
+    /// chain topology.
+    ///
+    /// The free list used to live in the `next` fields of the descriptor
+    /// table — that is, in memory the device can write.  A device that
+    /// scribbled there could redirect our next allocation anywhere.  The
+    /// authoritative copy now lives in the SPARK component, which the device
+    /// cannot reach, and the descriptor table became a write-only rendering
+    /// of it.  See known-issues.md B-VIRTIO-UNVALIDATED-USED-ID.
+    queue_id: u16,
     /// Driver's copy of the available ring index (what we've submitted).
     avail_idx: u16,
     /// Last used ring index we've seen.
@@ -145,8 +210,34 @@ impl Virtqueue {
             return Err(crate::error::KernelError::InvalidArgument);
         }
 
-        // Allocate one 16 KiB frame.
-        let phys = frame::alloc_frame()?;
+        // Claim a slot in the Ada descriptor pool and let the proved component
+        // decide whether this size is one it will accept.  It rejects 0, sizes
+        // above its compile-time maximum, and sizes that are not a power of
+        // two — the last of which the virtio spec requires and this code never
+        // checked.  Doing it here means a device advertising a nonsensical
+        // queue size fails at probe time rather than producing a queue whose
+        // index arithmetic is subtly wrong.
+        let queue_id = acquire_queue_id().ok_or(crate::error::KernelError::ResourceExhausted)?;
+
+        if let Err(status) = ada::initialize(queue_id, queue_size) {
+            release_queue_id(queue_id);
+            crate::serial_println!(
+                "[virtio] descriptor pool rejected queue size {queue_size}: {status:?}"
+            );
+            return Err(crate::error::KernelError::InvalidArgument);
+        }
+
+        // Allocate one 16 KiB frame.  From here on, every early return has to
+        // give the pool slot back, so the failure paths are written out rather
+        // than using `?`.
+        let phys = match frame::alloc_frame() {
+            Ok(p) => p,
+            Err(e) => {
+                ada::reset(queue_id);
+                release_queue_id(queue_id);
+                return Err(e);
+            }
+        };
         let phys_addr = phys.addr();
         let virt = phys_addr + hhdm_offset;
         let virt_ptr = virt as *mut u8;
@@ -158,16 +249,10 @@ impl Virtqueue {
             core::ptr::write_bytes(virt_ptr, 0, frame::FRAME_SIZE);
         }
 
-        // Initialize the free descriptor list (each descriptor's `next`
-        // points to the following one).
-        for i in 0..queue_size {
-            // SAFETY: virt_ptr is the start of a zeroed, owned frame.
-            // i < queue_size, and queue_size * 16 < FRAME_SIZE (checked
-            // indirectly via total < FRAME_SIZE above), so the pointer
-            // arithmetic stays within the allocated frame.
-            let desc = unsafe { &mut *(virt_ptr.add(i as usize * 16) as *mut VirtqDesc) };
-            desc.next = if i + 1 < queue_size { i + 1 } else { 0xFFFF };
-        }
+        // No free-list construction here any more.  The list the driver walks
+        // lives in the Ada pool, which `initialize` above has already built;
+        // the `next` fields in this table are now written only when a chain is
+        // submitted, and are read only by the device.
 
         // Physical PFN for the legacy transport (4096-byte granularity).
         let pfn = (phys_addr >> 12) as u32;
@@ -178,8 +263,7 @@ impl Virtqueue {
             queue_size,
             avail_offset: desc_size,
             used_offset: used_start,
-            free_head: 0,
-            free_count: queue_size,
+            queue_id,
             avail_idx: 0,
             last_used_idx: 0,
         };
@@ -210,61 +294,90 @@ impl Virtqueue {
             core::ptr::write_bytes(self.virt_base, 0, frame::FRAME_SIZE);
         }
 
-        // Rebuild the free descriptor list (each `next` points to the
-        // following descriptor; the last terminates the list).
-        for i in 0..self.queue_size {
-            // SAFETY: i < queue_size, and queue_size * 16 < FRAME_SIZE
-            // (checked in new()), so the pointer stays within the frame.
-            let desc = unsafe { &mut *(self.virt_base.add(i as usize * 16) as *mut VirtqDesc) };
-            desc.next = if i + 1 < self.queue_size {
-                i + 1
-            } else {
-                0xFFFF
-            };
+        // Rebuild the free list in the Ada pool.  `initialize` is idempotent
+        // and is the documented reset path, so this both returns every
+        // descriptor the device still nominally owned and re-establishes the
+        // invariants the component's proof rests on.
+        //
+        // If it fails the queue is left with size 0 in the pool, which makes
+        // every subsequent allocation and completion reject — the queue goes
+        // inert rather than silently reverting to unchecked behaviour.  It can
+        // only fail if `queue_size` is unacceptable, which `new` already
+        // established it is not.
+        if let Err(status) = ada::initialize(self.queue_id, self.queue_size) {
+            crate::serial_println!(
+                "[virtio] queue {} failed to re-initialize on reset: {status:?}; \
+                 queue is now inert",
+                self.queue_id
+            );
+            ada::reset(self.queue_id);
         }
 
-        self.free_head = 0;
-        self.free_count = self.queue_size;
         self.avail_idx = 0;
         self.last_used_idx = 0;
     }
 
     /// Allocate a descriptor from the free list.
+    ///
+    /// The index comes from the SPARK component, whose postcondition is that
+    /// the result is either "none" or a genuine index into this queue.  That
+    /// is what justifies the pointer arithmetic in [`desc_mut`].
     fn alloc_desc(&mut self) -> Option<u16> {
-        if self.free_count == 0 {
-            return None;
-        }
-        let idx = self.free_head;
-        let desc = self.desc(idx);
-        self.free_head = desc.next;
-        self.free_count = self.free_count.wrapping_sub(1);
-        Some(idx)
+        ada::allocate(self.queue_id)
     }
 
-    /// Free a descriptor (return it to the free list).
+    /// Free a descriptor as part of rolling back a chain that was never
+    /// submitted.
+    ///
+    /// `allocate` hands back a descriptor already marked as the end of its
+    /// chain, so one that has been allocated but not yet linked to a successor
+    /// is a well-formed one-element chain, and freeing it is [`free_chain`] on
+    /// itself.
+    ///
+    /// Rollback calls this for every index it allocated, which may include
+    /// indices that a *previous* call in the same loop already freed as part
+    /// of a longer partial chain — if links 0→1→2 were established before the
+    /// failure, freeing index 0 takes 1 and 2 with it. The later calls are
+    /// then no-ops: the pool sees a descriptor that is not allocated and
+    /// rejects, changing nothing. That is why this goes straight to the pool
+    /// instead of through [`free_chain`], which would log each of those
+    /// expected rejections as though a device had misbehaved.
     fn free_desc(&mut self, idx: u16) {
-        let old_head = self.free_head;
-        let desc = self.desc_mut(idx);
-        desc.next = old_head;
-        desc.flags = 0;
-        self.free_head = idx;
-        self.free_count = self.free_count.wrapping_add(1);
+        // The count is deliberately discarded. A zero here means "not
+        // allocated", which during rollback is the expected outcome for an
+        // index a previous iteration already freed as part of a longer partial
+        // chain — see above — and never indicates a failure this function
+        // could act on.
+        let _freed = ada::free_chain(self.queue_id, idx);
     }
 
-    /// Free a chain of descriptors starting from `head`.
-    pub fn free_chain(&mut self, head: u16) {
-        let mut idx = head;
-        loop {
-            let desc = self.desc(idx);
-            let next = desc.next;
-            let has_next = desc.flags & VRING_DESC_F_NEXT != 0;
-            self.free_desc(idx);
-            if has_next {
-                idx = next;
-            } else {
-                break;
-            }
+    /// Free the chain of descriptors whose head is `head`.
+    ///
+    /// Returns the number of descriptors returned to the free list; **0 means
+    /// the chain was rejected and nothing changed.**
+    ///
+    /// `head` normally comes from the used ring, which the *device* writes, so
+    /// it is attacker-controlled. The validation lives in the SPARK component
+    /// rather than here: it rejects an index outside this queue, an index that
+    /// is not currently allocated (a double completion), and a chain that
+    /// fails to terminate within the queue's own length (a cycle). The walk
+    /// follows the pool's private links, so a device that rewrites `next` in
+    /// the descriptor table cannot steer it.
+    pub fn free_chain(&mut self, head: u16) -> u16 {
+        let freed = ada::free_chain(self.queue_id, head);
+        if freed == 0 {
+            // Reaching here means the device named a chain we do not believe we
+            // own. Nothing was mutated, so the queue is still consistent, but
+            // it is worth saying out loud: on a correct device it is
+            // unreachable, so it means either a device bug or an attempt to
+            // walk us off the descriptor table.
+            crate::serial_println!(
+                "[virtio] queue {}: rejected completion for descriptor {head} \
+                 (out of range, not allocated, or a cyclic chain)",
+                self.queue_id
+            );
         }
+        freed
     }
 
     /// Read the physical address stored in descriptor `idx`.
@@ -273,23 +386,41 @@ impl Virtqueue {
     /// descriptor chain belongs to — e.g., mapping the `head_idx`
     /// returned by [`poll_used`] back to a buffer slot index.
     ///
-    /// Must be called **before** [`free_chain`], which overwrites
-    /// descriptor metadata.
-    pub fn desc_phys_addr(&self, idx: u16) -> u64 {
-        self.desc(idx).addr
+    /// Returns `None` if `idx` is not a descriptor of this queue.
+    ///
+    /// Must be called **before** [`free_chain`], which returns the descriptor
+    /// to the free list.
+    pub fn desc_phys_addr(&self, idx: u16) -> Option<u64> {
+        self.desc(idx).map(|d| d.addr)
     }
 
-    /// Get a reference to descriptor `idx`.
-    fn desc(&self, idx: u16) -> &VirtqDesc {
-        // SAFETY: idx is within 0..queue_size (ensured by alloc_desc).
-        unsafe { &*(self.virt_base.add(idx as usize * 16) as *const VirtqDesc) }
+    /// Get a reference to descriptor `idx`, or `None` if it is out of range.
+    ///
+    /// The bound is checked here rather than assumed from the caller. The
+    /// previous version asserted in a SAFETY comment that callers only ever
+    /// passed indices from `alloc_desc` — which was false, because
+    /// `free_chain` reached this function with an index the device chose, and
+    /// nothing in the type system or the call graph made the comment true.
+    /// A bounds check at the dereference is what actually makes it true.
+    fn desc(&self, idx: u16) -> Option<&VirtqDesc> {
+        if idx >= self.queue_size {
+            return None;
+        }
+        // SAFETY: idx < queue_size, just checked, and queue_size * 16 is
+        // within the frame (established in new(), which refuses any size whose
+        // layout does not fit). virt_base points at that exclusively-owned
+        // frame, mapped writable through the HHDM, and the descriptor table
+        // starts at offset 0 of it.
+        Some(unsafe { &*(self.virt_base.add(idx as usize * 16) as *const VirtqDesc) })
     }
 
-    /// Get a mutable reference to descriptor `idx`.
-    fn desc_mut(&mut self, idx: u16) -> &mut VirtqDesc {
-        // SAFETY: same as desc() — idx is within 0..queue_size
-        // (ensured by alloc_desc), and we have exclusive access (&mut self).
-        unsafe { &mut *(self.virt_base.add(idx as usize * 16) as *mut VirtqDesc) }
+    /// Get a mutable reference to descriptor `idx`, or `None` if out of range.
+    fn desc_mut(&mut self, idx: u16) -> Option<&mut VirtqDesc> {
+        if idx >= self.queue_size {
+            return None;
+        }
+        // SAFETY: as desc(), plus `&mut self` gives us exclusive access.
+        Some(unsafe { &mut *(self.virt_base.add(idx as usize * 16) as *mut VirtqDesc) })
     }
 
     /// Submit a chain of buffers to the available ring.
@@ -322,9 +453,47 @@ impl Virtqueue {
             }
         }
 
-        // Fill in the descriptors.
+        // Record the chain's shape in the Ada pool, which is what `free_chain`
+        // will walk on completion.  This is done before touching the
+        // descriptor table so that a failure leaves nothing published.
+        //
+        // These cannot fail: every index came from `allocate` on this queue and
+        // so is in range and marked allocated, which is exactly what `link`
+        // requires.  Checked anyway — the point of the component is that the
+        // caller's belief about an index is never what makes the access safe.
+        for i in 0..count.saturating_sub(1) {
+            if let Err(status) = ada::link(self.queue_id, indices[i], indices[i + 1]) {
+                crate::serial_println!(
+                    "[virtio] queue {}: link {} -> {} rejected: {status:?}",
+                    self.queue_id,
+                    indices[i],
+                    indices[i + 1]
+                );
+                for j in 0..count {
+                    self.free_desc(indices[j]);
+                }
+                return Err(crate::error::KernelError::InternalError);
+            }
+        }
+
+        // Fill in the descriptors the device reads.  From here the table is a
+        // rendering of state the pool already holds authoritatively.
         for i in 0..count {
-            let desc = self.desc_mut(indices[i]);
+            let Some(desc) = self.desc_mut(indices[i]) else {
+                // Unreachable: `allocate` guarantees the index is below the
+                // queue size.  Treated as a failure rather than ignored,
+                // because the alternative is submitting a chain with a
+                // descriptor we never filled in.
+                crate::serial_println!(
+                    "[virtio] queue {}: allocator returned out-of-range descriptor {}",
+                    self.queue_id,
+                    indices[i]
+                );
+                for j in 0..count {
+                    self.free_desc(indices[j]);
+                }
+                return Err(crate::error::KernelError::InternalError);
+            };
             desc.addr = buffers[i].0;
             desc.len = buffers[i].1;
             desc.flags = buffers[i].2;
@@ -403,12 +572,52 @@ impl Virtqueue {
 
         self.last_used_idx = self.last_used_idx.wrapping_add(1);
 
-        Some((elem.id as u16, elem.len))
+        // `elem.id` is written by the device and is the point at which
+        // device-controlled data becomes an index into our own descriptor
+        // table.  Validate it here, at the boundary, rather than leaving each
+        // driver to remember: every caller of this function immediately uses
+        // the value to look something up, and there are ten such call sites
+        // across four drivers.  Rejecting once, here, is what makes all of them
+        // safe.
+        //
+        // Note the id is declared u32 in the ring and truncating it would map
+        // 0x1_0000 onto descriptor 0 — a valid-looking index for a completion
+        // the device never legitimately made — so the width check comes first.
+        let Ok(id) = u16::try_from(elem.id) else {
+            crate::serial_println!(
+                "[virtio] queue {}: device reported used id {} (>= 2^16); ignoring",
+                self.queue_id,
+                elem.id
+            );
+            return None;
+        };
+
+        if !ada::is_allocated(self.queue_id, id) {
+            // Out of range for this queue, or in range but not currently
+            // outstanding — a completion for a chain we already freed, or one
+            // we never submitted.  Either way there is no buffer to hand back.
+            crate::serial_println!(
+                "[virtio] queue {}: device completed descriptor {id}, which is \
+                 not outstanding; ignoring",
+                self.queue_id
+            );
+            return None;
+        }
+
+        Some((id, elem.len))
     }
 }
 
 impl Drop for Virtqueue {
     fn drop(&mut self) {
+        // Return the descriptor pool slot.  `reset` puts the queue back to
+        // size 0, in which every operation on it rejects, so a stale index
+        // arriving for a queue that has gone away — a device being unplugged
+        // mid-flight is exactly when that happens — is answered as invalid
+        // rather than against whatever driver claims the slot next.
+        ada::reset(self.queue_id);
+        release_queue_id(self.queue_id);
+
         // Free the backing frame.
         // SAFETY: We own this frame and are being dropped.
         if let Err(e) = unsafe { frame::free_frame(self.phys_frame) } {

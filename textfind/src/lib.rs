@@ -81,6 +81,8 @@
 
 #![no_std]
 
+use core::cmp::Ordering;
+
 /// Whether a search distinguishes upper from lower case.
 ///
 /// This is an enum rather than the `bool` every caller stores because a bare
@@ -256,6 +258,64 @@ pub fn contains(haystack: &str, needle: &str, case: Case) -> bool {
     find_from(haystack, needle, 0, case).is_some()
 }
 
+/// Order `a` against `b` under `case`.
+///
+/// Under [`Case::Sensitive`] this is `str`'s own ordering. Under
+/// [`Case::Insensitive`] the two strings are compared by their folded
+/// character sequences, so `"apple"` sorts before `"Banana"` rather than after
+/// it — the byte order that `str::cmp` gives puts every capital before every
+/// lowercase letter, which is not an order any user asked for.
+///
+/// # Why this is here rather than written at each call site
+///
+/// `a.to_lowercase().cmp(&b.to_lowercase())` is the obvious spelling and is
+/// wrong in the same family as bugs 1–3 above, in a fourth way. It allocates
+/// two strings *per comparison*, and a comparison is what a sort does
+/// `n log n` times — sorting a directory of ten thousand names allocates a
+/// quarter of a million strings to answer a question that needs none. This
+/// folds lazily and stops at the first differing character, which for a
+/// typical file list is the first or second one.
+///
+/// It also agrees with [`match_at`] about what "the same, ignoring case"
+/// means. A list that is *filtered* by [`contains`] and *sorted* by a
+/// hand-written comparison can otherwise disagree with itself: two names the
+/// filter treats as equal land in an order the filter's own rule says is
+/// arbitrary.
+///
+/// # Equal is not identical
+///
+/// Under [`Case::Insensitive`] this returns [`Ordering::Equal`] for two
+/// *different* strings whenever they fold alike — `"README"` and `"readme"`,
+/// and also `"İ"` and `"i\u{307}"`. That is the correct answer to the question
+/// asked, but it means this must not be used alone as the ordering behind an
+/// `Ord` impl whose `PartialEq` is byte equality: the two would disagree, and
+/// `Ord`'s contract requires `a.cmp(b) == Equal` exactly when `a == b`.
+/// Break the tie with `a.cmp(b)` when this returns `Equal`.
+///
+/// # Examples
+///
+/// ```
+/// use core::cmp::Ordering;
+/// use textfind::{Case, compare};
+///
+/// // Byte order puts every capital first; folded order does not.
+/// assert_eq!(compare("apple", "Banana", Case::Sensitive), Ordering::Greater);
+/// assert_eq!(compare("apple", "Banana", Case::Insensitive), Ordering::Less);
+///
+/// // Folding alike is Equal even though the strings differ.
+/// assert_eq!(compare("README", "readme", Case::Insensitive), Ordering::Equal);
+/// assert_eq!(compare("\u{130}", "i\u{307}", Case::Insensitive), Ordering::Equal);
+/// ```
+#[must_use]
+pub fn compare(a: &str, b: &str, case: Case) -> Ordering {
+    if case.is_sensitive() {
+        return a.cmp(b);
+    }
+    a.chars()
+        .flat_map(char::to_lowercase)
+        .cmp(b.chars().flat_map(char::to_lowercase))
+}
+
 /// Iterator over the non-overlapping matches of a needle. See [`matches`].
 #[derive(Debug, Clone)]
 pub struct Matches<'h, 'n> {
@@ -302,7 +362,7 @@ mod tests {
     #![allow(clippy::indexing_slicing, clippy::unwrap_used, clippy::panic)]
 
     extern crate alloc;
-    use super::{Case, contains, find_from, match_at, matches};
+    use super::{Case, Ordering, compare, contains, find_from, match_at, matches};
     use alloc::vec::Vec;
 
     /// The Turkish capital I with a dot above: two bytes, but three once
@@ -323,9 +383,15 @@ mod tests {
     #[test]
     fn a_match_is_not_assumed_to_be_the_length_of_the_needle() {
         // Three-byte folded needle, two-byte match.
-        assert_eq!(match_at(DOTTED_I, 0, "i\u{307}", Case::Insensitive), Some(2));
+        assert_eq!(
+            match_at(DOTTED_I, 0, "i\u{307}", Case::Insensitive),
+            Some(2)
+        );
         // And the other way round: two-byte needle, three-byte match.
-        assert_eq!(match_at("i\u{307}", 0, DOTTED_I, Case::Insensitive), Some(3));
+        assert_eq!(
+            match_at("i\u{307}", 0, DOTTED_I, Case::Insensitive),
+            Some(3)
+        );
     }
 
     #[test]
@@ -405,7 +471,16 @@ mod tests {
         // chosen to break the assumptions the old implementations made:
         // length-changing folds, multi-byte characters, and repeats.
         let hays = [
-            "", "a", "aaaa", "İ", "İİİ", "xİy", "日本日本", "AaAa", "İstanbul", "straße",
+            "",
+            "a",
+            "aaaa",
+            "İ",
+            "İİİ",
+            "xİy",
+            "日本日本",
+            "AaAa",
+            "İstanbul",
+            "straße",
         ];
         let needles = ["a", "A", "aa", "İ", "i\u{307}", "日本", "ss", "st", "ß"];
         let mut checked = 0_u32;
@@ -429,5 +504,116 @@ mod tests {
             }
         }
         assert_eq!(checked, 10 * 9 * 2, "sweep did not cover every combination");
+    }
+
+    // ------------------------------------------------------------------
+    // compare
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn sensitive_compare_is_str_ordering() {
+        assert_eq!(compare("a", "b", Case::Sensitive), Ordering::Less);
+        assert_eq!(compare("B", "a", Case::Sensitive), Ordering::Less);
+        assert_eq!(compare("a", "a", Case::Sensitive), Ordering::Equal);
+    }
+
+    #[test]
+    fn insensitive_compare_ignores_the_capital_letters_block() {
+        // The whole point: byte order sorts every A-Z before every a-z, so a
+        // file list ordered by `str::cmp` puts `Zebra` before `apple`.
+        assert_eq!(compare("Zebra", "apple", Case::Sensitive), Ordering::Less);
+        assert_eq!(
+            compare("Zebra", "apple", Case::Insensitive),
+            Ordering::Greater
+        );
+    }
+
+    #[test]
+    fn insensitive_compare_agrees_with_match_at_about_equality() {
+        // Anything `match_at` calls a whole-string match must compare Equal,
+        // or a filtered list and a sorted list disagree about the same pair.
+        for (a, b) in [("README", "readme"), ("\u{130}", "i\u{307}"), ("ß", "ß")] {
+            assert_eq!(
+                match_at(a, 0, b, Case::Insensitive),
+                Some(a.len()),
+                "{a:?} should match {b:?} whole"
+            );
+            assert_eq!(
+                compare(a, b, Case::Insensitive),
+                Ordering::Equal,
+                "{a:?} vs {b:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn insensitive_compare_does_not_fold_by_truncation() {
+        // A fold that changes length must not shorten the comparison: `İ`
+        // folds to two characters, so `İa` vs `i\u{307}b` must be decided by
+        // the `a`/`b` that follow, not by a length mismatch.
+        assert_eq!(
+            compare("\u{130}a", "i\u{307}b", Case::Insensitive),
+            Ordering::Less
+        );
+        assert_eq!(
+            compare("\u{130}b", "i\u{307}a", Case::Insensitive),
+            Ordering::Greater
+        );
+    }
+
+    #[test]
+    fn a_prefix_sorts_before_the_string_it_prefixes() {
+        assert_eq!(compare("read", "readme", Case::Insensitive), Ordering::Less);
+        assert_eq!(compare("READ", "readme", Case::Insensitive), Ordering::Less);
+        assert_eq!(compare("", "a", Case::Insensitive), Ordering::Less);
+        assert_eq!(compare("", "", Case::Insensitive), Ordering::Equal);
+    }
+
+    #[test]
+    fn compare_is_a_total_order_over_a_mixed_sample() {
+        // Antisymmetry and transitivity, checked exhaustively over a sample
+        // chosen to include folds that change length and characters that fold
+        // together. A comparator that fails either makes `sort_by` behave
+        // arbitrarily rather than merely wrongly.
+        let sample = [
+            "",
+            "a",
+            "A",
+            "aa",
+            "ab",
+            "B",
+            "b",
+            "READ",
+            "read",
+            "readme",
+            "\u{130}",
+            "i\u{307}",
+            "ı",
+            "ß",
+            "日本",
+            "\u{130}a",
+            "i\u{307}b",
+        ];
+        for case in [Case::Sensitive, Case::Insensitive] {
+            for x in sample {
+                for y in sample {
+                    assert_eq!(
+                        compare(x, y, case),
+                        compare(y, x, case).reverse(),
+                        "antisymmetry: {x:?} {y:?} {case:?}"
+                    );
+                    for z in sample {
+                        let (xy, yz) = (compare(x, y, case), compare(y, z, case));
+                        if xy == yz && xy != Ordering::Equal {
+                            assert_eq!(
+                                compare(x, z, case),
+                                xy,
+                                "transitivity: {x:?} {y:?} {z:?} {case:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 }

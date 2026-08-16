@@ -969,6 +969,12 @@ enum ActionOutcome {
 ///
 /// The real OS will expose this via a proper syscall. The std implementation
 /// may or may not support it, so we silently ignore errors.
+// The `Result` is not superfluous, it is unreached: the body stands in for a
+// filesystem syscall that will fail in practice (no permission, a read-only
+// mount, a filesystem that stores no mtime), and the callers already handle
+// that. Narrowing the return type to `()` now would mean widening it back —
+// and revisiting every caller — the day the real implementation lands.
+#[allow(clippy::unnecessary_wraps)]
 fn set_file_mtime(path: &Path, _mtime: SystemTime) -> io::Result<()> {
     // Placeholder: on Slate OS this would call the appropriate filesystem
     // syscall to set the modification time. On the host (for testing)
@@ -1147,6 +1153,13 @@ pub struct RecycleBin {
     max_age: Duration,
 }
 
+/// Recycled items are eligible for auto-purge after 30 days.
+///
+/// Spelled in seconds rather than `Duration::from_days`, which is still
+/// nightly-gated (rust-lang/rust#120301) and would pin this crate to a
+/// nightly toolchain for nothing but a nicer literal.
+const DEFAULT_RECYCLE_MAX_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+
 impl RecycleBin {
     /// Create a new `RecycleBin` rooted at `root`.
     ///
@@ -1161,10 +1174,7 @@ impl RecycleBin {
         let home = std::env::var("HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from("/tmp"));
-        Self::new(
-            home.join(".recycle"),
-            Duration::from_secs(30 * 24 * 60 * 60),
-        )
+        Self::new(home.join(".recycle"), DEFAULT_RECYCLE_MAX_AGE)
     }
 
     /// Move `path` into the recycle bin and return the entry id.
@@ -1240,9 +1250,13 @@ impl RecycleBin {
                 continue;
             }
             let id = dir_entry.file_name().to_string_lossy().to_string();
-            match self.read_entry(&id) {
-                Ok(entry) => entries.push(entry),
-                Err(_) => continue,
+            // An entry whose metadata will not parse is skipped rather than
+            // failing the whole listing: one corrupt `meta.txt` must not make
+            // every other recycled file unrestorable. The cost is that the
+            // damaged entry is invisible in the UI — tracked in
+            // `known-issues.md` as `TD-EXPLORER-UNREADABLE-RECYCLE-ENTRY`.
+            if let Ok(entry) = self.read_entry(&id) {
+                entries.push(entry);
             }
         }
 
@@ -1434,6 +1448,16 @@ pub fn execute_undo(record: &UndoRecord) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    // A test that indexes out of range should fail loudly and point at the
+    // line that did it — that is the diagnosis. The defensive lints exist to
+    // keep panics out of code that runs on a user's data, which this is not.
+    #![allow(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic
+    )]
+
     use super::*;
     use std::fs;
     use std::io::Write as IoWrite;

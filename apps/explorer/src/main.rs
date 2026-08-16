@@ -15,6 +15,13 @@
 //!
 //! Uses the guitk library for UI rendering.
 
+// `Duration::from_days` / `from_hours` / `from_mins` — the constructors this
+// lint asks for — are still nightly-gated (rust-lang/rust#120301). Taking the
+// suggestion would pin the explorer to a nightly toolchain in exchange for a
+// nicer-looking literal, so the seconds spelling stays and each site spells
+// out the arithmetic that names the unit.
+#![allow(clippy::duration_suboptimal_units)]
+
 mod columns;
 mod dropzone;
 mod fileops;
@@ -979,6 +986,16 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    // A test that indexes out of range should fail loudly and point at the
+    // line that did it — that is the diagnosis. The defensive lints exist to
+    // keep panics out of code that runs on a user's data, which this is not.
+    #![allow(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic
+    )]
+
     use super::*;
     use std::time::{Duration, UNIX_EPOCH};
 

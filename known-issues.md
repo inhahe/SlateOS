@@ -410,6 +410,55 @@ This was a targeted pass at one defect family, not a full sweep of those five
 crates; their remaining `indexing_slicing` counts are `rssreader` 93,
 `spreadsheet` 42, `filediff` 17, `ebook` 16, `pdfviewer` 13.
 
+### Sweep progress: `explorer` 264 → 55, `indexing_slicing` 0 (2026-08-16)
+
+Third worst crate done. `apps/explorer` went from 125 `indexing_slicing`
+findings to **0** and 264 total warnings to 55; every `unwrap_used`,
+`expect_used`, `float_cmp` and `duration_suboptimal_units` finding is gone too.
+Tests 181 → 187, plus 5 new in `textfind` (12 → 17). Six reachable bugs fell
+out of it, recorded below.
+
+Pattern 2 — *a `Vec` plus an index is an invariant expressed as a convention* —
+did the bulk of the work again, in its most extreme form yet. `thumbs.rs` held
+a `Vec<u8>` of ARGB pixels alongside a `width` and `height`, and **115 index
+expressions** each independently restated the relationship between the three.
+Three of those 115 proofs were wrong. Replacing the triple with a `Canvas` type
+whose `set`/`fill_rect` clip and whose `get` returns `Option` took all 115 to
+zero and made the three bugs unwritable rather than merely fixed.
+
+A consequence worth naming: `Thumbnail::is_valid()` existed but was never
+called at construction, so an invalid thumbnail could be built and only fail
+later. `Canvas::into_thumbnail` is now the only way to build one, and it cannot
+build an invalid one, so the check is a property of the type.
+
+The 55 that remain are all `arithmetic_side_effects`, and every one was read:
+each is guarded by a proof stated within a few lines (a `count > 0` before a
+division, a `len == 0` early return before `len - 1`, a `.take(16)` bounding a
+shift). None is reachable. Whether that lint earns its keep tree-wide — it is
+3161 findings — is still open; see the note under `editor` above.
+
+### `textfind::compare` — the fourth member of the fold-then-index family (2026-08-16)
+
+The `textfind` sweep above covered *searching* case-insensitively. Sorting
+case-insensitively is the same mistake with the same cause, and the sweep found
+it in `explorer`. `textfind` gained `compare(a, b, case) -> Ordering`, which
+folds lazily with `char::to_lowercase` and stops at the first differing
+character.
+
+The hand-written spelling it replaces, `a.to_lowercase().cmp(&b.to_lowercase())`,
+is wrong in a way the search bugs are not — it does not panic, it is merely
+ruinous: a comparison is what a sort calls `n log n` times, so ordering a
+directory of ten thousand names allocates a quarter of a million strings to
+answer a question that needs none. It also lets a list that is *filtered* by
+`textfind::contains` and *sorted* by hand disagree with itself about which
+names are the same.
+
+`compare` returns `Equal` for two different strings that fold alike
+(`README`/`readme`, `İ`/`i` + U+0307), which is the right answer to the
+question asked but means it must be tie-broken with `a.cmp(b)` before it backs
+an `Ord` impl — otherwise `cmp` and `==` disagree, which is exactly the bug
+found in `explorer` below. That requirement is documented on the function.
+
 ## Two more reachable bugs in `apps/markdowneditor`, found by the lint sweep (lane C)
 
 **Status: FIXED 2026-08-16** (lane C), commit `2a5c23082`. Neither was caught
@@ -453,6 +502,121 @@ short) and cut at an arbitrary byte, which the subsequent `&text[head..tail]`
 slice panicked on whenever the cut landed inside a character. Rewritten to
 walk `char_indices` outwards from the match, so the window is in the unit it
 claims. Pinned by `a_snippet_window_lands_on_character_boundaries`.
+
+## Six reachable bugs in `apps/explorer`, found by the lint sweep (lane C)
+
+**Status: FIXED 2026-08-16** (lane C). None was caught by any existing test;
+all six now have one, and each test was verified by reverting the fix and
+watching it fail. Five come from `thumbs.rs`'s pixel buffer, one from the
+column sort order.
+
+**1. A sort that put every non-ASCII filename ahead of every ASCII one.**
+`ColumnValue::sort_key` packed a text value into an `i128` as its first sixteen
+lowercased bytes, shifting the leading byte left by 120 — into bit 127, the
+sign bit. Any name whose first byte is `>= 0x80` — which is *every* name that
+does not begin with an ASCII character — therefore produced a **negative** key
+and sorted ahead of every ASCII name. In a folder mixing `alpha`, `zulu` and
+`éclair`, `éclair` came first, ordered by nothing the user could see.
+
+**2. The same sort violated `Ord`'s contract, so its behaviour was undefined.**
+That key stopped after sixteen bytes, so two names sharing a sixteen-byte
+prefix compared `Equal` while the derived `PartialEq` called them different.
+`Ord` requires `cmp` to return `Equal` exactly when `==` does; a comparator
+that breaks it makes `sort_by` free to produce *any* permutation, not merely a
+wrong one. Both are fixed by comparing the strings directly —
+`textfind::compare(a, b, Insensitive).then_with(|| a.cmp(b))` — which is also
+cheaper, since it stops at the first differing character instead of walking
+sixteen bytes and allocating a lowercased copy of the whole name. A NaN
+`Percentage` had the same contract problem for the same reason (derived
+`PartialEq` on `f32` makes NaN unequal to itself); `f32::total_cmp` gives it a
+defined place instead.
+
+Note what is *not* fixed: ordering is now by Unicode scalar value after case
+folding, so `éclair` sorts after `zulu` rather than between `alpha` and `zulu`.
+See `TD-EXPLORER-SORT-IS-CODEPOINT-NOT-COLLATION` below.
+
+**3. A configured thumbnail size below 6 made a text thumbnail write past the
+buffer.** `generate_text_thumbnail` computed `size - margin * 2` on `u32` with
+`margin = 3`. At `size = 5` that wraps to ~4 billion, which made both of the
+loop's bounds checks vacuously true, and every subsequent row was written at an
+offset computed from a width the buffer does not have. `ThumbConfig::size` is a
+plain public field, so reaching it needs no malformed input at all — just a
+caller that asks for a tiny thumbnail. Now `saturating_sub` throughout, and the
+writes go through `Canvas::fill_rect`, which clips.
+
+**4. BMP header arithmetic ran unchecked on attacker-chosen numbers.**
+`try_bmp_thumbnail` multiplied and added width, height, bits-per-pixel and the
+pixel-data offset — all read straight out of the file — to compute row strides
+and source indices. A crafted `.bmp` in a browsed directory overflows those and
+lands the index anywhere. Every one is now `checked_mul`/`checked_add` and the
+pixel read is a `data.get(range)?`, so a malformed file yields no thumbnail
+rather than a panic or a wild read.
+
+**5. `draw_block_text` took a size argument that had to agree with the
+buffer's, and nothing checked.** It received `&mut Vec<u8>` and a `size`, and
+computed every offset from `size`. Two arguments that must agree is a
+precondition no signature states; passing a buffer and the wrong size wrote out
+of range. It now takes `&mut Canvas`, which carries its own dimensions, so the
+pair cannot disagree.
+
+**6. A circle-distance test overflowed `i32` above ~92 000 pixels.**
+`generate_default_thumbnail` compared `dx*dx + dy*dy` in `i32`. Promoted to
+`i64`. Not reachable at any size a display would ask for, but it was a wrong
+proof sitting next to five that were reachable, which is the argument for
+fixing the class rather than the instances.
+
+## TD-EXPLORER-SORT-IS-CODEPOINT-NOT-COLLATION
+
+**Status: OPEN 2026-08-16** (lane C). `apps/explorer/src/columns.rs`,
+`impl Ord for ColumnValue`.
+
+Sorting a text column folds case and then compares Unicode scalar values. That
+is well-defined, consistent, and agrees with `textfind`'s idea of equality — but
+it is not the order a reader of the language expects. `éclair` sorts after
+`zulu`, because U+00E9 is greater than `z`; a French speaker expects it between
+`alpha` and `zulu`. Every script that is not ASCII is affected, and names that
+differ only by an accent are separated rather than adjacent.
+
+**Why it is not fixed here.** Correct placement is the Unicode Collation
+Algorithm, which is a data table (DUCET, ~30 000 entries) plus a
+locale-tailoring layer, not an algorithm one writes from memory. The tree has
+no Unicode data of any kind today. Doing it properly means deciding first
+whether the OS ships collation data at all, and if so whether it is
+locale-tailored or root-only — which is a design question, not a bug fix.
+
+**The proper fix**, when the prerequisite exists: a `textfmt::collate` (or a
+`textcollate` crate) carrying DUCET primary/secondary/tertiary weights, with
+`textfind::compare` delegating to it and keeping its current behaviour as the
+documented fallback when no table is loaded. Every caller then improves at
+once, since `compare` is the single place case-insensitive ordering is decided.
+
+**What it costs while open:** a mis-ordered file list for non-ASCII names.
+Nothing is unsafe and nothing is blocked; the sort is total and stable, just
+not idiomatic for the locale.
+
+## TD-EXPLORER-UNREADABLE-RECYCLE-ENTRY
+
+**Status: OPEN 2026-08-16** (lane C). `apps/explorer/src/fileops.rs`,
+`RecycleBin::list`.
+
+The recycle-bin listing skips any entry whose `meta.txt` will not parse, rather
+than failing the whole listing. That is the right trade — one corrupt metadata
+file must not make every *other* recycled file unrestorable — but it has a cost
+that is currently invisible: the damaged entry does not appear in the UI at
+all, so the file is still on disk, still occupying space, and the user has no
+way to see it or to empty it.
+
+**The proper fix** is to surface it rather than swallow it: return the
+unparseable entries alongside the good ones as a distinct variant (id and
+on-disk size known, original path unknown), which the UI lists as "unknown
+item" with delete available and restore greyed out. That needs a UI decision
+about how such a row reads, which is why it is written down rather than done in
+the sweep commit.
+
+**What it costs while open:** a corrupt entry is undeletable through the UI and
+its space is unaccounted for. It cannot cause data loss — the file itself is
+untouched — and a corrupt `meta.txt` requires the disk or another process to
+have damaged it, so this is rare rather than routine.
 
 ## Two lanes merging up at once race in the shared `os` worktree (lane C)
 

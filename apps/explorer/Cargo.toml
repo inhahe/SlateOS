@@ -5,6 +5,7 @@ edition = "2024"
 description = "SlateOS File Explorer — graphical file manager with tree view"
 [dependencies]
 guitk = { path = "../../gui/toolkit" }
+textfind = { path = "../../textfind" }
 
 [lints]
 workspace = true

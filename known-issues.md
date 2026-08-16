@@ -71643,3 +71643,78 @@ delete.
 **Reproduce:** start any long `git worktree add` in the background, read the
 directory before it completes, and observe that a partial checkout looks
 identical to a failed one.
+
+### [A] B-BENCH-THE-ACCESS-FLOOR-CLAMP-BINDS-ON-EVERY-RUN-AND-SAYS-IT-MEASURED-SOMETHING — 2026-08-15 — ⚠️ OPEN
+
+**In short:** the benchmark suite calibrates two of its budgets against "how
+much does one memory access cost on this machine", measures that as **5
+cycles**, then quietly throws the measurement away and uses a hard-coded
+**100** instead — on every run, without ever saying so. The line it prints
+looks like a successful calibration and reads `measured=5.0 ... budgets below
+are multiples of this`, where "this" is 100, not 5. So both budgets are 20x
+looser than they claim to be, and they have never once been calibrated.
+
+**Where:** `kernel/src/bench.rs`, `let floor = core::cmp::max(measured_cycles.unwrap_or(0), 100);`
+(the `access_floor` binding, ~line 1432). Consumers: `mmio_suspicion =
+access_floor * 4` (`fast_cpu_index` PASS/SLOW, ~line 1513) and `access_floor *
+OWNER_TAG_BUDGET_ACCESSES` (frame-owner tagging, ~line 1658). It is also the
+divisor in `accesses()`, which prints "N accesses" figures in the report.
+
+**Evidence it binds every time.** Across every run in `build/` that used the
+current 1024-stores/window calibration:
+
+| run | measured | floor used |
+|---|---|---|
+| 4 runs, 1024 stores/window | 5.0, 5.0, 5.1, 5.1 cycles/store | 100 |
+
+`max(5, 100)` is 100 in all four. There is no recorded run on the current
+calibration where the clamp did not bind, so no budget verdict the suite has
+ever printed was calibrated to the machine it ran on.
+
+**Why the loud `UNMEASURED` path does not catch it.** That path fires only when
+the measurement *fails* (arms did not separate, or the scale check rejected
+it), and it says exactly the right thing: "falling back to the arbitrary clamp
+... verdicts below are NOT calibrated". The case here is the opposite and worse
+— the measurement **succeeded**, was believed, and was then discarded anyway by
+a clamp whose own comment claims it exists only for the degenerate
+`unwrap_or(0)` case. A clamp that binds on a good measurement is not a guard;
+it is a silent override.
+
+**The root cause is a units/quantity confusion, not the constant.** Two
+different physical quantities are being asked of one variable:
+
+1. **Cost of one memory access** (~5 cycles here). This is what is measured,
+   and it is the right divisor for `accesses()` — "this delta is worth N memory
+   accesses" is a meaningful sentence.
+2. **The noise floor of a single-shot measurement** (~100-200 cycles here).
+   This is what the *budgets* actually need, and the comment at the
+   `mmio_suspicion` site says so in as many words: an absolute 200-cycle budget
+   "reported SLOW on every healthy boot ... because 200 is below this harness's
+   floor for a single memory access — the nop baseline alone wanders by more
+   than that between adjacent measurements".
+
+The 100 is a hand-tuned stand-in for quantity 2 wearing quantity 1's name. That
+is why it cannot be simply deleted: dropping to the true 5 would make
+`fast_cpu_index`'s budget 20 cycles, far below the measurement noise, and it
+would report SLOW on every healthy boot — the exact bug the clamp was added to
+paper over.
+
+**Proper fix** (both halves, neither sufficient alone):
+
+1. **Measure quantity 2 instead of hard-coding it.** The A/B already runs
+   `CANARY_ROUNDS` interleaved rounds; the spread of the nop arm across those
+   rounds *is* the single-shot noise floor, and it is free — it is already
+   being computed and thrown away. Budgets become multiples of a measured
+   dispersion, and the two quantities stop sharing a variable.
+2. **Make the clamp announce itself.** Whenever the fallback is used at all —
+   whether because the measurement failed or because it was overridden —
+   the run must say so and its budget verdicts must be marked uncalibrated,
+   the same treatment the `UNMEASURED` branch already gives. Three outcomes
+   (measured / clamped / unmeasured), never two.
+
+**Consequence of leaving it:** the two budget checks cannot fail on this
+harness for any realistic regression, so they are decorative. Nothing else in
+the suite depends on the floor, and the SCORE lines that gate `BENCH_OK` do
+not, so this is a silently-dead check rather than a wrong number — which is
+the failure mode this project keeps rediscovering: a check that cannot fire is
+indistinguishable from a check that passes.

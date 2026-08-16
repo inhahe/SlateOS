@@ -298,6 +298,76 @@ large uncommitted change loses that change outright. Note the floor protects the
 *harness* only: a `cargo build` you run by hand, or an editor writing a file, is
 still unguarded, so this reduces the blast radius without removing it.
 
+## Q48 — [B] Finishing §312 will make "set the system clock", "listen on port 80" and "raise your own resource limit" permanently impossible. Give each of them a real kernel object to hang off, or leave them denied? — Status: OPEN
+
+**In short:** You decided last year (§312) that our C library should stop
+*claiming* the process can do anything privileged and instead work it out from
+what the kernel actually handed it. That is nearly done. The last step turns the
+library's permission checks from advisory into binding — and when it does, seven
+operations stop working for **every** program on the system, forever, because
+there is nothing in the kernel for the library to derive permission from. The
+list is short and concrete: set the clock, listen on a low-numbered network port,
+raise your own resource limit, lock memory beyond your quota, and set a wake-up
+alarm. Nothing breaks today; the question is what to do before the final step.
+
+**Terms, all in one place:**
+
+- A **capability** here means a *token the kernel hands a program*, naming one
+  object and what may be done to it — e.g. "this file, readable". SlateOS has no
+  other source of permission: there is no "you are root, therefore you may".
+- **Linux capabilities** (`CAP_SYS_TIME`, `CAP_NET_BIND_SERVICE`, …) are a
+  different, older idea: a fixed list of ~40 privileges attached to the *process*
+  rather than to any object. Ported programs expect them, so our C library has to
+  present them.
+- **§312** is your decision about how to bridge the two: each Linux privilege is
+  *computed* from the tokens the program holds, and **anything we have no rule
+  for reports "not held."**
+- A **low-numbered port** is a network address below 1024 (80 is the web, 22 is
+  remote login). Unix has always required privilege to listen on one.
+- A **resource limit** is a self-imposed ceiling (max open files, max memory). It
+  has a soft value you can lower freely and a hard value you can only *raise*
+  with privilege.
+
+**Why these seven and not the rest.** Most of the library's privileged calls sit
+in front of a kernel that checks permission again itself, so the library
+guessing "no" costs nothing — the program asks, the kernel decides. A previous
+change (§314) removed the library's guess wherever that was true. What is left
+is, by construction, the opposite case: the library is the only thing deciding,
+so a "no" is final. Of those, `setuid`/`setgid` (change your user identity) has
+an obvious object to hang off — the process itself — and is already being handled
+by a request to the kernel lane. These seven do not.
+
+| Option | *What changes:* | Cost |
+|---|---|---|
+| **A — Leave them denied** | `date -s`, an NTP client, a web server on port 80, and any program that raises its own limits all fail with "permission denied" no matter who runs them | Free, and consistent with §312's own precedent (it already refuses to invent an object for `sethostname`). But three of these are things a desktop OS is expected to do |
+| **B — Give the kernel real objects for them** — a system-clock object, a privileged-port object, a resource-limit object — and hand them to the programs that should have them | The clock is settable by a program holding the clock token, and by nothing else; likewise ports and limits | Honest, and it is what the capability model is *for*. Costs new kernel resource types (lane A) and a decision about who is granted them at boot |
+| **C — Drop the restriction where it is a Unix relic rather than a real boundary** | Any program may listen on port 80; only the clock and the limits stay gated | Smallest change, and defensible — Linux itself now lets you lower the privileged-port threshold to zero, and on a single-user desktop the rule protects nothing. But it is a visible departure from Unix that a ported service may assume |
+| **D — Keep the library's optimistic answer for exactly these seven** | Nothing changes; the library keeps claiming these privileges while telling the truth about everything else | Rejected on its face — it is the fiction §312 exists to remove, reintroduced in a smaller box, and it would be invisible to whoever reads the code next |
+
+**Claude's recommendation: B for the clock and the resource limits, C for the
+port.** The clock genuinely is an object — there is one of it, it has state, and
+"may write it" is exactly the sentence a capability is shaped to say; the same
+holds for a process's own limits. The privileged-port rule is different in kind:
+it protects a namespace of numbers, not a thing, and it exists because 1980s Unix
+had no better way to say "this daemon is the real one." We have a better way, so
+inheriting the number 1024 would be copying the workaround instead of the intent.
+That mix is a real judgement call, though, and B for all three is a perfectly
+coherent alternative — which is why this is here rather than decided.
+
+**If never answered:** nothing breaks and nothing gets worse — the final step of
+§312 simply does not land, and the library goes on over-claiming privilege as it
+has all along. The cost is that the over-claim stays: a ported program that asks
+"may I?" before trying gets a confidently wrong "yes," and any program that tries
+to *drop* privilege it believes it has is dropping something imaginary. This
+question does not decay, and it does not block other work.
+
+**Where it bites:** `posix/src/sys_capability.rs` → `kernel_view::project` (the
+rule table); the gate sites are `posix/src/time.rs` (`clock_settime`,
+`settimeofday`), `posix/src/sys_timex.rs` (`adjtimex`), `posix/src/socket.rs`
+(`bind`), `posix/src/resource.rs` (`setrlimit`), `posix/src/mman.rs`
+(`check_mlock_caps`), `posix/src/epoll.rs` (`timerfd_create`). Tracked in
+`known-issues.md` → `TD-POSIX-CAPS-ARE-NOT-THE-KERNEL'S`, step 3.
+
 ---
 
 # Resolved

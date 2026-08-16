@@ -14929,9 +14929,15 @@ keeps this entry open.**
   are, by construction, exactly the ones where under-reporting cannot be
   recovered from. Each of the twelve therefore needs a projection rule, and a
   rule needs a `(ResourceType, Rights)` pair the kernel is willing to mean it.
-  Some have an honest preimage already (`Process` + `METADATA` for credentials;
-  `Timer` + `WRITE` for the timebase); `CAP_NET_BIND_SERVICE` and
-  `CAP_IPC_LOCK` have none and are open questions.
+  Only `CAP_SETUID`/`CAP_SETGID` has an honest preimage already (`Process` +
+  `METADATA` — credentials are process attributes), and that pair is filed as
+  `requests/b-a-cap-grants-for-312-step3-fixtures.md`. The other seven sites —
+  the three clock setters, privileged `bind`, `setrlimit`, `mlock` past the
+  rlimit, alarm timerfds — have **no** object behind them at all, and §312's own
+  precedent (it refuses to invent a handle for `sethostname`) says an invented
+  one is ambient authority in a capability costume. Whether to give them real
+  kernel objects, drop the restriction, or leave them denied is **`open-questions.md`
+  Q48**, and step 3 should not flip until that is answered.
 
   **Fixtures.** The old blocker list here — `services/ctest-jobctl`,
   `self_test_cctty`, `self_test_cpgroup` — is **stale**: §314 deleted libc's

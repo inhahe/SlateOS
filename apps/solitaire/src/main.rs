@@ -680,10 +680,11 @@ impl GameState {
             return false;
         }
         if let Some(top) = self.tableau[col].last_mut()
-            && !top.face_up {
-                top.face_up = true;
-                return true;
-            }
+            && !top.face_up
+        {
+            top.face_up = true;
+            return true;
+        }
         false
     }
 
@@ -1007,7 +1008,9 @@ impl GameState {
     /// Handle a key event.
     fn handle_key(&mut self, key: Key, modifiers: Modifiers) {
         if self.won {
-            if key == Key::N { self.new_game() }
+            if key == Key::N {
+                self.new_game()
+            }
             return;
         }
 
@@ -1507,11 +1510,12 @@ impl SolitaireApp {
 
     fn handle_event(&mut self, event: Event) {
         if let Event::Key(KeyEvent {
-                key,
-                modifiers,
-                pressed: true,
-                ..
-            }) = event {
+            key,
+            modifiers,
+            pressed: true,
+            ..
+        }) = event
+        {
             self.state.handle_key(key, modifiers);
         }
     }

@@ -21591,11 +21591,22 @@ the guard that the offset is inside the string.
 which type `café`, step over the `é` in both directions, and delete it from
 both sides. Both panicked before the fix.
 
-**Not audited beyond the toolkit.** `apps/**` has its own text-entry code
-(`editor`, `spreadsheet`, `terminal`, `hexeditor`, `launcher`, and others all
-have a `cursor`/`cursor_pos`). Whether any of them repeats this is unchecked;
-the pattern to grep for is a `cursor` used as a `String` index that is moved by
-a literal `1`.
+**The rest of `apps/**` and `gui/**` was then audited, and is clean.** Every
+call site that edits a `String` at a cursor was checked:
+
+| Site | Verdict |
+|---|---|
+| `apps/editor` | **was broken**, fixed here |
+| `gui/toolkit` `TextInput`, `InputDialog` | **were broken**, fixed here |
+| `apps/markdowneditor` | already correct — has a `clamp_col` helper and steps by `len_utf8` throughout |
+| `apps/paint` (text tool) | already correct — scans for the adjacent character |
+| `apps/launcher`, `gui/desktop/launcher.rs` | already correct — `char_indices` |
+| `gui/desktop/run_dialog.rs` | already correct — scans back to a boundary |
+| `apps/jsonviewer` | correct by a different route: its cursor counts *characters* and is converted with `char_to_byte_pos` at every use |
+| `apps/unitconverter` | correct **only by invariant** — the field's input filter accepts nothing but ASCII digits, `.`, `-`, `e`, `E`, so one character is one byte. A comment now records that widening the filter without switching to `len_utf8` reintroduces the panic. |
+
+Everything else matching `cursor ± 1` in `apps/**` is a *grid* cursor (a row or
+column in a game board or a table), not a string index.
 
 ## B-WORKSPACE-TEST-IS-RED-SLATEOS-COREUTILS-SHADOW-THE-HOSTS (lane B's tree; filed by lane C, 2026-08-16)
 

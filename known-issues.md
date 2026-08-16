@@ -71422,7 +71422,7 @@ Better still, for anything that builds or boots: assert the working directory
 first, so a mislanded command fails loudly instead of quietly compiling in
 someone else's tree.
 
-### [A] B-BENCH-A-PERSISTENT-REGRESSION-IS-REPORTED-ONCE-THEN-ABSORBED-INTO-ITS-OWN-RANGE — 2026-08-15 — ⚠️ PARTLY FIXED (harness defect FIXED; `http_build_response_1KiB` RESOLVED as a layout lottery, not a regression — see Finding 3; `vfs_stat_*` still unattributed)
+### [A] B-BENCH-A-PERSISTENT-REGRESSION-IS-REPORTED-ONCE-THEN-ABSORBED-INTO-ITS-OWN-RANGE — 2026-08-15 — 🔧 FIXED (harness defect fixed; both "regressions" it exposed are disproved — `http_build_response_1KiB` is a layout lottery per Finding 3, `vfs_stat_root` is smaller than one binary's own spread per Finding 4)
 
 **Two findings: two genuine regressions, and the reason the harness stopped
 reporting them on the very next run.**
@@ -71643,10 +71643,10 @@ defaults to it and default arguments bind at definition time. A mutation test
 that patches the module attribute silently tests nothing and reports success —
 pass `threshold_pct=` explicitly, as the test does.
 
-**Still open in this entry:** the *cause* of the `vfs_stat_*` movement. The
-harness defect is fixed, and `http_build_response_1KiB` is resolved by Finding 3
-below — it was never a regression. Read Finding 3 before acting on Finding 1,
-which it supersedes for that benchmark.
+**Nothing is still open in this entry.** The harness defect is fixed;
+`http_build_response_1KiB` is resolved by Finding 3 and `vfs_stat_root` by
+Finding 4 — neither was a regression. **Read Findings 3 and 4 before acting on
+Finding 1, which they supersede.**
 
 #### Finding 3 (2026-08-15, supersedes Finding 1 for `http_build_response_1KiB`) — there is no regressing commit; the metric is **bimodal**, and the mode is a property of the binary
 
@@ -71726,11 +71726,48 @@ crossings are now the leading mechanism, and the loop-only tool blind spot
   threshold between 6396 and 8546 fires on a coin flip. The harness's
   own-range check (`f0cb9eccf`) partly absorbs this, but only by widening the
   range until the metric says nothing at all.
-- **`vfs_stat_root` is a different shape and is NOT explained by this.** Its 20
-  release values run 2623 – 6454 as a continuous spread with no empty gap, so
-  the 3278 → 4488 "regression" sits comfortably inside its own historical
-  range. That points at plain range-noise rather than a mode flip; it needs its
-  own analysis and the bimodality result should not be assumed to carry over.
+- **`vfs_stat_root` is a different shape and is NOT explained by this** — but
+  it is not a regression either; see Finding 4.
+
+#### Finding 4 (2026-08-15) — `vfs_stat_root`'s "regression" is smaller than one binary's own run-to-run spread
+
+**In short:** the other benchmark in this entry was also reported as regressing
+(about 3600 → 4450). It isn't. A *single unchanged build* of this benchmark has
+produced readings from 3344 to 5930 — a spread wider than the entire claimed
+regression, which sits comfortably inside it.
+
+`vfs_stat_root` is **not** mode-structured: its 21 release values form a
+continuous 2623 – 6454 spread with no empty gap, and the repeat-commit test
+declines it (commit `26c1c7330`'s own readings straddle every candidate split).
+So the mechanism is different from Finding 3 — but the conclusion is the same,
+for a simpler reason:
+
+| commit | readings (ns) |
+|---|---|
+| `26c1c7330` | **5930, 4394, 3344** |
+| `3f733c39c` | 2623, 3310 |
+| `c43ce8acc` | 3453, 3591 |
+
+One binary, `26c1c7330`, produced both 3344 and 5930 — a 1.77× spread with no
+code change whatsoever. The reported regression is 3278 → 4488, and 4488 is
+**below** one of that same binary's own readings. There is no effect here to
+attribute: the metric's run-to-run noise is larger than the movement being
+investigated.
+
+`vfs_stat_breakdown_full` has only six release readings (3170 – 4505, 1.42×
+spread) which is too few to judge, and it moves in step with `vfs_stat_root`;
+absent any independent evidence it should be treated the same way until it has
+enough history to say otherwise.
+
+**Consequence.** The task "attribute the `vfs_stat_root` regression" is closed
+with a negative answer, the same as Finding 3's. Both benchmarks are too noisy,
+in different ways, to support the reports that were made about them — and in
+both cases the disproof was already sitting in `bench/history.jsonl` and needed
+no new boot. The general lesson is worth stating plainly: **before attributing a
+movement to a commit, check what the same commit's own repeats do.** That is now
+enforced automatically by `mode_structure()` in `scripts/bench-history.py`,
+which reports a mode-structured shift as "NOT a regression to bisect" and
+excludes it from `--fail-on-regression`.
 
 **Method note, for reuse.** The test that settled this costs nothing and should
 be the *first* step next time a benchmark "regresses": group the history by

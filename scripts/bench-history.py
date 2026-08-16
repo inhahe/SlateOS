@@ -1358,8 +1358,18 @@ LEVEL_SHIFT_PCT = 25.0
 #: fence of 438-640. Three consecutive runs cleared both 25% and that fence --
 #: and then it went back to 578, so it was noise. Its 3-IQR fence is 363-716,
 #: which declines the run that fired. Over the same window
-#: `http_build_response_1KiB` (a real 2x regression) is outside its own 3-IQR
-#: fence of 5494-6649 in all three runs, by a factor of two.
+#: `http_build_response_1KiB` is outside its own 3-IQR fence of 5494-6649 in
+#: all three runs, by a factor of two.
+#:
+#: CORRECTION (2026-08-15): that second example was described here as "a real
+#: 2x regression" and is not one -- it is the code-layout lottery (see
+#: `mode_structure()`), so this fence *reporting* it is a false positive, not
+#: the true positive it was cited as. The constant is unchanged, because the
+#: `ipc_channel_sync` half of the justification stands on its own and 3.0 is
+#: Tukey's own extreme-outlier multiplier rather than a figure fitted to this
+#: data. What removes the false positive is the mode-structure check, which no
+#: fence on a single series could ever do: both modes are real values of the
+#: metric, so no threshold placed among them is right.
 #:
 #: Using the wider fence here rather than everywhere is deliberate: elsewhere
 #: the band vetoes a single-run movement that other checks still watch, whereas

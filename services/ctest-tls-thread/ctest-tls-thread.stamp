@@ -2,10 +2,12 @@
 # Records the inputs that produced this ELF, so a source change committed
 # without its rebuilt binary is detectable by content. Timestamps cannot
 # do this: a fresh checkout gives every file the same mtime.
+# Text inputs are hashed with CRLF folded to LF (version 2); binary ones
+# byte-for-byte. See `sha256_text` for why.
 # Regenerate with: scripts/ctest-fixtures.py build
 #   (run it with `python` on Windows, `python3` under WSL/Linux)
-version 1
-input  build.py sha256 3c8d01bde5fb2a9b722f73a4df0eabd4b1aa9a076340f7480c455c205f1ef485
+version 2
+input  build.py sha256 66c8e0e6b9bcf96ec549edf51a86b047dba80f662825cf17577b28b98473bfb2
 input  main.c sha256 25792f81bd44ab78746e0e22533b08ac694c355e4d6e688fe834319329c27675
 input  toolchain/sysroot/lib/libc.a sha256 e322989bd7e095a57d7962f39236d31722cf3a5fbfa1d8c157ef49bad1b91c95
 output ctest-tls-thread.elf sha256 72f2a53ef1bc16f7746026583b369b33e7e28f834d550fd6c5e3836f6536433b size 2567048

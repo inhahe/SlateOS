@@ -26,11 +26,11 @@
 #![allow(clippy::fn_params_excessive_bools)]
 
 use guitk::color::Color;
+#[allow(unused_imports)]
+use guitk::event::{Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::textfind;
-#[allow(unused_imports)]
-use guitk::event::{Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 
 // ============================================================================
 // Theme colors
@@ -241,7 +241,9 @@ pub fn parse_chapters(text: &str) -> Vec<Chapter> {
         if is_double_blank(text, i) {
             // Skip the blank lines.
             let mut j = i;
-            while j < len && (bytes.get(j).copied() == Some(b'\n') || bytes.get(j).copied() == Some(b'\r')) {
+            while j < len
+                && (bytes.get(j).copied() == Some(b'\n') || bytes.get(j).copied() == Some(b'\r'))
+            {
                 j = j.saturating_add(1);
             }
             if j < len {
@@ -410,7 +412,9 @@ pub struct PaginatedBook {
 /// and `lines_per_page` is the number of text lines fitting on one page.
 pub fn paginate(text: &str, chars_per_line: usize, lines_per_page: usize) -> PaginatedBook {
     if text.is_empty() || chars_per_line == 0 || lines_per_page == 0 {
-        return PaginatedBook { pages: vec![(0, 0)] };
+        return PaginatedBook {
+            pages: vec![(0, 0)],
+        };
     }
 
     let mut pages = Vec::new();
@@ -455,7 +459,9 @@ pub fn paginate(text: &str, chars_per_line: usize, lines_per_page: usize) -> Pag
         // If we didn't advance at all, force at least one character forward
         // to avoid infinite loops.
         if pos == page_start {
-            pos = text.ceil_char_boundary(page_start.saturating_add(1)).min(text_len);
+            pos = text
+                .ceil_char_boundary(page_start.saturating_add(1))
+                .min(text_len);
         }
 
         pages.push((page_start, pos));
@@ -536,6 +542,27 @@ pub fn page_for_offset(pages: &[(usize, usize)], byte_offset: usize) -> Option<u
     None
 }
 
+/// How far through a book a reading position is, as a fraction `0.0..=1.0`.
+///
+/// Measured in bytes of text, which is deliberately *not* the same measure as
+/// [`EbookApp::reading_progress`]. That one answers "which page of how many",
+/// which is what the status bar of an open book should say; this one answers
+/// "how much of this book is behind me", which is the only question that can
+/// be answered for a book that is not open — pagination exists only for the
+/// open book, so a page-based figure is unavailable for every other row of the
+/// library list.
+///
+/// Bytes rather than characters on purpose: this is a progress bar, not a
+/// count, and a ratio of two byte lengths of the same text is as accurate as a
+/// ratio of two character counts to well within the one percent it is rounded
+/// to.
+fn progress_through(offset: usize, text_len: usize) -> f32 {
+    if text_len == 0 {
+        return 0.0;
+    }
+    (offset as f32 / text_len as f32).clamp(0.0, 1.0)
+}
+
 // ============================================================================
 // Sample books
 // ============================================================================
@@ -608,7 +635,7 @@ pub fn sample_library() -> Vec<Book> {
              wheels turned in silent precision. At the center was a keyhole, and above \
              it, engraved in the iron: \"One winding lasts one year. Choose wisely.\"\n\
              \n\
-             Maren inserted the key and turned it. The garden exhaled."
+             Maren inserted the key and turned it. The garden exhaled.",
         ),
         Book::new(
             "Stars Over Quiet Water",
@@ -666,7 +693,7 @@ pub fn sample_library() -> Vec<Book> {
              grandfather's old chair, the one with the arm worn smooth from years \
              of resting hands.\n\
              \n\
-             He opened it as the first stars appeared over the quiet water."
+             He opened it as the first stars appeared over the quiet water.",
         ),
         Book::new(
             "A Brief History of Bread",
@@ -726,7 +753,7 @@ pub fn sample_library() -> Vec<Book> {
              and developed the first standardized loaf shapes. The round, scored \
              loaf found preserved in the ruins of Pompeii looks remarkably like a \
              modern artisan boule. They added olive oil, honey, and even cheese to \
-             their doughs, creating the ancestors of focaccia and pizza."
+             their doughs, creating the ancestors of focaccia and pizza.",
         ),
         Book::new(
             "The Probability Engine",
@@ -802,7 +829,7 @@ pub fn sample_library() -> Vec<Book> {
              That night Kira sat in her office, staring at the wall. David had already \
              made a backup of the design on a flash drive that he kept in his shoe. She \
              knew this because he had told her, grinning, as though it were a joke. She \
-             wasn't sure it was."
+             wasn't sure it was.",
         ),
         Book::new(
             "Sonnets from the Edge",
@@ -882,7 +909,7 @@ pub fn sample_library() -> Vec<Book> {
              that holds a window open on a breeze,\n\
              the hinge that bears the weight and does not creak.\n\
              Praise the anonymous and patient hand\n\
-             that made the small things work as they were planned."
+             that made the small things work as they were planned.",
         ),
     ]
 }
@@ -892,9 +919,24 @@ pub fn sample_library() -> Vec<Book> {
 // ============================================================================
 
 /// Per-book reading state stored in the library.
+///
+/// Both positions here are **byte offsets into the book's text**, not page
+/// numbers. A page number is a fact about a particular *pagination*, and the
+/// pagination depends on the font size and the window size — so the moment
+/// either changes, the same number names a different piece of text. Storing
+/// page numbers meant that pressing `+` once took a reader from page 2 of four
+/// to page 2 of six and threw them backwards through the book, and that a
+/// bookmark set at one font size pointed somewhere else at another.
+///
+/// [`Chapter`] already stored a `byte_offset` for exactly this reason. The
+/// reading position and the bookmarks were the two places that had not been
+/// given the same treatment.
 #[derive(Clone, Debug)]
 pub struct ReadingState {
-    pub current_page: usize,
+    /// Where the reader is, as a byte offset into the book's text.
+    pub offset: usize,
+    /// Bookmarked positions, as byte offsets, kept sorted so the bookmark list
+    /// reads in book order rather than in the order they were set.
     pub bookmarks: Vec<usize>,
     pub font_size: FontSizeLevel,
 }
@@ -902,25 +944,20 @@ pub struct ReadingState {
 impl ReadingState {
     pub fn new() -> Self {
         Self {
-            current_page: 0,
+            offset: 0,
             bookmarks: Vec::new(),
             font_size: FontSizeLevel::Medium,
         }
     }
 
-    /// Toggle bookmark on the given page.
-    pub fn toggle_bookmark(&mut self, page: usize) {
-        if let Some(idx) = self.bookmarks.iter().position(|&p| p == page) {
+    /// Toggle a bookmark at the given byte offset.
+    pub fn toggle_bookmark(&mut self, offset: usize) {
+        if let Some(idx) = self.bookmarks.iter().position(|&o| o == offset) {
             self.bookmarks.remove(idx);
         } else {
-            self.bookmarks.push(page);
+            self.bookmarks.push(offset);
             self.bookmarks.sort_unstable();
         }
-    }
-
-    /// Check whether a page is bookmarked.
-    pub fn is_bookmarked(&self, page: usize) -> bool {
-        self.bookmarks.contains(&page)
     }
 }
 
@@ -1003,7 +1040,8 @@ impl EbookApp {
         let font_size = self.current_font_size().font_size();
         let line_h = self.current_font_size().line_height();
         let content_width = self.window_width - 2.0 * CONTENT_PADDING;
-        let content_height = self.window_height - TOOLBAR_HEIGHT - STATUS_BAR_HEIGHT - 2.0 * CONTENT_PADDING;
+        let content_height =
+            self.window_height - TOOLBAR_HEIGHT - STATUS_BAR_HEIGHT - 2.0 * CONTENT_PADDING;
 
         // Estimate characters per line: typical character is roughly 0.5 * font_size wide.
         let char_width = font_size * 0.5;
@@ -1022,6 +1060,11 @@ impl EbookApp {
     }
 
     /// Re-paginate the current book.
+    ///
+    /// The reader's position needs no fixing up afterwards, which is the point
+    /// of storing it as a byte offset: repagination is precisely the operation
+    /// that changes which page a given piece of text is on, so any page number
+    /// recorded across it would name different text on the other side.
     pub fn repaginate(&mut self) {
         if let Some(book) = self.library.get(self.selected_book) {
             let (cpl, lpp) = self.layout_params();
@@ -1055,9 +1098,29 @@ impl EbookApp {
         self.paginated.as_ref().map_or(1, |p| p.pages.len().max(1))
     }
 
+    /// The reader's position in the current book, as a byte offset.
+    pub fn current_offset(&self) -> usize {
+        self.current_reading_state().map_or(0, |s| s.offset)
+    }
+
     /// Current page number (0-based).
+    ///
+    /// Derived from the stored offset rather than stored itself, so it is
+    /// always a page number in the pagination that is actually on screen.
     pub fn current_page(&self) -> usize {
-        self.current_reading_state().map_or(0, |s| s.current_page)
+        let offset = self.current_offset();
+        self.paginated
+            .as_ref()
+            .and_then(|p| page_for_offset(&p.pages, offset))
+            .unwrap_or(0)
+    }
+
+    /// The byte offset at which the given page starts.
+    fn offset_of_page(&self, page: usize) -> Option<usize> {
+        self.paginated.as_ref().and_then(|p| {
+            let last = p.pages.len().checked_sub(1)?;
+            p.pages.get(page.min(last)).map(|&(start, _)| start)
+        })
     }
 
     /// Reading progress as a fraction 0.0..=1.0.
@@ -1074,31 +1137,64 @@ impl EbookApp {
         format!("{:.0}%", self.reading_progress() * 100.0)
     }
 
+    /// How far through the book at `index` its reader has got, `0.0..=1.0`.
+    ///
+    /// Measured in the text rather than in pages, because a pagination exists
+    /// only for the book that is currently *open*. The page-based version this
+    /// replaces could therefore only answer for that one book and returned a
+    /// flat `0` for every other row of the library list, so a shelf of
+    /// half-finished books all reported "0%".
+    ///
+    /// This is why it is a separate method from [`Self::reading_progress`]
+    /// rather than a generalisation of it: that one answers "which page of how
+    /// many", which is the right thing for the status bar of an open book and
+    /// is unavailable for any other.
+    pub fn book_progress(&self, index: usize) -> f32 {
+        let Some(book) = self.library.get(index) else {
+            return 0.0;
+        };
+        self.reading_states
+            .get(index)
+            .map_or(0.0, |s| progress_through(s.offset, book.text.len()))
+    }
+
     // --------------------------------------------------------------------
     // Navigation
     // --------------------------------------------------------------------
 
     /// Go to the next page.
     pub fn next_page(&mut self) {
-        let total = self.total_pages();
-        if let Some(state) = self.current_reading_state_mut()
-            && state.current_page < total.saturating_sub(1) {
-                state.current_page = state.current_page.saturating_add(1);
-            }
+        let page = self.current_page();
+        if page < self.total_pages().saturating_sub(1) {
+            self.go_to_page(page.saturating_add(1));
+        }
     }
 
     /// Go to the previous page.
     pub fn prev_page(&mut self) {
-        if let Some(state) = self.current_reading_state_mut() {
-            state.current_page = state.current_page.saturating_sub(1);
-        }
+        let page = self.current_page();
+        self.go_to_page(page.saturating_sub(1));
     }
 
     /// Jump to a specific page.
+    ///
+    /// Records where that page *starts* rather than which page it is, so the
+    /// position survives a repagination. The clamp lives in
+    /// [`Self::offset_of_page`], which is the only code that knows how many
+    /// pages there are.
     pub fn go_to_page(&mut self, page: usize) {
-        let total = self.total_pages();
+        let Some(offset) = self.offset_of_page(page) else {
+            return;
+        };
         if let Some(state) = self.current_reading_state_mut() {
-            state.current_page = page.min(total.saturating_sub(1));
+            state.offset = offset;
+        }
+    }
+
+    /// Jump to a byte offset in the book's text.
+    pub fn go_to_offset(&mut self, offset: usize) {
+        if let Some(state) = self.current_reading_state_mut() {
+            state.offset = offset;
         }
     }
 
@@ -1118,14 +1214,37 @@ impl EbookApp {
     // --------------------------------------------------------------------
 
     /// Toggle bookmark on the current page.
+    ///
+    /// Anchored to the start of the page rather than to the reader's exact
+    /// offset, so that toggling twice on the same page removes the bookmark it
+    /// just added instead of accumulating one per position visited.
     pub fn toggle_bookmark(&mut self) {
-        let page = self.current_page();
+        let Some(offset) = self.offset_of_page(self.current_page()) else {
+            return;
+        };
         if let Some(state) = self.current_reading_state_mut() {
-            state.toggle_bookmark(page);
+            state.toggle_bookmark(offset);
         }
     }
 
-    /// Get bookmarks for the current book.
+    /// Whether a bookmark falls on the given page.
+    ///
+    /// A containment test, not an equality test: a bookmark is an offset and a
+    /// page is a range of offsets, and which page a given offset lands on
+    /// changes with every repagination.
+    pub fn is_page_bookmarked(&self, page: usize) -> bool {
+        let Some(paginated) = self.paginated.as_ref() else {
+            return false;
+        };
+        let Some(&(start, end)) = paginated.pages.get(page) else {
+            return false;
+        };
+        self.bookmarks()
+            .iter()
+            .any(|&o| o >= start && (o < end || o == start))
+    }
+
+    /// Bookmarked byte offsets for the current book, in book order.
     pub fn bookmarks(&self) -> Vec<usize> {
         self.current_reading_state()
             .map_or_else(Vec::new, |s| s.bookmarks.clone())
@@ -1196,9 +1315,10 @@ impl EbookApp {
                 // Jump to the page containing the first match.
                 if let Some(paginated) = &self.paginated
                     && let Some(first) = self.search_matches.first()
-                        && let Some(page) = page_for_offset(&paginated.pages, first.byte_offset) {
-                            self.go_to_page(page);
-                        }
+                    && let Some(page) = page_for_offset(&paginated.pages, first.byte_offset)
+                {
+                    self.go_to_page(page);
+                }
             }
         }
     }
@@ -1209,15 +1329,24 @@ impl EbookApp {
             return;
         }
         let next = match self.current_match_idx {
-            Some(i) => (i.saturating_add(1)) % self.search_matches.len(),
+            // `checked_rem` is `None` exactly when the list is empty, which the
+            // guard above has already excluded -- so the fallback is
+            // unreachable, and writing it as a fallback rather than a second
+            // `%` means the emptiness case cannot be a division by zero even
+            // if that guard is ever moved or removed.
+            Some(i) => i
+                .saturating_add(1)
+                .checked_rem(self.search_matches.len())
+                .unwrap_or(0),
             None => 0,
         };
         self.current_match_idx = Some(next);
         if let Some(paginated) = &self.paginated
             && let Some(m) = self.search_matches.get(next)
-                && let Some(page) = page_for_offset(&paginated.pages, m.byte_offset) {
-                    self.go_to_page(page);
-                }
+            && let Some(page) = page_for_offset(&paginated.pages, m.byte_offset)
+        {
+            self.go_to_page(page);
+        }
     }
 
     /// Go to the previous search match.
@@ -1233,9 +1362,10 @@ impl EbookApp {
         self.current_match_idx = Some(prev);
         if let Some(paginated) = &self.paginated
             && let Some(m) = self.search_matches.get(prev)
-                && let Some(page) = page_for_offset(&paginated.pages, m.byte_offset) {
-                    self.go_to_page(page);
-                }
+            && let Some(page) = page_for_offset(&paginated.pages, m.byte_offset)
+        {
+            self.go_to_page(page);
+        }
     }
 
     // --------------------------------------------------------------------
@@ -1272,22 +1402,34 @@ impl EbookApp {
 
     /// Jump to a chapter by its byte offset.
     pub fn jump_to_chapter(&mut self, chapter_idx: usize) {
-        if let Some(book) = self.library.get(self.selected_book)
-            && let Some(chapter) = book.chapters.get(chapter_idx)
-                && let Some(paginated) = &self.paginated
-                    && let Some(page) = page_for_offset(&paginated.pages, chapter.byte_offset) {
-                        self.go_to_page(page);
-                    }
+        if let Some(offset) = self
+            .library
+            .get(self.selected_book)
+            .and_then(|book| book.chapters.get(chapter_idx))
+            .map(|chapter| chapter.byte_offset)
+        {
+            // Straight to the offset: the chapter already knows where it
+            // starts, and going via a page number would round the position to
+            // the top of whichever page happens to contain it.
+            self.go_to_offset(offset);
+        }
         self.view = AppView::Reading;
     }
 
-    /// Jump to a bookmarked page (from the bookmark list).
+    /// Jump to a bookmark (from the bookmark list).
     pub fn jump_to_bookmark(&mut self, bookmark_idx: usize) {
-        let bookmarks = self.bookmarks();
-        if let Some(&page) = bookmarks.get(bookmark_idx) {
-            self.go_to_page(page);
+        if let Some(&offset) = self.bookmarks().get(bookmark_idx) {
+            self.go_to_offset(offset);
         }
         self.view = AppView::Reading;
+    }
+
+    /// The page a bookmarked offset currently falls on, for display.
+    pub fn bookmark_page(&self, offset: usize) -> usize {
+        self.paginated
+            .as_ref()
+            .and_then(|p| page_for_offset(&p.pages, offset))
+            .unwrap_or(0)
     }
 
     /// Add a new book to the library.
@@ -1304,11 +1446,12 @@ impl EbookApp {
     pub fn current_page_text(&self) -> &str {
         if let Some(book) = self.library.get(self.selected_book)
             && let Some(paginated) = &self.paginated
-                && let Some(&(start, end)) = paginated.pages.get(self.current_page()) {
-                    let safe_start = start.min(book.text.len());
-                    let safe_end = end.min(book.text.len());
-                    return &book.text[safe_start..safe_end];
-                }
+            && let Some(&(start, end)) = paginated.pages.get(self.current_page())
+        {
+            let safe_start = start.min(book.text.len());
+            let safe_end = end.min(book.text.len());
+            return &book.text[safe_start..safe_end];
+        }
         ""
     }
 
@@ -1443,10 +1586,11 @@ impl EbookApp {
             _ => {
                 // If the key produces a character, add it to the query.
                 if let Some(ch) = event.text
-                    && !ch.is_control() {
-                        self.search_query.push(ch);
-                        return true;
-                    }
+                    && !ch.is_control()
+                {
+                    self.search_query.push(ch);
+                    return true;
+                }
                 false
             }
         }
@@ -1525,7 +1669,8 @@ impl EbookApp {
                 AppView::Reading => {
                     // Click on left/right half to navigate pages.
                     let mid = self.window_width / 2.0;
-                    if event.y > TOOLBAR_HEIGHT && event.y < self.window_height - STATUS_BAR_HEIGHT {
+                    if event.y > TOOLBAR_HEIGHT && event.y < self.window_height - STATUS_BAR_HEIGHT
+                    {
                         if event.x < mid {
                             self.prev_page();
                         } else {
@@ -1659,24 +1804,14 @@ impl EbookApp {
                 overflow: TextOverflow::Ellipsis,
             });
 
-            // Progress and word count
-            let rs = self.reading_states.get(i);
-            let progress = rs.map_or(0, |s| {
-                if let Some(ref pag) = self.paginated {
-                    if i == self.selected_book {
-                        let total = pag.pages.len().max(1);
-                        (s.current_page * 100) / total
-                    } else {
-                        0
-                    }
-                } else {
-                    0
-                }
-            });
+            // Progress and word count.
+            let progress = self.book_progress(i);
             let reading_min = book.reading_time_minutes();
             let info = format!(
-                "{} words | {:.0} min | {}%",
-                book.word_count, reading_min, progress
+                "{} words | {:.0} min | {:.0}%",
+                book.word_count,
+                reading_min,
+                progress * 100.0
             );
             cmds.push(RenderCommand::Text {
                 x: 20.0,
@@ -1757,7 +1892,7 @@ impl EbookApp {
         });
 
         // Bookmark indicator
-        if self.current_reading_state().is_some_and(|s| s.is_bookmarked(self.current_page())) {
+        if self.is_page_bookmarked(self.current_page()) {
             cmds.push(RenderCommand::Text {
                 x: self.window_width - 80.0,
                 y: 12.0,
@@ -1820,37 +1955,34 @@ impl EbookApp {
         // -- Search highlight overlay --
         if !self.search_matches.is_empty()
             && let Some(paginated) = &self.paginated
-                && let Some(&(page_start, page_end)) = paginated.pages.get(self.current_page()) {
-                    // Highlight matches that fall on this page.
-                    for (mi, m) in self.search_matches.iter().enumerate() {
-                        if m.byte_offset >= page_start && m.byte_offset < page_end {
-                            let is_current = self.current_match_idx == Some(mi);
-                            let highlight_color = if is_current {
-                                tc.accent
-                            } else {
-                                tc.highlight
-                            };
-                            // Approximate y position: count newlines from page_start to match.
-                            let text_before = &book.text[page_start..m.byte_offset.min(book.text.len())];
-                            let line_idx = text_before.chars().filter(|&c| c == '\n').count();
-                            let hy = content_y + (line_idx as f32) * line_h;
-                            // Approximate x from the last newline.
-                            let last_nl = text_before.rfind('\n').map_or(0, |p| p.saturating_add(1));
-                            let chars_before = text_before[last_nl..].chars().count();
-                            let char_w = font_sz * 0.5;
-                            let hx = content_x + (chars_before as f32) * char_w;
-                            let hw = (m.byte_len as f32) * char_w;
-                            cmds.push(RenderCommand::FillRect {
-                                x: hx,
-                                y: hy,
-                                width: hw,
-                                height: line_h,
-                                color: highlight_color,
-                                corner_radii: CornerRadii::all(2.0),
-                            });
-                        }
-                    }
+            && let Some(&(page_start, page_end)) = paginated.pages.get(self.current_page())
+        {
+            // Highlight matches that fall on this page.
+            for (mi, m) in self.search_matches.iter().enumerate() {
+                if m.byte_offset >= page_start && m.byte_offset < page_end {
+                    let is_current = self.current_match_idx == Some(mi);
+                    let highlight_color = if is_current { tc.accent } else { tc.highlight };
+                    // Approximate y position: count newlines from page_start to match.
+                    let text_before = &book.text[page_start..m.byte_offset.min(book.text.len())];
+                    let line_idx = text_before.chars().filter(|&c| c == '\n').count();
+                    let hy = content_y + (line_idx as f32) * line_h;
+                    // Approximate x from the last newline.
+                    let last_nl = text_before.rfind('\n').map_or(0, |p| p.saturating_add(1));
+                    let chars_before = text_before[last_nl..].chars().count();
+                    let char_w = font_sz * 0.5;
+                    let hx = content_x + (chars_before as f32) * char_w;
+                    let hw = (m.byte_len as f32) * char_w;
+                    cmds.push(RenderCommand::FillRect {
+                        x: hx,
+                        y: hy,
+                        width: hw,
+                        height: line_h,
+                        color: highlight_color,
+                        corner_radii: CornerRadii::all(2.0),
+                    });
                 }
+            }
+        }
 
         // -- Search bar --
         if self.search_active {
@@ -2075,7 +2207,11 @@ impl EbookApp {
                 x: overlay_x + 20.0,
                 y: iy + 8.0,
                 text: chapter.title.clone(),
-                color: if i == self.list_selection { tc.accent } else { tc.text },
+                color: if i == self.list_selection {
+                    tc.accent
+                } else {
+                    tc.text
+                },
                 font_size: 14.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(overlay_w - 40.0),
@@ -2157,7 +2293,12 @@ impl EbookApp {
             });
         } else {
             let item_h = 32.0f32;
-            for (i, &page) in bookmarks.iter().enumerate() {
+            for (i, &offset) in bookmarks.iter().enumerate() {
+                // The stored bookmark is an offset; the page it is shown as is
+                // whatever page that offset falls on in the pagination on
+                // screen right now, so the list stays truthful after a font
+                // change instead of naming the page it was set on.
+                let page = self.bookmark_page(offset);
                 let iy = list_top + (i as f32) * item_h;
                 if iy + item_h > overlay_y + overlay_h {
                     break;
@@ -2178,7 +2319,11 @@ impl EbookApp {
                     x: overlay_x + 20.0,
                     y: iy + 8.0,
                     text: format!("Page {}", page.saturating_add(1)),
-                    color: if i == self.list_selection { tc.accent } else { tc.text },
+                    color: if i == self.list_selection {
+                        tc.accent
+                    } else {
+                        tc.text
+                    },
                     font_size: 14.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(overlay_w - 40.0),
@@ -2209,7 +2354,16 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    // A test that indexes out of range should fail loudly and point at the line
+    // that did it -- that is the diagnosis. The defensive lints exist to keep
+    // panics out of code that runs on a user's data, which this is not.
+    #![allow(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
 
     use super::*;
     use guitk::event::Modifiers;
@@ -2455,11 +2609,11 @@ mod tests {
     fn test_toggle_bookmark() {
         let mut app = make_app();
         app.open_book(0);
-        assert!(!app.current_reading_state().unwrap().is_bookmarked(0));
+        assert!(!app.is_page_bookmarked(0));
         app.toggle_bookmark();
-        assert!(app.current_reading_state().unwrap().is_bookmarked(0));
+        assert!(app.is_page_bookmarked(0));
         app.toggle_bookmark();
-        assert!(!app.current_reading_state().unwrap().is_bookmarked(0));
+        assert!(!app.is_page_bookmarked(0));
     }
 
     #[test]
@@ -2471,8 +2625,12 @@ mod tests {
         app.toggle_bookmark(); // page 1
         let bm = app.bookmarks();
         assert_eq!(bm.len(), 2);
-        assert!(bm.contains(&0));
-        assert!(bm.contains(&1));
+        // The stored values are offsets, so the assertion is about the pages
+        // they land on rather than about the numbers themselves.
+        let pages: Vec<usize> = bm.iter().map(|&o| app.bookmark_page(o)).collect();
+        assert_eq!(pages, vec![0, 1]);
+        assert!(app.is_page_bookmarked(0));
+        assert!(app.is_page_bookmarked(1));
     }
 
     #[test]
@@ -2489,7 +2647,7 @@ mod tests {
         let mut app = make_app();
         app.open_book(0);
         app.handle_key_event(&make_key(Key::B));
-        assert!(app.current_reading_state().unwrap().is_bookmarked(0));
+        assert!(app.is_page_bookmarked(0));
     }
 
     #[test]
@@ -2522,8 +2680,8 @@ mod tests {
         app.toggle_bookmark();
         app.next_page();
         // Page 0 should still be bookmarked.
-        assert!(app.current_reading_state().unwrap().is_bookmarked(0));
-        assert!(!app.current_reading_state().unwrap().is_bookmarked(app.current_page()));
+        assert!(app.is_page_bookmarked(0));
+        assert!(!app.is_page_bookmarked(app.current_page()));
     }
 
     // ================================================================
@@ -2727,7 +2885,11 @@ mod tests {
     fn test_parse_chapters_separator() {
         let text = "Chapter 1\nSome text.\n---\nChapter 2\nMore text.";
         let chapters = parse_chapters(text);
-        assert!(chapters.len() >= 2, "Expected at least 2 chapters, got {}", chapters.len());
+        assert!(
+            chapters.len() >= 2,
+            "Expected at least 2 chapters, got {}",
+            chapters.len()
+        );
         assert_eq!(chapters[0].title, "Chapter 1");
     }
 
@@ -2735,7 +2897,11 @@ mod tests {
     fn test_parse_chapters_double_blank() {
         let text = "Chapter 1\nText here.\n\n\n\nChapter 2\nMore text.";
         let chapters = parse_chapters(text);
-        assert!(chapters.len() >= 2, "Expected at least 2 chapters, got {}", chapters.len());
+        assert!(
+            chapters.len() >= 2,
+            "Expected at least 2 chapters, got {}",
+            chapters.len()
+        );
     }
 
     #[test]
@@ -3171,7 +3337,9 @@ mod tests {
         app.open_search();
         let cmds = app.render();
         // Should contain a search bar rectangle.
-        let has_stroke = cmds.iter().any(|cmd| matches!(cmd, RenderCommand::StrokeRect { .. }));
+        let has_stroke = cmds
+            .iter()
+            .any(|cmd| matches!(cmd, RenderCommand::StrokeRect { .. }));
         assert!(has_stroke, "Search bar should have a stroke rect");
     }
 
@@ -3217,10 +3385,13 @@ mod tests {
         app.open_book(0);
         app.toggle_bookmark();
         let cmds = app.render();
-        let has_bm_text = cmds.iter().any(|cmd| {
-            matches!(cmd, RenderCommand::Text { text, .. } if text == "BM")
-        });
-        assert!(has_bm_text, "Should show bookmark indicator when page is bookmarked");
+        let has_bm_text = cmds
+            .iter()
+            .any(|cmd| matches!(cmd, RenderCommand::Text { text, .. } if text == "BM"));
+        assert!(
+            has_bm_text,
+            "Should show bookmark indicator when page is bookmarked"
+        );
     }
 
     // ================================================================
@@ -3297,6 +3468,179 @@ mod tests {
         assert_eq!(app.view, AppView::Library);
     }
 
+    // ================================================================
+    // Position survives repagination
+    // ================================================================
+
+    /// The page range the reader is currently looking at.
+    fn current_page_span(app: &EbookApp) -> (usize, usize) {
+        let page = app.current_page();
+        app.paginated
+            .as_ref()
+            .and_then(|p| p.pages.get(page).copied())
+            .expect("the open book has pages")
+    }
+
+    /// Changing the font size used to keep the *page number* and therefore
+    /// move the reader: on the sample library, page 2 of four became page 2 of
+    /// six and threw them backwards through the book. One keystroke, and the
+    /// reader loses their place.
+    #[test]
+    fn changing_the_font_size_keeps_the_reader_where_they_were() {
+        let mut app = make_app();
+        app.open_book(3);
+        app.go_to_page(2);
+
+        let before = app.current_offset();
+        let pages_before = app.total_pages();
+        app.increase_font_size();
+        assert_ne!(
+            app.total_pages(),
+            pages_before,
+            "the premise: a bigger font must actually change the page count, \
+             or this test proves nothing"
+        );
+
+        assert_eq!(
+            app.current_offset(),
+            before,
+            "the reader's position in the text moved when only the font did"
+        );
+        let (start, end) = current_page_span(&app);
+        assert!(
+            before >= start && before < end,
+            "offset {before} is not on the page now being shown ({start}..{end})"
+        );
+    }
+
+    /// Shrinking the font must not move the reader either.
+    ///
+    /// Deliberately *not* written as an increase followed by a decrease. Both
+    /// directions repaginate the same way, so a page-number-preserving bug in
+    /// both makes the round trip land back where it started and the test passes
+    /// against the very defect it was written for -- which is what the first
+    /// draft of this test did, verified by reverting. Growing the font *before*
+    /// measuring makes the shrink the single operation under test, so there is
+    /// no second error for it to cancel against.
+    #[test]
+    fn shrinking_the_font_keeps_the_reader_where_they_were() {
+        let mut app = make_app();
+        app.open_book(3);
+        app.increase_font_size();
+        app.go_to_page(2);
+
+        let before = app.current_offset();
+        let pages_before = app.total_pages();
+        app.decrease_font_size();
+        assert_ne!(
+            app.total_pages(),
+            pages_before,
+            "the premise: a smaller font must actually change the page count"
+        );
+
+        assert_eq!(
+            app.current_offset(),
+            before,
+            "the reader's position in the text moved when only the font did"
+        );
+        let (start, end) = current_page_span(&app);
+        assert!(
+            before >= start && before < end,
+            "offset {before} is not on the page now being shown ({start}..{end})"
+        );
+    }
+
+    /// A bookmark is a position in the book, not a page number, so it must
+    /// still mark the same text after the pagination changes under it.
+    ///
+    /// The premise assertion is the load-bearing part. Comparing
+    /// `app.bookmarks()` before and after proves nothing on its own -- the
+    /// bookmarks are stored data and changing the font never writes to them --
+    /// so the test only says something once the font change is known to have
+    /// moved that text onto a *different page number*. That is precisely the
+    /// case a page-number bookmark gets wrong, and without checking for it the
+    /// test would pass on a book whose pagination happened not to shift.
+    #[test]
+    fn a_bookmark_still_marks_its_own_text_after_a_font_change() {
+        let mut app = make_app();
+        app.open_book(3);
+        app.go_to_page(2);
+        app.toggle_bookmark();
+        let marked = app.bookmarks();
+        assert_eq!(marked.len(), 1);
+        let page_before = app.bookmark_page(marked[0]);
+        let text_before = page_text_at(&app, marked[0]);
+
+        app.increase_font_size();
+        assert_ne!(
+            app.bookmark_page(marked[0]),
+            page_before,
+            "the premise: the bookmarked text must land on a different page \
+             number after the repagination, or a page-number bookmark would \
+             have survived too and this proves nothing"
+        );
+
+        // The bookmark still marks the text it was set on, on whatever page
+        // that text is now.
+        app.go_to_page(0);
+        app.jump_to_bookmark(0);
+        assert_eq!(app.current_offset(), marked[0]);
+        assert!(app.is_page_bookmarked(app.current_page()));
+        assert_eq!(
+            page_text_at(&app, marked[0]),
+            text_before,
+            "the bookmark points at different words than it was set on"
+        );
+    }
+
+    /// The text a bookmark sits at, independent of any pagination: the first
+    /// forty bytes of the book from that offset on. Compared across a font
+    /// change, this is what "the same place in the book" actually means.
+    fn page_text_at(app: &EbookApp, offset: usize) -> String {
+        let text = &app.library[app.selected_book].text;
+        text.get(offset..).unwrap_or("").chars().take(40).collect()
+    }
+
+    /// The library list showed `0%` against every book except the open one,
+    /// because progress was computed from a pagination and only the open book
+    /// has one. Measured in the text instead, every book can answer.
+    ///
+    /// Goes through [`EbookApp::book_progress`] -- the method the library row
+    /// actually calls -- rather than recomputing the ratio here, which would
+    /// only prove that the test and the fix agree with each other.
+    #[test]
+    fn the_library_shows_progress_for_a_book_that_is_not_open() {
+        let mut app = make_app();
+        app.open_book(1);
+        app.go_to_last_page();
+        assert!(app.current_offset() > 0, "the last page starts at zero");
+
+        // Open a different book: book 1 is now closed and has no pagination,
+        // which is the state in which the old page-based figure read 0%.
+        app.open_book(3);
+        assert!(
+            app.book_progress(1) > 0.5,
+            "a book read to its last page reports {}, not near 1.0",
+            app.book_progress(1)
+        );
+        // An untouched book is genuinely at zero, so the figure is reporting
+        // the reader's position and not merely being non-zero everywhere.
+        assert!((app.book_progress(0) - 0.0).abs() < f32::EPSILON);
+        // And an index past the end of the shelf is 0%, not a panic.
+        assert!((app.book_progress(999) - 0.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn progress_through_is_bounded_and_survives_an_empty_book() {
+        assert!((progress_through(0, 100) - 0.0).abs() < f32::EPSILON);
+        assert!((progress_through(100, 100) - 1.0).abs() < f32::EPSILON);
+        // An offset past the end -- which a stale state could hold -- clamps
+        // rather than reporting more than a whole book read.
+        assert!((progress_through(500, 100) - 1.0).abs() < f32::EPSILON);
+        // And an empty book is 0%, not a division by zero.
+        assert!((progress_through(0, 0) - 0.0).abs() < f32::EPSILON);
+    }
+
     #[test]
     fn test_default_theme_is_dark() {
         let app = make_app();
@@ -3306,7 +3650,7 @@ mod tests {
     #[test]
     fn test_reading_state_default() {
         let state = ReadingState::new();
-        assert_eq!(state.current_page, 0);
+        assert_eq!(state.offset, 0);
         assert!(state.bookmarks.is_empty());
         assert_eq!(state.font_size, FontSizeLevel::Medium);
     }

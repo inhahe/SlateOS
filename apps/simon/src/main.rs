@@ -8,11 +8,6 @@
 #![allow(clippy::similar_names)]
 #![allow(clippy::struct_excessive_bools)]
 #![allow(clippy::fn_params_excessive_bools)]
-#![allow(clippy::unwrap_used)]
-#![allow(clippy::expect_used)]
-#![allow(clippy::panic)]
-#![allow(clippy::indexing_slicing)]
-#![allow(clippy::arithmetic_side_effects)]
 
 //! Slate OS Simon — classic memory pattern game.
 //!
@@ -114,10 +109,29 @@ impl Lcg {
         self.state
     }
 
-    /// Returns a value in `0..bound` (exclusive upper bound).
+    /// Returns a value in `0..bound` (exclusive upper bound), or `0` when
+    /// `bound` is zero.
+    ///
+    /// Uses the **high** bits, via a widening multiply, and deliberately not
+    /// `val % bound`.
+    ///
+    /// This generator's modulus is 2^64, and in any power-of-two-modulus LCG bit
+    /// *k* of the state has period 2^(k+1) — the low bits are not merely weak,
+    /// they are a counter. `val % 4` therefore read the low *two* bits, whose
+    /// period is exactly 4, and this game draws from four colours: the sequence
+    /// it produced was Green, Red, Yellow, Blue repeating for ever, identical in
+    /// every game and at every seed, which is to say the memory game had nothing
+    /// to memorise. Any bound that is a power of two hits this; an odd bound
+    /// escapes it only because the remainder then depends on all 64 bits.
+    ///
+    /// Multiplying by the bound and keeping the top half of the 128-bit product
+    /// takes the high bits instead, and is very nearly unbiased into the bargain
+    /// (Lemire, *Fast Random Integer Generation in an Interval*, 2019). The
+    /// `wrapping_mul` cannot actually wrap — two 64-bit values multiply into 128
+    /// bits exactly — it is there to say so rather than to rely on it.
     fn next_bounded(&mut self, bound: usize) -> usize {
-        let val = self.next_u64();
-        (val % bound as u64) as usize
+        let product = u128::from(self.next_u64()).wrapping_mul(bound as u128);
+        (product >> 64) as usize
     }
 }
 
@@ -353,15 +367,19 @@ impl SimonApp {
         self.lit_button = None;
         self.player_flash_timer = 0;
         self.state_timer = 0;
-        self.games_played += 1;
+        self.games_played = self.games_played.saturating_add(1);
         self.start_next_round();
     }
 
     /// Add a new color to the sequence and begin showing it.
     fn start_next_round(&mut self) {
-        self.round += 1;
-        let idx = self.rng.next_bounded(4);
-        if let Some(color) = SimonColor::from_index(idx) {
+        self.round = self.round.saturating_add(1);
+        // The bound and the lookup come from the same array. Written as
+        // `next_bounded(4)` plus `from_index`, the count of colours was stated
+        // twice, and a fifth colour would have left the generator drawing from
+        // four while every other part of the game knew about five.
+        let idx = self.rng.next_bounded(SimonColor::ALL.len());
+        if let Some(&color) = SimonColor::ALL.get(idx) {
             self.sequence.push(color);
         }
         self.player_index = 0;
@@ -394,13 +412,13 @@ impl SimonApp {
                     self.lit_button = None;
                 }
             } else {
-                self.player_flash_timer -= elapsed_ms;
+                self.player_flash_timer = self.player_flash_timer.saturating_sub(elapsed_ms);
             }
         }
 
         match self.state {
             GameState::PreSequence => {
-                self.pre_delay_timer += elapsed_ms;
+                self.pre_delay_timer = self.pre_delay_timer.saturating_add(elapsed_ms);
                 if self.pre_delay_timer >= PRE_SEQUENCE_DELAY_MS {
                     self.begin_playback();
                 }
@@ -409,13 +427,13 @@ impl SimonApp {
                 self.advance_playback(elapsed_ms);
             }
             GameState::GameOver => {
-                self.state_timer += elapsed_ms;
+                self.state_timer = self.state_timer.saturating_add(elapsed_ms);
                 if self.state_timer >= ERROR_FLASH_MS {
                     self.lit_button = None;
                 }
             }
             GameState::RoundSuccess => {
-                self.state_timer += elapsed_ms;
+                self.state_timer = self.state_timer.saturating_add(elapsed_ms);
                 if self.state_timer >= SUCCESS_FLASH_MS {
                     self.start_next_round();
                 }
@@ -430,7 +448,7 @@ impl SimonApp {
     /// Loops through as many flash/gap transitions as the elapsed time covers,
     /// so a single large tick can complete the entire sequence.
     fn advance_playback(&mut self, elapsed_ms: u64) {
-        self.playback.phase_elapsed_ms += elapsed_ms;
+        self.playback.phase_elapsed_ms = self.playback.phase_elapsed_ms.saturating_add(elapsed_ms);
 
         loop {
             if self.playback.in_flash {
@@ -438,7 +456,8 @@ impl SimonApp {
                 if self.playback.phase_elapsed_ms >= duration {
                     // End of flash: enter gap.
                     self.playback.in_flash = false;
-                    self.playback.phase_elapsed_ms -= duration;
+                    self.playback.phase_elapsed_ms =
+                        self.playback.phase_elapsed_ms.saturating_sub(duration);
                     self.lit_button = None;
                 } else {
                     break;
@@ -449,19 +468,24 @@ impl SimonApp {
                 let duration = gap_duration_ms(self.speed);
                 if self.playback.phase_elapsed_ms >= duration {
                     // End of gap: move to next step.
-                    self.playback.step_index += 1;
-                    self.playback.phase_elapsed_ms -= duration;
+                    self.playback.step_index = self.playback.step_index.saturating_add(1);
+                    self.playback.phase_elapsed_ms =
+                        self.playback.phase_elapsed_ms.saturating_sub(duration);
                     self.playback.in_flash = true;
 
-                    if self.playback.step_index >= self.sequence.len() {
-                        // Sequence complete: switch to player input.
-                        self.state = GameState::PlayerInput;
-                        self.player_index = 0;
-                        self.lit_button = None;
-                        break;
-                    } else {
+                    // One lookup rather than a length test followed by an index:
+                    // "is there a next step" and "what is it" were the same
+                    // question asked twice, in two places free to drift apart.
+                    match self.sequence.get(self.playback.step_index) {
                         // Light up the next step.
-                        self.lit_button = Some(self.sequence[self.playback.step_index]);
+                        Some(&color) => self.lit_button = Some(color),
+                        None => {
+                            // Sequence complete: switch to player input.
+                            self.state = GameState::PlayerInput;
+                            self.player_index = 0;
+                            self.lit_button = None;
+                            break;
+                        }
                     }
                 } else {
                     break;
@@ -480,12 +504,18 @@ impl SimonApp {
         self.lit_button = Some(color);
         self.player_flash_timer = PLAYER_FLASH_MS;
 
-        let expected = self.sequence[self.player_index];
+        // `get` rather than an index. That `player_index` is inside the sequence
+        // whenever the state is `PlayerInput` is an invariant kept by four other
+        // methods between them, not a fact visible here; a press that arrives
+        // when it does not hold should do nothing, not end the process.
+        let Some(&expected) = self.sequence.get(self.player_index) else {
+            return;
+        };
         if color == expected {
-            self.player_index += 1;
+            self.player_index = self.player_index.saturating_add(1);
             if self.player_index >= self.sequence.len() {
                 // Round complete!
-                self.score += 1;
+                self.score = self.score.saturating_add(1);
                 if self.score > self.high_score {
                     self.high_score = self.score;
                 }
@@ -524,25 +554,25 @@ impl SimonApp {
             Key::Up => {
                 self.show_selection = true;
                 if self.selected_button >= 2 {
-                    self.selected_button -= 2;
+                    self.selected_button = self.selected_button.saturating_sub(2);
                 }
             }
             Key::Down => {
                 self.show_selection = true;
                 if self.selected_button < 2 {
-                    self.selected_button += 2;
+                    self.selected_button = self.selected_button.saturating_add(2);
                 }
             }
             Key::Left => {
                 self.show_selection = true;
                 if self.selected_button % 2 == 1 {
-                    self.selected_button -= 1;
+                    self.selected_button = self.selected_button.saturating_sub(1);
                 }
             }
             Key::Right => {
                 self.show_selection = true;
                 if self.selected_button.is_multiple_of(2) {
-                    self.selected_button += 1;
+                    self.selected_button = self.selected_button.saturating_add(1);
                 }
             }
             // Enter/Space confirm selected button.
@@ -550,9 +580,10 @@ impl SimonApp {
                 if self.state == GameState::GameOver {
                     self.start_new_game();
                 } else if self.state == GameState::PlayerInput
-                    && let Some(color) = SimonColor::from_index(self.selected_button) {
-                        self.player_press(color);
-                    }
+                    && let Some(color) = SimonColor::from_index(self.selected_button)
+                {
+                    self.player_press(color);
+                }
             }
             // Number keys 1-4 directly press a button.
             Key::Num1 => {
@@ -572,15 +603,13 @@ impl SimonApp {
                 self.speed = self.speed.next();
             }
             // R restarts (only on game over).
-            Key::R
-                if self.state == GameState::GameOver => {
-                    self.start_new_game();
-                }
+            Key::R if self.state == GameState::GameOver => {
+                self.start_new_game();
+            }
             // Escape restarts on game over.
-            Key::Escape
-                if self.state == GameState::GameOver => {
-                    self.start_new_game();
-                }
+            Key::Escape if self.state == GameState::GameOver => {
+                self.start_new_game();
+            }
             _ => {}
         }
     }
@@ -594,9 +623,10 @@ impl SimonApp {
         self.selected_button = idx;
         self.show_selection = true;
         if self.state == GameState::PlayerInput
-            && let Some(color) = SimonColor::from_index(idx) {
-                self.player_press(color);
-            }
+            && let Some(color) = SimonColor::from_index(idx)
+        {
+            self.player_press(color);
+        }
     }
 
     /// Handle incoming events (called by the framework).
@@ -799,7 +829,7 @@ impl SimonApp {
             });
 
             // Number key hint.
-            let num_label = format!("{}", color.to_index() + 1);
+            let num_label = format!("{}", color.to_index().saturating_add(1));
             cmds.push(RenderCommand::Text {
                 x: x + 8.0,
                 y: y + 8.0,
@@ -832,12 +862,12 @@ impl SimonApp {
             GameState::PreSequence => String::from("Get ready..."),
             GameState::ShowSequence => format!(
                 "Watch! ({}/{})",
-                self.playback.step_index + 1,
+                self.playback.step_index.saturating_add(1),
                 self.sequence.len()
             ),
             GameState::PlayerInput => format!(
                 "Your turn! ({}/{})",
-                self.player_index + 1,
+                self.player_index.saturating_add(1),
                 self.sequence.len()
             ),
             GameState::GameOver => String::from("Game Over!"),
@@ -1067,6 +1097,21 @@ fn main() {
 // ═══════════════════════════════════════════════════════════════════════
 #[cfg(test)]
 mod tests {
+    // A test that indexes out of range should fail loudly and point at the line
+    // that did it -- that is the diagnosis. The defensive lints exist to keep
+    // panics out of code that runs on a user's data, which this is not.
+    //
+    // These allows used to sit at the crate root, where they covered the game
+    // logic as well and hid every finding below.
+    #![allow(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::float_cmp,
+        clippy::arithmetic_side_effects
+    )]
+
     use super::*;
 
     /// Helper: create a game with a fixed seed for deterministic tests.
@@ -1104,6 +1149,109 @@ mod tests {
         let steps = app.sequence.len() as u64;
         let total = steps * (flash_duration_ms(app.speed) + gap_duration_ms(app.speed)) + 100;
         app.handle_tick(total);
+    }
+
+    // ── The sequence must actually be a sequence ────────────────────
+
+    /// Helper: the colours a fresh game hands out over `steps` rounds.
+    fn sequence_of(seed: u64, steps: usize) -> Vec<usize> {
+        let mut app = SimonApp::with_seed(seed);
+        while app.sequence.len() < steps {
+            app.start_next_round();
+        }
+        app.sequence.iter().map(|c| c.to_index()).collect()
+    }
+
+    /// The sequence must not be a fixed short cycle.
+    ///
+    /// It was one: `next_bounded` reduced the generator's output with
+    /// `val % 4`, which on a power-of-two-modulus LCG reads the low two bits,
+    /// and those have period exactly 4. Every game, at every seed, dealt out
+    /// Green, Red, Yellow, Blue for ever -- the step from each colour to the
+    /// next was always the *same* step, so there was nothing to memorise and
+    /// a player who noticed could go on for ever without watching.
+    ///
+    /// Phrased as "the step between consecutive colours varies" rather than as
+    /// a distribution check, because that is precisely the property the defect
+    /// destroyed and a distribution check would not have caught it: the broken
+    /// sequence uses all four colours exactly equally.
+    #[test]
+    fn the_sequence_is_not_a_fixed_cycle() {
+        let seq = sequence_of(0xDEAD_BEEF_CAFE, 64);
+        let steps: std::collections::BTreeSet<usize> = seq
+            .windows(2)
+            .filter_map(|w| Some((w.first()? + 4 - w.get(1)?) % 4))
+            .collect();
+        assert!(
+            steps.len() > 1,
+            "every colour follows the one before it by the same step {steps:?}; \
+             the sequence is a rotation, not a sequence: {seq:?}"
+        );
+    }
+
+    /// Two seeds must give two different games.
+    ///
+    /// Under the defect they did not, in the way that mattered: a different
+    /// seed only picked a different *starting point* on the same 4-cycle, so
+    /// after the first colour the two games were identical for ever.
+    #[test]
+    fn different_seeds_give_different_sequences() {
+        let a = sequence_of(1, 40);
+        let b = sequence_of(2, 40);
+        assert_ne!(a, b, "two seeds produced the same game");
+        // Not merely offset from one another: aligning them on any rotation
+        // must still leave them different.
+        for shift in 1..4 {
+            let rotated: Vec<usize> = a.iter().map(|v| (v + shift) % 4).collect();
+            assert_ne!(
+                rotated, b,
+                "seed 2's game is seed 1's game rotated by {shift}"
+            );
+        }
+    }
+
+    /// All four colours must turn up, and roughly evenly.
+    ///
+    /// Weaker than the cycle test above and kept anyway: it is the check that
+    /// fails if a future edit to `next_bounded` gets the *range* wrong rather
+    /// than the *order*, e.g. by taking too few high bits and never reaching
+    /// the last colour.
+    #[test]
+    fn every_colour_is_dealt_and_no_colour_dominates() {
+        let seq = sequence_of(0x1234_5678, 400);
+        let mut counts = [0usize; 4];
+        for c in &seq {
+            counts[*c] += 1;
+        }
+        for (colour, count) in counts.iter().enumerate() {
+            assert!(
+                (50..=250).contains(count),
+                "colour {colour} came up {count} times in 400; counts were {counts:?}"
+            );
+        }
+    }
+
+    /// `next_bounded` must stay inside its bound and survive a zero one.
+    ///
+    /// Zero is not reachable from this game -- the only caller passes
+    /// `SimonColor::ALL.len()` -- but the previous body was `val % bound`,
+    /// which divides by zero and takes the process with it. A generator that
+    /// answers "a value in `0..0`" with a panic is a trap left for the next
+    /// caller.
+    #[test]
+    fn next_bounded_respects_its_bound() {
+        let mut rng = Lcg::new(7);
+        for bound in [1usize, 2, 3, 4, 7, 8, 100] {
+            for _ in 0..200 {
+                let v = rng.next_bounded(bound);
+                assert!(v < bound, "{v} is not below {bound}");
+            }
+        }
+        assert_eq!(
+            rng.next_bounded(0),
+            0,
+            "a zero bound must not divide by zero"
+        );
     }
 
     // ── Construction & initialization ───────────────────────────────

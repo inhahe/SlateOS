@@ -226,8 +226,8 @@ character — a panic. Call `textfind`; do not write the loop.
 This was a targeted pass at one defect family, not a full sweep of those five
 crates; their remaining `indexing_slicing` counts are `rssreader` 93,
 `spreadsheet` 42, `filediff` 17, `ebook` 16, `pdfviewer` 13. (`rssreader`,
-`spreadsheet` and `filediff` have since been swept to zero; `ebook` and
-`pdfviewer` remain.)
+`spreadsheet`, `filediff`, `ebook` and `pdfviewer` have since all been swept
+to zero, so this list is now closed.)
 
 ### Sweep progress: `explorer` 264 → 55, `indexing_slicing` 0 (2026-08-16)
 
@@ -521,6 +521,293 @@ Other findings worth keeping:
   the path of addresses being visited, so a depth failure is never one; the
   depth backstop used to report `#CIRC!`, which pointed at a cycle that was not
   there.
+
+### Sweep progress: `contacts` 83 → 0, all lint classes (2026-08-16)
+
+Twelfth crate, seventh to reach **zero warnings of every class** across
+`--all-targets`. Tests 190 → 195.
+
+The most lopsided split of the sweep so far: of 83 warnings, **82 were in the
+test module and exactly one was in production code** — a single
+`indexing_slicing` on a twelve-element lookup table. Following that one warning
+found two user-visible defects and a third latent one, which is the sweep's
+recurring lesson stated as starkly as it gets: *the count of warnings in a
+crate says nothing about the number of defects in it.*
+
+## Two defects in `apps/contacts`' birthday handling (lane C)
+
+**Status: both FIXED 2026-08-16.** Each verified by reverting it alone and
+watching the specific tests fail.
+
+The one production warning was `days_before[m]` in `day_of_year`, guarded by
+`.min(11)` against a twelve-element array — safe, but *the bound written
+twice*. What made it worth pulling on is what the table sat next to:
+`SimpleDate::new` validated the day against a flat `1..=31` with no reference
+to the month at all. So the crate stated the calendar twice, in two
+incompatible forms, and the two disagreed.
+
+- **31 February was an acceptable birthday.** `SimpleDate::new(2026, 2, 31)`
+  returned `Some`, and `parse` goes through `new`, so the date came in from a
+  hand-typed field or an imported vCard, was stored, and was displayed straight
+  back as `2026-02-31` — nothing anywhere said it was impossible. It also
+  counted as a day of the year past the real end of February (59 + 31 = 90,
+  where 1 March is 60), so the "upcoming birthdays" list placed it thirty days
+  from where the person reading it would expect. Fixed by checking the day
+  against *that month's* length, taken from the same table `day_of_year` uses,
+  with the Gregorian leap rule applied so that 29 February 1988 is accepted and
+  29 February 1989 and 1900 are not.
+- **vCard's basic date form imported as no birthday at all.** `parse` split on
+  `-` and required exactly three parts, so it accepted `1990-12-25` and
+  rejected `19901225`. The second is not an edge case: **vCard 4.0 specifies
+  the basic form**, and it is what phones and mail clients export, so importing
+  a real address book dropped birthdays — silently, and indistinguishably from
+  a card that never carried one. Now both spellings parse to the same date.
+  Export still writes the extended form, which every reader accepts.
+
+The structural fix behind both is one table, `MONTH_LENGTHS`, used for the
+validation *and* for the day-of-year count, with `day_of_year` reaching it
+through `.iter().take(month - 1)` rather than an index — the months before this
+one are exactly the ones the iterator yields, so a month past December can only
+mean "all of them" and the `.min(11)` second copy of the bound is gone. A new
+property test asserts the first of each month is one past the last of the month
+before, which is what a single table makes true by construction.
+
+**Still not accepted, deliberately: vCard's year-less `--MMDD`** ("I know the
+day but not the year"), which real cards do carry. That one is not a parse bug
+but a missing representation — `SimpleDate` has a non-optional `year`, and a
+sentinel year would leak into `format_display`, the edit field and the sort
+order. Recording it here rather than fixing it in a lint sweep; the fix is an
+`Option<u16>` year with a display form of `--MM-DD`.
+
+Two further notes from the same read, neither a defect today:
+
+- `is_upcoming_within` takes `today_month`/`today_day` as raw `u8`s rather than
+  a `SimpleDate`, so the "today" side is unvalidated while the birthday side is
+  validated by construction. Left alone because there is no clock in the system
+  to feed it and its only non-test caller, `ContactStore::upcoming_birthdays`,
+  is itself uncalled — changing the signature now would be churn against an API
+  nobody has used yet.
+- `day_of_year` stays leap-agnostic on purpose, and the reason is now in its doc
+  comment: it compares a birthday against today, and those fall in *different*
+  years, so applying each side's own leap rule would move one and not the other.
+  A uniform 365-day year keeps the pair comparable, and one day of slack is
+  inside the tolerance the question is asking about.
+
+### Sweep progress: `pdfviewer` 94 → 0, all lint classes (2026-08-16)
+
+Eleventh crate, sixth to reach **zero warnings of every class** across
+`--all-targets`, and the last of the five crates listed as outstanding in the
+`textfind` note near the top of this file. Tests 110 → 118.
+
+The split is worth recording because it is unlike the other ten: of 94
+warnings, **67 were in the test module** and only 27 in production code, and
+all 27 were `arithmetic_side_effects` — not one `indexing_slicing` in shipping
+code. The crate is a plain data model over `Vec<PdfPage>` and it already goes
+through `get()` almost everywhere. The defects were therefore not where the
+warnings were, which is the usual finding by now: four of the five below are in
+a subsystem that produced five warnings between them.
+
+## Four defects in `apps/pdfviewer`'s print range, and one in its annotations
+
+**Status: all FIXED 2026-08-16** (lane C). Each verified by reverting it alone
+and watching the specific tests fail.
+
+`PrintSettings::resolve_pages` turns a page range into the list of pages to
+print, and `parse_page_range` turns what the user typed into that range. Both
+clamped against the page count — *the same bound written in two places*, the
+shape this sweep keeps finding — and the two copies disagreed:
+
+- **A range naming no pages printed the whole document.** `parse_page_range`
+  dropped the parts it could not use, found itself holding an empty list, and
+  fell back to `All`. So typing `50-60` into a ten-page document — a plain typo
+  — printed all ten pages. Now `Custom(vec![])`, which prints nothing. Blank
+  input and the word `all` are handled before that point, so reaching it means
+  the user named specific pages; if none of them exist, the honest answer is
+  "none". Of the two ways to be wrong about a range nobody asked for, printing
+  everything is the expensive one.
+- **A range beyond the end was dragged onto the last page.** The parser clamped
+  the range's *start* as well as its end, so `50-60` of a ten-page document
+  became `(9, 9)` — "print page 10". Now the start is a validity test (drop the
+  range) and only the end is clamped, at print time, by the one function that
+  knows how many pages the document has *now* rather than when it was typed.
+- **`Custom` returned `[0]` for a document with no pages.** The end clamp is
+  `page_count - 1`, saturating to `0`, so every range collapsed to `start..=0`
+  and one starting at zero yielded page zero — an index into an empty document,
+  handed to a caller with every reason to trust it. The `All` and `CurrentPage`
+  arms both return nothing there; this arm being the odd one out is the tell.
+  For a document that *has* pages the bug was masked, because `49..=9` is an
+  empty `RangeInclusive` — and it is exactly that accidental reasoning which
+  stopped holding at zero pages, so the precondition is now stated outright
+  rather than left to emerge from the range type.
+- **Overlapping ranges were deduplicated in quadratic time**, by a `contains`
+  scan per page, on a list that was sorted on the way out anyway. Now
+  `sort_unstable` + `dedup`.
+
+And separately, in the annotation layer:
+
+- **A failed annotation consumed an id.** `add_highlight`, `add_note` and
+  `add_freehand` were three copies of one routine, and each took an id from the
+  counter *before* looking for a page to put the annotation on — the guard
+  running downstream of the operation it guards, another shape already in this
+  sweep. Every call on a tab with no document returned `None` having burnt an
+  id. The ids stayed unique so nothing broke visibly; they simply grew gaps,
+  which is the kind of thing noticed only by whoever later assumes they are
+  dense. Now one private `add_annotation` that allocates after the page is in
+  hand, with the three public methods differing only in the `AnnotationType`
+  they build.
+
+Both id counters (`next_annotation_id` and `IdGenerator::next_id`) also moved
+from `+= 1` to `saturating_add`. The reasoning in the comments is deliberately
+not about overflow being reachable — it is that *wrapping* is the one failure
+mode that would be silent and wrong, because a wrapped id collides with a live
+object and makes `remove_annotation(id)` delete something else. Saturating
+turns that into a stuck feature rather than a corrupted document.
+
+## `apps/pdfviewer` can print nothing at all — the whole model is unwired (lane C)
+
+**Status: OPEN.** Recorded 2026-08-16 by lane C. *How* to wire it is `C-Q4` in
+`open-questions.md`, because it is an architecture choice rather than a repair.
+
+`PrintSettings`, `PrintPageRange`, `parse_page_range` and `resolve_pages` are
+complete, and as of today correct and tested. **Nothing outside the test module
+calls any of them.** `PdfViewerApp` holds a `print_settings` field written once
+at construction and never read. There is no print dialog, no Ctrl+P handler,
+and no path from the viewer to any output.
+
+This is the `filediff` find-in-diff shape again — a feature fully modelled and
+never connected — with a twist that makes it an architecture question rather
+than a missing render pass: **`gui/desktop/src/print_manager.rs` already
+contains a full printing stack**, 1409 lines of it, with `Printer`,
+`PrinterCapabilities`, a `PrintManager` job queue offering submit/cancel/pause/
+resume, a spooler flag, and a `PrintDialog`. It is used only by
+`gui/desktop/src/main.rs`. No application in `apps/**` submits a print job.
+
+So the tree has two print models that do not know about each other, and each is
+richer than the other in a different dimension:
+
+| | `pdfviewer` | `gui/desktop` |
+|---|---|---|
+| Page range | discontiguous list — `1-3, 5, 7-9` | one `(start, end)` pair |
+| Copies, paper, duplex, quality, scale | absent | present, with capability validation |
+| Job queue, spooler, cancel/pause | absent | present |
+| Reachable from an app | no | no |
+
+Neither is wrong; they were written for different halves of the problem. The
+range belongs with the document, which is the only thing that knows its page
+count and the reader's current page; everything else belongs with the system,
+which is the only thing that knows what printers exist. What is missing is the
+seam between them, and choosing it is the open question — an `apps/**` crate
+depending on the desktop shell crate would be the cheap answer and the wrong
+shape.
+
+Until that is answered, the honest description is that **the PDF viewer has no
+print command**, and the tested range logic is a component waiting for one.
+
+### Sweep progress: `ebook` 20 → 0, all lint classes (2026-08-16)
+
+Tenth crate, fifth to reach **zero warnings of every class** across
+`--all-targets`. Tests 114 → 119. As with `filediff`, the lint work was small
+and the finding was not a lint: **the reader's position in a book was stored as
+a page number**, and a page number is a fact about a *pagination*, which
+depends on the font size and the window size. Pressing `+` once moved the
+reader from page 2 of four to page 2 of six — backwards through the book, by
+about a fifth of it, on one keystroke.
+
+The shape is one already recorded in this sweep — *an index into a derived
+layout stored across a rebuild of that layout* — and this is its third
+appearance (after `filediff`'s edit-index-as-display-row and the stale search
+matches). The fix is always the same: **store the stable thing and derive the
+volatile one.**
+
+What makes this instance worth recording separately is that the codebase
+already contained the right answer. `Chapter` stored a `byte_offset`, with a
+comment saying why. The reading position and the bookmarks were simply the two
+places that had never been given the same treatment — so this was not a design
+that needed inventing, it was a design that had not been applied uniformly.
+That is a cheaper class of bug to look for than it sounds: *find the type that
+already got it right, then check its siblings.*
+
+| Was | Is |
+|---|---|
+| `ReadingState { current_page: usize }` | `ReadingState { offset: usize }`, with `current_page()` derived from the live pagination |
+| `bookmarks: Vec<usize>` of page numbers | `Vec<usize>` of byte offsets; `is_page_bookmarked` is a containment test against the page's range, not an equality test |
+| `jump_to_chapter` converted the chapter's offset to a page and jumped to that | jumps to the offset directly, so it no longer rounds the reader to the top of whichever page happens to contain the chapter |
+| `repaginate` needed a fix-up for the stored page | needs none, which is the point |
+
+## The reading position and bookmarks in `apps/ebook` were page numbers (lane C)
+
+**Status: FIXED 2026-08-16** (lane C). Verified by reverting each half
+separately: restoring the page-preserving font change fails
+`changing_the_font_size_keeps_the_reader_where_they_were` and
+`shrinking_the_font_keeps_the_reader_where_they_were`; restoring page-number
+bookmarks fails three, including two that predate this work.
+
+Reproduced before fixing, on sample book 3: at page 2 the reader is at
+`"True determinism would mean we're living in a sim…"`; press `+`; the same
+page number now shows `"2. Calibration"`. The book got longer in pages, the
+stored number did not move, so the reader was thrown backwards. `-` threw them
+forwards by the same mechanism. Bookmarks had it too — a bookmark set at one
+font size marked different words at another — and because bookmarks persist,
+that one is silent and permanent rather than merely startling.
+
+The two tests are written to be independent rather than as a round trip. The
+first draft *was* a round trip (`increase` then `decrease`, assert the offset
+came back), and it **passed with the bug reverted**: both directions repaginate
+by the same rule, so two page-preserving errors cancel exactly. The
+replacement grows the font *before* measuring, leaving the shrink as the only
+operation under test. Same lesson as `filediff`'s stale-match test, in a
+different disguise: a test that exercises an operation and its inverse together
+cannot see a bug that is symmetric in them.
+
+The bookmark test carries a `assert_ne!` premise for the same reason —
+comparing the stored bookmark list before and after a font change proves
+nothing, because nothing writes to it. The test only says something once the
+bookmarked text is known to have landed on a *different page number*.
+
+## The `apps/ebook` library list reported 0% for every book but one (lane C)
+
+**Status: FIXED 2026-08-16** (lane C). Verified by reverting; the test then
+reports `a book read to its last page reports 0, not near 1.0`.
+
+The shelf showed `… | 12 min | 0%` against every book. Progress was
+`current_page / total_pages`, and **a pagination exists only for the book that
+is currently open** — every other row divided a page number that was never
+updated by a total that was zero. A reader who had finished nine of ten books
+saw a shelf of untouched ones.
+
+Now `EbookApp::book_progress(index)`, measured in bytes of the text, which is
+the only measure available for a book that is not open. Deliberately a separate
+method from `reading_progress`, not a generalisation of it: that one answers
+"which page of how many", which is the right thing for the status bar of an
+open book and is unavailable everywhere else. Bytes rather than characters is
+fine here and the doc comment says why — it is a ratio of two lengths of the
+same text, rounded to a whole percent.
+
+Extracting the method was itself part of the fix rather than tidying. The
+computation had lived inline in the render loop, so the only way to test it was
+to recompute the ratio in the test — which would have proved that the test and
+the fix agreed with each other and nothing more.
+
+### Negative result: the wrapping-cursor rule does not want a shared crate
+
+Recorded so the analysis is not repeated. The `if !v.is_empty() { i = (i + 1) %
+v.len() }` shape appears about **59 times** tree-wide, and unifying it into a
+shared helper looked like the obvious follow-up to `filediff`'s `wrap_next` /
+`wrap_prev`. A scan (`build/scratch/wrapscan.py`) flagged 32 as unguarded;
+reading all 32 found **none that can actually divide by zero**. Nearly all take
+the modulus of a `const` array's length, which cannot be zero, or derive the
+index from a `position()` call, which implies the collection is non-empty. The
+two that looked genuinely dangerous — `gui/toolkit/src/svg.rs:2279` and
+`apps/crossword/src/main.rs:866` — are both guarded, the second by an
+`is_empty` early return sitting exactly twelve lines up, which is what the
+scanner's window missed.
+
+So the shape is common but the *bug* is not, and a shared crate would be
+churn across sixteen files to prevent nothing. Keep `wrap_next`/`wrap_prev`
+local to `filediff`, where they earned their place by collapsing three copies
+that were genuinely reachable. The general point: **a repeated shape is a
+reason to look, not a reason to refactor** — the refactor needs its own
+evidence.
 
 ### Sweep progress: `filediff` 23 → 0, all lint classes (2026-08-16)
 

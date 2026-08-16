@@ -489,6 +489,74 @@ re-run, and it neither grows nor worsens with time. Full detail in
 `known-issues.md` → "Two lanes merging up at once race in the shared `os`
 worktree".
 
+## C-Q4 — [C] Nothing in the system can print. Two half-built printing features exist and neither is connected. Which one should applications talk to? — Status: OPEN
+
+**In short:** There is no way to print anything from this OS today. Two
+separate pieces of printing code were written at different times and neither
+was ever hooked up to anything a user can click. One of them lives in the PDF
+viewer and knows how to work out *which pages* to print; the other lives in the
+desktop and knows about *printers* — which ones exist, paper sizes, how many
+copies, and a queue of pending jobs. Neither knows the other exists. The
+question is how an application should reach a printer: through the desktop's
+existing machinery, or through something new built for the purpose.
+
+**What is actually there.** Both pieces are real code with tests, not
+placeholders:
+
+| | In the PDF viewer | In the desktop |
+|---|---|---|
+| Works out which pages to print | yes — including "1-3, 5, 7-9" | only a single "from page X to page Y" |
+| Knows what printers exist | no | yes |
+| Copies, paper size, double-sided, quality | no | yes |
+| Queue of pending jobs, cancel, pause | no | yes |
+| Reachable by any application | **no** | **no** |
+
+Each is better than the other at a different half of the job, which is not a
+mistake — the page range is something only the document knows (it is the only
+thing that knows how long it is), and the printer list is something only the
+system knows. The gap is the connection between them.
+
+**Why this needs deciding rather than just doing.** Applications live in
+`apps/`, the desktop is the program that draws the screen. Making the PDF
+viewer call directly into the desktop's code would work in about an hour, and
+would mean every application that ever wants to print has to be built together
+with the desktop — so a change to the taskbar could stop the PDF viewer from
+compiling. That is the kind of tangle that is cheap to create and expensive to
+undo later, which is why it is worth a decision now rather than after four more
+applications have copied it.
+
+**The options.**
+
+- **A — Applications call the desktop's printing code directly.**
+  *What changes:* printing works in the PDF viewer today. Every application
+  that prints is from then on built together with the whole desktop, and
+  printing only works while the desktop is running.
+- **B — Move the printer-handling code into a small shared library that both
+  the desktop and applications use.**
+  *What changes:* nothing visible differs from A for a user; the code moves
+  house first, so applications depend on a printing library rather than on the
+  desktop. Roughly half a day more work than A, and it is the last time the
+  move is cheap.
+- **C — Printing becomes a background service that applications send jobs to,
+  like every other OS.**
+  *What changes:* a print job survives the application closing, and can be
+  cancelled from anywhere. Several days of work, and it needs the message
+  plumbing between programs that other parts of the system already use.
+- **D — Leave it. Delete neither piece, connect neither.**
+  *What changes:* nothing. Printing stays impossible, and the two models drift
+  further apart as each is edited for its own reasons.
+
+**Recommendation: B**, then C later if printing ever needs to outlive the
+application that started it. B costs little more than A and does not create the
+dependency that A does; C is the right long-run shape but is a real project and
+nothing is currently blocked on it.
+
+**If this is never answered:** nothing breaks and nothing worsens quickly, but
+printing stays impossible from every application, and the drift is real — the
+two models already disagree about what a page range is, and each additional
+edit to either makes the eventual merge harder. Detail in `known-issues.md` →
+"`apps/pdfviewer` can print nothing at all — the whole model is unwired".
+
 
 ---
 

@@ -39,6 +39,7 @@ use crate::indic_shape::{Script, continues_word};
 use crate::joining::{self, Form};
 use crate::lang::Lang;
 use crate::norm;
+use crate::norm::Ignorable;
 use crate::raster::{GlyphMask, rasterize};
 use crate::script::{self, ScriptTags};
 use crate::sfnt::{Face, PathCmd, SfntError};
@@ -577,8 +578,7 @@ impl ScaledFont {
         // `GSUB` — and a face with no `GSUB` is precisely the legacy Thai
         // font this pass exists for.
         let mut pua: Vec<Option<char>> = Vec::new();
-        let legacy =
-            |t| thai::legacy_run(t) && self.face.gsub_chosen_script(t) != Some(*b"thai");
+        let legacy = |t| thai::legacy_run(t) && self.face.gsub_chosen_script(t) != Some(*b"thai");
         if runs.iter().any(|&(_, t)| legacy(t)) {
             pua = alloc::vec![None; pieces.len()];
             let mut at = 0usize;
@@ -623,7 +623,9 @@ impl ScaledFont {
         // `latn` is shaped by the default shaper, and that shaper places marks
         // by measurement, zeroes their advances, and does no reordering. See
         // [`Face::shapes_as_default`](crate::sfnt::Face::shapes_as_default).
-        let mut simple = runs.first().is_some_and(|&(_, t)| self.face.shapes_as_default(t));
+        let mut simple = runs
+            .first()
+            .is_some_and(|&(_, t)| self.face.shapes_as_default(t));
         let mut synth = runs.first().is_none_or(|&(_, t)| !self.applies_gpos(t));
         let mut placeable = runs
             .first()
@@ -693,7 +695,11 @@ impl ScaledFont {
                 // rather than in a parallel vector like `tabs`: the Indic and
                 // Khmer shapers move glyphs within a syllable, and a joiner
                 // moves with them.
-                ignorable: !tab && norm::is_default_ignorable(ch),
+                ignorable: if tab {
+                    Ignorable::No
+                } else {
+                    norm::ignorable(ch)
+                },
                 // What the Indic shaper needs and cannot recover later: both
                 // are properties of the character, and by the time it runs
                 // there may be no character left to ask — a conjunct is one
@@ -797,8 +803,7 @@ impl ScaledFont {
             .iter()
             .map(|g| i32::from(self.face.advance(g.gid).unwrap_or(0)))
             .collect();
-        let adjusted =
-            self.position_segments(&segments, lang, &glyphs, &advances, &marks, &levels);
+        let adjusted = self.position_segments(&segments, lang, &glyphs, &advances, &marks, &levels);
         // Whether pairs still have to be kerned one at a time here. They do
         // only where the run's kerning is the legacy `kern` table's, which the
         // positioning pass cannot read; pairs the pass has already charged must
@@ -821,6 +826,15 @@ impl ScaledFont {
             // across it; kerning *against* the mark instead would shove the
             // accent off the letter it belongs to.
             let mark = marks.get(i).copied().unwrap_or(false);
+            // A never-drawn character is transparent to kerning: it is neither
+            // half of a pair, and it does not stand between one. Every
+            // positioning lookup steps over every default ignorable —
+            // HarfBuzz's matcher ignores the joiners and the hidden ones alike
+            // in `GPOS` — so a soft hyphen between `A` and `V` must not be
+            // allowed to break the pair the way a letter would. Recording it in
+            // `between` would do exactly that, since the face's flag says
+            // nothing about a character it never expected to see.
+            let erased = glyph.ignorable.erased();
             let adjust = adjusted
                 .get(i)
                 .copied()
@@ -835,6 +849,7 @@ impl ScaledFont {
             if legacy_at.get(i).copied().unwrap_or(false)
                 && !tab
                 && !mark
+                && !erased
                 && let Some(last) = kern_left.and_then(|at| out.get_mut(at))
             {
                 let kern = self.legacy_kern_across(last.key.gid(), gid, &between);
@@ -898,7 +913,9 @@ impl ScaledFont {
                 // unflipped; the flip happens once, at the blit.
                 offset: (self.px(adjust.x_offset) - back, self.px(adjust.y_offset)),
             });
-            if mark {
+            if erased {
+                // Not in `between` and not a new left half: see above.
+            } else if mark {
                 // Keep the mark in the run between the pair, but only while
                 // there is a pair to read across: a mark with no letter before
                 // it starts nothing.
@@ -920,7 +937,7 @@ impl ScaledFont {
         // would be dropping the instruction along with the mark of it. Before
         // the visual order below, though, because that is a permutation of
         // `out`'s indices and a deletion moves them.
-        if glyphs.iter().any(|g| g.ignorable) {
+        if glyphs.iter().any(|g| g.ignorable.erased()) {
             hide_ignorables(&mut out, &mut klasses, &glyphs, space);
         }
 
@@ -1051,7 +1068,15 @@ impl ScaledFont {
             // Ends are exclusive: `end == i` means the run stopped *before*
             // this glyph, so the stretch closes and `i` opens the next one.
             if runs.get(at).is_some_and(|&(end, _)| end <= i) {
-                flush(self, open, lang, &mut run, &mut out, &mut out_tabs, &mut segments);
+                flush(
+                    self,
+                    open,
+                    lang,
+                    &mut run,
+                    &mut out,
+                    &mut out_tabs,
+                    &mut segments,
+                );
                 while runs.get(at).is_some_and(|&(end, _)| end <= i) {
                     at = at.saturating_add(1);
                 }
@@ -1063,7 +1088,15 @@ impl ScaledFont {
                 }
                 continue;
             }
-            flush(self, open, lang, &mut run, &mut out, &mut out_tabs, &mut segments);
+            flush(
+                self,
+                open,
+                lang,
+                &mut run,
+                &mut out,
+                &mut out_tabs,
+                &mut segments,
+            );
             if let Some(glyph) = glyphs.get(i) {
                 out.push(*glyph);
                 out_tabs.push(true);
@@ -1226,15 +1259,9 @@ impl ScaledFont {
                 // attach to — including one this face draws blank, which is
                 // why the box comes from `glyph_bbox` and the width from the
                 // advance rather than from the ink.
-                origin = self
-                    .face
-                    .glyph_bbox(gid)
-                    .map_or(Extents::BLANK, |b| Extents::new(
-                        num(b.x_min),
-                        num(b.y_min),
-                        num(b.x_max),
-                        num(b.y_max),
-                    ));
+                origin = self.face.glyph_bbox(gid).map_or(Extents::BLANK, |b| {
+                    Extents::new(num(b.x_min), num(b.y_min), num(b.x_max), num(b.y_max))
+                });
                 // Horizontal placement measures against the *cell*, not the
                 // ink: a letter with no ink at all still has a width to centre
                 // an accent in, and a letter whose ink overhangs its cell
@@ -1250,9 +1277,11 @@ impl ScaledFont {
             let (Some(at), Some(k)) = (base, klass.get(i).copied()) else {
                 continue;
             };
-            let Some(mark) = self.face.glyph_bbox(gid).map(|b| {
-                Extents::new(num(b.x_min), num(b.y_min), num(b.x_max), num(b.y_max))
-            }) else {
+            let Some(mark) = self
+                .face
+                .glyph_bbox(gid)
+                .map(|b| Extents::new(num(b.x_min), num(b.y_min), num(b.x_max), num(b.y_max)))
+            else {
                 continue;
             };
             if open != k {
@@ -1477,20 +1506,20 @@ fn hide_ignorables(
         // parallel here because the loop that built `out` pushed exactly one
         // glyph per iteration.
         out.retain(|_| {
-            let keep = !glyphs.get(i).is_some_and(|g| g.ignorable);
+            let keep = !glyphs.get(i).is_some_and(|g| g.ignorable.erased());
             i = i.saturating_add(1);
             keep
         });
         let mut j = 0;
         klasses.retain(|_| {
-            let keep = !glyphs.get(j).is_some_and(|g| g.ignorable);
+            let keep = !glyphs.get(j).is_some_and(|g| g.ignorable.erased());
             j = j.saturating_add(1);
             keep
         });
         return;
     }
     for (glyph, sub) in out.iter_mut().zip(glyphs) {
-        if !sub.ignorable {
+        if !sub.ignorable.erased() {
             continue;
         }
         glyph.key = GlyphKey::outline(space);
@@ -1720,12 +1749,12 @@ mod tests {
         let plain: Vec<u16> = f.shape("AB").glyphs().iter().map(|g| g.key.gid()).collect();
         assert_eq!(plain, alloc::vec![1, 2]);
         for text in [
-            "A\u{200d}B",  // ZWJ
-            "A\u{200c}B",  // ZWNJ
-            "A\u{ad}B",    // SOFT HYPHEN, the one faces draw visibly
-            "A\u{fe0f}B",  // VARIATION SELECTOR-16
-            "A\u{2060}B",  // WORD JOINER
-            "A\u{034f}B",  // COMBINING GRAPHEME JOINER
+            "A\u{200d}B", // ZWJ
+            "A\u{200c}B", // ZWNJ
+            "A\u{ad}B",   // SOFT HYPHEN, the one faces draw visibly
+            "A\u{fe0f}B", // VARIATION SELECTOR-16
+            "A\u{2060}B", // WORD JOINER
+            "A\u{034f}B", // COMBINING GRAPHEME JOINER
         ] {
             let run = f.shape(text);
             let gids: Vec<u16> = run.glyphs().iter().map(|g| g.key.gid()).collect();
@@ -1754,12 +1783,16 @@ mod tests {
     /// move, and matching the reference exactly is worth more than tidying it.
     #[test]
     fn a_face_with_a_space_empties_the_glyph_rather_than_removing_it() {
-        let ignorable = |yes: bool| {
+        let ignorable = |yes: Ignorable| {
             let mut g = SubGlyph::new(0, 0);
             g.ignorable = yes;
             g
         };
-        let subs = alloc::vec![ignorable(false), ignorable(true), ignorable(false)];
+        let subs = alloc::vec![
+            ignorable(Ignorable::No),
+            ignorable(Ignorable::Plain),
+            ignorable(Ignorable::No)
+        ];
         let filled = |gid: u16| ShapedGlyph {
             key: GlyphKey::outline(gid),
             cluster: 0,
@@ -1787,12 +1820,16 @@ mod tests {
     /// silently, and only on faces that need the mark fallback.
     #[test]
     fn deleting_a_glyph_deletes_its_combining_class_too() {
-        let ignorable = |yes: bool| {
+        let ignorable = |yes: Ignorable| {
             let mut g = SubGlyph::new(0, 0);
             g.ignorable = yes;
             g
         };
-        let subs = alloc::vec![ignorable(false), ignorable(true), ignorable(false)];
+        let subs = alloc::vec![
+            ignorable(Ignorable::No),
+            ignorable(Ignorable::Plain),
+            ignorable(Ignorable::No)
+        ];
         let filled = |gid: u16| ShapedGlyph {
             key: GlyphKey::outline(gid),
             cluster: 0,
@@ -1827,8 +1864,7 @@ mod tests {
     /// `by_category` in `shape`. Nothing but the measuring fallback ever moves
     /// a glyph off the baseline, so a non-zero drop here means it ran.
     fn pointed_drops(scripts: &[[u8; 4]]) -> Vec<f32> {
-        let f = ScaledFont::from_bytes(build_test_font_with_gpos_scripts(scripts), 1000.0)
-            .unwrap();
+        let f = ScaledFont::from_bytes(build_test_font_with_gpos_scripts(scripts), 1000.0).unwrap();
         f.shape(POINTED)
             .glyphs()
             .iter()
@@ -1897,14 +1933,19 @@ mod tests {
                 .map(|g| (g.advance, g.offset.1))
                 .collect::<Vec<_>>()
         };
-        let with_gpos =
-            |scripts: &[[u8; 4]]| shaped(build_test_font_with_gpos_scripts(scripts));
+        let with_gpos = |scripts: &[[u8; 4]]| shaped(build_test_font_with_gpos_scripts(scripts));
         // 'A' is glyph 1, 300 units wide. A `GPOS` under `DFLT` alone still
         // covers a Latin run, so nothing measures the acute onto it and it
         // stays on the baseline — but it is still an `Mn` character in a face
         // with no `GDEF`, so it still takes no room.
-        assert_eq!(with_gpos(&[*b"DFLT"]), alloc::vec![(300.0, 0.0), (0.0, 0.0)]);
-        assert_eq!(with_gpos(&[*b"hebr"]), alloc::vec![(300.0, 0.0), (0.0, 0.0)]);
+        assert_eq!(
+            with_gpos(&[*b"DFLT"]),
+            alloc::vec![(300.0, 0.0), (0.0, 0.0)]
+        );
+        assert_eq!(
+            with_gpos(&[*b"hebr"]),
+            alloc::vec![(300.0, 0.0), (0.0, 0.0)]
+        );
         // No `GPOS` at all, and the fallback runs for everything: the acute is
         // lifted a clearance above the top of 'A', whose ink reaches y = 100.
         assert_eq!(

@@ -46,7 +46,7 @@
 use alloc::vec::Vec;
 
 use crate::bidi::{self, Class};
-use crate::gsub::{ALL_FEATURES, SubGlyph, Substitutions, feature_bit, feature_bits};
+use crate::gsub::{ALL_FEATURES, Staging, SubGlyph, Substitutions, feature_bit, feature_bits};
 use crate::indic::{Category, Position, Syllable, syllables};
 use crate::lang::Lang;
 use crate::script::ScriptTags;
@@ -358,9 +358,7 @@ impl<'a> Plan<'a> {
         // still decides how the reordering itself runs, and HarfBuzz reaches
         // the same answer by the same route, its script selection reporting
         // `DFLT` rather than nothing when it finds no script it asked for.
-        let old_spec = probe
-            .chosen
-            .is_none_or(|tag| tag.get(3) != Some(&b'2'));
+        let old_spec = probe.chosen.is_none_or(|tag| tag.get(3) != Some(&b'2'));
         let mask = |tag: &[u8; 4]| {
             probe
                 .subs
@@ -797,8 +795,7 @@ fn move_old_spec_halant(plan: &Plan, glyphs: &mut [SubGlyph], base: usize) {
         let mut j = end.saturating_sub(1);
         while j > i {
             let stop = glyphs.get(j).is_some_and(|g| {
-                is_consonant(g)
-                    || (disallow_double_halants && g.indic.category == Category::Halant)
+                is_consonant(g) || (disallow_double_halants && g.indic.category == Category::Halant)
             });
             if stop {
                 break;
@@ -960,10 +957,7 @@ fn set_masks(plan: &Plan, glyphs: &mut [SubGlyph], base: usize) {
     }
     // After it: the three dependent forms.
     let post = plan.masks.blwf | plan.masks.abvf | plan.masks.pstf;
-    for g in glyphs
-        .get_mut(base.saturating_add(1)..)
-        .unwrap_or_default()
-    {
+    for g in glyphs.get_mut(base.saturating_add(1)..).unwrap_or_default() {
         g.mask |= post;
     }
 
@@ -987,10 +981,7 @@ fn set_masks(plan: &Plan, glyphs: &mut [SubGlyph], base: usize) {
                     || glyphs.get(i.saturating_add(2)).map(|g| g.indic.category)
                         != Some(Category::Joiner));
             if eyelash {
-                for g in glyphs
-                    .get_mut(i..=i.saturating_add(1))
-                    .unwrap_or_default()
-                {
+                for g in glyphs.get_mut(i..=i.saturating_add(1)).unwrap_or_default() {
                     g.mask |= plan.masks.blwf;
                 }
             }
@@ -1007,10 +998,7 @@ fn set_masks(plan: &Plan, glyphs: &mut [SubGlyph], base: usize) {
                 glyphs.get(i.saturating_add(1)).map_or(0, |g| g.gid),
             ];
             if plan.would(b"pref", &pair) {
-                for g in glyphs
-                    .get_mut(i..=i.saturating_add(1))
-                    .unwrap_or_default()
-                {
+                for g in glyphs.get_mut(i..=i.saturating_add(1)).unwrap_or_default() {
                     g.mask |= plan.masks.pref;
                 }
                 break;
@@ -1191,7 +1179,8 @@ fn find_base_again(plan: &Plan, glyphs: &mut [SubGlyph], try_pref: &mut bool) ->
                 while i < end && glyphs.get(i).is_some_and(is_joiner) {
                     i = i.saturating_add(1);
                 }
-                if glyphs.get(i).is_some_and(is_consonant) && pos_at(glyphs, i) == Position::BelowC {
+                if glyphs.get(i).is_some_and(is_consonant) && pos_at(glyphs, i) == Position::BelowC
+                {
                     base = i;
                     if let Some(g) = glyphs.get_mut(base) {
                         g.indic.position = Position::BaseC;
@@ -1332,7 +1321,9 @@ fn reorder_matras(plan: &Plan, glyphs: &mut [SubGlyph], base: &mut usize) {
 /// and moving the glyph would undo the font's work.
 fn reorder_reph(plan: &Plan, glyphs: &mut [SubGlyph], base: &mut usize) {
     let end = glyphs.len();
-    let ligated = glyphs.first().is_some_and(|g| g.lig.ligated_and_didnt_multiply());
+    let ligated = glyphs
+        .first()
+        .is_some_and(|g| g.lig.ligated_and_didnt_multiply());
     let repha = glyphs.first().map(|g| g.indic.category) == Some(Category::Repha);
     if end < 2 || pos_at(glyphs, 0) != Position::RaToBecomeReph || repha == ligated {
         return;
@@ -1385,7 +1376,8 @@ fn reph_target(plan: &Plan, glyphs: &[SubGlyph], base: usize) -> usize {
         // main".
         if reph_pos == Position::AfterMain {
             let mut p = base;
-            while p.saturating_add(1) < end && pos_at(glyphs, p.saturating_add(1)) <= Position::AfterMain
+            while p.saturating_add(1) < end
+                && pos_at(glyphs, p.saturating_add(1)) <= Position::AfterMain
             {
                 p = p.saturating_add(1);
             }
@@ -1455,7 +1447,10 @@ fn reorder_pre_base(plan: &Plan, glyphs: &mut [SubGlyph], base: &mut usize, try_
         return;
     }
     for old_pos in base.saturating_add(1)..end {
-        if glyphs.get(old_pos).is_none_or(|g| g.mask & plan.masks.pref == 0) {
+        if glyphs
+            .get(old_pos)
+            .is_none_or(|g| g.mask & plan.masks.pref == 0)
+        {
             continue;
         }
         if glyphs
@@ -1474,9 +1469,7 @@ fn reorder_pre_base(plan: &Plan, glyphs: &mut [SubGlyph], base: &mut usize, try_
                 }
             }
             if new_pos > 0
-                && glyphs
-                    .get(new_pos.saturating_sub(1))
-                    .is_some_and(is_halant)
+                && glyphs.get(new_pos.saturating_sub(1)).is_some_and(is_halant)
                 && new_pos < end
                 && glyphs.get(new_pos).is_some_and(is_joiner)
             {
@@ -1535,6 +1528,23 @@ const AFTER: [&[u8; 4]; 6] = [b"init", b"pres", b"abvs", b"blws", b"psts", b"hal
 const GLOBAL: [&[u8; 4]; 10] = [
     b"nukt", b"akhn", b"rkrf", b"vatu", b"cjct", b"pres", b"abvs", b"blws", b"psts", b"haln",
 ];
+
+/// The features that read ZWJ and ZWNJ themselves: HarfBuzz's
+/// `F_MANUAL_JOINERS`, which every entry of its `indic_features` carries.
+///
+/// That is [`BASIC`] and [`AFTER`] — **not** [`BEFORE`], whose `locl` and
+/// `ccmp` are not in `indic_features` at all. `collect_features_indic` enables
+/// those two with `F_PER_SYLLABLE` alone, so they keep the automatic joiner
+/// skipping every ordinary feature has, and a `ccmp` ligature may still form
+/// across a ZWJ.
+///
+/// For the rest a joiner is the *subject* of the rule: `KA VIRAMA ZWJ SSA`
+/// asks for a half form where `KA VIRAMA SSA` asks for a conjunct, and
+/// `KA VIRAMA ZWNJ SSA` asks for neither. A lookup that stepped over the
+/// joiner would form exactly the shape it was typed to prevent.
+fn manual_joiners() -> u64 {
+    feature_bits(&BASIC) | feature_bits(&AFTER)
+}
 
 /// Does `ch` *continue* a word — so that whatever follows it does not begin
 /// one?
@@ -1611,7 +1621,12 @@ pub(crate) fn shape(
         final_reordering(&plan, glyphs);
         return;
     };
-    subs.apply_stages(data, tags, lang, &stages, per_syllable, glyphs, |stage, glyphs| {
+    let staging = Staging {
+        stages: &stages,
+        per_syllable,
+        manual_joiners: manual_joiners(),
+    };
+    subs.apply_stages(data, tags, lang, &staging, glyphs, |stage, glyphs| {
         if stage == 0 {
             initial_reordering(&plan, glyphs, dotted, &mut order);
         } else if stage == BASIC.len() {
@@ -1733,7 +1748,9 @@ fn insert_dotted_circles(glyphs: &mut Vec<SubGlyph>, dotted: Option<u16>) {
 )]
 mod tests {
     use super::*;
-    use crate::fixture::{gsub_from_scripts, ligature, ligature_set, ligature_subst, script_list, span};
+    use crate::fixture::{
+        gsub_from_scripts, ligature, ligature_set, ligature_subst, script_list, span,
+    };
     use crate::gsub::{LOOKUP_LIGATURE, Lig};
     use crate::indic::Char;
     use alloc::vec::Vec;
@@ -1750,7 +1767,11 @@ mod tests {
         let stages = stages();
         let mut seen = 0u64;
         for (i, &stage) in stages.iter().enumerate() {
-            assert_eq!(stage & seen, 0, "stage {i} repeats a feature of an earlier one");
+            assert_eq!(
+                stage & seen,
+                0,
+                "stage {i} repeats a feature of an earlier one"
+            );
             seen |= stage;
         }
         // And the last stage really is the catch-all, minus what ran already
@@ -1898,10 +1919,7 @@ mod tests {
     /// answer yes to a probe that should be about the pair.
     fn face(script: &[u8; 4], tags: &[&[u8; 4]], pair: &[u16; 2]) -> Vec<u8> {
         let indices: Vec<u16> = (0..u16::try_from(tags.len()).unwrap()).collect();
-        let subtable = ligature_subst(
-            &pair[..1],
-            &[ligature_set(&[ligature(JOINED, &pair[1..])])],
-        );
+        let subtable = ligature_subst(&pair[..1], &[ligature_set(&[ligature(JOINED, &pair[1..])])]);
         gsub_from_scripts(
             &script_list(&[(script, &indices)]),
             tags,
@@ -2101,10 +2119,11 @@ mod tests {
     /// something to say yes to.
     fn with_face(script: Script, tag: &[u8; 4], tags: &[&[u8; 4]], f: impl FnOnce(&Plan)) {
         let first = u16::try_from(FIRST).unwrap();
-        let data = face(tag, if tags.is_empty() { &[INERT] } else { tags }, &[
-            first,
-            first + 1,
-        ]);
+        let data = face(
+            tag,
+            if tags.is_empty() { &[INERT] } else { tags },
+            &[first, first + 1],
+        );
         let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
         let run = Some(ScriptTags::exactly(*tag));
         let plan = Plan::new(
@@ -2515,11 +2534,14 @@ mod tests {
         for_each_syllable(&mut glyphs, |kind, _, syllable| {
             seen.push((kind, order_of(syllable)));
         });
-        assert_eq!(seen, [
-            (Syllable::Consonant, vec![0, 1]),
-            (Syllable::Consonant, vec![2]),
-            (Syllable::Vowel, vec![3]),
-        ]);
+        assert_eq!(
+            seen,
+            [
+                (Syllable::Consonant, vec![0, 1]),
+                (Syllable::Consonant, vec![2]),
+                (Syllable::Vowel, vec![3]),
+            ]
+        );
     }
 
     /// A syllable begins a word when nothing that continues one precedes it —
@@ -2622,9 +2644,16 @@ mod tests {
     fn an_empty_run_is_shaped_into_nothing() {
         let mut glyphs: Vec<SubGlyph> = Vec::new();
         let tags = Some(ScriptTags::exactly(*b"dev2"));
-        shape(&[], None, tags, None, None, Script::Devanagari, &mut glyphs, |_| {
-            None
-        });
+        shape(
+            &[],
+            None,
+            tags,
+            None,
+            None,
+            Script::Devanagari,
+            &mut glyphs,
+            |_| None,
+        );
         assert!(glyphs.is_empty());
     }
 }

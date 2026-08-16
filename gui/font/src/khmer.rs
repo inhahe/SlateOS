@@ -46,7 +46,7 @@
 
 use alloc::vec::Vec;
 
-use crate::gsub::{ALL_FEATURES, SubGlyph, Substitutions, feature_bit, feature_bits};
+use crate::gsub::{ALL_FEATURES, Staging, SubGlyph, Substitutions, feature_bit, feature_bits};
 use crate::indic::Category;
 use crate::khmer_machine::{ACCEPTS, TRANSITIONS};
 use crate::lang::Lang;
@@ -287,10 +287,27 @@ const BASIC: [&[u8; 4]; 7] = [
 /// the reordering, which is the whole mechanism by which a font is told *which*
 /// consonant to draw subjoined. HarfBuzz's flag is `F_GLOBAL_MANUAL_JOINERS`
 /// for these four and `F_MANUAL_JOINERS` for those five, and the split is
-/// exactly the same one. (`F_MANUAL_JOINERS` itself is a no-op here: it turns
-/// off HarfBuzz's automatic skipping of ZWJ and ZWNJ, and this crate's
-/// [`skip`](crate::skip) never had it.)
+/// exactly the same one. The `MANUAL_JOINERS` half of both is
+/// [`manual_joiners`].
 const GLOBAL: [&[u8; 4]; 4] = [b"pres", b"abvs", b"blws", b"psts"];
+
+/// The features that read ZWJ and ZWNJ themselves: HarfBuzz's
+/// `F_MANUAL_JOINERS`, which every entry of its `khmer_features` carries.
+///
+/// That is the nine of [`BASIC`] and [`GLOBAL`] **less `locl` and `ccmp`**,
+/// which are not in `khmer_features` at all — `collect_features_khmer` enables
+/// them with `F_PER_SYLLABLE` alone, so they keep the automatic joiner
+/// skipping every ordinary feature has. The distinction is worth the
+/// subtraction: it decides whether a `ccmp` ligature may form across a ZWJ,
+/// and in HarfBuzz it may.
+///
+/// For the seven that are manual, a joiner is the *subject* of the rule rather
+/// than punctuation in it — `U+17D2 ZWJ` before a consonant asks for a
+/// different subjoined form than `U+17D2` alone — so a lookup that stepped
+/// over one would apply the rule the joiner was typed to redirect.
+fn manual_joiners() -> u64 {
+    (feature_bits(&BASIC) | feature_bits(&GLOBAL)) & !feature_bit(b"locl") & !feature_bit(b"ccmp")
+}
 
 /// Shape one run of Khmer text: HarfBuzz's Khmer shaper, end to end.
 ///
@@ -350,8 +367,11 @@ pub(crate) fn shape(
         data,
         tags,
         lang,
-        &stages,
-        feature_bits(&BASIC),
+        &Staging {
+            stages: &stages,
+            per_syllable: feature_bits(&BASIC),
+            manual_joiners: manual_joiners(),
+        },
         glyphs,
         |stage, glyphs| {
             if stage == 0 {
@@ -678,10 +698,7 @@ mod tests {
     fn a_split_vowel_becomes_two_marks_on_one_cluster() {
         // ក + ើ — KA and vowel sign OE.
         let out = split("\u{1780}\u{17BE}", |_| true);
-        assert_eq!(
-            out,
-            vec![('\u{1780}', 0), ('\u{17C1}', 3), ('\u{17BE}', 3)]
-        );
+        assert_eq!(out, vec![('\u{1780}', 0), ('\u{17C1}', 3), ('\u{17BE}', 3)]);
     }
 
     /// And does not when either half is missing: one drawable glyph beats a

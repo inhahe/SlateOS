@@ -121,12 +121,11 @@ use crate::context::{MAX_NESTING, Matched, Nested, chain_match, context_match, r
 use crate::indic::Char;
 use crate::joining::Form;
 use crate::lang::Lang;
-use crate::otl::{
-    ByScript, Lookup, MAX_SUBTABLES, coverage_index, lookup_at, lookup_list,
-};
+use crate::norm::Ignorable;
+use crate::otl::{ByScript, Lookup, MAX_SUBTABLES, coverage_index, lookup_at, lookup_list};
 use crate::script::ScriptTags;
 use crate::sfnt::{Span, u16_at};
-use crate::skip::{CLASS_BASE, CLASS_MARK, Definitions, Skipper};
+use crate::skip::{CLASS_BASE, CLASS_MARK, Definitions, Joiners, Skipper};
 use crate::would::would_apply;
 
 /// The features read, in the order whose positions become the mask bits.
@@ -214,6 +213,62 @@ const TJMO: u64 = 1 << 36;
 /// occupies is a bit no lookup carries — so the extra ones select nothing and
 /// the constant needs no maintenance when the list grows.
 pub(crate) const ALL_FEATURES: u64 = u64::MAX;
+
+/// The single stage a caller with no staging plan runs.
+const ONE_STAGE: [u64; 1] = [ALL_FEATURES];
+
+/// A shaper's instructions to [`Substitutions::apply_stages`]: which features
+/// run when, and the two things that are decided per feature rather than per
+/// lookup.
+///
+/// Everything here is a *set of feature bits*, intersected with each lookup's
+/// own mask. That is the granularity the questions really have: one lookup can
+/// be reached by two features that answer them differently, and HarfBuzz
+/// resolves each clash in a particular direction when it merges the two map
+/// entries that name the lookup. Those directions are reproduced at the point
+/// of use, and noted on each field below.
+pub(crate) struct Staging<'s> {
+    /// The passes, in order. A lookup runs in a stage when some feature that
+    /// reached it is in that stage's set, and it sees only the glyphs eligible
+    /// for the features in the intersection.
+    pub(crate) stages: &'s [u64],
+    /// The features that may not match across a syllable boundary.
+    ///
+    /// A lookup some feature in this set reaches is offered each maximal run of
+    /// glyphs sharing a [`SubGlyph::syllable`] separately, so no rule inside it
+    /// can see beyond one. Indic features are all declared that way — a
+    /// ligature spanning two syllables is never what the font meant, whatever
+    /// its coverage says — but the general ones the Indic shaper runs alongside
+    /// them in its last stage are not.
+    ///
+    /// Clash resolved *towards* confinement, as HarfBuzz's `per_syllable |=`.
+    pub(crate) per_syllable: u64,
+    /// The features that read ZWJ and ZWNJ themselves.
+    ///
+    /// For an ordinary feature the joiners are the font's business: a lookup
+    /// steps over a ZWJ on its way to the next glyph, which is what makes
+    /// `f ZWJ i` still reach the `fi` ligature. For the Indic-family basic
+    /// features they are the *shaper's* business — a joiner there selects
+    /// between a conjunct and a half-form — and stepping over one would apply
+    /// the rule the joiner was typed to suppress.
+    ///
+    /// Clash resolved *towards* manual, as HarfBuzz's `auto_zwj &=`. See
+    /// [`Joiners`].
+    pub(crate) manual_joiners: u64,
+}
+
+impl Staging<'static> {
+    /// One pass, every feature, nothing declared: what a script with no shaper
+    /// of its own runs.
+    #[must_use]
+    pub(crate) fn all() -> Self {
+        Self {
+            stages: &ONE_STAGE,
+            per_syllable: 0,
+            manual_joiners: 0,
+        }
+    }
+}
 
 /// The mask bit of the feature tagged `tag`, or `0` for a tag this crate never
 /// asks a face for.
@@ -418,9 +473,14 @@ pub struct SubGlyph {
     /// Left at its default — not Indic, never reordered — for every run no
     /// Indic shaper touches, which is nearly all of them.
     pub(crate) indic: Char,
-    /// Whether this glyph is still standing for a character that exists to
-    /// instruct the shaper and is never meant to be drawn — a joiner, a soft
-    /// hyphen, a bidi control, a variation selector.
+    /// Which never-drawn character this glyph is still standing for, if any —
+    /// a joiner, a soft hyphen, a bidi control, a variation selector.
+    ///
+    /// Read twice, for two different questions. [`Skipper`] asks which *kind*
+    /// it is, to decide whether a lookup may step over the glyph on its way
+    /// past; [`ScaledFont::shape`] asks only whether it is one at all, to erase
+    /// it at the end. See [`Ignorable`] for why the two questions have
+    /// different answers.
     ///
     /// **This is the one field substitution clears rather than carries.**
     /// Every other property here is about the character the glyph started as,
@@ -438,9 +498,9 @@ pub struct SubGlyph {
     /// component's — which, since a ligature is a substitution, is cleared
     /// anyway.
     ///
-    /// Read once, at the very end of [`ScaledFont::shape`], where a glyph
-    /// still carrying it is replaced by the face's space glyph or dropped.
-    pub(crate) ignorable: bool,
+    /// A glyph still carrying one at the very end of [`ScaledFont::shape`] is
+    /// replaced by the face's space glyph, or dropped.
+    pub(crate) ignorable: Ignorable,
 }
 
 /// Where a glyph sits inside a ligature: HarfBuzz's `lig_props`, unpacked.
@@ -645,7 +705,7 @@ impl SubGlyph {
             indic: Char::DEFAULT,
             syllable: 0,
             word: false,
-            ignorable: false,
+            ignorable: Ignorable::No,
         }
     }
 
@@ -665,7 +725,7 @@ impl SubGlyph {
             indic: Char::DEFAULT,
             syllable: 0,
             word: false,
-            ignorable: false,
+            ignorable: Ignorable::No,
         }
     }
 
@@ -705,7 +765,7 @@ impl SubGlyph {
             indic: Char::DEFAULT,
             syllable: 0,
             word: false,
-            ignorable: false,
+            ignorable: Ignorable::No,
         }
     }
 
@@ -728,7 +788,7 @@ impl SubGlyph {
             indic: Char::DEFAULT,
             syllable: 0,
             word: false,
-            ignorable: false,
+            ignorable: Ignorable::No,
         }
     }
 }
@@ -792,10 +852,10 @@ impl Substitutions {
         lang: Option<Lang>,
         glyphs: &mut Vec<SubGlyph>,
     ) {
-        self.apply_stages(data, script, lang, &[ALL_FEATURES], 0, glyphs, |_, _| {});
+        self.apply_stages(data, script, lang, &Staging::all(), glyphs, |_, _| {});
     }
 
-    /// Apply the lookups in several passes, one per entry of `stages`.
+    /// Apply the lookups in several passes, one per entry of `staging.stages`.
     ///
     /// A stage is a set of feature bits; a lookup runs in a stage when some
     /// feature that reached it is in that stage's set, and it sees only the
@@ -815,26 +875,13 @@ impl Substitutions {
     /// reordering that has to happen at a particular point in the sequence
     /// rather than before or after all of it.
     ///
-    /// `per_syllable` is the set of features that may not match across a
-    /// syllable boundary: a lookup some feature in it reaches is offered each
-    /// maximal run of glyphs sharing a [`SubGlyph::syllable`] separately, so no
-    /// rule inside it can see beyond one. Indic features are all declared that
-    /// way — a ligature spanning two syllables is never what the font meant,
-    /// whatever its coverage says — but the general ones the Indic shaper runs
-    /// alongside them in its last stage are not.
-    ///
-    /// A *set* and not a flag because that is the granularity the confinement
-    /// really has: one lookup can be reached by both a per-syllable feature and
-    /// an unconstrained one, and HarfBuzz resolves the clash by confining it —
-    /// its `per_syllable |= ` when it merges two entries for one lookup, which
-    /// is what the intersection below reproduces.
+    /// See [`Staging`] for what the rest of it means.
     pub(crate) fn apply_stages(
         &self,
         data: &[u8],
         script: Option<ScriptTags>,
         lang: Option<Lang>,
-        stages: &[u64],
-        per_syllable: u64,
+        staging: &Staging<'_>,
         glyphs: &mut Vec<SubGlyph>,
         mut between: impl FnMut(usize, &mut Vec<SubGlyph>),
     ) {
@@ -844,20 +891,21 @@ impl Substitutions {
             scratch: Vec::new(),
             defs: self.defs,
             mask: ALWAYS,
+            manual_joiners: staging.manual_joiners,
             serial: 0,
         };
         // Hoisted out of both loops for the same reason `Ctx::scratch` is: a
         // per-syllable stage would otherwise allocate once per syllable per
         // lookup, and Devanagari text is nothing but syllables.
         let mut piece: Vec<SubGlyph> = Vec::new();
-        for (i, &stage) in stages.iter().enumerate() {
+        for (i, &stage) in staging.stages.iter().enumerate() {
             for (lookup, mask) in self.lookups.for_script(script, lang) {
                 let mask = mask & stage;
                 if mask == 0 {
                     continue;
                 }
                 ctx.mask = mask;
-                if mask & per_syllable != 0 {
+                if mask & staging.per_syllable != 0 {
                     apply_per_syllable(data, lookup, glyphs, &mut ctx, &mut piece);
                 } else {
                     apply_lookup(data, lookup, glyphs, &mut ctx);
@@ -883,7 +931,12 @@ impl Substitutions {
         tag: &[u8; 4],
     ) -> u64 {
         let bit = feature_bit(tag);
-        if bit != 0 && self.lookups.for_script(script, lang).any(|(_, m)| m & bit != 0) {
+        if bit != 0
+            && self
+                .lookups
+                .for_script(script, lang)
+                .any(|(_, m)| m & bit != 0)
+        {
             bit
         } else {
             0
@@ -994,6 +1047,14 @@ struct Ctx {
     /// by contrast, is the nested lookup's own — which is why a skipper is
     /// built per invocation rather than passed down.
     mask: u64,
+    /// The features that read the joiners themselves rather than leaving them
+    /// to the font — the plan's `manual_joiners`, unchanged for the whole run.
+    ///
+    /// Intersected with [`mask`](Self::mask) to decide whether the lookup being
+    /// applied may step over a ZWJ. Held here rather than passed down because
+    /// it is a property of the *plan*, and a nested lookup inherits the mask
+    /// that reached the rule that invoked it.
+    manual_joiners: u64,
     /// How many ligature ids have been handed out so far in this run, for
     /// [`next_lig_id`](Ctx::next_lig_id).
     serial: u8,
@@ -1048,7 +1109,17 @@ fn apply_lookup(data: &[u8], lookup: &Lookup, glyphs: &mut Vec<SubGlyph>, ctx: &
 /// The view of the run that `lookup` is entitled to, under the features
 /// currently being applied.
 fn skipper<'a>(lookup: &Lookup, data: &'a [u8], ctx: &Ctx) -> Skipper<'a> {
-    Skipper::new(data, ctx.defs, lookup.flag, lookup.filter, ctx.mask)
+    Skipper::new(
+        data,
+        ctx.defs,
+        lookup.flag,
+        lookup.filter,
+        ctx.mask,
+        // Manual if *any* of the features that reached the lookup is manual,
+        // which is how HarfBuzz resolves it when it merges two map entries
+        // that name the same lookup: `auto_zwnj &= …`, `auto_zwj &= …`.
+        Joiners::substitution(ctx.mask & ctx.manual_joiners != 0),
+    )
 }
 
 /// Apply one lookup at exactly one position, if it matches there.
@@ -1091,7 +1162,12 @@ fn apply_at(
 ///
 /// The position is independent of every other — nothing here can look at a
 /// neighbour — so the run's length and clusters come out unchanged.
-fn apply_single(data: &[u8], subtables: &[usize], glyphs: &mut [SubGlyph], i: usize) -> Option<usize> {
+fn apply_single(
+    data: &[u8],
+    subtables: &[usize],
+    glyphs: &mut [SubGlyph],
+    i: usize,
+) -> Option<usize> {
     let glyph = glyphs.get_mut(i)?;
     // First subtable that covers the glyph wins, and the result is not offered
     // to the rest: within one lookup a glyph is substituted once.
@@ -1102,7 +1178,7 @@ fn apply_single(data: &[u8], subtables: &[usize], glyphs: &mut [SubGlyph], i: us
     // The font asked for this glyph, so it is no longer standing for the
     // control character it was looked up from and must not be hidden at the
     // end of shaping. See `SubGlyph::ignorable`.
-    glyph.ignorable = false;
+    glyph.ignorable = Ignorable::No;
     Some(1)
 }
 
@@ -1193,7 +1269,7 @@ fn apply_multiple(
             // Cleared, not inherited, and note that this is the one field of
             // `glyph` the `..glyph` spread must not carry: every piece is a
             // glyph the font asked for. See `SubGlyph::ignorable`.
-            ignorable: false,
+            ignorable: Ignorable::No,
             ..glyph
         }),
     );
@@ -1233,7 +1309,7 @@ fn apply_alternate(
         .find_map(|&sub| alternate_at(data, sub, glyph.gid))?;
     glyph.gid = gid;
     // As in `apply_single`: substituted is no longer ignorable.
-    glyph.ignorable = false;
+    glyph.ignorable = Ignorable::No;
     Some(1)
 }
 
@@ -1300,9 +1376,7 @@ fn sequence_at(data: &[u8], sub: usize, glyph: u16, out: &mut Vec<u16>) -> Optio
         return None;
     }
     for i in 0..glyph_count {
-        let at = sequence
-            .checked_add(2)?
-            .checked_add(i.checked_mul(2)?)?;
+        let at = sequence.checked_add(2)?.checked_add(i.checked_mul(2)?)?;
         out.push(u16_at(data, at)?);
     }
     Some(())
@@ -1347,7 +1421,7 @@ fn apply_ligature(
         // letters is exactly what makes some faces' ligature fire — and those
         // components are removed below, which disposes of them just as
         // thoroughly.
-        first.ignorable = false;
+        first.ignorable = Ignorable::No;
     }
     // Removed from the back so that the earlier indices stay valid. Component
     // zero is the glyph just rewritten and stays.
@@ -1395,12 +1469,13 @@ fn stamp_components(
     ctx: &mut Ctx,
 ) {
     let defs = ctx.defs;
-    let class_of = |glyphs: &[SubGlyph], pos: usize| {
-        glyphs.get(pos).map_or(0, |g| defs.class(data, g.gid))
-    };
+    let class_of =
+        |glyphs: &[SubGlyph], pos: usize| glyphs.get(pos).map_or(0, |g| defs.class(data, g.gid));
     let Some(&first) = at.first() else { return };
-    let rest_all_marks =
-        (1..count).all(|k| at.get(k).is_some_and(|&p| class_of(glyphs, p) == CLASS_MARK));
+    let rest_all_marks = (1..count).all(|k| {
+        at.get(k)
+            .is_some_and(|&p| class_of(glyphs, p) == CLASS_MARK)
+    });
     let first_class = class_of(glyphs, first);
     let mark_ligature = rest_all_marks && first_class == CLASS_MARK;
     let ligature = !(rest_all_marks && matches!(first_class, CLASS_BASE | CLASS_MARK));
@@ -1462,9 +1537,7 @@ fn renumber(glyphs: &mut [SubGlyph], at: usize, id: u8, so_far: u8, last: u8) {
         0 => last,
         n => n,
     };
-    let comp = so_far
-        .saturating_sub(last)
-        .saturating_add(this.min(last));
+    let comp = so_far.saturating_sub(last).saturating_add(this.min(last));
     glyph.lig = glyph.lig.mark(id, comp);
 }
 
@@ -1549,11 +1622,15 @@ fn ligature_matches(
             lig.checked_add(4)?
                 .checked_add(k.checked_sub(1)?.checked_mul(2)?)?,
         )?;
-        pos = skip.next(glyphs, pos)?;
+        // Not `next` plus a comparison: a never-drawn character between two
+        // components is stepped over rather than failing the match — `f ZWJ i`
+        // is a request for the `fi` ligature — while a rule that names the
+        // joiner itself still matches it. Only a walk that carries the
+        // criterion can tell those apart. See [`Skipper::next_matching`].
+        pos = skip.next_matching(glyphs, pos, |p| {
+            glyphs.get(p).is_some_and(|g| g.gid == want)
+        })?;
         let component = glyphs.get(pos)?;
-        if component.gid != want {
-            return None;
-        }
         if !ligation_allowed(glyphs, i, head, component.lig, skip, &mut ligbase) {
             return None;
         }
@@ -1604,7 +1681,9 @@ fn ligation_allowed(
 fn base_is_hidden(glyphs: &[SubGlyph], from: usize, id: u8, skip: Skipper<'_>) -> bool {
     let mut j = from;
     while let Some(k) = j.checked_sub(1) {
-        let Some(glyph) = glyphs.get(k) else { return false };
+        let Some(glyph) = glyphs.get(k) else {
+            return false;
+        };
         if glyph.lig.id != id {
             return false;
         }
@@ -1968,8 +2047,9 @@ mod tests {
         let mut data = gsub.to_vec();
         let at = data.len();
         data.extend_from_slice(gdef);
-        let subs = Substitutions::parse(&data, Some(span(0, gsub.len())), Some(span(at, gdef.len())))
-            .expect("a flagged lookup must still parse");
+        let subs =
+            Substitutions::parse(&data, Some(span(0, gsub.len())), Some(span(at, gdef.len())))
+                .expect("a flagged lookup must still parse");
         (data, subs)
     }
 
@@ -2099,11 +2179,8 @@ mod tests {
         sets: &[Vec<u8>],
     ) -> Vec<u8> {
         let coverage = coverage1(glyphs);
-        let (blocks, offs) = sets_after(
-            12 + sets.len() * 2,
-            &[&coverage, back, input, ahead],
-            sets,
-        );
+        let (blocks, offs) =
+            sets_after(12 + sets.len() * 2, &[&coverage, back, input, ahead], sets);
         let mut out = Vec::new();
         out.extend_from_slice(&be16(2));
         for b in &blocks {
@@ -2166,7 +2243,10 @@ mod tests {
         let mut out = Vec::new();
         out.extend_from_slice(&be16(3));
         let mut next = offs.iter();
-        for (n, part) in [back.len(), input.len(), ahead.len()].into_iter().enumerate() {
+        for (n, part) in [back.len(), input.len(), ahead.len()]
+            .into_iter()
+            .enumerate()
+        {
             let _ = n;
             out.extend_from_slice(&be16(u16::try_from(part).unwrap()));
             for _ in 0..part {
@@ -2212,7 +2292,8 @@ mod tests {
         ]);
         let sub = ligature_subst(&[10], &[set_f]);
         let data = gsub_table(b"liga", LOOKUP_LIGATURE, &sub);
-        let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).expect("liga must parse");
+        let subs =
+            Substitutions::parse(&data, Some(span(0, data.len())), None).expect("liga must parse");
         (data, subs)
     }
 
@@ -2285,8 +2366,11 @@ mod tests {
             data,
             None,
             None,
-            &[ALL_FEATURES],
-            ALL_FEATURES,
+            &Staging {
+                stages: &[ALL_FEATURES],
+                per_syllable: ALL_FEATURES,
+                manual_joiners: 0,
+            },
             &mut glyphs,
             |_, _| {},
         );
@@ -2347,7 +2431,18 @@ mod tests {
             .enumerate()
             .map(|(i, &gid)| SubGlyph::new(gid, i))
             .collect();
-        subs.apply_stages(&data, None, None, &[0], 0, &mut glyphs, |_, _| {});
+        subs.apply_stages(
+            &data,
+            None,
+            None,
+            &Staging {
+                stages: &[0],
+                per_syllable: 0,
+                manual_joiners: 0,
+            },
+            &mut glyphs,
+            |_, _| {},
+        );
         assert_eq!(glyphs.iter().map(|g| g.gid).collect::<Vec<_>>(), [10, 11]);
     }
 
@@ -2367,8 +2462,11 @@ mod tests {
             &data,
             None,
             None,
-            &[0, ALL_FEATURES],
-            0,
+            &Staging {
+                stages: &[0, ALL_FEATURES],
+                per_syllable: 0,
+                manual_joiners: 0,
+            },
             &mut glyphs,
             |i, glyphs| seen.push((i, glyphs.len())),
         );
@@ -2789,11 +2887,7 @@ mod tests {
 
     /// Run every lookup over `gids`, each glyph eligible for the cursive form
     /// beside it, and report what comes out.
-    fn subst_cursive(
-        data: &[u8],
-        subs: &Substitutions,
-        run: &[(u16, Option<Form>)],
-    ) -> Vec<u16> {
+    fn subst_cursive(data: &[u8], subs: &Substitutions, run: &[(u16, Option<Form>)]) -> Vec<u16> {
         let mut glyphs: Vec<SubGlyph> = run
             .iter()
             .enumerate()
@@ -2870,7 +2964,10 @@ mod tests {
         // clearing it in `SubGlyph::jamo` meaningful: a bit that was not in
         // `ALWAYS` would already be clear and the removal a no-op.
         assert_eq!(ALWAYS & CALT, CALT);
-        assert!(FEATURES.len() < u64::BITS as usize, "a feature past the 64th gets no bit");
+        assert!(
+            FEATURES.len() < u64::BITS as usize,
+            "a feature past the 64th gets no bit"
+        );
         // `ALWAYS` is a prefix of the list: every feature before the first
         // positional one and none after it. Being a *prefix* is the property
         // that lets it be a literal — an unconditional feature added after a
@@ -2899,7 +2996,12 @@ mod tests {
         for tag in FEATURES {
             let bit = feature_bit(tag);
             assert_ne!(bit, 0, "{:?}", core::str::from_utf8(*tag));
-            assert_eq!(seen & bit, 0, "{:?} repeats a bit", core::str::from_utf8(*tag));
+            assert_eq!(
+                seen & bit,
+                0,
+                "{:?} repeats a bit",
+                core::str::from_utf8(*tag)
+            );
             seen |= bit;
         }
     }
@@ -2995,8 +3097,8 @@ mod tests {
     /// Shape glyph 10 alone under `script` and `lang`, and report what it
     /// became.
     fn one(data: &[u8], subs: &Substitutions, script: Option<ScriptTags>, lang: &str) -> u16 {
-        let lang = (!lang.is_empty())
-            .then(|| Lang::new(lang).expect("the tests name real languages"));
+        let lang =
+            (!lang.is_empty()).then(|| Lang::new(lang).expect("the tests name real languages"));
         let mut glyphs = vec![SubGlyph::new(10, 0)];
         subs.apply(data, script, lang, &mut glyphs);
         glyphs.first().map_or(0, |g| g.gid)
@@ -3051,11 +3153,7 @@ mod tests {
     #[test]
     fn a_required_feature_is_applied_like_any_other() {
         // Neither language lists a feature; the Turkish one requires it.
-        let scripts = languages(&[(
-            b"latn",
-            Some((NO_REQUIRED, &[])),
-            &[(b"TRK ", (0, &[]))],
-        )]);
+        let scripts = languages(&[(b"latn", Some((NO_REQUIRED, &[])), &[(b"TRK ", (0, &[]))])]);
         let sub = single_delta(&[10], 5);
         let data = gsub_from_scripts(&scripts, &[b"locl"], LOOKUP_SINGLE, &[&sub]);
         let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
@@ -3353,10 +3451,11 @@ mod tests {
         assert_eq!(none.first().map(|g| g.gid), Some(60));
 
         // A face with no `latn` and no default really does say nothing.
-        let data = gsub_scripts(&[(b"arab", b"liga")], LOOKUP_SINGLE, &[&single_list(
-            &[10],
-            &[50],
-        )]);
+        let data = gsub_scripts(
+            &[(b"arab", b"liga")],
+            LOOKUP_SINGLE,
+            &[&single_list(&[10], &[50])],
+        );
         let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
         let mut glyphs = vec![SubGlyph::new(10, 0)];
         subs.apply(&data, hebrew, None, &mut glyphs);
@@ -3413,7 +3512,9 @@ mod tests {
         let lookups_at = lookup_list + 2 + 2 * 2;
         out.extend_from_slice(&be16(2));
         for i in 0..2 {
-            out.extend_from_slice(&be16(u16::try_from(lookups_at + i * 8 - lookup_list).unwrap()));
+            out.extend_from_slice(&be16(
+                u16::try_from(lookups_at + i * 8 - lookup_list).unwrap(),
+            ));
         }
         let mut sub_at = lookups_at + 2 * 8;
         for (i, sub) in subtables.iter().enumerate() {
@@ -3428,10 +3529,7 @@ mod tests {
         }
 
         let subs = Substitutions::parse(&out, Some(span(0, out.len())), None).unwrap();
-        let mut glyphs = vec![
-            SubGlyph::new(10, 0),
-            SubGlyph::new(11, 1),
-        ];
+        let mut glyphs = vec![SubGlyph::new(10, 0), SubGlyph::new(11, 1)];
         subs.apply(&out, LATIN, None, &mut glyphs);
         assert_eq!(
             glyphs.iter().map(|g| g.gid).collect::<Vec<_>>(),
@@ -3512,11 +3610,7 @@ mod tests {
     fn a_substitution_is_not_offered_to_the_lookup_that_made_it() {
         // A font whose output is also its input must not loop or cascade
         // inside one lookup: 10 becomes 11 once, not 12.
-        let data = gsub_lookups(&[(
-            b"ccmp",
-            LOOKUP_SINGLE,
-            single_list(&[10, 11], &[11, 12]),
-        )]);
+        let data = gsub_lookups(&[(b"ccmp", LOOKUP_SINGLE, single_list(&[10, 11], &[11, 12]))]);
         let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
         assert_eq!(subst(&data, &subs, &[10]), [11]);
     }
@@ -3589,7 +3683,11 @@ mod tests {
 
     #[test]
     fn every_glyph_of_a_run_is_decomposed_not_just_the_first() {
-        let data = gsub_table(b"ccmp", LOOKUP_MULTIPLE, &multiple(&[10, 12], &[&[30, 31], &[40, 41]]));
+        let data = gsub_table(
+            b"ccmp",
+            LOOKUP_MULTIPLE,
+            &multiple(&[10, 12], &[&[30, 31], &[40, 41]]),
+        );
         let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
         assert_eq!(subst(&data, &subs, &[10, 11, 12]), [30, 31, 11, 40, 41]);
         assert_eq!(clusters(&data, &subs, &[10, 11, 12]), [0, 0, 1, 2, 2]);
@@ -3756,7 +3854,11 @@ mod tests {
 
     #[test]
     fn a_truncated_multiple_substitution_is_survivable() {
-        let data = gsub_table(b"ccmp", LOOKUP_MULTIPLE, &multiple(&[10, 12], &[&[30, 31], &[40]]));
+        let data = gsub_table(
+            b"ccmp",
+            LOOKUP_MULTIPLE,
+            &multiple(&[10, 12], &[&[30, 31], &[40]]),
+        );
         let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
         for cut in 0..data.len() {
             let short = &data[..cut];
@@ -3771,7 +3873,11 @@ mod tests {
     /// it can reach a run is by being invoked — which is the arrangement real
     /// fonts use and the thing that makes these tests test the invocation
     /// rather than the helper.
-    fn context_font(kind: u16, sub: Vec<u8>, helpers: &[(u16, Vec<u8>)]) -> (Vec<u8>, Substitutions) {
+    fn context_font(
+        kind: u16,
+        sub: Vec<u8>,
+        helpers: &[(u16, Vec<u8>)],
+    ) -> (Vec<u8>, Substitutions) {
         let mut lookups: Vec<(&[u8; 4], u16, Vec<u8>)> = alloc::vec![(b"calt", kind, sub)];
         // Three off-by-default tags, so a helper is never reachable on its own.
         for (tag, (kind, sub)) in [b"dlig", b"hlig", b"swsh"].iter().zip(helpers) {
@@ -3824,14 +3930,14 @@ mod tests {
     fn a_rule_set_tries_its_rules_in_the_fonts_order() {
         // Longest first, as with ligatures: the font decides, and the first
         // rule that matches wins rather than the most specific one.
-        let set = rule_set_of(&[
-            rule(&[11, 12], &[(0, 1)]),
-            rule(&[11], &[(0, 2)]),
-        ]);
+        let set = rule_set_of(&[rule(&[11, 12], &[(0, 1)]), rule(&[11], &[(0, 2)])]);
         let (data, subs) = context_font(
             LOOKUP_CONTEXT,
             context1(&[10], &[set]),
-            &[helper_10_to_30(), (LOOKUP_SINGLE, single_list(&[10], &[40]))],
+            &[
+                helper_10_to_30(),
+                (LOOKUP_SINGLE, single_list(&[10], &[40])),
+            ],
         );
         assert_eq!(subst(&data, &subs, &[10, 11, 12]), [30, 11, 12]);
         assert_eq!(subst(&data, &subs, &[10, 11, 13]), [40, 11, 13]);
@@ -3870,10 +3976,7 @@ mod tests {
         // subtable's own header and read its format as a rule count.
         let classes = class_def(10, &[1, 1]);
         // Both glyphs are class 1, and a format-2 rule names classes.
-        let sets = alloc::vec![
-            rule_set_of(&[]),
-            rule_set_of(&[rule(&[1], &[(0, 1)])]),
-        ];
+        let sets = alloc::vec![rule_set_of(&[]), rule_set_of(&[rule(&[1], &[(0, 1)])]),];
         let mut sub = context2(&[10, 11], &classes, &sets);
         // The class-1 rule set is the second offset, at byte 10 of the header.
         assert_eq!(subst_with(&sub, &[10, 11]), [30, 11]);
@@ -3884,11 +3987,7 @@ mod tests {
     /// Build a context font around `sub` with the usual 10 -> 30 helper and
     /// run it, for the tests that only care about whether the context fired.
     fn subst_with(sub: &[u8], gids: &[u16]) -> Vec<u16> {
-        let (data, subs) = context_font(
-            LOOKUP_CONTEXT,
-            sub.to_vec(),
-            &[helper_10_to_30()],
-        );
+        let (data, subs) = context_font(LOOKUP_CONTEXT, sub.to_vec(), &[helper_10_to_30()]);
         subst(&data, &subs, gids)
     }
 
@@ -4081,18 +4180,43 @@ mod tests {
     #[test]
     fn a_truncated_contextual_substitution_is_survivable() {
         let subtables = alloc::vec![
-            (LOOKUP_CONTEXT, context1(&[10], &[rule_set_of(&[rule(&[11], &[(0, 1)])])])),
-            (LOOKUP_CONTEXT, context2(&[10, 11], &class_def(10, &[1, 1]), &[
-                rule_set_of(&[]),
-                rule_set_of(&[rule(&[1], &[(0, 1)])]),
-            ])),
+            (
+                LOOKUP_CONTEXT,
+                context1(&[10], &[rule_set_of(&[rule(&[11], &[(0, 1)])])])
+            ),
+            (
+                LOOKUP_CONTEXT,
+                context2(
+                    &[10, 11],
+                    &class_def(10, &[1, 1]),
+                    &[rule_set_of(&[]), rule_set_of(&[rule(&[1], &[(0, 1)])]),]
+                )
+            ),
             (LOOKUP_CONTEXT, context3(&[&[10], &[11]], &[(0, 1)])),
-            (LOOKUP_CHAIN_CONTEXT, context1(&[10], &[rule_set_of(&[chained(&[5], &[], &[20], &[(0, 1)])])])),
-            (LOOKUP_CHAIN_CONTEXT, chain_context2(&[10], &class_def(5, &[1]), &class_def(10, &[1]), &class_def(20, &[1]), &[
-                rule_set_of(&[]),
-                rule_set_of(&[chained(&[1], &[], &[1], &[(0, 1)])]),
-            ])),
-            (LOOKUP_CHAIN_CONTEXT, chain_context3(&[&[5]], &[&[10]], &[&[20]], &[(0, 1)])),
+            (
+                LOOKUP_CHAIN_CONTEXT,
+                context1(
+                    &[10],
+                    &[rule_set_of(&[chained(&[5], &[], &[20], &[(0, 1)])])]
+                )
+            ),
+            (
+                LOOKUP_CHAIN_CONTEXT,
+                chain_context2(
+                    &[10],
+                    &class_def(5, &[1]),
+                    &class_def(10, &[1]),
+                    &class_def(20, &[1]),
+                    &[
+                        rule_set_of(&[]),
+                        rule_set_of(&[chained(&[1], &[], &[1], &[(0, 1)])]),
+                    ]
+                )
+            ),
+            (
+                LOOKUP_CHAIN_CONTEXT,
+                chain_context3(&[&[5]], &[&[10]], &[&[20]], &[(0, 1)])
+            ),
         ];
         for (kind, sub) in subtables {
             let (data, subs) = context_font(kind, sub, &[helper_10_to_30()]);
